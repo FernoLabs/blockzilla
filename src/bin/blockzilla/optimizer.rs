@@ -16,9 +16,6 @@ use solana_transaction_status_client_types::{
     UiTransactionTokenBalance,
 };
 
-// -----------------------------------------------------------------------------
-// 1. KeyRegistry (Pubkey ↔ u32) with SQLite persistence
-// -----------------------------------------------------------------------------
 #[derive(Default, Debug)]
 pub struct KeyRegistry {
     pub next_id: u32,
@@ -70,9 +67,6 @@ impl KeyRegistry {
     }
 }
 
-// -----------------------------------------------------------------------------
-// 2. Compact structs with COMPLETE metadata for full reconstruction
-// -----------------------------------------------------------------------------
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompactInstruction {
     pub program_id: u32,
@@ -159,9 +153,6 @@ pub struct BlockWithIds {
     pub num_transactions: u64, // Total count including votes
 }
 
-// -----------------------------------------------------------------------------
-// 3. Convert EncodedConfirmedBlock → BlockWithIds (COMPLETE)
-// -----------------------------------------------------------------------------
 fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) -> Result<BlockWithIds> {
     let slot = block.parent_slot + 1;
     let blockhash = block.blockhash.clone();
@@ -385,10 +376,6 @@ fn convert_token_balance(tb: &UiTransactionTokenBalance, reg:&mut KeyRegistry) -
         program_id,
     }
 }
-
-// -----------------------------------------------------------------------------
-// 4. Main optimizer — postcard + zstd + BufWriter
-// -----------------------------------------------------------------------------
 
 fn extract_epoch_from_path(path: &str) -> Option<u64> {
     Path::new(path)
