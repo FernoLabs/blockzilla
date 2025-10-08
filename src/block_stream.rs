@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use cid::Cid;
 use futures::io::AsyncRead;
 use fvm_ipld_car::{CarHeader, CarReader};
@@ -23,10 +23,10 @@ impl CarBlock {
 
         while let Some(frame) = stack.pop() {
             // prevent infinite recursion
-            if let Some(hash) = frame.hash {
-                if !visited.insert(hash) {
-                    return Err(anyhow!("Cycle detected at DataFrame hash={hash}"));
-                }
+            if let Some(hash) = frame.hash
+                && !visited.insert(hash)
+            {
+                return Err(anyhow!("Cycle detected at DataFrame hash={hash}"));
             }
 
             // merge data

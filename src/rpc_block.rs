@@ -16,8 +16,8 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
 
     fn try_into(self) -> Result<EncodedConfirmedBlock, Self::Error> {
         // todo compute block hash
-        let previous_blockhash = format!("missing");
-        let blockhash = format!("missing");
+        let previous_blockhash = "missing".to_string();
+        let blockhash = "missing".to_string();
 
         let parent_slot = self
             .block
@@ -38,7 +38,7 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
                 }
             })
             .collect();
-    
+
         let transactions: Result<Vec<EncodedTransactionWithStatusMeta>, anyhow::Error> =
             transactions_cid
                 .iter()
@@ -91,7 +91,7 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             blockhash,
             parent_slot,
             transactions: transactions?,
-            rewards: rewards,
+            rewards,
             num_partitions: None, // todo what is this ?
             block_time: self.block.meta.blocktime,
             block_height: self.block.meta.block_height,

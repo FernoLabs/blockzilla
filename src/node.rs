@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use cid::Cid;
 use serde_cbor::Value;
 
@@ -203,7 +203,13 @@ fn decode_block(arr: Vec<Value>) -> Result<BlockNode> {
 
     let rewards = rest
         .first()
-        .and_then(|v| if matches!(v, Value::Bytes(_)) { Some(strict_cid(v, "block rewards")) } else { None })
+        .and_then(|v| {
+            if matches!(v, Value::Bytes(_)) {
+                Some(strict_cid(v, "block rewards"))
+            } else {
+                None
+            }
+        })
         .transpose()?;
 
     Ok(BlockNode {
@@ -304,7 +310,7 @@ fn decode_dataframe(v: Value) -> Result<DataFrame> {
 fn decode_slot_meta(v: &Value) -> Result<SlotMeta> {
     match v {
         Value::Array(a) => Ok(SlotMeta {
-            parent_slot: a.get(0).and_then(extract_u64),
+            parent_slot: a.first().and_then(extract_u64),
             blocktime: a.get(1).and_then(extract_i64),
             block_height: a.get(2).and_then(extract_u64),
         }),

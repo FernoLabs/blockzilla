@@ -7,9 +7,7 @@ use clap::{Parser, Subcommand};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-use crate::{
-    block_mode::run_block_mode, node_mode::run_node_mode, optimizer::run_car_optimizer,
-};
+use crate::{block_mode::run_block_mode, node_mode::run_node_mode, optimizer::run_car_optimizer};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
