@@ -3,6 +3,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -10,14 +11,11 @@ use blockzilla::block_stream::SolanaBlockStream;
 use futures::io::AllowStdIo;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use solana_sdk::{
-    bs58, message::MessageHeader, pubkey::Pubkey, signature::Signature,
-    transaction::TransactionVersion,
-};
-use solana_transaction_status_client_types::{
-    EncodedConfirmedBlock, EncodedTransactionWithStatusMeta, UiTransactionTokenBalance,
-    option_serializer::OptionSerializer,
-};
+use solana_sdk::{bs58, message::MessageHeader, pubkey::Pubkey, signature::Signature, transaction::TransactionVersion};
+use solana_transaction_status_client_types::{EncodedConfirmedBlock, EncodedTransactionWithStatusMeta, UiTransactionTokenBalance, option_serializer::OptionSerializer};
+use tokio::{sync::{mpsc, Mutex}, task};
+
+const WORKER_COUNT: usize = 8; // adjust for your CPU
 
 #[derive(Default, Debug)]
 pub struct KeyRegistry {
@@ -423,7 +421,11 @@ fn extract_epoch_from_path(path: &str) -> Option<u64> {
 }
 
 pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result<()> {
-    let epoch = extract_epoch_from_path(path)
+    let epoch = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.split('-').nth(1))
+        .and_then(|n| n.parse::<u64>().ok())
         .context("Could not parse epoch number from input filename")?;
 
     let file = File::open(path)?;
@@ -437,7 +439,7 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
     let idx_path = out_dir.join(format!("epoch-{epoch}.idx"));
     let reg_path = out_dir.join("registry.sqlite");
 
-    let mut reg = KeyRegistry::new();
+    let reg = Arc::new(Mutex::new(KeyRegistry::new()));
 
     let bin_file = OpenOptions::new()
         .create(true)
@@ -455,54 +457,102 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
         .context("Failed to open .idx file")?;
     let mut idx = BufWriter::with_capacity(1024 * 1024, idx_file);
 
-    let mut count = 0u64;
-    let mut current_offset = 0u64; // Track offset manually instead of using file metadata
+    // Channels
+let (block_tx, block_rx) = mpsc::channel::<EncodedConfirmedBlock>(WORKER_COUNT * 2);
+let (out_tx, mut out_rx) = mpsc::channel::<(u64, Vec<u8>)>(WORKER_COUNT * 2);
 
-    while let Some(block) = stream.next_solana_block().await? {
-        let rpc_block: EncodedConfirmedBlock = block.try_into()?;
-        let compact = to_compact_block(&rpc_block, &mut reg)?;
+// Wrap receiver in Arc<Mutex<...>> so all workers can pull from it
+let shared_block_rx = Arc::new(Mutex::new(block_rx));
 
-        // Serialize + compress
-        let raw = postcard::to_allocvec(&compact)?;
-        let compressed = zstd::bulk::compress(&raw, 5)?;
+// Spawn workers
+for _ in 0..WORKER_COUNT {
+    let block_rx = Arc::clone(&shared_block_rx);
+    let out_tx = out_tx.clone();
+    let reg = reg.clone();
 
-        let len = compressed.len() as u32;
+    tokio::spawn(async move {
+        loop {
+            // Each worker locks the receiver briefly to pull one block
+            let maybe_block = {
+                let mut guard = block_rx.lock().await;
+                guard.recv().await
+            };
+            let Some(block) = maybe_block else { break };
 
-        // Write length prefix and compressed data to binary file
-        bin.write_all(&len.to_le_bytes())?;
-        bin.write_all(&compressed)?;
+            // Process block
+            let mut reg_guard = reg.lock().await;
+            let compact = match to_compact_block(&block, &mut *reg_guard) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error compacting block: {e}");
+                    continue;
+                }
+            };
+            drop(reg_guard); // release lock early
 
-        // Write index entry: slot and offset
-        idx.write_all(&compact.slot.to_le_bytes())?;
+            let raw = postcard::to_allocvec(&compact).unwrap();
+            let compressed = zstd::bulk::compress(&raw, 1).unwrap();
+
+            let len = compressed.len() as u32;
+            let mut data = Vec::with_capacity(4 + compressed.len());
+            data.extend_from_slice(&len.to_le_bytes());
+            data.extend_from_slice(&compressed);
+            out_tx.send((compact.slot, data)).await.ok();
+        }
+    });
+}
+
+
+    // Reader task
+    let reader_tx = block_tx.clone();
+    let reader_handle = task::spawn(async move {
+        while let Some(block) = stream.next_solana_block().await.unwrap() {
+            let rpc_block: EncodedConfirmedBlock = block.try_into().unwrap();
+            reader_tx.send(rpc_block).await.unwrap();
+        }
+    });
+
+    drop(block_tx);
+    drop(out_tx);
+
+    // Writer loop
+    let mut current_offset: u64 = 0;
+    let mut count: u64 = 0;
+
+    while let Some((slot, data)) = out_rx.recv().await {
+        bin.write_all(&data)?;
+        idx.write_all(&slot.to_le_bytes())?;
         idx.write_all(&current_offset.to_le_bytes())?;
-
-        // Update offset for next block (4 bytes for length + compressed data size)
-        current_offset += 4 + compressed.len() as u64;
-
+        current_offset += data.len() as u64;
         count += 1;
 
-        if count.is_multiple_of(100) {
+        if count % 10_000 == 0 {
             bin.flush()?;
             idx.flush()?;
+            let reg_guard = reg.lock().await;
+            reg_guard.save_to_sqlite(reg_path.to_str().unwrap())?;
             println!(
                 "Processed {} blocks, {} unique keys, file ≈ {:.2} MB",
                 count,
-                reg.len(),
+                reg_guard.len(),
                 current_offset as f64 / 1_000_000.0
             );
-            reg.save_to_sqlite(reg_path.to_str().unwrap())?;
         }
     }
 
+    reader_handle.await?;
     bin.flush()?;
     idx.flush()?;
-    reg.save_to_sqlite(reg_path.to_str().unwrap())?;
+
+    let reg_guard = reg.lock().await;
+    reg_guard.save_to_sqlite(reg_path.to_str().unwrap())?;
 
     println!(
         "✅ Done: {} blocks → {}, {} unique keys",
         count,
         bin_path.display(),
-        reg.len()
+        reg_guard.len()
     );
+
     Ok(())
 }

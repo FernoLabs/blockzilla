@@ -1,14 +1,19 @@
 mod block_mode;
+mod network_mode;
 mod node_mode;
 mod optimizer;
 mod print_compressed_block;
+mod mutli_thread;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-use crate::{block_mode::run_block_mode, node_mode::run_node_mode, optimizer::run_car_optimizer, print_compressed_block::read_and_print_block_compact};
+use crate::{
+    block_mode::run_block_mode, node_mode::run_node_mode, optimizer::run_car_optimizer,
+    print_compressed_block::read_and_print_block_compact,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -34,13 +39,23 @@ enum Commands {
         output_dir: Option<String>,
     },
     Read {
-                #[arg(long)]
+        #[arg(long)]
         epoch: String,
-                #[arg(long)]
+        #[arg(long)]
         idx: String,
-                #[arg(long)]
+        #[arg(long)]
         registry: String,
         slot: u64,
+    },
+    /// Stream and process CAR files directly from network
+    Network {
+        /// URL or IP of the remote CAR file or stream
+        #[arg(short, long)]
+        source: String,
+
+        /// Optional output dir for compressed data
+        #[arg(long)]
+        output_dir: Option<String>,
     },
 }
 
@@ -65,6 +80,9 @@ async fn main() -> Result<()> {
             registry,
             slot,
         } => read_and_print_block_compact(&epoch, &idx, &registry, slot)?,
+        Commands::Network { source, output_dir } => {
+            network_mode::run_network_mode(&source, output_dir).await?
+        }
     }
 
     Ok(())
