@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
             slot,
         } => read_and_print_block_compact(&epoch, &idx, &registry, slot)?,
         Commands::Network { source, output_dir } => {
-            network_mode::run_network_mode(&source, output_dir).await?
+            network_mode::run_network_optimizer(&source, output_dir).await?
         }
     }
 

@@ -1,12 +1,9 @@
-use anyhow::{Context, anyhow};
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use cid::Cid;
 use prost::Message;
 use solana_reward_info::RewardType;
-use solana_sdk::{
-    bs58,
-    transaction::{TransactionVersion, VersionedTransaction},
-};
+use solana_sdk::transaction::{TransactionVersion, VersionedTransaction};
 use solana_storage_proto::convert::generated;
 use solana_transaction_error::TransactionError;
 use solana_transaction_status_client_types::{
@@ -15,15 +12,23 @@ use solana_transaction_status_client_types::{
     UiLoadedAddresses, UiReturnDataEncoding, UiTransactionError, UiTransactionReturnData,
     UiTransactionStatusMeta, UiTransactionTokenBalance, option_serializer::OptionSerializer,
 };
-use zstd;
+use std::cell::RefCell;
+use std::io::{Cursor, Read};
+use std::time::Instant;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
-use crate::{Node, block_stream::CarBlock};
+use crate::{block_stream::CarBlock, Node};
+
+/// Reusable decode buffer to avoid per-call allocations in decode_meta
+thread_local! {
+    static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(32 * 1024));
+}
 
 impl TryInto<EncodedConfirmedBlock> for CarBlock {
     type Error = anyhow::Error;
 
     fn try_into(self) -> Result<EncodedConfirmedBlock, Self::Error> {
-        // todo compute block hash
+        // TODO: compute real hashes if/when available
         let previous_blockhash = "missing".to_string();
         let blockhash = "missing".to_string();
 
@@ -31,55 +36,76 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             .block
             .meta
             .parent_slot
-            .ok_or(anyhow!("missing parent block"))?;
+            .ok_or_else(|| anyhow!("missing parent block"))?;
 
-        let transactions_cid: Vec<Cid> = self
-            .block
-            .entries
-            .iter()
-            .flat_map(|e| {
-                if let Some(Node::Entry(entry)) = self.entries.get(e) {
-                    entry.transactions.clone()
-                } else {
-                    println!("Not an entry");
-                    vec![]
-                }
-            })
-            .collect();
+        // --- Stream transactions directly from entries, no intermediate Vec<Cid> ---
+        // We may not know exact capacity. If you have a rough upper bound, reserve here.
+        let mut transactions: Vec<EncodedTransactionWithStatusMeta> = Vec::new();
 
-        let transactions: Result<Vec<EncodedTransactionWithStatusMeta>, anyhow::Error> =
-            transactions_cid
-                .iter()
-                .map(|cid| match self.entries.get(cid) {
-                    Some(crate::Node::Transaction(tx)) => {
-                        let meta_byte = self.merge_dataframe(&tx.metadata)?;
-                        let tx_bytes = self.merge_dataframe(&tx.data)?;
+        for e_cid in &self.block.entries {
+            let Some(Node::Entry(entry)) = self.entries.get(e_cid) else {
+                continue; // skip non-entry
+            };
 
-                        let vt: VersionedTransaction = bincode::deserialize(&tx_bytes)
-                            .context("Failed to decode VersionedTransaction")?;
+            // If you have an average tx per entry, you can reserve here:
+            // transactions.reserve(entry.transactions.len());
 
-                        let meta = decode_meta(&meta_byte);
-                        let tx_bincode = bincode::serialize(&vt)?;
-                        let encoded_tx = base64::encode(tx_bincode);
+            for tx_cid in &entry.transactions {
+                match self.entries.get(tx_cid) {
+                    Some(Node::Transaction(tx)) => {
+                        // Merge metadata/data frames once
+                        let t_merge0 = Instant::now();
+                        let meta_bytes = self.merge_dataframe(&tx.metadata)
+                            .context("merge_dataframe(meta) failed")?;
+                        let tx_bytes = self.merge_dataframe(&tx.data)
+                            .context("merge_dataframe(tx) failed")?;
+                        let _t_merge = t_merge0.elapsed();
 
-                        Ok(EncodedTransactionWithStatusMeta {
+                        // Decode VersionedTransaction (bincode)
+                        let t_tx0 = Instant::now();
+                        let vt: VersionedTransaction =
+                            bincode::deserialize(&tx_bytes).context("decode VersionedTransaction")?;
+                        let _t_tx = t_tx0.elapsed();
+
+                        // Decode UiTransactionStatusMeta (zstd + prost) with buffer reuse
+                        let t_meta0 = Instant::now();
+                        let meta = decode_meta(&meta_bytes);
+                        let _t_meta = t_meta0.elapsed();
+
+                        // Re-encode tx to bincode -> base64 (UI format)
+                        let t_ser0 = Instant::now();
+                        let tx_bincode =
+                            bincode::serialize(&vt).context("re-serialize VersionedTransaction")?;
+                        let encoded_tx = BASE64.encode(tx_bincode);
+                        let _t_ser = t_ser0.elapsed();
+
+                        transactions.push(EncodedTransactionWithStatusMeta {
                             transaction: EncodedTransaction::Binary(
                                 encoded_tx,
                                 TransactionBinaryEncoding::Base64,
                             ),
                             meta,
+                            // If you have the actual version, set it; 0 keeps your previous behavior.
                             version: Some(TransactionVersion::Number(0)),
-                        })
+                        });
                     }
-                    Some(b) => Err(anyhow!("block entry not a transaction ({b:?})")),
-                    None => Err(anyhow!("block entry not found")),
-                })
-                .collect();
+                    Some(other) => {
+                        // Keep the error behavior the same as before, but without noisy prints:
+                        return Err(anyhow!("block entry not a transaction ({other:?})"));
+                    }
+                    None => return Err(anyhow!("block entry not found for tx cid")),
+                }
+            }
+        }
 
+        // Rewards (same logic as before)
         let rewards = match self.block.rewards.and_then(|cid| self.entries.get(&cid)) {
-            Some(crate::Node::DataFrame(df)) => {
+            Some(Node::DataFrame(df)) => {
+                let t0 = Instant::now();
                 let bytes = self.merge_dataframe(df)?;
-                bincode::deserialize(&bytes)?
+                let decoded: Vec<Reward> = bincode::deserialize(&bytes)?;
+                let _t = t0.elapsed();
+                decoded
             }
             _ => vec![],
         };
@@ -88,40 +114,49 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             previous_blockhash,
             blockhash,
             parent_slot,
-            transactions: transactions?,
+            transactions,
             rewards,
-            num_partitions: None, // todo what is this ?
+            num_partitions: None,
             block_time: self.block.meta.blocktime,
             block_height: self.block.meta.block_height,
         })
     }
 }
 
-/// Main entry: decode and convert protobuf bytes into UiTransactionStatusMeta
+/// Public entry: decode and convert protobuf bytes into UiTransactionStatusMeta
+/// Fast path: zero-alloc (per call) via thread-local reused buffer.
 pub fn decode_meta(meta_bytes: &[u8]) -> Option<UiTransactionStatusMeta> {
-    (|| -> Result<UiTransactionStatusMeta, anyhow::Error> {
+    (|| -> Result<UiTransactionStatusMeta> {
         let meta = decode_protobuf_meta(meta_bytes)?;
         convert_generated_meta(meta)
     })()
     .ok()
 }
 
-fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta, anyhow::Error> {
-    let buffer = zstd::decode_all(bytes).context("zstd decode failed")?;
-    let meta = generated::TransactionStatusMeta::decode(buffer.as_slice())
-        .context("prost decode failed")?;
-    Ok(meta)
+/// Decode zstd-compressed protobuf into generated::TransactionStatusMeta
+/// Uses a thread-local reusable buffer to avoid per-call allocations.
+fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
+    TL_META_BUF.try_with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+
+        // Streaming zstd -> Vec (reused)
+        let mut decoder = ZstdDecoder::new(Cursor::new(bytes)).context("zstd stream open failed")?;
+        decoder.read_to_end(&mut *buf).context("zstd decode failed")?;
+
+        // Prost decode directly from the in-place buffer
+        let meta = generated::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
+            .context("prost decode failed")?;
+        Ok(meta)
+    }).map_err(|_| anyhow!("thread-local access failed"))?
 }
 
 fn convert_generated_meta(
     meta: generated::TransactionStatusMeta,
-) -> Result<UiTransactionStatusMeta, anyhow::Error> {
+) -> Result<UiTransactionStatusMeta> {
     let err = decode_transaction_error(&meta)?;
     let ui_err = err.clone().map(UiTransactionError::from);
-    let ui_status = err
-        .clone()
-        .map(UiTransactionError::from)
-        .map_or(Ok(()), Err);
+    let ui_status = err.clone().map(UiTransactionError::from).map_or(Ok(()), Err);
 
     Ok(UiTransactionStatusMeta {
         err: ui_err,
@@ -149,7 +184,7 @@ fn convert_generated_meta(
 
 fn decode_transaction_error(
     meta: &generated::TransactionStatusMeta,
-) -> Result<Option<TransactionError>, anyhow::Error> {
+) -> Result<Option<TransactionError>> {
     meta.err
         .as_ref()
         .map(|e| bincode::deserialize::<TransactionError>(&e.err))
@@ -175,7 +210,7 @@ fn convert_inner_instructions(
                             UiInstruction::Compiled(UiCompiledInstruction {
                                 program_id_index: i.program_id_index as u8,
                                 accounts: i.accounts,
-                                data: bs58::encode(i.data).into_string(),
+                                data: solana_sdk::bs58::encode(i.data).into_string(),
                                 stack_height: i.stack_height,
                             })
                         })
@@ -265,11 +300,11 @@ fn convert_loaded_addresses(
     OptionSerializer::Some(UiLoadedAddresses {
         writable: writable
             .into_iter()
-            .map(|v| bs58::encode(v).into_string())
+            .map(|v| solana_sdk::bs58::encode(v).into_string())
             .collect(),
         readonly: readonly
             .into_iter()
-            .map(|v| bs58::encode(v).into_string())
+            .map(|v| solana_sdk::bs58::encode(v).into_string())
             .collect(),
     })
 }
@@ -279,7 +314,7 @@ fn convert_return_data(
 ) -> OptionSerializer<UiTransactionReturnData> {
     match data {
         Some(rd) => OptionSerializer::Some(UiTransactionReturnData {
-            program_id: bs58::encode(rd.program_id).into_string(),
+            program_id: solana_sdk::bs58::encode(rd.program_id).into_string(),
             data: (BASE64.encode(rd.data), UiReturnDataEncoding::Base64),
         }),
         None => OptionSerializer::None,

@@ -3,12 +3,13 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use blockzilla::block_stream::SolanaBlockStream;
 use futures::io::AllowStdIo;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{
     bs58, message::MessageHeader, pubkey::Pubkey, signature::Signature,
@@ -19,7 +20,7 @@ use solana_transaction_status_client_types::{
     option_serializer::OptionSerializer,
 };
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct KeyRegistry {
     pub next_id: u32,
     pub by_pubkey: HashMap<Pubkey, u32>,
@@ -70,17 +71,66 @@ impl KeyRegistry {
     }
 }
 
+/// Stage timing collector (same as network mode)
+#[derive(Default, Debug)]
+struct StageTimings {
+    decode_total: f64,
+    compact_total: f64,
+    serialize_total: f64,
+    compress_total: f64,
+    write_total: f64,
+    blocks: u64,
+}
+
+impl StageTimings {
+    fn record(&mut self, d: f64, c: f64, s: f64, z: f64, w: f64) {
+        self.decode_total += d;
+        self.compact_total += c;
+        self.serialize_total += s;
+        self.compress_total += z;
+        self.write_total += w;
+        self.blocks += 1;
+    }
+
+    fn print_periodic(&self, count: u64, bytes: u64, start: Instant) {
+        if self.blocks == 0 {
+            println!("🧮 {:>7} blk | collecting…", count);
+            return;
+        }
+        let total = self.decode_total
+            + self.compact_total
+            + self.serialize_total
+            + self.compress_total
+            + self.write_total;
+        let pct = |x: f64| if total > 0.0 { x / total * 100.0 } else { 0.0 };
+        let avg_ms = total / self.blocks as f64;
+        let throughput = count as f64 / start.elapsed().as_secs_f64().max(0.001);
+        println!(
+            "🧮 {:>7} blk | decode {:>6.2}% | compact {:>6.2}% | ser {:>6.2}% | comp {:>6.2}% | write {:>6.2}% | avg {:>6.2} ms/blk | {:.1} blk/s | {:.2} MB",
+            count,
+            pct(self.decode_total),
+            pct(self.compact_total),
+            pct(self.serialize_total),
+            pct(self.compress_total),
+            pct(self.write_total),
+            avg_ms,
+            throughput,
+            bytes as f64 / 1_000_000.0
+        );
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompactInstruction {
     pub program_id: u32,
     pub accounts: Vec<u8>,
     pub data: Vec<u8>,
-    pub stack_height: Option<u32>, // For inner instructions
+    pub stack_height: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompactInnerInstructions {
-    pub index: u8, // Index of the outer instruction
+    pub index: u8,
     pub instructions: Vec<CompactInstruction>,
 }
 
@@ -88,7 +138,7 @@ pub struct CompactInnerInstructions {
 pub struct CompactTokenBalance {
     pub account_index: u8,
     pub mint: u32,
-    pub ui_token_amount: String, // JSON serialized
+    pub ui_token_amount: String,
     pub owner: u32,
     pub program_id: u32,
 }
@@ -116,22 +166,22 @@ pub struct CompactTransactionMeta {
     pub log_messages: Option<Vec<String>>,
     pub pre_token_balances: Option<Vec<CompactTokenBalance>>,
     pub post_token_balances: Option<Vec<CompactTokenBalance>>,
-    pub rewards: Option<Vec<CompactReward>>, // Per-tx rewards if any
+    pub rewards: Option<Vec<CompactReward>>,
     pub loaded_addresses: Option<CompactLoadedAddresses>,
-    pub return_data: Option<(u32, Vec<u8>)>, // (program_id, data)
+    pub return_data: Option<(u32, Vec<u8>)>,
     pub compute_units_consumed: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompactTransaction {
     pub signatures: Vec<Signature>,
-    pub message_header: MessageHeader, // num_required_signatures, etc.
-    pub account_keys: Vec<u32>,        // Static account keys
+    pub message_header: MessageHeader,
+    pub account_keys: Vec<u32>,
     pub recent_blockhash: String,
     pub instructions: Vec<CompactInstruction>,
     pub address_table_lookups: Option<Vec<CompactAddressTableLookup>>,
     pub meta: Option<CompactTransactionMeta>,
-    pub version: u8, // 0 = legacy, 1 = v0
+    pub version: u8,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -153,7 +203,7 @@ pub struct BlockWithIds {
     pub block_height: Option<u64>,
     pub rewards: Vec<CompactReward>,
     pub transactions: Vec<CompactTransaction>,
-    pub num_transactions: u64, // Total count including votes
+    pub num_transactions: u64,
 }
 
 pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) -> Result<BlockWithIds> {
@@ -438,59 +488,57 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
     let reg_path = out_dir.join("registry.sqlite");
 
     let mut reg = KeyRegistry::new();
+    let mut timings = StageTimings::default();
+    let start = Instant::now();
 
-    let bin_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&bin_path)
-        .context("Failed to open .bin file")?;
+    let bin_file = OpenOptions::new().create(true).write(true).truncate(true).open(&bin_path)?;
     let mut bin = BufWriter::with_capacity(8 * 1024 * 1024, bin_file);
-
-    let idx_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&idx_path)
-        .context("Failed to open .idx file")?;
+    let idx_file = OpenOptions::new().create(true).write(true).truncate(true).open(&idx_path)?;
     let mut idx = BufWriter::with_capacity(1024 * 1024, idx_file);
 
     let mut count = 0u64;
-    let mut current_offset = 0u64; // Track offset manually instead of using file metadata
+    let mut current_offset = 0u64;
+    let mut total_bytes = 0u64;
+    let mut last_log = Instant::now();
 
     while let Some(block) = stream.next_solana_block().await? {
+        let t0 = Instant::now();
         let rpc_block: EncodedConfirmedBlock = block.try_into()?;
-        let compact = to_compact_block(&rpc_block, &mut reg)?;
+        let t1 = Instant::now();
 
-        // Serialize + compress
+        let compact = to_compact_block(&rpc_block, &mut reg)?;
+        let t2 = Instant::now();
+
         let raw = postcard::to_allocvec(&compact)?;
+        let t3 = Instant::now();
         let compressed = zstd::bulk::compress(&raw, 5)?;
+        let t4 = Instant::now();
 
         let len = compressed.len() as u32;
-
-        // Write length prefix and compressed data to binary file
         bin.write_all(&len.to_le_bytes())?;
         bin.write_all(&compressed)?;
-
-        // Write index entry: slot and offset
         idx.write_all(&compact.slot.to_le_bytes())?;
         idx.write_all(&current_offset.to_le_bytes())?;
+        let t5 = Instant::now();
 
-        // Update offset for next block (4 bytes for length + compressed data size)
         current_offset += 4 + compressed.len() as u64;
-
+        total_bytes += compressed.len() as u64;
         count += 1;
 
-        if count.is_multiple_of(100) {
+        timings.record(
+            (t1 - t0).as_secs_f64() * 1000.0,
+            (t2 - t1).as_secs_f64() * 1000.0,
+            (t3 - t2).as_secs_f64() * 1000.0,
+            (t4 - t3).as_secs_f64() * 1000.0,
+            (t5 - t4).as_secs_f64() * 1000.0,
+        );
+
+        if last_log.elapsed() > Duration::from_secs(10) || count % 1000 == 0 {
             bin.flush()?;
             idx.flush()?;
-            println!(
-                "Processed {} blocks, {} unique keys, file ≈ {:.2} MB",
-                count,
-                reg.len(),
-                current_offset as f64 / 1_000_000.0
-            );
             reg.save_to_sqlite(reg_path.to_str().unwrap())?;
+            timings.print_periodic(count, total_bytes, start);
+            last_log = Instant::now();
         }
     }
 
@@ -498,11 +546,13 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
     idx.flush()?;
     reg.save_to_sqlite(reg_path.to_str().unwrap())?;
 
+    timings.print_periodic(count, total_bytes, start);
     println!(
-        "✅ Done: {} blocks → {}, {} unique keys",
-        count,
+        "✅ Done: {count} blocks → {}, {} unique keys ({:.2} MB total)",
         bin_path.display(),
-        reg.len()
+        reg.len(),
+        total_bytes as f64 / 1_000_000.0
     );
+
     Ok(())
 }

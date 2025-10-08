@@ -3,7 +3,7 @@
 This repo contains tool use to build and maitain ferno archive node
 
 cargo run --release --bin blockzilla network \
-  --source https://files.old-faithful.net/839/epoch-839.car  \
+  --source https://files.old-faithful.net/0/epoch-0.car  \
   --output-dir optimized/
 
 ## archive builder
