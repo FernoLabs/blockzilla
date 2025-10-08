@@ -1,24 +1,57 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use cid::Cid;
 use futures::io::AsyncRead;
 use fvm_ipld_car::{CarHeader, CarReader};
-use serde_cbor::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::decode::decode_node;
-use crate::node::{Entry, Node, Transaction};
+use crate::node::{BlockNode, DataFrame, Node, decode_node};
 
 #[derive(Debug)]
-pub struct SolanaBlock {
-    pub slot: u64,
-    pub entries: Vec<Entry>,
-    pub transactions: Vec<Transaction>,
-    pub meta: crate::node::SlotMeta,
+pub struct CarBlock {
+    pub block: BlockNode,
+    pub entries: HashMap<Cid, Node>,
+}
+impl CarBlock {
+    /// Follows and merges a linked list of DataFrames into one contiguous Vec<u8>.
+    pub fn merge_dataframe(&self, root: &DataFrame) -> Result<Vec<u8>> {
+        let mut visited = HashSet::new();
+        let mut buffer = Vec::new();
+        let mut stack = Vec::new();
+
+        // start from root
+        stack.push(root);
+
+        while let Some(frame) = stack.pop() {
+            // prevent infinite recursion
+            if let Some(hash) = frame.hash {
+                if !visited.insert(hash) {
+                    return Err(anyhow!("Cycle detected at DataFrame hash={hash}"));
+                }
+            }
+
+            // merge data
+            buffer.extend_from_slice(&frame.data);
+
+            // follow next links
+            if let Some(next_cids) = &frame.next {
+                for cid in next_cids {
+                    let Some(node) = self.entries.get(cid) else {
+                        return Err(anyhow!("Missing DataFrame CID {}", cid));
+                    };
+                    let Node::DataFrame(next_frame) = node else {
+                        return Err(anyhow!("Invalid node type for CID {}", cid));
+                    };
+                    stack.push(next_frame);
+                }
+            }
+        }
+
+        Ok(buffer)
+    }
 }
 
 pub struct SolanaBlockStream<R: AsyncRead + Unpin + Send> {
     inner: CarReader<R>,
-    scratch: Vec<u8>,
     cache: HashMap<Cid, Node>,
 }
 
@@ -27,7 +60,6 @@ impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
         let inner = CarReader::new(reader).await?;
         Ok(Self {
             inner,
-            scratch: Vec::with_capacity(8192),
             cache: HashMap::new(),
         })
     }
@@ -36,39 +68,16 @@ impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
         &self.inner.header
     }
 
-    pub async fn next_solana_block(&mut self) -> Result<Option<SolanaBlock>> {
-        while let Some(block) = self.inner.next_block().await? {
-            self.scratch.clear();
-            self.scratch.extend_from_slice(&block.data);
-            let val: Value = serde_cbor::from_slice(&self.scratch)?;
-            let node = decode_node(&val)?;
-            let cid = block.cid;
-
-            self.cache.insert(cid, node.clone());
-
+    pub async fn next_solana_block(&mut self) -> Result<Option<CarBlock>> {
+        while let Some(car_block) = self.inner.next_block().await? {
+            let node = decode_node(&car_block.data)?;
             if let Node::Block(b) = node {
-                let mut entries = Vec::new();
-                for e_cid in &b.entries {
-                    if let Some(Node::Entry(entry)) = self.cache.get(e_cid) {
-                        entries.push(entry.clone());
-                    }
-                }
-
-                let mut txs = Vec::new();
-                for e in &entries {
-                    for t_cid in &e.transactions {
-                        if let Some(Node::Transaction(tx)) = self.cache.get(t_cid) {
-                            txs.push(tx.clone());
-                        }
-                    }
-                }
-
-                return Ok(Some(SolanaBlock {
-                    slot: b.slot,
-                    entries,
-                    transactions: txs,
-                    meta: b.meta,
+                return Ok(Some(CarBlock {
+                    block: b,
+                    entries: self.cache.drain().collect(), // clone / clear maybe faster
                 }));
+            } else {
+                self.cache.insert(car_block.cid, node);
             }
         }
 

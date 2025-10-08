@@ -2,6 +2,16 @@
 
 This repo contains tool use to build and maitain ferno archive node
 
+## archive builder
+
+```bash
+# download epoch car file from old-faithful archive or IPFS
+curl -fSL https://files.old-faithful.net/0/epoch-0.car # /!\ epoch 0 is 4Gb
+
+# run epoch optimizer
+cargo run --release --bin blockzilla optimize --file epoch-0.car
+```
+
 ## Deploy to local blockzilla
 
 ```bash

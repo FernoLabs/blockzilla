@@ -1,6 +1,7 @@
 use anyhow::Result;
 use blockzilla::block_stream::SolanaBlockStream;
 use futures_util::io::AllowStdIo;
+use solana_transaction_status_client_types::EncodedConfirmedBlock;
 use std::{fs::File, time::Instant};
 use tracing::info;
 
@@ -22,21 +23,25 @@ pub async fn run_block_mode(path: &str) -> Result<()> {
     while let Some(block) = stream.next_solana_block().await? {
         count += 1;
 
-        total_entries += block.entries.len() as u64;
-        total_txs += block.transactions.len() as u64;
+        let slot = block.block.slot;
+        let entries_count = block.entries.len() as u64;
+        total_entries += entries_count;
+        let rpc_block: EncodedConfirmedBlock = block.try_into()?;
+
+        total_txs += rpc_block.transactions.len() as u64;
 
         if count.is_multiple_of(10) || last_log.elapsed().as_secs() >= 5 {
             let elapsed = start.elapsed();
             let rate = count as f64 / elapsed.as_secs_f64().max(0.001);
 
             info!(
-                "[{:>7}] blocks in {:>7.2?} ({:.1} blk/s) — slot {} ({} entries, {} txs)",
+                "[{:>7}] blocks in {:>7.2?} ({:.1} blk/s) — slot {} ({} entries) - {} txs",
                 count,
                 elapsed,
                 rate,
-                block.slot,
-                block.entries.len(),
-                block.transactions.len()
+                slot,
+                entries_count,
+                rpc_block.transactions.len()
             );
             last_log = Instant::now();
         }

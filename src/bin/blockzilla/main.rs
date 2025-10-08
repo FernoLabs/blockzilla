@@ -1,6 +1,6 @@
 mod block_mode;
 mod node_mode;
-mod rpc_block_mode;
+mod optimizer;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -8,7 +8,7 @@ use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use crate::{
-    block_mode::run_block_mode, node_mode::run_node_mode, rpc_block_mode::run_rpcblock_mode,
+    block_mode::run_block_mode, node_mode::run_node_mode, optimizer::run_car_optimizer,
 };
 
 #[derive(Parser, Debug)]
@@ -28,7 +28,7 @@ enum Commands {
         #[arg(short, long)]
         file: String,
     },
-    RpcBlock {
+    Optimize {
         #[arg(short, long)]
         file: String,
         #[arg(long)]
@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Node { file } => run_node_mode(&file).await?,
         Commands::Block { file } => run_block_mode(&file).await?,
-        Commands::RpcBlock { file, output_dir } => run_rpcblock_mode(&file, output_dir).await?,
+        Commands::Optimize { file, output_dir } => run_car_optimizer(&file, output_dir).await?,
     }
 
     Ok(())

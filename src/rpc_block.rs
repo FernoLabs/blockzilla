@@ -1,49 +1,105 @@
-use anyhow::{Context, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use anyhow::{Context, anyhow};
+use cid::Cid;
 use prost::Message;
-use serde::{Deserialize, Serialize};
-use solana_sdk::transaction::{TransactionError, VersionedTransaction};
+use serde::Deserialize;
+use solana_sdk::transaction::{TransactionVersion, VersionedTransaction};
 use solana_storage_proto::convert::generated;
+use solana_transaction_status_client_types::{
+    EncodedConfirmedBlock, EncodedTransaction, EncodedTransactionWithStatusMeta,
+    TransactionBinaryEncoding,
+};
 
-use crate::block_stream::SolanaBlock;
+use crate::{Node, block_stream::CarBlock};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RpcBlock {
-    pub slot: u64,
-    pub blockhash: String,
-    pub previous_blockhash: String,
-    pub parent_slot: Option<u64>,
-    pub block_time: Option<i64>,
-    pub block_height: Option<u64>,
-    pub transactions: Vec<RpcTransactionWithMeta>,
-    pub rewards: Option<Vec<RpcReward>>,
+impl TryInto<EncodedConfirmedBlock> for CarBlock {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> Result<EncodedConfirmedBlock, Self::Error> {
+        // todo compute block hash
+        let previous_blockhash = format!("missing");
+        let blockhash = format!("missing");
+
+        let parent_slot = self
+            .block
+            .meta
+            .parent_slot
+            .ok_or(anyhow!("missing parent block"))?;
+
+        let transactions_cid: Vec<Cid> = self
+            .block
+            .entries
+            .iter()
+            .flat_map(|e| {
+                if let Some(Node::Entry(entry)) = self.entries.get(e) {
+                    entry.transactions.clone()
+                } else {
+                    println!("Not an entry");
+                    vec![]
+                }
+            })
+            .collect();
+    
+        let transactions: Result<Vec<EncodedTransactionWithStatusMeta>, anyhow::Error> =
+            transactions_cid
+                .iter()
+                .map(|cid| match self.entries.get(cid) {
+                    Some(crate::Node::Transaction(tx)) => {
+                        let meta_byte = self.merge_dataframe(&tx.metadata)?;
+                        let tx_bytes = self.merge_dataframe(&tx.data)?;
+                        let vt: VersionedTransaction = bincode::deserialize(&tx_bytes)
+                            .context("Failed to decode VersionedTransaction")?;
+
+                        let (fee, err) = if !meta_byte.is_empty() {
+                            match zstd::decode_all(meta_byte.as_slice()) {
+                                Ok(decoded_meta) => {
+                                    decode_transaction_meta(&decoded_meta).unwrap_or((0, None))
+                                }
+                                Err(_) => (0, None),
+                            }
+                        } else {
+                            (0, None)
+                        };
+
+                        let mut wire = Vec::new();
+                        bincode::serialize_into(&mut wire, &vt)?;
+                        let encoded_tx = base64::encode(wire);
+
+                        Ok(EncodedTransactionWithStatusMeta {
+                            transaction: EncodedTransaction::Binary(
+                                encoded_tx,
+                                TransactionBinaryEncoding::Base64,
+                            ),
+                            meta: None,
+                            version: Some(TransactionVersion::Number(0)),
+                        })
+                    }
+                    Some(b) => Err(anyhow!("block entry not a transaction ({b:?})")),
+                    None => Err(anyhow!("block entry not found")),
+                })
+                .collect();
+
+        let rewards = match self.block.rewards.and_then(|cid| self.entries.get(&cid)) {
+            Some(crate::Node::DataFrame(df)) => {
+                let bytes = self.merge_dataframe(df)?;
+                bincode::deserialize(&bytes)?
+            }
+            _ => vec![],
+        };
+
+        Ok(EncodedConfirmedBlock {
+            previous_blockhash,
+            blockhash,
+            parent_slot,
+            transactions: transactions?,
+            rewards: rewards,
+            num_partitions: None, // todo what is this ?
+            block_time: self.block.meta.blocktime,
+            block_height: self.block.meta.block_height,
+        })
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RpcTransactionWithMeta {
-    pub transaction: String,
-    pub meta: RpcTransactionMeta,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RpcTransactionMeta {
-    pub fee: u64,
-    pub err: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RpcReward {
-    pub pubkey: String,
-    pub lamports: i64,
-    pub reward_type: Option<String>,
-    pub commission: Option<u8>,
-}
-
-fn decode_transaction_meta(buffer: &[u8]) -> Result<(u64, Option<String>)> {
+fn decode_transaction_meta(buffer: &[u8]) -> Result<(u64, Option<String>), anyhow::Error> {
     // try protobuf (solana-storage-proto)
     if let Ok(proto) = generated::TransactionStatusMeta::decode(buffer) {
         let err = if proto.err.is_some() {
@@ -57,7 +113,7 @@ fn decode_transaction_meta(buffer: &[u8]) -> Result<(u64, Option<String>)> {
     // fallback to legacy bincode path
     #[derive(Deserialize)]
     struct StoredTransactionMeta {
-        err: Result<(), TransactionError>,
+        err: Result<(), solana_sdk::transaction::TransactionError>,
         fee: u64,
     }
 
@@ -71,50 +127,4 @@ fn decode_transaction_meta(buffer: &[u8]) -> Result<(u64, Option<String>)> {
     }
 
     Ok((0, None))
-}
-
-pub fn solana_block_to_rpc(
-    block: &SolanaBlock,
-    blockhash: String,
-    previous_blockhash: String,
-    parent_slot: Option<u64>,
-    block_time: Option<i64>,
-    block_height: Option<u64>,
-    rewards: Option<Vec<RpcReward>>,
-) -> Result<RpcBlock> {
-    let mut rpc_txs = Vec::with_capacity(block.transactions.len());
-
-    for tx_node in &block.transactions {
-        let vt: VersionedTransaction = bincode::deserialize(&tx_node.data.data)
-            .context("Failed to decode VersionedTransaction")?;
-
-        let (fee, err) = if !tx_node.metadata.data.is_empty() {
-            match zstd::decode_all(tx_node.metadata.data.as_slice()) {
-                Ok(decoded_meta) => decode_transaction_meta(&decoded_meta).unwrap_or((0, None)),
-                Err(_) => (0, None),
-            }
-        } else {
-            (0, None)
-        };
-
-        let mut wire = Vec::new();
-        bincode::serialize_into(&mut wire, &vt)?;
-        let encoded_tx = B64.encode(wire);
-
-        rpc_txs.push(RpcTransactionWithMeta {
-            transaction: encoded_tx,
-            meta: RpcTransactionMeta { fee, err },
-        });
-    }
-
-    Ok(RpcBlock {
-        slot: block.slot,
-        blockhash,
-        previous_blockhash,
-        parent_slot,
-        block_time,
-        block_height,
-        rewards,
-        transactions: rpc_txs,
-    })
 }
