@@ -8,8 +8,11 @@ This repo contains tool use to build and maitain ferno archive node
 # download epoch car file from old-faithful archive or IPFS
 curl -fSL https://files.old-faithful.net/0/epoch-0.car # /!\ epoch 0 is 4Gb
 
-# run epoch optimizer
-cargo run --release --bin blockzilla optimize --file epoch-0.car
+# run optimizer
+cargo run --release optimize --file epoch-0.car
+
+# get block out optimized archive
+cargo run --release -- read --epoch "optimized/epoch-0.bin" --idx "optimized/epoch-0.idx" --registry "optimized/registry.sqlite" 4  
 ```
 
 ## Deploy to local blockzilla
