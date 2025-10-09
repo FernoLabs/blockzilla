@@ -1,0 +1,424 @@
+use rusqlite::{params, Connection};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result};
+use blockzilla::block_stream::SolanaBlockStream;
+use blockzilla::Node;
+use crossbeam_channel::{bounded, Receiver, Sender};
+use futures::io::AllowStdIo;
+use prost::Message;
+use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
+use solana_storage_proto::convert::generated;
+use zstd::stream::read::Decoder as ZstdDecoder;
+
+const NUM_WORKERS: usize = 8;
+// Small channels create backpressure so reader pauses during flush
+const CHANNEL_SIZE_BLOCKS: usize = 8;
+// Unique keys in RAM before a flush
+const FLUSH_THRESHOLD: usize = 1_000_000;
+// Log interval
+const LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+thread_local! {
+    static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(128 * 1024));
+}
+
+struct KeyBatch {
+    keys: Vec<Pubkey>,
+    counts: Vec<u32>,
+}
+
+/// HDD safe parallel extractor:
+/// 1) single reader streams blocks sequentially
+/// 2) workers extract keys and send per block counts
+/// 3) writer merges into a HashMap and flushes to SQLite when threshold is reached
+/// Backpressure pauses reader during flush so disk never mixes read and write
+pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>) -> Result<()> {
+    let epoch = extract_epoch_from_path(path)
+        .context("Could not parse epoch number from input filename")?;
+    let out_dir = PathBuf::from(output_dir.unwrap_or_else(|| "optimized".into()));
+    std::fs::create_dir_all(&out_dir)?;
+
+    let reg_path = out_dir.join("registry.sqlite");
+    println!("🔑 Building registry for epoch {epoch}... (HDD safe parallel)");
+
+    // SQLite init
+    let conn = Connection::open(&reg_path)?;
+    conn.execute_batch(
+        "PRAGMA page_size = 32768;
+         PRAGMA synchronous = OFF;
+         PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 0;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = 200000;
+         PRAGMA locking_mode = EXCLUSIVE;
+
+         CREATE TABLE IF NOT EXISTS keymap (
+            pubkey BLOB PRIMARY KEY,
+            views  INTEGER NOT NULL DEFAULT 0
+         ) WITHOUT ROWID;",
+    )?;
+
+    // Channels
+    let (block_tx, block_rx) = bounded::<blockzilla::block_stream::CarBlock>(CHANNEL_SIZE_BLOCKS);
+    let (keys_tx, keys_rx) = bounded::<KeyBatch>(CHANNEL_SIZE_BLOCKS * 2);
+
+    // Reader thread: sequential read from disk
+    let path_owned = path.to_string();
+    let reader_handle = thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { reader_thread(path_owned, block_tx).await })
+    });
+
+    // Worker threads
+    let mut worker_handles = Vec::with_capacity(NUM_WORKERS);
+    for worker_id in 0..NUM_WORKERS {
+        let rx = block_rx.clone();
+        let tx = keys_tx.clone();
+        worker_handles.push(thread::spawn(move || worker_thread(worker_id, rx, tx)));
+    }
+    drop(block_rx);
+    drop(keys_tx);
+
+    // Writer loop: merge and flush with HDD safe backpressure
+    let start = Instant::now();
+    let mut counts: HashMap<Pubkey, u64> = HashMap::with_capacity(FLUSH_THRESHOLD);
+    let mut blocks_processed = 0u64;
+    let mut flush_count = 0u64;
+    let mut last_log = Instant::now();
+
+    while let Ok(batch) = keys_rx.recv() {
+        merge_batch(&mut counts, &batch);
+        blocks_processed += 1;
+
+        if counts.len() >= FLUSH_THRESHOLD {
+            // Drain remaining pending batches to minimize backlog
+            while let Ok(b) = keys_rx.try_recv() {
+                merge_batch(&mut counts, &b);
+                blocks_processed += 1;
+            }
+            // With small channels, reader and workers block here, so no concurrent disk I/O
+            flush_count += 1;
+            let before = Instant::now();
+            let batch_keys = counts.len();
+            println!(
+                "\n💾 Flush #{flush_count} with {batch_keys} keys (blk={blocks_processed})..."
+            );
+            flush_to_sqlite(&conn, &mut counts)?;
+            let dur = before.elapsed().as_secs_f64();
+            println!(
+                "✅ Flush #{flush_count} done in {:.2}s → {:.1} kkeys/s",
+                dur,
+                (batch_keys as f64 / 1000.0) / dur
+            );
+        }
+
+        if last_log.elapsed() >= LOG_INTERVAL {
+            let elapsed = start.elapsed().as_secs_f64();
+            let blk_per_s = blocks_processed as f64 / elapsed;
+            println!(
+                "🧮 {:>9} blk | {:>7.1} blk/s | {:>9} keys in RAM | {:>3} flushes",
+                blocks_processed,
+                blk_per_s,
+                counts.len(),
+                flush_count
+            );
+            last_log = Instant::now();
+        }
+    }
+
+    // Final drain in case workers raced close to channel close
+    while let Ok(b) = keys_rx.try_recv() {
+        merge_batch(&mut counts, &b);
+        blocks_processed += 1;
+    }
+
+    if !counts.is_empty() {
+        flush_count += 1;
+        let before = Instant::now();
+        let batch_keys = counts.len();
+        println!(
+            "\n💾 Final flush #{flush_count} with {batch_keys} keys (blk={blocks_processed})..."
+        );
+        flush_to_sqlite(&conn, &mut counts)?;
+        let dur = before.elapsed().as_secs_f64();
+        println!(
+            "✅ Final flush done in {:.2}s → {:.1} kkeys/s",
+            dur,
+            (batch_keys as f64 / 1000.0) / dur
+        );
+    }
+
+    // Join threads
+    reader_handle.join().unwrap()?;
+    for h in worker_handles {
+        h.join().unwrap()?;
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let blk_per_s = blocks_processed as f64 / elapsed;
+    println!(
+        "\n✅ Done: {blocks_processed} blocks | {flush_count} flushes | {:.1} blk/s | {:.1}s total",
+        blk_per_s, elapsed
+    );
+    println!("📘 Registry saved → {}", reg_path.display());
+    Ok(())
+}
+
+async fn reader_thread(
+    path: String,
+    tx: Sender<blockzilla::block_stream::CarBlock>,
+) -> Result<()> {
+    let file = File::open(&path)?;
+    let reader = AllowStdIo::new(file);
+    let mut stream = SolanaBlockStream::new(reader).await?;
+    while let Some(block) = stream.next_solana_block().await? {
+        tx.send(block)?;
+    }
+    Ok(())
+}
+
+fn worker_thread(
+    worker_id: usize,
+    rx: Receiver<blockzilla::block_stream::CarBlock>,
+    tx: Sender<KeyBatch>,
+) -> Result<()> {
+    use std::collections::HashMap;
+    let mut keys_buf = Vec::with_capacity(8_000);
+    let mut per_block: HashMap<Pubkey, u32> = HashMap::with_capacity(4_000);
+
+    while let Ok(block) = rx.recv() {
+        keys_buf.clear();
+        extract_pubkeys_from_block(&block, &mut keys_buf)?;
+        per_block.clear();
+        for k in &keys_buf {
+            *per_block.entry(*k).or_insert(0) += 1;
+        }
+        if !per_block.is_empty() {
+            // Convert to compact arrays for transfer
+            let mut keys = Vec::with_capacity(per_block.len());
+            let mut counts = Vec::with_capacity(per_block.len());
+            for (k, c) in per_block.iter() {
+                keys.push(*k);
+                counts.push(*c);
+            }
+            tx.send(KeyBatch { keys, counts })?;
+        }
+    }
+
+    let _ = worker_id;
+    Ok(())
+}
+
+#[inline]
+fn merge_batch(acc: &mut HashMap<Pubkey, u64>, batch: &KeyBatch) {
+    for (k, c) in batch.keys.iter().zip(batch.counts.iter()) {
+        *acc.entry(*k).or_default() += *c as u64;
+    }
+}
+
+/// Flushes current hashmap contents to SQLite using a TEMP staging table
+/// Binds pubkeys as 32 byte BLOB and does a single INSERT..SELECT..GROUP BY merge
+fn flush_to_sqlite(conn: &Connection, counts: &mut HashMap<Pubkey, u64>) -> Result<()> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+
+    // One big tx for the whole flush
+    let tx = conn.unchecked_transaction()?;
+
+    // Create TEMP staging once per connection
+    tx.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS staging_keys (
+            pubkey BLOB NOT NULL,
+            views  INTEGER NOT NULL
+         );",
+    )?;
+
+    // Clear staging
+    tx.execute("DELETE FROM staging_keys;", [])?;
+
+    // Bulk fill staging with BLOB keys
+    {
+        let mut ins = tx.prepare("INSERT INTO staging_keys (pubkey, views) VALUES (?1, ?2)")?;
+        for (pk, v) in counts.drain() {
+            let bytes = pk.to_bytes(); // [u8; 32]
+            ins.execute(params![&bytes[..], v as i64])?;
+        }
+    }
+
+    // Single merge with GROUP BY to fold duplicates in batch
+    tx.execute_batch(
+        "INSERT INTO keymap (pubkey, views)
+         SELECT pubkey, SUM(views) FROM staging_keys GROUP BY pubkey
+         ON CONFLICT(pubkey) DO UPDATE SET views = views + excluded.views;",
+    )?;
+
+    // Keep temp table allocated but empty for next flush
+    tx.execute("DELETE FROM staging_keys;", [])?;
+
+    tx.commit()?;
+
+    // Trim WAL so future reads do not jump around on HDD
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+
+    Ok(())
+}
+
+/// Extract all pubkeys from a block
+fn extract_pubkeys_from_block(
+    cb: &blockzilla::block_stream::CarBlock,
+    keys: &mut Vec<Pubkey>,
+) -> Result<()> {
+    // rewards
+    if let Some(reward_cid) = cb.block.rewards {
+        if let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid) {
+            let bytes = cb.merge_dataframe(df)?;
+            if let Ok(rewards) =
+                bincode::deserialize::<Vec<solana_transaction_status_client_types::Reward>>(&bytes)
+            {
+                for rw in rewards {
+                    if let Ok(pk) = rw.pubkey.parse::<Pubkey>() {
+                        keys.push(pk);
+                    }
+                }
+            }
+        }
+    }
+
+    // transactions
+    for e_cid in &cb.block.entries {
+        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else {
+            continue;
+        };
+
+        for tx_cid in &entry.transactions {
+            if let Some(Node::Transaction(tx)) = cb.entries.get(tx_cid) {
+                // tx data
+                let tx_bytes = cb.merge_dataframe(&tx.data)?;
+                if let Ok(vt) = bincode::deserialize::<VersionedTransaction>(&tx_bytes) {
+                    let msg = vt.message;
+
+                    // static account keys
+                    keys.extend_from_slice(msg.static_account_keys());
+
+                    // address table lookups
+                    if let Some(lookups) = msg.address_table_lookups() {
+                        for lookup in lookups {
+                            keys.push(lookup.account_key);
+                        }
+                    }
+                }
+
+                // metadata
+                let meta_bytes = cb.merge_dataframe(&tx.metadata)?;
+                if let Ok(meta_proto) = decode_protobuf_meta(&meta_bytes) {
+                    extract_pubkeys_from_meta(&meta_proto, keys);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
+    match zstd::bulk::decompress(bytes, 512 * 1024) {
+        Ok(decompressed) => {
+            generated::TransactionStatusMeta::decode(&decompressed[..])
+                .context("prost decode failed")
+        }
+        Err(_) => TL_META_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+
+            match ZstdDecoder::new(bytes) {
+                Ok(mut decoder) => {
+                    decoder.read_to_end(&mut *buf)?;
+                    generated::TransactionStatusMeta::decode(&buf[..])
+                        .context("prost decode failed")
+                }
+                Err(_) => {
+                    generated::TransactionStatusMeta::decode(bytes).context("raw decode failed")
+                }
+            }
+        }),
+    }
+}
+
+fn extract_pubkeys_from_meta(meta: &generated::TransactionStatusMeta, keys: &mut Vec<Pubkey>) {
+    // token balances pre
+    for tb in &meta.pre_token_balances {
+        if let Ok(pk) = tb.mint.parse::<Pubkey>() {
+            keys.push(pk);
+        }
+        if !tb.owner.is_empty() {
+            if let Ok(pk) = tb.owner.parse::<Pubkey>() {
+                keys.push(pk);
+            }
+        }
+        if !tb.program_id.is_empty() {
+            if let Ok(pk) = tb.program_id.parse::<Pubkey>() {
+                keys.push(pk);
+            }
+        }
+    }
+
+    // token balances post
+    for tb in &meta.post_token_balances {
+        if let Ok(pk) = tb.mint.parse::<Pubkey>() {
+            keys.push(pk);
+        }
+        if !tb.owner.is_empty() {
+            if let Ok(pk) = tb.owner.parse::<Pubkey>() {
+                keys.push(pk);
+            }
+        }
+        if !tb.program_id.is_empty() {
+            if let Ok(pk) = tb.program_id.parse::<Pubkey>() {
+                keys.push(pk);
+            }
+        }
+    }
+
+    // loaded addresses
+    for addr_bytes in meta
+        .loaded_writable_addresses
+        .iter()
+        .chain(meta.loaded_readonly_addresses.iter())
+    {
+        if addr_bytes.len() == 32 {
+            if let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice()) {
+                keys.push(pk);
+            }
+        }
+    }
+
+    // return data program id
+    if let Some(rd) = &meta.return_data {
+        if rd.program_id.len() == 32 {
+            if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
+                keys.push(pk);
+            }
+        }
+    }
+}
+
+fn extract_epoch_from_path(path: &str) -> Option<u64> {
+    Path::new(path)
+        .file_stem()?
+        .to_string_lossy()
+        .split('-')
+        .nth(1)?
+        .parse::<u64>()
+        .ok()
+}

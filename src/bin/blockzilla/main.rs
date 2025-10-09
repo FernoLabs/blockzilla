@@ -1,9 +1,12 @@
 mod block_mode;
+mod compat_block;
+mod key_extractor;
 mod network_mode;
 mod node_mode;
 mod optimizer;
+mod parallel_optimizer;
 mod print_compressed_block;
-mod compat_block;
+mod dump_registry;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -11,7 +14,8 @@ use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 use crate::{
-    block_mode::run_block_mode, node_mode::run_node_mode, optimizer::run_car_optimizer,
+    block_mode::run_block_mode, key_extractor::build_registry_hdd_parallel,
+    node_mode::run_node_mode, optimizer::run_car_optimizer,
     print_compressed_block::read_and_print_block_compact,
 };
 
@@ -57,6 +61,19 @@ enum Commands {
         #[arg(long)]
         output_dir: Option<String>,
     },
+    Registry {
+        #[arg(long)]
+        file: String,
+    },
+    DumpRegistry {
+        /// Path to the SQLite registry file
+        #[arg(long)]
+        registry: String,
+
+        /// Output CSV path
+        #[arg(long, default_value = "pubkey_map.csv")]
+        output: String,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +99,12 @@ async fn main() -> Result<()> {
         } => read_and_print_block_compact(&epoch, &idx, &registry, slot)?,
         Commands::Network { source, output_dir } => {
             network_mode::run_network_optimizer(&source, output_dir).await?
+        }
+        Commands::Registry { file } => {
+            build_registry_hdd_parallel(&file, Some("optimized".to_string())).await?
+        }
+        Commands::DumpRegistry { registry, output } => {
+            dump_registry::dump_registry_to_csv(&registry, &output)?
         }
     }
 
