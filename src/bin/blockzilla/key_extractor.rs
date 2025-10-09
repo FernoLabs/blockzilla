@@ -19,12 +19,9 @@ use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
 use solana_storage_proto::convert::generated;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
-const NUM_WORKERS: usize = 8;
-// Small channels create backpressure so reader pauses during flush
+const NUM_WORKERS: usize = 4;
 const CHANNEL_SIZE_BLOCKS: usize = 8;
-// Unique keys in RAM before a flush
-const FLUSH_THRESHOLD: usize = 1_000_000;
-// Log interval
+const FLUSH_THRESHOLD: usize = 2_000_000;
 const LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 thread_local! {
@@ -34,21 +31,23 @@ thread_local! {
 struct KeyBatch {
     keys: Vec<Pubkey>,
     counts: Vec<u32>,
+    slot: u64,
 }
 
-/// HDD safe parallel extractor:
-/// 1) single reader streams blocks sequentially
-/// 2) workers extract keys and send per block counts
-/// 3) writer merges into a HashMap and flushes to SQLite when threshold is reached
-/// Backpressure pauses reader during flush so disk never mixes read and write
+/// HDD-safe parallel registry builder
+///  - Reads one epoch’s CAR sequentially
+///  - Extracts pubkeys in parallel
+///  - Writes per-epoch registry like `registry-0839.sqlite`
 pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>) -> Result<()> {
     let epoch = extract_epoch_from_path(path)
         .context("Could not parse epoch number from input filename")?;
+
     let out_dir = PathBuf::from(output_dir.unwrap_or_else(|| "optimized".into()));
     std::fs::create_dir_all(&out_dir)?;
 
-    let reg_path = out_dir.join("registry.sqlite");
-    println!("🔑 Building registry for epoch {epoch}... (HDD safe parallel)");
+    // 🆕 Derive registry name from epoch number
+    let reg_path = out_dir.join(format!("registry-{epoch:04}.sqlite"));
+    println!("🔑 Building registry for epoch {epoch} → {}", reg_path.display());
 
     // SQLite init
     let conn = Connection::open(&reg_path)?;
@@ -62,8 +61,10 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
          PRAGMA locking_mode = EXCLUSIVE;
 
          CREATE TABLE IF NOT EXISTS keymap (
-            pubkey BLOB PRIMARY KEY,
-            views  INTEGER NOT NULL DEFAULT 0
+            pubkey   BLOB PRIMARY KEY,
+            views    INTEGER NOT NULL DEFAULT 0,
+            min_slot INTEGER,
+            max_slot INTEGER
          ) WITHOUT ROWID;",
     )?;
 
@@ -71,7 +72,7 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
     let (block_tx, block_rx) = bounded::<blockzilla::block_stream::CarBlock>(CHANNEL_SIZE_BLOCKS);
     let (keys_tx, keys_rx) = bounded::<KeyBatch>(CHANNEL_SIZE_BLOCKS * 2);
 
-    // Reader thread: sequential read from disk
+    // Reader thread
     let path_owned = path.to_string();
     let reader_handle = thread::spawn(move || {
         tokio::runtime::Runtime::new()
@@ -89,9 +90,10 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
     drop(block_rx);
     drop(keys_tx);
 
-    // Writer loop: merge and flush with HDD safe backpressure
+    // Writer loop
     let start = Instant::now();
-    let mut counts: HashMap<Pubkey, u64> = HashMap::with_capacity(FLUSH_THRESHOLD);
+    let mut counts: HashMap<Pubkey, (u64, u64, u64)> = HashMap::with_capacity(FLUSH_THRESHOLD);
+    // key → (views, min_slot, max_slot)
     let mut blocks_processed = 0u64;
     let mut flush_count = 0u64;
     let mut last_log = Instant::now();
@@ -101,12 +103,10 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
         blocks_processed += 1;
 
         if counts.len() >= FLUSH_THRESHOLD {
-            // Drain remaining pending batches to minimize backlog
             while let Ok(b) = keys_rx.try_recv() {
                 merge_batch(&mut counts, &b);
                 blocks_processed += 1;
             }
-            // With small channels, reader and workers block here, so no concurrent disk I/O
             flush_count += 1;
             let before = Instant::now();
             let batch_keys = counts.len();
@@ -136,7 +136,7 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
         }
     }
 
-    // Final drain in case workers raced close to channel close
+    // Final drain
     while let Ok(b) = keys_rx.try_recv() {
         merge_batch(&mut counts, &b);
         blocks_processed += 1;
@@ -158,7 +158,6 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
         );
     }
 
-    // Join threads
     reader_handle.join().unwrap()?;
     for h in worker_handles {
         h.join().unwrap()?;
@@ -204,14 +203,14 @@ fn worker_thread(
             *per_block.entry(*k).or_insert(0) += 1;
         }
         if !per_block.is_empty() {
-            // Convert to compact arrays for transfer
             let mut keys = Vec::with_capacity(per_block.len());
             let mut counts = Vec::with_capacity(per_block.len());
             for (k, c) in per_block.iter() {
                 keys.push(*k);
                 counts.push(*c);
             }
-            tx.send(KeyBatch { keys, counts })?;
+            let slot = block.block.slot;
+            tx.send(KeyBatch { keys, counts, slot })?;
         }
     }
 
@@ -220,66 +219,64 @@ fn worker_thread(
 }
 
 #[inline]
-fn merge_batch(acc: &mut HashMap<Pubkey, u64>, batch: &KeyBatch) {
+fn merge_batch(acc: &mut HashMap<Pubkey, (u64, u64, u64)>, batch: &KeyBatch) {
     for (k, c) in batch.keys.iter().zip(batch.counts.iter()) {
-        *acc.entry(*k).or_default() += *c as u64;
+        let entry = acc.entry(*k).or_insert((*c as u64, batch.slot, batch.slot));
+        entry.0 += *c as u64;
+        entry.2 = batch.slot; // update max_slot
+        if batch.slot < entry.1 {
+            entry.1 = batch.slot;
+        }
     }
 }
 
-/// Flushes current hashmap contents to SQLite using a TEMP staging table
-/// Binds pubkeys as 32 byte BLOB and does a single INSERT..SELECT..GROUP BY merge
-fn flush_to_sqlite(conn: &Connection, counts: &mut HashMap<Pubkey, u64>) -> Result<()> {
+fn flush_to_sqlite(conn: &Connection, counts: &mut HashMap<Pubkey, (u64, u64, u64)>) -> Result<()> {
     if counts.is_empty() {
         return Ok(());
     }
 
-    // One big tx for the whole flush
     let tx = conn.unchecked_transaction()?;
 
-    // Create TEMP staging once per connection
     tx.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS staging_keys (
-            pubkey BLOB NOT NULL,
-            views  INTEGER NOT NULL
+            pubkey   BLOB NOT NULL,
+            views    INTEGER NOT NULL,
+            min_slot INTEGER NOT NULL,
+            max_slot INTEGER NOT NULL
          );",
     )?;
-
-    // Clear staging
     tx.execute("DELETE FROM staging_keys;", [])?;
 
-    // Bulk fill staging with BLOB keys
     {
-        let mut ins = tx.prepare("INSERT INTO staging_keys (pubkey, views) VALUES (?1, ?2)")?;
-        for (pk, v) in counts.drain() {
-            let bytes = pk.to_bytes(); // [u8; 32]
-            ins.execute(params![&bytes[..], v as i64])?;
+        let mut ins = tx.prepare(
+            "INSERT INTO staging_keys (pubkey, views, min_slot, max_slot) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (pk, (views, min_slot, max_slot)) in counts.drain() {
+            let bytes = pk.to_bytes();
+            ins.execute(params![&bytes[..], views as i64, min_slot as i64, max_slot as i64])?;
         }
     }
 
-    // Single merge with GROUP BY to fold duplicates in batch
     tx.execute_batch(
-        "INSERT INTO keymap (pubkey, views)
-         SELECT pubkey, SUM(views) FROM staging_keys GROUP BY pubkey
-         ON CONFLICT(pubkey) DO UPDATE SET views = views + excluded.views;",
+        "INSERT INTO keymap (pubkey, views, min_slot, max_slot)
+         SELECT pubkey, SUM(views), MIN(min_slot), MAX(max_slot)
+         FROM staging_keys
+         GROUP BY pubkey
+         ON CONFLICT(pubkey) DO UPDATE SET
+            views    = keymap.views + excluded.views,
+            max_slot = excluded.max_slot;",
     )?;
 
-    // Keep temp table allocated but empty for next flush
     tx.execute("DELETE FROM staging_keys;", [])?;
-
     tx.commit()?;
-
-    // Trim WAL so future reads do not jump around on HDD
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-
     Ok(())
 }
 
-/// Extract all pubkeys from a block
 fn extract_pubkeys_from_block(
     cb: &blockzilla::block_stream::CarBlock,
     keys: &mut Vec<Pubkey>,
 ) -> Result<()> {
-    // rewards
     if let Some(reward_cid) = cb.block.rewards {
         if let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid) {
             let bytes = cb.merge_dataframe(df)?;
@@ -295,23 +292,14 @@ fn extract_pubkeys_from_block(
         }
     }
 
-    // transactions
     for e_cid in &cb.block.entries {
-        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else {
-            continue;
-        };
-
+        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else { continue; };
         for tx_cid in &entry.transactions {
             if let Some(Node::Transaction(tx)) = cb.entries.get(tx_cid) {
-                // tx data
                 let tx_bytes = cb.merge_dataframe(&tx.data)?;
                 if let Ok(vt) = bincode::deserialize::<VersionedTransaction>(&tx_bytes) {
                     let msg = vt.message;
-
-                    // static account keys
                     keys.extend_from_slice(msg.static_account_keys());
-
-                    // address table lookups
                     if let Some(lookups) = msg.address_table_lookups() {
                         for lookup in lookups {
                             keys.push(lookup.account_key);
@@ -319,7 +307,6 @@ fn extract_pubkeys_from_block(
                     }
                 }
 
-                // metadata
                 let meta_bytes = cb.merge_dataframe(&tx.metadata)?;
                 if let Ok(meta_proto) = decode_protobuf_meta(&meta_bytes) {
                     extract_pubkeys_from_meta(&meta_proto, keys);
@@ -327,88 +314,54 @@ fn extract_pubkeys_from_block(
             }
         }
     }
-
     Ok(())
 }
 
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
     match zstd::bulk::decompress(bytes, 512 * 1024) {
-        Ok(decompressed) => {
-            generated::TransactionStatusMeta::decode(&decompressed[..])
-                .context("prost decode failed")
-        }
+        Ok(decompressed) => generated::TransactionStatusMeta::decode(&decompressed[..])
+            .context("prost decode failed"),
         Err(_) => TL_META_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
             buf.clear();
-
             match ZstdDecoder::new(bytes) {
                 Ok(mut decoder) => {
                     decoder.read_to_end(&mut *buf)?;
                     generated::TransactionStatusMeta::decode(&buf[..])
                         .context("prost decode failed")
                 }
-                Err(_) => {
-                    generated::TransactionStatusMeta::decode(bytes).context("raw decode failed")
-                }
+                Err(_) => generated::TransactionStatusMeta::decode(bytes).context("raw decode failed"),
             }
         }),
     }
 }
 
 fn extract_pubkeys_from_meta(meta: &generated::TransactionStatusMeta, keys: &mut Vec<Pubkey>) {
-    // token balances pre
     for tb in &meta.pre_token_balances {
-        if let Ok(pk) = tb.mint.parse::<Pubkey>() {
-            keys.push(pk);
-        }
-        if !tb.owner.is_empty() {
-            if let Ok(pk) = tb.owner.parse::<Pubkey>() {
-                keys.push(pk);
-            }
-        }
-        if !tb.program_id.is_empty() {
-            if let Ok(pk) = tb.program_id.parse::<Pubkey>() {
-                keys.push(pk);
-            }
-        }
+        if let Ok(pk) = tb.mint.parse::<Pubkey>() { keys.push(pk); }
+        if let Ok(pk) = tb.owner.parse::<Pubkey>() { keys.push(pk); }
+        if let Ok(pk) = tb.program_id.parse::<Pubkey>() { keys.push(pk); }
     }
 
-    // token balances post
     for tb in &meta.post_token_balances {
-        if let Ok(pk) = tb.mint.parse::<Pubkey>() {
-            keys.push(pk);
-        }
-        if !tb.owner.is_empty() {
-            if let Ok(pk) = tb.owner.parse::<Pubkey>() {
-                keys.push(pk);
-            }
-        }
-        if !tb.program_id.is_empty() {
-            if let Ok(pk) = tb.program_id.parse::<Pubkey>() {
-                keys.push(pk);
-            }
-        }
+        if let Ok(pk) = tb.mint.parse::<Pubkey>() { keys.push(pk); }
+        if let Ok(pk) = tb.owner.parse::<Pubkey>() { keys.push(pk); }
+        if let Ok(pk) = tb.program_id.parse::<Pubkey>() { keys.push(pk); }
     }
 
-    // loaded addresses
     for addr_bytes in meta
         .loaded_writable_addresses
         .iter()
         .chain(meta.loaded_readonly_addresses.iter())
     {
         if addr_bytes.len() == 32 {
-            if let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice()) {
-                keys.push(pk);
-            }
+            if let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice()) { keys.push(pk); }
         }
     }
 
-    // return data program id
     if let Some(rd) = &meta.return_data {
         if rd.program_id.len() == 32 {
-            if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
-                keys.push(pk);
-            }
+            if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) { keys.push(pk); }
         }
     }
 }
@@ -418,7 +371,6 @@ fn extract_epoch_from_path(path: &str) -> Option<u64> {
         .file_stem()?
         .to_string_lossy()
         .split('-')
-        .nth(1)?
-        .parse::<u64>()
-        .ok()
+        .find(|s| s.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|num| num.parse::<u64>().ok())
 }
