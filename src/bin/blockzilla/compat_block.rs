@@ -3,10 +3,7 @@ use blockzilla::Node;
 use blockzilla::block_stream::CarBlock;
 use prost::Message;
 use rayon::prelude::*;
-use solana_sdk::{
-    message::VersionedMessage, pubkey::Pubkey,
-    transaction::VersionedTransaction,
-};
+use solana_sdk::{message::VersionedMessage, pubkey::Pubkey, transaction::VersionedTransaction};
 use solana_storage_proto::convert::generated;
 use solana_transaction_error::TransactionError;
 use std::cell::RefCell;
@@ -59,7 +56,7 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
                     let tx_bytes = cb
                         .merge_dataframe(&tx.data)
                         .context("merge_dataframe(tx) failed")?;
-                    
+
                     tx_data.push((meta_bytes, tx_bytes));
                 }
                 Some(other) => {
@@ -72,20 +69,20 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
 
     // Parallel processing of transactions
     let reg_mutex = Mutex::new(reg);
-    
+
     let transactions: Result<Vec<_>> = tx_data
         .par_iter()
         .map(|(meta_bytes, tx_bytes)| {
             // Decode VersionedTransaction
-            let vt: VersionedTransaction = bincode::deserialize(tx_bytes)
-                .context("decode VersionedTransaction")?;
+            let vt: VersionedTransaction =
+                bincode::deserialize(tx_bytes).context("decode VersionedTransaction")?;
 
             // Decode metadata
             let meta_proto = decode_protobuf_meta(meta_bytes)?;
 
             // Convert to compact format (thread-local work)
             let partial_tx = convert_to_partial_transaction(vt, meta_proto)?;
-            
+
             Ok(partial_tx)
         })
         .collect();
@@ -93,7 +90,7 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
     let partial_transactions = transactions?;
 
     // Final phase: register all keys (serial, but fast)
-    let mut reg = reg_mutex.into_inner().unwrap();
+    let reg = reg_mutex.into_inner().unwrap();
     let transactions: Vec<CompactTransaction> = partial_transactions
         .into_iter()
         .map(|partial| finalize_transaction(partial, reg))
@@ -141,35 +138,23 @@ fn extract_rewards(cb: &CarBlock, reg: &mut KeyRegistry) -> Result<Vec<CompactRe
 
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
     match zstd::bulk::decompress(bytes, 512 * 1024) {
-        Ok(decompressed) => {
-            generated::TransactionStatusMeta::decode(&decompressed[..])
-                .context("prost decode failed after bulk zstd")
-        }
-        Err(_) => {
-            TL_META_BUF.with(|cell| {
-                let mut buf = cell.borrow_mut();
-                buf.clear();
+        Ok(decompressed) => generated::TransactionStatusMeta::decode(&decompressed[..])
+            .context("prost decode failed after bulk zstd"),
+        Err(_) => TL_META_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
 
-                match ZstdDecoder::new(bytes) {
-                    Ok(mut decoder) => {
-                        match decoder.read_to_end(&mut *buf) {
-                            Ok(_) => {
-                                generated::TransactionStatusMeta::decode(&buf[..])
-                                    .context("prost decode failed after streaming zstd")
-                            }
-                            Err(_) => {
-                                generated::TransactionStatusMeta::decode(bytes)
-                                    .context("all decode methods failed")
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        generated::TransactionStatusMeta::decode(bytes)
-                            .context("zstd decoder creation failed, tried raw decode")
-                    }
-                }
-            })
-        }
+            match ZstdDecoder::new(bytes) {
+                Ok(mut decoder) => match decoder.read_to_end(&mut buf) {
+                    Ok(_) => generated::TransactionStatusMeta::decode(&buf[..])
+                        .context("prost decode failed after streaming zstd"),
+                    Err(_) => generated::TransactionStatusMeta::decode(bytes)
+                        .context("all decode methods failed"),
+                },
+                Err(_) => generated::TransactionStatusMeta::decode(bytes)
+                    .context("zstd decoder creation failed, tried raw decode"),
+            }
+        }),
     }
 }
 
@@ -273,13 +258,19 @@ fn convert_to_partial_transaction(
 
     // Build complete key list
     let mut all_keys = static_keys.to_vec();
-    all_keys.reserve(meta_proto.loaded_writable_addresses.len() + meta_proto.loaded_readonly_addresses.len());
-    
-    for addr_bytes in meta_proto.loaded_writable_addresses.iter().chain(meta_proto.loaded_readonly_addresses.iter()) {
-        if addr_bytes.len() == 32 {
-            if let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice()) {
-                all_keys.push(pk);
-            }
+    all_keys.reserve(
+        meta_proto.loaded_writable_addresses.len() + meta_proto.loaded_readonly_addresses.len(),
+    );
+
+    for addr_bytes in meta_proto
+        .loaded_writable_addresses
+        .iter()
+        .chain(meta_proto.loaded_readonly_addresses.iter())
+    {
+        if addr_bytes.len() == 32
+            && let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice())
+        {
+            all_keys.push(pk);
         }
     }
 
@@ -363,29 +354,30 @@ fn convert_to_partial_meta(
     };
 
     // Convert loaded addresses
-    let loaded_addresses = if meta.loaded_writable_addresses.is_empty() && meta.loaded_readonly_addresses.is_empty() {
-        None
-    } else {
-        let mut writable = Vec::new();
-        for bytes in meta.loaded_writable_addresses {
-            if bytes.len() == 32 {
-                if let Ok(pk) = Pubkey::try_from(bytes.as_slice()) {
+    let loaded_addresses =
+        if meta.loaded_writable_addresses.is_empty() && meta.loaded_readonly_addresses.is_empty() {
+            None
+        } else {
+            let mut writable = Vec::new();
+            for bytes in meta.loaded_writable_addresses {
+                if bytes.len() == 32
+                    && let Ok(pk) = Pubkey::try_from(bytes.as_slice())
+                {
                     writable.push(pk);
                 }
             }
-        }
-        
-        let mut readonly = Vec::new();
-        for bytes in meta.loaded_readonly_addresses {
-            if bytes.len() == 32 {
-                if let Ok(pk) = Pubkey::try_from(bytes.as_slice()) {
+
+            let mut readonly = Vec::new();
+            for bytes in meta.loaded_readonly_addresses {
+                if bytes.len() == 32
+                    && let Ok(pk) = Pubkey::try_from(bytes.as_slice())
+                {
                     readonly.push(pk);
                 }
             }
-        }
 
-        Some(PartialLoadedAddresses { writable, readonly })
-    };
+            Some(PartialLoadedAddresses { writable, readonly })
+        };
 
     let return_data = meta.return_data.and_then(|rd| {
         if rd.program_id.len() == 32 {
@@ -413,9 +405,8 @@ fn convert_to_partial_meta(
 }
 
 fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<PartialTokenBalance> {
-    let mint = tb.mint.parse::<Pubkey>()
-        .context("Failed to parse mint")?;
-    
+    let mint = tb.mint.parse::<Pubkey>().context("Failed to parse mint")?;
+
     let owner = if tb.owner.is_empty() {
         Pubkey::default()
     } else {
@@ -428,7 +419,8 @@ fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<Parti
         tb.program_id.parse::<Pubkey>().unwrap_or_default()
     };
 
-    let ui_token_amount = tb.ui_token_amount
+    let ui_token_amount = tb
+        .ui_token_amount
         .map(|amount| {
             serde_json::json!({
                 "amount": amount.amount,
@@ -450,13 +442,18 @@ fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<Parti
 }
 
 // Final phase: convert all Pubkeys to registry IDs
-fn finalize_transaction(partial: PartialTransaction, reg: &mut KeyRegistry) -> Result<CompactTransaction> {
-    let account_keys: Vec<u32> = partial.account_keys
+fn finalize_transaction(
+    partial: PartialTransaction,
+    reg: &mut KeyRegistry,
+) -> Result<CompactTransaction> {
+    let account_keys: Vec<u32> = partial
+        .account_keys
         .iter()
         .map(|pk| reg.get_or_insert(pk))
         .collect();
 
-    let instructions: Vec<CompactInstruction> = partial.instructions
+    let instructions: Vec<CompactInstruction> = partial
+        .instructions
         .into_iter()
         .map(|ix| CompactInstruction {
             program_id: reg.get_or_insert(&ix.program_id),
@@ -491,13 +488,17 @@ fn finalize_transaction(partial: PartialTransaction, reg: &mut KeyRegistry) -> R
     })
 }
 
-fn finalize_meta(partial: PartialTransactionMeta, reg: &mut KeyRegistry) -> Result<CompactTransactionMeta> {
+fn finalize_meta(
+    partial: PartialTransactionMeta,
+    reg: &mut KeyRegistry,
+) -> Result<CompactTransactionMeta> {
     let inner_instructions = partial.inner_instructions.map(|inners| {
         inners
             .into_iter()
             .map(|inner| CompactInnerInstructions {
                 index: inner.index,
-                instructions: inner.instructions
+                instructions: inner
+                    .instructions
                     .into_iter()
                     .map(|ix| CompactInstruction {
                         program_id: reg.get_or_insert(&ix.program_id),
@@ -517,8 +518,16 @@ fn finalize_meta(partial: PartialTransactionMeta, reg: &mut KeyRegistry) -> Resu
                 account_index: tb.account_index,
                 mint: reg.get_or_insert(&tb.mint),
                 ui_token_amount: tb.ui_token_amount,
-                owner: if tb.owner == Pubkey::default() { 0 } else { reg.get_or_insert(&tb.owner) },
-                program_id: if tb.program_id == Pubkey::default() { 0 } else { reg.get_or_insert(&tb.program_id) },
+                owner: if tb.owner == Pubkey::default() {
+                    0
+                } else {
+                    reg.get_or_insert(&tb.owner)
+                },
+                program_id: if tb.program_id == Pubkey::default() {
+                    0
+                } else {
+                    reg.get_or_insert(&tb.program_id)
+                },
             })
             .collect()
     });
@@ -530,18 +539,38 @@ fn finalize_meta(partial: PartialTransactionMeta, reg: &mut KeyRegistry) -> Resu
                 account_index: tb.account_index,
                 mint: reg.get_or_insert(&tb.mint),
                 ui_token_amount: tb.ui_token_amount,
-                owner: if tb.owner == Pubkey::default() { 0 } else { reg.get_or_insert(&tb.owner) },
-                program_id: if tb.program_id == Pubkey::default() { 0 } else { reg.get_or_insert(&tb.program_id) },
+                owner: if tb.owner == Pubkey::default() {
+                    0
+                } else {
+                    reg.get_or_insert(&tb.owner)
+                },
+                program_id: if tb.program_id == Pubkey::default() {
+                    0
+                } else {
+                    reg.get_or_insert(&tb.program_id)
+                },
             })
             .collect()
     });
 
-    let loaded_addresses = partial.loaded_addresses.map(|addrs| CompactLoadedAddresses {
-        writable: addrs.writable.iter().map(|pk| reg.get_or_insert(pk)).collect(),
-        readonly: addrs.readonly.iter().map(|pk| reg.get_or_insert(pk)).collect(),
-    });
+    let loaded_addresses = partial
+        .loaded_addresses
+        .map(|addrs| CompactLoadedAddresses {
+            writable: addrs
+                .writable
+                .iter()
+                .map(|pk| reg.get_or_insert(pk))
+                .collect(),
+            readonly: addrs
+                .readonly
+                .iter()
+                .map(|pk| reg.get_or_insert(pk))
+                .collect(),
+        });
 
-    let return_data = partial.return_data.map(|(pk, data)| (reg.get_or_insert(&pk), data));
+    let return_data = partial
+        .return_data
+        .map(|(pk, data)| (reg.get_or_insert(&pk), data));
 
     Ok(CompactTransactionMeta {
         err: partial.err,

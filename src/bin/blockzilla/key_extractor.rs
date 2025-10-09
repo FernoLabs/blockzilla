@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -10,9 +10,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use blockzilla::block_stream::SolanaBlockStream;
 use blockzilla::Node;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use blockzilla::block_stream::SolanaBlockStream;
+use crossbeam_channel::{Receiver, Sender, bounded};
 use futures::io::AllowStdIo;
 use prost::Message;
 use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
@@ -47,7 +47,10 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
 
     // 🆕 Derive registry name from epoch number
     let reg_path = out_dir.join(format!("registry-{epoch:04}.sqlite"));
-    println!("🔑 Building registry for epoch {epoch} → {}", reg_path.display());
+    println!(
+        "🔑 Building registry for epoch {epoch} → {}",
+        reg_path.display()
+    );
 
     // SQLite init
     let conn = Connection::open(&reg_path)?;
@@ -173,10 +176,7 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
     Ok(())
 }
 
-async fn reader_thread(
-    path: String,
-    tx: Sender<blockzilla::block_stream::CarBlock>,
-) -> Result<()> {
+async fn reader_thread(path: String, tx: Sender<blockzilla::block_stream::CarBlock>) -> Result<()> {
     let file = File::open(&path)?;
     let reader = AllowStdIo::new(file);
     let mut stream = SolanaBlockStream::new(reader).await?;
@@ -253,7 +253,12 @@ fn flush_to_sqlite(conn: &Connection, counts: &mut HashMap<Pubkey, (u64, u64, u6
         )?;
         for (pk, (views, min_slot, max_slot)) in counts.drain() {
             let bytes = pk.to_bytes();
-            ins.execute(params![&bytes[..], views as i64, min_slot as i64, max_slot as i64])?;
+            ins.execute(params![
+                &bytes[..],
+                views as i64,
+                min_slot as i64,
+                max_slot as i64
+            ])?;
         }
     }
 
@@ -277,23 +282,25 @@ fn extract_pubkeys_from_block(
     cb: &blockzilla::block_stream::CarBlock,
     keys: &mut Vec<Pubkey>,
 ) -> Result<()> {
-    if let Some(reward_cid) = cb.block.rewards {
-        if let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid) {
-            let bytes = cb.merge_dataframe(df)?;
-            if let Ok(rewards) =
-                bincode::deserialize::<Vec<solana_transaction_status_client_types::Reward>>(&bytes)
-            {
-                for rw in rewards {
-                    if let Ok(pk) = rw.pubkey.parse::<Pubkey>() {
-                        keys.push(pk);
-                    }
+    if let Some(reward_cid) = cb.block.rewards
+        && let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid)
+    {
+        let bytes = cb.merge_dataframe(df)?;
+        if let Ok(rewards) =
+            bincode::deserialize::<Vec<solana_transaction_status_client_types::Reward>>(&bytes)
+        {
+            for rw in rewards {
+                if let Ok(pk) = rw.pubkey.parse::<Pubkey>() {
+                    keys.push(pk);
                 }
             }
         }
     }
 
     for e_cid in &cb.block.entries {
-        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else { continue; };
+        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else {
+            continue;
+        };
         for tx_cid in &entry.transactions {
             if let Some(Node::Transaction(tx)) = cb.entries.get(tx_cid) {
                 let tx_bytes = cb.merge_dataframe(&tx.data)?;
@@ -326,11 +333,13 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
             buf.clear();
             match ZstdDecoder::new(bytes) {
                 Ok(mut decoder) => {
-                    decoder.read_to_end(&mut *buf)?;
+                    decoder.read_to_end(&mut buf)?;
                     generated::TransactionStatusMeta::decode(&buf[..])
                         .context("prost decode failed")
                 }
-                Err(_) => generated::TransactionStatusMeta::decode(bytes).context("raw decode failed"),
+                Err(_) => {
+                    generated::TransactionStatusMeta::decode(bytes).context("raw decode failed")
+                }
             }
         }),
     }
@@ -338,15 +347,27 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
 
 fn extract_pubkeys_from_meta(meta: &generated::TransactionStatusMeta, keys: &mut Vec<Pubkey>) {
     for tb in &meta.pre_token_balances {
-        if let Ok(pk) = tb.mint.parse::<Pubkey>() { keys.push(pk); }
-        if let Ok(pk) = tb.owner.parse::<Pubkey>() { keys.push(pk); }
-        if let Ok(pk) = tb.program_id.parse::<Pubkey>() { keys.push(pk); }
+        if let Ok(pk) = tb.mint.parse::<Pubkey>() {
+            keys.push(pk);
+        }
+        if let Ok(pk) = tb.owner.parse::<Pubkey>() {
+            keys.push(pk);
+        }
+        if let Ok(pk) = tb.program_id.parse::<Pubkey>() {
+            keys.push(pk);
+        }
     }
 
     for tb in &meta.post_token_balances {
-        if let Ok(pk) = tb.mint.parse::<Pubkey>() { keys.push(pk); }
-        if let Ok(pk) = tb.owner.parse::<Pubkey>() { keys.push(pk); }
-        if let Ok(pk) = tb.program_id.parse::<Pubkey>() { keys.push(pk); }
+        if let Ok(pk) = tb.mint.parse::<Pubkey>() {
+            keys.push(pk);
+        }
+        if let Ok(pk) = tb.owner.parse::<Pubkey>() {
+            keys.push(pk);
+        }
+        if let Ok(pk) = tb.program_id.parse::<Pubkey>() {
+            keys.push(pk);
+        }
     }
 
     for addr_bytes in meta
@@ -354,15 +375,18 @@ fn extract_pubkeys_from_meta(meta: &generated::TransactionStatusMeta, keys: &mut
         .iter()
         .chain(meta.loaded_readonly_addresses.iter())
     {
-        if addr_bytes.len() == 32 {
-            if let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice()) { keys.push(pk); }
+        if addr_bytes.len() == 32
+            && let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice())
+        {
+            keys.push(pk);
         }
     }
 
-    if let Some(rd) = &meta.return_data {
-        if rd.program_id.len() == 32 {
-            if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) { keys.push(pk); }
-        }
+    if let Some(rd) = &meta.return_data
+        && rd.program_id.len() == 32
+        && let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice())
+    {
+        keys.push(pk);
     }
 }
 

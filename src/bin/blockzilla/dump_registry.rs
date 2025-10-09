@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection};
+use rusqlite::Connection;
 use solana_sdk::pubkey::Pubkey;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -17,9 +17,9 @@ pub fn dump_registry_to_csv(registry_path: &str, output_path: &str) -> Result<()
         let blob: Vec<u8> = row.get(1)?;
         if blob.len() == 32 {
             let pk = Pubkey::new_from_array(blob.try_into().unwrap());
-            writeln!(writer, "{},{}", id, pk.to_string())?;
+            writeln!(writer, "{},{}", id, pk)?;
             count += 1;
-            if count % 1_000_000 == 0 {
+            if count.is_multiple_of(1_000_000) {
                 eprintln!("🧮 dumped {} entries...", count);
             }
         }

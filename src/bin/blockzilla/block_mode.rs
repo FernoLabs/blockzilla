@@ -69,14 +69,12 @@ pub async fn run_block_mode(path: &str) -> Result<()> {
 
     while let Some(block) = stream.next_solana_block().await? {
         let entries_count = block.entries.len() as u64; // ✅ store before move
-        let slot = block.block.slot; // ✅ store slot if needed for logging
-
         let t0 = Instant::now();
         let rpc_block: EncodedConfirmedBlock = block.try_into()?; // consumes `block`
         let t1 = Instant::now();
 
         // --- Intermediate log #1 (after decode)
-        if count % 100 == 0 {
+        if count.is_multiple_of(100) {
             let ms = (t1 - t0).as_secs_f64() * 1000.0;
             info!("blk {count:>6} | decode took {ms:.2} ms");
         }
@@ -89,7 +87,7 @@ pub async fn run_block_mode(path: &str) -> Result<()> {
         let t4 = Instant::now();
 
         // --- Intermediate log #2 (after compression)
-        if count % 100 == 0 {
+        if count.is_multiple_of(100) {
             let decode_ms = (t1 - t0).as_secs_f64() * 1000.0;
             let compact_ms = (t2 - t1).as_secs_f64() * 1000.0;
             let serialize_ms = (t3 - t2).as_secs_f64() * 1000.0;
@@ -114,7 +112,7 @@ pub async fn run_block_mode(path: &str) -> Result<()> {
         total_bytes += compressed.len() as u64;
 
         // --- Periodic cumulative log
-        if last_log.elapsed() > Duration::from_secs(5) || count % 1000 == 0 {
+        if last_log.elapsed() > Duration::from_secs(5) || count.is_multiple_of(1000) {
             timings.print_periodic(count, total_bytes, start);
             last_log = Instant::now();
         }

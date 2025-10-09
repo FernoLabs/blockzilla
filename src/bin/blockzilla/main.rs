@@ -1,12 +1,11 @@
 mod block_mode;
 mod compat_block;
+mod dump_registry;
 mod key_extractor;
 mod network_mode;
 mod node_mode;
 mod optimizer;
-mod parallel_optimizer;
 mod print_compressed_block;
-mod dump_registry;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

@@ -3,27 +3,22 @@ use anyhow::Result;
 use blockzilla::block_stream::SolanaBlockStream;
 use futures::TryStreamExt;
 use reqwest::Client;
-use solana_transaction_status_client_types::EncodedConfirmedBlock;
 use std::{
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::PathBuf,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
 
-use crate::{
-    compat_block::cb_to_compact_block,
-    optimizer::{KeyRegistry, to_compact_block},
-};
+use crate::{compat_block::cb_to_compact_block, optimizer::KeyRegistry};
 
 const ZSTD_LEVEL: i32 = 1;
 const LOG_EVERY: u64 = 10_000; // print + flush every N blocks
-const SAVE_REG_EVERY: u64 = 10_000; // dump registry to SQLite every N blocks
 
 fn extract_epoch_from_url(url: &str) -> u64 {
     url.split('/')
-        .last()
+        .next_back()
         .and_then(|f| f.strip_prefix("epoch-"))
         .and_then(|f| f.strip_suffix(".car"))
         .and_then(|n| n.parse::<u64>().ok())
@@ -95,16 +90,13 @@ pub async fn run_network_optimizer(source: &str, output_dir: Option<String>) -> 
         .write(true)
         .truncate(true)
         .open(&idx_path)?;
-    let mut idx = BufWriter::with_capacity(1 * 1024 * 1024, idx_file);
+    let mut idx = BufWriter::with_capacity(1024 * 1024, idx_file);
 
     // HTTP stream → AsyncRead
     let client = Client::new();
     let resp = client.get(source).send().await?.error_for_status()?;
-    let reader = StreamReader::new(
-        resp.bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
-    )
-    .compat();
+    let reader =
+        StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other)).compat();
 
     // CAR → block stream
     let mut stream = SolanaBlockStream::new(reader).await?;
@@ -152,7 +144,7 @@ pub async fn run_network_optimizer(source: &str, output_dir: Option<String>) -> 
         let c = (t4 - t3).as_secs_f64() * 1000.0;
         let w = (t5 - t4).as_secs_f64() * 1000.0;
         timers.record(d, cp, s, c, w);
-        if count % 100 == 0 {
+        if count.is_multiple_of(100) {
             let elapsed = start.elapsed().as_secs_f64();
             let blk_s = count as f64 / elapsed;
             let total_ms = d + cp + s + c + w;
@@ -163,7 +155,7 @@ pub async fn run_network_optimizer(source: &str, output_dir: Option<String>) -> 
         }
 
         count += 1;
-        if count % LOG_EVERY == 0 {
+        if count.is_multiple_of(LOG_EVERY) {
             bin.flush()?;
             idx.flush()?;
             reg.save_to_sqlite(reg_path.to_str().unwrap())?;

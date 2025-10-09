@@ -1,6 +1,5 @@
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use cid::Cid;
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use prost::Message;
 use solana_reward_info::RewardType;
 use solana_sdk::transaction::{TransactionVersion, VersionedTransaction};
@@ -14,10 +13,9 @@ use solana_transaction_status_client_types::{
 };
 use std::cell::RefCell;
 use std::io::{Cursor, Read};
-use std::time::Instant;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
-use crate::{block_stream::CarBlock, Node};
+use crate::{Node, block_stream::CarBlock};
 
 thread_local! {
     static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));
@@ -31,7 +29,7 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
     fn try_into(self) -> Result<EncodedConfirmedBlock, Self::Error> {
         // Constant strings to avoid allocation
         const MISSING_HASH: &str = "missing";
-        
+
         let parent_slot = self
             .block
             .meta
@@ -40,7 +38,7 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
 
         // Pre-allocate with estimated capacity
         let estimated_tx_count = self.block.entries.len() * 4; // Rough estimate
-        let mut transactions: Vec<EncodedTransactionWithStatusMeta> = 
+        let mut transactions: Vec<EncodedTransactionWithStatusMeta> =
             Vec::with_capacity(estimated_tx_count);
 
         for e_cid in &self.block.entries {
@@ -52,14 +50,16 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
                 match self.entries.get(tx_cid) {
                     Some(Node::Transaction(tx)) => {
                         // Merge dataframes
-                        let meta_bytes = self.merge_dataframe(&tx.metadata)
+                        let meta_bytes = self
+                            .merge_dataframe(&tx.metadata)
                             .context("merge_dataframe(meta) failed")?;
-                        let tx_bytes = self.merge_dataframe(&tx.data)
+                        let tx_bytes = self
+                            .merge_dataframe(&tx.data)
                             .context("merge_dataframe(tx) failed")?;
 
                         // Decode VersionedTransaction (bincode)
-                        let vt: VersionedTransaction =
-                            bincode::deserialize(&tx_bytes).context("decode VersionedTransaction")?;
+                        let vt: VersionedTransaction = bincode::deserialize(&tx_bytes)
+                            .context("decode VersionedTransaction")?;
 
                         // Decode metadata (zstd + prost) with buffer reuse
                         let meta = decode_meta(&meta_bytes);
@@ -113,14 +113,14 @@ fn encode_transaction_base64(vt: &VersionedTransaction) -> Result<String> {
         TL_BASE64_BUF.with(|base64_cell| {
             let mut bincode_buf = bincode_cell.borrow_mut();
             let mut base64_buf = base64_cell.borrow_mut();
-            
+
             bincode_buf.clear();
             bincode::serialize_into(&mut *bincode_buf, vt)
                 .context("re-serialize VersionedTransaction")?;
-            
+
             base64_buf.clear();
-            BASE64.encode_string(&*bincode_buf, &mut *base64_buf);
-            
+            BASE64.encode_string(&*bincode_buf, &mut base64_buf);
+
             Ok(base64_buf.clone())
         })
     })
@@ -141,9 +141,10 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
         buf.clear();
 
         // Streaming zstd decode
-        let mut decoder = ZstdDecoder::new(Cursor::new(bytes))
-            .context("zstd stream open failed")?;
-        decoder.read_to_end(&mut *buf)
+        let mut decoder =
+            ZstdDecoder::new(Cursor::new(bytes)).context("zstd stream open failed")?;
+        decoder
+            .read_to_end(&mut buf)
             .context("zstd decode failed")?;
 
         // Prost decode from reused buffer
@@ -158,7 +159,9 @@ fn convert_generated_meta(
 ) -> Result<UiTransactionStatusMeta> {
     let err = decode_transaction_error(&meta)?;
     let ui_err = err.as_ref().map(|e| UiTransactionError::from(e.clone()));
-    let ui_status = err.map(|e| Err(UiTransactionError::from(e))).unwrap_or(Ok(()));
+    let ui_status = err
+        .map(|e| Err(UiTransactionError::from(e)))
+        .unwrap_or(Ok(()));
 
     Ok(UiTransactionStatusMeta {
         err: ui_err,
@@ -219,7 +222,7 @@ fn convert_inner_instructions(
                     })
                 })
                 .collect();
-            
+
             UiInnerInstructions {
                 index: ix.index as u8,
                 instructions,
@@ -252,14 +255,14 @@ fn convert_token_balances(
         .map(|t| {
             let ui_token_amount = t
                 .ui_token_amount
-                .map(|amount| {
-                    solana_account_decoder_client_types::token::UiTokenAmount {
+                .map(
+                    |amount| solana_account_decoder_client_types::token::UiTokenAmount {
                         ui_amount: Some(amount.ui_amount),
                         decimals: amount.decimals as u8,
                         amount: amount.amount,
                         ui_amount_string: amount.ui_amount_string,
-                    }
-                })
+                    },
+                )
                 .unwrap();
 
             UiTransactionTokenBalance {
@@ -338,7 +341,7 @@ fn convert_return_data(
         Some(rd) => {
             let program_id = solana_sdk::bs58::encode(rd.program_id).into_string();
             let encoded_data = BASE64.encode(rd.data);
-            
+
             OptionSerializer::Some(UiTransactionReturnData {
                 program_id,
                 data: (encoded_data, UiReturnDataEncoding::Base64),

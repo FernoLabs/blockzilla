@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use blockzilla::block_stream::SolanaBlockStream;
 use futures::io::AllowStdIo;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{
     bs58, message::MessageHeader, pubkey::Pubkey, signature::Signature,
@@ -210,7 +210,10 @@ pub struct BlockWithIds {
     pub num_transactions: u64,
 }
 
-pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) -> Result<BlockWithIds> {
+pub fn to_compact_block(
+    block: &EncodedConfirmedBlock,
+    reg: &mut KeyRegistry,
+) -> Result<BlockWithIds> {
     let slot = block.parent_slot + 1;
     let blockhash = block.blockhash.clone();
     let previous_blockhash = block.previous_blockhash.clone();
@@ -293,15 +296,15 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
         // Build complete key list for inner instructions
         let mut all_keys = static_keys.to_vec();
 
-        if let Some(meta) = meta {
-            if let OptionSerializer::Some(loaded) = &meta.loaded_addresses {
-                // Estimate capacity
-                let extra_capacity = loaded.writable.len() + loaded.readonly.len();
-                all_keys.reserve(extra_capacity);
-                
-                for p_str in loaded.writable.iter().chain(loaded.readonly.iter()) {
-                        all_keys.push(Pubkey::from_str_const(p_str));
-                }
+        if let Some(meta) = meta
+            && let OptionSerializer::Some(loaded) = &meta.loaded_addresses
+        {
+            // Estimate capacity
+            let extra_capacity = loaded.writable.len() + loaded.readonly.len();
+            all_keys.reserve(extra_capacity);
+
+            for p_str in loaded.writable.iter().chain(loaded.readonly.iter()) {
+                all_keys.push(Pubkey::from_str_const(p_str));
             }
         }
 
@@ -319,7 +322,6 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
                                     let data_bytes = bs58::decode(&compiled.data)
                                         .into_vec()
                                         .unwrap_or_default();
-                                    
                                     Some(CompactInstruction {
                                         program_id: reg.get_or_insert(&all_keys[compiled.program_id_index as usize]),
                                         accounts: compiled.accounts.clone(),
@@ -330,7 +332,6 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
                                 _ => None,
                             }
                         }).collect();
-                        
                         compact_inners.push(CompactInnerInstructions {
                             index: ui_inner.index,
                             instructions,
@@ -362,23 +363,21 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
                     .filter_map(|s| s.parse::<Pubkey>().ok())
                     .map(|pk| reg.get_or_insert(&pk))
                     .collect();
-                
                 let readonly: Vec<u32> = addrs.readonly.iter()
                     .filter_map(|s| s.parse::<Pubkey>().ok())
                     .map(|pk| reg.get_or_insert(&pk))
                     .collect();
-                
                 CompactLoadedAddresses { writable, readonly }
             });
 
             // Return data
             let return_data = match &m.return_data {
                 OptionSerializer::Some(rd) => {
-                    rd.program_id.parse::<Pubkey>().ok().and_then(|pk| {
+                    rd.program_id.parse::<Pubkey>().ok().map(|pk| {
                         let data_bytes = bs58::decode(&rd.data.0)
                             .into_vec()
                             .unwrap_or_else(|_| rd.data.0.as_bytes().to_vec());
-                        Some((reg.get_or_insert(&pk), data_bytes))
+                        (reg.get_or_insert(&pk), data_bytes)
                     })
                 },
                 _ => None,
@@ -436,7 +435,8 @@ fn convert_token_balance(
     tb: &UiTransactionTokenBalance,
     reg: &mut KeyRegistry,
 ) -> CompactTokenBalance {
-    let mint = tb.mint
+    let mint = tb
+        .mint
         .parse::<Pubkey>()
         .ok()
         .map(|pk| reg.get_or_insert(&pk))
@@ -506,7 +506,7 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
         .truncate(true)
         .open(&bin_path)?;
     let mut bin = BufWriter::with_capacity(16 * 1024 * 1024, bin_file);
-    
+
     let idx_file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -519,18 +519,17 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
     let mut total_bytes = 0u64;
     let mut last_log = Instant::now();
 
-
     while let Some(block) = stream.next_solana_block().await? {
         let t0 = Instant::now();
         //let rpc_block: EncodedConfirmedBlock = block.try_into()?;
         let t1 = Instant::now();
         //let compact = to_compact_block(&rpc_block, &mut reg)?;
-        let compact = cb_to_compact_block(block,&mut reg)?;
+        let compact = cb_to_compact_block(block, &mut reg)?;
         let t2 = Instant::now();
 
         let raw = postcard::to_allocvec(&compact)?;
         let t3 = Instant::now();
-        
+
         // Use faster zstd compression level (3 instead of 5)
         let compressed = zstd::bulk::compress(&raw, 3)?;
         let t4 = Instant::now();
