@@ -19,65 +19,53 @@ use zstd::stream::read::Decoder as ZstdDecoder;
 
 use crate::{block_stream::CarBlock, Node};
 
-/// Reusable decode buffer to avoid per-call allocations in decode_meta
 thread_local! {
-    static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(32 * 1024));
+    static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));
+    static TL_BINCODE_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(16 * 1024));
+    static TL_BASE64_BUF: RefCell<String> = RefCell::new(String::with_capacity(24 * 1024));
 }
 
 impl TryInto<EncodedConfirmedBlock> for CarBlock {
     type Error = anyhow::Error;
 
     fn try_into(self) -> Result<EncodedConfirmedBlock, Self::Error> {
-        // TODO: compute real hashes if/when available
-        let previous_blockhash = "missing".to_string();
-        let blockhash = "missing".to_string();
-
+        // Constant strings to avoid allocation
+        const MISSING_HASH: &str = "missing";
+        
         let parent_slot = self
             .block
             .meta
             .parent_slot
             .ok_or_else(|| anyhow!("missing parent block"))?;
 
-        // --- Stream transactions directly from entries, no intermediate Vec<Cid> ---
-        // We may not know exact capacity. If you have a rough upper bound, reserve here.
-        let mut transactions: Vec<EncodedTransactionWithStatusMeta> = Vec::new();
+        // Pre-allocate with estimated capacity
+        let estimated_tx_count = self.block.entries.len() * 4; // Rough estimate
+        let mut transactions: Vec<EncodedTransactionWithStatusMeta> = 
+            Vec::with_capacity(estimated_tx_count);
 
         for e_cid in &self.block.entries {
             let Some(Node::Entry(entry)) = self.entries.get(e_cid) else {
-                continue; // skip non-entry
+                continue;
             };
-
-            // If you have an average tx per entry, you can reserve here:
-            // transactions.reserve(entry.transactions.len());
 
             for tx_cid in &entry.transactions {
                 match self.entries.get(tx_cid) {
                     Some(Node::Transaction(tx)) => {
-                        // Merge metadata/data frames once
-                        let t_merge0 = Instant::now();
+                        // Merge dataframes
                         let meta_bytes = self.merge_dataframe(&tx.metadata)
                             .context("merge_dataframe(meta) failed")?;
                         let tx_bytes = self.merge_dataframe(&tx.data)
                             .context("merge_dataframe(tx) failed")?;
-                        let _t_merge = t_merge0.elapsed();
 
                         // Decode VersionedTransaction (bincode)
-                        let t_tx0 = Instant::now();
                         let vt: VersionedTransaction =
                             bincode::deserialize(&tx_bytes).context("decode VersionedTransaction")?;
-                        let _t_tx = t_tx0.elapsed();
 
-                        // Decode UiTransactionStatusMeta (zstd + prost) with buffer reuse
-                        let t_meta0 = Instant::now();
+                        // Decode metadata (zstd + prost) with buffer reuse
                         let meta = decode_meta(&meta_bytes);
-                        let _t_meta = t_meta0.elapsed();
 
-                        // Re-encode tx to bincode -> base64 (UI format)
-                        let t_ser0 = Instant::now();
-                        let tx_bincode =
-                            bincode::serialize(&vt).context("re-serialize VersionedTransaction")?;
-                        let encoded_tx = BASE64.encode(tx_bincode);
-                        let _t_ser = t_ser0.elapsed();
+                        // Re-encode transaction with buffer reuse
+                        let encoded_tx = encode_transaction_base64(&vt)?;
 
                         transactions.push(EncodedTransactionWithStatusMeta {
                             transaction: EncodedTransaction::Binary(
@@ -85,12 +73,10 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
                                 TransactionBinaryEncoding::Base64,
                             ),
                             meta,
-                            // If you have the actual version, set it; 0 keeps your previous behavior.
                             version: Some(TransactionVersion::Number(0)),
                         });
                     }
                     Some(other) => {
-                        // Keep the error behavior the same as before, but without noisy prints:
                         return Err(anyhow!("block entry not a transaction ({other:?})"));
                     }
                     None => return Err(anyhow!("block entry not found for tx cid")),
@@ -98,21 +84,18 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             }
         }
 
-        // Rewards (same logic as before)
+        // Decode rewards efficiently
         let rewards = match self.block.rewards.and_then(|cid| self.entries.get(&cid)) {
             Some(Node::DataFrame(df)) => {
-                let t0 = Instant::now();
                 let bytes = self.merge_dataframe(df)?;
-                let decoded: Vec<Reward> = bincode::deserialize(&bytes)?;
-                let _t = t0.elapsed();
-                decoded
+                bincode::deserialize(&bytes)?
             }
-            _ => vec![],
+            _ => Vec::new(),
         };
 
         Ok(EncodedConfirmedBlock {
-            previous_blockhash,
-            blockhash,
+            previous_blockhash: MISSING_HASH.to_string(),
+            blockhash: MISSING_HASH.to_string(),
             parent_slot,
             transactions,
             rewards,
@@ -123,40 +106,59 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
     }
 }
 
-/// Public entry: decode and convert protobuf bytes into UiTransactionStatusMeta
-/// Fast path: zero-alloc (per call) via thread-local reused buffer.
-pub fn decode_meta(meta_bytes: &[u8]) -> Option<UiTransactionStatusMeta> {
-    (|| -> Result<UiTransactionStatusMeta> {
-        let meta = decode_protobuf_meta(meta_bytes)?;
-        convert_generated_meta(meta)
-    })()
-    .ok()
+/// Encode VersionedTransaction to base64 using thread-local buffer reuse
+#[inline]
+fn encode_transaction_base64(vt: &VersionedTransaction) -> Result<String> {
+    TL_BINCODE_BUF.with(|bincode_cell| {
+        TL_BASE64_BUF.with(|base64_cell| {
+            let mut bincode_buf = bincode_cell.borrow_mut();
+            let mut base64_buf = base64_cell.borrow_mut();
+            
+            bincode_buf.clear();
+            bincode::serialize_into(&mut *bincode_buf, vt)
+                .context("re-serialize VersionedTransaction")?;
+            
+            base64_buf.clear();
+            BASE64.encode_string(&*bincode_buf, &mut *base64_buf);
+            
+            Ok(base64_buf.clone())
+        })
+    })
 }
 
-/// Decode zstd-compressed protobuf into generated::TransactionStatusMeta
-/// Uses a thread-local reusable buffer to avoid per-call allocations.
+/// Decode and convert protobuf bytes into UiTransactionStatusMeta
+#[inline]
+pub fn decode_meta(meta_bytes: &[u8]) -> Option<UiTransactionStatusMeta> {
+    decode_protobuf_meta(meta_bytes)
+        .and_then(convert_generated_meta)
+        .ok()
+}
+
+/// Decode zstd-compressed protobuf using thread-local reusable buffer
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
-    TL_META_BUF.try_with(|cell| {
+    TL_META_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear();
 
-        // Streaming zstd -> Vec (reused)
-        let mut decoder = ZstdDecoder::new(Cursor::new(bytes)).context("zstd stream open failed")?;
-        decoder.read_to_end(&mut *buf).context("zstd decode failed")?;
+        // Streaming zstd decode
+        let mut decoder = ZstdDecoder::new(Cursor::new(bytes))
+            .context("zstd stream open failed")?;
+        decoder.read_to_end(&mut *buf)
+            .context("zstd decode failed")?;
 
-        // Prost decode directly from the in-place buffer
-        let meta = generated::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
-            .context("prost decode failed")?;
-        Ok(meta)
-    }).map_err(|_| anyhow!("thread-local access failed"))?
+        // Prost decode from reused buffer
+        generated::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
+            .context("prost decode failed")
+    })
 }
 
+#[inline]
 fn convert_generated_meta(
     meta: generated::TransactionStatusMeta,
 ) -> Result<UiTransactionStatusMeta> {
     let err = decode_transaction_error(&meta)?;
-    let ui_err = err.clone().map(UiTransactionError::from);
-    let ui_status = err.clone().map(UiTransactionError::from).map_or(Ok(()), Err);
+    let ui_err = err.as_ref().map(|e| UiTransactionError::from(e.clone()));
+    let ui_status = err.map(|e| Err(UiTransactionError::from(e))).unwrap_or(Ok(()));
 
     Ok(UiTransactionStatusMeta {
         err: ui_err,
@@ -182,6 +184,7 @@ fn convert_generated_meta(
     })
 }
 
+#[inline]
 fn decode_transaction_error(
     meta: &generated::TransactionStatusMeta,
 ) -> Result<Option<TransactionError>> {
@@ -192,35 +195,42 @@ fn decode_transaction_error(
         .context("failed to deserialize TransactionError")
 }
 
+#[inline]
 fn convert_inner_instructions(
     list: Vec<generated::InnerInstructions>,
     is_none: bool,
 ) -> OptionSerializer<Vec<UiInnerInstructions>> {
     if is_none {
-        OptionSerializer::None
-    } else {
-        OptionSerializer::Some(
-            list.into_iter()
-                .map(|ix| UiInnerInstructions {
-                    index: ix.index as u8,
-                    instructions: ix
-                        .instructions
-                        .into_iter()
-                        .map(|i| {
-                            UiInstruction::Compiled(UiCompiledInstruction {
-                                program_id_index: i.program_id_index as u8,
-                                accounts: i.accounts,
-                                data: solana_sdk::bs58::encode(i.data).into_string(),
-                                stack_height: i.stack_height,
-                            })
-                        })
-                        .collect(),
-                })
-                .collect(),
-        )
+        return OptionSerializer::None;
     }
+
+    let converted: Vec<UiInnerInstructions> = list
+        .into_iter()
+        .map(|ix| {
+            let instructions: Vec<UiInstruction> = ix
+                .instructions
+                .into_iter()
+                .map(|i| {
+                    UiInstruction::Compiled(UiCompiledInstruction {
+                        program_id_index: i.program_id_index as u8,
+                        accounts: i.accounts,
+                        data: solana_sdk::bs58::encode(i.data).into_string(),
+                        stack_height: i.stack_height,
+                    })
+                })
+                .collect();
+            
+            UiInnerInstructions {
+                index: ix.index as u8,
+                instructions,
+            }
+        })
+        .collect();
+
+    OptionSerializer::Some(converted)
 }
 
+#[inline]
 fn convert_log_messages(msgs: Vec<String>, is_none: bool) -> OptionSerializer<Vec<String>> {
     if is_none {
         OptionSerializer::None
@@ -229,98 +239,116 @@ fn convert_log_messages(msgs: Vec<String>, is_none: bool) -> OptionSerializer<Ve
     }
 }
 
+#[inline]
 fn convert_token_balances(
     balances: Vec<generated::TokenBalance>,
 ) -> OptionSerializer<Vec<UiTransactionTokenBalance>> {
     if balances.is_empty() {
-        OptionSerializer::None
-    } else {
-        OptionSerializer::Some(
-            balances
-                .into_iter()
-                .map(|t| UiTransactionTokenBalance {
-                    account_index: t.account_index as u8,
-                    mint: t.mint,
-                    ui_token_amount: t
-                        .ui_token_amount
-                        .map(
-                            |amount| solana_account_decoder_client_types::token::UiTokenAmount {
-                                ui_amount: Some(amount.ui_amount),
-                                decimals: amount.decimals as u8,
-                                amount: amount.amount,
-                                ui_amount_string: amount.ui_amount_string,
-                            },
-                        )
-                        .unwrap(),
-                    owner: if t.owner.is_empty() {
-                        OptionSerializer::Skip
-                    } else {
-                        OptionSerializer::Some(t.owner)
-                    },
-                    program_id: if t.program_id.is_empty() {
-                        OptionSerializer::Skip
-                    } else {
-                        OptionSerializer::Some(t.program_id)
-                    },
-                })
-                .collect(),
-        )
+        return OptionSerializer::None;
     }
+
+    let converted: Vec<UiTransactionTokenBalance> = balances
+        .into_iter()
+        .map(|t| {
+            let ui_token_amount = t
+                .ui_token_amount
+                .map(|amount| {
+                    solana_account_decoder_client_types::token::UiTokenAmount {
+                        ui_amount: Some(amount.ui_amount),
+                        decimals: amount.decimals as u8,
+                        amount: amount.amount,
+                        ui_amount_string: amount.ui_amount_string,
+                    }
+                })
+                .unwrap();
+
+            UiTransactionTokenBalance {
+                account_index: t.account_index as u8,
+                mint: t.mint,
+                ui_token_amount,
+                owner: if t.owner.is_empty() {
+                    OptionSerializer::Skip
+                } else {
+                    OptionSerializer::Some(t.owner)
+                },
+                program_id: if t.program_id.is_empty() {
+                    OptionSerializer::Skip
+                } else {
+                    OptionSerializer::Some(t.program_id)
+                },
+            }
+        })
+        .collect();
+
+    OptionSerializer::Some(converted)
 }
 
+#[inline]
 fn convert_rewards(list: Vec<generated::Reward>) -> OptionSerializer<Vec<Reward>> {
     if list.is_empty() {
-        OptionSerializer::None
-    } else {
-        OptionSerializer::Some(
-            list.into_iter()
-                .map(|r| Reward {
-                    pubkey: r.pubkey,
-                    lamports: r.lamports,
-                    post_balance: r.post_balance,
-                    reward_type: match r.reward_type {
-                        1 => Some(RewardType::Fee),
-                        2 => Some(RewardType::Rent),
-                        3 => Some(RewardType::Staking),
-                        4 => Some(RewardType::Voting),
-                        0 => None,
-                        _ => None,
-                    },
-                    commission: r.commission.parse::<u8>().ok(),
-                })
-                .collect(),
-        )
+        return OptionSerializer::None;
     }
+
+    let converted: Vec<Reward> = list
+        .into_iter()
+        .map(|r| Reward {
+            pubkey: r.pubkey,
+            lamports: r.lamports,
+            post_balance: r.post_balance,
+            reward_type: match r.reward_type {
+                1 => Some(RewardType::Fee),
+                2 => Some(RewardType::Rent),
+                3 => Some(RewardType::Staking),
+                4 => Some(RewardType::Voting),
+                _ => None,
+            },
+            commission: r.commission.parse::<u8>().ok(),
+        })
+        .collect();
+
+    OptionSerializer::Some(converted)
 }
 
+#[inline]
 fn convert_loaded_addresses(
     writable: Vec<Vec<u8>>,
     readonly: Vec<Vec<u8>>,
 ) -> OptionSerializer<UiLoadedAddresses> {
+    let writable_strings: Vec<String> = writable
+        .into_iter()
+        .map(|v| solana_sdk::bs58::encode(v).into_string())
+        .collect();
+
+    let readonly_strings: Vec<String> = readonly
+        .into_iter()
+        .map(|v| solana_sdk::bs58::encode(v).into_string())
+        .collect();
+
     OptionSerializer::Some(UiLoadedAddresses {
-        writable: writable
-            .into_iter()
-            .map(|v| solana_sdk::bs58::encode(v).into_string())
-            .collect(),
-        readonly: readonly
-            .into_iter()
-            .map(|v| solana_sdk::bs58::encode(v).into_string())
-            .collect(),
+        writable: writable_strings,
+        readonly: readonly_strings,
     })
 }
 
+#[inline]
 fn convert_return_data(
     data: Option<generated::ReturnData>,
 ) -> OptionSerializer<UiTransactionReturnData> {
     match data {
-        Some(rd) => OptionSerializer::Some(UiTransactionReturnData {
-            program_id: solana_sdk::bs58::encode(rd.program_id).into_string(),
-            data: (BASE64.encode(rd.data), UiReturnDataEncoding::Base64),
-        }),
+        Some(rd) => {
+            let program_id = solana_sdk::bs58::encode(rd.program_id).into_string();
+            let encoded_data = BASE64.encode(rd.data);
+            
+            OptionSerializer::Some(UiTransactionReturnData {
+                program_id,
+                data: (encoded_data, UiReturnDataEncoding::Base64),
+            })
+        }
         None => OptionSerializer::None,
     }
 }
 
+#[inline]
 fn convert_option_u64(value: Option<u64>) -> OptionSerializer<u64> {
     value
         .map(OptionSerializer::Some)

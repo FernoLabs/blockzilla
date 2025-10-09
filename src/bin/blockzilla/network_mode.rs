@@ -12,7 +12,10 @@ use std::{
 };
 use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
 
-use crate::optimizer::{KeyRegistry, to_compact_block};
+use crate::{
+    compat_block::cb_to_compact_block,
+    optimizer::{KeyRegistry, to_compact_block},
+};
 
 const ZSTD_LEVEL: i32 = 1;
 const LOG_EVERY: u64 = 10_000; // print + flush every N blocks
@@ -117,11 +120,12 @@ pub async fn run_network_optimizer(source: &str, output_dir: Option<String>) -> 
     while let Some(car_block) = stream.next_solana_block().await? {
         // decode CAR -> EncodedConfirmedBlock
         let t0 = Instant::now();
-        let rpc_block: EncodedConfirmedBlock = car_block.try_into()?;
+        //let rpc_block: EncodedConfirmedBlock = car_block.try_into()?;
         let t1 = Instant::now();
 
         // to_compact_block (walk + map pubkeys)
-        let compact = to_compact_block(&rpc_block, &mut reg)?;
+        //let compact = to_compact_block(&rpc_block, &mut reg)?;
+        let compact = cb_to_compact_block(car_block, &mut reg)?;
         let t2 = Instant::now();
 
         // serialize (postcard)

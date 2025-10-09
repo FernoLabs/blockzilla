@@ -3,7 +3,7 @@ mod network_mode;
 mod node_mode;
 mod optimizer;
 mod print_compressed_block;
-mod mutli_thread;
+mod compat_block;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

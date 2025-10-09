@@ -20,6 +20,8 @@ use solana_transaction_status_client_types::{
     option_serializer::OptionSerializer,
 };
 
+use crate::compat_block::cb_to_compact_block;
+
 #[derive(Default, Debug, Clone)]
 pub struct KeyRegistry {
     pub next_id: u32,
@@ -28,26 +30,27 @@ pub struct KeyRegistry {
 }
 
 impl KeyRegistry {
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[inline]
     pub fn get_or_insert(&mut self, key: &Pubkey) -> u32 {
-        if let Some(id) = self.by_pubkey.get(key) {
-            *id
-        } else {
+        *self.by_pubkey.entry(*key).or_insert_with(|| {
             let id = self.next_id;
             self.next_id += 1;
-            self.by_pubkey.insert(*key, id);
             self.by_id.push(*key);
             id
-        }
+        })
     }
 
+    #[inline]
     pub fn get(&self, id: u32) -> Option<&Pubkey> {
         self.by_id.get(id as usize)
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
@@ -58,6 +61,7 @@ impl KeyRegistry {
             "CREATE TABLE IF NOT EXISTS keymap (id INTEGER PRIMARY KEY, pubkey TEXT UNIQUE)",
             [],
         )?;
+        // Use transaction for batch inserts
         let tx = conn.transaction()?;
         {
             let mut stmt =
@@ -71,7 +75,6 @@ impl KeyRegistry {
     }
 }
 
-/// Stage timing collector (same as network mode)
 #[derive(Default, Debug)]
 struct StageTimings {
     decode_total: f64,
@@ -83,6 +86,7 @@ struct StageTimings {
 }
 
 impl StageTimings {
+    #[inline]
     fn record(&mut self, d: f64, c: f64, s: f64, z: f64, w: f64) {
         self.decode_total += d;
         self.compact_total += c;
@@ -211,13 +215,11 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
     let blockhash = block.blockhash.clone();
     let previous_blockhash = block.previous_blockhash.clone();
     let parent_slot = block.parent_slot;
-
-    // Handle Option types directly (not OptionSerializer)
     let block_time = block.block_time;
     let block_height = block.block_height;
 
-    // Collect rewards - block.rewards is a Vec, not OptionSerializer
-    let mut rewards = Vec::new();
+    // Pre-allocate with expected capacity
+    let mut rewards = Vec::with_capacity(block.rewards.len());
     for rw in &block.rewards {
         if let Ok(pk) = rw.pubkey.parse::<Pubkey>() {
             rewards.push(CompactReward {
@@ -231,7 +233,7 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
     }
 
     let num_transactions = block.transactions.len() as u64;
-    let mut transactions = Vec::new();
+    let mut transactions = Vec::with_capacity(block.transactions.len());
 
     for EncodedTransactionWithStatusMeta {
         transaction,
@@ -244,24 +246,21 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
         };
         let msg = decoded_tx.message;
 
-        // Map static account keys
-        let account_keys = msg
-            .static_account_keys()
-            .iter()
-            .map(|k| reg.get_or_insert(k))
-            .collect::<Vec<_>>();
+        // Map static account keys - pre-allocate
+        let static_keys = msg.static_account_keys();
+        let mut account_keys = Vec::with_capacity(static_keys.len());
+        for k in static_keys.iter() {
+            account_keys.push(reg.get_or_insert(k));
+        }
 
-        // Get message header
         let message_header = *msg.header();
-
-        // Get recent blockhash
         let recent_blockhash = msg.recent_blockhash().to_string();
 
-        // Extract instructions
-        let mut instructions = Vec::new();
-        for ix in msg.instructions() {
-            let all_keys = msg.static_account_keys();
-            let program_id = reg.get_or_insert(&all_keys[ix.program_id_index as usize]);
+        // Extract instructions - pre-allocate
+        let msg_instructions = msg.instructions();
+        let mut instructions = Vec::with_capacity(msg_instructions.len());
+        for ix in msg_instructions {
+            let program_id = reg.get_or_insert(&static_keys[ix.program_id_index as usize]);
             instructions.push(CompactInstruction {
                 program_id,
                 accounts: ix.accounts.clone(),
@@ -271,8 +270,8 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
         }
 
         // Extract address table lookups
-        let address_table_lookups = if let Some(lookups) = msg.address_table_lookups() {
-            let mut compact_lookups = Vec::new();
+        let address_table_lookups = msg.address_table_lookups().map(|lookups| {
+            let mut compact_lookups = Vec::with_capacity(lookups.len());
             for lookup in lookups {
                 compact_lookups.push(CompactAddressTableLookup {
                     account_key: reg.get_or_insert(&lookup.account_key),
@@ -280,50 +279,47 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
                     readonly_indexes: lookup.readonly_indexes.clone(),
                 });
             }
-            Some(compact_lookups)
-        } else {
-            None
-        };
+            compact_lookups
+        });
 
         let signatures = decoded_tx.signatures;
 
-        // Determine version - TransactionVersion is an enum with Number(u8) variant
+        // Determine version
         let tx_version = match version {
-            Some(v) => match v {
-                TransactionVersion::Number(n) => *n,
-                TransactionVersion::Legacy(_) => 0,
-            },
-            None => 0, // Legacy transactions
+            Some(TransactionVersion::Number(n)) => *n,
+            Some(TransactionVersion::Legacy(_)) | None => 0,
         };
 
-        // Keep reference to account keys for inner instructions
-
-        let mut all_keys = msg.static_account_keys().to_vec();
+        // Build complete key list for inner instructions
+        let mut all_keys = static_keys.to_vec();
 
         if let Some(meta) = meta {
             if let OptionSerializer::Some(loaded) = &meta.loaded_addresses {
-                // Decode both readonly and writable LUT addresses
-                let lut_keys = loaded
-                    .writable
-                    .iter()
-                    .chain(loaded.readonly.iter())
-                    .map(|p_str| Pubkey::from_str_const(p_str));
-                all_keys.extend(lut_keys);
+                // Estimate capacity
+                let extra_capacity = loaded.writable.len() + loaded.readonly.len();
+                all_keys.reserve(extra_capacity);
+                
+                for p_str in loaded.writable.iter().chain(loaded.readonly.iter()) {
+                        all_keys.push(Pubkey::from_str_const(p_str));
+                }
             }
         }
 
-        // Extract COMPLETE transaction metadata
+        // Extract transaction metadata
         let compact_meta = meta.as_ref().map(|m| {
             // Inner instructions
             let inner_instructions = match &m.inner_instructions {
                 OptionSerializer::Some(inners) => {
-                    Some(inners.iter().map(|ui_inner| {
+                    let mut compact_inners = Vec::with_capacity(inners.len());
+                    for ui_inner in inners {
                         let instructions = ui_inner.instructions.iter().filter_map(|ui_ix| {
-                            // UiInstruction can be Compiled or Parsed - we need Compiled
                             match ui_ix {
                                 solana_transaction_status_client_types::UiInstruction::Compiled(compiled) => {
-                                    // compiled.data is a base58 String, need to decode it
-                                    let data_bytes = bs58::decode(&compiled.data).into_vec().unwrap_or_default();
+                                    // Decode base58 data
+                                    let data_bytes = bs58::decode(&compiled.data)
+                                        .into_vec()
+                                        .unwrap_or_default();
+                                    
                                     Some(CompactInstruction {
                                         program_id: reg.get_or_insert(&all_keys[compiled.program_id_index as usize]),
                                         accounts: compiled.accounts.clone(),
@@ -331,47 +327,58 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
                                         stack_height: compiled.stack_height,
                                     })
                                 },
-                                _ => None, // Skip parsed instructions
+                                _ => None,
                             }
                         }).collect();
-                        CompactInnerInstructions {
+                        
+                        compact_inners.push(CompactInnerInstructions {
                             index: ui_inner.index,
                             instructions,
-                        }
-                    }).collect())
+                        });
+                    }
+                    Some(compact_inners)
                 },
                 _ => None,
             };
 
-            // Token balances
+            // Token balances - use helper function
             let pre_token_balances = match &m.pre_token_balances {
-                OptionSerializer::Some(balances) => Some(balances.iter().map(|x|convert_token_balance(x, reg)).collect()),
+                OptionSerializer::Some(balances) => {
+                    Some(balances.iter().map(|x| convert_token_balance(x, reg)).collect())
+                },
                 _ => None,
             };
 
             let post_token_balances = match &m.post_token_balances {
-                OptionSerializer::Some(balances) => Some(balances.iter().map(|x|convert_token_balance(x, reg)).collect()),
+                OptionSerializer::Some(balances) => {
+                    Some(balances.iter().map(|x| convert_token_balance(x, reg)).collect())
+                },
                 _ => None,
             };
 
             // Loaded addresses
             let loaded_addresses = m.loaded_addresses.as_ref().map(|addrs| {
-                CompactLoadedAddresses {
-                    writable: addrs.writable.iter().filter_map(|s| s.parse::<Pubkey>().ok()).map(|pk| reg.get_or_insert(&pk)).collect(),
-                    readonly: addrs.readonly.iter().filter_map(|s| s.parse::<Pubkey>().ok()).map(|pk| reg.get_or_insert(&pk)).collect(),
-                }
+                let writable: Vec<u32> = addrs.writable.iter()
+                    .filter_map(|s| s.parse::<Pubkey>().ok())
+                    .map(|pk| reg.get_or_insert(&pk))
+                    .collect();
+                
+                let readonly: Vec<u32> = addrs.readonly.iter()
+                    .filter_map(|s| s.parse::<Pubkey>().ok())
+                    .map(|pk| reg.get_or_insert(&pk))
+                    .collect();
+                
+                CompactLoadedAddresses { writable, readonly }
             });
 
             // Return data
             let return_data = match &m.return_data {
                 OptionSerializer::Some(rd) => {
-                    rd.program_id.parse::<Pubkey>().ok().map(|pk| {
-                        // rd.data is (String, UiReturnDataEncoding) - we need the decoded bytes
-                        let data_bytes = match bs58::decode(&rd.data.0).into_vec() {
-                            Ok(bytes) => bytes,
-                            Err(_) => rd.data.0.as_bytes().to_vec(), // Fallback
-                        };
-                        (reg.get_or_insert(&pk), data_bytes)
+                    rd.program_id.parse::<Pubkey>().ok().and_then(|pk| {
+                        let data_bytes = bs58::decode(&rd.data.0)
+                            .into_vec()
+                            .unwrap_or_else(|_| rd.data.0.as_bytes().to_vec());
+                        Some((reg.get_or_insert(&pk), data_bytes))
                     })
                 },
                 _ => None,
@@ -424,12 +431,12 @@ pub fn to_compact_block(block: &EncodedConfirmedBlock, reg: &mut KeyRegistry) ->
     })
 }
 
+#[inline]
 fn convert_token_balance(
     tb: &UiTransactionTokenBalance,
     reg: &mut KeyRegistry,
 ) -> CompactTokenBalance {
-    let mint = tb
-        .mint
+    let mint = tb.mint
         .parse::<Pubkey>()
         .ok()
         .map(|pk| reg.get_or_insert(&pk))
@@ -462,6 +469,7 @@ fn convert_token_balance(
     }
 }
 
+#[inline]
 fn extract_epoch_from_path(path: &str) -> Option<u64> {
     Path::new(path)
         .file_stem()?
@@ -491,27 +499,40 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
     let mut timings = StageTimings::default();
     let start = Instant::now();
 
-    let bin_file = OpenOptions::new().create(true).write(true).truncate(true).open(&bin_path)?;
-    let mut bin = BufWriter::with_capacity(8 * 1024 * 1024, bin_file);
-    let idx_file = OpenOptions::new().create(true).write(true).truncate(true).open(&idx_path)?;
-    let mut idx = BufWriter::with_capacity(1024 * 1024, idx_file);
+    // Larger buffer sizes for better I/O performance
+    let bin_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&bin_path)?;
+    let mut bin = BufWriter::with_capacity(16 * 1024 * 1024, bin_file);
+    
+    let idx_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&idx_path)?;
+    let mut idx = BufWriter::with_capacity(2 * 1024 * 1024, idx_file);
 
     let mut count = 0u64;
     let mut current_offset = 0u64;
     let mut total_bytes = 0u64;
     let mut last_log = Instant::now();
 
+
     while let Some(block) = stream.next_solana_block().await? {
         let t0 = Instant::now();
-        let rpc_block: EncodedConfirmedBlock = block.try_into()?;
+        //let rpc_block: EncodedConfirmedBlock = block.try_into()?;
         let t1 = Instant::now();
-
-        let compact = to_compact_block(&rpc_block, &mut reg)?;
+        //let compact = to_compact_block(&rpc_block, &mut reg)?;
+        let compact = cb_to_compact_block(block,&mut reg)?;
         let t2 = Instant::now();
 
         let raw = postcard::to_allocvec(&compact)?;
         let t3 = Instant::now();
-        let compressed = zstd::bulk::compress(&raw, 5)?;
+        
+        // Use faster zstd compression level (3 instead of 5)
+        let compressed = zstd::bulk::compress(&raw, 3)?;
         let t4 = Instant::now();
 
         let len = compressed.len() as u32;
@@ -533,7 +554,8 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
             (t5 - t4).as_secs_f64() * 1000.0,
         );
 
-        if last_log.elapsed() > Duration::from_secs(10) || count % 1000 == 0 {
+        // Less frequent logging and flushing
+        if last_log.elapsed() > Duration::from_secs(15) {
             bin.flush()?;
             idx.flush()?;
             reg.save_to_sqlite(reg_path.to_str().unwrap())?;
