@@ -1,12 +1,11 @@
 use anyhow::Result;
 use blockzilla::block_stream::SolanaBlockStream;
-use futures_util::io::AllowStdIo;
 use solana_transaction_status_client_types::EncodedConfirmedBlock;
 use std::{
-    fs::File,
     time::{Duration, Instant},
 };
 use tracing::info;
+use tokio::fs::File;
 
 #[derive(Default)]
 struct StageStats {
@@ -53,11 +52,8 @@ pub async fn run_block_mode(path: &str) -> Result<()> {
     info!("🔄 Reading CAR file: {path}");
     let start = Instant::now();
 
-    let file = File::open(path)?;
-    let reader = AllowStdIo::new(file);
-    let mut stream = SolanaBlockStream::new(reader).await?;
-
-    info!("Header: {:?}", stream.header());
+    let file = File::open(path).await?;
+    let mut stream = SolanaBlockStream::new(file).await?;
 
     let mut count: u64 = 0;
     let mut total_entries: u64 = 0;

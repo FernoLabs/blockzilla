@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     time::Instant,
 };
-use tokio_util::{compat::TokioAsyncReadCompatExt, io::StreamReader};
+use tokio_util::{io::StreamReader};
 
 use crate::{compat_block::cb_to_compact_block, optimizer::KeyRegistry};
 
@@ -92,13 +92,12 @@ pub async fn run_network_optimizer(source: &str, output_dir: Option<String>) -> 
         .open(&idx_path)?;
     let mut idx = BufWriter::with_capacity(1024 * 1024, idx_file);
 
-    // HTTP stream → AsyncRead
     let client = Client::new();
     let resp = client.get(source).send().await?.error_for_status()?;
-    let reader =
-        StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other)).compat();
-
-    // CAR → block stream
+    let reader = StreamReader::new(
+        resp.bytes_stream()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+    );
     let mut stream = SolanaBlockStream::new(reader).await?;
 
     // Registry + counters
@@ -125,7 +124,7 @@ pub async fn run_network_optimizer(source: &str, output_dir: Option<String>) -> 
         let t3 = Instant::now();
 
         // compress (zstd)
-        let compressed = zstd::bulk::compress(&raw, ZSTD_LEVEL)?;
+        let compressed = &zstd::bulk::compress(&raw, ZSTD_LEVEL)?;
         let t4 = Instant::now();
 
         // write (bin + idx)

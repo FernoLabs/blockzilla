@@ -85,27 +85,45 @@ pub struct SlotMeta {
     pub block_height: Option<u64>,
 }
 
+#[inline]
 fn extract_u64(v: &Value) -> Option<u64> {
-    if let Value::Integer(i) = v {
-        (*i >= 0).then_some(*i as u64)
-    } else {
-        None
+    match v {
+        Value::Integer(i) if *i >= 0 => Some(*i as u64),
+        _ => None,
     }
 }
 
+#[inline]
 fn extract_i64(v: &Value) -> Option<i64> {
-    if let Value::Integer(i) = v {
-        (*i < i64::MAX as i128).then_some(*i as i64)
-    } else {
-        None
+    match v {
+        Value::Integer(i) if *i < i64::MAX as i128 => Some(*i as i64),
+        _ => None,
     }
 }
 
+#[inline]
 fn strict_cid(v: &Value, ctx: &str) -> Result<Cid> {
-    if let Value::Bytes(bytes) = v {
-        Cid::try_from(&bytes[1..]).map_err(|e| anyhow!("{ctx}: {e}"))
-    } else {
-        bail!("{ctx}: CID not bytes");
+    match v {
+        Value::Bytes(bytes) if bytes.len() > 1 => {
+            Cid::try_from(&bytes[1..]).map_err(|e| anyhow!("{ctx}: {e}"))
+        }
+        Value::Bytes(_) => bail!("{ctx}: CID bytes too short"),
+        _ => bail!("{ctx}: CID not bytes"),
+    }
+}
+
+// Pre-allocate CID vector with capacity hint
+#[inline]
+fn extract_cid_vec(v: &Value, ctx: &str) -> Result<Vec<Cid>> {
+    match v {
+        Value::Array(list) => {
+            let mut cids = Vec::with_capacity(list.len());
+            for item in list {
+                cids.push(strict_cid(item, ctx)?);
+            }
+            Ok(cids)
+        }
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -114,11 +132,10 @@ pub fn decode_node(data: &[u8]) -> Result<Node> {
     let Value::Array(arr) = value else {
         bail!("node not array");
     };
-    if arr.is_empty() {
-        bail!("empty node array");
-    }
-
-    let kind = extract_u64(&arr[0]).ok_or_else(|| anyhow!("missing kind id"))?;
+    
+    let kind = arr.first()
+        .and_then(extract_u64)
+        .ok_or_else(|| anyhow!("missing kind id"))?;
 
     Ok(match kind {
         0 => Node::Transaction(decode_transaction(arr)?),
@@ -133,178 +150,157 @@ pub fn decode_node(data: &[u8]) -> Result<Node> {
 }
 
 fn decode_transaction(arr: Vec<Value>) -> Result<TransactionNode> {
-    let [kind, data, metadata, slot, index] = arr.as_slice() else {
+    if arr.len() != 5 {
         bail!("Transaction: expected 5 elements, got {}", arr.len());
-    };
+    }
+    
+    let mut iter = arr.into_iter();
+    let kind = extract_u64(&iter.next().unwrap()).unwrap_or_default();
+    let data = decode_dataframe(iter.next().unwrap())?;
+    let metadata = decode_dataframe(iter.next().unwrap())?;
+    let slot = extract_u64(&iter.next().unwrap()).unwrap_or_default();
+    let index = extract_u64(&iter.next().unwrap());
 
-    Ok(TransactionNode {
-        kind: extract_u64(kind).unwrap_or_default(),
-        data: decode_dataframe(data.clone())?,
-        metadata: decode_dataframe(metadata.clone())?,
-        slot: extract_u64(slot).unwrap_or_default(),
-        index: extract_u64(index),
-    })
+    Ok(TransactionNode { kind, data, metadata, slot, index })
 }
 
 fn decode_entry(arr: Vec<Value>) -> Result<EntryNode> {
-    let [kind, num_hashes, hash, txs] = arr.as_slice() else {
+    if arr.len() != 4 {
         bail!("Entry: expected 4 elements, got {}", arr.len());
-    };
+    }
 
-    let transactions = match txs {
-        Value::Array(list) => list
-            .iter()
-            .map(|v| strict_cid(v, "entry tx"))
-            .collect::<Result<Vec<_>>>()?,
+    let mut iter = arr.into_iter();
+    let kind = extract_u64(&iter.next().unwrap()).unwrap_or_default();
+    let num_hashes = extract_u64(&iter.next().unwrap()).unwrap_or_default();
+    
+    let hash = match iter.next().unwrap() {
+        Value::Bytes(b) => b,
         _ => Vec::new(),
     };
+    
+    let transactions = extract_cid_vec(&iter.next().unwrap(), "entry tx")?;
 
-    let hash = match hash {
-        Value::Bytes(b) => b.clone(),
-        _ => Vec::new(),
-    };
-
-    Ok(EntryNode {
-        kind: extract_u64(kind).unwrap_or_default(),
-        num_hashes: extract_u64(num_hashes).unwrap_or_default(),
-        hash,
-        transactions,
-    })
+    Ok(EntryNode { kind, num_hashes, hash, transactions })
 }
 
-fn decode_block(arr: Vec<Value>) -> Result<BlockNode> {
-    let [kind, slot, shredding, entries, meta, rest @ ..] = arr.as_slice() else {
+fn decode_block(mut arr: Vec<Value>) -> Result<BlockNode> {
+    if arr.len() < 5 {
         bail!("Block: expected ≥5 elements, got {}", arr.len());
-    };
+    }
 
-    let shredding = match shredding {
-        Value::Array(list) => list
-            .iter()
-            .filter_map(|v| match v {
-                Value::Array(a) if a.len() == 2 => Some(Shredding {
-                    entry_end_idx: extract_u64(&a[0]).unwrap_or_default(),
-                    shred_end_idx: extract_u64(&a[1]).unwrap_or_default(),
-                }),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
-
-    let entries = match entries {
-        Value::Array(list) => list
-            .iter()
-            .map(|v| strict_cid(v, "block entry"))
-            .collect::<Result<Vec<_>>>()?,
-        _ => Vec::new(),
-    };
-
-    let meta = decode_slot_meta(meta)?;
-
-    let rewards = rest
-        .first()
-        .and_then(|v| {
-            if matches!(v, Value::Bytes(_)) {
-                Some(strict_cid(v, "block rewards"))
-            } else {
-                None
+    let kind = extract_u64(&arr[0]).unwrap_or_default();
+    let slot = extract_u64(&arr[1]).unwrap_or_default();
+    
+    let shredding = match &arr[2] {
+        Value::Array(list) => {
+            let mut result = Vec::with_capacity(list.len());
+            for v in list {
+                if let Value::Array(a) = v {
+                    if a.len() == 2 {
+                        result.push(Shredding {
+                            entry_end_idx: extract_u64(&a[0]).unwrap_or_default(),
+                            shred_end_idx: extract_u64(&a[1]).unwrap_or_default(),
+                        });
+                    }
+                }
             }
-        })
-        .transpose()?;
+            result
+        }
+        _ => Vec::new(),
+    };
 
-    Ok(BlockNode {
-        kind: extract_u64(kind).unwrap_or_default(),
-        slot: extract_u64(slot).unwrap_or_default(),
-        shredding,
-        entries,
-        meta,
-        rewards,
-    })
+    let entries = extract_cid_vec(&arr[3], "block entry")?;
+    let meta = decode_slot_meta(&arr[4])?;
+    
+    let rewards = if arr.len() > 5 {
+        match &arr[5] {
+            Value::Bytes(_) => Some(strict_cid(&arr[5], "block rewards")?),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(BlockNode { kind, slot, shredding, entries, meta, rewards })
 }
 
 fn decode_subset(arr: Vec<Value>) -> Result<SubsetNode> {
-    let [kind, first, last, blocks] = arr.as_slice() else {
+    if arr.len() != 4 {
         bail!("Subset: expected 4 elements, got {}", arr.len());
-    };
+    }
 
-    let blocks = match blocks {
-        Value::Array(list) => list
-            .iter()
-            .map(|v| strict_cid(v, "subset block"))
-            .collect::<Result<Vec<_>>>()?,
-        _ => Vec::new(),
-    };
+    let kind = extract_u64(&arr[0]).unwrap_or_default();
+    let first = extract_u64(&arr[1]).unwrap_or_default();
+    let last = extract_u64(&arr[2]).unwrap_or_default();
+    let blocks = extract_cid_vec(&arr[3], "subset block")?;
 
-    Ok(SubsetNode {
-        kind: extract_u64(kind).unwrap_or_default(),
-        first: extract_u64(first).unwrap_or_default(),
-        last: extract_u64(last).unwrap_or_default(),
-        blocks,
-    })
+    Ok(SubsetNode { kind, first, last, blocks })
 }
 
 fn decode_epoch(arr: Vec<Value>) -> Result<EpochNode> {
-    let [kind, epoch, subsets] = arr.as_slice() else {
+    if arr.len() != 3 {
         bail!("Epoch: expected 3 elements, got {}", arr.len());
-    };
+    }
 
-    let subsets = match subsets {
-        Value::Array(list) => list
-            .iter()
-            .map(|v| strict_cid(v, "epoch subset"))
-            .collect::<Result<Vec<_>>>()?,
-        _ => Vec::new(),
-    };
+    let kind = extract_u64(&arr[0]).unwrap_or_default();
+    let epoch = extract_u64(&arr[1]).unwrap_or_default();
+    let subsets = extract_cid_vec(&arr[2], "epoch subset")?;
 
-    Ok(EpochNode {
-        kind: extract_u64(kind).unwrap_or_default(),
-        epoch: extract_u64(epoch).unwrap_or_default(),
-        subsets,
-    })
+    Ok(EpochNode { kind, epoch, subsets })
 }
 
 fn decode_rewards(arr: Vec<Value>) -> Result<RewardsNode> {
-    let [kind, slot, data] = arr.as_slice() else {
+    if arr.len() != 3 {
         bail!("Rewards: expected 3 elements, got {}", arr.len());
-    };
+    }
 
-    Ok(RewardsNode {
-        kind: extract_u64(kind).unwrap_or_default(),
-        slot: extract_u64(slot).unwrap_or_default(),
-        data: decode_dataframe(data.clone())?,
-    })
+    let kind = extract_u64(&arr[0]).unwrap_or_default();
+    let slot = extract_u64(&arr[1]).unwrap_or_default();
+    let data = decode_dataframe(arr[2].clone())?;
+
+    Ok(RewardsNode { kind, slot, data })
 }
 
 fn decode_dataframe(v: Value) -> Result<DataFrame> {
     let Value::Array(arr) = v else {
         bail!("DataFrame not array");
     };
-    let [kind, hash, index, total, data, next @ ..] = arr.as_slice() else {
+    
+    if arr.len() < 5 {
         bail!("DataFrame: too short ({})", arr.len());
-    };
+    }
 
-    if extract_u64(kind) != Some(6) {
+    if extract_u64(&arr[0]) != Some(6) {
         bail!("invalid DataFrame header");
     }
 
-    Ok(DataFrame {
-        kind: 6,
-        hash: extract_u64(hash),
-        index: extract_u64(index),
-        total: extract_u64(total),
-        data: match data {
-            Value::Bytes(b) => b.clone(),
-            _ => Vec::new(),
-        },
-        next: next.first().and_then(|v| match v {
-            Value::Array(list) => Some(
-                list.iter()
-                    .filter_map(|x| strict_cid(x, "dataframe next").ok())
-                    .collect(),
-            ),
+    let hash = extract_u64(&arr[1]);
+    let index = extract_u64(&arr[2]);
+    let total = extract_u64(&arr[3]);
+    
+    let data = match &arr[4] {
+        Value::Bytes(b) => b.clone(),
+        _ => Vec::new(),
+    };
+
+    let next = if arr.len() > 5 {
+        match &arr[5] {
+            Value::Array(list) => {
+                let mut cids = Vec::with_capacity(list.len());
+                for x in list {
+                    if let Ok(cid) = strict_cid(x, "dataframe next") {
+                        cids.push(cid);
+                    }
+                }
+                Some(cids)
+            }
             _ => None,
-        }),
-    })
+        }
+    } else {
+        None
+    };
+
+    Ok(DataFrame { kind: 6, hash, index, total, data, next })
 }
 
 fn decode_slot_meta(v: &Value) -> Result<SlotMeta> {

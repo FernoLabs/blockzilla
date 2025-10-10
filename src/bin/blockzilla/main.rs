@@ -2,6 +2,7 @@ mod block_mode;
 mod compat_block;
 mod dump_registry;
 mod key_extractor;
+mod key_extractor_ssd;
 mod network_mode;
 mod node_mode;
 mod optimizer;
@@ -64,6 +65,14 @@ enum Commands {
         #[arg(long)]
         file: String,
     },
+    RegistrySsd {
+        #[arg(long)]
+        file: String,
+        #[arg(long)]
+        output_dir: Option<String>,
+        #[arg(long, default_value_t = false)]
+        bench: bool,
+    },
     DumpRegistry {
         /// Path to the SQLite registry file
         #[arg(long)]
@@ -72,6 +81,7 @@ enum Commands {
         /// Output CSV path
         #[arg(long, default_value = "pubkey_map.csv")]
         output: String,
+        
     },
 }
 
@@ -104,6 +114,9 @@ async fn main() -> Result<()> {
         }
         Commands::DumpRegistry { registry, output } => {
             dump_registry::dump_registry_to_csv(&registry, &output)?
+        }
+        Commands::RegistrySsd { file, output_dir ,bench} => {
+            key_extractor_ssd::extract_unique_pubkeys_profiled(&file, output_dir, bench).await?
         }
     }
 

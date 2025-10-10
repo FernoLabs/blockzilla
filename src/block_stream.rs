@@ -1,46 +1,48 @@
 use anyhow::{Result, anyhow};
 use cid::Cid;
-use futures::io::AsyncRead;
-use fvm_ipld_car::{CarHeader, CarReader};
 use std::collections::{HashMap, HashSet};
+use tokio::io::AsyncRead;
 
-use crate::node::{BlockNode, DataFrame, Node, decode_node};
+use crate::{
+    node::{BlockNode, DataFrame, Node, decode_node},
+    car_reader::{AsyncCarReader, AsyncCarBlock},
+};
 
 #[derive(Debug)]
 pub struct CarBlock {
     pub block: BlockNode,
     pub entries: HashMap<Cid, Node>,
 }
-impl CarBlock {
-    /// Follows and merges a linked list of DataFrames into one contiguous Vec<u8>.
-    pub fn merge_dataframe(&self, root: &DataFrame) -> Result<Vec<u8>> {
-        let mut visited = HashSet::new();
-        let mut buffer = Vec::new();
-        let mut stack = Vec::new();
 
-        // start from root
+impl CarBlock {
+    /// Optimized merge with pre-allocation based on total field
+    pub fn merge_dataframe(&self, root: &DataFrame) -> Result<Vec<u8>> {
+        // Pre-allocate based on total field if available
+        let capacity = root.total.map(|t| t as usize).unwrap_or(root.data.len());
+        let mut buffer = Vec::with_capacity(capacity);
+        
+        let mut visited = HashSet::new();
+        let mut stack = Vec::new();
         stack.push(root);
 
         while let Some(frame) = stack.pop() {
-            // prevent infinite recursion
-            if let Some(hash) = frame.hash
-                && !visited.insert(hash)
-            {
-                return Err(anyhow!("Cycle detected at DataFrame hash={hash}"));
+            if let Some(hash) = frame.hash {
+                if !visited.insert(hash) {
+                    return Err(anyhow!("Cycle detected at DataFrame hash={hash}"));
+                }
             }
 
-            // merge data
             buffer.extend_from_slice(&frame.data);
 
-            // follow next links
             if let Some(next_cids) = &frame.next {
-                for cid in next_cids {
-                    let Some(node) = self.entries.get(cid) else {
-                        return Err(anyhow!("Missing DataFrame CID {}", cid));
-                    };
+                for cid in next_cids.iter().rev() {
+                    let node = self.entries.get(cid)
+                        .ok_or_else(|| anyhow!("Missing DataFrame CID {}", cid))?;
+                    
                     let Node::DataFrame(next_frame) = node else {
                         return Err(anyhow!("Invalid node type for CID {}", cid));
                     };
+                    
                     stack.push(next_frame);
                 }
             }
@@ -51,36 +53,37 @@ impl CarBlock {
 }
 
 pub struct SolanaBlockStream<R: AsyncRead + Unpin + Send> {
-    inner: CarReader<R>,
+    reader: AsyncCarReader<R>,
     cache: HashMap<Cid, Node>,
 }
 
 impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
     pub async fn new(reader: R) -> Result<Self> {
-        let inner = CarReader::new(reader).await?;
+        let mut reader = AsyncCarReader::new(reader, 16 << 20);
+        let _header = reader.read_header().await?;
         Ok(Self {
-            inner,
-            cache: HashMap::new(),
+            reader,
+            cache: HashMap::with_capacity(1024), // Pre-allocate
         })
     }
 
-    pub fn header(&self) -> &CarHeader {
-        &self.inner.header
-    }
-
     pub async fn next_solana_block(&mut self) -> Result<Option<CarBlock>> {
-        while let Some(car_block) = self.inner.next_block().await? {
-            let node = decode_node(&car_block.data)?;
-            if let Node::Block(b) = node {
-                return Ok(Some(CarBlock {
-                    block: b,
-                    entries: self.cache.drain().collect(), // clone / clear maybe faster
-                }));
-            } else {
-                self.cache.insert(car_block.cid, node);
+        while let Some(AsyncCarBlock { cid, data }) = self.reader.next_block().await? {
+            let node = decode_node(data)?;
+            
+            match node {
+                Node::Block(block_node) => {
+                    let entries = std::mem::replace(
+                        &mut self.cache, 
+                        HashMap::with_capacity(1024)
+                    );
+                    return Ok(Some(CarBlock { block: block_node, entries }));
+                }
+                _ => {
+                    self.cache.insert(cid, node);
+                }
             }
         }
-
         Ok(None)
     }
 }

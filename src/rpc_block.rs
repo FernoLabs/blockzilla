@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::io::{Cursor, Read};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
-use crate::{Node, block_stream::CarBlock};
+use crate::{node::Node, block_stream::CarBlock};
 
 thread_local! {
     static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));

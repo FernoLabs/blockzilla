@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
+    fs::{OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+use tokio::fs::File;
 
 use anyhow::{Context, Result};
 use blockzilla::block_stream::SolanaBlockStream;
@@ -484,9 +485,8 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
     let epoch = extract_epoch_from_path(path)
         .context("Could not parse epoch number from input filename")?;
 
-    let file = File::open(path)?;
-    let reader = AllowStdIo::new(file);
-    let mut stream = SolanaBlockStream::new(reader).await?;
+    let file = File::open(path).await?;
+    let mut stream = SolanaBlockStream::new(file).await?;
 
     let out_dir = PathBuf::from(output_dir.unwrap_or_else(|| "optimized".into()));
     std::fs::create_dir_all(&out_dir)?;
@@ -531,7 +531,7 @@ pub async fn run_car_optimizer(path: &str, output_dir: Option<String>) -> Result
         let t3 = Instant::now();
 
         // Use faster zstd compression level (3 instead of 5)
-        let compressed = zstd::bulk::compress(&raw, 3)?;
+        let compressed = &zstd::bulk::compress(&raw, 3)?;
         let t4 = Instant::now();
 
         let len = compressed.len() as u32;

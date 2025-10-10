@@ -2,25 +2,24 @@ use rusqlite::{Connection, params};
 use std::{
     cell::RefCell,
     collections::HashMap,
-    fs::File,
     io::Read,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
+use tokio::fs::File;
 
 use anyhow::{Context, Result};
-use blockzilla::Node;
 use blockzilla::block_stream::SolanaBlockStream;
+use blockzilla::node::Node;
 use crossbeam_channel::{Receiver, Sender, bounded};
-use futures::io::AllowStdIo;
 use prost::Message;
 use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
 use solana_storage_proto::convert::generated;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
-const NUM_WORKERS: usize = 4;
-const CHANNEL_SIZE_BLOCKS: usize = 8;
+const NUM_WORKERS: usize = 8;
+const CHANNEL_SIZE_BLOCKS: usize = 16;
 const FLUSH_THRESHOLD: usize = 2_000_000;
 const LOG_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -177,9 +176,8 @@ pub async fn build_registry_hdd_parallel(path: &str, output_dir: Option<String>)
 }
 
 async fn reader_thread(path: String, tx: Sender<blockzilla::block_stream::CarBlock>) -> Result<()> {
-    let file = File::open(&path)?;
-    let reader = AllowStdIo::new(file);
-    let mut stream = SolanaBlockStream::new(reader).await?;
+    let file = File::open(path).await?;
+    let mut stream = SolanaBlockStream::new(file).await?;
     while let Some(block) = stream.next_solana_block().await? {
         tx.send(block)?;
     }

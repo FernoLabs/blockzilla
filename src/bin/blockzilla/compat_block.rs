@@ -1,14 +1,16 @@
-use anyhow::{Context, Result, anyhow};
-use blockzilla::Node;
-use blockzilla::block_stream::CarBlock;
+use anyhow::{anyhow, Context, Result};
+use blockzilla::{block_stream::CarBlock, node::Node};
 use prost::Message;
 use rayon::prelude::*;
-use solana_sdk::{message::VersionedMessage, pubkey::Pubkey, transaction::VersionedTransaction};
+use solana_sdk::{
+    message::{VersionedMessage, MessageHeader},
+    pubkey::Pubkey,
+    signature::Signature,
+    transaction::VersionedTransaction,
+};
 use solana_storage_proto::convert::generated;
 use solana_transaction_error::TransactionError;
-use std::cell::RefCell;
-use std::io::Read;
-use std::sync::Mutex;
+use std::{cell::RefCell, io::Read};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 use crate::optimizer::{
@@ -23,13 +25,7 @@ thread_local! {
 
 /// Convert directly to BlockWithIds with parallel transaction processing
 pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockWithIds> {
-    let slot = cb
-        .block
-        .meta
-        .parent_slot
-        .ok_or_else(|| anyhow!("missing parent slot"))?
-        + 1;
-
+    let slot = cb.block.meta.parent_slot.ok_or_else(|| anyhow!("missing parent slot"))? + 1;
     let parent_slot = cb.block.meta.parent_slot.unwrap();
     let block_time = cb.block.meta.blocktime;
     let block_height = cb.block.meta.block_height;
@@ -37,16 +33,24 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
     let blockhash = "missing".to_string();
     let previous_blockhash = "missing".to_string();
 
-    // Process block rewards first (small, keep serial)
+    // Process rewards (small serial step)
     let rewards = extract_rewards(&cb, reg)?;
 
-    // Collect all transaction data first (serial phase)
+    // Collect all transaction data first (serial but I/O bound)
     let mut tx_data = Vec::new();
-    for e_cid in &cb.block.entries {
-        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else {
-            continue;
-        };
+    tx_data.reserve(
+        cb.block
+            .entries
+            .iter()
+            .filter_map(|cid| match cb.entries.get(cid) {
+                Some(Node::Entry(e)) => Some(e.transactions.len()),
+                _ => None,
+            })
+            .sum(),
+    );
 
+    for e_cid in &cb.block.entries {
+        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else { continue; };
         for tx_cid in &entry.transactions {
             match cb.entries.get(tx_cid) {
                 Some(Node::Transaction(tx)) => {
@@ -56,47 +60,32 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
                     let tx_bytes = cb
                         .merge_dataframe(&tx.data)
                         .context("merge_dataframe(tx) failed")?;
-
                     tx_data.push((meta_bytes, tx_bytes));
                 }
-                Some(other) => {
-                    return Err(anyhow!("block entry not a transaction ({other:?})"));
-                }
+                Some(other) => return Err(anyhow!("block entry not a transaction ({other:?})")),
                 None => return Err(anyhow!("block entry not found for tx cid")),
             }
         }
     }
 
-    // Parallel processing of transactions
-    let reg_mutex = Mutex::new(reg);
-
-    let transactions: Result<Vec<_>> = tx_data
-        .par_iter()
+    // Parallel decode + compact conversion
+    let partial_transactions: Result<Vec<_>> = tx_data
+        .into_par_iter()
         .map(|(meta_bytes, tx_bytes)| {
-            // Decode VersionedTransaction
             let vt: VersionedTransaction =
-                bincode::deserialize(tx_bytes).context("decode VersionedTransaction")?;
-
-            // Decode metadata
-            let meta_proto = decode_protobuf_meta(meta_bytes)?;
-
-            // Convert to compact format (thread-local work)
-            let partial_tx = convert_to_partial_transaction(vt, meta_proto)?;
-
-            Ok(partial_tx)
+                bincode::deserialize(&tx_bytes).context("decode VersionedTransaction")?;
+            let meta_proto = decode_protobuf_meta(&meta_bytes)?;
+            convert_to_partial_transaction(vt, meta_proto)
         })
         .collect();
 
-    let partial_transactions = transactions?;
+    let partial_transactions = partial_transactions?;
 
-    // Final phase: register all keys (serial, but fast)
-    let reg = reg_mutex.into_inner().unwrap();
-    let transactions: Vec<CompactTransaction> = partial_transactions
+    // Final serial key registration
+    let transactions = partial_transactions
         .into_iter()
         .map(|partial| finalize_transaction(partial, reg))
         .collect::<Result<Vec<_>>>()?;
-
-    let num_transactions = transactions.len() as u64;
 
     Ok(BlockWithIds {
         slot,
@@ -106,8 +95,8 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
         block_time,
         block_height,
         rewards,
+        num_transactions: transactions.len() as u64,
         transactions,
-        num_transactions,
     })
 }
 
@@ -132,36 +121,36 @@ fn extract_rewards(cb: &CarBlock, reg: &mut KeyRegistry) -> Result<Vec<CompactRe
             });
         }
     }
-
     Ok(rewards)
 }
 
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
-    match zstd::bulk::decompress(bytes, 512 * 1024) {
-        Ok(decompressed) => generated::TransactionStatusMeta::decode(&decompressed[..])
-            .context("prost decode failed after bulk zstd"),
-        Err(_) => TL_META_BUF.with(|cell| {
-            let mut buf = cell.borrow_mut();
-            buf.clear();
+    TL_META_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
 
-            match ZstdDecoder::new(bytes) {
-                Ok(mut decoder) => match decoder.read_to_end(&mut buf) {
-                    Ok(_) => generated::TransactionStatusMeta::decode(&buf[..])
-                        .context("prost decode failed after streaming zstd"),
-                    Err(_) => generated::TransactionStatusMeta::decode(bytes)
-                        .context("all decode methods failed"),
-                },
-                Err(_) => generated::TransactionStatusMeta::decode(bytes)
-                    .context("zstd decoder creation failed, tried raw decode"),
+        // 1st try: stream decode into reusable buffer
+        if let Ok(mut dec) = ZstdDecoder::new(bytes) {
+            if dec.read_to_end(&mut *buf).is_ok() {
+                return generated::TransactionStatusMeta::decode(&buf[..])
+                    .context("prost decode failed after streaming zstd");
             }
-        }),
-    }
+        }
+
+        // 2nd: bulk decompress
+        match zstd::bulk::decompress(bytes, 512 * 1024) {
+            Ok(decompressed) => generated::TransactionStatusMeta::decode(&decompressed[..])
+                .context("prost decode failed after bulk zstd"),
+            Err(_) => generated::TransactionStatusMeta::decode(bytes)
+                .context("all decode methods failed"),
+        }
+    })
 }
 
-// Intermediate structure that holds pubkeys, not registry IDs
+// Intermediate “partial” structs
 struct PartialTransaction {
-    signatures: Vec<solana_sdk::signature::Signature>,
-    message_header: solana_sdk::message::MessageHeader,
+    signatures: Vec<Signature>,
+    message_header: MessageHeader,
     account_keys: Vec<Pubkey>,
     recent_blockhash: String,
     instructions: Vec<PartialInstruction>,
@@ -169,19 +158,16 @@ struct PartialTransaction {
     meta: Option<PartialTransactionMeta>,
     version: u8,
 }
-
 struct PartialInstruction {
     program_id: Pubkey,
     accounts: Vec<u8>,
     data: Vec<u8>,
 }
-
 struct PartialAddressTableLookup {
     account_key: Pubkey,
     writable_indexes: Vec<u8>,
     readonly_indexes: Vec<u8>,
 }
-
 struct PartialTransactionMeta {
     err: Option<String>,
     fee: u64,
@@ -195,12 +181,10 @@ struct PartialTransactionMeta {
     return_data: Option<(Pubkey, Vec<u8>)>,
     compute_units_consumed: Option<u64>,
 }
-
 struct PartialInnerInstructions {
     index: u8,
     instructions: Vec<PartialInstruction>,
 }
-
 struct PartialTokenBalance {
     account_index: u8,
     mint: Pubkey,
@@ -208,7 +192,6 @@ struct PartialTokenBalance {
     owner: Pubkey,
     program_id: Pubkey,
 }
-
 struct PartialLoadedAddresses {
     writable: Vec<Pubkey>,
     readonly: Vec<Pubkey>,
@@ -220,17 +203,13 @@ fn convert_to_partial_transaction(
 ) -> Result<PartialTransaction> {
     let msg = vt.message;
     let signatures = vt.signatures;
-
     let static_keys = msg.static_account_keys();
     let account_keys = static_keys.to_vec();
-
     let message_header = *msg.header();
     let recent_blockhash = msg.recent_blockhash().to_string();
 
-    // Convert instructions
-    let msg_instructions = msg.instructions();
-    let mut instructions = Vec::with_capacity(msg_instructions.len());
-    for ix in msg_instructions {
+    let mut instructions = Vec::with_capacity(msg.instructions().len());
+    for ix in msg.instructions() {
         instructions.push(PartialInstruction {
             program_id: static_keys[ix.program_id_index as usize],
             accounts: ix.accounts.clone(),
@@ -238,25 +217,23 @@ fn convert_to_partial_transaction(
         });
     }
 
-    // Convert address table lookups
     let address_table_lookups = msg.address_table_lookups().map(|lookups| {
-        let mut partial_lookups = Vec::with_capacity(lookups.len());
-        for lookup in lookups {
-            partial_lookups.push(PartialAddressTableLookup {
-                account_key: lookup.account_key,
-                writable_indexes: lookup.writable_indexes.clone(),
-                readonly_indexes: lookup.readonly_indexes.clone(),
+        let mut out = Vec::with_capacity(lookups.len());
+        for l in lookups {
+            out.push(PartialAddressTableLookup {
+                account_key: l.account_key,
+                writable_indexes: l.writable_indexes.clone(),
+                readonly_indexes: l.readonly_indexes.clone(),
             });
         }
-        partial_lookups
+        out
     });
 
     let version = match msg {
         VersionedMessage::Legacy(_) => 0,
-        VersionedMessage::V0(_) => 0,
+        VersionedMessage::V0(_) => 1,
     };
 
-    // Build complete key list
     let mut all_keys = static_keys.to_vec();
     all_keys.reserve(
         meta_proto.loaded_writable_addresses.len() + meta_proto.loaded_readonly_addresses.len(),
@@ -267,14 +244,13 @@ fn convert_to_partial_transaction(
         .iter()
         .chain(meta_proto.loaded_readonly_addresses.iter())
     {
-        if addr_bytes.len() == 32
-            && let Ok(pk) = Pubkey::try_from(addr_bytes.as_slice())
-        {
-            all_keys.push(pk);
+        if addr_bytes.len() == 32 {
+            if let Ok(arr) = <[u8; 32]>::try_from(addr_bytes.as_slice()) {
+                all_keys.push(Pubkey::new_from_array(arr));
+            }
         }
     }
 
-    // Convert metadata
     let meta = convert_to_partial_meta(meta_proto, &all_keys)?;
 
     Ok(PartialTransaction {
@@ -301,29 +277,32 @@ fn convert_to_partial_meta(
         .context("failed to deserialize TransactionError")?
         .map(|e| format!("{:?}", e));
 
-    // Convert inner instructions
     let inner_instructions = if meta.inner_instructions_none || meta.inner_instructions.is_empty() {
         None
     } else {
         let mut result = Vec::with_capacity(meta.inner_instructions.len());
         for ui_inner in meta.inner_instructions {
-            let mut instructions = Vec::with_capacity(ui_inner.instructions.len());
+            if ui_inner.instructions.is_empty() {
+                continue;
+            }
+            let mut inst = Vec::with_capacity(ui_inner.instructions.len());
             for i in ui_inner.instructions {
-                let idx = i.program_id_index as usize;
-                if idx < all_keys.len() {
-                    instructions.push(PartialInstruction {
-                        program_id: all_keys[idx],
+                if let Some(&pid) = all_keys.get(i.program_id_index as usize) {
+                    inst.push(PartialInstruction {
+                        program_id: pid,
                         accounts: i.accounts,
                         data: i.data,
                     });
                 }
             }
-            result.push(PartialInnerInstructions {
-                index: ui_inner.index as u8,
-                instructions,
-            });
+            if !inst.is_empty() {
+                result.push(PartialInnerInstructions {
+                    index: ui_inner.index as u8,
+                    instructions: inst,
+                });
+            }
         }
-        Some(result)
+        if result.is_empty() { None } else { Some(result) }
     };
 
     let log_messages = if meta.log_messages_none || meta.log_messages.is_empty() {
@@ -332,7 +311,6 @@ fn convert_to_partial_meta(
         Some(meta.log_messages)
     };
 
-    // Convert token balances
     let pre_token_balances = if meta.pre_token_balances.is_empty() {
         None
     } else {
@@ -353,37 +331,37 @@ fn convert_to_partial_meta(
         Some(balances)
     };
 
-    // Convert loaded addresses
-    let loaded_addresses =
-        if meta.loaded_writable_addresses.is_empty() && meta.loaded_readonly_addresses.is_empty() {
+    let loaded_addresses = {
+        let w_len = meta.loaded_writable_addresses.len();
+        let r_len = meta.loaded_readonly_addresses.len();
+        if w_len == 0 && r_len == 0 {
             None
         } else {
-            let mut writable = Vec::new();
+            let mut writable = Vec::with_capacity(w_len);
             for bytes in meta.loaded_writable_addresses {
-                if bytes.len() == 32
-                    && let Ok(pk) = Pubkey::try_from(bytes.as_slice())
-                {
-                    writable.push(pk);
+                if bytes.len() == 32 {
+                    if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                        writable.push(Pubkey::new_from_array(arr));
+                    }
                 }
             }
-
-            let mut readonly = Vec::new();
+            let mut readonly = Vec::with_capacity(r_len);
             for bytes in meta.loaded_readonly_addresses {
-                if bytes.len() == 32
-                    && let Ok(pk) = Pubkey::try_from(bytes.as_slice())
-                {
-                    readonly.push(pk);
+                if bytes.len() == 32 {
+                    if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                        readonly.push(Pubkey::new_from_array(arr));
+                    }
                 }
             }
-
             Some(PartialLoadedAddresses { writable, readonly })
-        };
+        }
+    };
 
     let return_data = meta.return_data.and_then(|rd| {
         if rd.program_id.len() == 32 {
-            Pubkey::try_from(rd.program_id.as_slice())
+            <[u8; 32]>::try_from(rd.program_id.as_slice())
                 .ok()
-                .map(|pk| (pk, rd.data))
+                .map(|arr| (Pubkey::new_from_array(arr), rd.data))
         } else {
             None
         }
@@ -406,13 +384,11 @@ fn convert_to_partial_meta(
 
 fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<PartialTokenBalance> {
     let mint = tb.mint.parse::<Pubkey>().context("Failed to parse mint")?;
-
     let owner = if tb.owner.is_empty() {
         Pubkey::default()
     } else {
         tb.owner.parse::<Pubkey>().unwrap_or_default()
     };
-
     let program_id = if tb.program_id.is_empty() {
         Pubkey::default()
     } else {
@@ -421,12 +397,12 @@ fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<Parti
 
     let ui_token_amount = tb
         .ui_token_amount
-        .map(|amount| {
+        .map(|a| {
             serde_json::json!({
-                "amount": amount.amount,
-                "decimals": amount.decimals,
-                "uiAmount": amount.ui_amount,
-                "uiAmountString": amount.ui_amount_string,
+                "amount": a.amount,
+                "decimals": a.decimals,
+                "uiAmount": a.ui_amount,
+                "uiAmountString": a.ui_amount_string,
             })
             .to_string()
         })
@@ -441,11 +417,7 @@ fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<Parti
     })
 }
 
-// Final phase: convert all Pubkeys to registry IDs
-fn finalize_transaction(
-    partial: PartialTransaction,
-    reg: &mut KeyRegistry,
-) -> Result<CompactTransaction> {
+fn finalize_transaction(partial: PartialTransaction, reg: &mut KeyRegistry) -> Result<CompactTransaction> {
     let account_keys: Vec<u32> = partial
         .account_keys
         .iter()
@@ -488,10 +460,7 @@ fn finalize_transaction(
     })
 }
 
-fn finalize_meta(
-    partial: PartialTransactionMeta,
-    reg: &mut KeyRegistry,
-) -> Result<CompactTransactionMeta> {
+fn finalize_meta(partial: PartialTransactionMeta, reg: &mut KeyRegistry) -> Result<CompactTransactionMeta> {
     let inner_instructions = partial.inner_instructions.map(|inners| {
         inners
             .into_iter()
@@ -553,20 +522,18 @@ fn finalize_meta(
             .collect()
     });
 
-    let loaded_addresses = partial
-        .loaded_addresses
-        .map(|addrs| CompactLoadedAddresses {
-            writable: addrs
-                .writable
-                .iter()
-                .map(|pk| reg.get_or_insert(pk))
-                .collect(),
-            readonly: addrs
-                .readonly
-                .iter()
-                .map(|pk| reg.get_or_insert(pk))
-                .collect(),
-        });
+    let loaded_addresses = partial.loaded_addresses.map(|addrs| CompactLoadedAddresses {
+        writable: addrs
+            .writable
+            .iter()
+            .map(|pk| reg.get_or_insert(pk))
+            .collect(),
+        readonly: addrs
+            .readonly
+            .iter()
+            .map(|pk| reg.get_or_insert(pk))
+            .collect(),
+    });
 
     let return_data = partial
         .return_data

@@ -1,18 +1,13 @@
 use anyhow::Result;
-use blockzilla::CarStream;
-use futures_util::io::AllowStdIo;
-use std::{fs::File, time::Instant};
+use std::{time::Instant};
 use tracing::info;
+use blockzilla::{car_reader::AsyncCarReader, node::{Node, decode_node}};
 
 pub async fn run_node_mode(path: &str) -> Result<()> {
     info!("🔄 Reading CAR file: {path}");
     let start = Instant::now();
 
-    let file = File::open(path)?;
-    let reader = AllowStdIo::new(file);
-    let mut stream = CarStream::new(reader).await?;
-
-    info!("Header: {:?}", stream.header());
+    let mut stream  = AsyncCarReader::<tokio::fs::File>::open(path).await?;
 
     let mut total: u64 = 0;
     let mut tx_count: u64 = 0;
@@ -24,30 +19,34 @@ pub async fn run_node_mode(path: &str) -> Result<()> {
     let mut dataframe_count: u64 = 0;
 
     let mut last_log = Instant::now();
+    let log_interval = 10.0; // seconds
 
-    while let Some((_cid, node)) = stream.next().await? {
+    while let Some(car_block) = stream.next_block().await? {
+        let node = decode_node(car_block.data)?;
         total += 1;
 
         match &node {
-            blockzilla::Node::Transaction(_) => tx_count += 1,
-            blockzilla::Node::Entry(_) => entry_count += 1,
-            blockzilla::Node::Block(_) => block_count += 1,
-            blockzilla::Node::Subset(_) => subset_count += 1,
-            blockzilla::Node::Epoch(_) => epoch_count += 1,
-            blockzilla::Node::Rewards(_) => rewards_count += 1,
-            blockzilla::Node::DataFrame(_) => dataframe_count += 1,
+            Node::Transaction(_) => tx_count += 1,
+            Node::Entry(_) => entry_count += 1,
+            Node::Block(_) => block_count += 1,
+            Node::Subset(_) => subset_count += 1,
+            Node::Epoch(_) => epoch_count += 1,
+            Node::Rewards(_) => rewards_count += 1,
+            Node::DataFrame(_) => dataframe_count += 1,
         }
 
-        if total.is_multiple_of(10_000) || last_log.elapsed().as_secs() >= 5 {
-            let elapsed = start.elapsed();
-            let rate = total as f64 / elapsed.as_secs_f64().max(0.001);
+        if last_log.elapsed().as_secs_f64() >= log_interval {
+            let elapsed = start.elapsed().as_secs_f64();
+            let total_rate = total as f64 / elapsed;
+            let block_rate = block_count as f64 / elapsed;
 
             info!(
-                "[{:>10}] nodes in {:>6.2?} ({:.2} n/s) \
+                "[{:>10}] nodes in {:>6.2?} ({:>8.0} n/s, {:>6.1} blk/s) \
                  Tx:{} Entry:{} Block:{} Subset:{} Epoch:{} Rewards:{} DF:{}",
                 total,
-                elapsed,
-                rate,
+                std::time::Duration::from_secs_f64(elapsed),
+                total_rate,
+                block_rate,
                 tx_count,
                 entry_count,
                 block_count,
@@ -61,13 +60,17 @@ pub async fn run_node_mode(path: &str) -> Result<()> {
         }
     }
 
-    let total_time = start.elapsed();
-    let rate = total as f64 / total_time.as_secs_f64().max(0.001);
+    let total_time = start.elapsed().as_secs_f64();
+    let total_rate = total as f64 / total_time;
+    let block_rate = block_count as f64 / total_time;
 
     info!(
-        "✅ Done. Parsed {total} nodes in {:.2?} ({:.2} n/s)",
-        total_time, rate
+        "✅ Done. Parsed {total} nodes in {:.2?} ({:.0} n/s, {:.1} blk/s)",
+        std::time::Duration::from_secs_f64(total_time),
+        total_rate,
+        block_rate
     );
+
     info!(
         "📊 Final counts — Tx:{} Entry:{} Block:{} Subset:{} Epoch:{} Rewards:{} DF:{}",
         tx_count,
