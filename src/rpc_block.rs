@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use bincode::serde::Compat;
 use prost::Message;
 use solana_reward_info::RewardType;
 use solana_sdk::transaction::{TransactionVersion, VersionedTransaction};
@@ -15,7 +16,7 @@ use std::cell::RefCell;
 use std::io::{Cursor, Read};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
-use crate::{node::Node, block_stream::CarBlock};
+use crate::{block_stream::CarBlock, node::Node};
 
 thread_local! {
     static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));
@@ -58,8 +59,11 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
                             .context("merge_dataframe(tx) failed")?;
 
                         // Decode VersionedTransaction (bincode)
-                        let vt: VersionedTransaction = bincode::deserialize(&tx_bytes)
-                            .context("decode VersionedTransaction")?;
+                        let (bincode::serde::Compat(vt), _len): (
+                            bincode::serde::Compat<VersionedTransaction>,
+                            usize,
+                        ) = bincode::decode_from_slice(&tx_bytes, bincode::config::legacy())
+                            .map_err(|err| anyhow!("cant decode {err}"))?;
 
                         // Decode metadata (zstd + prost) with buffer reuse
                         let meta = decode_meta(&meta_bytes);
@@ -88,7 +92,9 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
         let rewards = match self.block.rewards.and_then(|cid| self.entries.get(&cid)) {
             Some(Node::DataFrame(df)) => {
                 let bytes = self.merge_dataframe(df)?;
-                bincode::deserialize(&bytes)?
+                let res: Vec<Compat<Reward>> =
+                    bincode::decode_from_slice(&bytes, bincode::config::legacy())?.0;
+                res.into_iter().map(|a| a.0).collect()
             }
             _ => Vec::new(),
         };
@@ -115,7 +121,7 @@ fn encode_transaction_base64(vt: &VersionedTransaction) -> Result<String> {
             let mut base64_buf = base64_cell.borrow_mut();
 
             bincode_buf.clear();
-            bincode::serialize_into(&mut *bincode_buf, vt)
+            bincode::encode_into_slice(Compat(vt), &mut *bincode_buf, bincode::config::legacy())
                 .context("re-serialize VersionedTransaction")?;
 
             base64_buf.clear();
@@ -193,7 +199,13 @@ fn decode_transaction_error(
 ) -> Result<Option<TransactionError>> {
     meta.err
         .as_ref()
-        .map(|e| bincode::deserialize::<TransactionError>(&e.err))
+        .map(|e| {
+            bincode::decode_from_slice::<bincode::serde::Compat<TransactionError>, _>(
+                &e.err,
+                bincode::config::legacy(),
+            )
+            .map(|(v, _)| v.0)
+        })
         .transpose()
         .context("failed to deserialize TransactionError")
 }

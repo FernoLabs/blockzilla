@@ -183,7 +183,7 @@ fn decode_entry(arr: Vec<Value>) -> Result<EntryNode> {
     Ok(EntryNode { kind, num_hashes, hash, transactions })
 }
 
-fn decode_block(mut arr: Vec<Value>) -> Result<BlockNode> {
+fn decode_block(arr: Vec<Value>) -> Result<BlockNode> {
     if arr.len() < 5 {
         bail!("Block: expected ≥5 elements, got {}", arr.len());
     }

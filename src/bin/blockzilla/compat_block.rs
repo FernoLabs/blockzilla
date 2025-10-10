@@ -1,9 +1,10 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+use bincode::serde::Compat;
 use blockzilla::{block_stream::CarBlock, node::Node};
 use prost::Message;
 use rayon::prelude::*;
 use solana_sdk::{
-    message::{VersionedMessage, MessageHeader},
+    message::{MessageHeader, VersionedMessage},
     pubkey::Pubkey,
     signature::Signature,
     transaction::VersionedTransaction,
@@ -25,7 +26,12 @@ thread_local! {
 
 /// Convert directly to BlockWithIds with parallel transaction processing
 pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockWithIds> {
-    let slot = cb.block.meta.parent_slot.ok_or_else(|| anyhow!("missing parent slot"))? + 1;
+    let slot = cb
+        .block
+        .meta
+        .parent_slot
+        .ok_or_else(|| anyhow!("missing parent slot"))?
+        + 1;
     let parent_slot = cb.block.meta.parent_slot.unwrap();
     let block_time = cb.block.meta.blocktime;
     let block_height = cb.block.meta.block_height;
@@ -50,7 +56,9 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
     );
 
     for e_cid in &cb.block.entries {
-        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else { continue; };
+        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else {
+            continue;
+        };
         for tx_cid in &entry.transactions {
             match cb.entries.get(tx_cid) {
                 Some(Node::Transaction(tx)) => {
@@ -72,8 +80,9 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
     let partial_transactions: Result<Vec<_>> = tx_data
         .into_par_iter()
         .map(|(meta_bytes, tx_bytes)| {
-            let vt: VersionedTransaction =
-                bincode::deserialize(&tx_bytes).context("decode VersionedTransaction")?;
+            let (Compat(vt), _): (Compat<VersionedTransaction>, _) =
+                bincode::decode_from_slice(&tx_bytes, bincode::config::legacy())
+                    .context("decode VersionedTransaction")?;
             let meta_proto = decode_protobuf_meta(&meta_bytes)?;
             convert_to_partial_transaction(vt, meta_proto)
         })
@@ -104,13 +113,18 @@ fn extract_rewards(cb: &CarBlock, reg: &mut KeyRegistry) -> Result<Vec<CompactRe
     let rewards_data = match cb.block.rewards.and_then(|cid| cb.entries.get(&cid)) {
         Some(Node::DataFrame(df)) => {
             let bytes = cb.merge_dataframe(df)?;
-            bincode::deserialize::<Vec<solana_transaction_status_client_types::Reward>>(&bytes)?
+
+            bincode::decode_from_slice::<
+                Vec<Compat<solana_transaction_status_client_types::Reward>>,
+                _,
+            >(&bytes, bincode::config::legacy())?
+            .0
         }
         _ => return Ok(Vec::new()),
     };
 
     let mut rewards = Vec::with_capacity(rewards_data.len());
-    for rw in rewards_data {
+    for Compat(rw) in rewards_data {
         if let Ok(pk) = rw.pubkey.parse::<Pubkey>() {
             rewards.push(CompactReward {
                 pubkey: reg.get_or_insert(&pk),
@@ -141,8 +155,9 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
         match zstd::bulk::decompress(bytes, 512 * 1024) {
             Ok(decompressed) => generated::TransactionStatusMeta::decode(&decompressed[..])
                 .context("prost decode failed after bulk zstd"),
-            Err(_) => generated::TransactionStatusMeta::decode(bytes)
-                .context("all decode methods failed"),
+            Err(_) => {
+                generated::TransactionStatusMeta::decode(bytes).context("all decode methods failed")
+            }
         }
     })
 }
@@ -272,7 +287,13 @@ fn convert_to_partial_meta(
     let err = meta
         .err
         .as_ref()
-        .map(|e| bincode::deserialize::<TransactionError>(&e.err))
+        .map(|e| {
+            bincode::decode_from_slice::<Compat<TransactionError>, _>(
+                &e.err,
+                bincode::config::legacy(),
+            )
+            .map(|a| a.0.0)
+        })
         .transpose()
         .context("failed to deserialize TransactionError")?
         .map(|e| format!("{:?}", e));
@@ -302,7 +323,11 @@ fn convert_to_partial_meta(
                 });
             }
         }
-        if result.is_empty() { None } else { Some(result) }
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     };
 
     let log_messages = if meta.log_messages_none || meta.log_messages.is_empty() {
@@ -417,7 +442,10 @@ fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<Parti
     })
 }
 
-fn finalize_transaction(partial: PartialTransaction, reg: &mut KeyRegistry) -> Result<CompactTransaction> {
+fn finalize_transaction(
+    partial: PartialTransaction,
+    reg: &mut KeyRegistry,
+) -> Result<CompactTransaction> {
     let account_keys: Vec<u32> = partial
         .account_keys
         .iter()
@@ -460,7 +488,10 @@ fn finalize_transaction(partial: PartialTransaction, reg: &mut KeyRegistry) -> R
     })
 }
 
-fn finalize_meta(partial: PartialTransactionMeta, reg: &mut KeyRegistry) -> Result<CompactTransactionMeta> {
+fn finalize_meta(
+    partial: PartialTransactionMeta,
+    reg: &mut KeyRegistry,
+) -> Result<CompactTransactionMeta> {
     let inner_instructions = partial.inner_instructions.map(|inners| {
         inners
             .into_iter()
@@ -522,18 +553,20 @@ fn finalize_meta(partial: PartialTransactionMeta, reg: &mut KeyRegistry) -> Resu
             .collect()
     });
 
-    let loaded_addresses = partial.loaded_addresses.map(|addrs| CompactLoadedAddresses {
-        writable: addrs
-            .writable
-            .iter()
-            .map(|pk| reg.get_or_insert(pk))
-            .collect(),
-        readonly: addrs
-            .readonly
-            .iter()
-            .map(|pk| reg.get_or_insert(pk))
-            .collect(),
-    });
+    let loaded_addresses = partial
+        .loaded_addresses
+        .map(|addrs| CompactLoadedAddresses {
+            writable: addrs
+                .writable
+                .iter()
+                .map(|pk| reg.get_or_insert(pk))
+                .collect(),
+            readonly: addrs
+                .readonly
+                .iter()
+                .map(|pk| reg.get_or_insert(pk))
+                .collect(),
+        });
 
     let return_data = partial
         .return_data

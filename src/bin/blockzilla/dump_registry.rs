@@ -15,13 +15,12 @@ pub fn dump_registry_to_csv(registry_path: &str, output_path: &str) -> Result<()
     while let Some(row) = rows.next()? {
         let id: u32 = row.get(0)?;
         let blob: Vec<u8> = row.get(1)?;
-        if blob.len() == 32 {
-            let pk = Pubkey::new_from_array(blob.try_into().unwrap());
-            writeln!(writer, "{},{}", id, pk)?;
-            count += 1;
-            if count.is_multiple_of(1_000_000) {
-                eprintln!("🧮 dumped {} entries...", count);
-            }
+
+        let pk = Pubkey::new_from_array(blob.try_into().unwrap());
+        writeln!(writer, "{},{}", id, pk)?;
+        count += 1;
+        if count.is_multiple_of(1_000_000) {
+            eprintln!("🧮 dumped {} entries...", count);
         }
     }
 

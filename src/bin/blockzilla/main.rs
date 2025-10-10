@@ -7,6 +7,7 @@ mod network_mode;
 mod node_mode;
 mod optimizer;
 mod print_compressed_block;
+mod partial_tx_parser;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -69,9 +70,7 @@ enum Commands {
         #[arg(long)]
         file: String,
         #[arg(long)]
-        output_dir: Option<String>,
-        #[arg(long, default_value_t = false)]
-        bench: bool,
+        output_dir: Option<String>
     },
     DumpRegistry {
         /// Path to the SQLite registry file
@@ -115,8 +114,8 @@ async fn main() -> Result<()> {
         Commands::DumpRegistry { registry, output } => {
             dump_registry::dump_registry_to_csv(&registry, &output)?
         }
-        Commands::RegistrySsd { file, output_dir ,bench} => {
-            key_extractor_ssd::extract_unique_pubkeys_profiled(&file, output_dir, bench).await?
+        Commands::RegistrySsd { file, output_dir } => {
+            key_extractor_ssd::extract_unique_pubkeys(&file, output_dir).await?
         }
     }
 

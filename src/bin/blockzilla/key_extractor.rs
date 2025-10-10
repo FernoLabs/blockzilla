@@ -1,3 +1,4 @@
+use bincode::serde::Compat;
 use rusqlite::{Connection, params};
 use std::{
     cell::RefCell,
@@ -284,10 +285,12 @@ fn extract_pubkeys_from_block(
         && let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid)
     {
         let bytes = cb.merge_dataframe(df)?;
-        if let Ok(rewards) =
-            bincode::deserialize::<Vec<solana_transaction_status_client_types::Reward>>(&bytes)
+        if let Ok((rewards,_)) = bincode::decode_from_slice::<
+            Vec<bincode::serde::Compat<solana_transaction_status_client_types::Reward>>,
+            _,
+        >(&bytes, bincode::config::legacy())
         {
-            for rw in rewards {
+            for bincode::serde::Compat(rw) in rewards {
                 if let Ok(pk) = rw.pubkey.parse::<Pubkey>() {
                     keys.push(pk);
                 }
@@ -302,7 +305,7 @@ fn extract_pubkeys_from_block(
         for tx_cid in &entry.transactions {
             if let Some(Node::Transaction(tx)) = cb.entries.get(tx_cid) {
                 let tx_bytes = cb.merge_dataframe(&tx.data)?;
-                if let Ok(vt) = bincode::deserialize::<VersionedTransaction>(&tx_bytes) {
+                if let Ok((Compat(vt),_)) = bincode::decode_from_slice::<Compat<VersionedTransaction>,_>(&tx_bytes, bincode::config::legacy()) {
                     let msg = vt.message;
                     keys.extend_from_slice(msg.static_account_keys());
                     if let Some(lookups) = msg.address_table_lookups() {
@@ -312,10 +315,10 @@ fn extract_pubkeys_from_block(
                     }
                 }
 
-                let meta_bytes = cb.merge_dataframe(&tx.metadata)?;
-                if let Ok(meta_proto) = decode_protobuf_meta(&meta_bytes) {
-                    extract_pubkeys_from_meta(&meta_proto, keys);
-                }
+                //let meta_bytes = cb.merge_dataframe(&tx.metadata)?;
+                //if let Ok(meta_proto) = decode_protobuf_meta(&meta_bytes) {
+                //    extract_pubkeys_from_meta(&meta_proto, keys);
+                //}
             }
         }
     }
