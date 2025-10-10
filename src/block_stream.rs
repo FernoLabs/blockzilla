@@ -28,12 +28,10 @@ impl CarBlock {
             buffer.extend_from_slice(&frame.data);
 
             if let Some(next) = &frame.next {
-                for cid in next.iter().rev() {
-                    let Some(Node::DataFrame(next_frame)) = self.entries.get(cid) else {
-                        return Err(anyhow!("Missing DataFrame CID"));
-                    };
-                    stack.push(next_frame);
-                }
+                let Some(Node::DataFrame(next_frame)) = self.entries.get(&next.0) else {
+                    return Err(anyhow!("Missing DataFrame CID"));
+                };
+                stack.push(next_frame);
             }
         }
 
@@ -48,7 +46,7 @@ pub struct SolanaBlockStream<R: AsyncRead + Unpin + Send> {
 
 impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
     pub async fn new(reader: R) -> Result<Self> {
-        let mut reader = AsyncCarReader::new(reader, 16 << 20);
+        let mut reader = AsyncCarReader::new(reader);
         let _header = reader.read_header().await?;
         Ok(Self {
             reader,
@@ -59,7 +57,7 @@ impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
 
     pub async fn next_solana_block(&mut self) -> Result<Option<CarBlock>> {
         while let Some(AsyncCarBlock { cid, data }) = self.reader.next_block().await? {
-            let node = decode_node(data)?;
+            let node = decode_node(&data)?;
 
             match node {
                 Node::Block(block_node) => {

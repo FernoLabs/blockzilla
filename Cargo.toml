@@ -33,19 +33,19 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 rayon = "1.10"
 crossbeam-channel = "0.5"
-serde_cbor = "0.11.2"
 ahash = "0.8.12"
 smallvec = "1.15.1"
 solana-message = { version = "3.0.1", features = ["bincode"] }
 solana-instruction = { version = "3.0.0", features = ["bincode"] }
+minicbor = { version = "2.1.1", features = ["full"] }
 
 [build-dependencies]
 prost-build = "0.14.1"
 
 [profile.release]
 opt-level = 3
-lto = "fat"                # full link-time optimization across crates
-codegen-units = 1          # compile slower, but optimize globally
+#lto = "fat"                # full link-time optimization across crates
+#codegen-units = 1          # compile slower, but optimize globally
 panic = "abort"            # smaller binary, no stack unwinding
 strip = true               # strip debug symbols
 debug = false

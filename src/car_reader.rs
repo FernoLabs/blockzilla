@@ -1,29 +1,26 @@
 use anyhow::{Result, anyhow};
 use cid::Cid;
-use serde_cbor::Value;
 use tokio::io::{self, AsyncRead, AsyncReadExt, BufReader};
 
-pub struct AsyncCarBlock<'a> {
+pub struct AsyncCarBlock {
     pub cid: Cid,
-    pub data: &'a [u8],
+    pub data: Vec<u8>,
 }
 
 pub struct AsyncCarReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
-    buf: Vec<u8>,
 }
 
 impl<R: AsyncRead + Unpin + Send> AsyncCarReader<R> {
-    pub fn new(inner: R, buf_size: usize) -> Self {
+    pub fn new(inner: R) -> Self {
         Self {
-            reader: BufReader::with_capacity(buf_size, inner),
-            buf: Vec::with_capacity(buf_size),
+            reader: BufReader::with_capacity(10 * 1024 * 1024, inner),
         }
     }
 
     pub async fn open(path: &str) -> Result<AsyncCarReader<tokio::fs::File>> {
         let file = tokio::fs::File::open(path).await?;
-        let mut reader = AsyncCarReader::new(file, 16 << 20);
+        let mut reader = AsyncCarReader::new(file);
         reader.read_header().await?;
         Ok(reader)
     }
@@ -32,33 +29,29 @@ impl<R: AsyncRead + Unpin + Send> AsyncCarReader<R> {
         let len = read_varint_usize(&mut self.reader).await?;
         let mut buf = vec![0u8; len];
         self.reader.read_exact(&mut buf).await?;
-        let _value: Value = serde_cbor::from_slice(&buf)?;
+        //let _value: Value = minicbor::from_slice(&buf)?;
         Ok(())
     }
 
-    pub async fn next_block(&mut self) -> Result<Option<AsyncCarBlock<'_>>> {
+    pub async fn next_block(&mut self) -> Result<Option<AsyncCarBlock>> {
         let len = match read_varint_usize(&mut self.reader).await {
             Ok(l) => l,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e.into()),
         };
 
-        // Grow buffer if needed, but prefer reusing existing capacity
-        if len > self.buf.capacity() {
-            self.buf.reserve(len - self.buf.capacity());
-        }
-        self.buf.resize(len, 0);
+        let mut buf = vec![0u8; len];
+        self.reader.read_exact(&mut buf).await?;
 
-        self.reader.read_exact(&mut self.buf).await?;
-
-        let bytes = &self.buf[..];
-        let mut cursor = std::io::Cursor::new(bytes);
+        // Parse directly from the slice
+        let mut cursor = std::io::Cursor::new(&buf);
         let cid = Cid::read_bytes(&mut cursor).map_err(|e| anyhow!("CID parse error: {e}"))?;
-
         let pos = cursor.position() as usize;
-        let data = &bytes[pos..];
 
-        Ok(Some(AsyncCarBlock { cid, data }))
+        Ok(Some(AsyncCarBlock {
+            cid,
+            data: buf[pos..len].to_vec(),
+        }))
     }
 }
 

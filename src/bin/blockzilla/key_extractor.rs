@@ -11,8 +11,8 @@ use std::{
 use tokio::fs::File;
 
 use anyhow::{Context, Result};
+use blockzilla::node::{CborCid, Node};
 use blockzilla::{block_stream::SolanaBlockStream, confirmed_block};
-use blockzilla::node::Node;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use prost::Message;
 use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
@@ -280,8 +280,8 @@ fn extract_pubkeys_from_block(
     cb: &blockzilla::block_stream::CarBlock,
     keys: &mut Vec<Pubkey>,
 ) -> Result<()> {
-    if let Some(reward_cid) = cb.block.rewards
-        && let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid)
+    if let Some(ref reward_cid) = cb.block.rewards
+        && let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid.0)
     {
         let bytes = cb.merge_dataframe(df)?;
         if let Ok((rewards, _)) = bincode::decode_from_slice::<
@@ -297,12 +297,12 @@ fn extract_pubkeys_from_block(
         }
     }
 
-    for e_cid in &cb.block.entries {
-        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else {
+    for e_cid in &cb.entries {
+        let Some(Node::Entry(entry)) = cb.entries.get(&e_cid.0) else {
             continue;
         };
         for tx_cid in &entry.transactions {
-            if let Some(Node::Transaction(tx)) = cb.entries.get(tx_cid) {
+            if let Some(Node::Transaction(tx)) = cb.entries.get(&tx_cid.0) {
                 let tx_bytes = cb.merge_dataframe(&tx.data)?;
                 if let Ok((Compat(vt), _)) = bincode::decode_from_slice::<
                     Compat<VersionedTransaction>,
@@ -341,15 +341,17 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStat
                     confirmed_block::TransactionStatusMeta::decode(&buf[..])
                         .context("prost decode failed")
                 }
-                Err(_) => {
-                    confirmed_block::TransactionStatusMeta::decode(bytes).context("raw decode failed")
-                }
+                Err(_) => confirmed_block::TransactionStatusMeta::decode(bytes)
+                    .context("raw decode failed"),
             }
         }),
     }
 }
 
-fn extract_pubkeys_from_meta(meta: &confirmed_block::TransactionStatusMeta, keys: &mut Vec<Pubkey>) {
+fn extract_pubkeys_from_meta(
+    meta: &confirmed_block::TransactionStatusMeta,
+    keys: &mut Vec<Pubkey>,
+) {
     for tb in &meta.pre_token_balances {
         if let Ok(pk) = tb.mint.parse::<Pubkey>() {
             keys.push(pk);

@@ -1,6 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use bincode::serde::Compat;
-use blockzilla::{block_stream::CarBlock, confirmed_block, node::Node};
+use blockzilla::{
+    block_stream::CarBlock,
+    confirmed_block,
+    node::{CborCid, Node},
+};
 use prost::Message;
 use rayon::prelude::*;
 use solana_sdk::{
@@ -47,19 +51,19 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
         cb.block
             .entries
             .iter()
-            .filter_map(|cid| match cb.entries.get(cid) {
+            .filter_map(|cid| match cb.entries.get(&cid.0) {
                 Some(Node::Entry(e)) => Some(e.transactions.len()),
                 _ => None,
             })
             .sum(),
     );
 
-    for e_cid in &cb.block.entries {
-        let Some(Node::Entry(entry)) = cb.entries.get(e_cid) else {
+    for e_cid in &cb.entries {
+        let Some(Node::Entry(entry)) = cb.entries.get(&e_cid.0) else {
             continue;
         };
         for tx_cid in &entry.transactions {
-            match cb.entries.get(tx_cid) {
+            match cb.entries.get(&tx_cid.0) {
                 Some(Node::Transaction(tx)) => {
                     let meta_bytes = cb
                         .merge_dataframe(&tx.metadata)
@@ -109,7 +113,12 @@ pub fn cb_to_compact_block(cb: CarBlock, reg: &mut KeyRegistry) -> Result<BlockW
 }
 
 fn extract_rewards(cb: &CarBlock, reg: &mut KeyRegistry) -> Result<Vec<CompactReward>> {
-    let rewards_data = match cb.block.rewards.and_then(|cid| cb.entries.get(&cid)) {
+    let rewards_data = match cb
+        .block
+        .rewards
+        .clone()
+        .and_then(|cid| cb.entries.get(&cid.0))
+    {
         Some(Node::DataFrame(df)) => {
             let bytes = cb.merge_dataframe(df)?;
 
@@ -154,9 +163,8 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStat
         match zstd::bulk::decompress(bytes, 512 * 1024) {
             Ok(decompressed) => confirmed_block::TransactionStatusMeta::decode(&decompressed[..])
                 .context("prost decode failed after bulk zstd"),
-            Err(_) => {
-                confirmed_block::TransactionStatusMeta::decode(bytes).context("all decode methods failed")
-            }
+            Err(_) => confirmed_block::TransactionStatusMeta::decode(bytes)
+                .context("all decode methods failed"),
         }
     })
 }
@@ -406,7 +414,9 @@ fn convert_to_partial_meta(
     })
 }
 
-fn convert_to_partial_token_balance(tb: confirmed_block::TokenBalance) -> Result<PartialTokenBalance> {
+fn convert_to_partial_token_balance(
+    tb: confirmed_block::TokenBalance,
+) -> Result<PartialTokenBalance> {
     let mint = tb.mint.parse::<Pubkey>().context("Failed to parse mint")?;
     let owner = if tb.owner.is_empty() {
         Pubkey::default()

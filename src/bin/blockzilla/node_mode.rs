@@ -25,7 +25,7 @@ pub async fn run_node_mode(path: &str) -> Result<()> {
     let log_interval = 10.0; // seconds
 
     while let Some(car_block) = stream.next_block().await? {
-        let node = decode_node(car_block.data)?;
+        let node = decode_node(&car_block.data)?;
         total += 1;
 
         match &node {

@@ -16,6 +16,7 @@ use std::io::{Cursor, Read};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 use crate::confirmed_block;
+use crate::node::CborCid;
 use crate::{block_stream::CarBlock, node::Node};
 
 thread_local! {
@@ -38,17 +39,17 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             .ok_or_else(|| anyhow!("missing parent block"))?;
 
         // Pre-allocate with estimated capacity
-        let estimated_tx_count = self.block.entries.len() * 4; // Rough estimate
+        let estimated_tx_count = 0; //self.block.entries.len() * 4; // Rough estimate
         let mut transactions: Vec<EncodedTransactionWithStatusMeta> =
             Vec::with_capacity(estimated_tx_count);
 
         for e_cid in &self.block.entries {
-            let Some(Node::Entry(entry)) = self.entries.get(e_cid) else {
+            let Some(Node::Entry(entry)) = self.entries.get(&e_cid.0) else {
                 continue;
             };
 
             for tx_cid in &entry.transactions {
-                match self.entries.get(tx_cid) {
+                match self.entries.get(&tx_cid.0) {
                     Some(Node::Transaction(tx)) => {
                         // Merge dataframes
                         let meta_bytes = self
@@ -89,7 +90,12 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
         }
 
         // Decode rewards efficiently
-        let rewards = match self.block.rewards.and_then(|cid| self.entries.get(&cid)) {
+        let rewards = match self
+            .block
+            .rewards
+            .clone()
+            .and_then(|ref cid| self.entries.get(&cid.0))
+        {
             Some(Node::DataFrame(df)) => {
                 let bytes = self.merge_dataframe(df)?;
                 let res: Vec<Compat<Reward>> =
@@ -102,12 +108,12 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
         Ok(EncodedConfirmedBlock {
             previous_blockhash: MISSING_HASH.to_string(),
             blockhash: MISSING_HASH.to_string(),
-            parent_slot,
+            parent_slot: 0, //parent_slot,
             transactions,
             rewards,
             num_partitions: None,
-            block_time: self.block.meta.blocktime,
-            block_height: self.block.meta.block_height,
+            block_time: None,   //self.block.meta.blocktime,
+            block_height: None, // self.block.meta.block_height,
         })
     }
 }

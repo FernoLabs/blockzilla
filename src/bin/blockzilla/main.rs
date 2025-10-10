@@ -85,12 +85,13 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize global logger
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .with_target(false)
-        .compact()
+        .with_max_level(tracing::Level::DEBUG) // or INFO
         .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
+
+    tracing::info!("TEST info log");
 
     let cli = Cli::parse();
 
