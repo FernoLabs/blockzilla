@@ -6,8 +6,8 @@ mod key_extractor_ssd;
 mod network_mode;
 mod node_mode;
 mod optimizer;
-mod print_compressed_block;
 mod partial_tx_parser;
+mod print_compressed_block;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -70,7 +70,7 @@ enum Commands {
         #[arg(long)]
         file: String,
         #[arg(long)]
-        output_dir: Option<String>
+        output_dir: Option<String>,
     },
     DumpRegistry {
         /// Path to the SQLite registry file
@@ -80,7 +80,6 @@ enum Commands {
         /// Output CSV path
         #[arg(long, default_value = "pubkey_map.csv")]
         output: String,
-        
     },
 }
 

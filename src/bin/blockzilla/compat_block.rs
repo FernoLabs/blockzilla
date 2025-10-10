@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use bincode::serde::Compat;
-use blockzilla::{block_stream::CarBlock, node::Node};
+use blockzilla::{block_stream::CarBlock, confirmed_block, node::Node};
 use prost::Message;
 use rayon::prelude::*;
 use solana_sdk::{
@@ -9,7 +9,6 @@ use solana_sdk::{
     signature::Signature,
     transaction::VersionedTransaction,
 };
-use solana_storage_proto::convert::generated;
 use solana_transaction_error::TransactionError;
 use std::{cell::RefCell, io::Read};
 use zstd::stream::read::Decoder as ZstdDecoder;
@@ -138,7 +137,7 @@ fn extract_rewards(cb: &CarBlock, reg: &mut KeyRegistry) -> Result<Vec<CompactRe
     Ok(rewards)
 }
 
-fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
+fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
     TL_META_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear();
@@ -146,17 +145,17 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
         // 1st try: stream decode into reusable buffer
         if let Ok(mut dec) = ZstdDecoder::new(bytes) {
             if dec.read_to_end(&mut *buf).is_ok() {
-                return generated::TransactionStatusMeta::decode(&buf[..])
+                return confirmed_block::TransactionStatusMeta::decode(&buf[..])
                     .context("prost decode failed after streaming zstd");
             }
         }
 
         // 2nd: bulk decompress
         match zstd::bulk::decompress(bytes, 512 * 1024) {
-            Ok(decompressed) => generated::TransactionStatusMeta::decode(&decompressed[..])
+            Ok(decompressed) => confirmed_block::TransactionStatusMeta::decode(&decompressed[..])
                 .context("prost decode failed after bulk zstd"),
             Err(_) => {
-                generated::TransactionStatusMeta::decode(bytes).context("all decode methods failed")
+                confirmed_block::TransactionStatusMeta::decode(bytes).context("all decode methods failed")
             }
         }
     })
@@ -214,7 +213,7 @@ struct PartialLoadedAddresses {
 
 fn convert_to_partial_transaction(
     vt: VersionedTransaction,
-    meta_proto: generated::TransactionStatusMeta,
+    meta_proto: confirmed_block::TransactionStatusMeta,
 ) -> Result<PartialTransaction> {
     let msg = vt.message;
     let signatures = vt.signatures;
@@ -281,7 +280,7 @@ fn convert_to_partial_transaction(
 }
 
 fn convert_to_partial_meta(
-    meta: generated::TransactionStatusMeta,
+    meta: confirmed_block::TransactionStatusMeta,
     all_keys: &[Pubkey],
 ) -> Result<PartialTransactionMeta> {
     let err = meta
@@ -407,7 +406,7 @@ fn convert_to_partial_meta(
     })
 }
 
-fn convert_to_partial_token_balance(tb: generated::TokenBalance) -> Result<PartialTokenBalance> {
+fn convert_to_partial_token_balance(tb: confirmed_block::TokenBalance) -> Result<PartialTokenBalance> {
     let mint = tb.mint.parse::<Pubkey>().context("Failed to parse mint")?;
     let owner = if tb.owner.is_empty() {
         Pubkey::default()

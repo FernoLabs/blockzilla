@@ -11,12 +11,11 @@ use std::{
 use tokio::fs::File;
 
 use anyhow::{Context, Result};
-use blockzilla::block_stream::SolanaBlockStream;
+use blockzilla::{block_stream::SolanaBlockStream, confirmed_block};
 use blockzilla::node::Node;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use prost::Message;
 use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
-use solana_storage_proto::convert::generated;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 const NUM_WORKERS: usize = 8;
@@ -285,7 +284,7 @@ fn extract_pubkeys_from_block(
         && let Some(Node::DataFrame(df)) = cb.entries.get(&reward_cid)
     {
         let bytes = cb.merge_dataframe(df)?;
-        if let Ok((rewards,_)) = bincode::decode_from_slice::<
+        if let Ok((rewards, _)) = bincode::decode_from_slice::<
             Vec<bincode::serde::Compat<solana_transaction_status_client_types::Reward>>,
             _,
         >(&bytes, bincode::config::legacy())
@@ -305,7 +304,11 @@ fn extract_pubkeys_from_block(
         for tx_cid in &entry.transactions {
             if let Some(Node::Transaction(tx)) = cb.entries.get(tx_cid) {
                 let tx_bytes = cb.merge_dataframe(&tx.data)?;
-                if let Ok((Compat(vt),_)) = bincode::decode_from_slice::<Compat<VersionedTransaction>,_>(&tx_bytes, bincode::config::legacy()) {
+                if let Ok((Compat(vt), _)) = bincode::decode_from_slice::<
+                    Compat<VersionedTransaction>,
+                    _,
+                >(&tx_bytes, bincode::config::legacy())
+                {
                     let msg = vt.message;
                     keys.extend_from_slice(msg.static_account_keys());
                     if let Some(lookups) = msg.address_table_lookups() {
@@ -325,9 +328,9 @@ fn extract_pubkeys_from_block(
     Ok(())
 }
 
-fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
+fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
     match zstd::bulk::decompress(bytes, 512 * 1024) {
-        Ok(decompressed) => generated::TransactionStatusMeta::decode(&decompressed[..])
+        Ok(decompressed) => confirmed_block::TransactionStatusMeta::decode(&decompressed[..])
             .context("prost decode failed"),
         Err(_) => TL_META_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
@@ -335,18 +338,18 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
             match ZstdDecoder::new(bytes) {
                 Ok(mut decoder) => {
                     decoder.read_to_end(&mut buf)?;
-                    generated::TransactionStatusMeta::decode(&buf[..])
+                    confirmed_block::TransactionStatusMeta::decode(&buf[..])
                         .context("prost decode failed")
                 }
                 Err(_) => {
-                    generated::TransactionStatusMeta::decode(bytes).context("raw decode failed")
+                    confirmed_block::TransactionStatusMeta::decode(bytes).context("raw decode failed")
                 }
             }
         }),
     }
 }
 
-fn extract_pubkeys_from_meta(meta: &generated::TransactionStatusMeta, keys: &mut Vec<Pubkey>) {
+fn extract_pubkeys_from_meta(meta: &confirmed_block::TransactionStatusMeta, keys: &mut Vec<Pubkey>) {
     for tb in &meta.pre_token_balances {
         if let Ok(pk) = tb.mint.parse::<Pubkey>() {
             keys.push(pk);

@@ -4,7 +4,6 @@ use bincode::serde::Compat;
 use prost::Message;
 use solana_reward_info::RewardType;
 use solana_sdk::transaction::{TransactionVersion, VersionedTransaction};
-use solana_storage_proto::convert::generated;
 use solana_transaction_error::TransactionError;
 use solana_transaction_status_client_types::{
     EncodedConfirmedBlock, EncodedTransaction, EncodedTransactionWithStatusMeta, Reward,
@@ -16,6 +15,7 @@ use std::cell::RefCell;
 use std::io::{Cursor, Read};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
+use crate::confirmed_block;
 use crate::{block_stream::CarBlock, node::Node};
 
 thread_local! {
@@ -136,12 +136,12 @@ fn encode_transaction_base64(vt: &VersionedTransaction) -> Result<String> {
 #[inline]
 pub fn decode_meta(meta_bytes: &[u8]) -> Option<UiTransactionStatusMeta> {
     decode_protobuf_meta(meta_bytes)
-        .and_then(convert_generated_meta)
+        .and_then(convert_confirmed_block_meta)
         .ok()
 }
 
 /// Decode zstd-compressed protobuf using thread-local reusable buffer
-fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
+fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
     TL_META_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear();
@@ -154,14 +154,14 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
             .context("zstd decode failed")?;
 
         // Prost decode from reused buffer
-        generated::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
+        confirmed_block::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
             .context("prost decode failed")
     })
 }
 
 #[inline]
-fn convert_generated_meta(
-    meta: generated::TransactionStatusMeta,
+fn convert_confirmed_block_meta(
+    meta: confirmed_block::TransactionStatusMeta,
 ) -> Result<UiTransactionStatusMeta> {
     let err = decode_transaction_error(&meta)?;
     let ui_err = err.as_ref().map(|e| UiTransactionError::from(e.clone()));
@@ -195,7 +195,7 @@ fn convert_generated_meta(
 
 #[inline]
 fn decode_transaction_error(
-    meta: &generated::TransactionStatusMeta,
+    meta: &confirmed_block::TransactionStatusMeta,
 ) -> Result<Option<TransactionError>> {
     meta.err
         .as_ref()
@@ -212,7 +212,7 @@ fn decode_transaction_error(
 
 #[inline]
 fn convert_inner_instructions(
-    list: Vec<generated::InnerInstructions>,
+    list: Vec<confirmed_block::InnerInstructions>,
     is_none: bool,
 ) -> OptionSerializer<Vec<UiInnerInstructions>> {
     if is_none {
@@ -256,7 +256,7 @@ fn convert_log_messages(msgs: Vec<String>, is_none: bool) -> OptionSerializer<Ve
 
 #[inline]
 fn convert_token_balances(
-    balances: Vec<generated::TokenBalance>,
+    balances: Vec<confirmed_block::TokenBalance>,
 ) -> OptionSerializer<Vec<UiTransactionTokenBalance>> {
     if balances.is_empty() {
         return OptionSerializer::None;
@@ -299,7 +299,7 @@ fn convert_token_balances(
 }
 
 #[inline]
-fn convert_rewards(list: Vec<generated::Reward>) -> OptionSerializer<Vec<Reward>> {
+fn convert_rewards(list: Vec<confirmed_block::Reward>) -> OptionSerializer<Vec<Reward>> {
     if list.is_empty() {
         return OptionSerializer::None;
     }
@@ -347,7 +347,7 @@ fn convert_loaded_addresses(
 
 #[inline]
 fn convert_return_data(
-    data: Option<generated::ReturnData>,
+    data: Option<confirmed_block::ReturnData>,
 ) -> OptionSerializer<UiTransactionReturnData> {
     match data {
         Some(rd) => {

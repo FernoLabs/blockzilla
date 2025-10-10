@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::{OpenOptions},
+    fs::OpenOptions,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},

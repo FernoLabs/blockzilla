@@ -53,8 +53,7 @@ impl<R: AsyncRead + Unpin + Send> AsyncCarReader<R> {
 
         let bytes = &self.buf[..];
         let mut cursor = std::io::Cursor::new(bytes);
-        let cid = Cid::read_bytes(&mut cursor)
-            .map_err(|e| anyhow!("CID parse error: {e}"))?;
+        let cid = Cid::read_bytes(&mut cursor).map_err(|e| anyhow!("CID parse error: {e}"))?;
 
         let pos = cursor.position() as usize;
         let data = &bytes[pos..];
@@ -73,11 +72,11 @@ async fn read_varint_usize<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<u
         reader.read_exact(&mut buf).await?;
         let byte = buf[0];
         value |= ((byte & 0x7F) as usize) << shift;
-        
+
         if (byte & 0x80) == 0 {
             return Ok(value);
         }
-        
+
         shift += 7;
         if shift >= std::mem::size_of::<usize>() * 8 {
             return Err(io::Error::new(

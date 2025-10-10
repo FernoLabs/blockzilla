@@ -1,11 +1,9 @@
 use anyhow::Result;
 use blockzilla::block_stream::SolanaBlockStream;
 use solana_transaction_status_client_types::EncodedConfirmedBlock;
-use std::{
-    time::{Duration, Instant},
-};
-use tracing::info;
+use std::time::{Duration, Instant};
 use tokio::fs::File;
+use tracing::info;
 
 #[derive(Default)]
 struct StageStats {

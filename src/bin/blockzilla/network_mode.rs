@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     time::Instant,
 };
-use tokio_util::{io::StreamReader};
+use tokio_util::io::StreamReader;
 
 use crate::{compat_block::cb_to_compact_block, optimizer::KeyRegistry};
 

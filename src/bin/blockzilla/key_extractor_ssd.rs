@@ -1,13 +1,11 @@
 use ahash::AHashSet;
 use anyhow::{Context, Result};
 use blockzilla::{
-    block_stream::{CarBlock, SolanaBlockStream},
-    node::Node,
+    block_stream::{CarBlock, SolanaBlockStream}, confirmed_block, node::Node
 };
 use prost::Message;
 use rusqlite::{Connection, params};
-use solana_sdk::{pubkey::Pubkey};
-use solana_storage_proto::convert::generated;
+use solana_sdk::pubkey::Pubkey;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -137,7 +135,7 @@ pub fn same_accounts(vec_accounts: &[Pubkey], set_accounts: &AHashSet<Pubkey>) -
     false
 }
 
-fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta> {
+fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
     let decompressed = match zstd::bulk::decompress(bytes, 512 * 1024) {
         Ok(buf) => buf,
         Err(_) => {
@@ -150,10 +148,10 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<generated::TransactionStatusMeta
             tmp
         }
     };
-    Ok(generated::TransactionStatusMeta::decode(&decompressed[..])?)
+    Ok(confirmed_block::TransactionStatusMeta::decode(&decompressed[..])?)
 }
 
-fn extract_pubkeys_from_meta(meta: &generated::TransactionStatusMeta, out: &mut AHashSet<Pubkey>) {
+fn extract_pubkeys_from_meta(meta: &confirmed_block::TransactionStatusMeta, out: &mut AHashSet<Pubkey>) {
     // Pre/post token balances
     for tb in &meta.pre_token_balances {
         out.insert(Pubkey::from_str_const(&tb.mint));

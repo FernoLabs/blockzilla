@@ -1,13 +1,16 @@
 use anyhow::Result;
-use std::{time::Instant};
+use blockzilla::{
+    car_reader::AsyncCarReader,
+    node::{Node, decode_node},
+};
+use std::time::Instant;
 use tracing::info;
-use blockzilla::{car_reader::AsyncCarReader, node::{Node, decode_node}};
 
 pub async fn run_node_mode(path: &str) -> Result<()> {
     info!("🔄 Reading CAR file: {path}");
     let start = Instant::now();
 
-    let mut stream  = AsyncCarReader::<tokio::fs::File>::open(path).await?;
+    let mut stream = AsyncCarReader::<tokio::fs::File>::open(path).await?;
 
     let mut total: u64 = 0;
     let mut tx_count: u64 = 0;
