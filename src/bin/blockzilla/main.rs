@@ -6,7 +6,7 @@ mod key_extractor_ssd;
 //mod network_mode;
 mod node_mode;
 //mod optimizer;
-mod partial_tx_parser;
+mod transaction_parser;
 //mod print_compressed_block;
 
 use anyhow::Result;
