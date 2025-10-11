@@ -2,19 +2,23 @@ use anyhow::{Result, anyhow};
 use cid::Cid;
 use tokio::io::{self, AsyncRead, AsyncReadExt, BufReader};
 
-pub struct AsyncCarBlock {
+/// Borrowed view over the current CAR block.
+/// `data` borrows from the reader's internal buffer.
+pub struct AsyncCarBlock<'a> {
     pub cid: Cid,
-    pub data: Vec<u8>,
+    pub data: &'a [u8],
 }
 
 pub struct AsyncCarReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
+    buf: Vec<u8>,  // reused buffer
 }
 
 impl<R: AsyncRead + Unpin + Send> AsyncCarReader<R> {
     pub fn new(inner: R) -> Self {
         Self {
             reader: BufReader::with_capacity(10 * 1024 * 1024, inner),
+            buf: Vec::with_capacity(1 << 20), // preallocate 1 MB
         }
     }
 
@@ -25,32 +29,39 @@ impl<R: AsyncRead + Unpin + Send> AsyncCarReader<R> {
         Ok(reader)
     }
 
+    /// Read and discard the CAR header.
     pub async fn read_header(&mut self) -> Result<()> {
         let len = read_varint_usize(&mut self.reader).await?;
-        let mut buf = vec![0u8; len];
-        self.reader.read_exact(&mut buf).await?;
-        //let _value: Value = minicbor::from_slice(&buf)?;
+        if len > self.buf.capacity() {
+            self.buf.reserve(len - self.buf.capacity());
+        }
+        self.buf.resize(len, 0);
+        self.reader.read_exact(&mut self.buf).await?;
         Ok(())
     }
 
-    pub async fn next_block(&mut self) -> Result<Option<AsyncCarBlock>> {
+    /// Read next block, borrowing bytes from the internal buffer.
+    pub async fn next_block(&mut self) -> Result<Option<AsyncCarBlock<'_>>> {
         let len = match read_varint_usize(&mut self.reader).await {
             Ok(l) => l,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e.into()),
         };
 
-        let mut buf = vec![0u8; len];
-        self.reader.read_exact(&mut buf).await?;
+        if len > self.buf.capacity() {
+            self.buf.reserve(len - self.buf.capacity());
+        }
+        self.buf.resize(len, 0);
+        self.reader.read_exact(&mut self.buf).await?;
 
-        // Parse directly from the slice
-        let mut cursor = std::io::Cursor::new(&buf);
+        // Parse CID directly from the buffer
+        let mut cursor = std::io::Cursor::new(&self.buf);
         let cid = Cid::read_bytes(&mut cursor).map_err(|e| anyhow!("CID parse error: {e}"))?;
         let pos = cursor.position() as usize;
 
         Ok(Some(AsyncCarBlock {
             cid,
-            data: buf[pos..len].to_vec(),
+            data: &self.buf[pos..len], // <-- borrow, not clone
         }))
     }
 }
@@ -72,10 +83,7 @@ async fn read_varint_usize<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<u
 
         shift += 7;
         if shift >= std::mem::size_of::<usize>() * 8 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "varint overflow",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "varint overflow"));
         }
     }
 }

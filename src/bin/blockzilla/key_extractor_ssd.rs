@@ -8,23 +8,13 @@ use blockzilla::{
 use prost::Message;
 use rusqlite::{Connection, params};
 use solana_sdk::pubkey::Pubkey;
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-    thread,
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 use tokio::{fs::File, time::Instant};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 use crate::partial_tx_parser;
 
-const WORKER_THREADS: usize = 4;
-const CHANNEL_BUFFER: usize = 1000;
-const MERGE_INTERVAL_BLOCKS: usize = 1000;
+const LOG_INTERVAL_SECS: u64 = 10;
 
 pub async fn extract_unique_pubkeys(path: &str, output_dir: Option<String>) -> Result<()> {
     let epoch =
@@ -34,138 +24,53 @@ pub async fn extract_unique_pubkeys(path: &str, output_dir: Option<String>) -> R
     let db_path = out_dir.join(format!("pubkeys-{epoch:04}.sqlite"));
 
     println!(
-        "🧮 Extracting pubkeys for epoch {epoch} → {} (using {} threads)",
-        db_path.display(),
-        WORKER_THREADS
+        "🧮 Extracting pubkeys for epoch {epoch} → {} (single threaded)",
+        db_path.display()
     );
 
-    // Shared global set (protected by mutex)
-    let global_set: Arc<Mutex<AHashSet<Pubkey>>> =
-        Arc::new(Mutex::new(AHashSet::with_capacity(10_000_000)));
+    // Single global set
+    let mut set: AHashSet<Pubkey> = AHashSet::with_capacity(10_000_000);
 
-    // Metrics
-    let blocks_processed = Arc::new(AtomicU64::new(0));
-    let start = Instant::now();
-
-    // Create channel for sending blocks to workers
-    let (tx, rx) = crossbeam_channel::bounded::<CarBlock>(CHANNEL_BUFFER);
-    let rx = Arc::new(rx);
-
-    // Spawn worker threads
-    let mut handles = vec![];
-    for worker_id in 0..WORKER_THREADS {
-        let rx = Arc::clone(&rx);
-        let global_set = Arc::clone(&global_set);
-        let blocks_processed = Arc::clone(&blocks_processed);
-
-        let handle =
-            thread::spawn(move || worker_thread(worker_id, rx, global_set, blocks_processed));
-        handles.push(handle);
-    }
-
-    // Progress logging thread
-    let blocks_processed_log = Arc::clone(&blocks_processed);
-    let global_set_log = Arc::clone(&global_set);
-    let log_handle = thread::spawn(move || {
-        let mut last_count = 0u64;
-        loop {
-            thread::sleep(Duration::from_secs(10));
-            let count = blocks_processed_log.load(Ordering::Relaxed);
-            if count == last_count {
-                break; // No progress, likely done
-            }
-            last_count = count;
-            let elapsed = start.elapsed().as_secs_f64();
-            let blk_per_s = (count as f64) / elapsed;
-            let unique = global_set_log.lock().unwrap().len();
-            println!(
-                "🧮 {:>7} blk | {:>6.1} blk/s | {:>9} unique pubkeys",
-                count, blk_per_s, unique,
-            );
-        }
-    });
-
-    // Stream CAR file and send blocks to workers
     let file = File::open(path).await?;
     let mut stream = SolanaBlockStream::new(file).await?;
 
-    while let Some(block) = stream.next_solana_block().await? {
-        // Send block to workers (blocks if channel is full)
-        tx.send(block).context("Failed to send block to workers")?;
-    }
+    let start = Instant::now();
+    let mut last_log = start;
+    let mut blocks_processed: u64 = 0;
 
-    // Close channel to signal workers to finish
-    drop(tx);
+    while let Some(cb) = stream.next_solana_block().await? {
+        // Rewards
+        //extract_rewards(&cb, &mut set)?;
+        // Transactions
+        extract_transactions(&cb, &mut set)?;
 
-    // Wait for all workers to complete
-    for handle in handles {
-        handle.join().expect("Worker thread panicked");
-    }
+        blocks_processed += 1;
 
-    // Stop logging thread
-    log_handle.join().ok();
-
-    let final_set = Arc::try_unwrap(global_set)
-        .unwrap_or_else(|arc| (*arc.lock().unwrap()).clone().into())
-        .into_inner()
-        .unwrap();
-
-    let total_blocks = blocks_processed.load(Ordering::Relaxed);
-    println!(
-        "✅ Processed {} blocks, found {} unique pubkeys",
-        total_blocks,
-        final_set.len()
-    );
-
-    println!("💾 Writing {} pubkeys to SQLite...", final_set.len());
-    dump_pubkeys_to_sqlite(&db_path, &final_set)?;
-    println!("✅ Done.");
-    Ok(())
-}
-
-fn worker_thread(
-    worker_id: usize,
-    rx: Arc<crossbeam_channel::Receiver<CarBlock>>,
-    global_set: Arc<Mutex<AHashSet<Pubkey>>>,
-    blocks_processed: Arc<AtomicU64>,
-) -> Result<()> {
-    let mut local_set = AHashSet::with_capacity(100_000);
-    let mut blocks_since_merge = 0;
-
-    loop {
-        match rx.recv() {
-            Ok(block) => {
-                // Extract pubkeys into local set
-                extract_transactions(&block, &mut local_set)?;
-                blocks_processed.fetch_add(1, Ordering::Relaxed);
-                blocks_since_merge += 1;
-
-                // Periodically merge local set into global set
-                if blocks_since_merge >= MERGE_INTERVAL_BLOCKS {
-                    merge_into_global(&mut local_set, &global_set);
-                    blocks_since_merge = 0;
-                }
-            }
-            Err(_) => {
-                // Channel closed, do final merge and exit
-                if !local_set.is_empty() {
-                    merge_into_global(&mut local_set, &global_set);
-                }
-                break;
-            }
+        // Log roughly every LOG_INTERVAL_SECS
+        let now = Instant::now();
+        if now.duration_since(last_log).as_secs() >= LOG_INTERVAL_SECS {
+            let elapsed = now.duration_since(start).as_secs_f64();
+            let blk_per_s = (blocks_processed as f64) / elapsed;
+            println!(
+                "🧮 {:>7} blk | {:>6.1} blk/s | {:>9} unique pubkeys",
+                blocks_processed,
+                blk_per_s,
+                set.len()
+            );
+            last_log = now;
         }
     }
 
+    println!(
+        "✅ Processed {} blocks, found {} unique pubkeys",
+        blocks_processed,
+        set.len()
+    );
+
+    println!("💾 Writing {} pubkeys to SQLite...", set.len());
+    dump_pubkeys_to_sqlite(&db_path, &set)?;
+    println!("✅ Done.");
     Ok(())
-}
-
-fn merge_into_global(local_set: &mut AHashSet<Pubkey>, global_set: &Arc<Mutex<AHashSet<Pubkey>>>) {
-    if local_set.is_empty() {
-        return;
-    }
-
-    let mut global = global_set.lock().unwrap();
-    global.extend(local_set.drain());
 }
 
 fn extract_rewards(cb: &CarBlock, out: &mut AHashSet<Pubkey>) -> Result<()> {
@@ -187,10 +92,7 @@ fn extract_rewards(cb: &CarBlock, out: &mut AHashSet<Pubkey>) -> Result<()> {
 }
 
 fn extract_transactions(cb: &CarBlock, out: &mut AHashSet<Pubkey>) -> Result<()> {
-    for e_cid in &cb.entries {
-        let Some(Node::Entry(entry)) = cb.entries.get(&e_cid.0) else {
-            continue;
-        };
+    for entry in cb.entries.get_block_entries() {
         for tx_cid in &entry.transactions {
             let Some(Node::Transaction(tx)) = cb.entries.get(&tx_cid.0) else {
                 continue;
@@ -198,18 +100,18 @@ fn extract_transactions(cb: &CarBlock, out: &mut AHashSet<Pubkey>) -> Result<()>
 
             // Transaction data
             let tx_bytes = if tx.data.next.is_none() {
-                &tx.data.data
+                tx.data.data
             } else {
-                &cb.merge_dataframe(&tx.data)?
+                &cb.merge_dataframe(tx.data)?
             };
 
             partial_tx_parser::parse_bincode_tx_static_accounts(tx_bytes, out)?;
 
-            // Metadata (commented out in original)
-            let meta_bytes = cb.merge_dataframe(&tx.metadata)?;
-            if let Ok(meta) = decode_protobuf_meta(&meta_bytes) {
-                extract_pubkeys_from_meta(&meta, out);
-            }
+            // Metadata
+            //let meta_bytes = cb.merge_dataframe(tx.metadata)?;
+            //if let Ok(meta) = decode_protobuf_meta(&meta_bytes) {
+            //    extract_pubkeys_from_meta(&meta, out);
+            //}
         }
     }
     Ok(())
@@ -230,7 +132,6 @@ pub fn same_accounts(vec_accounts: &[Pubkey], set_accounts: &AHashSet<Pubkey>) -
         return true;
     }
 
-    // Compute diffs
     for pk in vec_set.difference(set_accounts) {
         eprintln!("⚠️ Missing in set: {}", pk);
     }
@@ -242,6 +143,7 @@ pub fn same_accounts(vec_accounts: &[Pubkey], set_accounts: &AHashSet<Pubkey>) -
 }
 
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
+    // Try fast-path sized decompress, then streaming, else raw
     let decompressed = match zstd::bulk::decompress(bytes, 512 * 1024) {
         Ok(buf) => buf,
         Err(_) => {
@@ -263,20 +165,17 @@ fn extract_pubkeys_from_meta(
     meta: &confirmed_block::TransactionStatusMeta,
     out: &mut AHashSet<Pubkey>,
 ) {
-    // Pre/post token balances
     for tb in &meta.pre_token_balances {
         out.insert(Pubkey::from_str_const(&tb.mint));
         out.insert(Pubkey::from_str_const(&tb.owner));
         out.insert(Pubkey::from_str_const(&tb.program_id));
     }
-
     for tb in &meta.post_token_balances {
         out.insert(Pubkey::from_str_const(&tb.mint));
         out.insert(Pubkey::from_str_const(&tb.owner));
         out.insert(Pubkey::from_str_const(&tb.program_id));
     }
 
-    // Loaded addresses
     for addr_bytes in meta
         .loaded_writable_addresses
         .iter()
@@ -287,7 +186,6 @@ fn extract_pubkeys_from_meta(
         }
     }
 
-    // Return data program id
     if let Some(rd) = &meta.return_data {
         if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
             out.insert(pk);

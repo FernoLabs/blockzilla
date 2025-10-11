@@ -1,30 +1,9 @@
 use cid::Cid;
 use minicbor::{Decode, Decoder, Encode, data::Type};
 
-#[derive(Debug, Clone)]
-pub struct CborCid(pub Cid);
-
-impl<'b, C> Decode<'b, C> for CborCid {
-    fn decode(
-        d: &mut Decoder<'b>,
-        _: &mut C,
-    ) -> std::result::Result<Self, minicbor::decode::Error> {
-        if d.datatype()? == Type::Tag {
-            let _ = d.tag()?;
-        }
-        let bytes = d.bytes()?;
-        if bytes.len() <= 1 {
-            return Err(minicbor::decode::Error::message("invalid CID bytes"));
-        }
-        let cid = Cid::try_from(&bytes[1..])
-            .map_err(|e| minicbor::decode::Error::message(format!("invalid CID: {e}")))?;
-        Ok(Self(cid))
-    }
-}
-
 #[derive(Debug, Decode)]
 #[cbor(array)]
-pub struct DataFrame {
+pub struct DataFrame<'a> {
     #[n(0)]
     pub kind: u64,
     #[n(1)]
@@ -35,7 +14,7 @@ pub struct DataFrame {
     pub total: Option<u64>,
     #[n(4)]
     #[cbor(decode_with = "minicbor::bytes::decode")]
-    pub data: Vec<u8>,
+    pub data: &'a [u8],
     #[n(5)]
     pub next: Option<CborCid>,
 }
@@ -62,13 +41,14 @@ pub struct Shredding {
 
 #[derive(Debug, Decode)]
 #[cbor(array)]
-pub struct TransactionNode {
+pub struct TransactionNode<'a> {
     #[n(0)]
     pub kind: u64,
     #[n(1)]
-    pub data: DataFrame,
+    #[cbor(borrow = "'a + 'bytes")]
+    pub data: DataFrame<'a>,
     #[n(2)]
-    pub metadata: DataFrame,
+    pub metadata: DataFrame<'a>,
     #[n(3)]
     pub slot: u64,
     #[n(4)]
@@ -132,33 +112,29 @@ pub struct EpochNode {
 
 #[derive(Debug, Decode)]
 #[cbor(array)]
-pub struct RewardsNode {
+pub struct RewardsNode<'a> {
     #[n(0)]
     pub kind: u64,
     #[n(1)]
     pub slot: u64,
     #[n(2)]
-    pub data: DataFrame,
+    #[cbor(borrow = "'a + 'bytes")]
+    pub data: DataFrame<'a>,
 }
 
 #[derive(Debug)]
-pub enum Node {
-    Transaction(TransactionNode),
+pub enum Node<'a> {
+    Transaction(TransactionNode<'a>),
     Entry(EntryNode),
     Block(BlockNode),
     Subset(SubsetNode),
     Epoch(EpochNode),
-    Rewards(RewardsNode),
-    DataFrame(DataFrame),
+    Rewards(RewardsNode<'a>),
+    DataFrame(DataFrame<'a>),
 }
 
 pub fn decode_node(data: &[u8]) -> anyhow::Result<Node> {
-    // 1) Peek `kind` without consuming the real decode stream.
-    let mut peek = minicbor::Decoder::new(data);
-    let _ = peek.array()?; // enter the top-level array
-    let kind = peek.u64()?; // first element is the kind
-
-    // 2) Decode the full value with a fresh decoder so the derive sees the array header.
+    let kind = peek_node_type(data)?;
     let mut d = minicbor::Decoder::new(data);
 
     Ok(match kind {
@@ -171,4 +147,32 @@ pub fn decode_node(data: &[u8]) -> anyhow::Result<Node> {
         6 => Node::DataFrame(d.decode()?),
         _ => anyhow::bail!("unknown kind id {kind}"),
     })
+}
+
+pub fn peek_node_type(data: &[u8]) -> anyhow::Result<u64> {
+    let mut peek = minicbor::Decoder::new(data);
+    let _ = peek.array()?;
+    let kind = peek.u64()?;
+    Ok(kind)
+}
+
+#[derive(Debug, Clone)]
+pub struct CborCid(pub Cid);
+
+impl<'b, C> Decode<'b, C> for CborCid {
+    fn decode(
+        d: &mut Decoder<'b>,
+        _: &mut C,
+    ) -> std::result::Result<Self, minicbor::decode::Error> {
+        if d.datatype()? == Type::Tag {
+            let _ = d.tag()?;
+        }
+        let bytes = d.bytes()?;
+        if bytes.len() <= 1 {
+            return Err(minicbor::decode::Error::message("invalid CID bytes"));
+        }
+        let cid = Cid::try_from(&bytes[1..])
+            .map_err(|e| minicbor::decode::Error::message(format!("invalid CID: {e}")))?;
+        Ok(Self(cid))
+    }
 }
