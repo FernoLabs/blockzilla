@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use blockzilla::{
     block_stream::{CarBlock, SolanaBlockStream},
     confirmed_block,
-    node::{CborCid, Node},
+    node::Node,
 };
 use prost::Message;
 use rusqlite::{Connection, params};
@@ -11,8 +11,6 @@ use solana_sdk::pubkey::Pubkey;
 use std::path::{Path, PathBuf};
 use tokio::{fs::File, time::Instant};
 use zstd::stream::read::Decoder as ZstdDecoder;
-
-use crate::partial_tx_parser;
 
 const LOG_INTERVAL_SECS: u64 = 10;
 
@@ -105,7 +103,7 @@ fn extract_transactions(cb: &CarBlock, out: &mut AHashSet<Pubkey>) -> Result<()>
                 &cb.merge_dataframe(tx.data)?
             };
 
-            partial_tx_parser::parse_bincode_tx_static_accounts(tx_bytes, out)?;
+            transaction_parser::parse_account_keys_only(tx_bytes, out)?;
 
             // Metadata
             //let meta_bytes = cb.merge_dataframe(tx.metadata)?;

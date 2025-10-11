@@ -11,7 +11,7 @@ pub struct AsyncCarBlock<'a> {
 
 pub struct AsyncCarReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
-    buf: Vec<u8>,  // reused buffer
+    buf: Vec<u8>,
 }
 
 impl<R: AsyncRead + Unpin + Send> AsyncCarReader<R> {
@@ -83,7 +83,10 @@ async fn read_varint_usize<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<u
 
         shift += 7;
         if shift >= std::mem::size_of::<usize>() * 8 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "varint overflow"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
         }
     }
 }

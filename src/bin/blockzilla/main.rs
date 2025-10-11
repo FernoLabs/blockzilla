@@ -100,10 +100,10 @@ async fn main() -> Result<()> {
         Commands::Node { file } => run_node_mode(&file).await?,
         Commands::Block { file } => {
             //run_block_mode(&file).await?
-        },
+        }
         Commands::Optimize { file, output_dir } => {
             //run_car_optimizer(&file, output_dir).await?
-        },
+        }
         Commands::Read {
             epoch,
             idx,
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
             slot,
         } => {
             //read_and_print_block_compact(&epoch, &idx, &registry, slot)?
-        },
+        }
         Commands::Network { source, output_dir } => {
             //network_mode::run_network_optimizer(&source, output_dir).await?
         }

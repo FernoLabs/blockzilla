@@ -1,22 +1,17 @@
 use ahash::AHashSet;
-use anyhow::{Result, anyhow};
-use bincode::serde::Compat;
+use anyhow::Result;
 use solana_sdk::pubkey::Pubkey;
 use std::mem::MaybeUninit;
-use tracing::{debug, warn};
 use wincode::ReadResult;
 use wincode::SchemaRead;
 use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
+use wincode::len::SeqLen;
 use wincode::len::ShortU16Len;
 
 pub fn parse_bincode_tx_static_accounts(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<()> {
-    //wincode_parse(tx, out)
-    bincode_parse(tx, out)
-}
-
-fn wincode_parse(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<()> {
     let vt: VersionedTransaction = wincode::deserialize(tx)?;
+
     // Static account keys
     out.extend(
         vt.message
@@ -37,31 +32,80 @@ fn wincode_parse(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<()> {
     Ok(())
 }
 
-pub fn bincode_parse(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<()> {
-    let (Compat(vt), _): (Compat<solana_sdk::transaction::VersionedTransaction>, _) =
-        bincode::decode_from_slice(tx, bincode::config::legacy())?;
+pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<()> {
+    let mut reader = Reader::new(tx);
 
-    // Static account keys
-    out.extend(vt.message.static_account_keys());
+    // 1️⃣ Read signatures (skip their bytes)
+    let sig_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+    let sig_bytes = sig_len.saturating_mul(64);
+    reader.consume(sig_bytes)?;
 
-    // Address lookup table accounts (v0 only)
-    if let Some(lookups) = vt.message.address_table_lookups() {
-        out.extend(lookups.iter().map(|l| l.account_key));
+    // 2️⃣ Peek message prefix
+    let buf = reader.as_slice();
+    if buf.is_empty() {
+        return Ok(());
+    }
+    let prefix = buf[0];
+    let is_v0 = prefix & 0x80 != 0;
+    if is_v0 {
+        // skip prefix byte
+        reader.consume(1)?;
+    }
+
+    // 3️⃣ Read header
+    let mut header = [MaybeUninit::zeroed(); 3];
+    reader.read_exact(&mut header)?;
+
+    // 4️⃣ Read account_keys short vec
+    let n_keys = ShortU16Len::read::<usize>(&mut reader)? as usize;
+    for _ in 0..n_keys {
+        let mut key_bytes = [MaybeUninit::zeroed(); 32];
+        reader.read_exact(&mut key_bytes)?;
+        // SAFETY: All bytes have been initialized by read_exact.
+        let key_bytes: [u8; 32] = unsafe { std::mem::transmute_copy(&key_bytes) };
+        out.insert(Pubkey::new_from_array(key_bytes));
+    }
+
+    // 5️⃣ Skip recent_blockhash (32 bytes)
+    reader.consume(32)?;
+
+    if is_v0 {
+        // Skip instructions entirely — read len and skip per-instruction payload
+        let n_instructions = ShortU16Len::read::<usize>(&mut reader)? as usize;
+        for _ in 0..n_instructions {
+            reader.consume(1)?; // program_id_index
+            let ac_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(ac_len)?;
+            let data_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(data_len)?;
+        }
+
+        // Read address_table_lookups
+        let n_lookups = ShortU16Len::read::<usize>(&mut reader)? as usize;
+        for _ in 0..n_lookups {
+            let mut key = [MaybeUninit::zeroed(); 32];
+            reader.read_exact(&mut key)?;
+            // SAFETY: All bytes have been initialized by read_exact.
+            let key: [u8; 32] = unsafe { std::mem::transmute_copy(&key) };
+            out.insert(Pubkey::new_from_array(key));
+
+            let w_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(w_len)?;
+            let r_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(r_len)?;
+        }
     }
 
     Ok(())
 }
 
-// ------------------- Types -------------------
-
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
 pub struct VersionedTransaction {
-    #[wincode(with = "containers::Vec<Pod<Signature>, ShortU16Len>")] // ✅ short_vec
+    #[wincode(with = "containers::Vec<Pod<Signature>, ShortU16Len>")]
     pub signatures: Vec<Signature>,
     pub message: VersionedMessage,
 }
 
-/// 64-byte signature (plain-old-data)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead)]
 #[repr(transparent)]
 pub struct Signature(pub [u8; 64]);
@@ -160,7 +204,7 @@ impl<'de> SchemaRead<'de> for VersionedMessage {
         } else {
             let _version = first & 0x7F;
             // Consume prefix byte manually
-            reader.read_exact(&mut vec![MaybeUninit::uninit()])?; // advances by one
+            reader.consume(1)?; // advances by one
             let mut inner = MaybeUninit::uninit();
             V0Message::read(reader, &mut inner)?;
             VersionedMessage::V0(unsafe { inner.assume_init() })
@@ -195,68 +239,4 @@ impl VersionedMessage {
             VersionedMessage::V0(m) => &m.header,
         }
     }
-}
-
-fn compare(
-    theirs: &solana_sdk::transaction::VersionedTransaction,
-    ours: &VersionedTransaction,
-) -> Result<()> {
-    // --- Compare signature list ---
-    if ours.signatures.len() != theirs.signatures.len() {
-        return Err(anyhow!(
-            "Signature length mismatch: ours={} theirs={}",
-            ours.signatures.len(),
-            theirs.signatures.len()
-        ));
-    }
-    for (i, (a, b)) in ours.signatures.iter().zip(&theirs.signatures).enumerate() {
-        if a.0 != b.as_ref() {
-            return Err(anyhow!("Signature #{i} mismatch"));
-        }
-    }
-
-    // --- Compare static account keys ---
-    let ours_keys = ours.message.static_account_keys();
-    let theirs_keys: Vec<[u8; 32]> = theirs
-        .message
-        .static_account_keys()
-        .iter()
-        .map(|k| *k.as_array())
-        .collect();
-
-    if ours_keys != theirs_keys.as_slice() {
-        return Err(anyhow!(
-            "Account key mismatch (ours={} theirs={})",
-            ours_keys.len(),
-            theirs_keys.len()
-        ));
-    }
-
-    // --- Compare recent blockhash ---
-    let ours_hash = match &ours.message {
-        VersionedMessage::Legacy(m) => m.recent_blockhash,
-        VersionedMessage::V0(m) => m.recent_blockhash,
-    };
-    let theirs_hash = theirs.message.recent_blockhash().as_ref();
-    if ours_hash != theirs_hash {
-        return Err(anyhow!("Recent blockhash mismatch"));
-    }
-
-    // --- Compare message type ---
-    let ours_ver = match &ours.message {
-        VersionedMessage::Legacy(_) => "Legacy",
-        VersionedMessage::V0(_) => "V0",
-    };
-    let theirs_ver = match theirs.version() {
-        solana_sdk::transaction::TransactionVersion::Legacy(_) => "Legacy",
-        solana_sdk::transaction::TransactionVersion::Number(_) => "V0",
-    };
-
-    if ours_ver != theirs_ver {
-        return Err(anyhow!(
-            "Message version mismatch (ours={ours_ver}, theirs={theirs_ver})"
-        ));
-    }
-
-    Ok(())
 }
