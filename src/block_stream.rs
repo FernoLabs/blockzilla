@@ -1,5 +1,3 @@
-use std::iter::Filter;
-
 use ahash::AHashMap;
 use anyhow::{Result, anyhow};
 use cid::{Cid, CidGeneric};
@@ -13,7 +11,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct BlockBuffer {
     buf: Vec<u8>,
-    index: AHashMap<Cid, (usize, usize)>,
+    pub index: AHashMap<Cid, (usize, usize)>,
 }
 
 impl BlockBuffer {
@@ -29,7 +27,7 @@ impl BlockBuffer {
         self.index.clear();
     }
 
-    pub fn get(&self, cid: &Cid) -> Option<Node> {
+    pub fn get(&self, cid: &Cid) -> Option<Node<'_>> {
         self.index
             .get(cid)
             .map(|&(s, e)| &self.buf[s..e])
@@ -41,15 +39,15 @@ impl BlockBuffer {
     pub fn get_block_entries(&self) -> impl Iterator<Item = EntryNode> + '_ {
         self.index
             .iter()
-            .filter(|(k, (s, e))| peek_node_type(&self.buf[*s..*e]).unwrap() == 1)
-            .map(|(id, (s, e))| {
+            .filter(|(_k, (s, e))| peek_node_type(&self.buf[*s..*e]).unwrap() == 1)
+            .map(|(_id, (s, e))| {
                 let entry: EntryNode = minicbor::decode(&self.buf[*s..*e]).unwrap();
                 entry
             })
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CarBlock<'a> {
     pub block: BlockNode,
     pub entries: &'a BlockBuffer,
@@ -97,7 +95,7 @@ impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
         })
     }
 
-    pub async fn next_solana_block<'a>(&'a mut self) -> Result<Option<CarBlock>> {
+    pub async fn next_solana_block<'a>(&mut self) -> Result<Option<CarBlock<'_>>> {
         self.block_data.clear();
 
         while let Some(AsyncCarBlock { cid, data }) = self.reader.next_block().await? {

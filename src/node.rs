@@ -19,7 +19,7 @@ pub struct DataFrame<'a> {
     pub next: Option<CborCid>,
 }
 
-#[derive(Debug, Decode)]
+#[derive(Debug, Decode, Clone)]
 #[cbor(array)]
 pub struct SlotMeta {
     #[n(0)]
@@ -30,7 +30,7 @@ pub struct SlotMeta {
     pub block_height: Option<u64>,
 }
 
-#[derive(Debug, Decode, Encode)]
+#[derive(Debug, Decode, Encode, Clone)]
 #[cbor(array)]
 pub struct Shredding {
     #[n(0)]
@@ -69,7 +69,7 @@ pub struct EntryNode {
     pub transactions: Vec<CborCid>,
 }
 
-#[derive(Debug, Decode)]
+#[derive(Debug, Decode, Clone)]
 #[cbor(array)]
 pub struct BlockNode {
     #[n(0)]
@@ -133,7 +133,7 @@ pub enum Node<'a> {
     DataFrame(DataFrame<'a>),
 }
 
-pub fn decode_node(data: &[u8]) -> anyhow::Result<Node> {
+pub fn decode_node(data: &[u8]) -> anyhow::Result<Node<'_>> {
     let kind = peek_node_type(data)?;
     let mut d = minicbor::Decoder::new(data);
 

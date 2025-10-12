@@ -62,7 +62,7 @@ pub async fn run_block_mode(path: &str) -> Result<()> {
     let mut timings = StageStats::default();
 
     while let Some(block) = stream.next_solana_block().await? {
-        let entries_count = block.entries.len() as u64; // ✅ store before move
+        let entries_count = block.entries.index.len() as u64; // ✅ store before move
         let t0 = Instant::now();
         let rpc_block: EncodedConfirmedBlock = block.try_into()?; // consumes `block`
         let t1 = Instant::now();
