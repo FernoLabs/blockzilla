@@ -9,16 +9,22 @@ use wincode::io::Reader;
 use wincode::len::SeqLen;
 use wincode::len::ShortU16Len;
 
-pub fn parse_bincode_tx_static_accounts(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<()> {
+pub fn parse_bincode_tx_static_accounts(
+    tx: &[u8],
+    out: &mut AHashSet<Pubkey>,
+) -> Result<Option<Pubkey>> {
     let vt: VersionedTransaction = wincode::deserialize(tx)?;
 
-    // Static account keys
-    out.extend(
-        vt.message
-            .static_account_keys()
-            .iter()
-            .map(|p| Pubkey::new_from_array(*p)),
-    );
+    let keys = vt.message.static_account_keys();
+    if keys.is_empty() {
+        return Ok(None);
+    }
+
+    // The first static account key is always the fee payer
+    let fee_payer = Pubkey::new_from_array(keys[0]);
+
+    // Add all static account keys
+    out.extend(keys.iter().map(|p| Pubkey::new_from_array(*p)));
 
     // Address lookup table accounts (v0 only)
     if let Some(lookups) = vt.message.address_table_lookups() {
@@ -29,10 +35,10 @@ pub fn parse_bincode_tx_static_accounts(tx: &[u8], out: &mut AHashSet<Pubkey>) -
         );
     }
 
-    Ok(())
+    Ok(Some(fee_payer))
 }
 
-pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<()> {
+pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<Option<Pubkey>> {
     let mut reader = Reader::new(tx);
 
     // 1️⃣ Read signatures (skip their bytes)
@@ -43,34 +49,42 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
     // 2️⃣ Peek message prefix
     let buf = reader.as_slice();
     if buf.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let prefix = buf[0];
     let is_v0 = prefix & 0x80 != 0;
     if is_v0 {
-        // skip prefix byte
-        reader.consume(1)?;
+        reader.consume(1)?; // skip prefix
     }
 
     // 3️⃣ Read header
     let mut header = [MaybeUninit::zeroed(); 3];
     reader.read_exact(&mut header)?;
 
-    // 4️⃣ Read account_keys short vec
+    // 4️⃣ Read static account keys
     let n_keys = ShortU16Len::read::<usize>(&mut reader)? as usize;
-    for _ in 0..n_keys {
+    if n_keys == 0 {
+        return Ok(None);
+    }
+
+    let mut first_key: Option<Pubkey> = None;
+    for i in 0..n_keys {
         let mut key_bytes = [MaybeUninit::zeroed(); 32];
         reader.read_exact(&mut key_bytes)?;
-        // SAFETY: All bytes have been initialized by read_exact.
         let key_bytes: [u8; 32] = unsafe { std::mem::transmute_copy(&key_bytes) };
-        out.insert(Pubkey::new_from_array(key_bytes));
+        let key = Pubkey::new_from_array(key_bytes);
+        if i == 0 {
+            // First key is always fee payer
+            first_key = Some(key);
+        }
+        out.insert(key);
     }
 
     // 5️⃣ Skip recent_blockhash (32 bytes)
     reader.consume(32)?;
 
     if is_v0 {
-        // Skip instructions entirely — read len and skip per-instruction payload
+        // Skip instructions
         let n_instructions = ShortU16Len::read::<usize>(&mut reader)? as usize;
         for _ in 0..n_instructions {
             reader.consume(1)?; // program_id_index
@@ -85,7 +99,6 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
         for _ in 0..n_lookups {
             let mut key = [MaybeUninit::zeroed(); 32];
             reader.read_exact(&mut key)?;
-            // SAFETY: All bytes have been initialized by read_exact.
             let key: [u8; 32] = unsafe { std::mem::transmute_copy(&key) };
             out.insert(Pubkey::new_from_array(key));
 
@@ -96,7 +109,7 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
         }
     }
 
-    Ok(())
+    Ok(first_key)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
@@ -112,19 +125,15 @@ pub struct Signature(pub [u8; 64]);
 
 pub const PUBKEY_BYTES: usize = 32;
 
-/// Single program instruction
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
 pub struct CompiledInstruction {
     pub program_id_index: u8,
-
     #[wincode(with = "containers::Vec<Pod<u8>, ShortU16Len>")]
     pub accounts: Vec<u8>,
-
     #[wincode(with = "containers::Vec<Pod<u8>, ShortU16Len>")]
     pub data: Vec<u8>,
 }
 
-/// Message header metadata
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead)]
 pub struct MessageHeader {
     pub num_required_signatures: u8,
@@ -132,50 +141,37 @@ pub struct MessageHeader {
     pub num_readonly_unsigned_accounts: u8,
 }
 
-/// Address table lookups for v0 messages
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
 pub struct MessageAddressTableLookup {
     pub account_key: [u8; PUBKEY_BYTES],
-
     #[wincode(with = "containers::Vec<Pod<u8>, ShortU16Len>")]
     pub writable_indexes: Vec<u8>,
-
     #[wincode(with = "containers::Vec<Pod<u8>, ShortU16Len>")]
     pub readonly_indexes: Vec<u8>,
 }
 
-/// Legacy message (pre-v0)
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
 pub struct LegacyMessage {
     pub header: MessageHeader,
-
     #[wincode(with = "containers::Vec<Pod<[u8; PUBKEY_BYTES]>, ShortU16Len>")]
     pub account_keys: Vec<[u8; PUBKEY_BYTES]>,
-
     pub recent_blockhash: [u8; 32],
-
     #[wincode(with = "containers::Vec<Elem<CompiledInstruction>, ShortU16Len>")]
     pub instructions: Vec<CompiledInstruction>,
 }
 
-/// Version 0 message (adds lookups)
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
 pub struct V0Message {
     pub header: MessageHeader,
-
     #[wincode(with = "containers::Vec<Pod<[u8; PUBKEY_BYTES]>, ShortU16Len>")]
     pub account_keys: Vec<[u8; PUBKEY_BYTES]>,
-
     pub recent_blockhash: [u8; 32],
-
     #[wincode(with = "containers::Vec<Elem<CompiledInstruction>, ShortU16Len>")]
     pub instructions: Vec<CompiledInstruction>,
-
     #[wincode(with = "containers::Vec<Elem<MessageAddressTableLookup>, ShortU16Len>")]
     pub address_table_lookups: Vec<MessageAddressTableLookup>,
 }
 
-/// Unified versioned message
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionedMessage {
     Legacy(LegacyMessage),
@@ -184,32 +180,22 @@ pub enum VersionedMessage {
 
 impl<'de> SchemaRead<'de> for VersionedMessage {
     type Dst = Self;
-
     fn read(reader: &mut Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
         let buf = reader.as_slice();
         if buf.is_empty() {
             return Err(wincode::ReadError::PointerSizedReadError);
         }
-
         let first = buf[0];
-
-        if first != 0x80 && first < 0x01 {
-            tracing::warn!("Suspicious message prefix: 0x{:02x}", first);
-        }
-
         let value = if first & 0x80 == 0 {
             let mut inner = MaybeUninit::uninit();
             LegacyMessage::read(reader, &mut inner)?;
             VersionedMessage::Legacy(unsafe { inner.assume_init() })
         } else {
-            let _version = first & 0x7F;
-            // Consume prefix byte manually
-            reader.consume(1)?; // advances by one
+            reader.consume(1)?; // skip prefix
             let mut inner = MaybeUninit::uninit();
             V0Message::read(reader, &mut inner)?;
             VersionedMessage::V0(unsafe { inner.assume_init() })
         };
-
         dst.write(value);
         Ok(())
     }

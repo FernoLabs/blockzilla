@@ -1,7 +1,6 @@
 //mod block_mode;
 //mod compat_block;
 //mod dump_registry;
-//mod network_mode;
 //mod optimizer;
 //mod print_compressed_block;
 mod key_extractor;
@@ -9,14 +8,12 @@ mod merge_registry;
 mod node_mode;
 mod transaction_parser;
 
-use std::path::Path;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use indicatif::ProgressBar;
+use std::path::Path;
 use tracing_subscriber::FmtSubscriber;
 
-use crate::node_mode::run_node_mode;
+use crate::{key_extractor::DownloadMode, node_mode::run_node_mode};
 
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
@@ -52,16 +49,6 @@ enum Commands {
         #[arg(long)]
         registry: String,
         slot: u64,
-    },
-    /// Stream and process CAR files directly from network
-    Network {
-        /// URL or IP of the remote CAR file or stream
-        #[arg(short, long)]
-        source: String,
-
-        /// Optional output dir for compressed data
-        #[arg(long)]
-        output_dir: Option<String>,
     },
     Registry {
         #[arg(long)]
@@ -121,32 +108,14 @@ async fn main() -> Result<()> {
         } => {
             //read_and_print_block_compact(&epoch, &idx, &registry, slot)?
         }
-        Commands::Network { source, output_dir } => {
-            //network_mode::run_network_optimizer(&source, output_dir).await?
-        }
         Commands::DumpRegistry { registry, output } => {
             //dump_registry::dump_registry_to_csv(&registry, &output)?
         }
         Commands::Registry { file, output_dir } => {
-            let epoch = extract_epoch_from_path(&file).expect("could not parse epoch");
-            let path = output_dir.unwrap_or_else(|| "optimized".to_string());
-            let out_dir = Path::new(&path);
-            std::fs::create_dir_all(out_dir)?;
-
-            let bin_path = out_dir.join(format!("pubkeys-{epoch:04}.bin"));
-
-            if bin_path.is_dir() {
-                return Err(anyhow::anyhow!(
-                    "Output path '{}' is a directory, expected a file",
-                    bin_path.display()
-                ));
-            }
-
-            key_extractor::extract_unique_pubkeys_with_pb(
-                &Path::new(&file),
-                &bin_path,
-                epoch,
-                ProgressBar::new_spinner(),
+            key_extractor::process_single_epoch_file(
+                Path::new(&file),
+                Path::new(&output_dir.unwrap_or_else(|| "optimized".to_string())),
+                key_extractor::DownloadMode::NoDownload,
             )
             .await?;
         }
@@ -156,8 +125,9 @@ async fn main() -> Result<()> {
         } => key_extractor::extract_all_pubkeys(
             &base_dir.into(),
             &output_dir.unwrap_or("optimized".into()).into(),
-            100,
+            500,
             4,
+            DownloadMode::Stream,
         ),
         Commands::MergeRegistry { input, output } => {
             let src = std::path::PathBuf::from(input);
