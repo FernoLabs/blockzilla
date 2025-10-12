@@ -16,7 +16,7 @@ use tracing_subscriber::FmtSubscriber;
 use crate::{key_extractor::DownloadMode, node_mode::run_node_mode};
 
 #[global_allocator]
-static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -125,10 +125,10 @@ async fn main() -> Result<()> {
         } => key_extractor::extract_all_pubkeys(
             &base_dir.into(),
             &output_dir.unwrap_or("optimized".into()).into(),
-            500,
-            4,
+            200,
+            8,
             DownloadMode::Stream,
-        ),
+        ).await,
         Commands::MergeRegistry { input, output } => {
             let src = std::path::PathBuf::from(input);
             let dest = std::path::PathBuf::from(output);

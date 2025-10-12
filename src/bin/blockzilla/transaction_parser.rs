@@ -38,74 +38,159 @@ pub fn parse_bincode_tx_static_accounts(
     Ok(Some(fee_payer))
 }
 
-pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<Option<Pubkey>> {
-    let mut reader = Reader::new(tx);
+#[inline]
+fn read_u16_le(buf: &[u8]) -> u16 {
+    u16::from_le_bytes([buf[0], buf[1]])
+}
+
+#[inline]
+fn read_pubkey_bytes(buf: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&buf[..32]);
+    key
+}
+
+pub fn parse_account_keys_only(
+    tx: &[u8],
+    out: &mut AHashSet<Pubkey>,
+) -> Result<Option<Pubkey>> {
+    let mut pos = 0;
+    let len = tx.len();
 
     // 1️⃣ Read signatures (skip their bytes)
-    let sig_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
-    let sig_bytes = sig_len.saturating_mul(64);
-    reader.consume(sig_bytes)?;
-
-    // 2️⃣ Peek message prefix
-    let buf = reader.as_slice();
-    if buf.is_empty() {
+    if pos + 2 > len {
         return Ok(None);
     }
-    let prefix = buf[0];
-    let is_v0 = prefix & 0x80 != 0;
-    if is_v0 {
-        reader.consume(1)?; // skip prefix
+    let sig_len = read_u16_le(&tx[pos..]) as usize;
+    pos += 2;
+    let sig_bytes = sig_len.saturating_mul(64);
+    pos += sig_bytes;
+    if pos > len {
+        return Ok(None);
     }
 
-    // 3️⃣ Read header
-    let mut header = [MaybeUninit::zeroed(); 3];
-    reader.read_exact(&mut header)?;
+    // 2️⃣ Peek message prefix
+    if pos >= len {
+        return Ok(None);
+    }
+    let prefix = tx[pos];
+    let is_v0 = prefix & 0x80 != 0;
+    if is_v0 {
+        pos += 1;
+    }
+
+    // 3️⃣ Read header (3 bytes)
+    if pos + 3 > len {
+        return Ok(None);
+    }
+    pos += 3; // Skip the 3 header bytes
 
     // 4️⃣ Read static account keys
-    let n_keys = ShortU16Len::read::<usize>(&mut reader)? as usize;
+    if pos + 2 > len {
+        return Ok(None);
+    }
+    let n_keys = read_u16_le(&tx[pos..]) as usize;
+    pos += 2;
+
     if n_keys == 0 {
         return Ok(None);
     }
 
     let mut first_key: Option<Pubkey> = None;
+
+    // Bulk read all static keys
+    let static_keys_end = pos + n_keys * 32;
+    if static_keys_end > len {
+        return Ok(None);
+    }
+
     for i in 0..n_keys {
-        let mut key_bytes = [MaybeUninit::zeroed(); 32];
-        reader.read_exact(&mut key_bytes)?;
-        let key_bytes: [u8; 32] = unsafe { std::mem::transmute_copy(&key_bytes) };
+        let key_slice = &tx[pos + i * 32..pos + (i + 1) * 32];
+        let key_bytes = read_pubkey_bytes(key_slice);
         let key = Pubkey::new_from_array(key_bytes);
+
         if i == 0 {
-            // First key is always fee payer
             first_key = Some(key);
         }
         out.insert(key);
     }
+    pos = static_keys_end;
 
     // 5️⃣ Skip recent_blockhash (32 bytes)
-    reader.consume(32)?;
+    if pos + 32 > len {
+        return Ok(first_key);
+    }
+    pos += 32;
 
     if is_v0 {
         // Skip instructions
-        let n_instructions = ShortU16Len::read::<usize>(&mut reader)? as usize;
+        if pos + 2 > len {
+            return Ok(first_key);
+        }
+        let n_instructions = read_u16_le(&tx[pos..]) as usize;
+        pos += 2;
+
         for _ in 0..n_instructions {
-            reader.consume(1)?; // program_id_index
-            let ac_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
-            reader.consume(ac_len)?;
-            let data_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
-            reader.consume(data_len)?;
+            if pos + 1 > len {
+                return Ok(first_key);
+            }
+            pos += 1; // program_id_index
+
+            if pos + 2 > len {
+                return Ok(first_key);
+            }
+            let ac_len = read_u16_le(&tx[pos..]) as usize;
+            pos += 2;
+            pos += ac_len;
+            if pos > len {
+                return Ok(first_key);
+            }
+
+            if pos + 2 > len {
+                return Ok(first_key);
+            }
+            let data_len = read_u16_le(&tx[pos..]) as usize;
+            pos += 2;
+            pos += data_len;
+            if pos > len {
+                return Ok(first_key);
+            }
         }
 
         // Read address_table_lookups
-        let n_lookups = ShortU16Len::read::<usize>(&mut reader)? as usize;
-        for _ in 0..n_lookups {
-            let mut key = [MaybeUninit::zeroed(); 32];
-            reader.read_exact(&mut key)?;
-            let key: [u8; 32] = unsafe { std::mem::transmute_copy(&key) };
-            out.insert(Pubkey::new_from_array(key));
+        if pos + 2 > len {
+            return Ok(first_key);
+        }
+        let n_lookups = read_u16_le(&tx[pos..]) as usize;
+        pos += 2;
 
-            let w_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
-            reader.consume(w_len)?;
-            let r_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
-            reader.consume(r_len)?;
+        for _ in 0..n_lookups {
+            if pos + 32 > len {
+                return Ok(first_key);
+            }
+            let key_bytes = read_pubkey_bytes(&tx[pos..]);
+            out.insert(Pubkey::new_from_array(key_bytes));
+            pos += 32;
+
+            if pos + 2 > len {
+                return Ok(first_key);
+            }
+            let w_len = read_u16_le(&tx[pos..]) as usize;
+            pos += 2;
+            pos += w_len;
+            if pos > len {
+                return Ok(first_key);
+            }
+
+            if pos + 2 > len {
+                return Ok(first_key);
+            }
+            let r_len = read_u16_le(&tx[pos..]) as usize;
+            pos += 2;
+            pos += r_len;
+            if pos > len {
+                return Ok(first_key);
+            }
         }
     }
 

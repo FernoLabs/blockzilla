@@ -42,6 +42,7 @@ wincode = { version = "0.1.1", features = ["derive", "solana-short-vec"] }
 indicatif = "0.17.7"
 jemallocator = "0.5.4"
 humantime = "2.3.0"
+mimalloc = "0.1.48"
 
 [build-dependencies]
 prost-build = "0.14.1"

@@ -2,7 +2,6 @@ use ahash::AHashMap;
 use anyhow::{Result, anyhow};
 use cid::{Cid, CidGeneric};
 use tokio::io::AsyncRead;
-
 use crate::{
     car_reader::{AsyncCarBlock, AsyncCarReader},
     node::{BlockNode, DataFrame, EntryNode, Node, decode_node, peek_node_type},
@@ -10,39 +9,40 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct BlockBuffer {
-    buf: Vec<u8>,
-    pub index: AHashMap<Cid, (usize, usize)>,
+    // Store Vec<u8> directly - no Arc needed if owned
+    blocks: AHashMap<Cid, Vec<u8>>,
 }
 
 impl BlockBuffer {
-    fn insert(&mut self, cid: Cid, data: &[u8]) {
-        let start = self.buf.len();
-        self.buf.extend_from_slice(data);
-        let end = self.buf.len();
-        self.index.insert(cid, (start, end));
+    #[inline]
+    fn insert(&mut self, cid: Cid, data: Vec<u8>) {
+        self.blocks.insert(cid, data);
     }
 
+    #[inline]
     fn clear(&mut self) {
-        self.buf.clear();
-        self.index.clear();
+        self.blocks.clear();
     }
 
+    #[inline]
     pub fn get(&self, cid: &Cid) -> Option<Node<'_>> {
-        self.index
+        self.blocks
             .get(cid)
-            .map(|&(s, e)| &self.buf[s..e])
-            .map(|data| decode_node(data).unwrap())
+            .and_then(|data| decode_node(data).ok())
     }
-    pub fn get_cids(&self) -> std::collections::hash_map::Keys<'_, CidGeneric<64>, (usize, usize)> {
-        self.index.keys()
+
+    #[inline]
+    pub fn get_cids(&self) -> std::collections::hash_map::Keys<'_, CidGeneric<64>, Vec<u8>> {
+        self.blocks.keys()
     }
+
+    #[inline]
     pub fn get_block_entries(&self) -> impl Iterator<Item = EntryNode> + '_ {
-        self.index
+        self.blocks
             .iter()
-            .filter(|(_k, (s, e))| peek_node_type(&self.buf[*s..*e]).unwrap() == 1)
-            .map(|(_id, (s, e))| {
-                let entry: EntryNode = minicbor::decode(&self.buf[*s..*e]).unwrap();
-                entry
+            .filter(|(_k, data)| peek_node_type(data).ok() == Some(1))
+            .filter_map(|(_id, data)| {
+                minicbor::decode::<EntryNode>(data.as_slice()).ok()
             })
     }
 }
@@ -77,6 +77,7 @@ impl<'a> CarBlock<'a> {
         Ok(buffer)
     }
 }
+
 pub struct SolanaBlockStream<R: AsyncRead + Unpin + Send> {
     reader: AsyncCarReader<R>,
     block_data: BlockBuffer,
@@ -89,8 +90,7 @@ impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
         Ok(Self {
             reader,
             block_data: BlockBuffer {
-                buf: Vec::with_capacity(10 * 1024 * 1024),
-                index: AHashMap::with_capacity(3 * 1024),
+                blocks: AHashMap::with_capacity(3 * 1024),
             },
         })
     }
@@ -108,7 +108,10 @@ impl<R: AsyncRead + Unpin + Send> SolanaBlockStream<R> {
                         entries: &self.block_data,
                     }));
                 }
-                _ => self.block_data.insert(cid, data),
+                _ => {
+                    // Move data into Arc instead of copying into monolithic buffer
+                    self.block_data.insert(cid, data.to_vec());
+                }
             }
         }
         Ok(None)

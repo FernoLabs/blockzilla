@@ -9,28 +9,30 @@ use rayon::{prelude::*, ThreadPoolBuilder};
 use reqwest::Client;
 use solana_sdk::pubkey::Pubkey;
 use std::{
+    collections::BTreeMap,
     fs,
     fs::File,
-    io::{BufWriter, Write},
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{
     fs as tokio_fs,
-    io::{AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::mpsc,
-    task::JoinHandle,
+    io::{AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader},
     time::Instant as TokioInstant,
 };
 use tokio_util::io::StreamReader;
 use futures::TryStreamExt;
 use tracing::{error, info};
+use futures::StreamExt;
 
 use crate::transaction_parser;
 
 const LOG_INTERVAL_SECS: u64 = 10;
-const HTTP_BUFFER_SIZE: usize = 256 * 1024; // 256KB buffer
+const HTTP_BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4MB buffer for better throughput
+const CHUNK_CAPACITY: usize = 10_000_000; // 10M keys per chunk before spilling to disk
+const TEMP_CHUNK_DIR: &str = ".epoch_chunks";
 
 /// How to handle missing .car files
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +66,85 @@ struct GlobalStats {
     skipped_missing: u64,
 }
 
-/// Shared helper to resolve epoch source and build async reader
+/// Parallel HTTP download using range requests (like aria2c)
+pub async fn download_with_parallel_ranges(
+    url: &str,
+    output_path: &Path,
+    client: &Client,
+    num_connections: usize,
+) -> Result<()> {
+    // Get file size first
+    let head_resp = client.head(url).send().await?;
+    let total_size = head_resp
+        .headers()
+        .get("content-length")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| anyhow!("Could not determine file size"))?;
+
+    let chunk_size = (total_size / num_connections as u64).max(1024 * 1024); // Min 1MB chunks
+
+    let mut handles = vec![];
+    let mut temp_files = vec![];
+
+    for i in 0..num_connections {
+        let start = i as u64 * chunk_size;
+        let end = if i == num_connections - 1 {
+            total_size - 1
+        } else {
+            (i as u64 + 1) * chunk_size - 1
+        };
+
+        if start >= total_size {
+            break;
+        }
+
+        let url = url.to_string();
+        let client = client.clone();
+        let temp_path = output_path.with_extension(format!("part-{}", i));
+        temp_files.push(temp_path.clone());
+
+        let handle = tokio::spawn(async move {
+            let resp = client
+                .get(&url)
+                .header("Range", format!("bytes={}-{}", start, end))
+                .send()
+                .await?;
+
+            if !resp.status().is_success() && resp.status().as_u16() != 206 {
+                return Err(anyhow!("HTTP error {} for range {}-{}", resp.status(), start, end));
+            }
+
+            let mut file = tokio_fs::File::create(&temp_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all downloads to complete
+    for handle in handles {
+        handle.await??;
+    }
+
+    // Concatenate all parts
+    let mut output = BufWriter::new(File::create(output_path)?);
+    for temp_path in temp_files {
+        let mut file = BufReader::new(File::open(&temp_path)?);
+        std::io::copy(&mut file, &mut output)?;
+        let _ = fs::remove_file(&temp_path);
+    }
+    output.flush()?;
+
+    Ok(())
+}
+
+
 pub async fn build_epoch_reader(
     base: &Path,
     epoch: u64,
@@ -77,7 +157,7 @@ pub async fn build_epoch_reader(
         EpochSource::Local(path) => {
             let file = tokio_fs::File::open(&path).await?;
             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let buffered = BufReader::with_capacity(HTTP_BUFFER_SIZE, file);
+            let buffered = TokioBufReader::with_capacity(HTTP_BUFFER_SIZE, file);
             Ok((Box::new(buffered), size))
         }
         EpochSource::Stream(url) => {
@@ -89,8 +169,7 @@ pub async fn build_epoch_reader(
             let reader = StreamReader::new(stream.map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("HTTP stream error: {e}"))
             }));
-            // Wrap in a large buffer for HTTP streaming
-            let buffered = BufReader::with_capacity(HTTP_BUFFER_SIZE, reader);
+            let buffered = TokioBufReader::with_capacity(HTTP_BUFFER_SIZE, reader);
             Ok((Box::new(buffered), 0))
         }
     }
@@ -138,8 +217,8 @@ pub async fn process_single_epoch_file(
     Ok(())
 }
 
-/// Main entry point for all epochs
-pub fn extract_all_pubkeys(
+/// Main entry point for all epochs (async version)
+pub async fn extract_all_pubkeys(
     base: &PathBuf,
     out_dir: &PathBuf,
     max_epoch_inclusive: u64,
@@ -168,7 +247,7 @@ pub fn extract_all_pubkeys(
     }));
 
     // --- Planning phase: collect work items ---
-    let mut work_items: Vec<(u64, u64)> = Vec::new(); // (epoch, size)
+    let mut work_items: Vec<(u64, u64)> = Vec::new();
     for epoch in 0..=max_epoch_inclusive {
         let bin = out_dir.join(format!("pubkeys-{epoch:04}.bin"));
         if bin.exists() {
@@ -199,7 +278,6 @@ pub fn extract_all_pubkeys(
         }
     }
 
-    // Sort by size (largest first) for better load balancing
     work_items.sort_by(|a, b| b.1.cmp(&a.1));
 
     // --- Header update thread ---
@@ -257,33 +335,35 @@ pub fn extract_all_pubkeys(
         .build()
         .expect("failed to build rayon pool");
 
-    // Use a dedicated tokio runtime (not per-thread)
-    let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    // Use tokio's existing runtime - spawn concurrent tasks
+    let client = Client::new();
+    let mut tasks = vec![];
 
-    // Use work_items instead of all epochs
-    pool.install(|| {
-        let client = Client::new();
+    for (epoch, _size) in work_items {
+        let bin_path = out_dir.join(format!("pubkeys-{epoch:04}.bin"));
+        let chunk_dir = out_dir.join(format!("{TEMP_CHUNK_DIR}-{epoch}"));
+        let base = base.clone();
+        let client = client.clone();
+        let pb = bars[epoch as usize % max_threads].clone();
+        let stats = Arc::clone(&stats);
 
-        work_items.into_par_iter().for_each(|(epoch, _size)| {
-            let thread_id = rayon::current_thread_index().unwrap_or(0);
-            let pb = &bars[thread_id];
-
+        let task = tokio::spawn(async move {
             pb.set_message(format!("⏳ epoch {epoch:04} processing..."));
+            fs::create_dir_all(&chunk_dir).ok();
 
-            let res = rt.block_on(async {
-                let bin_path = out_dir.join(format!("pubkeys-{epoch:04}.bin"));
+            let res = async {
                 let (reader, file_size) =
-                    build_epoch_reader(base, epoch, download_mode, pb, &client).await?;
+                    build_epoch_reader(&base, epoch, download_mode, &pb, &client).await?;
                 let mut stream = SolanaBlockStream::new(reader).await?;
-                extract_one_epoch(&mut stream, &bin_path, epoch, pb.clone(), file_size).await
-            });
+                extract_one_epoch_streamed(&mut stream, &bin_path, &chunk_dir, epoch, pb.clone(), file_size).await
+            }.await;
 
-            let mut s = match stats.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
             match res {
                 Ok((blocks, count, file_size)) => {
+                    let mut s = match stats.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                     s.done_epochs += 1;
                     s.done_bytes += file_size;
                     pb.set_message(format!(
@@ -293,13 +373,24 @@ pub fn extract_all_pubkeys(
                     info!(epoch, blocks, keys = count, "Epoch completed successfully");
                 }
                 Err(e) => {
+                    let mut s = match stats.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                     s.done_epochs += 1;
                     pb.set_message(format!("❌ epoch {epoch:04} — {e:?}"));
                     error!(epoch, error=?e, "Epoch failed");
                 }
             }
         });
-    });
+
+        tasks.push(task);
+    }
+
+    // Wait for all tasks to complete
+    for task in tasks {
+        let _ = task.await;
+    }
 
     let _ = mp.clear();
     let s = match stats.lock() {
@@ -312,6 +403,164 @@ pub fn extract_all_pubkeys(
         s.done_bytes as f64 / 1_000_000_000.0, start_global.elapsed()
     );
     println!("✅ Extraction complete.");
+}
+
+/// Extract one epoch worth of pubkeys (delegates to streamed version)
+pub async fn extract_one_epoch<R: tokio::io::AsyncRead + Unpin + Send>(
+    stream: &mut SolanaBlockStream<R>,
+    bin_path: &Path,
+    epoch: u64,
+    pb: ProgressBar,
+    known_file_size: u64,
+) -> Result<(u64, usize, u64)> {
+    let chunk_dir = PathBuf::from(format!(".{TEMP_CHUNK_DIR}-{epoch}"));
+    fs::create_dir_all(&chunk_dir).ok();
+    let result = extract_one_epoch_streamed(stream, bin_path, &chunk_dir, epoch, pb, known_file_size).await?;
+    let _ = fs::remove_dir_all(&chunk_dir);
+    Ok(result)
+}
+
+/// Extract one epoch with chunked processing (for very large files)
+pub async fn extract_one_epoch_streamed<R: tokio::io::AsyncRead + Unpin + Send>(
+    stream: &mut SolanaBlockStream<R>,
+    bin_path: &Path,
+    chunk_dir: &Path,
+    epoch: u64,
+    pb: ProgressBar,
+    known_file_size: u64,
+) -> Result<(u64, usize, u64)> {
+    let mut chunk_num = 0u32;
+    // Pre-allocate with 20% headroom to reduce rehashing
+    let mut current_map: AHashMap<Pubkey, KeyStats> = AHashMap::with_capacity((CHUNK_CAPACITY as f64 * 1.2) as usize);
+    let mut next_id: u32 = 1;
+    let mut blocks = 0u64;
+    let start = TokioInstant::now();
+    let mut last_log = start;
+
+    // Process blocks, spilling to disk when chunk gets too large
+    while let Some(cb) = stream.next_solana_block().await? {
+        extract_transactions(&cb, &mut current_map, &mut next_id, epoch)?;
+        blocks += 1;
+
+        let now = TokioInstant::now();
+        if now.duration_since(last_log).as_secs() >= LOG_INTERVAL_SECS {
+            let elapsed = now.duration_since(start).as_secs_f64();
+            let blk_per_s = (blocks as f64) / elapsed;
+            pb.set_message(format!(
+                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>9} in-mem",
+                blocks, blk_per_s, current_map.len()
+            ));
+            last_log = now;
+        }
+
+        // Spill to disk if chunk too large
+        if current_map.len() >= CHUNK_CAPACITY {
+            let chunk_path = chunk_dir.join(format!("chunk-{chunk_num:06}.bin"));
+            dump_chunk_to_bin(&chunk_path, &current_map)?;
+            current_map.clear();
+            // Shrink the allocation before growing again
+            current_map.shrink_to(0);
+            chunk_num += 1;
+            pb.set_message(format!(
+                "epoch {epoch:04} — spilled to disk (chunk {chunk_num})"
+            ));
+        }
+    }
+
+    // Merge all chunks + remaining data
+    let final_count = if chunk_num > 0 {
+        merge_chunks_and_dump(bin_path, chunk_dir, current_map, chunk_num)?
+    } else {
+        dump_pubkeys_to_bin(bin_path, &current_map)?;
+        current_map.len()
+    };
+
+    // Clean up temp chunks
+    let _ = fs::remove_dir_all(chunk_dir);
+
+    Ok((blocks, final_count, known_file_size))
+}
+
+/// Dump chunk to binary (doesn't need to be sorted)
+fn dump_chunk_to_bin(path: &Path, map: &AHashMap<Pubkey, KeyStats>) -> Result<()> {
+    let mut writer = BufWriter::new(File::create(path)?);
+    writer.write_all(&(map.len() as u64).to_le_bytes())?;
+    for (pk, meta) in map {
+        writer.write_all(&pk.to_bytes())?;
+        writer.write_all(&meta.id.to_le_bytes())?;
+        writer.write_all(&meta.count.to_le_bytes())?;
+        writer.write_all(&meta.first_fee_payer.to_le_bytes())?;
+        writer.write_all(&meta.first_epoch.to_le_bytes())?;
+        writer.write_all(&meta.last_epoch.to_le_bytes())?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+/// Merge all disk chunks + final in-memory map
+fn merge_chunks_and_dump(
+    bin_path: &Path,
+    chunk_dir: &Path,
+    final_map: AHashMap<Pubkey, KeyStats>,
+    chunk_count: u32,
+) -> Result<usize> {
+    // Read all chunks into a merged map (using sorted merge to save memory)
+    let mut merged: AHashMap<Pubkey, KeyStats> = final_map;
+    let mut next_id = merged.values().map(|v| v.id).max().unwrap_or(0) + 1;
+
+    for i in 0..chunk_count {
+        let chunk_path = chunk_dir.join(format!("chunk-{i:06}.bin"));
+        let file = File::open(&chunk_path)?;
+        let mut reader = BufReader::new(file);
+
+        let mut len_bytes = [0u8; 8];
+        reader.read_exact(&mut len_bytes)?;
+        let len = u64::from_le_bytes(len_bytes) as usize;
+
+        for _ in 0..len {
+            let mut pk_bytes = [0u8; 32];
+            reader.read_exact(&mut pk_bytes)?;
+            let pk = Pubkey::new_from_array(pk_bytes);
+
+            let mut id_bytes = [0u8; 4];
+            reader.read_exact(&mut id_bytes)?;
+            let id = u32::from_le_bytes(id_bytes);
+
+            let mut count_bytes = [0u8; 4];
+            reader.read_exact(&mut count_bytes)?;
+            let count = u32::from_le_bytes(count_bytes);
+
+            let mut fee_payer_bytes = [0u8; 4];
+            reader.read_exact(&mut fee_payer_bytes)?;
+            let fee_payer = u32::from_le_bytes(fee_payer_bytes);
+
+            let mut first_epoch_bytes = [0u8; 2];
+            reader.read_exact(&mut first_epoch_bytes)?;
+            let first_epoch = u16::from_le_bytes(first_epoch_bytes);
+
+            let mut last_epoch_bytes = [0u8; 2];
+            reader.read_exact(&mut last_epoch_bytes)?;
+            let last_epoch = u16::from_le_bytes(last_epoch_bytes);
+
+            merged
+                .entry(pk)
+                .and_modify(|e| {
+                    e.count += count;
+                    e.last_epoch = e.last_epoch.max(last_epoch);
+                })
+                .or_insert(KeyStats {
+                    id: next_id,
+                    count,
+                    first_fee_payer: fee_payer,
+                    first_epoch,
+                    last_epoch,
+                });
+            next_id += 1;
+        }
+    }
+
+    dump_pubkeys_to_bin(bin_path, &merged)?;
+    Ok(merged.len())
 }
 
 /// Source of the epoch file
@@ -338,58 +587,20 @@ pub async fn resolve_epoch_source(
         DownloadMode::Stream => {
             let url = format!("https://files.old-faithful.net/{epoch}/epoch-{epoch}.car");
             pb.set_message(format!("🌐 streaming {}", url));
+            // Use reqwest with connection pooling for parallel range requests
             Ok(EpochSource::Stream(url))
         }
         DownloadMode::Cache => {
             let url = format!("https://files.old-faithful.net/{epoch}/epoch-{epoch}.car");
             pb.set_message(format!("🌐 downloading {}", url));
-            let resp = client.get(&url).send().await?;
-            if !resp.status().is_success() {
-                return Err(anyhow!("HTTP error {} for {}", resp.status(), url));
-            }
-            let tmp = base.join(format!("epoch-{epoch}.car.part"));
-            let bytes = resp.bytes().await?;
-            let mut file = tokio_fs::File::create(&tmp).await?;
-            file.write_all(&bytes).await?;
-            tokio_fs::rename(&tmp, &local_path).await?;
+            
+            // Use parallel range requests (16 connections like aria2c)
+            download_with_parallel_ranges(&url, &local_path, client, 16).await?;
+            
             pb.set_message(format!("✅ cached epoch-{epoch}.car"));
             Ok(EpochSource::Local(local_path))
         }
     }
-}
-
-/// Extract one epoch worth of pubkeys
-pub async fn extract_one_epoch<R: tokio::io::AsyncRead + Unpin + Send>(
-    stream: &mut SolanaBlockStream<R>,
-    bin_path: &Path,
-    epoch: u64,
-    pb: ProgressBar,
-    known_file_size: u64,
-) -> Result<(u64, usize, u64)> {
-    let mut map: AHashMap<Pubkey, KeyStats> = AHashMap::with_capacity(1_000_000);
-    let mut next_id: u32 = 1;
-    let start = TokioInstant::now();
-    let mut last_log = start;
-    let mut blocks = 0u64;
-
-    while let Some(cb) = stream.next_solana_block().await? {
-        extract_transactions(&cb, &mut map, &mut next_id, epoch)?;
-        blocks += 1;
-
-        let now = TokioInstant::now();
-        if now.duration_since(last_log).as_secs() >= LOG_INTERVAL_SECS {
-            let elapsed = now.duration_since(start).as_secs_f64();
-            let blk_per_s = (blocks as f64) / elapsed;
-            pb.set_message(format!(
-                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>9} unique",
-                blocks, blk_per_s, map.len()
-            ));
-            last_log = now;
-        }
-    }
-
-    dump_pubkeys_to_bin(bin_path, &map)?;
-    Ok((blocks, map.len(), known_file_size))
 }
 
 /// Extract pubkeys from block transactions
