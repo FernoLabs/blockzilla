@@ -8,7 +8,8 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
-use crate::key_extractor::KeyStats;
+
+use crate::types::KeyStats;
 
 /// Compact merged registry entry written at the end
 #[repr(C, packed)]

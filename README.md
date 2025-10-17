@@ -35,3 +35,10 @@ export CC=/opt/homebrew/bin/gcc-15
 export CXX=/opt/homebrew/bin/g++-15
 export CXXFLAGS="-std=c++11"
 ```
+
+tar cz --no-xattrs --exclude target --exclude .git --exclude epoch-0.car --exclude epoch-1.car --exclude optimized . | ssh root@188.245.147.127 'mkdir -p ~/dev/blockzilla && tar xz -C ~/dev/blockzilla'
+
+aria2c -x 16 -s 16 -j 8 https://files.old-faithful.net/800/epoch-800.car -o /dev/null --file-allocation=none 
+cargo run --release block --file epoch-800.car
+cargo run --release node --file epoch-800.car
+cargo run --release car --file epoch-800.car

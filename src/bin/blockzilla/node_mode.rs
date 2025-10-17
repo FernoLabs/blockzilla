@@ -3,14 +3,34 @@ use blockzilla::{
     car_reader::AsyncCarReader,
     node::{Node, decode_node},
 };
-use std::time::Instant;
+use indicatif::ProgressBar;
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 use tracing::info;
 
-pub async fn run_node_mode(path: &str) -> Result<()> {
-    info!("🔄 Reading CAR file: {path}");
+use crate::{reader::build_epoch_reader, types::DownloadMode};
+
+pub async fn run_node_mode(file: &PathBuf, download_mode: DownloadMode) -> Result<()> {
+    info!("🔄 Reading CAR file: {file:?} ({download_mode:?})");
     let start = Instant::now();
 
-    let mut stream = AsyncCarReader::<tokio::fs::File>::open(path).await?;
+    let epoch = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.split('-').find(|x| x.chars().all(|c| c.is_ascii_digit())))
+        .and_then(|num| num.parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("Could not parse epoch number from file name"))?;
+
+    let base = file.parent().unwrap_or(Path::new("."));
+
+    let client = reqwest::Client::new();
+    let pb = ProgressBar::new_spinner();
+    let (reader, file_size) = build_epoch_reader(&base, epoch, download_mode, &pb, &client).await?;
+
+    let mut stream = AsyncCarReader::new(reader);
+    stream.read_header().await?;
 
     let mut total: u64 = 0;
     let mut tx_count: u64 = 0;
@@ -83,6 +103,64 @@ pub async fn run_node_mode(path: &str) -> Result<()> {
         epoch_count,
         rewards_count,
         dataframe_count
+    );
+
+    Ok(())
+}
+
+pub async fn run_car_mode(file: &PathBuf, download_mode: DownloadMode) -> Result<()> {
+    info!("🔄 Reading CAR file: {file:?} ({download_mode:?})");
+    let start = Instant::now();
+
+    let epoch = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.split('-').find(|x| x.chars().all(|c| c.is_ascii_digit())))
+        .and_then(|num| num.parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("Could not parse epoch number from file name"))?;
+
+    let base = file.parent().unwrap_or(Path::new("."));
+
+    let client = reqwest::Client::new();
+    let pb = ProgressBar::new_spinner();
+    let (reader, file_size) = build_epoch_reader(&base, epoch, download_mode, &pb, &client).await?;
+    info!("Will read {file_size} bytes");
+
+    let mut stream = AsyncCarReader::new(reader);
+    stream.read_header().await?;
+
+    let mut last_log = Instant::now();
+    let log_interval = 10.0; // seconds
+    let mut total = 0;
+    let mut bytes_count = 0;
+
+    while let Some(car_block) = stream.next_block().await? {
+        total += 1;
+        bytes_count += car_block.data.len();
+
+        if last_log.elapsed().as_secs_f64() >= log_interval {
+            let elapsed = start.elapsed().as_secs_f64();
+            let total_rate = total as f64 / elapsed;
+
+            info!(
+                "{:>10} car entry in {:>6.2?} ({:>8.0} n/s) {:>5.2} MB/s",
+                total,
+                std::time::Duration::from_secs_f64(elapsed),
+                total_rate,
+                bytes_count as f64 / elapsed
+            );
+
+            last_log = Instant::now();
+        }
+    }
+
+    let total_time = start.elapsed().as_secs_f64();
+    let total_rate = total as f64 / total_time;
+
+    info!(
+        "✅ Done. Parsed {total} nodes in {:.2?} ({:.0} n/s)",
+        std::time::Duration::from_secs_f64(total_time),
+        total_rate,
     );
 
     Ok(())

@@ -16,7 +16,7 @@ pub struct DataFrame<'a> {
     #[cbor(decode_with = "minicbor::bytes::decode")]
     pub data: &'a [u8],
     #[n(5)]
-    pub next: Option<CborCid>,
+    pub next: Option<CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode, Clone)]
@@ -57,7 +57,7 @@ pub struct TransactionNode<'a> {
 
 #[derive(Debug, Decode)]
 #[cbor(array)]
-pub struct EntryNode {
+pub struct EntryNode<'a> {
     #[n(0)]
     pub kind: u64,
     #[n(1)]
@@ -66,12 +66,13 @@ pub struct EntryNode {
     #[cbor(decode_with = "minicbor::bytes::decode")]
     pub hash: Vec<u8>,
     #[n(3)]
-    pub transactions: Vec<CborCid>,
+    #[cbor(borrow = "'a + 'bytes")]
+    pub transactions: Vec<CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode, Clone)]
 #[cbor(array)]
-pub struct BlockNode {
+pub struct BlockNode<'a> {
     #[n(0)]
     pub kind: u64,
     #[n(1)]
@@ -79,16 +80,17 @@ pub struct BlockNode {
     #[n(2)]
     pub shredding: Vec<Shredding>,
     #[n(3)]
-    pub entries: Vec<CborCid>,
+    #[cbor(borrow = "'a + 'bytes")]
+    pub entries: Vec<CborCidRef<'a>>,
     #[n(4)]
     pub meta: SlotMeta,
     #[n(5)]
-    pub rewards: Option<CborCid>,
+    pub rewards: Option<CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode)]
 #[cbor(array)]
-pub struct SubsetNode {
+pub struct SubsetNode<'a> {
     #[n(0)]
     pub kind: u64,
     #[n(1)]
@@ -96,18 +98,20 @@ pub struct SubsetNode {
     #[n(2)]
     pub last: u64,
     #[n(3)]
-    pub blocks: Vec<CborCid>,
+    #[cbor(borrow = "'a + 'bytes")]
+    pub blocks: Vec<CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode)]
 #[cbor(array)]
-pub struct EpochNode {
+pub struct EpochNode<'a> {
     #[n(0)]
     pub kind: u64,
     #[n(1)]
     pub epoch: u64,
     #[n(2)]
-    pub subsets: Vec<CborCid>,
+    #[cbor(borrow = "'a + 'bytes")]
+    pub subsets: Vec<CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode)]
@@ -125,10 +129,10 @@ pub struct RewardsNode<'a> {
 #[derive(Debug)]
 pub enum Node<'a> {
     Transaction(TransactionNode<'a>),
-    Entry(EntryNode),
-    Block(BlockNode),
-    Subset(SubsetNode),
-    Epoch(EpochNode),
+    Entry(EntryNode<'a>),
+    Block(BlockNode<'a>),
+    Subset(SubsetNode<'a>),
+    Epoch(EpochNode<'a>),
     Rewards(RewardsNode<'a>),
     DataFrame(DataFrame<'a>),
 }
@@ -155,11 +159,28 @@ pub fn peek_node_type(data: &[u8]) -> anyhow::Result<u64> {
     let kind = peek.u64()?;
     Ok(kind)
 }
+/// Raw CID bytes - avoids allocation during decode
+#[derive(Debug, Clone, Copy)]
+pub struct CborCidRef<'a> {
+    pub bytes: &'a [u8],
+}
 
-#[derive(Debug, Clone)]
-pub struct CborCid(pub Cid);
+impl<'a> CborCidRef<'a> {
+    /// Decode to actual CID only when needed
+    #[inline]
+    pub fn to_cid(&self) -> Result<Cid, cid::Error> {
+        // Skip the first byte (multicodec prefix)
+        Cid::try_from(&self.bytes[1..])
+    }
 
-impl<'b, C> Decode<'b, C> for CborCid {
+    /// Get hash bytes for HashMap key without full CID decode
+    #[inline]
+    pub fn hash_bytes(&self) -> &[u8] {
+        self.bytes
+    }
+}
+
+impl<'b, C> Decode<'b, C> for CborCidRef<'b> {
     fn decode(
         d: &mut Decoder<'b>,
         _: &mut C,
@@ -171,8 +192,6 @@ impl<'b, C> Decode<'b, C> for CborCid {
         if bytes.len() <= 1 {
             return Err(minicbor::decode::Error::message("invalid CID bytes"));
         }
-        let cid = Cid::try_from(&bytes[1..])
-            .map_err(|e| minicbor::decode::Error::message(format!("invalid CID: {e}")))?;
-        Ok(Self(cid))
+        Ok(Self { bytes })
     }
 }

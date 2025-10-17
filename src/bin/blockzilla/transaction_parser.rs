@@ -1,13 +1,19 @@
+use ahash::AHashMap;
 use ahash::AHashSet;
 use anyhow::Result;
+use blockzilla::block_stream::CarBlock;
+use blockzilla::node::Node;
 use solana_sdk::pubkey::Pubkey;
 use std::mem::MaybeUninit;
+use std::ptr::copy_nonoverlapping;
 use wincode::ReadResult;
 use wincode::SchemaRead;
 use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
 use wincode::len::SeqLen;
 use wincode::len::ShortU16Len;
+
+use crate::types::KeyStats;
 
 pub fn parse_bincode_tx_static_accounts(
     tx: &[u8],
@@ -38,159 +44,183 @@ pub fn parse_bincode_tx_static_accounts(
     Ok(Some(fee_payer))
 }
 
-#[inline]
-fn read_u16_le(buf: &[u8]) -> u16 {
-    u16::from_le_bytes([buf[0], buf[1]])
+/// Solana shortvec decoder
+#[inline(always)]
+fn read_short_u16_len(buf: &[u8], pos: &mut usize) -> anyhow::Result<usize> {
+    let mut len = 0usize;
+    let mut shift = 0;
+    loop {
+        if *pos >= buf.len() {
+            anyhow::bail!("shortvec overflow");
+        }
+        let b = buf[*pos];
+        *pos += 1;
+        len |= ((b & 0x7f) as usize) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    Ok(len)
 }
 
-#[inline]
-fn read_pubkey_bytes(buf: &[u8]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&buf[..32]);
-    key
-}
-
-pub fn parse_account_keys_only(
+#[inline(always)]
+pub fn parse_account_keys_only_fast(
     tx: &[u8],
     out: &mut AHashSet<Pubkey>,
-) -> Result<Option<Pubkey>> {
-    let mut pos = 0;
-    let len = tx.len();
+) -> anyhow::Result<Option<Pubkey>> {
+    let mut pos = 0usize;
 
-    // 1️⃣ Read signatures (skip their bytes)
-    if pos + 2 > len {
-        return Ok(None);
-    }
-    let sig_len = read_u16_le(&tx[pos..]) as usize;
-    pos += 2;
-    let sig_bytes = sig_len.saturating_mul(64);
-    pos += sig_bytes;
-    if pos > len {
+    // 1️⃣ Skip signatures
+    let sig_len = read_short_u16_len(tx, &mut pos)? as usize;
+    pos += sig_len * 64;
+    if pos >= tx.len() {
         return Ok(None);
     }
 
-    // 2️⃣ Peek message prefix
-    if pos >= len {
-        return Ok(None);
-    }
+    // 2️⃣ Version prefix
     let prefix = tx[pos];
     let is_v0 = prefix & 0x80 != 0;
     if is_v0 {
         pos += 1;
     }
 
-    // 3️⃣ Read header (3 bytes)
-    if pos + 3 > len {
+    // 3️⃣ Header (3 bytes)
+    pos += 3;
+    if pos >= tx.len() {
         return Ok(None);
     }
-    pos += 3; // Skip the 3 header bytes
 
-    // 4️⃣ Read static account keys
-    if pos + 2 > len {
-        return Ok(None);
-    }
-    let n_keys = read_u16_le(&tx[pos..]) as usize;
-    pos += 2;
-
+    // 4️⃣ Account keys
+    let n_keys = read_short_u16_len(tx, &mut pos)? as usize;
     if n_keys == 0 {
         return Ok(None);
     }
 
     let mut first_key: Option<Pubkey> = None;
 
-    // Bulk read all static keys
-    let static_keys_end = pos + n_keys * 32;
-    if static_keys_end > len {
+    for i in 0..n_keys {
+        if pos + 32 > tx.len() {
+            anyhow::bail!("truncated key array");
+        }
+        let mut key = [0u8; 32];
+        unsafe {
+            copy_nonoverlapping(tx[pos..].as_ptr(), key.as_mut_ptr(), 32);
+        }
+        pos += 32;
+        let pk = Pubkey::new_from_array(key);
+        if i == 0 {
+            first_key = Some(pk);
+        }
+        out.insert(pk);
+    }
+
+    // 5️⃣ Skip recent_blockhash
+    pos += 32;
+
+    // 6️⃣ Versioned message (v0)
+    if is_v0 {
+        // Instructions
+        let n_ix = read_short_u16_len(tx, &mut pos)? as usize;
+        for _ in 0..n_ix {
+            pos += 1; // program_id_index
+            let ac_len = read_short_u16_len(tx, &mut pos)? as usize;
+            pos += ac_len;
+            let data_len = read_short_u16_len(tx, &mut pos)? as usize;
+            pos += data_len;
+        }
+
+        // Address table lookups
+        let n_lookups = read_short_u16_len(tx, &mut pos)? as usize;
+        for _ in 0..n_lookups {
+            if pos + 32 > tx.len() {
+                anyhow::bail!("truncated lookup key");
+            }
+            let mut key = [0u8; 32];
+            unsafe {
+                copy_nonoverlapping(tx[pos..].as_ptr(), key.as_mut_ptr(), 32);
+            }
+            pos += 32;
+            out.insert(Pubkey::new_from_array(key));
+
+            let w_len = read_short_u16_len(tx, &mut pos)? as usize;
+            pos += w_len;
+            let r_len = read_short_u16_len(tx, &mut pos)? as usize;
+            pos += r_len;
+        }
+    }
+
+    Ok(first_key)
+}
+
+pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<Option<Pubkey>> {
+    let mut reader = Reader::new(tx);
+
+    // 1️⃣ Read signatures (skip their bytes)
+    let sig_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+    let sig_bytes = sig_len.saturating_mul(64);
+    reader.consume(sig_bytes)?;
+
+    // 2️⃣ Peek message prefix
+    let buf = reader.as_slice();
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    let prefix = buf[0];
+    let is_v0 = prefix & 0x80 != 0;
+    if is_v0 {
+        reader.consume(1)?; // skip prefix
+    }
+
+    // 3️⃣ Read header
+    let mut header = [MaybeUninit::zeroed(); 3];
+    reader.read_exact(&mut header)?;
+
+    // 4️⃣ Read static account keys
+    let n_keys = ShortU16Len::read::<usize>(&mut reader)? as usize;
+    if n_keys == 0 {
         return Ok(None);
     }
 
+    let mut first_key: Option<Pubkey> = None;
     for i in 0..n_keys {
-        let key_slice = &tx[pos + i * 32..pos + (i + 1) * 32];
-        let key_bytes = read_pubkey_bytes(key_slice);
+        let mut key_bytes = [MaybeUninit::zeroed(); 32];
+        reader.read_exact(&mut key_bytes)?;
+        let key_bytes: [u8; 32] = unsafe { std::mem::transmute_copy(&key_bytes) };
         let key = Pubkey::new_from_array(key_bytes);
-
         if i == 0 {
+            // First key is always fee payer
             first_key = Some(key);
         }
         out.insert(key);
     }
-    pos = static_keys_end;
 
     // 5️⃣ Skip recent_blockhash (32 bytes)
-    if pos + 32 > len {
-        return Ok(first_key);
-    }
-    pos += 32;
+    reader.consume(32)?;
 
     if is_v0 {
         // Skip instructions
-        if pos + 2 > len {
-            return Ok(first_key);
-        }
-        let n_instructions = read_u16_le(&tx[pos..]) as usize;
-        pos += 2;
-
+        let n_instructions = ShortU16Len::read::<usize>(&mut reader)? as usize;
         for _ in 0..n_instructions {
-            if pos + 1 > len {
-                return Ok(first_key);
-            }
-            pos += 1; // program_id_index
-
-            if pos + 2 > len {
-                return Ok(first_key);
-            }
-            let ac_len = read_u16_le(&tx[pos..]) as usize;
-            pos += 2;
-            pos += ac_len;
-            if pos > len {
-                return Ok(first_key);
-            }
-
-            if pos + 2 > len {
-                return Ok(first_key);
-            }
-            let data_len = read_u16_le(&tx[pos..]) as usize;
-            pos += 2;
-            pos += data_len;
-            if pos > len {
-                return Ok(first_key);
-            }
+            reader.consume(1)?; // program_id_index
+            let ac_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(ac_len)?;
+            let data_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(data_len)?;
         }
 
         // Read address_table_lookups
-        if pos + 2 > len {
-            return Ok(first_key);
-        }
-        let n_lookups = read_u16_le(&tx[pos..]) as usize;
-        pos += 2;
-
+        let n_lookups = ShortU16Len::read::<usize>(&mut reader)? as usize;
         for _ in 0..n_lookups {
-            if pos + 32 > len {
-                return Ok(first_key);
-            }
-            let key_bytes = read_pubkey_bytes(&tx[pos..]);
-            out.insert(Pubkey::new_from_array(key_bytes));
-            pos += 32;
+            let mut key = [MaybeUninit::zeroed(); 32];
+            reader.read_exact(&mut key)?;
+            let key: [u8; 32] = unsafe { std::mem::transmute_copy(&key) };
+            out.insert(Pubkey::new_from_array(key));
 
-            if pos + 2 > len {
-                return Ok(first_key);
-            }
-            let w_len = read_u16_le(&tx[pos..]) as usize;
-            pos += 2;
-            pos += w_len;
-            if pos > len {
-                return Ok(first_key);
-            }
-
-            if pos + 2 > len {
-                return Ok(first_key);
-            }
-            let r_len = read_u16_le(&tx[pos..]) as usize;
-            pos += 2;
-            pos += r_len;
-            if pos > len {
-                return Ok(first_key);
-            }
+            let w_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(w_len)?;
+            let r_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            reader.consume(r_len)?;
         }
     }
 
@@ -310,4 +340,80 @@ impl VersionedMessage {
             VersionedMessage::V0(m) => &m.header,
         }
     }
+}
+
+/// Parse transactions within a CarBlock, extract all unique pubkeys,
+/// and update `current_map` with KeyStats counts.
+pub fn extract_transactions(
+    cb: &CarBlock,
+    map: &mut AHashMap<Pubkey, KeyStats>,
+    next_id: &mut u32,
+    epoch: u64,
+) -> Result<()> {
+    for entry in cb.entries.get_block_entries() {
+        for tx_cid in &entry.transactions {
+            let Some(Node::Transaction(tx)) = cb.entries.get(&tx_cid.0) else {
+                continue;
+            };
+
+            // Merge dataframes if fragmented
+            let tx_bytes = if tx.data.next.is_none() {
+                tx.data.data
+            } else {
+                &cb.merge_dataframe(tx.data)?
+            };
+
+            let mut keys = AHashSet::with_capacity(32);
+            // cargo run --release registry --file epoch-1.car  12.78s user 1.65s system 93% cpu 15.501 total
+            // cargo run --release registry --file epoch-1.car  19.56s user 2.29s system 94% cpu 23.122 total
+            let fee_payer_opt = parse_bincode_tx_static_accounts(tx_bytes, &mut keys)?;
+
+            // Track fee payer
+            let fee_payer_id = if let Some(fee_payer) = fee_payer_opt {
+                ensure_key(fee_payer, map, next_id, epoch, 0)
+            } else {
+                0
+            };
+
+            for key in keys {
+                let entry = map.entry(key).or_insert_with(|| {
+                    let id = *next_id;
+                    *next_id += 1;
+                    KeyStats {
+                        id,
+                        count: 0,
+                        first_fee_payer: fee_payer_id,
+                        first_epoch: epoch as u16,
+                        last_epoch: epoch as u16,
+                    }
+                });
+                entry.count += 1;
+                entry.last_epoch = epoch as u16;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Ensure a key exists in the map and return its ID.
+fn ensure_key(
+    key: Pubkey,
+    map: &mut AHashMap<Pubkey, KeyStats>,
+    next_id: &mut u32,
+    epoch: u64,
+    fee_payer_id: u32,
+) -> u32 {
+    map.entry(key)
+        .or_insert_with(|| {
+            let id = *next_id;
+            *next_id += 1;
+            KeyStats {
+                id,
+                count: 0,
+                first_fee_payer: fee_payer_id,
+                first_epoch: epoch as u16,
+                last_epoch: epoch as u16,
+            }
+        })
+        .id
 }
