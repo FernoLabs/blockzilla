@@ -1,19 +1,21 @@
-use ahash::AHashMap;
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
-use cid::Cid;
 use std::io::{self, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
+
+use cid::Cid;
 
 use crate::node::{BlockNode, Node, decode_node, peek_node_type};
 
-/// A self-contained partial CAR file (one logical Solana block)
-/// Owns all raw bytes and CIDs for zero-copy decoding within this block.
+/// A contiguous section of the CAR corresponding to a BlockNode.
+/// - `block_bytes` is the *CBOR payload* of the BlockNode (not the whole group).
+/// - `entries` is a sorted Vec of (raw_cid_bytes, payload_bytes),
+///    both are zero-copy slices into the underlying frozen `Bytes`.
 pub struct CarBlock {
     pub block_bytes: Bytes,
-    pub index: AHashMap<Cid, Bytes>,
+    pub entries: Vec<(Bytes, Bytes)>, // sorted by raw CID bytes
 }
 
 impl CarBlock {
@@ -24,133 +26,199 @@ impl CarBlock {
         Ok(block)
     }
 
-    /// Decode one node zero-copy; lifetime is tied to this CarBlock
-    pub fn decode<'b>(&'b self, cid: &Cid) -> Result<Node<'b>> {
-        let bytes = self
-            .index
-            .get(cid)
-            .ok_or_else(|| anyhow!("index out of range"))?;
-        decode_node(bytes)
+    /// Zero-copy decode by CID using binary search over raw CID bytes.
+    pub fn decode<'b>(&'b self, key: &[u8]) -> Result<Node<'b>> {
+        let idx = self
+            .entries
+            .binary_search_by(|(raw, _)| raw.as_ref().cmp(&key))
+            .map_err(|_| anyhow!("CID not found in block index"))?;
+        decode_node(&self.entries[idx].1)
     }
 
-    /// Peek node kind without decoding
-    pub fn peek_kind(&self, cid: &Cid) -> Result<u64> {
-        let bytes = self
-            .index
-            .get(cid)
-            .ok_or_else(|| anyhow!("index out of range"))?;
-        peek_node_type(bytes)
-    }
-
-    /// Build a streaming reader over concatenated DataFrames starting at index
+    /// Build a streaming reader over concatenated DataFrames by CID (binary search lookup).
     pub fn dataframe_reader<'b>(&'b self, cid: &'b Cid) -> DataFrameReader<'b> {
         DataFrameReader {
             blk: self,
-            current_index: Some(*cid),
+            current_index: Some(cid.to_bytes()), // store search key as raw bytes
             offset: 0,
         }
     }
 
-    /// Async version of the above
     pub fn async_dataframe_reader<'b>(&'b self, cid: &'b Cid) -> AsyncDataFrameReader<'b> {
         AsyncDataFrameReader {
             blk: self,
-            current_index: Some(*cid),
+            current_index: Some(cid.to_bytes()),
             offset: 0,
         }
     }
 }
 
-/// Reader that streams the CAR file and yields self-contained CarBlocks.
-/// Each block can be processed independently and in parallel.
+/// Metadata we gather while reading entries (no CID parsing).
+#[derive(Debug, Clone, Copy)]
+struct EntryMeta {
+    cid_start: usize,
+    cid_end: usize,
+    payload_start: usize,
+    payload_end: usize,
+}
+
+/// Streams a CAR file and yields CarBlocks.
+/// Buffering and allocations are tuned for ~1–2 MB average block sizes.
 pub struct CarBlockReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
     buf: BytesMut,
-    cur_index: AHashMap<Cid, Bytes>,
+    entry_offsets: Vec<EntryMeta>,
 }
 
 impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
     pub fn new(inner: R) -> Self {
         Self {
-            reader: BufReader::with_capacity(100 << 20, inner),
-            buf: BytesMut::with_capacity(1 << 20),
-            cur_index: AHashMap::with_capacity(256),
+            // Larger read buffer reduces syscalls on 1–2 MB blocks
+            reader: BufReader::with_capacity(16 << 20, inner),
+            // Working buffer sized to hold a typical large block without reallocations
+            buf: BytesMut::with_capacity(32 << 20),
+            entry_offsets: Vec::with_capacity(4096),
         }
     }
 
+    /// Read and discard the CAR header (length-prefixed blob).
     pub async fn read_header(&mut self) -> Result<()> {
-        let len = read_varint_usize(&mut self.reader).await?;
-        self.ensure_capacity(len);
-        self.buf.resize(len, 0);
-        self.reader.read_exact(&mut self.buf[..len]).await?;
+        let len = read_varint(&mut self.reader).await?;
+        self.reader.consume(len);
         Ok(())
     }
 
+    /// Reads entries until a BlockNode (kind == 2) is found.
+    /// Returns a CarBlock with:
+    ///   - block_bytes: the BlockNode CBOR payload
+    ///   - entries: sorted Vec of (raw_cid, payload) for all *prior* entries
     pub async fn next_block(&mut self) -> Result<Option<CarBlock>> {
-        self.cur_index.clear();
+        self.entry_offsets.clear();
+
+        // Keep memory footprint under control across epochs
+        if self.buf.capacity() > (256 << 20) {
+            self.buf = BytesMut::with_capacity(32 << 20);
+        } else {
+            self.buf.clear();
+        }
 
         loop {
-            let Some((cid, payload)) = self.read_next_entry().await? else {
-                tracing::debug!("unexpected EOF: block without BlockNode");
+            let Some((entry_start, entry_end, payload_start)) = self.read_next_entry().await?
+            else {
+                if self.entry_offsets.is_empty() {
+                    return Ok(None);
+                }
+                tracing::error!("unexpected EOF: block without BlockNode");
                 return Ok(None);
             };
 
-            // Check if this is a BlockNode before adding to collections
-            if peek_node_type(&payload)? == 2 {
-                return Ok(Some(self.flush_block(payload)));
+            // Some datasets store a multicodec varint *before* CBOR.
+            // Try peek; if it fails, attempt to skip one varint and peek again.
+            let mut cbor_start = payload_start;
+            let payload = &self.buf[payload_start..entry_end];
+            let is_cbor = matches!(payload.first(), Some(b) if (0x80..=0xBF).contains(b));
+
+            let kind_is_block = if is_cbor {
+                peek_node_type(payload).map(|k| k == 2).unwrap_or(false)
+            } else {
+                // Try skipping one varint (likely codec tag) before CBOR
+                if let Ok((_, skip)) = read_varint_usize_sync(payload) {
+                    cbor_start = payload_start + skip;
+                    let payload2 = &self.buf[cbor_start..entry_end];
+                    matches!(peek_node_type(payload2), Ok(2))
+                } else {
+                    false
+                }
+            };
+
+            if kind_is_block {
+                // Freeze the region up to and including this BlockNode entry
+                let frozen = self.buf.split_to(entry_end).freeze();
+                let block_bytes = frozen.slice(cbor_start..entry_end); // CBOR payload only
+
+                // Convert gathered offsets into zero-copy (raw_cid, payload) pairs
+                let mut entries: Vec<(Bytes, Bytes)> = Vec::with_capacity(self.entry_offsets.len());
+                for m in self.entry_offsets.drain(..) {
+                    let raw_cid = frozen.slice(m.cid_start..m.cid_end);
+                    let payload = frozen.slice(m.payload_start..m.payload_end);
+                    entries.push((raw_cid, payload));
+                }
+
+                // Sort once by raw CID bytes for binary-search lookups
+                entries.sort_unstable_by(|(a, _), (b, _)| a.as_ref().cmp(b.as_ref()));
+
+                return Ok(Some(CarBlock {
+                    block_bytes,
+                    entries,
+                }));
             }
 
-            // Only store non-BlockNode entries
-            self.cur_index.insert(cid.clone(), payload);
+            // Not a BlockNode → remember this entry's slices for the eventual block
+            self.entry_offsets.push(EntryMeta {
+                cid_start: entry_start,
+                cid_end: payload_start,
+                payload_start,
+                payload_end: entry_end,
+            });
         }
     }
 
-    fn flush_block(&mut self, block_bytes: Bytes) -> CarBlock {
-        CarBlock {
-            block_bytes,
-            index: std::mem::take(&mut self.cur_index),
-        }
-    }
-
-    async fn read_next_entry(&mut self) -> Result<Option<(Cid, Bytes)>> {
-        let len = match read_varint_usize(&mut self.reader).await {
+    /// Reads one CAR entry into `buf`; returns (entry_start, entry_end, payload_start).
+    /// We do *not* parse the CID—only compute its byte length to find `payload_start`.
+    async fn read_next_entry(&mut self) -> Result<Option<(usize, usize, usize)>> {
+        // 1) length prefix (varint) for this entry (CID + payload)
+        let len = match read_varint(&mut self.reader).await {
             Ok(l) => l,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(e.into()),
         };
 
-        self.ensure_capacity(len);
-        self.buf.resize(len, 0);
-        self.reader.read_exact(&mut self.buf[..len]).await?;
-        let bytes = self.buf.split_to(len).freeze();
+        // 2) append entry bytes in place
+        let start = self.buf.len();
+        self.ensure_capacity(start + len);
+        self.buf.resize(start + len, 0);
+        self.reader
+            .read_exact(&mut self.buf[start..start + len])
+            .await?;
 
-        let mut cursor = std::io::Cursor::new(&bytes);
-        let cid = Cid::read_bytes(&mut cursor).map_err(|e| anyhow!("CID parse error: {e}"))?;
-        let pos = cursor.position() as usize;
-        Ok(Some((cid, bytes.slice(pos..))))
+        // 3) compute CID length (no allocation, no full parsing)
+        let entry_slice = &self.buf[start..start + len];
+        let cid_len = read_cid_len(entry_slice).map_err(|e| anyhow!("CID parse/len error: {e}"))?;
+
+        let payload_start = start + cid_len;
+        Ok(Some((start, start + len, payload_start)))
     }
 
-    fn ensure_capacity(&mut self, len: usize) {
-        if self.buf.capacity() < len {
-            let new_cap = len.next_power_of_two().max(self.buf.capacity() * 2);
+    fn ensure_capacity(&mut self, need: usize) {
+        if self.buf.capacity() < need {
+            let new_cap = need.next_power_of_two().max(self.buf.capacity() * 2);
             self.buf.reserve(new_cap - self.buf.capacity());
         }
     }
 }
 
-/// Compact unsigned varint reader
+/// Compact unsigned varint from a BufReader
 #[inline]
-async fn read_varint_usize<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<usize> {
+async fn read_varint<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> io::Result<usize> {
     let mut value: usize = 0;
     let mut shift = 0;
     loop {
-        let b = reader.read_u8().await?;
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF while reading varint",
+            ));
+        }
+        let b = buf[0];
+        reader.consume(1);
+
         value |= ((b & 0x7F) as usize) << shift;
         if b & 0x80 == 0 {
             return Ok(value);
         }
         shift += 7;
-        if shift >= usize::BITS as usize {
+        if shift >= 64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "varint overflow",
@@ -158,10 +226,67 @@ async fn read_varint_usize<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<u
         }
     }
 }
+
+/// Compact unsigned varint from a slice; returns (value, bytes_consumed)
+#[inline]
+fn read_varint_usize_sync(buf: &[u8]) -> Result<(usize, usize)> {
+    let mut value: usize = 0;
+    let mut shift = 0;
+    for (i, &b) in buf.iter().enumerate() {
+        value |= ((b & 0x7F) as usize) << shift;
+        if b & 0x80 == 0 {
+            return Ok((value, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(anyhow!("varint overflow"));
+        }
+    }
+    Err(anyhow!("unexpected EOF in varint"))
+}
+
+/// Minimal, zero-alloc CID length parser (CIDv1).
+/// CIDv1 layout: 0x01 (version) + varint(codec) + multihash(varint(code), varint(digest_len), digest)
+#[inline]
+fn read_cid_len(buf: &[u8]) -> Result<usize> {
+    if buf.is_empty() {
+        return Err(anyhow!("empty entry"));
+    }
+
+    // CIDv1 must start with 0x01
+    if buf[0] != 0x01 {
+        // Some data could be CIDv0; not expected in CARv1 blocks, but handle gracefully
+        // Fall back to full parser if needed; here we error out to surface misuse
+        return Err(anyhow!("expected CIDv1 (0x01), got 0x{:02x}", buf[0]));
+    }
+
+    let mut off = 1;
+
+    // codec
+    let (_, n_codec) = read_varint_usize_sync(&buf[off..])?;
+    off += n_codec;
+
+    // multihash: code
+    let (_, n_mh_code) = read_varint_usize_sync(&buf[off..])?;
+    off += n_mh_code;
+
+    // multihash: digest length
+    let (digest_len, n_mh_len) = read_varint_usize_sync(&buf[off..])?;
+    off += n_mh_len;
+
+    // digest
+    if buf.len() < off + digest_len {
+        return Err(anyhow!("CID multihash digest truncated"));
+    }
+    off += digest_len;
+
+    Ok(off)
+}
+
 /// Synchronous reader over chained DataFrames inside a CarBlock
 pub struct DataFrameReader<'b> {
     blk: &'b CarBlock,
-    current_index: Option<Cid>,
+    current_index: Option<Vec<u8>>, // raw CID search key
     offset: usize,
 }
 
@@ -170,12 +295,21 @@ impl<'b> Read for DataFrameReader<'b> {
         let mut written = 0;
 
         while written < out.len() {
-            let Some(cid) = self.current_index else {
+            let Some(ref key) = self.current_index else {
                 break;
             };
-            let node = self
+
+            // binary search by raw cid bytes
+            let idx = match self
                 .blk
-                .decode(&cid)
+                .entries
+                .binary_search_by(|(raw, _)| raw.as_ref().cmp(key.as_slice()))
+            {
+                Ok(i) => i,
+                Err(_) => return Ok(written), // CID not found
+            };
+
+            let node = decode_node(&self.blk.entries[idx].1)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
             let df = match node {
@@ -196,7 +330,16 @@ impl<'b> Read for DataFrameReader<'b> {
 
             if self.offset >= df.data.len() {
                 self.offset = 0;
-                self.current_index = df.next.map(|cid| cid.to_cid().unwrap());
+                // Follow the chained CID if present
+                if let Some(next_cbor_cid) = df.next {
+                    if let Ok(next) = next_cbor_cid.to_cid() {
+                        self.current_index = Some(next.to_bytes());
+                    } else {
+                        self.current_index = None;
+                    }
+                } else {
+                    self.current_index = None;
+                }
             }
 
             if to_copy == 0 {
@@ -211,7 +354,7 @@ impl<'b> Read for DataFrameReader<'b> {
 /// Async version of DataFrameReader
 pub struct AsyncDataFrameReader<'b> {
     blk: &'b CarBlock,
-    current_index: Option<Cid>,
+    current_index: Option<Vec<u8>>, // raw CID search key
     offset: usize,
 }
 
@@ -225,12 +368,20 @@ impl<'b> AsyncRead for AsyncDataFrameReader<'b> {
         let mut written = 0;
 
         while written < dst.len() {
-            let Some(cid) = self.current_index else {
+            let Some(ref key) = self.current_index else {
                 break;
             };
-            let node = self
+
+            let idx = match self
                 .blk
-                .decode(&cid)
+                .entries
+                .binary_search_by(|(raw, _)| raw.as_ref().cmp(key.as_slice()))
+            {
+                Ok(i) => i,
+                Err(_) => break, // CID not found
+            };
+
+            let node = decode_node(&self.blk.entries[idx].1)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
             let df = match node {
@@ -251,7 +402,15 @@ impl<'b> AsyncRead for AsyncDataFrameReader<'b> {
 
             if self.offset >= df.data.len() {
                 self.offset = 0;
-                self.current_index = df.next.map(|cid| cid.to_cid().unwrap());
+                if let Some(next_cbor_cid) = df.next {
+                    if let Ok(next) = next_cbor_cid.to_cid() {
+                        self.current_index = Some(next.to_bytes());
+                    } else {
+                        self.current_index = None;
+                    }
+                } else {
+                    self.current_index = None;
+                }
             }
 
             if to_copy == 0 {

@@ -1,4 +1,6 @@
 use cid::Cid;
+use core::marker::PhantomData;
+use minicbor::decode::Error as CborError;
 use minicbor::{Decode, Decoder, Encode, data::Type};
 
 #[derive(Debug, Decode)]
@@ -64,10 +66,10 @@ pub struct EntryNode<'a> {
     pub num_hashes: u64,
     #[n(2)]
     #[cbor(decode_with = "minicbor::bytes::decode")]
-    pub hash: Vec<u8>,
+    pub hash: &'a [u8],
     #[n(3)]
     #[cbor(borrow = "'a + 'bytes")]
-    pub transactions: Vec<CborCidRef<'a>>,
+    pub transactions: CborArrayView<'a, CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode, Clone)]
@@ -81,7 +83,7 @@ pub struct BlockNode<'a> {
     pub shredding: Vec<Shredding>,
     #[n(3)]
     #[cbor(borrow = "'a + 'bytes")]
-    pub entries: Vec<CborCidRef<'a>>,
+    pub entries: CborArrayView<'a, CborCidRef<'a>>,
     #[n(4)]
     pub meta: SlotMeta,
     #[n(5)]
@@ -170,13 +172,14 @@ impl<'a> CborCidRef<'a> {
     #[inline]
     pub fn to_cid(&self) -> Result<Cid, cid::Error> {
         // Skip the first byte (multicodec prefix)
-        Cid::try_from(&self.bytes[1..])
+        //Cid::try_from(&self.bytes[1..])
+        Cid::read_bytes(&self.bytes[1..])
     }
 
     /// Get hash bytes for HashMap key without full CID decode
     #[inline]
     pub fn hash_bytes(&self) -> &[u8] {
-        self.bytes
+        &self.bytes[1..]
     }
 }
 
@@ -193,5 +196,36 @@ impl<'b, C> Decode<'b, C> for CborCidRef<'b> {
             return Err(minicbor::decode::Error::message("invalid CID bytes"));
         }
         Ok(Self { bytes })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CborArrayView<'b, T> {
+    slice: &'b [u8],
+    _t: PhantomData<T>,
+}
+
+impl<'b, C, T> Decode<'b, C> for CborArrayView<'b, T> {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
+        let start = d.position();
+        d.skip()?;
+        let end = d.position();
+        let input = d.input();
+
+        Ok(Self {
+            slice: &input[start..end],
+            _t: PhantomData,
+        })
+    }
+}
+
+impl<'b, T> CborArrayView<'b, T>
+where
+    T: Decode<'b, ()>,
+{
+    pub fn iter(&self) -> impl Iterator<Item = Result<T, minicbor::decode::Error>> + 'b {
+        let mut d = minicbor::Decoder::new(self.slice);
+        let n = d.array().unwrap_or(Some(0)).unwrap_or(0);
+        (0..n).map(move |_| d.decode_with(&mut ()))
     }
 }

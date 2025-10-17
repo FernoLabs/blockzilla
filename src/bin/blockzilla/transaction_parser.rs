@@ -4,6 +4,7 @@ use anyhow::Result;
 use blockzilla::car_block_reader::CarBlock;
 use blockzilla::node::Node;
 use solana_sdk::pubkey::Pubkey;
+use std::io::Read;
 use std::mem::MaybeUninit;
 use std::ptr::copy_nonoverlapping;
 use wincode::ReadResult;
@@ -12,9 +13,16 @@ use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
 use wincode::len::SeqLen;
 use wincode::len::ShortU16Len;
-use std::io::Read;
 
-use crate::types::KeyStats;
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct KeyStats {
+    pub id: u32,
+    pub count: u32,
+    pub first_fee_payer: u32,
+    pub first_epoch: u16,
+    pub last_epoch: u16,
+}
 
 pub fn parse_bincode_tx_static_accounts(
     tx: &[u8],
@@ -351,17 +359,17 @@ pub fn extract_transactions(
     next_id: &mut u32,
     epoch: u64,
 ) -> Result<()> {
-    for entry_cid in &cb.block()?.entries {
-        let entry_cid = entry_cid.to_cid()?;
-        let Node::Entry(entry) = cb.decode(&entry_cid)? else {
-            tracing::error!("Entry not a Node::Entry {entry_cid}");
+    for entry_cid in cb.block()?.entries.iter() {
+        let entry_cid = entry_cid?;
+        let Node::Entry(entry) = cb.decode(entry_cid.hash_bytes())? else {
+            tracing::error!("Entry not a Node::Entry {entry_cid:?}");
             continue;
             //return Err(anyhow!("Entry not a Node::Entry"));
         };
-        for tx_cid in entry.transactions {
-            let tx_cid = tx_cid.to_cid()?;
-            let Node::Transaction(tx) = cb.decode(&tx_cid)? else {
-                tracing::error!("Entry not a Node::Transaction {tx_cid}");
+        for tx_cid in entry.transactions.iter() {
+            let tx_cid = tx_cid?;
+            let Node::Transaction(tx) = cb.decode(tx_cid.hash_bytes())? else {
+                tracing::error!("Entry not a Node::Transaction {tx_cid:?}");
                 continue;
                 //return Err(anyhow!("Entry not a Node::Transaction"));
             };

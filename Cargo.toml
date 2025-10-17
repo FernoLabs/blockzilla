@@ -40,7 +40,6 @@ solana-instruction = { version = "3.0.0", features = ["bincode"] }
 minicbor = { version = "2.1.1", features = ["full"] }
 wincode = { version = "0.1.1", features = ["derive", "solana-short-vec"] }
 indicatif = "0.17.7"
-jemallocator = "0.5.4"
 humantime = "2.3.0"
 mimalloc = "0.1.48"
 sysinfo = "0.30"
@@ -52,10 +51,10 @@ prost-build = "0.14.1"
 
 [profile.release]
 opt-level = 3
-lto = "fat"                # full link-time optimization across crates
-codegen-units = 1          # compile slower, but optimize globally
-panic = "abort"            # smaller binary, no stack unwinding
-strip = true               # strip debug symbols
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = false
 debug = false
 incremental = false
 overflow-checks = false

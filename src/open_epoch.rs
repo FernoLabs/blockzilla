@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use clap::ValueEnum;
 use futures::TryStreamExt;
 use std::path::Path;
 use tokio::fs::{self, File};
@@ -6,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 
 /// Fetching policy for epoch files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FetchMode {
     /// Always stream from the network (ignore cache).
     Network,
