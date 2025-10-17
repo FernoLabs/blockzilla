@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 
-use crate::node::{BlockNode, CborCidRef, Node, decode_node, peek_node_type};
+use crate::node::{BlockNode, Node, decode_node, peek_node_type};
 
 /// A self-contained partial CAR file (one logical Solana block)
 /// Owns all raw bytes and CIDs for zero-copy decoding within this block.
@@ -91,7 +91,8 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
 
         loop {
             let Some((cid, payload)) = self.read_next_entry().await? else {
-                return Err(anyhow!("unexpected EOF: block without BlockNode"));
+                tracing::debug!("unexpected EOF: block without BlockNode");
+                return Ok(None);
             };
 
             // Check if this is a BlockNode before adding to collections

@@ -1,15 +1,7 @@
-mod block_mode;
-//mod compat_block;
-//mod dump_registry;
-//mod optimizer;
-//mod print_compressed_block;
-
 mod config;
 mod downloader;
-mod key_extractor;
 mod merge;
 mod merge_registry;
-mod node_mode;
 mod reader;
 mod transaction_parser;
 mod types;
@@ -37,11 +29,7 @@ use tracing_subscriber::FmtSubscriber;
 use wincode::Deserialize;
 
 use crate::{
-    block_mode::run_block_mode,
-    config::LOG_INTERVAL_SECS,
-    node_mode::{run_car_mode, run_node_mode},
-    transaction_parser::VersionedTransaction,
-    types::DownloadMode,
+    config::LOG_INTERVAL_SECS, transaction_parser::VersionedTransaction, types::DownloadMode,
 };
 
 #[global_allocator]
@@ -130,12 +118,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Car { file } => run_car_mode(&PathBuf::from(file), DownloadMode::Stream).await?,
+        Commands::Car { file } => {
+            //run_car_mode(&PathBuf::from(file), DownloadMode::Stream).await?,
+        }
         Commands::Node { file } => {
-            run_node_mode(&PathBuf::from(file), DownloadMode::Stream).await?
+            //run_node_mode(&PathBuf::from(file), DownloadMode::Stream).await?
         }
         Commands::Block { file } => {
-            run_block_mode(&PathBuf::from(file), DownloadMode::Stream).await?
+            //run_block_mode(&PathBuf::from(file), DownloadMode::Stream).await?
         }
         Commands::Optimize {
             file: _,
@@ -159,12 +149,12 @@ async fn main() -> Result<()> {
         }
         Commands::Registry { file, output_dir } => {
             /*key_extractor::process_single_epoch_file(
-                &PathBuf::from(file),
-                &PathBuf::from(&output_dir.unwrap_or_else(|| "optimized".to_string())),
-                DownloadMode::Stream,
-            )
-            .await?;
-        */
+                    &PathBuf::from(file),
+                    &PathBuf::from(&output_dir.unwrap_or_else(|| "optimized".to_string())),
+                    DownloadMode::Stream,
+                )
+                .await?;
+            */
         }
         Commands::RegistryAll {
             base_dir,
@@ -203,7 +193,7 @@ pub fn extract_epoch_from_path(path: &str) -> Option<u64> {
 
 async fn read_block2(epoch: u64) -> anyhow::Result<()> {
     let cache_dir = "./";
-    let mode = FetchMode::Network;
+    let mode = FetchMode::Offline;
 
     let reader = open_epoch::open_epoch(epoch, cache_dir, mode).await?;
     let mut car = CarBlockReader::new(reader);
@@ -213,19 +203,21 @@ async fn read_block2(epoch: u64) -> anyhow::Result<()> {
     let mut last_log = start;
 
     let pb = ProgressBar::new_spinner();
-    let mut reusable_tx = MaybeUninit::uninit();
+    //let mut reusable_tx = MaybeUninit::uninit();
     let mut blocks_count = 0;
     let mut tx_count = 0;
     let mut bytes_count = 0;
 
     while let Some(block) = car.next_block().await? {
-        for CborCid(entry_cid) in &block.block()?.entries {
-            let Node::Entry(entry) = block.decode(entry_cid)? else {
+        for entry_cid in &block.block()?.entries {
+            let entry_cid = entry_cid.to_cid()?;
+            let Node::Entry(entry) = block.decode(&entry_cid)? else {
                 tracing::error!("Entry not a Node::Entry {entry_cid}");
                 continue;
                 //return Err(anyhow!("Entry not a Node::Entry"));
             };
-            for CborCid(tx_cid) in entry.transactions {
+            for tx_cid in entry.transactions {
+                let tx_cid = tx_cid.to_cid()?;
                 let Node::Transaction(tx) = block.decode(&tx_cid)? else {
                     tracing::error!("Entry not a Node::Transaction {tx_cid}");
                     continue;
@@ -234,14 +226,15 @@ async fn read_block2(epoch: u64) -> anyhow::Result<()> {
                 let mut out = Vec::new();
                 let tx_bytes = match tx.data.next {
                     None => tx.data.data,
-                    Some(CborCid(df_cid)) => {
+                    Some(df_cid) => {
+                        let df_cid = df_cid.to_cid()?;
                         let mut reader = block.dataframe_reader(&df_cid);
                         reader.read_to_end(&mut out)?;
                         &out
                     }
                 };
-                VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)?;
-                let tx = unsafe { reusable_tx.assume_init_ref() };
+                //VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)?;
+                //let tx = unsafe { reusable_tx.assume_init_ref() };
                 tx_count += 1;
             }
         }
@@ -307,18 +300,21 @@ async fn read_block2_par(epoch: u64) -> anyhow::Result<()> {
             move || -> anyhow::Result<usize> {
                 let mut reusable_tx = MaybeUninit::uninit();
                 let mut local_tx_count = 0usize;
-                for CborCid(entry_cid) in &b.block()?.entries {
-                    let Node::Entry(entry) = b.decode(entry_cid)? else {
+                for entry_cid in &b.block()?.entries {
+                    let entry_cid = entry_cid.to_cid()?;
+                    let Node::Entry(entry) = b.decode(&entry_cid)? else {
                         continue;
                     };
-                    for CborCid(tx_cid) in entry.transactions {
+                    for tx_cid in entry.transactions {
+                        let tx_cid = tx_cid.to_cid()?;
                         let Node::Transaction(tx) = b.decode(&tx_cid)? else {
                             continue;
                         };
                         let mut out = Vec::new();
                         let tx_bytes = match tx.data.next {
                             None => tx.data.data,
-                            Some(CborCid(df_cid)) => {
+                            Some(df_cid) => {
+                                let df_cid = df_cid.to_cid()?;
                                 let mut reader = b.dataframe_reader(&df_cid);
                                 reader.read_to_end(&mut out)?;
                                 &out

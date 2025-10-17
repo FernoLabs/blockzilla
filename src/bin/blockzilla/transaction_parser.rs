@@ -1,7 +1,7 @@
 use ahash::AHashMap;
 use ahash::AHashSet;
 use anyhow::Result;
-use blockzilla::block_stream::CarBlock;
+use blockzilla::car_block_reader::CarBlock;
 use blockzilla::node::Node;
 use solana_sdk::pubkey::Pubkey;
 use std::mem::MaybeUninit;
@@ -12,6 +12,7 @@ use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
 use wincode::len::SeqLen;
 use wincode::len::ShortU16Len;
+use std::io::Read;
 
 use crate::types::KeyStats;
 
@@ -350,17 +351,29 @@ pub fn extract_transactions(
     next_id: &mut u32,
     epoch: u64,
 ) -> Result<()> {
-    for entry in cb.entries.get_block_entries() {
-        for tx_cid in &entry.transactions {
-            let Some(Node::Transaction(tx)) = cb.entries.get(&tx_cid.0) else {
+    for entry_cid in &cb.block()?.entries {
+        let entry_cid = entry_cid.to_cid()?;
+        let Node::Entry(entry) = cb.decode(&entry_cid)? else {
+            tracing::error!("Entry not a Node::Entry {entry_cid}");
+            continue;
+            //return Err(anyhow!("Entry not a Node::Entry"));
+        };
+        for tx_cid in entry.transactions {
+            let tx_cid = tx_cid.to_cid()?;
+            let Node::Transaction(tx) = cb.decode(&tx_cid)? else {
+                tracing::error!("Entry not a Node::Transaction {tx_cid}");
                 continue;
+                //return Err(anyhow!("Entry not a Node::Transaction"));
             };
-
-            // Merge dataframes if fragmented
-            let tx_bytes = if tx.data.next.is_none() {
-                tx.data.data
-            } else {
-                &cb.merge_dataframe(tx.data)?
+            let mut out = Vec::new();
+            let tx_bytes = match tx.data.next {
+                None => tx.data.data,
+                Some(df_cid) => {
+                    let df_cid = df_cid.to_cid()?;
+                    let mut reader = cb.dataframe_reader(&df_cid);
+                    reader.read_to_end(&mut out)?;
+                    &out
+                }
             };
 
             let mut keys = AHashSet::with_capacity(32);
