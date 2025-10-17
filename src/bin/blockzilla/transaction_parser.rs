@@ -166,7 +166,7 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
     let mut reader = Reader::new(tx);
 
     // 1️⃣ Read signatures (skip their bytes)
-    let sig_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+    let sig_len = ShortU16Len::read::<usize>(&mut reader)?;
     let sig_bytes = sig_len.saturating_mul(64);
     reader.consume(sig_bytes)?;
 
@@ -186,7 +186,7 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
     reader.read_exact(&mut header)?;
 
     // 4️⃣ Read static account keys
-    let n_keys = ShortU16Len::read::<usize>(&mut reader)? as usize;
+    let n_keys = ShortU16Len::read::<usize>(&mut reader)?;
     if n_keys == 0 {
         return Ok(None);
     }
@@ -209,26 +209,26 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
 
     if is_v0 {
         // Skip instructions
-        let n_instructions = ShortU16Len::read::<usize>(&mut reader)? as usize;
+        let n_instructions = ShortU16Len::read::<usize>(&mut reader)?;
         for _ in 0..n_instructions {
             reader.consume(1)?; // program_id_index
-            let ac_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            let ac_len = ShortU16Len::read::<usize>(&mut reader)?;
             reader.consume(ac_len)?;
-            let data_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            let data_len = ShortU16Len::read::<usize>(&mut reader)?;
             reader.consume(data_len)?;
         }
 
         // Read address_table_lookups
-        let n_lookups = ShortU16Len::read::<usize>(&mut reader)? as usize;
+        let n_lookups = ShortU16Len::read::<usize>(&mut reader)?;
         for _ in 0..n_lookups {
             let mut key = [MaybeUninit::zeroed(); 32];
             reader.read_exact(&mut key)?;
             let key: [u8; 32] = unsafe { std::mem::transmute_copy(&key) };
             out.insert(Pubkey::new_from_array(key));
 
-            let w_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            let w_len = ShortU16Len::read::<usize>(&mut reader)?;
             reader.consume(w_len)?;
-            let r_len = ShortU16Len::read::<usize>(&mut reader)? as usize;
+            let r_len = ShortU16Len::read::<usize>(&mut reader)?;
             reader.consume(r_len)?;
         }
     }

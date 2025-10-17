@@ -54,7 +54,7 @@ pub async fn open_epoch(
             }
 
             let network_stream = response.bytes_stream().map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("network error: {e}"))
+                std::io::Error::other(format!("network error: {e}"))
             });
             let reader = StreamReader::new(network_stream);
             Ok(Box::new(reader))
@@ -78,7 +78,7 @@ pub async fn open_epoch(
 
             let mut file_out = File::create(&cached_path).await?;
             let network_stream = response.bytes_stream().map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("network error: {e}"))
+                std::io::Error::other(format!("network error: {e}"))
             });
             let mut stream_reader = StreamReader::new(network_stream);
 

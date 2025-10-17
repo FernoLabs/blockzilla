@@ -30,7 +30,7 @@ impl CarBlock {
     pub fn decode<'b>(&'b self, key: &[u8]) -> Result<Node<'b>> {
         let idx = self
             .entries
-            .binary_search_by(|(raw, _)| raw.as_ref().cmp(&key))
+            .binary_search_by(|(raw, _)| raw.as_ref().cmp(key))
             .map_err(|_| anyhow!("CID not found in block index"))?;
         decode_node(&self.entries[idx].1)
     }
@@ -310,7 +310,7 @@ impl<'b> Read for DataFrameReader<'b> {
             };
 
             let node = decode_node(&self.blk.entries[idx].1)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(|e| io::Error::other(e))?;
 
             let df = match node {
                 Node::DataFrame(df) => df,
@@ -382,7 +382,7 @@ impl<'b> AsyncRead for AsyncDataFrameReader<'b> {
             };
 
             let node = decode_node(&self.blk.entries[idx].1)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(|e| io::Error::other(e))?;
 
             let df = match node {
                 Node::DataFrame(df) => df,
