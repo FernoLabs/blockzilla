@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
-use futures::{StreamExt, TryStreamExt};
+use futures::{StreamExt};
 use reqwest::Client;
 use std::{
     collections::BTreeMap,
@@ -12,7 +12,6 @@ use tokio::{
     fs,
     io::{self, AsyncRead, AsyncWriteExt},
 };
-use tokio_util::io::StreamReader;
 
 // -----------------------------
 // Fetch mode enum
@@ -57,7 +56,7 @@ async fn head_content_length(client: &Client, url: &str) -> Result<u64> {
 async fn spawn_network_reader(url: String) -> Result<impl AsyncRead + Unpin + Send> {
     const CHUNK: u64 = 128 * 1024 * 1024;
     const PARALLEL: usize = 8;
-    const PIPE_SIZE: usize = 512 * 1024 * 1024;
+    const PIPE_SIZE: usize = 256 * 1024 * 1024;
 
     let client = build_fast_client()?;
     let total_size = head_content_length(&client, &url).await?;
@@ -67,7 +66,7 @@ async fn spawn_network_reader(url: String) -> Result<impl AsyncRead + Unpin + Se
         total_size as f64 / 1e9
     );
 
-    let (mut pipe_r, mut pipe_w) = tokio::io::duplex(PIPE_SIZE);
+    let (pipe_r, mut pipe_w) = tokio::io::duplex(PIPE_SIZE);
 
     // Build queue of ranges
     let ranges: Arc<tokio::sync::Mutex<std::collections::VecDeque<(usize, u64, u64)>>> =
