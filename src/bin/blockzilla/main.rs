@@ -9,11 +9,9 @@ use blockzilla::{
 };
 use clap::{Parser, Subcommand};
 use indicatif::ProgressBar;
-use std::{
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use std::{io::Read, mem::MaybeUninit};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wincode::Deserialize;
 
 use crate::transaction_parser::{VersionedTransaction, parse_account_keys_only_fast};
@@ -52,11 +50,13 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize global logger
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(EnvFilter::new(
+            "debug,hyper=off,hyper_util=off,h2=off,reqwest=off,tokio_util=off",
+        ))
         .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
+
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let cli = Cli::parse();
 

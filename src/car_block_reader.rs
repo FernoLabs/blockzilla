@@ -53,20 +53,18 @@ pub struct CarBlockReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
     buf: Vec<u8>,
     entry_offsets: Vec<EntryMeta>,
-    max_buf_capacity: usize,
 }
 
 impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
     pub fn new(inner: R) -> Self {
-        Self::with_capacity(inner, 64 << 10, 4 << 20)
+        Self::with_capacity(inner, 64 << 10)
     }
 
-    pub fn with_capacity(inner: R, read_capacity: usize, max_buf_capacity: usize) -> Self {
+    pub fn with_capacity(inner: R, read_capacity: usize) -> Self {
         Self {
             reader: BufReader::with_capacity(read_capacity, inner),
             buf: Vec::with_capacity(512 << 10),
             entry_offsets: Vec::with_capacity(8192),
-            max_buf_capacity,
         }
     }
 
@@ -156,12 +154,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
         };
 
         let start = self.buf.len();
-        let needed = start + len;
-        if self.buf.capacity() < needed {
-            let new_cap = needed.next_power_of_two().min(self.max_buf_capacity * 2);
-            self.buf.reserve(new_cap - self.buf.capacity());
-        }
-
         self.buf.resize(start + len, 0);
         self.reader
             .read_exact(&mut self.buf[start..start + len])
