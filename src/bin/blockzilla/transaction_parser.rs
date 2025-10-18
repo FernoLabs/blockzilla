@@ -3,7 +3,7 @@ use ahash::AHashSet;
 use anyhow::Result;
 use blockzilla::car_block_reader::CarBlock;
 use blockzilla::node::Node;
-use solana_sdk::pubkey::Pubkey;
+use solana_pubkey::Pubkey;
 use std::io::Read;
 use std::mem::MaybeUninit;
 use std::ptr::copy_nonoverlapping;
@@ -380,6 +380,7 @@ pub fn extract_transactions(
                     let df_cid = df_cid.to_cid()?;
                     let mut reader = cb.dataframe_reader(&df_cid);
                     reader.read_to_end(&mut out)?;
+                    drop(reader);
                     &out
                 }
             };

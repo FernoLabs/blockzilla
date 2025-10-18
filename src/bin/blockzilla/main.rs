@@ -9,7 +9,9 @@ use blockzilla::{
 };
 use clap::{Parser, Subcommand};
 use indicatif::ProgressBar;
-use std::time::{Duration, Instant};
+use std::{
+    time::{Duration, Instant},
+};
 use std::{io::Read, mem::MaybeUninit};
 use tracing_subscriber::FmtSubscriber;
 use wincode::Deserialize;
@@ -52,7 +54,7 @@ enum Commands {
 async fn main() -> Result<()> {
     // Initialize global logger
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::DEBUG) // or INFO
+        .with_max_level(tracing::Level::DEBUG)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
 
@@ -93,20 +95,19 @@ async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> anyhow::Res
 
     while let Some(block) = car.next_block().await? {
         entry_count += block.entries.len();
+
         for entry_cid in block.block()?.entries.iter() {
             let entry_cid = entry_cid?;
             let Node::Entry(entry) = block.decode(entry_cid.hash_bytes())? else {
-                //tracing::error!("Entry not a Node::Entry {entry_cid}");
-                //continue;
                 return Err(anyhow!("Entry not a Node::Entry"));
             };
+
             for tx_cid in entry.transactions.iter() {
                 let tx_cid = tx_cid?;
                 let Node::Transaction(tx) = block.decode(tx_cid.hash_bytes())? else {
-                    //tracing::error!("Entry not a Node::Transaction {tx_cid}");
-                    //continue;
                     return Err(anyhow!("Entry not a Node::Transaction"));
                 };
+
                 let tx_bytes = match tx.data.next {
                     None => tx.data.data,
                     Some(df_cid) => {
@@ -114,16 +115,24 @@ async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> anyhow::Res
                         let mut reader = block.dataframe_reader(&df_cid);
                         out.clear();
                         reader.read_to_end(&mut out)?;
+                        drop(reader);
                         &out
                     }
                 };
+                //let rx = VersionedTransaction::deserialize(tx_bytes)?;
                 VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)?;
-                let _tx = unsafe { reusable_tx.assume_init_ref() };
+                let tx = unsafe { reusable_tx.assume_init_ref() };
+
+                unsafe {
+                    std::ptr::drop_in_place(tx as *const _ as *mut VersionedTransaction);
+                }
                 tx_count += 1;
             }
         }
+
         blocks_count += 1;
         bytes_count += block.entries.iter().map(|(_id, a)| a.len()).sum::<usize>();
+        drop(block);
 
         let now = Instant::now();
         if now.duration_since(last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
@@ -139,7 +148,6 @@ async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> anyhow::Res
                 entry_count / blocks_count
             ));
         }
-        drop(block);
     }
     let now = Instant::now();
     let elapsed = now.duration_since(start);
@@ -170,17 +178,12 @@ async fn build_registry(epoch: u64, cache_dir: &str, mode: FetchMode) -> anyhow:
 
     while let Some(block) = car.next_block().await? {
         for entry_cid in block.block()?.entries.iter() {
-            let entry_cid = entry_cid?;
-            let Node::Entry(entry) = block.decode(entry_cid.hash_bytes())? else {
-                //tracing::error!("Entry not a Node::Entry {entry_cid}");
-                //continue;
+            let Node::Entry(entry) = block.decode(entry_cid?.hash_bytes())? else {
                 return Err(anyhow!("Entry not a Node::Entry"));
             };
             for tx_cid in entry.transactions.iter() {
                 let tx_cid = tx_cid?;
                 let Node::Transaction(tx) = block.decode(tx_cid.hash_bytes())? else {
-                    //tracing::error!("Entry not a Node::Transaction {tx_cid}");
-                    //continue;
                     return Err(anyhow!("Entry not a Node::Transaction"));
                 };
                 let tx_bytes = match tx.data.next {
