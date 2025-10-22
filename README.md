@@ -23,6 +23,8 @@ cargo run --release -- read --epoch "optimized/epoch-0.bin" --idx "optimized/epo
 
 ```bash
 tar cz --no-xattrs --exclude target --exclude .git --exclude epoch-0.car --exclude epoch-1.car --exclude optimized . | ssh ach@blockzilla.local 'mkdir -p ~/dev/blockzilla && tar xz -C ~/dev/blockzilla'
+
+
 ```
 
 ## mac m1 build

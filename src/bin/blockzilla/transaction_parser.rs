@@ -1,10 +1,6 @@
-use ahash::AHashMap;
 use ahash::AHashSet;
 use anyhow::Result;
-use blockzilla::car_block_reader::CarBlock;
-use blockzilla::node::Node;
 use solana_pubkey::Pubkey;
-use std::io::Read;
 use std::mem::MaybeUninit;
 use std::ptr::copy_nonoverlapping;
 use wincode::ReadResult;
@@ -13,45 +9,6 @@ use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
 use wincode::len::SeqLen;
 use wincode::len::ShortU16Len;
-
-#[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
-pub struct KeyStats {
-    pub id: u32,
-    pub count: u32,
-    pub first_fee_payer: u32,
-    pub first_epoch: u16,
-    pub last_epoch: u16,
-}
-
-pub fn parse_bincode_tx_static_accounts(
-    tx: &[u8],
-    out: &mut AHashSet<Pubkey>,
-) -> Result<Option<Pubkey>> {
-    let vt: VersionedTransaction = wincode::deserialize(tx)?;
-
-    let keys = vt.message.static_account_keys();
-    if keys.is_empty() {
-        return Ok(None);
-    }
-
-    // The first static account key is always the fee payer
-    let fee_payer = Pubkey::new_from_array(keys[0]);
-
-    // Add all static account keys
-    out.extend(keys.iter().map(|p| Pubkey::new_from_array(*p)));
-
-    // Address lookup table accounts (v0 only)
-    if let Some(lookups) = vt.message.address_table_lookups() {
-        out.extend(
-            lookups
-                .iter()
-                .map(|l| Pubkey::new_from_array(l.account_key)),
-        );
-    }
-
-    Ok(Some(fee_payer))
-}
 
 /// Solana shortvec decoder
 #[inline(always)]
@@ -349,93 +306,4 @@ impl VersionedMessage {
             VersionedMessage::V0(m) => &m.header,
         }
     }
-}
-
-/// Parse transactions within a CarBlock, extract all unique pubkeys,
-/// and update `current_map` with KeyStats counts.
-pub fn extract_transactions(
-    cb: &CarBlock,
-    map: &mut AHashMap<Pubkey, KeyStats>,
-    next_id: &mut u32,
-    epoch: u64,
-) -> Result<()> {
-    for entry_cid in cb.block()?.entries.iter() {
-        let entry_cid = entry_cid?;
-        let Node::Entry(entry) = cb.decode(entry_cid.hash_bytes())? else {
-            tracing::error!("Entry not a Node::Entry {entry_cid:?}");
-            continue;
-            //return Err(anyhow!("Entry not a Node::Entry"));
-        };
-        for tx_cid in entry.transactions.iter() {
-            let tx_cid = tx_cid?;
-            let Node::Transaction(tx) = cb.decode(tx_cid.hash_bytes())? else {
-                tracing::error!("Entry not a Node::Transaction {tx_cid:?}");
-                continue;
-                //return Err(anyhow!("Entry not a Node::Transaction"));
-            };
-            let mut out = Vec::new();
-            let tx_bytes = match tx.data.next {
-                None => tx.data.data,
-                Some(df_cid) => {
-                    let df_cid = df_cid.to_cid()?;
-                    let mut reader = cb.dataframe_reader(&df_cid);
-                    reader.read_to_end(&mut out)?;
-                    drop(reader);
-                    &out
-                }
-            };
-
-            let mut keys = AHashSet::with_capacity(32);
-            // cargo run --release registry --file epoch-1.car  12.78s user 1.65s system 93% cpu 15.501 total
-            // cargo run --release registry --file epoch-1.car  19.56s user 2.29s system 94% cpu 23.122 total
-            let fee_payer_opt = parse_bincode_tx_static_accounts(tx_bytes, &mut keys)?;
-
-            // Track fee payer
-            let fee_payer_id = if let Some(fee_payer) = fee_payer_opt {
-                ensure_key(fee_payer, map, next_id, epoch, 0)
-            } else {
-                0
-            };
-
-            for key in keys {
-                let entry = map.entry(key).or_insert_with(|| {
-                    let id = *next_id;
-                    *next_id += 1;
-                    KeyStats {
-                        id,
-                        count: 0,
-                        first_fee_payer: fee_payer_id,
-                        first_epoch: epoch as u16,
-                        last_epoch: epoch as u16,
-                    }
-                });
-                entry.count += 1;
-                entry.last_epoch = epoch as u16;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Ensure a key exists in the map and return its ID.
-fn ensure_key(
-    key: Pubkey,
-    map: &mut AHashMap<Pubkey, KeyStats>,
-    next_id: &mut u32,
-    epoch: u64,
-    fee_payer_id: u32,
-) -> u32 {
-    map.entry(key)
-        .or_insert_with(|| {
-            let id = *next_id;
-            *next_id += 1;
-            KeyStats {
-                id,
-                count: 0,
-                first_fee_payer: fee_payer_id,
-                first_epoch: epoch as u16,
-                last_epoch: epoch as u16,
-            }
-        })
-        .id
 }
