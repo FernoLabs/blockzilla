@@ -1,7 +1,7 @@
 mod block_reader;
 mod build_registry;
-mod build_registry_db;
 mod file_downloader;
+mod optimizer;
 mod transaction_parser;
 
 use anyhow::Result;
@@ -13,7 +13,6 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use crate::{
     block_reader::{read_block, read_block_par},
     build_registry::{build_registry_auto, build_registry_single},
-    build_registry_db::inspect_registry_cli,
 };
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
@@ -59,27 +58,13 @@ enum Commands {
         #[arg(short, long)]
         epoch: u64,
     },
-    RegistryDb {
+    Optimize {
         #[arg(short, long)]
         cache_dir: String,
-        #[arg(short, long)]
+        #[arg(short, long, default_value = "optimized")]
         results_dir: String,
-        #[arg(long, default_value_t = 900)]
-        max_epoch: u64,
-    },
-    /// Inspect global sled registry
-    RegistryInspect {
-        /// Path to sled DB (e.g. ./out/registry-global.db)
         #[arg(short, long)]
-        db_path: String,
-
-        /// Print as JSON instead of table
-        #[arg(long, default_value_t = false)]
-        json: bool,
-
-        /// Optional Pubkey to query
-        #[arg(short, long)]
-        pubkey: Option<String>,
+        epoch: u64,
     },
 }
 
@@ -112,7 +97,7 @@ async fn main() -> Result<()> {
             cache_dir,
             results_dir,
             max_epoch,
-        } => build_registry_auto(&cache_dir, &results_dir, max_epoch).await?,
+        } => build_registry_auto(&cache_dir, &results_dir, max_epoch, 4).await?,
         Commands::RegistrySingle {
             cache_dir,
             results_dir,
@@ -120,20 +105,11 @@ async fn main() -> Result<()> {
         } => {
             build_registry_single(&cache_dir, &results_dir, epoch).await?;
         }
-
-        Commands::RegistryDb {
+        Commands::Optimize {
             cache_dir,
             results_dir,
-            max_epoch,
-        } => build_registry_db::build_registry_auto(&cache_dir, &results_dir, max_epoch).await?,
-
-        Commands::RegistryInspect {
-            db_path,
-            json,
-            pubkey,
-        } => {
-            inspect_registry_cli(&db_path, json, pubkey)?;
-        }
+            epoch,
+        } => optimizer::run_car_optimizer(&cache_dir, epoch, &results_dir, 4).await?,
     }
 
     Ok(())

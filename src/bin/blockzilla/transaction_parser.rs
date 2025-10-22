@@ -1,5 +1,8 @@
 use ahash::AHashSet;
 use anyhow::Result;
+use serde::Deserialize;
+use serde::Serialize;
+use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::mem::MaybeUninit;
 use std::ptr::copy_nonoverlapping;
@@ -33,8 +36,8 @@ fn read_short_u16_len(buf: &[u8], pos: &mut usize) -> anyhow::Result<usize> {
 #[inline(always)]
 pub fn parse_account_keys_only_fast(
     tx: &[u8],
-    out: &mut AHashSet<Pubkey>,
-) -> anyhow::Result<Option<Pubkey>> {
+    out: &mut SmallVec<[Pubkey; 256]>,
+) -> Result<Option<Pubkey>> {
     let mut pos = 0usize;
 
     // 1️⃣ Skip signatures
@@ -63,6 +66,8 @@ pub fn parse_account_keys_only_fast(
         return Ok(None);
     }
 
+    out.clear();
+    out.reserve(n_keys);
     let mut first_key: Option<Pubkey> = None;
 
     for i in 0..n_keys {
@@ -78,7 +83,7 @@ pub fn parse_account_keys_only_fast(
         if i == 0 {
             first_key = Some(pk);
         }
-        out.insert(pk);
+        out.push(pk);
     }
 
     // 5️⃣ Skip recent_blockhash
@@ -107,7 +112,7 @@ pub fn parse_account_keys_only_fast(
                 copy_nonoverlapping(tx[pos..].as_ptr(), key.as_mut_ptr(), 32);
             }
             pos += 32;
-            out.insert(Pubkey::new_from_array(key));
+            out.push(Pubkey::new_from_array(key));
 
             let w_len = read_short_u16_len(tx, &mut pos)? as usize;
             pos += w_len;
@@ -304,6 +309,21 @@ impl VersionedMessage {
         match self {
             VersionedMessage::Legacy(m) => &m.header,
             VersionedMessage::V0(m) => &m.header,
+        }
+    }
+    #[inline]
+    pub fn instructions_len(&self) -> usize {
+        match self {
+            VersionedMessage::Legacy(m) => m.instructions.len(),
+            VersionedMessage::V0(m) => m.instructions.len(),
+        }
+    }
+
+    #[inline]
+    pub fn instructions_iter(&self) -> impl Iterator<Item = &CompiledInstruction> {
+        match self {
+            VersionedMessage::Legacy(m) => m.instructions.iter(),
+            VersionedMessage::V0(m) => m.instructions.iter(),
         }
     }
 }
