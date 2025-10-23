@@ -226,12 +226,6 @@ async fn process_epoch_one_pass(
     epoch: u64,
     pb: &ProgressBar,
 ) -> Result<(AHashMap<Pubkey, KeyStats>, Vec<u32>, usize)> {
-    let local_path = if has_local_epoch(cache_dir, epoch) {
-        PathBuf::from(format!("{cache_dir}/epoch-{epoch}.car"))
-    } else {
-        download_epoch_to_disk(cache_dir, epoch).await?
-    };
-
     let keys_path = Path::new(results_dir).join(format!("keys-{epoch:04}.bin"));
     let keys_tmp = keys_path.with_extension("tmp");
     let f = File::create(&keys_tmp).await?;
@@ -347,10 +341,6 @@ async fn process_epoch_one_pass(
 
     let counts = data.counts.clone();
     let registry = data.to_registry(&keys_path, epoch)?;
-    
-    if let Err(e) = fs::remove_file(&local_path).await {
-        tracing::warn!("cleanup failed for {}: {e}", local_path.display());
-    }
     
     Ok((registry, counts, next_id as usize))
 }

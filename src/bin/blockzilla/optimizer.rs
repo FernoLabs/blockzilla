@@ -668,12 +668,6 @@ pub async fn run_car_optimizer(
     output_dir: &str,
     zstd_level: i32,
 ) -> Result<()> {
-    let _car = if has_local_epoch(cache_dir, epoch) {
-        PathBuf::from(format!("{cache_dir}/epoch-{epoch}.car"))
-    } else {
-        download_epoch_to_disk(cache_dir, epoch).await?
-    };
-
     let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
