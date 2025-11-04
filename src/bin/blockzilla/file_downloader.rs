@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
@@ -6,7 +6,7 @@ use tokio::process::Command;
 use tokio::{
     fs,
     io::{AsyncBufReadExt, BufReader},
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 
 /// Base URL for all epochs.
@@ -41,10 +41,18 @@ async fn download_with_aria2(url: &str, out_path: &Path) -> Result<()> {
 
     // Tuned aria2c command: -c -x 16 -s 16 -j 8 --file-allocation=none
     let args = [
-        "-c", "-x", "16", "-s", "16", "-j", "8",
+        "-c",
+        "-x",
+        "16",
+        "-s",
+        "16",
+        "-j",
+        "8",
         "--file-allocation=none",
-        "-d", &out_dir.to_string_lossy(),
-        "-o", &file_name,
+        "-d",
+        &out_dir.to_string_lossy(),
+        "-o",
+        &file_name,
         url,
     ];
 
@@ -91,7 +99,11 @@ async fn download_with_aria2(url: &str, out_path: &Path) -> Result<()> {
     }
 
     let elapsed = start.elapsed().as_secs_f64();
-    tracing::info!("✅ aria2c completed in {:.1}s → {}", elapsed, out_path.display());
+    tracing::info!(
+        "✅ aria2c completed in {:.1}s → {}",
+        elapsed,
+        out_path.display()
+    );
     Ok(())
 }
 

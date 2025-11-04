@@ -1,16 +1,16 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use clap::ValueEnum;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
-use reqwest::{header, Client};
+use reqwest::{Client, header};
 use std::{
     env,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context as TaskCx, Poll},
     time::{Duration, Instant},
@@ -18,7 +18,7 @@ use std::{
 use tokio::{
     fs,
     io::{AsyncRead, ReadBuf},
-    sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc},
 };
 
 // ============================================================================
@@ -35,13 +35,22 @@ pub enum FetchMode {
 // Env helpers
 // ============================================================================
 fn env_usize(key: &str, default: usize) -> usize {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 fn env_f64(key: &str, default: f64) -> f64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 // ============================================================================
@@ -55,16 +64,28 @@ const SMALL_THRESHOLD: usize = 4 * 1024 * 1024;
 
 #[inline]
 async fn get_buf(cap: usize) -> BytesMut {
-    let pool = if cap <= SMALL_THRESHOLD { &*POOL_SMALL } else { &*POOL_LARGE };
+    let pool = if cap <= SMALL_THRESHOLD {
+        &*POOL_SMALL
+    } else {
+        &*POOL_LARGE
+    };
     let mut p = pool.lock().await;
     p.pop().unwrap_or_else(|| BytesMut::with_capacity(cap))
 }
 #[inline]
 async fn return_buf(mut buf: BytesMut) {
     buf.clear();
-    let pool = if buf.capacity() <= SMALL_THRESHOLD { &*POOL_SMALL } else { &*POOL_LARGE };
+    let pool = if buf.capacity() <= SMALL_THRESHOLD {
+        &*POOL_SMALL
+    } else {
+        &*POOL_LARGE
+    };
     let mut p = pool.lock().await;
-    let lim = if buf.capacity() <= SMALL_THRESHOLD { POOL_SMALL_LIMIT } else { POOL_LARGE_LIMIT };
+    let lim = if buf.capacity() <= SMALL_THRESHOLD {
+        POOL_SMALL_LIMIT
+    } else {
+        POOL_LARGE_LIMIT
+    };
     if p.len() < lim {
         p.push(buf);
     }
@@ -90,7 +111,11 @@ pub struct ChannelReader {
 }
 impl ChannelReader {
     pub fn new(rx: mpsc::Receiver<Bytes>) -> Self {
-        Self { rx, current: None, done: false }
+        Self {
+            rx,
+            current: None,
+            done: false,
+        }
     }
 }
 impl AsyncRead for ChannelReader {
@@ -186,8 +211,8 @@ async fn stream_epoch_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Se
                     break;
                 }
                 if last_log.elapsed() >= Duration::from_secs(1) {
-                    let mbps = (written as f64 / 1_048_576.0)
-                        / start.elapsed().as_secs_f64().max(0.001);
+                    let mbps =
+                        (written as f64 / 1_048_576.0) / start.elapsed().as_secs_f64().max(0.001);
                     tracing::info!(
                         "📦 streamed {} / ~{:.2} GB ({:.1} MB/s)",
                         written,
@@ -209,17 +234,17 @@ async fn stream_epoch_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Se
 // Network: adaptive multi-client H2 with byte-based window + stash guard
 // ============================================================================
 async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
-    let slice_mb        = env_u64("BZ_SLICE_MB", 16);
-    let workers_min     = env_usize("BZ_WORKERS_MIN", 28);
-    let workers_max     = env_usize("BZ_WORKERS_MAX", 64);
-    let clients_n       = env_usize("BZ_H2_CLIENTS", 8);
-    let target_mbps     = env_f64("BZ_TARGET_MBPS", 900.0);
-    let alpha           = env_f64("BZ_EWMA_ALPHA", 0.25);
-    let adapt_interval_s= env_u64("BZ_ADAPT_INTERVAL_S", 4);
-    let mem_cap_mb      = env_usize("BZ_MEM_CAP_MB", 2048);
+    let slice_mb = env_u64("BZ_SLICE_MB", 16);
+    let workers_min = env_usize("BZ_WORKERS_MIN", 28);
+    let workers_max = env_usize("BZ_WORKERS_MAX", 64);
+    let clients_n = env_usize("BZ_H2_CLIENTS", 8);
+    let target_mbps = env_f64("BZ_TARGET_MBPS", 900.0);
+    let alpha = env_f64("BZ_EWMA_ALPHA", 0.25);
+    let adapt_interval_s = env_u64("BZ_ADAPT_INTERVAL_S", 4);
+    let mem_cap_mb = env_usize("BZ_MEM_CAP_MB", 2048);
     let ring_slots_pow2 = env_usize("BZ_RING_SLOTS", 8192);
-    let window_mb       = env_u64("BZ_WINDOW_MB", 1024);
-    let stash_guard_mb  = env_u64("BZ_STASH_GUARD_MB", 768);
+    let window_mb = env_u64("BZ_WINDOW_MB", 1024);
+    let stash_guard_mb = env_u64("BZ_STASH_GUARD_MB", 768);
 
     let slice_bytes = (slice_mb * 1024 * 1024) as u64;
     let unit_bytes = 1024 * 1024usize;
@@ -249,8 +274,15 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
 
     tracing::info!(
         "🚀 Network(H2Adaptive): {:.2} GB | slice={} MB | workers={}..{} | mem={} MiB | clients={} | ring={} | window={} MB | stash_guard={} MB",
-        total as f64 / 1e9, slice_mb, workers_min, workers_max, mem_cap_mb,
-        clients.len(), ring_cap, window_mb, stash_guard_mb
+        total as f64 / 1e9,
+        slice_mb,
+        workers_min,
+        workers_max,
+        mem_cap_mb,
+        clients.len(),
+        ring_cap,
+        window_mb,
+        stash_guard_mb
     );
 
     // -------------------- Workers --------------------
@@ -287,7 +319,10 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                     if cur >= total_slices {
                         break cur;
                     }
-                    if next_idx.compare_exchange(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                    if next_idx
+                        .compare_exchange(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                    {
                         break cur;
                     }
                 };
@@ -298,7 +333,8 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                 // enforce byte-based reordering window
                 loop {
                     let drained_i = drained.load(Ordering::Relaxed);
-                    let ahead_bytes = (idx.saturating_sub(drained_i)) as u128 * (slice_bytes as u128);
+                    let ahead_bytes =
+                        (idx.saturating_sub(drained_i)) as u128 * (slice_bytes as u128);
                     if ahead_bytes <= window_bytes as u128 {
                         break;
                     }
@@ -346,7 +382,10 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                             while let Some(c) = s.next().await {
                                 match c {
                                     Ok(b) => buf.extend_from_slice(&b),
-                                    Err(_) => { ok = false; break; }
+                                    Err(_) => {
+                                        ok = false;
+                                        break;
+                                    }
                                 }
                             }
                             if ok && buf.len() == need {
@@ -427,7 +466,11 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
         let drained = drained_index.clone();
         let stop_ref = stop.clone();
         async move {
-            struct Held { buf: Bytes, permit: OwnedSemaphorePermit, len: usize }
+            struct Held {
+                buf: Bytes,
+                permit: OwnedSemaphorePermit,
+                len: usize,
+            }
             let mut ring: Vec<Option<Held>> = (0..ring_cap).map(|_| None).collect();
             let mut next_idx = 0u64;
             let mut written = 0u64;
@@ -437,7 +480,9 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                 let len = buf.len();
                 let slot = (idx as usize) & ring_mask;
                 ring[slot] = Some(Held { buf, permit, len });
-                while let Some(Held { buf, permit, len }) = ring[(next_idx as usize) & ring_mask].take() {
+                while let Some(Held { buf, permit, len }) =
+                    ring[(next_idx as usize) & ring_mask].take()
+                {
                     if tx_stream.send(buf).await.is_err() {
                         drop(permit);
                         drop(tx_stream);
@@ -458,11 +503,16 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                 }
                 if last_log.elapsed() >= Duration::from_secs(1) {
                     last_log = Instant::now();
-                    let mbps = (written as f64 / 1_048_576.0)
-                        / start.elapsed().as_secs_f64().max(0.001);
+                    let mbps =
+                        (written as f64 / 1_048_576.0) / start.elapsed().as_secs_f64().max(0.001);
                     let stash_mb = stash_ref.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
-                    tracing::info!("📦 {} / ~{:.2} GB ({:.1} MB/s) | stash: {:.0} MB",
-                        written, total as f64 / 1e9, mbps, stash_mb);
+                    tracing::info!(
+                        "📦 {} / ~{:.2} GB ({:.1} MB/s) | stash: {:.0} MB",
+                        written,
+                        total as f64 / 1e9,
+                        mbps,
+                        stash_mb
+                    );
                 }
             }
         }
