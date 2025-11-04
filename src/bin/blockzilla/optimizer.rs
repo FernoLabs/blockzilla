@@ -11,7 +11,7 @@ use solana_message::MessageHeader;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap},
     hash::{BuildHasherDefault, Hasher},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -23,21 +23,6 @@ use crate::transaction_parser::{VersionedMessage, VersionedTransaction};
 // How often to print progress
 const LOG_INTERVAL_SECS: u64 = 10;
 
-// =============================== Hashers ===============================
-#[derive(Default)]
-struct PubkeyHasher(u64);
-impl Hasher for PubkeyHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        if bytes.len() >= 8 {
-            self.0 = u64::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-            ]);
-        }
-    }
-}
 #[derive(Default)]
 struct NoOpHasher(u64);
 impl Hasher for NoOpHasher {
@@ -53,99 +38,120 @@ type U64Map<V> = HashMap<u64, V, BuildHasherDefault<NoOpHasher>>;
 
 // First 8 bytes fingerprint
 #[inline(always)]
-fn pubkey_fp(k: &Pubkey) -> u64 {
-    let b = k.as_ref();
-    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+fn pubkey_fp(k: &[u8]) -> u64 {
+    u64::from_le_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]])
 }
 
-// =============================== Registry ===============================
-pub struct KeyRegistry {
-    next_id: u32,
-    fp_to_id: U64Map<u32>,
-    keys_writer: BufWriter<std::fs::File>,
-    index_writer: BufWriter<std::fs::File>,
-    key_batch: Vec<u8>,
-    index_batch: Vec<u8>,
+enum IndexEntry {
+    Single(u32),
+    Multiple(Vec<u32>),
 }
-impl KeyRegistry {
-    const KEY_BATCH_SIZE: usize = 2048;
-    const INDEX_BATCH_SIZE: usize = 2048;
 
-    pub fn new<P: AsRef<Path>>(out_dir: P, epoch: u64) -> Result<Self> {
-        std::fs::create_dir_all(&out_dir)?;
-        let keys_path = out_dir.as_ref().join(format!("keys-{epoch:04}.bin"));
-        let index_path = out_dir.as_ref().join(format!("index-{epoch:04}.bin"));
-        let kf = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&keys_path)?;
-        let inf = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&index_path)?;
+impl IndexEntry {
+    fn push(&mut self, id: u32) {
+        match self {
+            IndexEntry::Single(existing) => {
+                let mut v = Vec::with_capacity(2);
+                v.push(*existing);
+                v.push(id);
+                *self = IndexEntry::Multiple(v);
+            }
+            IndexEntry::Multiple(list) => list.push(id),
+        }
+    }
+}
+
+pub struct OrderedPubkeyRegistry {
+    index: U64Map<IndexEntry>,
+    pubkeys: Box<[u8]>,
+    len: usize,
+}
+
+impl OrderedPubkeyRegistry {
+    const KEY_SIZE: usize = 32;
+
+    pub fn load<P: AsRef<Path>>(registry_dir: P, epoch: u64) -> Result<Self> {
+        let path = registry_dir
+            .as_ref()
+            .join(format!("registry-pubkeys-{epoch:04}.bin"));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .with_context(|| format!("missing registry pubkeys file: {}", path.display()))?;
+        let len_bytes = file.metadata()?.len() as usize;
+        if len_bytes % Self::KEY_SIZE != 0 {
+            return Err(anyhow!(
+                "registry pubkeys file has invalid length: {} bytes",
+                len_bytes
+            ));
+        }
+        let mut data = Vec::with_capacity(len_bytes);
+        // SAFETY: we immediately fill the buffer via read_exact
+        unsafe { data.set_len(len_bytes); }
+        file.read_exact(&mut data)?;
+        let pubkeys = data.into_boxed_slice();
+
+        let len = pubkeys.len() / Self::KEY_SIZE;
+        let mut index: U64Map<IndexEntry> =
+            HashMap::with_capacity_and_hasher(len, Default::default());
+        for id in 0..len {
+            let start = id * Self::KEY_SIZE;
+            let slice = &pubkeys[start..start + Self::KEY_SIZE];
+            let fp = pubkey_fp(slice);
+            match index.entry(fp) {
+                Entry::Vacant(v) => {
+                    v.insert(IndexEntry::Single(id as u32));
+                }
+                Entry::Occupied(mut o) => {
+                    o.get_mut().push(id as u32);
+                }
+            }
+        }
+
         Ok(Self {
-            next_id: 0,
-            fp_to_id: HashMap::with_capacity_and_hasher(10_000_000, BuildHasherDefault::default()),
-            keys_writer: BufWriter::with_capacity(32 * 1024 * 1024, kf),
-            index_writer: BufWriter::with_capacity(16 * 1024 * 1024, inf),
-            key_batch: Vec::with_capacity(Self::KEY_BATCH_SIZE * 32),
-            index_batch: Vec::with_capacity(Self::INDEX_BATCH_SIZE * 12),
+            index,
+            pubkeys,
+            len,
         })
     }
 
     #[inline]
-    pub fn get_or_insert(&mut self, key: &Pubkey) -> Result<u32> {
-        let fp = pubkey_fp(key);
-        if let Some(&id) = self.fp_to_id.get(&fp) {
-            return Ok(id);
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.fp_to_id.insert(fp, id);
-
-        self.key_batch.extend_from_slice(key.as_ref());
-        if self.key_batch.len() >= Self::KEY_BATCH_SIZE * 32 {
-            self.keys_writer.write_all(&self.key_batch)?;
-            self.key_batch.clear();
-        }
-
-        self.index_batch.extend_from_slice(&fp.to_le_bytes());
-        self.index_batch.extend_from_slice(&id.to_le_bytes());
-        if self.index_batch.len() >= Self::INDEX_BATCH_SIZE * 12 {
-            self.index_writer.write_all(&self.index_batch)?;
-            self.index_batch.clear();
-        }
-        Ok(id)
+    fn slice_for(&self, id: u32) -> &[u8] {
+        let start = id as usize * Self::KEY_SIZE;
+        &self.pubkeys[start..start + Self::KEY_SIZE]
     }
 
-    pub fn flush(&mut self) -> Result<()> {
-        if !self.key_batch.is_empty() {
-            self.keys_writer.write_all(&self.key_batch)?;
-            self.key_batch.clear();
+    #[inline]
+    fn lookup_raw(&self, pk: &Pubkey) -> Option<u32> {
+        let bytes = pk.as_ref();
+        let fp = pubkey_fp(bytes);
+        match self.index.get(&fp)? {
+            IndexEntry::Single(id) => {
+                if self.slice_for(*id).eq(bytes) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            }
+            IndexEntry::Multiple(ids) => {
+                ids.iter().copied().find(|id| self.slice_for(*id).eq(bytes))
+            }
         }
-        if !self.index_batch.is_empty() {
-            self.index_writer.write_all(&self.index_batch)?;
-            self.index_batch.clear();
-        }
-        self.keys_writer.flush()?;
-        self.index_writer.flush()?;
-        Ok(())
     }
 
     pub fn len(&self) -> usize {
-        self.fp_to_id.len()
+        self.len
     }
 }
 
 pub trait RegistryAccess {
     fn get_or_insert(&mut self, pk: &Pubkey) -> Result<u32>;
 }
-impl RegistryAccess for KeyRegistry {
-    #[inline]
+
+impl RegistryAccess for OrderedPubkeyRegistry {
     fn get_or_insert(&mut self, pk: &Pubkey) -> Result<u32> {
-        KeyRegistry::get_or_insert(self, pk)
+        self.lookup_raw(pk)
+            .ok_or_else(|| anyhow!("pubkey {} missing from registry", pk))
     }
 }
 
@@ -666,6 +672,7 @@ pub async fn run_car_optimizer(
     cache_dir: &str,
     epoch: u64,
     output_dir: &str,
+    registry_dir: Option<&str>,
     zstd_level: i32,
 ) -> Result<()> {
     let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
@@ -694,7 +701,8 @@ pub async fn run_car_optimizer(
             .open(&idx_path)?,
     );
 
-    let mut reg = KeyRegistry::new(&out_dir, epoch)?;
+    let registry_base = registry_dir.unwrap_or(output_dir);
+    let mut reg = OrderedPubkeyRegistry::load(registry_base, epoch)?;
 
     let start = Instant::now();
     let mut last_log = start;
@@ -727,7 +735,6 @@ pub async fn run_car_optimizer(
         if now.duration_since(last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
             bin.flush()?;
             idx.flush()?;
-            reg.flush()?;
             let elapsed = now.duration_since(start).as_secs_f64().max(0.001);
             let blkps = blocks as f64 / elapsed;
             println!(
@@ -743,8 +750,6 @@ pub async fn run_car_optimizer(
 
     bin.flush()?;
     idx.flush()?;
-    reg.flush()?;
-
     println!(
         "✅ Done: {blocks} blocks → {} | keys={} | {:.2} MB | {:.1}s",
         bin_path.display(),
