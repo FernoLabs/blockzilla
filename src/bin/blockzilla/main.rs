@@ -16,7 +16,9 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use crate::{
     block_reader::{read_block, read_block_par},
     build_registry::{build_registry_auto, build_registry_single, inspect_registry},
-    optimized_block_reader::{analyze_compressed_blocks, read_compressed_blocks},
+    optimized_block_reader::{
+        analyze_compressed_blocks, read_compressed_blocks, read_compressed_blocks_par,
+    },
 };
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
@@ -165,6 +167,18 @@ enum OptimizeCommand {
         zstd_level: i32,
         #[arg(long, default_value_t = false)]
         force: bool,
+    },
+
+    /// Legacy alias for reading compressed BlockWithIds archives
+    Read {
+        #[arg(value_name = "EPOCH")]
+        epoch: u64,
+        #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
+        input_dir: String,
+        #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
+        registry_dir: String,
+        #[arg(short = 'j', long, default_value_t = 1)]
+        jobs: usize,
     },
 
     /// Analyzes compressed BlockWithIds and shows statistics
@@ -323,6 +337,19 @@ async fn main() -> Result<()> {
                 info!(
                     "🏁 completed range {start_epoch:04}-{end_epoch:04} | {completed} processed | {skipped} skipped"
                 );
+            }
+
+            OptimizeCommand::Read {
+                epoch,
+                input_dir,
+                registry_dir,
+                jobs,
+            } => {
+                if jobs <= 1 {
+                    read_compressed_blocks(epoch, &input_dir, &registry_dir, jobs).await?
+                } else {
+                    read_compressed_blocks_par(epoch, &input_dir, &registry_dir, jobs).await?
+                }
             }
 
             OptimizeCommand::Analyze { epoch, input_dir } => {

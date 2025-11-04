@@ -41,6 +41,15 @@ pub async fn read_compressed_blocks(
     Ok(())
 }
 
+pub async fn read_compressed_blocks_par(
+    epoch: u64,
+    input_dir: &str,
+    registry_dir: &str,
+    jobs: usize,
+) -> Result<()> {
+    read_compressed_blocks(epoch, input_dir, registry_dir, jobs).await
+}
+
 async fn read_compressed_blocks_seq(
     epoch: u64,
     input_dir: &str,
