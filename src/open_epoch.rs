@@ -21,9 +21,6 @@ use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc},
 };
 
-// ============================================================================
-// Modes
-// ============================================================================
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FetchMode {
     Offline,
@@ -31,9 +28,6 @@ pub enum FetchMode {
     Network,
 }
 
-// ============================================================================
-// Env helpers
-// ============================================================================
 fn env_usize(key: &str, default: usize) -> usize {
     env::var(key)
         .ok()
@@ -53,9 +47,6 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-// ============================================================================
-// Tiered buffer pool
-// ============================================================================
 static POOL_SMALL: Lazy<Mutex<Vec<BytesMut>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static POOL_LARGE: Lazy<Mutex<Vec<BytesMut>>> = Lazy::new(|| Mutex::new(Vec::new()));
 const POOL_SMALL_LIMIT: usize = 256;
@@ -101,9 +92,6 @@ pub async fn warmup_pools() {
     }
 }
 
-// ============================================================================
-// AsyncRead over channel
-// ============================================================================
 pub struct ChannelReader {
     rx: mpsc::Receiver<Bytes>,
     current: Option<Bytes>,
@@ -153,9 +141,6 @@ impl AsyncRead for ChannelReader {
     }
 }
 
-// ============================================================================
-// HTTP client helpers
-// ============================================================================
 fn build_h2_client() -> Result<Client> {
     Ok(Client::builder()
         .http2_adaptive_window(true)
@@ -183,9 +168,6 @@ async fn head_content_length(client: &Client, url: &str) -> Result<u64> {
         .context("Missing Content-Length")
 }
 
-// ============================================================================
-// SafeNetwork: sequential stream
-// ============================================================================
 async fn stream_epoch_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     let client = build_h2_client()?;
     let total = head_content_length(&client, &url).await?;
@@ -230,9 +212,7 @@ async fn stream_epoch_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Se
     Ok(Box::new(ChannelReader::new(rx)))
 }
 
-// ============================================================================
 // Network: adaptive multi-client H2 with byte-based window + stash guard
-// ============================================================================
 async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     let slice_mb = env_u64("BZ_SLICE_MB", 16);
     let workers_min = env_usize("BZ_WORKERS_MIN", 28);
@@ -285,7 +265,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
         stash_guard_mb
     );
 
-    // -------------------- Workers --------------------
     for wid in 0..workers_max {
         let clients = clients.clone();
         let url = url.clone();
@@ -411,7 +390,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
     }
     drop(tx_prod);
 
-    // -------------------- Adaptive scaler --------------------
     {
         let workers_ref = active_workers.clone();
         let delivered = delivered_bytes.clone();
@@ -459,7 +437,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
         });
     }
 
-    // -------------------- Orderer --------------------
     tokio::spawn({
         let delivered = delivered_bytes.clone();
         let stash_ref = stash_bytes.clone();
@@ -521,9 +498,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
     Ok(Box::new(ChannelReader::new(rx_stream)))
 }
 
-// ============================================================================
-// Entry point
-// ============================================================================
 pub async fn open_epoch(
     epoch: u64,
     cache_dir: impl AsRef<Path>,
