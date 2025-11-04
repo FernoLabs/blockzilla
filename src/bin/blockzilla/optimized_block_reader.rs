@@ -3,36 +3,61 @@ use indicatif::ProgressBar;
 use solana_pubkey::Pubkey;
 use std::{
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     fs,
     fs::File,
     io::{AsyncReadExt, BufReader},
+    sync::{Mutex, mpsc},
+    task,
 };
 
-use crate::optimizer::{BlockWithIds, CompactInstruction, CompactReward, CompactTokenBalance};
-pub const LOG_INTERVAL_SECS: u64 = 2;
+use crate::{
+    LOG_INTERVAL_SECS,
+    optimizer::{BlockWithIds, CompactInstruction, CompactReward, CompactTokenBalance},
+};
 
-pub async fn read_compressed_blocks(epoch: u64, input_dir: &str, registry_dir: &str) -> Result<()> {
+pub async fn read_compressed_blocks(
+    epoch: u64,
+    input_dir: &str,
+    registry_dir: &str,
+    jobs: usize,
+) -> Result<()> {
+    let registry_pubkeys = load_registry_pubkeys(registry_dir, epoch).await?;
+    let usage = RegistryUsage::new(registry_pubkeys);
+    let jobs = jobs.max(1);
+
+    let usage = if jobs == 1 {
+        read_compressed_blocks_seq(epoch, input_dir, usage).await?
+    } else {
+        read_compressed_blocks_parallel(epoch, input_dir, usage, jobs).await?
+    };
+
+    usage.print_summary(epoch);
+
+    Ok(())
+}
+
+async fn read_compressed_blocks_seq(
+    epoch: u64,
+    input_dir: &str,
+    mut usage: RegistryUsage,
+) -> Result<RegistryUsage> {
     let bin_path = Path::new(input_dir).join(format!("epoch-{epoch:04}.bin"));
 
     if !bin_path.exists() {
         anyhow::bail!("Binary file not found: {}", bin_path.display());
     }
 
-    let registry_pubkeys = load_registry_pubkeys(registry_dir, epoch).await?;
-    let mut registry_usage = RegistryUsage::new(registry_pubkeys);
-
     let file = File::open(&bin_path).await?;
     let mut reader = BufReader::with_capacity(32 * 1024 * 1024, file);
 
     let start = Instant::now();
-    let mut last_log = start;
+    let mut stats = ReaderStats::new(start);
     let pb = ProgressBar::new_spinner();
-
-    let mut blocks_count = 0u64;
-    let mut tx_count = 0u64;
     let mut decompress_buf = Vec::with_capacity(2 * 1024 * 1024);
 
     loop {
@@ -54,43 +79,257 @@ pub async fn read_compressed_blocks(epoch: u64, input_dir: &str, registry_dir: &
         let block: BlockWithIds =
             postcard::from_bytes(&decompress_buf).context("Failed to deserialize BlockWithIds")?;
 
-        tx_count += block.num_transactions;
-        blocks_count += 1;
+        stats.record_block(&block, &mut usage, epoch, start, &pb)?;
+    }
 
-        registry_usage.record_block(&block)?;
+    stats.finish(epoch, start, &pb);
+
+    Ok(usage)
+}
+
+async fn read_compressed_blocks_parallel(
+    epoch: u64,
+    input_dir: &str,
+    mut usage: RegistryUsage,
+    jobs: usize,
+) -> Result<RegistryUsage> {
+    let bin_path = Path::new(input_dir).join(format!("epoch-{epoch:04}.bin"));
+
+    if !bin_path.exists() {
+        anyhow::bail!("Binary file not found: {}", bin_path.display());
+    }
+
+    let file = File::open(&bin_path).await?;
+    let mut reader = BufReader::with_capacity(32 * 1024 * 1024, file);
+
+    let start = Instant::now();
+    let mut stats = ReaderStats::new(start);
+    let pb = ProgressBar::new_spinner();
+
+    let (work_tx, work_rx) = mpsc::channel::<Vec<u8>>(jobs * 4);
+    let work_rx = Arc::new(Mutex::new(work_rx));
+    let (result_tx, mut result_rx) = mpsc::channel::<WorkerMessage>(jobs * 4);
+
+    for _ in 0..jobs {
+        let work_rx = Arc::clone(&work_rx);
+        let result_tx = result_tx.clone();
+        task::spawn_blocking(move || {
+            let mut decompress_buf = Vec::with_capacity(2 * 1024 * 1024);
+
+            loop {
+                let compressed = {
+                    let mut guard = work_rx.blocking_lock();
+                    guard.blocking_recv()
+                };
+
+                let Some(compressed) = compressed else {
+                    break;
+                };
+
+                decompress_buf.clear();
+                let message = (|| {
+                    zstd::stream::copy_decode(&compressed[..], &mut decompress_buf)
+                        .map_err(|e| format!("Failed to decompress block: {e}"))?;
+                    postcard::from_bytes(&decompress_buf)
+                        .map_err(|e| format!("Failed to deserialize BlockWithIds: {e}"))
+                })();
+
+                match message {
+                    Ok(block) => {
+                        if result_tx
+                            .blocking_send(WorkerMessage::Block(block))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = result_tx.blocking_send(WorkerMessage::Error(err));
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    drop(result_tx);
+
+    let mut pending = 0usize;
+
+    loop {
+        let mut len_bytes = [0u8; 4];
+        match reader.read_exact(&mut len_bytes).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let len = u32::from_le_bytes(len_bytes) as usize;
+
+        let mut compressed = vec![0u8; len];
+        reader.read_exact(&mut compressed).await?;
+
+        if work_tx.send(compressed).await.is_err() {
+            break;
+        }
+
+        pending = pending.saturating_add(1);
+        drain_ready_results(
+            &mut result_rx,
+            &mut pending,
+            &mut usage,
+            &mut stats,
+            epoch,
+            start,
+            &pb,
+        )?;
+    }
+
+    drop(work_tx);
+
+    drain_ready_results(
+        &mut result_rx,
+        &mut pending,
+        &mut usage,
+        &mut stats,
+        epoch,
+        start,
+        &pb,
+    )?;
+
+    while pending > 0 {
+        let message = result_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("worker channel closed unexpectedly"))?;
+        process_worker_message(message, &mut usage, &mut stats, epoch, start, &pb)?;
+        if pending > 0 {
+            pending -= 1;
+        }
+    }
+
+    stats.finish(epoch, start, &pb);
+
+    Ok(usage)
+}
+
+struct ReaderStats {
+    blocks_count: u64,
+    tx_count: u64,
+    last_log: Instant,
+}
+
+impl ReaderStats {
+    fn new(start: Instant) -> Self {
+        Self {
+            blocks_count: 0,
+            tx_count: 0,
+            last_log: start,
+        }
+    }
+
+    fn record_block(
+        &mut self,
+        block: &BlockWithIds,
+        usage: &mut RegistryUsage,
+        epoch: u64,
+        start: Instant,
+        pb: &ProgressBar,
+    ) -> Result<()> {
+        usage.record_block(block)?;
+        self.blocks_count = self.blocks_count.saturating_add(1);
+        self.tx_count = self.tx_count.saturating_add(block.num_transactions);
 
         let now = Instant::now();
-        if now.duration_since(last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
-            last_log = now;
+        if now.duration_since(self.last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
+            self.last_log = now;
             let elapsed = now.duration_since(start);
+            let block_rate = if elapsed.as_secs_f64() > 0.0 {
+                self.blocks_count as f64 / elapsed.as_secs_f64()
+            } else {
+                0.0
+            };
             pb.set_message(format!(
                 "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>8} txs | {:>6} TPS",
-                blocks_count,
-                blocks_count as f64 / elapsed.as_secs_f64(),
-                tx_count,
+                self.blocks_count,
+                block_rate,
+                self.tx_count,
                 if elapsed.as_secs() > 0 {
-                    tx_count / elapsed.as_secs()
+                    self.tx_count / elapsed.as_secs()
                 } else {
                     0
                 },
             ));
         }
+
+        Ok(())
     }
 
-    pb.finish_with_message(format!(
-        "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>8} txs | {:>6} TPS | {:.1}s",
-        blocks_count,
-        blocks_count as f64 / start.elapsed().as_secs_f64(),
-        tx_count,
-        if start.elapsed().as_secs() > 0 {
-            tx_count / start.elapsed().as_secs()
-        } else {
-            0
-        },
-        start.elapsed().as_secs_f64()
-    ));
+    fn finish(&self, epoch: u64, start: Instant, pb: &ProgressBar) {
+        let elapsed = start.elapsed();
+        pb.finish_with_message(format!(
+            "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>8} txs | {:>6} TPS | {:.1}s",
+            self.blocks_count,
+            if elapsed.as_secs_f64() > 0.0 {
+                self.blocks_count as f64 / elapsed.as_secs_f64()
+            } else {
+                0.0
+            },
+            self.tx_count,
+            if elapsed.as_secs() > 0 {
+                self.tx_count / elapsed.as_secs()
+            } else {
+                0
+            },
+            elapsed.as_secs_f64()
+        ));
+    }
+}
 
-    registry_usage.print_summary(epoch);
+enum WorkerMessage {
+    Block(BlockWithIds),
+    Error(String),
+}
+
+fn process_worker_message(
+    message: WorkerMessage,
+    usage: &mut RegistryUsage,
+    stats: &mut ReaderStats,
+    epoch: u64,
+    start: Instant,
+    pb: &ProgressBar,
+) -> Result<()> {
+    match message {
+        WorkerMessage::Block(block) => {
+            stats.record_block(&block, usage, epoch, start, pb)?;
+        }
+        WorkerMessage::Error(err) => return Err(anyhow!(err)),
+    }
+
+    Ok(())
+}
+
+fn drain_ready_results(
+    result_rx: &mut mpsc::Receiver<WorkerMessage>,
+    pending: &mut usize,
+    usage: &mut RegistryUsage,
+    stats: &mut ReaderStats,
+    epoch: u64,
+    start: Instant,
+    pb: &ProgressBar,
+) -> Result<()> {
+    loop {
+        match result_rx.try_recv() {
+            Ok(message) => {
+                process_worker_message(message, usage, stats, epoch, start, pb)?;
+                if *pending > 0 {
+                    *pending -= 1;
+                }
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                return Err(anyhow!("worker channel closed unexpectedly"));
+            }
+        }
+    }
 
     Ok(())
 }

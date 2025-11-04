@@ -55,6 +55,7 @@ Walk the optimized archive with registry lookups:
 
 ```bash
 cargo run --release --bin blockzilla read optimized 839 --input-dir optimized --registry-dir registry
+# add `--jobs 4` (or any value > 1) to parallelize decompression and decoding
 ```
 
 ## Legacy archive builder flow

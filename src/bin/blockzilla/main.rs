@@ -62,7 +62,7 @@ enum ReadCommand {
         epoch: u64,
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
         cache_dir: String,
-        #[arg(short, long)]
+        #[arg(short, long, default_value = "offline")]
         mode: FetchMode,
         #[arg(short = 'j', long, default_value_t = 1)]
         jobs: usize,
@@ -76,6 +76,8 @@ enum ReadCommand {
         input_dir: String,
         #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
         registry_dir: String,
+        #[arg(short = 'j', long, default_value_t = 1)]
+        jobs: usize,
     },
 }
 
@@ -204,7 +206,8 @@ async fn main() -> Result<()> {
                 epoch,
                 input_dir,
                 registry_dir,
-            } => read_compressed_blocks(epoch, &input_dir, &registry_dir).await?,
+                jobs,
+            } => read_compressed_blocks(epoch, &input_dir, &registry_dir, jobs).await?,
         },
 
         Commands::Registry(cmd) => match cmd {
