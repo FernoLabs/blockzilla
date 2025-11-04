@@ -11,7 +11,7 @@ use solana_message::MessageHeader;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     hash::{BuildHasherDefault, Hasher},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -87,7 +87,9 @@ impl OrderedPubkeyRegistry {
         }
         let mut data = Vec::with_capacity(len_bytes);
         // SAFETY: we immediately fill the buffer via read_exact
-        unsafe { data.set_len(len_bytes); }
+        unsafe {
+            data.set_len(len_bytes);
+        }
         file.read_exact(&mut data)?;
         let pubkeys = data.into_boxed_slice();
 
