@@ -40,27 +40,23 @@ pub fn parse_account_keys_only_fast(
 ) -> Result<Option<Pubkey>> {
     let mut pos = 0usize;
 
-    // 1️⃣ Skip signatures
     let sig_len = read_short_u16_len(tx, &mut pos)? as usize;
     pos += sig_len * 64;
     if pos >= tx.len() {
         return Ok(None);
     }
 
-    // 2️⃣ Version prefix
     let prefix = tx[pos];
     let is_v0 = prefix & 0x80 != 0;
     if is_v0 {
         pos += 1;
     }
 
-    // 3️⃣ Header (3 bytes)
     pos += 3;
     if pos >= tx.len() {
         return Ok(None);
     }
 
-    // 4️⃣ Account keys
     let n_keys = read_short_u16_len(tx, &mut pos)? as usize;
     if n_keys == 0 {
         return Ok(None);
@@ -86,22 +82,18 @@ pub fn parse_account_keys_only_fast(
         out.push(pk);
     }
 
-    // 5️⃣ Skip recent_blockhash
     pos += 32;
 
-    // 6️⃣ Versioned message (v0)
     if is_v0 {
-        // Instructions
         let n_ix = read_short_u16_len(tx, &mut pos)? as usize;
         for _ in 0..n_ix {
-            pos += 1; // program_id_index
+            pos += 1;
             let ac_len = read_short_u16_len(tx, &mut pos)? as usize;
             pos += ac_len;
             let data_len = read_short_u16_len(tx, &mut pos)? as usize;
             pos += data_len;
         }
 
-        // Address table lookups
         let n_lookups = read_short_u16_len(tx, &mut pos)? as usize;
         for _ in 0..n_lookups {
             if pos + 32 > tx.len() {
@@ -127,12 +119,10 @@ pub fn parse_account_keys_only_fast(
 pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<Option<Pubkey>> {
     let mut reader = Reader::new(tx);
 
-    // 1️⃣ Read signatures (skip their bytes)
     let sig_len = ShortU16Len::read::<usize>(&mut reader)?;
     let sig_bytes = sig_len.saturating_mul(64);
     reader.consume(sig_bytes)?;
 
-    // 2️⃣ Peek message prefix
     let buf = reader.as_slice();
     if buf.is_empty() {
         return Ok(None);
@@ -140,14 +130,12 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
     let prefix = buf[0];
     let is_v0 = prefix & 0x80 != 0;
     if is_v0 {
-        reader.consume(1)?; // skip prefix
+        reader.consume(1)?;
     }
 
-    // 3️⃣ Read header
     let mut header = [MaybeUninit::zeroed(); 3];
     reader.read_exact(&mut header)?;
 
-    // 4️⃣ Read static account keys
     let n_keys = ShortU16Len::read::<usize>(&mut reader)?;
     if n_keys == 0 {
         return Ok(None);
@@ -160,27 +148,23 @@ pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<
         let key_bytes: [u8; 32] = unsafe { std::mem::transmute_copy(&key_bytes) };
         let key = Pubkey::new_from_array(key_bytes);
         if i == 0 {
-            // First key is always fee payer
             first_key = Some(key);
         }
         out.insert(key);
     }
 
-    // 5️⃣ Skip recent_blockhash (32 bytes)
     reader.consume(32)?;
 
     if is_v0 {
-        // Skip instructions
         let n_instructions = ShortU16Len::read::<usize>(&mut reader)?;
         for _ in 0..n_instructions {
-            reader.consume(1)?; // program_id_index
+            reader.consume(1)?;
             let ac_len = ShortU16Len::read::<usize>(&mut reader)?;
             reader.consume(ac_len)?;
             let data_len = ShortU16Len::read::<usize>(&mut reader)?;
             reader.consume(data_len)?;
         }
 
-        // Read address_table_lookups
         let n_lookups = ShortU16Len::read::<usize>(&mut reader)?;
         for _ in 0..n_lookups {
             let mut key = [MaybeUninit::zeroed(); 32];
@@ -277,7 +261,7 @@ impl<'de> SchemaRead<'de> for VersionedMessage {
             LegacyMessage::read(reader, &mut inner)?;
             VersionedMessage::Legacy(unsafe { inner.assume_init() })
         } else {
-            reader.consume(1)?; // skip prefix
+            reader.consume(1)?;
             let mut inner = MaybeUninit::uninit();
             V0Message::read(reader, &mut inner)?;
             VersionedMessage::V0(unsafe { inner.assume_init() })

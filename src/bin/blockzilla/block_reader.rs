@@ -24,10 +24,6 @@ use crate::transaction_parser::VersionedTransaction;
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
 
-
-// ============================================================================
-// Block reading
-// ============================================================================
 pub async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> Result<()> {
     let reader = open_epoch::open_epoch(epoch, cache_dir, mode).await?;
     let mut car = CarBlockReader::new(reader);
@@ -112,10 +108,12 @@ pub async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> Result<
     Ok(())
 }
 
-// ============================================================================
-// Parallel block reading (unchanged)
-// ============================================================================
-pub async fn read_block_par(epoch: u64, cache_dir: &str, mode: FetchMode, jobs: usize) -> Result<()> {
+pub async fn read_block_par(
+    epoch: u64,
+    cache_dir: &str,
+    mode: FetchMode,
+    jobs: usize,
+) -> Result<()> {
     use indicatif::ProgressBar;
     use std::time::{Duration, Instant};
 
