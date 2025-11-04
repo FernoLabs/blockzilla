@@ -43,9 +43,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Read helpers for CAR and optimized archives
-    #[command(subcommand)]
-    Read(ReadCommand),
+    /// Reads and parses a single epoch from CAR format (optionally multi-threaded)
+    Block {
+        #[arg(short, long)]
+        epoch: u64,
+        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
+        cache_dir: String,
+        #[arg(short, long)]
+        mode: FetchMode,
+        #[arg(short = 'j', long, default_value_t = 1)]
+        jobs: usize,
+    },
 
     /// Registry utilities
     #[command(subcommand)]
@@ -54,33 +62,6 @@ enum Commands {
     /// Optimize workflows for CAR epochs and compressed archives
     #[command(subcommand)]
     Optimize(OptimizeCommand),
-}
-
-#[derive(Subcommand, Debug)]
-enum ReadCommand {
-    /// Reads and parses a single epoch from CAR format (optionally multi-threaded)
-    Car {
-        #[arg(value_name = "EPOCH")]
-        epoch: u64,
-        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
-        cache_dir: String,
-        #[arg(short, long, default_value = "offline")]
-        mode: FetchMode,
-        #[arg(short = 'j', long, default_value_t = 1)]
-        jobs: usize,
-    },
-
-    /// Reads the optimized BlockWithIds archive using the registry mapping
-    Optimized {
-        #[arg(value_name = "EPOCH")]
-        epoch: u64,
-        #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
-        input_dir: String,
-        #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
-        registry_dir: String,
-        #[arg(short = 'j', long, default_value_t = 1)]
-        jobs: usize,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -169,14 +150,12 @@ enum OptimizeCommand {
         force: bool,
     },
 
-    /// Legacy alias for reading compressed BlockWithIds archives
+    /// Reads compressed BlockWithIds format
     Read {
         #[arg(value_name = "EPOCH")]
         epoch: u64,
         #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
         input_dir: String,
-        #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
-        registry_dir: String,
         #[arg(short = 'j', long, default_value_t = 1)]
         jobs: usize,
     },
@@ -202,27 +181,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Read(cmd) => match cmd {
-            ReadCommand::Car {
-                epoch,
-                cache_dir,
-                mode,
-                jobs,
-            } => {
-                if jobs == 1 {
-                    read_block(epoch, &cache_dir, mode).await?
-                } else {
-                    read_block_par(epoch, &cache_dir, mode, jobs).await?
-                }
+        Commands::Block {
+            epoch,
+            cache_dir,
+            mode,
+            jobs,
+        } => {
+            if jobs == 1 {
+                read_block(epoch, &cache_dir, mode).await?
+            } else {
+                read_block_par(epoch, &cache_dir, mode, jobs).await?
             }
-
-            ReadCommand::Optimized {
-                epoch,
-                input_dir,
-                registry_dir,
-                jobs,
-            } => read_compressed_blocks(epoch, &input_dir, &registry_dir, jobs).await?,
-        },
+        }
 
         Commands::Registry(cmd) => match cmd {
             RegistryCommand::Auto {
@@ -342,13 +312,12 @@ async fn main() -> Result<()> {
             OptimizeCommand::Read {
                 epoch,
                 input_dir,
-                registry_dir,
                 jobs,
             } => {
                 if jobs <= 1 {
-                    read_compressed_blocks(epoch, &input_dir, &registry_dir, jobs).await?
+                    read_compressed_blocks(epoch, &input_dir).await?
                 } else {
-                    read_compressed_blocks_par(epoch, &input_dir, &registry_dir, jobs).await?
+                    read_compressed_blocks_par(epoch, &input_dir, jobs).await?
                 }
             }
 

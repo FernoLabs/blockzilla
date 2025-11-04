@@ -43,24 +43,6 @@ Inspect summary information about an existing registry:
 cargo run --release --bin blockzilla registry info 839
 ```
 
-### Read archives
-
-Stream and inspect a CAR epoch directly:
-
-```bash
-cargo run --release --bin blockzilla read car 839 --mode offline
-```
-
-Walk the optimized archive with registry lookups:
-
-```bash
-cargo run --release --bin blockzilla read optimized 839 --input-dir optimized --registry-dir registry
-# add `--jobs 4` (or any value > 1) to parallelize decompression and decoding
-
-# legacy alias retained for compatibility with older workflows
-cargo run --release --bin blockzilla optimize read 839 --input-dir optimized --registry-dir registry --jobs 4
-```
-
 ## Legacy archive builder flow
 
 The older, more manual steps are still available if you want to drive each stage
@@ -73,9 +55,8 @@ curl -fSL https://files.old-faithful.net/0/epoch-0.car -o cache/epoch-0.car # /!
 # convert the cached CAR without running the downloader/cleanup workflow
 cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized
 
-# read the optimized archive alongside the registry output (or via `optimize read`)
-cargo run --release --bin blockzilla read optimized 0 --input-dir optimized --registry-dir registry
-cargo run --release --bin blockzilla optimize read 0 --input-dir optimized --registry-dir registry --jobs 4
+# read the optimized archive (sequential by default, or parallel with --jobs)
+cargo run --release --bin blockzilla optimize read 0 --input-dir optimized --jobs 4
 ```
 
 ## Registry outputs
@@ -111,6 +92,3 @@ export CXXFLAGS="-std=c++11"
 tar cz --no-xattrs --exclude target --exclude .git --exclude epoch-0.car --exclude epoch-1.car --exclude optimized . | ssh root@static.127.147.245.188.clients.your-server.de 'mkdir -p ~/dev/blockzilla && tar xz -C ~/dev/blockzilla'
 
 aria2c -x 16 -s 16 -j 8 https://files.old-faithful.net/800/epoch-800.car -o /dev/null --file-allocation=none 
-cargo run --release block --file epoch-800.car
-cargo run --release node --file epoch-800.car
-cargo run --release car --file epoch-800.car
