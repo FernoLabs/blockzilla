@@ -192,7 +192,7 @@ impl<'b> Read for DataFrameReader<'b> {
                 Err(_) => return Ok(written),
             };
 
-            let node = decode_node(&self.blk.entries[idx].1).map_err(|e| io::Error::other(e))?;
+            let node = decode_node(&self.blk.entries[idx].1).map_err(io::Error::other)?;
 
             let df = match node {
                 Node::DataFrame(df) => df,
