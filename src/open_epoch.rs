@@ -226,13 +226,13 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
     let window_mb = env_u64("BZ_WINDOW_MB", 1024);
     let stash_guard_mb = env_u64("BZ_STASH_GUARD_MB", 768);
 
-    let slice_bytes = (slice_mb * 1024 * 1024);
+    let slice_bytes = slice_mb * 1024 * 1024;
     let unit_bytes = 1024 * 1024usize;
     let cap_units = (mem_cap_mb * 1024 * 1024) / unit_bytes;
     let ring_cap = ring_slots_pow2.next_power_of_two().max(1024);
     let ring_mask = ring_cap - 1;
     let adapt_interval = Duration::from_secs(adapt_interval_s);
-    let window_bytes = (window_mb * 1024 * 1024);
+    let window_bytes = window_mb * 1024 * 1024;
     let stash_guard = (stash_guard_mb * 1024 * 1024) as usize;
 
     let clients: Arc<Vec<Client>> =

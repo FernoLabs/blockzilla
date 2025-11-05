@@ -156,7 +156,7 @@ impl CompactKeyData {
         }
     }
 
-    fn to_registry(self, keys_file: &Path, epoch: u64) -> Result<AHashMap<Pubkey, KeyStats>> {
+    fn into_registry(self, keys_file: &Path, epoch: u64) -> Result<AHashMap<Pubkey, KeyStats>> {
         let mut reg = AHashMap::with_capacity(self.counts.len());
         let mut reader = std::fs::File::open(keys_file)?;
         let mut buf = [0u8; 32];
@@ -379,7 +379,7 @@ async fn process_epoch_one_pass(
     }
 
     let counts = data.counts.clone();
-    let registry = data.to_registry(&keys_path, epoch)?;
+    let registry = data.into_registry(&keys_path, epoch)?;
 
     Ok((registry, counts, next_id as usize))
 }
