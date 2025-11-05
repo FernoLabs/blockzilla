@@ -234,14 +234,8 @@ async fn main() -> Result<()> {
                 optimized_dir,
                 force,
             } => {
-                match run_epoch_optimize(
-                    &cache_dir,
-                    &registry_dir,
-                    &optimized_dir,
-                    epoch,
-                    force,
-                )
-                .await?
+                match run_epoch_optimize(&cache_dir, &registry_dir, &optimized_dir, epoch, force)
+                    .await?
                 {
                     OptimizeOutcome::Completed => {
                         info!("✅ epoch {epoch:04} processed");
@@ -369,13 +363,7 @@ async fn run_epoch_optimize(
 
     build_registry_single(cache_dir, registry_dir, epoch).await?;
 
-    optimizer::run_car_optimizer(
-        cache_dir,
-        epoch,
-        optimized_dir,
-        Some(registry_dir),
-    )
-    .await?;
+    optimizer::run_car_optimizer(cache_dir, epoch, optimized_dir, Some(registry_dir)).await?;
 
     if downloaded {
         if let Err(err) = tokio::fs::remove_file(&car_path).await {

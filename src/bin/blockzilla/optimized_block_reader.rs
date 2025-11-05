@@ -285,7 +285,7 @@ pub async fn analyze_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()
             }
         }
 
-        if blocks_count % 1000 == 0 {
+        if blocks_count.is_multiple_of(1000) {
             pb.set_message(format!("Analyzed {} blocks...", blocks_count));
         }
     }

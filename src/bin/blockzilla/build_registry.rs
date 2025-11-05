@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     hash::{BuildHasherDefault, Hasher},
     io::{ErrorKind, Read},
-    path::{Path},
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -24,10 +24,7 @@ use tokio::{
     task,
 };
 
-use crate::{
-    LOG_INTERVAL_SECS,
-    transaction_parser::parse_account_keys_only,
-};
+use crate::{LOG_INTERVAL_SECS, transaction_parser::parse_account_keys_only};
 
 #[derive(Default)]
 struct PubkeyHasher(u64);
@@ -98,23 +95,24 @@ pub async fn cleanup_all_keys_tmp(results_dir: &str) -> Result<usize> {
         Ok(rd) => rd,
         Err(_) => return Ok(0),
     };
-    
+
     while let Ok(Some(entry)) = read_dir.next_entry().await {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        
-        if name_str.starts_with("keys-") && name_str.ends_with(".tmp") {
-            if fs::remove_file(entry.path()).await.is_ok() {
-                removed += 1;
-                tracing::debug!("🧹 Removed temporary file: {}", name_str);
-            }
+
+        if name_str.starts_with("keys-")
+            && name_str.ends_with(".tmp")
+            && fs::remove_file(entry.path()).await.is_ok()
+        {
+            removed += 1;
+            tracing::debug!("🧹 Removed temporary file: {}", name_str);
         }
     }
-    
+
     if removed > 0 {
         tracing::info!("🧹 Cleaned up {} temporary keys files", removed);
     }
-    
+
     Ok(removed)
 }
 
@@ -205,11 +203,11 @@ fn assign_order_ids_from_arrays(
     // Assign order_ids and build ordered list
     let mut ordered_keys = Vec::with_capacity(registry.len());
     for (order_id, idx) in idxs.into_iter().enumerate() {
-        if let Some(key) = id_to_key.get(&idx) {
-            if let Some(stats) = registry.get_mut(key) {
-                stats.order_id = order_id as u32;
-                ordered_keys.push(*key);
-            }
+        if let Some(key) = id_to_key.get(&idx)
+            && let Some(stats) = registry.get_mut(key)
+        {
+            stats.order_id = order_id as u32;
+            ordered_keys.push(*key);
         }
     }
 
@@ -223,13 +221,13 @@ async fn write_registry_to_disk<P: AsRef<Path>>(
     let path = path.as_ref();
     let tmp = path.with_extension("tmp");
     remove_if_exists(&tmp).await?;
-    
+
     let data = postcard::to_allocvec(registry)?;
     let f = fs::File::create(&tmp).await?;
     let mut w = BufWriter::new(f);
     w.write_all(&data).await?;
     w.flush().await?;
-    
+
     if let Err(err) = fs::rename(&tmp, path).await {
         let _ = remove_if_exists(&tmp).await;
         return Err(err.into());
@@ -244,14 +242,14 @@ async fn write_ordered_pubkeys_to_disk<P: AsRef<Path>>(
     let path = path.as_ref();
     let tmp = path.with_extension("tmp");
     remove_if_exists(&tmp).await?;
-    
+
     let f = fs::File::create(&tmp).await?;
     let mut w = BufWriter::new(f);
     for key in ordered_pubkeys {
         w.write_all(key.as_ref()).await?;
     }
     w.flush().await?;
-    
+
     if let Err(err) = fs::rename(&tmp, path).await {
         let _ = remove_if_exists(&tmp).await;
         return Err(err.into());
@@ -267,10 +265,10 @@ async fn process_epoch_one_pass(
 ) -> Result<(AHashMap<Pubkey, KeyStats>, Vec<u32>, usize)> {
     let keys_path = Path::new(results_dir).join(format!("keys-{epoch:04}.bin"));
     let keys_tmp = keys_path.with_extension("tmp");
-    
+
     // Clean up any existing tmp file before starting
     remove_if_exists(&keys_tmp).await?;
-    
+
     let f = File::create(&keys_tmp).await?;
     let mut keys_writer = BufWriter::with_capacity(32 * 1024 * 1024, f);
 
@@ -411,10 +409,9 @@ pub async fn build_registry_auto(
             if let Some(num_str) = name
                 .strip_prefix("registry-")
                 .and_then(|s| s.strip_suffix(".bin"))
+                && let Ok(num) = num_str.parse::<u64>()
             {
-                if let Ok(num) = num_str.parse::<u64>() {
-                    completed_epochs.insert(num);
-                }
+                completed_epochs.insert(num);
             }
         }
     }
@@ -527,7 +524,10 @@ pub async fn build_registry_auto(
     // Final cleanup of any remaining tmp files
     let final_cleaned = cleanup_all_keys_tmp(results_dir).await?;
     if final_cleaned > 0 {
-        tracing::info!("🧹 Final cleanup: removed {} temporary files", final_cleaned);
+        tracing::info!(
+            "🧹 Final cleanup: removed {} temporary files",
+            final_cleaned
+        );
     }
 
     tracing::info!(
@@ -608,10 +608,9 @@ pub async fn inspect_registry(registry_dir: &str, epoch: u64) -> Result<()> {
             .iter()
             .enumerate()
             .min_by_key(|(_, entry)| entry.1.count)
+            && stats.count > top[idx].1.count
         {
-            if stats.count > top[idx].1.count {
-                top[idx] = (*pk, stats);
-            }
+            top[idx] = (*pk, stats);
         }
     }
 

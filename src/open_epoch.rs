@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 use reqwest::{Client, header};
 use std::{
     env,
-    path::{Path},
+    path::Path,
     pin::Pin,
     sync::{
         Arc,
@@ -226,19 +226,19 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
     let window_mb = env_u64("BZ_WINDOW_MB", 1024);
     let stash_guard_mb = env_u64("BZ_STASH_GUARD_MB", 768);
 
-    let slice_bytes = (slice_mb * 1024 * 1024) as u64;
+    let slice_bytes = (slice_mb * 1024 * 1024);
     let unit_bytes = 1024 * 1024usize;
     let cap_units = (mem_cap_mb * 1024 * 1024) / unit_bytes;
     let ring_cap = ring_slots_pow2.next_power_of_two().max(1024);
     let ring_mask = ring_cap - 1;
     let adapt_interval = Duration::from_secs(adapt_interval_s);
-    let window_bytes = (window_mb * 1024 * 1024) as u64;
+    let window_bytes = (window_mb * 1024 * 1024);
     let stash_guard = (stash_guard_mb * 1024 * 1024) as usize;
 
     let clients: Arc<Vec<Client>> =
         Arc::new((0..clients_n).map(|_| build_h2_client().unwrap()).collect());
     let total = head_content_length(&clients[0], &url).await?;
-    let total_slices = ((total + slice_bytes - 1) / slice_bytes) as u64;
+    let total_slices = total.div_ceil(slice_bytes) as u64;
 
     let active_workers = Arc::new(AtomicU64::new(workers_min as u64));
     let next_index = Arc::new(AtomicU64::new(0));
@@ -332,7 +332,7 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                 };
 
                 // memory permit
-                let units = ((need + unit_bytes - 1) / unit_bytes).max(1) as u32;
+                let units = need.div_ceil(unit_bytes).max(1) as u32;
                 let permit = match mem_sem.clone().acquire_many_owned(units).await {
                     Ok(p) => p,
                     Err(_) => break,
@@ -352,32 +352,32 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                         .header(header::ACCEPT_ENCODING, "identity")
                         .send()
                         .await;
-                    if let Ok(r) = resp {
-                        if r.status().is_success() || r.status() == 206 {
-                            let mut buf = get_buf(need).await;
-                            buf.reserve(need.saturating_sub(buf.capacity()));
-                            let mut s = r.bytes_stream();
-                            let mut ok = true;
-                            while let Some(c) = s.next().await {
-                                match c {
-                                    Ok(b) => buf.extend_from_slice(&b),
-                                    Err(_) => {
-                                        ok = false;
-                                        break;
-                                    }
+                    if let Ok(r) = resp
+                        && (r.status().is_success() || r.status() == 206)
+                    {
+                        let mut buf = get_buf(need).await;
+                        buf.reserve(need.saturating_sub(buf.capacity()));
+                        let mut s = r.bytes_stream();
+                        let mut ok = true;
+                        while let Some(c) = s.next().await {
+                            match c {
+                                Ok(b) => buf.extend_from_slice(&b),
+                                Err(_) => {
+                                    ok = false;
+                                    break;
                                 }
                             }
-                            if ok && buf.len() == need {
-                                let b = buf.freeze();
-                                stash_ref.fetch_add(need, Ordering::Relaxed);
-                                if tx.send((idx, b, permit)).await.is_err() {
-                                    return;
-                                }
-                                sent = true;
-                                break;
-                            } else {
-                                return_buf(buf).await;
+                        }
+                        if ok && buf.len() == need {
+                            let b = buf.freeze();
+                            stash_ref.fetch_add(need, Ordering::Relaxed);
+                            if tx.send((idx, b, permit)).await.is_err() {
+                                return;
                             }
+                            sent = true;
+                            break;
+                        } else {
+                            return_buf(buf).await;
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;

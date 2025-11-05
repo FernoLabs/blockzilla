@@ -81,7 +81,7 @@ impl OrderedPubkeyRegistry {
             .open(&path)
             .with_context(|| format!("missing registry pubkeys file: {}", path.display()))?;
         let len_bytes = file.metadata()?.len() as usize;
-        if len_bytes % Self::KEY_SIZE != 0 {
+        if !len_bytes.is_multiple_of(Self::KEY_SIZE) {
             return Err(anyhow!(
                 "registry pubkeys file has invalid length: {} bytes",
                 len_bytes
@@ -120,9 +120,7 @@ impl OrderedPubkeyRegistry {
     fn slice_for(&self, id: u32) -> &[u8] {
         let start = id as usize * Self::KEY_SIZE;
         // SAFETY: id comes from our own index, so it's always valid
-        unsafe {
-            self.pubkeys.get_unchecked(start..start + Self::KEY_SIZE)
-        }
+        unsafe { self.pubkeys.get_unchecked(start..start + Self::KEY_SIZE) }
     }
 
     #[inline]
@@ -240,20 +238,20 @@ pub struct BlockWithIds {
 
 // Thread-local buffers to eliminate repeated allocations
 thread_local! {
-    static TL_META_BUF: std::cell::RefCell<Vec<u8>> = 
+    static TL_META_BUF: std::cell::RefCell<Vec<u8>> =
         std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
-    static TL_ZSTD_BUF: std::cell::RefCell<Vec<u8>> = 
+    static TL_ZSTD_BUF: std::cell::RefCell<Vec<u8>> =
         std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
-    static TL_TX_BUF: std::cell::RefCell<Vec<u8>> = 
+    static TL_TX_BUF: std::cell::RefCell<Vec<u8>> =
         std::cell::RefCell::new(Vec::with_capacity(64 * 1024));
-    static TL_SER_BUF: std::cell::RefCell<Vec<u8>> = 
+    static TL_SER_BUF: std::cell::RefCell<Vec<u8>> =
         std::cell::RefCell::new(Vec::with_capacity(2 * 1024 * 1024));
 }
 
 #[inline]
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
     // Check for zstd magic bytes
-    if bytes.len() >= 4 && &bytes[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
+    if bytes.len() >= 4 && bytes[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
         return TL_META_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
             buf.clear();
@@ -262,16 +260,17 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStat
                 .context("prost decode after zstd")
         });
     }
-    
+
     // Try bulk decompress first, then raw decode
     TL_ZSTD_BUF.with(|zbuf_cell| {
         let mut zbuf = zbuf_cell.borrow_mut();
         zbuf.clear();
-        match zstd::bulk::decompress_to_buffer(bytes, &mut *zbuf) {
+        match zstd::bulk::decompress_to_buffer(bytes, &mut zbuf) {
             Ok(_) => confirmed_block::TransactionStatusMeta::decode(&zbuf[..])
                 .context("prost decode after bulk zstd"),
-            Err(_) => confirmed_block::TransactionStatusMeta::decode(bytes)
-                .context("prost decode raw"),
+            Err(_) => {
+                confirmed_block::TransactionStatusMeta::decode(bytes).context("prost decode raw")
+            }
         }
     })
 }
@@ -396,12 +395,13 @@ fn build_compact_tx<R: RegistryAccess>(
         .collect();
 
     let static_keys = vt.message.static_account_keys();
-    
+
     // Reuse pre-allocated vector
     ctx.account_keys.clear();
     ctx.account_keys.reserve(static_keys.len());
     for raw in static_keys {
-        ctx.account_keys.push(reg.get_or_insert(&Pubkey::new_from_array(*raw))?);
+        ctx.account_keys
+            .push(reg.get_or_insert(&Pubkey::new_from_array(*raw))?);
     }
 
     let header = vt.message.header();
@@ -441,24 +441,21 @@ fn build_compact_tx<R: RegistryAccess>(
 
     // Reuse all_keys vector
     ctx.all_keys.clear();
-    ctx.all_keys.extend(
-        static_keys
-            .iter()
-            .map(|a| Pubkey::new_from_array(*a))
-    );
-    
+    ctx.all_keys
+        .extend(static_keys.iter().map(|a| Pubkey::new_from_array(*a)));
+
     for a in &meta.loaded_writable_addresses {
-        if a.len() == 32 {
-            if let Ok(arr) = <[u8; 32]>::try_from(a.as_slice()) {
-                ctx.all_keys.push(Pubkey::new_from_array(arr));
-            }
+        if a.len() == 32
+            && let Ok(arr) = <[u8; 32]>::try_from(a.as_slice())
+        {
+            ctx.all_keys.push(Pubkey::new_from_array(arr));
         }
     }
     for a in &meta.loaded_readonly_addresses {
-        if a.len() == 32 {
-            if let Ok(arr) = <[u8; 32]>::try_from(a.as_slice()) {
-                ctx.all_keys.push(Pubkey::new_from_array(arr));
-            }
+        if a.len() == 32
+            && let Ok(arr) = <[u8; 32]>::try_from(a.as_slice())
+        {
+            ctx.all_keys.push(Pubkey::new_from_array(arr));
         }
     }
 
@@ -551,18 +548,18 @@ fn make_compact_meta<R: RegistryAccess>(
         } else {
             let mut writable = Vec::with_capacity(w_len);
             for b in meta.loaded_writable_addresses {
-                if b.len() == 32 {
-                    if let Ok(arr) = <[u8; 32]>::try_from(b.as_slice()) {
-                        writable.push(reg.get_or_insert(&Pubkey::new_from_array(arr))?);
-                    }
+                if b.len() == 32
+                    && let Ok(arr) = <[u8; 32]>::try_from(b.as_slice())
+                {
+                    writable.push(reg.get_or_insert(&Pubkey::new_from_array(arr))?);
                 }
             }
             let mut readonly = Vec::with_capacity(r_len);
             for b in meta.loaded_readonly_addresses {
-                if b.len() == 32 {
-                    if let Ok(arr) = <[u8; 32]>::try_from(b.as_slice()) {
-                        readonly.push(reg.get_or_insert(&Pubkey::new_from_array(arr))?);
-                    }
+                if b.len() == 32
+                    && let Ok(arr) = <[u8; 32]>::try_from(b.as_slice())
+                {
+                    readonly.push(reg.get_or_insert(&Pubkey::new_from_array(arr))?);
                 }
             }
             Some(CompactLoadedAddresses { writable, readonly })
@@ -572,7 +569,7 @@ fn make_compact_meta<R: RegistryAccess>(
     let return_data = meta.return_data.and_then(|rd| {
         <[u8; 32]>::try_from(rd.program_id.as_slice())
             .ok()
-            .map(|arr| Pubkey::new_from_array(arr))
+            .map(Pubkey::new_from_array)
             .and_then(|pk| reg.get_or_insert(&pk).ok().map(|id| (id, rd.data)))
     });
 
@@ -752,8 +749,8 @@ pub async fn run_car_optimizer(
         let compact = cb_to_compact_block(&accessor, &mut reg, &mut ctx)?;
 
         // Serialize without compression. Layout: [len: u32][postcard bytes...]
-        let serialized: Vec<u8> = postcard::to_allocvec(&compact)
-            .context("postcard serialize compact block")?;
+        let serialized: Vec<u8> =
+            postcard::to_allocvec(&compact).context("postcard serialize compact block")?;
         let ser_len_u32 = u32::try_from(serialized.len())
             .map_err(|_| anyhow!("serialized block too large (>4GB)"))?;
 

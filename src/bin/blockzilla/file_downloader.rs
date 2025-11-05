@@ -58,7 +58,7 @@ async fn download_with_aria2(url: &str, out_path: &Path) -> Result<()> {
 
     let start = Instant::now();
     let mut child = Command::new("aria2c")
-        .args(&args)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
