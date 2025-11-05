@@ -1,795 +1,560 @@
 use anyhow::{Context, Result, anyhow};
 use blockzilla::{
-    car_block_reader::{CarBlock, CarBlockReader},
-    confirmed_block,
+    car_block_reader::CarBlockReader,
     node::Node,
     open_epoch::{self, FetchMode},
 };
-use prost::Message;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
-use solana_message::MessageHeader;
+use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
-use solana_signature::Signature;
+use std::io::Read;
 use std::{
-    collections::{HashMap, hash_map::Entry},
-    hash::{BuildHasherDefault, Hasher},
-    io::{BufWriter, Read, Write},
+    cmp::max,
+    collections::HashSet,
+    io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::{
+    fs::{self, File},
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
+    task,
+};
 
-use crate::transaction_parser::{VersionedMessage, VersionedTransaction};
+use crate::{LOG_INTERVAL_SECS, transaction_parser::parse_account_keys_only};
 
-const LOG_INTERVAL_SECS: u64 = 10;
+/// ========================================================================
+/// Public compact wire types (postcard-serialized, length-prefixed frames)
+/// ========================================================================
 
-#[derive(Default)]
-struct NoOpHasher(u64);
-impl Hasher for NoOpHasher {
-    #[inline(always)]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    #[inline(always)]
-    fn write_u64(&mut self, i: u64) {
-        self.0 = i;
-    }
-    #[inline(always)]
-    fn write(&mut self, _: &[u8]) {}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompactInstruction {
+    /// usage-ordered account id from the registry snapshot
+    pub account_id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_len: Option<u32>,
 }
-type U64Map<V> = HashMap<u64, V, BuildHasherDefault<NoOpHasher>>;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompactReward {
+    pub account_id: u32,
+    pub lamports: i64,
+    pub reward_type: u8,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompactTokenBalance {
+    pub account_id: u32,
+    pub amount: i128,
+    pub mint_id: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BlockWithIds {
+    pub slot: u64,
+    pub instructions: Vec<CompactInstruction>,
+    pub rewards: Vec<CompactReward>,
+    pub token_balances: Vec<CompactTokenBalance>,
+}
+
+/// ========================================================================
+/// Paths
+/// ========================================================================
+fn epoch_dir(base: &Path, epoch: u64) -> PathBuf {
+    base.join(format!("epoch-{epoch:04}"))
+}
+fn keys_bin(dir: &Path) -> PathBuf {
+    dir.join("keys.bin") // arrival order, raw 32B pubkeys
+}
+fn usage_map_bin(dir: &Path) -> PathBuf {
+    dir.join("order_ids.map") // u32 array: usage_id -> arrival_id
+}
+fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
+    base.join(format!("epoch-{epoch:04}/optimized"))
+}
+fn optimized_blocks_file(dir: &Path) -> PathBuf {
+    dir.join("blocks.bin")
+}
+fn unique_tmp(dir: &Path, name: &str) -> PathBuf {
+    let pid = std::process::id();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    dir.join(format!("{name}.tmp.{pid}.{ts}"))
+}
+
+/// ========================================================================
+/// Fingerprint + FlatTable (u128 -> u32)
+/// ========================================================================
 #[inline(always)]
-fn pubkey_fp(k: &[u8]) -> u64 {
-    u64::from_le_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]])
+fn fp128_from_bytes(b: &[u8; 32]) -> u128 {
+    u128::from_le_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+        b[14], b[15],
+    ])
 }
 
-enum IndexEntry {
-    Single(u32),
-    Multiple(Vec<u32>),
+struct FlatTable {
+    mask: usize, // capacity - 1
+    len: usize,
+    keys: Vec<u128>,
+    vals: Vec<u32>,
+    occ: Vec<u64>, // bitset
 }
+const EMPTY_KEY: u128 = 0;
 
-impl IndexEntry {
-    #[inline(always)]
-    fn push(&mut self, id: u32) {
-        match self {
-            IndexEntry::Single(existing) => {
-                let mut v = Vec::with_capacity(4); // Slightly larger initial capacity
-                v.push(*existing);
-                v.push(id);
-                *self = IndexEntry::Multiple(v);
+impl FlatTable {
+    fn with_capacity_for(expected_items: usize, target_load: f64) -> Self {
+        let min_cap = ((expected_items as f64) / target_load).ceil() as usize;
+        let cap = next_pow2(max(1024, min_cap));
+        let words = (cap + 63) / 64;
+        FlatTable {
+            mask: cap - 1,
+            len: 0,
+            keys: vec![EMPTY_KEY; cap],
+            vals: vec![0u32; cap],
+            occ: vec![0u64; words],
+        }
+    }
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.mask + 1
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+    #[inline]
+    fn is_occupied(&self, idx: usize) -> bool {
+        let w = idx >> 6;
+        let b = idx & 63;
+        (self.occ[w] >> b) & 1 == 1
+    }
+    #[inline]
+    fn set_occupied(&mut self, idx: usize) {
+        let w = idx >> 6;
+        let b = idx & 63;
+        self.occ[w] |= 1u64 << b;
+    }
+    #[inline]
+    fn hash_idx(&self, k: u128) -> usize {
+        let lo = k as u64;
+        let hi = (k >> 64) as u64;
+        let x = lo ^ hi.rotate_left(23) ^ hi.wrapping_mul(0x9E3779B97F4A7C15);
+        (((x as u128).wrapping_mul(0x9E3779B97F4A7C15u128) >> 64) as usize) & self.mask
+    }
+    fn insert_exact(&mut self, fp: u128, usage_id: u32) {
+        let mut idx = self.hash_idx(fp);
+        loop {
+            if !self.is_occupied(idx) {
+                self.keys[idx] = fp;
+                self.vals[idx] = usage_id;
+                self.set_occupied(idx);
+                self.len += 1;
+                return;
+            } else if self.keys[idx] == fp {
+                debug_assert_eq!(
+                    self.vals[idx], usage_id,
+                    "fingerprint collision in registry map"
+                );
+                return;
             }
-            IndexEntry::Multiple(list) => list.push(id),
+            idx = (idx + 1) & self.mask;
+        }
+    }
+    #[inline(always)]
+    fn get(&self, fp: u128) -> Option<u32> {
+        let mut idx = self.hash_idx(fp);
+        loop {
+            if !self.is_occupied(idx) {
+                return None;
+            }
+            if self.keys[idx] == fp {
+                return Some(self.vals[idx]);
+            }
+            idx = (idx + 1) & self.mask;
         }
     }
 }
-
-pub struct OrderedPubkeyRegistry {
-    index: U64Map<IndexEntry>,
-    pubkeys: Box<[u8]>,
-    len: usize,
+#[inline(always)]
+fn next_pow2(x: usize) -> usize {
+    x.next_power_of_two()
 }
 
-impl OrderedPubkeyRegistry {
-    const KEY_SIZE: usize = 32;
+/// ========================================================================
+/// Mutable registry snapshot (baseline + appended unknown keys)
+/// ========================================================================
+struct MutableRegistry {
+    // baseline
+    base_keys_mmap: Mmap, // arrival-ordered baseline keys
+    base_order: Vec<u8>,  // usage_id -> arrival_id (u32 LE)
+    base_len: usize,      // number of existing usage ids / keys
 
-    pub fn load<P: AsRef<Path>>(registry_dir: P, epoch: u64) -> Result<Self> {
-        let path = registry_dir
-            .as_ref()
-            .join(format!("registry-pubkeys-{epoch:04}.bin"));
-        let mut file = std::fs::OpenOptions::new()
+    // lookup from fingerprint -> usage_id
+    map: FlatTable,
+
+    // newly discovered keys during optimize
+    new_keys: Vec<[u8; 32]>,
+}
+
+impl MutableRegistry {
+    fn open(registry_dir: &Path, epoch: u64) -> Result<Self> {
+        let edir = epoch_dir(registry_dir, epoch);
+        let p_keys = keys_bin(&edir);
+        let p_map = usage_map_bin(&edir);
+
+        // baseline keys
+        let in_keys = std::fs::OpenOptions::new()
             .read(true)
-            .open(&path)
-            .with_context(|| format!("missing registry pubkeys file: {}", path.display()))?;
-        let len_bytes = file.metadata()?.len() as usize;
-        if !len_bytes.is_multiple_of(Self::KEY_SIZE) {
-            return Err(anyhow!(
-                "registry pubkeys file has invalid length: {} bytes",
-                len_bytes
-            ));
+            .open(&p_keys)
+            .with_context(|| format!("open {}", p_keys.display()))?;
+        let keys_mmap = unsafe { Mmap::map(&in_keys)? };
+        if keys_mmap.len() % 32 != 0 {
+            anyhow::bail!("keys.bin size not multiple of 32");
+        }
+        let n = keys_mmap.len() / 32;
+
+        // baseline order
+        let order_bytes =
+            std::fs::read(&p_map).with_context(|| format!("read {}", p_map.display()))?;
+        if order_bytes.len() != n * 4 {
+            anyhow::bail!(
+                "order_ids.map size mismatch: got {}, expected {}",
+                order_bytes.len(),
+                n * 4
+            );
         }
 
-        let mut data = vec![0u8; len_bytes];
-        file.read_exact(&mut data)?;
-        let pubkeys = data.into_boxed_slice();
-
-        let len = pubkeys.len() / Self::KEY_SIZE;
-        let mut index: U64Map<IndexEntry> =
-            HashMap::with_capacity_and_hasher(len, Default::default());
-        for id in 0..len {
-            let start = id * Self::KEY_SIZE;
-            let slice = &pubkeys[start..start + Self::KEY_SIZE];
-            let fp = pubkey_fp(slice);
-            match index.entry(fp) {
-                Entry::Vacant(v) => {
-                    v.insert(IndexEntry::Single(id as u32));
-                }
-                Entry::Occupied(mut o) => {
-                    o.get_mut().push(id as u32);
-                }
-            }
+        // build fp -> usage_id from baseline
+        let mut table = FlatTable::with_capacity_for(n, 0.65);
+        for usage_id in 0..n {
+            let off = usage_id * 4;
+            let arrival = u32::from_le_bytes([
+                order_bytes[off],
+                order_bytes[off + 1],
+                order_bytes[off + 2],
+                order_bytes[off + 3],
+            ]) as usize;
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&keys_mmap[arrival * 32..arrival * 32 + 32]);
+            let fp = fp128_from_bytes(&key);
+            table.insert_exact(fp, usage_id as u32);
         }
 
         Ok(Self {
-            index,
-            pubkeys,
-            len,
+            base_keys_mmap: keys_mmap,
+            base_order: order_bytes,
+            base_len: n,
+            map: table,
+            new_keys: Vec::with_capacity(1 << 20),
         })
     }
 
     #[inline(always)]
-    fn slice_for(&self, id: u32) -> &[u8] {
-        let start = id as usize * Self::KEY_SIZE;
-        // SAFETY: id comes from our own index, so it's always valid
-        unsafe { self.pubkeys.get_unchecked(start..start + Self::KEY_SIZE) }
-    }
-
-    #[inline]
-    fn lookup_raw(&self, pk: &Pubkey) -> Option<u32> {
-        let bytes = pk.as_ref();
-        let fp = pubkey_fp(bytes);
-        match self.index.get(&fp)? {
-            IndexEntry::Single(id) => {
-                if self.slice_for(*id) == bytes {
-                    Some(*id)
-                } else {
-                    None
-                }
-            }
-            IndexEntry::Multiple(ids) => {
-                ids.iter().copied().find(|id| self.slice_for(*id) == bytes)
-            }
+    fn get_or_insert_usage_id(&mut self, key32: &[u8; 32]) -> u32 {
+        let fp = fp128_from_bytes(key32);
+        if let Some(id) = self.map.get(fp) {
+            return id;
         }
+        // assign a new id (append to end)
+        let id = (self.base_len + self.new_keys.len()) as u32;
+        self.new_keys.push(*key32);
+        self.map.insert_exact(fp, id);
+        id
     }
 
-    pub fn len(&self) -> usize {
-        self.len
-    }
-}
+    /// Commit updated snapshot into `optimized/` (keys.bin + order_ids.map).
+    /// Does NOT modify the baseline registry dir.
+    fn commit_snapshot(&self, optimized_epoch_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(optimized_epoch_dir)
+            .with_context(|| format!("create {}", optimized_epoch_dir.display()))?;
 
-pub trait RegistryAccess {
-    fn get_or_insert(&mut self, pk: &Pubkey) -> Result<u32>;
-}
-
-impl RegistryAccess for OrderedPubkeyRegistry {
-    #[inline]
-    fn get_or_insert(&mut self, pk: &Pubkey) -> Result<u32> {
-        self.lookup_raw(pk)
-            .ok_or_else(|| anyhow!("pubkey {} missing from registry", pk))
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactInstruction {
-    pub program_id: u32,
-    pub accounts: Vec<u8>,
-    pub data: Vec<u8>,
-    pub stack_height: Option<u32>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactInnerInstructions {
-    pub index: u8,
-    pub instructions: Vec<CompactInstruction>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactTokenBalance {
-    pub account_index: u8,
-    pub mint: u32,
-    pub ui_token_amount: String,
-    pub owner: u32,
-    pub program_id: u32,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactAddressTableLookup {
-    pub account_key: u32,
-    pub writable_indexes: Vec<u8>,
-    pub readonly_indexes: Vec<u8>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactLoadedAddresses {
-    pub writable: Vec<u32>,
-    pub readonly: Vec<u32>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactTransactionMeta {
-    pub err: Option<String>,
-    pub fee: u64,
-    pub pre_balances: Vec<u64>,
-    pub post_balances: Vec<u64>,
-    pub inner_instructions: Option<Vec<CompactInnerInstructions>>,
-    pub log_messages: Option<Vec<String>>,
-    pub pre_token_balances: Option<Vec<CompactTokenBalance>>,
-    pub post_token_balances: Option<Vec<CompactTokenBalance>>,
-    pub rewards: Option<Vec<CompactReward>>,
-    pub loaded_addresses: Option<CompactLoadedAddresses>,
-    pub return_data: Option<(u32, Vec<u8>)>,
-    pub compute_units_consumed: Option<u64>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactTransaction {
-    pub signatures: Vec<Signature>,
-    pub message_header: MessageHeader,
-    pub account_keys: Vec<u32>,
-    pub recent_blockhash: String,
-    pub instructions: Vec<CompactInstruction>,
-    pub address_table_lookups: Option<Vec<CompactAddressTableLookup>>,
-    pub meta: Option<CompactTransactionMeta>,
-    pub version: u8,
-}
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct CompactReward {
-    pub pubkey: u32,
-    pub lamports: i64,
-    pub post_balance: u64,
-    pub reward_type: Option<String>,
-    pub commission: Option<u8>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BlockWithIds {
-    pub slot: u64,
-    pub blockhash: String,
-    pub previous_blockhash: String,
-    pub parent_slot: u64,
-    pub block_time: Option<i64>,
-    pub block_height: Option<u64>,
-    pub rewards: Vec<CompactReward>,
-    pub transactions: Vec<CompactTransaction>,
-    pub num_transactions: u64,
-}
-
-// Thread-local buffers to eliminate repeated allocations
-thread_local! {
-    static TL_META_BUF: std::cell::RefCell<Vec<u8>> =
-        std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
-    static TL_ZSTD_BUF: std::cell::RefCell<Vec<u8>> =
-        std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
-    static TL_TX_BUF: std::cell::RefCell<Vec<u8>> =
-        std::cell::RefCell::new(Vec::with_capacity(64 * 1024));
-    static TL_SER_BUF: std::cell::RefCell<Vec<u8>> =
-        std::cell::RefCell::new(Vec::with_capacity(2 * 1024 * 1024));
-}
-
-#[inline]
-fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
-    // Check for zstd magic bytes
-    if bytes.len() >= 4 && bytes[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
-        return TL_META_BUF.with(|cell| {
-            let mut buf = cell.borrow_mut();
-            buf.clear();
-            zstd::stream::copy_decode(bytes, &mut *buf).context("zstd stream decode meta")?;
-            confirmed_block::TransactionStatusMeta::decode(&buf[..])
-                .context("prost decode after zstd")
-        });
-    }
-
-    // Try bulk decompress first, then raw decode
-    TL_ZSTD_BUF.with(|zbuf_cell| {
-        let mut zbuf = zbuf_cell.borrow_mut();
-        zbuf.clear();
-        match zstd::bulk::decompress_to_buffer(bytes, &mut zbuf) {
-            Ok(_) => confirmed_block::TransactionStatusMeta::decode(&zbuf[..])
-                .context("prost decode after bulk zstd"),
-            Err(_) => {
-                confirmed_block::TransactionStatusMeta::decode(bytes).context("prost decode raw")
-            }
-        }
-    })
-}
-
-#[inline]
-fn decode_wincode_tx(bytes: &[u8]) -> Result<VersionedTransaction> {
-    let mut reader = wincode::io::Reader::new(bytes);
-    let mut dst = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
-    <VersionedTransaction as wincode::SchemaRead>::read(&mut reader, &mut dst)
-        .map_err(|_| anyhow!("wincode decode VersionedTransaction failed"))?;
-    Ok(unsafe { dst.assume_init() })
-}
-
-// Reusable context for processing blocks - avoids repeated allocations
-struct BlockProcessingContext {
-    tx_buf: Vec<u8>,
-    meta_buf: Vec<u8>,
-    all_keys: Vec<Pubkey>,
-    account_keys: Vec<u32>,
-}
-
-impl BlockProcessingContext {
-    fn new() -> Self {
-        Self {
-            tx_buf: Vec::with_capacity(64 * 1024),
-            meta_buf: Vec::with_capacity(32 * 1024),
-            all_keys: Vec::with_capacity(64),
-            account_keys: Vec::with_capacity(64),
-        }
-    }
-
-    fn reset(&mut self) {
-        self.tx_buf.clear();
-        self.meta_buf.clear();
-        self.all_keys.clear();
-        self.account_keys.clear();
-    }
-}
-
-fn cb_to_compact_block<R: RegistryAccess>(
-    block: &CarBlock,
-    reg: &mut R,
-    ctx: &mut BlockProcessingContext,
-) -> Result<BlockWithIds> {
-    let blk = block.block()?;
-    let slot = blk.slot;
-    let parent_slot = blk
-        .meta
-        .parent_slot
-        .unwrap_or_else(|| slot.saturating_sub(1));
-    let block_time = blk.meta.blocktime;
-    let block_height = blk.meta.block_height;
-
-    let blockhash = "missing".to_string();
-    let previous_blockhash = "missing".to_string();
-
-    let rewards = extract_rewards(block, reg).unwrap_or_default();
-
-    let mut transactions = Vec::new();
-
-    for entry_cid in blk.entries.iter() {
-        let Node::Entry(entry) = block.decode(entry_cid?.hash_bytes())? else {
-            continue;
-        };
-        for tx_cid in entry.transactions.iter() {
-            let tx_cid = tx_cid?;
-            let Node::Transaction(tx) = block.decode(tx_cid.hash_bytes())? else {
-                continue;
-            };
-
-            ctx.tx_buf.clear();
-            let tx_bytes: &[u8] = match tx.data.next {
-                None => tx.data.data,
-                Some(df_cbor) => {
-                    let mut rdr = block.dataframe_reader(&df_cbor.to_cid()?);
-                    rdr.read_to_end(&mut ctx.tx_buf)?;
-                    &ctx.tx_buf
-                }
-            };
-
-            ctx.meta_buf.clear();
-            let meta_bytes: &[u8] = match tx.metadata.next {
-                None => tx.metadata.data,
-                Some(df_cbor) => {
-                    let mut rdr = block.dataframe_reader(&df_cbor.to_cid()?);
-                    rdr.read_to_end(&mut ctx.meta_buf)?;
-                    &ctx.meta_buf
-                }
-            };
-
-            let vt = decode_wincode_tx(tx_bytes)?;
-            let meta = decode_protobuf_meta(meta_bytes)?;
-
-            let compact = build_compact_tx(vt, meta, reg, ctx)?;
-            transactions.push(compact);
-        }
-    }
-
-    Ok(BlockWithIds {
-        slot,
-        blockhash,
-        previous_blockhash,
-        parent_slot,
-        block_time,
-        block_height,
-        rewards,
-        num_transactions: transactions.len() as u64,
-        transactions,
-    })
-}
-
-fn build_compact_tx<R: RegistryAccess>(
-    vt: VersionedTransaction,
-    meta: confirmed_block::TransactionStatusMeta,
-    reg: &mut R,
-    ctx: &mut BlockProcessingContext,
-) -> Result<CompactTransaction> {
-    let signatures: Vec<Signature> = vt
-        .signatures
-        .into_iter()
-        .map(|s| Signature::from(s.0))
-        .collect();
-
-    let static_keys = vt.message.static_account_keys();
-
-    // Reuse pre-allocated vector
-    ctx.account_keys.clear();
-    ctx.account_keys.reserve(static_keys.len());
-    for raw in static_keys {
-        ctx.account_keys
-            .push(reg.get_or_insert(&Pubkey::new_from_array(*raw))?);
-    }
-
-    let header = vt.message.header();
-    let message_header = MessageHeader {
-        num_required_signatures: header.num_required_signatures,
-        num_readonly_signed_accounts: header.num_readonly_signed_accounts,
-        num_readonly_unsigned_accounts: header.num_readonly_unsigned_accounts,
-    };
-    let recent_blockhash = "missing".to_string();
-
-    let mut instructions = Vec::with_capacity(vt.message.instructions_len());
-    for ix in vt.message.instructions_iter() {
-        let pid = Pubkey::new_from_array(static_keys[ix.program_id_index as usize]);
-        instructions.push(CompactInstruction {
-            program_id: reg.get_or_insert(&pid)?,
-            accounts: ix.accounts.clone(),
-            data: ix.data.clone(),
-            stack_height: None,
-        });
-    }
-
-    let address_table_lookups = vt.message.address_table_lookups().map(|lookups| {
-        lookups
-            .iter()
-            .map(|l| {
-                let id = reg
-                    .get_or_insert(&Pubkey::new_from_array(l.account_key))
-                    .unwrap_or(0);
-                CompactAddressTableLookup {
-                    account_key: id,
-                    writable_indexes: l.writable_indexes.clone(),
-                    readonly_indexes: l.readonly_indexes.clone(),
-                }
-            })
-            .collect::<Vec<_>>()
-    });
-
-    // Reuse all_keys vector
-    ctx.all_keys.clear();
-    ctx.all_keys
-        .extend(static_keys.iter().map(|a| Pubkey::new_from_array(*a)));
-
-    for a in &meta.loaded_writable_addresses {
-        if a.len() == 32
-            && let Ok(arr) = <[u8; 32]>::try_from(a.as_slice())
+        // keys.bin' = baseline keys + new keys
+        let out_keys = optimized_epoch_dir.join("keys.bin");
         {
-            ctx.all_keys.push(Pubkey::new_from_array(arr));
+            let mut w = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&out_keys)
+                .with_context(|| format!("create {}", out_keys.display()))?;
+            // baseline
+            std::io::copy(&mut &*self.base_keys_mmap, &mut w)
+                .with_context(|| "copy baseline keys")?;
+            // appended
+            for k in &self.new_keys {
+                w.write_all(k)?;
+            }
+            w.flush()?;
         }
-    }
-    for a in &meta.loaded_readonly_addresses {
-        if a.len() == 32
-            && let Ok(arr) = <[u8; 32]>::try_from(a.as_slice())
+
+        // order_ids.map' = baseline order + identity for appended range
+        let out_map = optimized_epoch_dir.join("order_ids.map");
         {
-            ctx.all_keys.push(Pubkey::new_from_array(arr));
+            let mut mw = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&out_map)
+                .with_context(|| format!("create {}", out_map.display()))?;
+            mw.write_all(&self.base_order)?;
+            let start_arrival = self.base_len as u32;
+            for i in 0..(self.new_keys.len() as u32) {
+                let arrival = start_arrival + i;
+                mw.write_all(&arrival.to_le_bytes())?;
+            }
+            mw.flush()?;
         }
+
+        Ok(())
     }
 
-    let compact_meta = make_compact_meta(meta, &ctx.all_keys, reg)?;
-
-    let version = match vt.message {
-        VersionedMessage::Legacy(_) => 0,
-        VersionedMessage::V0(_) => 1,
-    };
-
-    Ok(CompactTransaction {
-        signatures,
-        message_header,
-        account_keys: ctx.account_keys.clone(),
-        recent_blockhash,
-        instructions,
-        address_table_lookups,
-        meta: Some(compact_meta),
-        version,
-    })
-}
-
-fn make_compact_meta<R: RegistryAccess>(
-    meta: confirmed_block::TransactionStatusMeta,
-    all_keys: &[Pubkey],
-    reg: &mut R,
-) -> Result<CompactTransactionMeta> {
-    let err = meta.err.as_ref().map(|_| "TransactionError".to_string());
-
-    let inner_instructions = if meta.inner_instructions_none || meta.inner_instructions.is_empty() {
-        None
-    } else {
-        let mut out = Vec::with_capacity(meta.inner_instructions.len());
-        for ui in meta.inner_instructions {
-            if ui.instructions.is_empty() {
-                continue;
-            }
-            let mut inst = Vec::with_capacity(ui.instructions.len());
-            for i in ui.instructions {
-                if let Some(pk) = all_keys.get(i.program_id_index as usize) {
-                    inst.push(CompactInstruction {
-                        program_id: reg.get_or_insert(pk).unwrap_or(0),
-                        accounts: i.accounts,
-                        data: i.data,
-                        stack_height: None,
-                    });
-                }
-            }
-            if !inst.is_empty() {
-                out.push(CompactInnerInstructions {
-                    index: ui.index as u8,
-                    instructions: inst,
-                });
-            }
-        }
-        if out.is_empty() { None } else { Some(out) }
-    };
-
-    let log_messages = if meta.log_messages_none || meta.log_messages.is_empty() {
-        None
-    } else {
-        Some(meta.log_messages)
-    };
-
-    let pre_token_balances = if meta.pre_token_balances.is_empty() {
-        None
-    } else {
-        let mut v = Vec::with_capacity(meta.pre_token_balances.len());
-        for tb in meta.pre_token_balances {
-            v.push(convert_token_balance(tb, reg)?);
-        }
-        Some(v)
-    };
-
-    let post_token_balances = if meta.post_token_balances.is_empty() {
-        None
-    } else {
-        let mut v = Vec::with_capacity(meta.post_token_balances.len());
-        for tb in meta.post_token_balances {
-            v.push(convert_token_balance(tb, reg)?);
-        }
-        Some(v)
-    };
-
-    let loaded_addresses = {
-        let w_len = meta.loaded_writable_addresses.len();
-        let r_len = meta.loaded_readonly_addresses.len();
-        if w_len == 0 && r_len == 0 {
-            None
-        } else {
-            let mut writable = Vec::with_capacity(w_len);
-            for b in meta.loaded_writable_addresses {
-                if b.len() == 32
-                    && let Ok(arr) = <[u8; 32]>::try_from(b.as_slice())
-                {
-                    writable.push(reg.get_or_insert(&Pubkey::new_from_array(arr))?);
-                }
-            }
-            let mut readonly = Vec::with_capacity(r_len);
-            for b in meta.loaded_readonly_addresses {
-                if b.len() == 32
-                    && let Ok(arr) = <[u8; 32]>::try_from(b.as_slice())
-                {
-                    readonly.push(reg.get_or_insert(&Pubkey::new_from_array(arr))?);
-                }
-            }
-            Some(CompactLoadedAddresses { writable, readonly })
-        }
-    };
-
-    let return_data = meta.return_data.and_then(|rd| {
-        <[u8; 32]>::try_from(rd.program_id.as_slice())
-            .ok()
-            .map(Pubkey::new_from_array)
-            .and_then(|pk| reg.get_or_insert(&pk).ok().map(|id| (id, rd.data)))
-    });
-
-    Ok(CompactTransactionMeta {
-        err,
-        fee: meta.fee,
-        pre_balances: meta.pre_balances,
-        post_balances: meta.post_balances,
-        inner_instructions,
-        log_messages,
-        pre_token_balances,
-        post_token_balances,
-        rewards: None,
-        loaded_addresses,
-        return_data,
-        compute_units_consumed: meta.compute_units_consumed,
-    })
-}
-
-fn convert_token_balance<R: RegistryAccess>(
-    tb: confirmed_block::TokenBalance,
-    reg: &mut R,
-) -> Result<CompactTokenBalance> {
-    let mint = tb
-        .mint
-        .parse::<Pubkey>()
-        .ok()
-        .and_then(|pk| reg.get_or_insert(&pk).ok())
-        .unwrap_or(0);
-    let owner = if tb.owner.is_empty() {
-        0
-    } else {
-        tb.owner
-            .parse::<Pubkey>()
-            .ok()
-            .and_then(|pk| reg.get_or_insert(&pk).ok())
-            .unwrap_or(0)
-    };
-    let program_id = if tb.program_id.is_empty() {
-        0
-    } else {
-        tb.program_id
-            .parse::<Pubkey>()
-            .ok()
-            .and_then(|pk| reg.get_or_insert(&pk).ok())
-            .unwrap_or(0)
-    };
-    let ui_token_amount = tb
-        .ui_token_amount
-        .map(|a| {
-            serde_json::json!({
-                "amount": a.amount,
-                "decimals": a.decimals,
-                "uiAmount": a.ui_amount,
-                "uiAmountString": a.ui_amount_string,
-            })
-            .to_string()
-        })
-        .unwrap_or_default();
-
-    Ok(CompactTokenBalance {
-        account_index: tb.account_index as u8,
-        mint,
-        ui_token_amount,
-        owner,
-        program_id,
-    })
-}
-
-fn extract_rewards<R: RegistryAccess>(block: &CarBlock, reg: &mut R) -> Result<Vec<CompactReward>> {
-    let blk = block.block()?;
-    let Some(cid) = blk.rewards else {
-        return Ok(Vec::new());
-    };
-    let node = block.decode(cid.hash_bytes())?;
-    let Node::DataFrame(df_cbor) = node else {
-        return Ok(Vec::new());
-    };
-
-    let mut buf = df_cbor.data.to_vec();
-    if let Some(cid) = df_cbor.next {
-        let mut rdr = block.dataframe_reader(&cid.to_cid()?);
-        rdr.read_to_end(&mut buf)?;
+    #[inline(always)]
+    fn appended_count(&self) -> usize {
+        self.new_keys.len()
     }
+}
 
-    #[derive(wincode::SchemaRead)]
-    struct WReward {
-        pubkey: String,
-        lamports: i64,
-        post_balance: u64,
-        reward_type: Option<String>,
-        commission: Option<u8>,
-    }
-    #[derive(wincode::SchemaRead)]
-    struct WRewards(
-        #[wincode(
-            with = "wincode::containers::Vec<wincode::containers::Elem<WReward>, wincode::len::ShortU16Len>"
-        )]
-        Vec<WReward>,
+/// ========================================================================
+/// Optimize an epoch: remap pubkeys to usage_id, auto-extend registry snapshot
+/// ========================================================================
+pub async fn optimize_epoch(
+    cache_dir: &str,
+    registry_dir: &str, // baseline registry lives here
+    out_base: &str,     // optimized output (and snapshot) lives here
+    epoch: u64,
+) -> Result<()> {
+    let outdir = optimized_dir(Path::new(out_base), epoch);
+    fs::create_dir_all(&outdir).await?;
+
+    let blocks_path = optimized_blocks_file(&outdir);
+    // We always rewrite blocks.bin; if you want to skip when present, early-return here.
+
+    // open mutable registry on baseline (will append unknown keys in-memory)
+    let mut reg = MutableRegistry::open(Path::new(registry_dir), epoch)
+        .with_context(|| "open baseline registry")?;
+    tracing::info!(
+        "optimizer registry baseline: {} ids; snapshot target: {}",
+        reg.base_len,
+        outdir.display()
     );
 
-    let rewards: Vec<CompactReward> = (|| -> Result<Vec<CompactReward>> {
-        let mut reader = wincode::io::Reader::new(&buf);
-        let mut dst = std::mem::MaybeUninit::<WRewards>::uninit();
-        <WRewards as wincode::SchemaRead>::read(&mut reader, &mut dst)
-            .map_err(|_| anyhow!("wincode decode rewards failed"))?;
-        let list = unsafe { dst.assume_init() }.0;
-        let mut out = Vec::with_capacity(list.len());
-        for r in list {
-            if let Ok(pk) = r.pubkey.parse::<Pubkey>() {
-                out.push(CompactReward {
-                    pubkey: reg.get_or_insert(&pk)?,
-                    lamports: r.lamports,
-                    post_balance: r.post_balance,
-                    reward_type: r.reward_type,
-                    commission: r.commission,
-                });
-            }
-        }
-        Ok(out)
-    })()
-    .unwrap_or_default();
-
-    Ok(rewards)
-}
-
-pub async fn run_car_optimizer(
-    cache_dir: &str,
-    epoch: u64,
-    output_dir: &str,
-    registry_dir: Option<&str>,
-) -> Result<()> {
-    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
-        .await
-        .with_context(|| format!("opening epoch {} from {}", epoch, cache_dir))?;
+    // Stream CAR and write compact frames
+    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
 
-    let out_dir = PathBuf::from(output_dir);
-    std::fs::create_dir_all(&out_dir)?;
-    let bin_path = out_dir.join(format!("epoch-{epoch:04}.bin"));
-    let idx_path = out_dir.join(format!("epoch-{epoch:04}.idx"));
+    let tmp_path = unique_tmp(&outdir, "blocks");
+    let mut out = BufWriter::with_capacity(8 << 20, File::create(&tmp_path).await?);
 
-    let mut bin = BufWriter::with_capacity(
-        32 * 1024 * 1024,
-        std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&bin_path)?,
-    );
-    let mut idx = BufWriter::with_capacity(
-        8 * 1024 * 1024,
-        std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&idx_path)?,
-    );
-
-    let registry_base = registry_dir.unwrap_or(output_dir);
-    let mut reg = OrderedPubkeyRegistry::load(registry_base, epoch)
-        .with_context(|| format!("loading registry for epoch {}", epoch))?;
+    let mut tmp_keys: SmallVec<[Pubkey; 256]> = SmallVec::new();
+    let mut tx_buf = Vec::<u8>::with_capacity(128 * 1024);
 
     let start = Instant::now();
     let mut last_log = start;
     let mut blocks = 0u64;
-    let mut current_offset = 0u64;
-    let mut total_bytes = 0u64;
+    let mut msg = String::with_capacity(128);
 
-    // Reusable context to avoid allocations
-    let mut ctx = BlockProcessingContext::new();
+    while let Some(block) = car.next_block().await? {
+        let bnode = block.block()?;
+        let slot = bnode.slot;
 
-    while let Some(accessor) = car.next_block().await? {
-        ctx.reset();
+        let mut compact_instructions: Vec<CompactInstruction> = Vec::new();
+        let compact_rewards: Vec<CompactReward> = Vec::new();
+        let compact_balances: Vec<CompactTokenBalance> = Vec::new();
 
-        let compact = cb_to_compact_block(&accessor, &mut reg, &mut ctx)?;
+        for entry_cid in bnode.entries.iter() {
+            let Node::Entry(entry) = block.decode(entry_cid?.hash_bytes())? else {
+                continue;
+            };
+            for tx_cid in entry.transactions.iter() {
+                let tcid = tx_cid?;
+                let Node::Transaction(tx_node) = block.decode(tcid.hash_bytes())? else {
+                    continue;
+                };
 
-        // Serialize without compression. Layout: [len: u32][postcard bytes...]
-        let serialized: Vec<u8> =
-            postcard::to_allocvec(&compact).context("postcard serialize compact block")?;
-        let ser_len_u32 = u32::try_from(serialized.len())
-            .map_err(|_| anyhow!("serialized block too large (>4GB)"))?;
+                let tx_bytes: &[u8] = match tx_node.data.next {
+                    None => tx_node.data.data,
+                    Some(df_cid) => {
+                        tx_buf.clear();
+                        let df_cid = df_cid.to_cid()?;
+                        let mut rdr = block.dataframe_reader(&df_cid);
+                        rdr.read_to_end(&mut tx_buf)?;
+                        &tx_buf
+                    }
+                };
 
-        bin.write_all(&ser_len_u32.to_le_bytes())?;
-        bin.write_all(&serialized)?;
+                tmp_keys.clear();
+                let parsed = parse_account_keys_only(tx_bytes, &mut tmp_keys)?;
+                if parsed.is_none() {
+                    continue;
+                }
 
-        // Write index entry: (slot, offset)
-        idx.write_all(&compact.slot.to_le_bytes())?;
-        idx.write_all(&current_offset.to_le_bytes())?;
+                for k in tmp_keys.iter() {
+                    let key = k.to_bytes();
+                    let uid = reg.get_or_insert_usage_id(&key);
+                    compact_instructions.push(CompactInstruction {
+                        account_id: uid,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
 
-        current_offset += 4 + serialized.len() as u64;
-        total_bytes += serialized.len() as u64;
+        let bw = BlockWithIds {
+            slot,
+            instructions: compact_instructions,
+            rewards: compact_rewards,
+            token_balances: compact_balances,
+        };
+        let bytes =
+            postcard::to_allocvec(&bw).map_err(|e| anyhow!("serialize compact block: {e}"))?;
+        out.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
+        out.write_all(&bytes).await?;
+
         blocks += 1;
-
         let now = Instant::now();
         if now.duration_since(last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
-            bin.flush()?;
-            idx.flush()?;
+            msg.clear();
             let elapsed = now.duration_since(start).as_secs_f64().max(0.001);
             let blkps = blocks as f64 / elapsed;
-            println!(
-                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>8} keys | avg {:>7.1} B/blk",
-                blocks,
-                blkps,
-                reg.len(),
-                (total_bytes as f64 / blocks.max(1) as f64)
+            use std::fmt::Write as _;
+            let _ = write!(
+                &mut msg,
+                "opt epoch {epoch:04} | {blocks:>7} blk | {blkps:>7.1} blk/s | new keys {}",
+                reg.appended_count()
             );
+            tracing::info!("{}", msg);
             last_log = now;
         }
     }
 
-    bin.flush()?;
-    idx.flush()?;
-    println!(
-        "✅ Done: {blocks} blocks → {} | keys={} | {:.2} MB | {:.1}s",
-        bin_path.display(),
-        reg.len(),
-        total_bytes as f64 / 1_000_000.0,
+    out.flush().await?;
+    if fs::metadata(&blocks_path).await.is_ok() {
+        fs::remove_file(&tmp_path).await.ok();
+    } else {
+        fs::rename(&tmp_path, &blocks_path).await?;
+    }
+
+    // Commit registry snapshot into optimized/
+    reg.commit_snapshot(&outdir)
+        .with_context(|| "commit updated registry snapshot into optimized/")?;
+    tracing::info!(
+        "registry snapshot committed into {} (+{} new keys)",
+        outdir.display(),
+        reg.appended_count()
+    );
+
+    Ok(())
+}
+
+/// Optimize multiple epochs concurrently (writes blocks + snapshot under `out_base/epoch-####/optimized`)
+pub async fn optimize_auto(
+    cache_dir: &str,
+    registry_dir: &str,
+    out_base: &str,
+    max_epoch: u64,
+    workers: usize,
+) -> Result<()> {
+    fs::create_dir_all(out_base).await.ok();
+
+    // detect already optimized (blocks.bin present)
+    let mut completed = HashSet::new();
+    if let Ok(mut rd) = fs::read_dir(out_base).await {
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            let p = ent.path();
+            if p.is_dir() {
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if let Some(num) = name
+                        .strip_prefix("epoch-")
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        if fs::metadata(optimized_blocks_file(&p.join("optimized")))
+                            .await
+                            .is_ok()
+                        {
+                            completed.insert(num);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let work: Vec<u64> = (0..=max_epoch).filter(|e| !completed.contains(e)).collect();
+    if work.is_empty() {
+        tracing::info!("All epochs already optimized");
+        return Ok(());
+    }
+
+    let mp = Arc::new(MultiProgress::new());
+    let style = ProgressStyle::with_template("[{elapsed_precise}] {prefix:>4} | {msg}").unwrap();
+    let queue = Arc::new(tokio::sync::Mutex::new(work.into_iter()));
+    let mut handles = Vec::new();
+
+    for w in 0..workers {
+        let cache = cache_dir.to_string();
+        let reg = registry_dir.to_string();
+        let out = out_base.to_string();
+        let q = queue.clone();
+        let pb = mp.add(ProgressBar::new_spinner());
+        pb.set_prefix(format!("O{w}"));
+        pb.set_style(style.clone());
+        pb.enable_steady_tick(Duration::from_millis(100));
+
+        handles.push(task::spawn(async move {
+            loop {
+                let epoch = {
+                    let mut g = q.lock().await;
+                    g.next()
+                };
+                let Some(e) = epoch else { break };
+                pb.set_message(format!("optimize epoch {e:04}..."));
+                match optimize_epoch(&cache, &reg, &out, e).await {
+                    Ok(_) => pb.set_message(format!("ok epoch {e:04}")),
+                    Err(err) => pb.set_message(format!("fail epoch {e:04}: {err}")),
+                }
+            }
+            pb.finish_with_message("done");
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+    Ok(())
+}
+
+/// Optimize a single epoch with log wrapper.
+pub async fn optimize_single(
+    cache_dir: &str,
+    registry_dir: &str,
+    out_base: &str,
+    epoch: u64,
+) -> Result<()> {
+    tracing::info!("Optimizing epoch {epoch:04}");
+    let start = Instant::now();
+    optimize_epoch(cache_dir, registry_dir, out_base, epoch).await?;
+    tracing::info!(
+        "Done epoch {epoch:04} in {:.1}s",
         start.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// Back-compat wrapper expected by main.rs (`run_car_optimizer`)
+pub async fn run_car_optimizer(
+    cache_dir: &str,
+    epoch: u64,
+    optimized_dir: &str,
+    registry_dir: Option<&str>,
+) -> anyhow::Result<()> {
+    let registry_root = registry_dir.unwrap_or(optimized_dir);
+    optimize_epoch(cache_dir, registry_root, optimized_dir, epoch).await
 }
