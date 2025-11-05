@@ -6,10 +6,12 @@ use blockzilla::{
     open_epoch::{self, FetchMode},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use memmap2::Mmap;
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::{
-    io::{ErrorKind, Read, Seek, SeekFrom, Write},
+    collections::HashSet,
+    io::{ErrorKind, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -19,97 +21,99 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
     task,
 };
-
-use memmap2::Mmap;
+use std::io::Read;
 
 use crate::{LOG_INTERVAL_SECS, transaction_parser::parse_account_keys_only};
 
-/// 8-byte fingerprint from the first bytes of the pubkey
+/// -------- Path helpers (per-epoch directories) --------
+
+fn epoch_dir(base: &Path, epoch: u64) -> PathBuf {
+    base.join(format!("epoch-{epoch:04}"))
+}
+fn keys_bin(dir: &Path) -> PathBuf {
+    dir.join("keys.bin")
+}
+fn pubkeys_bin(dir: &Path) -> PathBuf {
+    dir.join("registry-pubkeys.bin")
+}
+fn lock_path(dir: &Path) -> PathBuf {
+    dir.join("epoch.lock")
+}
+fn unique_tmp_keys(dir: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    dir.join(format!("keys.tmp.{pid}.{ts}"))
+}
+
+/// Optional per-epoch lock for multi-process safety.
+async fn try_epoch_lock(dir: &Path) -> Result<Option<File>> {
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(lock_path(dir))
+        .await
+    {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+async fn release_epoch_lock(dir: &Path) {
+    let _ = fs::remove_file(lock_path(dir)).await;
+}
+
+/// -------- Fingerprint + index structures --------
+
 #[inline(always)]
-fn pubkey_fp(k: &Pubkey) -> u64 {
-    let b = k.as_ref();
-    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+fn fp128_from_bytes(b: &[u8; 32]) -> u128 {
+    u128::from_le_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+    ])
 }
 
-/// Map entry that guarantees collision-safety by verifying full 32B keys
+/// Collision-safe entry: stores full 32B key for verification.
 enum IndexEntry {
-    /// Fast path: only one key currently mapped for this fp
+    /// Fast path: only one key for this fp
     Single { id: u32, key: [u8; 32] },
-    /// Slow path: multiple distinct keys sharing the same fp
-    Multi(Vec<([u8; 32], u32)>),
+    /// Slow path: multiple distinct keys sharing the same fp (rare). Inline cap 4.
+    Multi(SmallVec<[([u8; 32], u32); 4]>),
 }
-
 impl IndexEntry {
     #[inline(always)]
-    fn get_or_insert_id(&mut self, key: &[u8; 32], next_id: &mut u32) -> u32 {
+    fn get_or_insert(&mut self, key_bytes: &[u8; 32], next_id: &mut u32) -> (u32, bool) {
+        // returns (id, is_new_id)
         match self {
-            IndexEntry::Single { id, key: stored } => {
-                if stored == key {
-                    *id
+            IndexEntry::Single { id, key } => {
+                if key == key_bytes {
+                    (*id, false)
                 } else {
-                    // Collision: upgrade to Multi
-                    let old = (*stored, *id);
+                    let old = (*key, *id);
                     let new_id = *next_id;
-                    *next_id = next_id.saturating_add(1);
-                    *self = IndexEntry::Multi(vec![old, (*key, new_id)]);
-                    new_id
+                    *next_id += 1;
+                    *self = IndexEntry::Multi(smallvec::smallvec![old, (*key_bytes, new_id)]);
+                    (new_id, true)
                 }
             }
             IndexEntry::Multi(list) => {
-                if let Some((_, id)) = list.iter().find(|(k, _)| k == key) {
-                    *id
+                if let Some((_, id)) = list.iter().find(|(k, _)| k == key_bytes) {
+                    (*id, false)
                 } else {
                     let new_id = *next_id;
-                    *next_id = next_id.saturating_add(1);
-                    list.push((*key, new_id));
-                    new_id
+                    *next_id += 1;
+                    list.push((*key_bytes, new_id));
+                    (new_id, true)
                 }
             }
         }
     }
 }
 
-async fn remove_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path).await {
-        Ok(_) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
+/// -------- Compact counters --------
 
-/// Clean up temporary keys file for a specific epoch
-async fn cleanup_keys_tmp_for_epoch(results_dir: &str, epoch: u64) -> Result<()> {
-    let tmp_path = Path::new(results_dir).join(format!("keys-{epoch:04}.tmp"));
-    remove_if_exists(&tmp_path).await
-}
-
-/// Clean up all temporary keys files in the results directory
-pub async fn cleanup_all_keys_tmp(results_dir: &str) -> Result<usize> {
-    let mut removed = 0usize;
-    let mut read_dir = match fs::read_dir(results_dir).await {
-        Ok(rd) => rd,
-        Err(_) => return Ok(0),
-    };
-
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with("keys-")
-            && name_str.ends_with(".tmp")
-            && fs::remove_file(entry.path()).await.is_ok()
-        {
-            removed += 1;
-            tracing::debug!("Removed temporary file: {}", name_str);
-        }
-    }
-
-    if removed > 0 {
-        tracing::info!("Cleaned up {} temporary keys files", removed);
-    }
-    Ok(removed)
-}
-
-/// Simple grow-on-demand counters
 struct CompactKeyData {
     counts: Vec<u32>,
 }
@@ -120,41 +124,54 @@ impl CompactKeyData {
     #[inline(always)]
     fn ensure_len(&mut self, idx: usize) {
         if idx >= self.counts.len() {
-            self.counts.resize(idx + 1, 0);
+            // grow in chunks to reduce reallocs
+            let new_len = (idx + 1).max(self.counts.len().saturating_add(100_000));
+            self.counts.resize(new_len, 0);
         }
     }
     #[inline(always)]
     fn inc(&mut self, idx: usize) {
         self.ensure_len(idx);
+        // SAFETY: ensured above
         unsafe {
-            let c = self.counts.get_unchecked_mut(idx);
-            *c = c.saturating_add(1);
+            *self.counts.get_unchecked_mut(idx) += 1;
         }
+    }
+    #[inline(always)]
+    fn into_counts_truncated(mut self, new_len: usize) -> Vec<u32> {
+        if self.counts.len() > new_len {
+            self.counts.truncate(new_len);
+        }
+        self.counts
     }
 }
 
-/// Write ordered pubkeys using only counts + keys file (no rayon)
+/// -------- Final writer: order by counts, stream keys via mmap --------
+
 fn write_ordered_pubkeys_from_counts(
     keys_file: &Path,
     out_file: &Path,
     counts: &[u32],
     total_keys: usize,
 ) -> Result<()> {
-    // Build index vector 0..N-1 and sort by count desc
-    let mut idxs: Vec<u32> = (0..total_keys as u32).collect();
-    idxs.sort_unstable_by(|&a, &b| counts[b as usize].cmp(&counts[a as usize]));
+    // Build indices 0..N-1 and sort by count desc (counts.len() == total_keys).
+    let mut idxs: Vec<u32> = Vec::with_capacity(total_keys);
+    idxs.extend(0..total_keys as u32);
+    let c = &counts;
+    idxs.sort_unstable_by(|&a, &b| c[b as usize].cmp(&c[a as usize]));
 
-    // mmap input for fast random reads; write output sequentially
+    // mmap input for fast reads; write output sequentially
     let in_f = std::fs::OpenOptions::new()
         .read(true)
         .open(keys_file)
         .with_context(|| format!("open {}", keys_file.display()))?;
     let mmap = unsafe { Mmap::map(&in_f).with_context(|| "mmap keys file")? };
-    if mmap.len() != total_keys * 32 {
+    let expected_size = total_keys * 32;
+    if mmap.len() != expected_size {
         return Err(anyhow!(
             "keys file size mismatch: {} vs expected {}",
             mmap.len(),
-            total_keys * 32
+            expected_size
         ));
     }
 
@@ -174,27 +191,53 @@ fn write_ordered_pubkeys_from_counts(
     Ok(())
 }
 
-/// One pass over an epoch: count unique pubkeys and persist canonical key list
-/// Returns (counts, total_unique_keys)
+/// -------- One-pass scanner per epoch --------
+/// Returns (counts, total_unique_keys).
 async fn process_epoch_one_pass(
     cache_dir: &str,
     results_dir: &str,
     epoch: u64,
     pb: &ProgressBar,
 ) -> Result<(Vec<u32>, usize)> {
-    let keys_path = Path::new(results_dir).join(format!("keys-{epoch:04}.bin"));
-    let keys_tmp = keys_path.with_extension("tmp");
-    remove_if_exists(&keys_tmp).await?;
+    // Per-epoch dir + files
+    let base = Path::new(results_dir);
+    let edir = epoch_dir(base, epoch);
+    fs::create_dir_all(&edir).await?;
 
+    let keys_final = keys_bin(&edir);
+    let keys_tmp = unique_tmp_keys(&edir);
+
+    // Optional lock (safe multi-process)
+    let _lock = match try_epoch_lock(&edir).await? {
+        Some(f) => Some(f),
+        None => {
+            pb.set_message(format!(
+                "epoch {epoch:04} skipped (locked by another process)"
+            ));
+            return Ok((Vec::new(), 0));
+        }
+    };
+
+    // If keys.bin already exists, skip scanning
+    if fs::metadata(&keys_final).await.is_ok() {
+        release_epoch_lock(&edir).await;
+        return Ok((Vec::new(), 0));
+    }
+
+    // Writer for canonical 32B keys
     let f = File::create(&keys_tmp).await?;
-    let mut keys_writer = BufWriter::with_capacity(32 * 1024 * 1024, f);
+    let mut keys_writer = BufWriter::new(f);
+    // Batched append of 32B keys (reduce syscalls)
+    const KEY_BATCH_SIZE: usize = 16_384; // 512 KiB per batch
+    let mut key_batch = Vec::with_capacity(KEY_BATCH_SIZE * 32);
 
+    // Read CAR/epoch
     let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
 
-    // fp -> IndexEntry (conflict-safe via full 32B check)
-    let mut fp_index: AHashMap<u64, IndexEntry> = AHashMap::with_capacity(1_000_000);
+    // fp -> entry (u128) — hardcoded 50M capacity as requested
+    let mut fp_index: AHashMap<u128, IndexEntry> = AHashMap::with_capacity(50_000_000);
     let mut next_id: u32 = 0;
 
     let mut data = CompactKeyData::new();
@@ -204,13 +247,11 @@ async fn process_epoch_one_pass(
     let mut blocks = 0u64;
 
     let mut tmp_keys: SmallVec<[Pubkey; 256]> = SmallVec::new();
-    let mut tx_buf = Vec::<u8>::with_capacity(64 * 1024);
+    let mut tx_buf = Vec::<u8>::with_capacity(128 * 1024);
 
-    // Batch write 32B keys to reduce syscalls
-    const KEY_BATCH_SIZE: usize = 8192;
-    let mut key_batch = Vec::with_capacity(KEY_BATCH_SIZE * 32);
-
-    let mut msg = String::with_capacity(96);
+    let mut msg = String::with_capacity(128);
+    #[cfg(debug_assertions)]
+    let mut collisions = 0u64;
 
     while let Some(block) = car.next_block().await? {
         let block_info = block.block()?;
@@ -225,7 +266,7 @@ async fn process_epoch_one_pass(
                     continue;
                 };
 
-                // Load tx bytes
+                // Pull tx bytes
                 let tx_bytes: &[u8] = match tx_node.data.next {
                     None => tx_node.data.data,
                     Some(df_cid) => {
@@ -237,34 +278,49 @@ async fn process_epoch_one_pass(
                     }
                 };
 
-                // Extract static account keys, dedup inside tx
+                // Extract & dedup static account keys by full bytes
                 tmp_keys.clear();
                 if parse_account_keys_only(tx_bytes, &mut tmp_keys)?.is_some() {
+                    // Dedup by full key – sorting by slice avoids extra array copies in comparator
                     tmp_keys.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
                     tmp_keys.dedup_by_key(|k| *k);
 
                     for &k in tmp_keys.iter() {
-                        let fp = pubkey_fp(&k);
-                        let key_arr: [u8; 32] = k.as_ref().try_into().unwrap();
+                        // One 32B array: reuse for fp + file write
+                        let key_bytes = k.to_bytes();
+                        let fp = fp128_from_bytes(&key_bytes);
 
-                        let id = match fp_index.get_mut(&fp) {
-                            Some(entry) => entry.get_or_insert_id(&key_arr, &mut next_id),
+                        match fp_index.get_mut(&fp) {
+                            Some(entry) => {
+                                // Existing fingerprint: might be same key, or a true collision bucket
+                                let before = next_id;
+                                let (id, is_new) = entry.get_or_insert(&key_bytes, &mut next_id);
+                                if is_new {
+                                    // ✅ BUGFIX: append bytes for new ID even in collision bucket
+                                    key_batch.extend_from_slice(&key_bytes);
+                                    if key_batch.len() >= KEY_BATCH_SIZE * 32 {
+                                        keys_writer.write_all(&key_batch).await?;
+                                        key_batch.clear();
+                                    }
+                                    #[cfg(debug_assertions)]
+                                    { collisions += 1; }
+                                }
+                                data.inc(id as usize);
+                            }
                             None => {
+                                // New fingerprint: definitely a brand-new key/id
                                 let id = next_id;
-                                next_id = next_id.saturating_add(1);
-                                fp_index.insert(fp, IndexEntry::Single { id, key: key_arr });
+                                next_id += 1;
+                                fp_index.insert(fp, IndexEntry::Single { id, key: key_bytes });
 
-                                // Append 32-byte key to file in batches
-                                key_batch.extend_from_slice(&key_arr);
+                                key_batch.extend_from_slice(&key_bytes);
                                 if key_batch.len() >= KEY_BATCH_SIZE * 32 {
                                     keys_writer.write_all(&key_batch).await?;
                                     key_batch.clear();
                                 }
-                                id
+                                data.inc(id as usize);
                             }
-                        };
-
-                        data.inc(id as usize);
+                        }
                     }
                 }
             }
@@ -276,31 +332,58 @@ async fn process_epoch_one_pass(
             msg.clear();
             let elapsed = now.duration_since(start).as_secs_f64().max(0.001);
             let blkps = blocks as f64 / elapsed;
-            use std::fmt::Write;
-            let _ = write!(
-                &mut msg,
-                "epoch {epoch:04} | {blocks:>7} blk | {blkps:>7.1} blk/s | {keys} keys",
-                keys = next_id
-            );
-            pb.set_message(msg.clone());
+            use std::fmt::Write as _;
+            #[cfg(debug_assertions)]
+            {
+                let _ = write!(
+                    &mut msg,
+                    "epoch {epoch:04} | {blocks:>7} blk | {blkps:>7.1} blk/s | {keys:>8} keys | {collisions} collisions",
+                    keys = next_id
+                );
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                let _ = write!(
+                    &mut msg,
+                    "epoch {epoch:04} | {blocks:>7} blk | {blkps:>7.1} blk/s | {keys:>8} keys",
+                    keys = next_id
+                );
+            }
+            pb.set_message(std::mem::take(&mut msg));
             last_log = now;
         }
     }
 
-    // Flush remaining keys
+    // Flush remaining batch
     if !key_batch.is_empty() {
         keys_writer.write_all(&key_batch).await?;
     }
     keys_writer.flush().await?;
 
-    // Atomic rename tmp to final file
-    if let Err(err) = fs::rename(&keys_tmp, &keys_path).await {
-        let _ = remove_if_exists(&keys_tmp).await;
+    // Atomic finalize: tmp -> keys.bin (unless another process already wrote it)
+    if fs::metadata(&keys_final).await.is_ok() {
+        let _ = fs::remove_file(&keys_tmp).await;
+        release_epoch_lock(&edir).await;
+        let total = next_id as usize;
+        // Trim counts to exact size for later sort
+        let counts = data.into_counts_truncated(total);
+        return Ok((counts, total));
+    }
+    if let Err(err) = fs::rename(&keys_tmp, &keys_final).await {
+        let _ = fs::remove_file(&keys_tmp).await;
+        release_epoch_lock(&edir).await;
         return Err(err.into());
     }
 
-    Ok((data.counts, next_id as usize))
+    release_epoch_lock(&edir).await;
+
+    // Trim counts to exact size for later sort
+    let total = next_id as usize;
+    let counts = data.into_counts_truncated(total);
+    Ok((counts, total))
 }
+
+/// -------- Multi-epoch orchestration --------
 
 pub async fn build_registry_auto(
     cache_dir: &str,
@@ -310,47 +393,43 @@ pub async fn build_registry_auto(
 ) -> Result<()> {
     fs::create_dir_all(results_dir).await.ok();
 
-    // Clean stale tmp files
-    let cleaned = cleanup_all_keys_tmp(results_dir).await?;
-    if cleaned > 0 {
-        tracing::info!("Cleaned up {} stale temporary files", cleaned);
-    }
-
-    let start_total = Instant::now();
-
-    // Detect completed epochs by presence of registry-pubkeys
-    let mut completed_epochs = std::collections::HashSet::new();
-    if let Ok(mut entries) = fs::read_dir(results_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(num_str) = name
-                .strip_prefix("registry-pubkeys-")
-                .and_then(|s| s.strip_suffix(".bin"))
-            {
-                if let Ok(num) = num_str.parse::<u64>() {
-                    completed_epochs.insert(num);
+    // Discover completed epochs (presence of registry-pubkeys.bin)
+    let mut completed = HashSet::new();
+    if let Ok(mut rd) = fs::read_dir(results_dir).await {
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            let p = ent.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                if let Some(num) = name
+                    .strip_prefix("epoch-")
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    if fs::metadata(pubkeys_bin(&p)).await.is_ok() {
+                        completed.insert(num);
+                    }
                 }
             }
         }
     }
 
-    let work_queue: Vec<u64> = (0..=max_epoch)
-        .filter(|e| !completed_epochs.contains(e))
-        .collect();
-
+    let work_queue: Vec<u64> = (0..=max_epoch).filter(|e| !completed.contains(e)).collect();
     if work_queue.is_empty() {
-        tracing::info!("All epochs already completed");
+        tracing::info!("✅ All epochs already completed");
         return Ok(());
     }
 
     tracing::info!(
-        "Processing {} epochs with {} workers (skipping {})",
+        "📋 Processing {} epochs with {} workers (skipping {})",
         work_queue.len(),
         workers,
-        completed_epochs.len()
+        completed.len()
     );
 
-    let work_queue = Arc::new(tokio::sync::Mutex::new(work_queue.into_iter()));
+    let start_total = Instant::now();
+
+    let queue = Arc::new(tokio::sync::Mutex::new(work_queue.into_iter()));
     let multi = Arc::new(MultiProgress::new());
     let style = ProgressStyle::with_template("[{elapsed_precise}] {prefix:>4} | {msg}").unwrap();
 
@@ -359,22 +438,22 @@ pub async fn build_registry_auto(
         let cache = cache_dir.to_string();
         let out = results_dir.to_string();
         let mp = multi.clone();
-        let val = style.clone();
-        let queue = work_queue.clone();
+        let sty = style.clone();
+        let q = queue.clone();
 
         handles.push(task::spawn(async move {
             let pb = mp.add(ProgressBar::new_spinner());
             pb.set_prefix(format!("W{w}"));
-            pb.set_style(val.clone());
+            pb.set_style(sty);
             pb.enable_steady_tick(Duration::from_millis(100));
 
-            let mut processed = 0usize;
+            let mut done = 0usize;
             let mut failed = 0usize;
 
             loop {
                 let epoch = {
-                    let mut q = queue.lock().await;
-                    q.next()
+                    let mut guard = q.lock().await;
+                    guard.next()
                 };
                 let Some(epoch) = epoch else { break };
 
@@ -382,40 +461,38 @@ pub async fn build_registry_auto(
 
                 match process_epoch_one_pass(&cache, &out, epoch, &pb).await {
                     Ok((counts, total)) => {
-                        pb.set_message(format!("epoch {epoch:04} sorting/writing pubkeys..."));
+                        // If total==0 it means we skipped due to existing keys.bin or lock.
+                        let edir = epoch_dir(Path::new(&out), epoch);
+                        let keys_final = keys_bin(&edir);
+                        let pubkeys_final = pubkeys_bin(&edir);
 
-                        let keys_path = Path::new(&out).join(format!("keys-{epoch:04}.bin"));
-                        let pubkeys_path =
-                            Path::new(&out).join(format!("registry-pubkeys-{epoch:04}.bin"));
-
-                        let write_res = (|| -> Result<()> {
-                            write_ordered_pubkeys_from_counts(
-                                &keys_path,
-                                &pubkeys_path,
-                                &counts,
-                                total,
-                            )?;
+                        let sort_res = (|| -> Result<()> {
+                            if total > 0 && !counts.is_empty() {
+                                // 1) Build the sorted pubkeys
+                                write_ordered_pubkeys_from_counts(
+                                    &keys_final,
+                                    &pubkeys_final,
+                                    &counts,
+                                    total,
+                                )?;
+                                // 2) Delete keys.bin to save space (per your request)
+                                std::fs::remove_file(&keys_final).ok();
+                            }
                             Ok(())
                         })();
 
-                        match write_res {
+                        match sort_res {
                             Ok(_) => {
-                                // Optional: remove the raw keys file to save disk
-                                // std::fs::remove_file(&keys_path).ok();
-
-                                // Clean tmp for this epoch
-                                let _ = cleanup_keys_tmp_for_epoch(&out, epoch).await;
-
-                                processed += 1;
+                                done += 1;
                                 pb.set_message(format!(
-                                    "done epoch {epoch:04} | {} keys | {processed} ok, {failed} fail",
+                                    "✅ epoch {epoch:04} | {:>8} keys | {done} ok, {failed} fail",
                                     total
                                 ));
                             }
                             Err(e) => {
                                 failed += 1;
                                 pb.set_message(format!(
-                                    "write failed epoch {epoch:04}: {e} | {processed} ok, {failed} fail"
+                                    "❌ epoch {epoch:04} sort/write failed: {e} | {done} ok, {failed} fail"
                                 ));
                             }
                         }
@@ -423,13 +500,13 @@ pub async fn build_registry_auto(
                     Err(e) => {
                         failed += 1;
                         pb.set_message(format!(
-                            "failed epoch {epoch:04}: {e} | {processed} ok, {failed} fail"
+                            "❌ epoch {epoch:04} failed: {e} | {done} ok, {failed} fail"
                         ));
                     }
                 }
             }
 
-            pb.finish_with_message(format!("W{w} finished: {processed} ok, {failed} fail"));
+            pb.finish_with_message(format!("✅ W{w} finished: {done} ok, {failed} fail"));
         }));
     }
 
@@ -437,151 +514,96 @@ pub async fn build_registry_auto(
         let _ = h.await;
     }
 
-    // Final cleanup
-    let final_cleaned = cleanup_all_keys_tmp(results_dir).await?;
-    if final_cleaned > 0 {
-        tracing::info!("Final cleanup removed {} temporary files", final_cleaned);
-    }
-
     tracing::info!(
-        "Finished all epochs ({} workers) in {:.1}s",
+        "🏁 Finished all epochs ({} workers) in {:.1}s",
         workers,
         start_total.elapsed().as_secs_f64()
     );
     Ok(())
 }
 
+/// Single-epoch helper (handy for retries / debugging).
 pub async fn build_registry_single(cache_dir: &str, results_dir: &str, epoch: u64) -> Result<()> {
     fs::create_dir_all(results_dir).await.ok();
-    let dir = Path::new(results_dir);
 
     let pb = ProgressBar::new_spinner();
     pb.set_prefix("SINGLE");
     pb.enable_steady_tick(Duration::from_millis(200));
 
-    tracing::info!("Building ordered pubkeys for epoch {epoch:04}");
+    tracing::info!("🧩 Building ordered pubkeys for epoch {epoch:04}");
 
     let start = Instant::now();
-    let (counts, total_keys) =
-        process_epoch_one_pass(cache_dir, results_dir, epoch, &pb).await?;
+    let (counts, total) = process_epoch_one_pass(cache_dir, results_dir, epoch, &pb).await?;
 
-    let keys_path = dir.join(format!("keys-{epoch:04}.bin"));
-    let pubkeys_out = dir.join(format!("registry-pubkeys-{epoch:04}.bin"));
+    let edir = epoch_dir(Path::new(results_dir), epoch);
+    let keys_final = keys_bin(&edir);
+    let pubkeys_final = pubkeys_bin(&edir);
 
-    write_ordered_pubkeys_from_counts(&keys_path, &pubkeys_out, &counts, total_keys)?;
-
-    // Optional: remove keys file after success
-    // fs::remove_file(&keys_path).await.ok();
-
-    // Clean up tmp file
-    let _ = cleanup_keys_tmp_for_epoch(results_dir, epoch).await;
+    if total > 0 && !counts.is_empty() {
+        write_ordered_pubkeys_from_counts(&keys_final, &pubkeys_final, &counts, total)?;
+        // Delete keys.bin after success
+        std::fs::remove_file(&keys_final).ok();
+    }
 
     tracing::info!(
-        "Finished epoch {epoch:04} | {} keys | {:.1}s",
-        total_keys,
+        "✅ Finished epoch {epoch:04} | {} keys | {:.1}s",
+        total,
         start.elapsed().as_secs_f64()
     );
-
-    pb.finish_with_message(format!("epoch {epoch:04} complete | {} keys", total_keys));
+    pb.finish_with_message(format!("✅ epoch {epoch:04} complete | {} keys", total));
     Ok(())
 }
 
-/// Simple inspection that reads first few ordered pubkeys for sanity
-pub async fn inspect_pubkeys(registry_dir: &str, epoch: u64) -> Result<()> {
-    let dir = Path::new(registry_dir);
-    let pubkeys_path = dir.join(format!("registry-pubkeys-{epoch:04}.bin"));
-
-    let meta = fs::metadata(&pubkeys_path)
-        .await
-        .with_context(|| format!("missing {}", pubkeys_path.display()))?;
-    if meta.len() % 32 != 0 {
-        tracing::warn!(
-            "File size {} is not a multiple of 32 for {}",
-            meta.len(),
-            pubkeys_path.display()
-        );
-    }
-
-    let mut preview = Vec::new();
-    let mut reader = File::open(&pubkeys_path)
-        .await
-        .with_context(|| format!("open {}", pubkeys_path.display()))?;
-    for order in 0..5u32 {
-        let mut buf = [0u8; 32];
-        match reader.read_exact(&mut buf).await {
-            Ok(_) => {
-                let pk = Pubkey::new_from_array(buf);
-                preview.push((order, pk));
-            }
-            Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    tracing::info!(
-        "pubkeys-{:04}: {} entries | showing first {}",
-        epoch,
-        meta.len() / 32,
-        preview.len()
-    );
-    for (i, pk) in preview {
-        tracing::info!("order {:04} => {}", i, pk);
-    }
-    Ok(())
-}
-
+/// Inspect the pubkeys file with head/tail preview and basic checks.
 pub async fn inspect_registry(registry_dir: &str, epoch: u64) -> Result<()> {
-    let dir = Path::new(registry_dir);
-    let pubkeys_path = dir.join(format!("registry-pubkeys-{epoch:04}.bin"));
+    let edir = epoch_dir(Path::new(registry_dir), epoch);
+    let path = pubkeys_bin(&edir);
 
-    // Check file existence
-    let meta = fs::metadata(&pubkeys_path)
+    // Check file existence and shape
+    let meta = fs::metadata(&path)
         .await
-        .with_context(|| format!("missing {}", pubkeys_path.display()))?;
+        .with_context(|| format!("missing {}", path.display()))?;
     if meta.len() % 32 != 0 {
         tracing::warn!(
-            "⚠️ registry-pubkeys-{:04}.bin has unexpected size {} (not multiple of 32)",
-            epoch,
+            "⚠️ registry-pubkeys.bin has unexpected size {} (not multiple of 32)",
             meta.len()
         );
     }
 
     let total_keys = (meta.len() / 32) as usize;
     if total_keys == 0 {
-        tracing::info!("ℹ️ registry-pubkeys-{epoch:04}.bin is empty");
+        tracing::info!("ℹ️ registry-pubkeys.bin is empty for epoch {epoch:04}");
         return Ok(());
     }
 
     tracing::info!(
-        "📘 registry-pubkeys-{epoch:04}.bin → {} keys ({} bytes)",
+        "📘 registry-pubkeys.bin (epoch {epoch:04}) → {} keys ({} bytes)",
         total_keys,
         meta.len()
     );
 
-    // Read a few from start and end
-    let mut reader = File::open(&pubkeys_path)
+    // Head
+    let mut head_reader = File::open(&path)
         .await
-        .with_context(|| format!("failed to open {}", pubkeys_path.display()))?;
-
-    let mut preview_first = Vec::new();
+        .with_context(|| format!("failed to open {}", path.display()))?;
     let mut buf = [0u8; 32];
-
+    let mut preview_first = Vec::new();
     for order in 0..5u32.min(total_keys as u32) {
-        if reader.read_exact(&mut buf).await.is_err() {
+        if head_reader.read_exact(&mut buf).await.is_err() {
             break;
         }
         let pk = Pubkey::new_from_array(buf);
         preview_first.push((order, pk));
     }
 
-    // Preview last few pubkeys
+    // Tail
     let mut preview_last = Vec::new();
     if total_keys > 10 {
-        let mut reader_tail = File::open(&pubkeys_path).await?;
+        let mut tail_reader = File::open(&path).await?;
         let start = (total_keys - 5) as u64 * 32;
-        reader_tail.seek(SeekFrom::Start(start)).await?;
+        tail_reader.seek(SeekFrom::Start(start)).await?;
         for i in (total_keys - 5)..total_keys {
-            if reader_tail.read_exact(&mut buf).await.is_err() {
+            if tail_reader.read_exact(&mut buf).await.is_err() {
                 break;
             }
             let pk = Pubkey::new_from_array(buf);
@@ -589,12 +611,10 @@ pub async fn inspect_registry(registry_dir: &str, epoch: u64) -> Result<()> {
         }
     }
 
-    // Log preview
     tracing::info!("🔹 First {} entries:", preview_first.len());
     for (order, pk) in &preview_first {
         tracing::info!("   #{:04} {}", order, pk);
     }
-
     if !preview_last.is_empty() {
         tracing::info!("🔹 Last {} entries:", preview_last.len());
         for (order, pk) in &preview_last {
@@ -603,7 +623,7 @@ pub async fn inspect_registry(registry_dir: &str, epoch: u64) -> Result<()> {
     }
 
     tracing::info!(
-        "✅ registry-pubkeys-{epoch:04}.bin looks consistent: {} keys",
+        "✅ registry-pubkeys.bin looks consistent for epoch {epoch:04}: {} keys",
         total_keys
     );
     Ok(())
