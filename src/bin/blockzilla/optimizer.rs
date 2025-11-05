@@ -12,6 +12,7 @@ use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use std::{
     collections::{HashMap, hash_map::Entry},
+    convert::TryInto,
     hash::{BuildHasherDefault, Hasher},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -137,6 +138,18 @@ impl OrderedPubkeyRegistry {
                 ids.iter().copied().find(|id| self.slice_for(*id).eq(bytes))
             }
         }
+    }
+
+    pub fn get_pubkey(&self, id: u32) -> Option<Pubkey> {
+        let idx = id as usize;
+        if idx >= self.len {
+            return None;
+        }
+        let start = idx * Self::KEY_SIZE;
+        let bytes: [u8; Self::KEY_SIZE] = self.pubkeys[start..start + Self::KEY_SIZE]
+            .try_into()
+            .ok()?;
+        Some(Pubkey::new_from_array(bytes))
     }
 
     pub fn len(&self) -> usize {

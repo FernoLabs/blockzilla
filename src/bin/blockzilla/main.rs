@@ -17,7 +17,8 @@ use crate::{
     block_reader::{read_block, read_block_par},
     build_registry::{build_registry_auto, build_registry_single, inspect_registry},
     optimized_block_reader::{
-        analyze_compressed_blocks, read_compressed_blocks, read_compressed_blocks_par,
+        analyze_compressed_blocks, read_compressed_block_with_registry, read_compressed_blocks,
+        read_compressed_blocks_par,
     },
 };
 
@@ -158,6 +159,18 @@ enum OptimizeCommand {
         input_dir: String,
         #[arg(short = 'j', long, default_value_t = 1)]
         jobs: usize,
+    },
+
+    /// Reads a single block from the compressed archive using the registry
+    ReadBlock {
+        #[arg(value_name = "EPOCH")]
+        epoch: u64,
+        #[arg(short, long, value_name = "SLOT")]
+        slot: u64,
+        #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
+        input_dir: String,
+        #[arg(long)]
+        registry_dir: Option<String>,
     },
 
     /// Analyzes compressed BlockWithIds and shows statistics
@@ -319,6 +332,16 @@ async fn main() -> Result<()> {
                 } else {
                     read_compressed_blocks_par(epoch, &input_dir, jobs).await?
                 }
+            }
+
+            OptimizeCommand::ReadBlock {
+                epoch,
+                slot,
+                input_dir,
+                registry_dir,
+            } => {
+                let registry_dir = registry_dir.unwrap_or_else(|| input_dir.clone());
+                read_compressed_block_with_registry(epoch, slot, &input_dir, &registry_dir).await?
             }
 
             OptimizeCommand::Analyze { epoch, input_dir } => {
