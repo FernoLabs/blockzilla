@@ -1,7 +1,4 @@
-use ahash::AHashSet;
 use anyhow::Result;
-use serde::Deserialize;
-use serde::Serialize;
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::mem::MaybeUninit;
@@ -10,7 +7,6 @@ use wincode::ReadResult;
 use wincode::SchemaRead;
 use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
-use wincode::len::SeqLen;
 use wincode::len::ShortU16Len;
 
 /// Solana shortvec decoder
@@ -34,7 +30,7 @@ fn read_short_u16_len(buf: &[u8], pos: &mut usize) -> anyhow::Result<usize> {
 }
 
 #[inline(always)]
-pub fn parse_account_keys_only_fast(
+pub fn parse_account_keys_only(
     tx: &[u8],
     out: &mut SmallVec<[Pubkey; 256]>,
 ) -> Result<Option<Pubkey>> {
@@ -110,72 +106,6 @@ pub fn parse_account_keys_only_fast(
             pos += w_len;
             let r_len = read_short_u16_len(tx, &mut pos)? as usize;
             pos += r_len;
-        }
-    }
-
-    Ok(first_key)
-}
-
-pub fn parse_account_keys_only(tx: &[u8], out: &mut AHashSet<Pubkey>) -> Result<Option<Pubkey>> {
-    let mut reader = Reader::new(tx);
-
-    let sig_len = ShortU16Len::read::<usize>(&mut reader)?;
-    let sig_bytes = sig_len.saturating_mul(64);
-    reader.consume(sig_bytes)?;
-
-    let buf = reader.as_slice();
-    if buf.is_empty() {
-        return Ok(None);
-    }
-    let prefix = buf[0];
-    let is_v0 = prefix & 0x80 != 0;
-    if is_v0 {
-        reader.consume(1)?;
-    }
-
-    let mut header = [MaybeUninit::zeroed(); 3];
-    reader.read_exact(&mut header)?;
-
-    let n_keys = ShortU16Len::read::<usize>(&mut reader)?;
-    if n_keys == 0 {
-        return Ok(None);
-    }
-
-    let mut first_key: Option<Pubkey> = None;
-    for i in 0..n_keys {
-        let mut key_bytes = [MaybeUninit::zeroed(); 32];
-        reader.read_exact(&mut key_bytes)?;
-        let key_bytes: [u8; 32] = unsafe { std::mem::transmute_copy(&key_bytes) };
-        let key = Pubkey::new_from_array(key_bytes);
-        if i == 0 {
-            first_key = Some(key);
-        }
-        out.insert(key);
-    }
-
-    reader.consume(32)?;
-
-    if is_v0 {
-        let n_instructions = ShortU16Len::read::<usize>(&mut reader)?;
-        for _ in 0..n_instructions {
-            reader.consume(1)?;
-            let ac_len = ShortU16Len::read::<usize>(&mut reader)?;
-            reader.consume(ac_len)?;
-            let data_len = ShortU16Len::read::<usize>(&mut reader)?;
-            reader.consume(data_len)?;
-        }
-
-        let n_lookups = ShortU16Len::read::<usize>(&mut reader)?;
-        for _ in 0..n_lookups {
-            let mut key = [MaybeUninit::zeroed(); 32];
-            reader.read_exact(&mut key)?;
-            let key: [u8; 32] = unsafe { std::mem::transmute_copy(&key) };
-            out.insert(Pubkey::new_from_array(key));
-
-            let w_len = ShortU16Len::read::<usize>(&mut reader)?;
-            reader.consume(w_len)?;
-            let r_len = ShortU16Len::read::<usize>(&mut reader)?;
-            reader.consume(r_len)?;
         }
     }
 

@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     hash::{BuildHasherDefault, Hasher},
     io::{ErrorKind, Read},
-    path::{Path, PathBuf},
+    path::{Path},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -26,8 +26,7 @@ use tokio::{
 
 use crate::{
     LOG_INTERVAL_SECS,
-    file_downloader::download_epoch,
-    transaction_parser::parse_account_keys_only_fast,
+    transaction_parser::parse_account_keys_only,
 };
 
 #[derive(Default)]
@@ -67,7 +66,6 @@ impl Hasher for NoOpHasher {
     fn write(&mut self, _: &[u8]) {}
 }
 
-type FastPubkeyMap<V> = HashMap<Pubkey, V, BuildHasherDefault<PubkeyHasher>>;
 type FastPubkeySet = HashSet<Pubkey, BuildHasherDefault<PubkeyHasher>>;
 type U64Map<V> = HashMap<u64, V, BuildHasherDefault<NoOpHasher>>;
 
@@ -325,7 +323,7 @@ async fn process_epoch_one_pass(
                 };
 
                 tmp_keys.clear();
-                if let Some(fee_payer) = parse_account_keys_only_fast(tx_bytes, &mut tmp_keys)? {
+                if let Some(fee_payer) = parse_account_keys_only(tx_bytes, &mut tmp_keys)? {
                     unique_keys.clear();
                     unique_keys.extend(tmp_keys.iter().copied());
                     let fee_fp = pubkey_fp(&fee_payer);

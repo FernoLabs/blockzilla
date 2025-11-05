@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 use reqwest::{Client, header};
 use std::{
     env,
-    path::{Path, PathBuf},
+    path::{Path},
     pin::Pin,
     sync::{
         Arc,
@@ -178,7 +178,7 @@ async fn stream_epoch_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Se
         let mut written = 0u64;
         let start = Instant::now();
         let mut last_log = Instant::now();
-        let mut resp = match client.get(&url).send().await {
+        let resp = match client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("SafeNetwork error: {e}");
