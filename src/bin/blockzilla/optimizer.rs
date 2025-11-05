@@ -25,12 +25,15 @@ const LOG_INTERVAL_SECS: u64 = 10;
 #[derive(Default)]
 struct NoOpHasher(u64);
 impl Hasher for NoOpHasher {
+    #[inline(always)]
     fn finish(&self) -> u64 {
         self.0
     }
+    #[inline(always)]
     fn write_u64(&mut self, i: u64) {
         self.0 = i;
     }
+    #[inline(always)]
     fn write(&mut self, _: &[u8]) {}
 }
 type U64Map<V> = HashMap<u64, V, BuildHasherDefault<NoOpHasher>>;
@@ -46,10 +49,11 @@ enum IndexEntry {
 }
 
 impl IndexEntry {
+    #[inline(always)]
     fn push(&mut self, id: u32) {
         match self {
             IndexEntry::Single(existing) => {
-                let mut v = Vec::with_capacity(2);
+                let mut v = Vec::with_capacity(4); // Slightly larger initial capacity
                 v.push(*existing);
                 v.push(id);
                 *self = IndexEntry::Multiple(v);
@@ -83,11 +87,8 @@ impl OrderedPubkeyRegistry {
                 len_bytes
             ));
         }
-        let mut data = Vec::with_capacity(len_bytes);
-        // SAFETY: we immediately fill the buffer via read_exact
-        unsafe {
-            data.set_len(len_bytes);
-        }
+
+        let mut data = vec![0u8; len_bytes];
         file.read_exact(&mut data)?;
         let pubkeys = data.into_boxed_slice();
 
@@ -115,10 +116,13 @@ impl OrderedPubkeyRegistry {
         })
     }
 
-    #[inline]
+    #[inline(always)]
     fn slice_for(&self, id: u32) -> &[u8] {
         let start = id as usize * Self::KEY_SIZE;
-        &self.pubkeys[start..start + Self::KEY_SIZE]
+        // SAFETY: id comes from our own index, so it's always valid
+        unsafe {
+            self.pubkeys.get_unchecked(start..start + Self::KEY_SIZE)
+        }
     }
 
     #[inline]
@@ -127,14 +131,14 @@ impl OrderedPubkeyRegistry {
         let fp = pubkey_fp(bytes);
         match self.index.get(&fp)? {
             IndexEntry::Single(id) => {
-                if self.slice_for(*id).eq(bytes) {
+                if self.slice_for(*id) == bytes {
                     Some(*id)
                 } else {
                     None
                 }
             }
             IndexEntry::Multiple(ids) => {
-                ids.iter().copied().find(|id| self.slice_for(*id).eq(bytes))
+                ids.iter().copied().find(|id| self.slice_for(*id) == bytes)
             }
         }
     }
@@ -149,6 +153,7 @@ pub trait RegistryAccess {
 }
 
 impl RegistryAccess for OrderedPubkeyRegistry {
+    #[inline]
     fn get_or_insert(&mut self, pk: &Pubkey) -> Result<u32> {
         self.lookup_raw(pk)
             .ok_or_else(|| anyhow!("pubkey {} missing from registry", pk))
@@ -233,11 +238,21 @@ pub struct BlockWithIds {
     pub num_transactions: u64,
 }
 
+// Thread-local buffers to eliminate repeated allocations
 thread_local! {
-    static TL_META_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
-    static TL_ZSTD_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
+    static TL_META_BUF: std::cell::RefCell<Vec<u8>> = 
+        std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
+    static TL_ZSTD_BUF: std::cell::RefCell<Vec<u8>> = 
+        std::cell::RefCell::new(Vec::with_capacity(256 * 1024));
+    static TL_TX_BUF: std::cell::RefCell<Vec<u8>> = 
+        std::cell::RefCell::new(Vec::with_capacity(64 * 1024));
+    static TL_SER_BUF: std::cell::RefCell<Vec<u8>> = 
+        std::cell::RefCell::new(Vec::with_capacity(2 * 1024 * 1024));
 }
+
+#[inline]
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
+    // Check for zstd magic bytes
     if bytes.len() >= 4 && &bytes[0..4] == [0x28, 0xB5, 0x2F, 0xFD] {
         return TL_META_BUF.with(|cell| {
             let mut buf = cell.borrow_mut();
@@ -247,6 +262,8 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStat
                 .context("prost decode after zstd")
         });
     }
+    
+    // Try bulk decompress first, then raw decode
     TL_ZSTD_BUF.with(|zbuf_cell| {
         let mut zbuf = zbuf_cell.borrow_mut();
         zbuf.clear();
@@ -254,11 +271,12 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStat
             Ok(_) => confirmed_block::TransactionStatusMeta::decode(&zbuf[..])
                 .context("prost decode after bulk zstd"),
             Err(_) => confirmed_block::TransactionStatusMeta::decode(bytes)
-                .context("prost decode raw failed"),
+                .context("prost decode raw"),
         }
     })
 }
 
+#[inline]
 fn decode_wincode_tx(bytes: &[u8]) -> Result<VersionedTransaction> {
     let mut reader = wincode::io::Reader::new(bytes);
     let mut dst = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
@@ -267,7 +285,37 @@ fn decode_wincode_tx(bytes: &[u8]) -> Result<VersionedTransaction> {
     Ok(unsafe { dst.assume_init() })
 }
 
-fn cb_to_compact_block<R: RegistryAccess>(block: &CarBlock, reg: &mut R) -> Result<BlockWithIds> {
+// Reusable context for processing blocks - avoids repeated allocations
+struct BlockProcessingContext {
+    tx_buf: Vec<u8>,
+    meta_buf: Vec<u8>,
+    all_keys: Vec<Pubkey>,
+    account_keys: Vec<u32>,
+}
+
+impl BlockProcessingContext {
+    fn new() -> Self {
+        Self {
+            tx_buf: Vec::with_capacity(64 * 1024),
+            meta_buf: Vec::with_capacity(32 * 1024),
+            all_keys: Vec::with_capacity(64),
+            account_keys: Vec::with_capacity(64),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.tx_buf.clear();
+        self.meta_buf.clear();
+        self.all_keys.clear();
+        self.account_keys.clear();
+    }
+}
+
+fn cb_to_compact_block<R: RegistryAccess>(
+    block: &CarBlock,
+    reg: &mut R,
+    ctx: &mut BlockProcessingContext,
+) -> Result<BlockWithIds> {
     let blk = block.block()?;
     let slot = blk.slot;
     let parent_slot = blk
@@ -283,8 +331,6 @@ fn cb_to_compact_block<R: RegistryAccess>(block: &CarBlock, reg: &mut R) -> Resu
     let rewards = extract_rewards(block, reg).unwrap_or_default();
 
     let mut transactions = Vec::new();
-    let mut tx_buf = Vec::<u8>::with_capacity(16 * 1024);
-    let mut meta_buf = Vec::<u8>::with_capacity(8 * 1024);
 
     for entry_cid in blk.entries.iter() {
         let Node::Entry(entry) = block.decode(entry_cid?.hash_bytes())? else {
@@ -296,30 +342,30 @@ fn cb_to_compact_block<R: RegistryAccess>(block: &CarBlock, reg: &mut R) -> Resu
                 continue;
             };
 
+            ctx.tx_buf.clear();
             let tx_bytes: &[u8] = match tx.data.next {
                 None => tx.data.data,
                 Some(df_cbor) => {
-                    tx_buf.clear();
                     let mut rdr = block.dataframe_reader(&df_cbor.to_cid()?);
-                    rdr.read_to_end(&mut tx_buf)?;
-                    &tx_buf
+                    rdr.read_to_end(&mut ctx.tx_buf)?;
+                    &ctx.tx_buf
                 }
             };
 
+            ctx.meta_buf.clear();
             let meta_bytes: &[u8] = match tx.metadata.next {
                 None => tx.metadata.data,
                 Some(df_cbor) => {
-                    meta_buf.clear();
                     let mut rdr = block.dataframe_reader(&df_cbor.to_cid()?);
-                    rdr.read_to_end(&mut meta_buf)?;
-                    &meta_buf
+                    rdr.read_to_end(&mut ctx.meta_buf)?;
+                    &ctx.meta_buf
                 }
             };
 
             let vt = decode_wincode_tx(tx_bytes)?;
             let meta = decode_protobuf_meta(meta_bytes)?;
 
-            let compact = build_compact_tx(vt, meta, reg)?;
+            let compact = build_compact_tx(vt, meta, reg, ctx)?;
             transactions.push(compact);
         }
     }
@@ -341,6 +387,7 @@ fn build_compact_tx<R: RegistryAccess>(
     vt: VersionedTransaction,
     meta: confirmed_block::TransactionStatusMeta,
     reg: &mut R,
+    ctx: &mut BlockProcessingContext,
 ) -> Result<CompactTransaction> {
     let signatures: Vec<Signature> = vt
         .signatures
@@ -349,9 +396,12 @@ fn build_compact_tx<R: RegistryAccess>(
         .collect();
 
     let static_keys = vt.message.static_account_keys();
-    let mut account_keys = Vec::with_capacity(static_keys.len());
+    
+    // Reuse pre-allocated vector
+    ctx.account_keys.clear();
+    ctx.account_keys.reserve(static_keys.len());
     for raw in static_keys {
-        account_keys.push(reg.get_or_insert(&Pubkey::new_from_array(*raw))?);
+        ctx.account_keys.push(reg.get_or_insert(&Pubkey::new_from_array(*raw))?);
     }
 
     let header = vt.message.header();
@@ -389,26 +439,30 @@ fn build_compact_tx<R: RegistryAccess>(
             .collect::<Vec<_>>()
     });
 
-    let mut all_keys: Vec<Pubkey> = static_keys
-        .iter()
-        .map(|a| Pubkey::new_from_array(*a))
-        .collect();
+    // Reuse all_keys vector
+    ctx.all_keys.clear();
+    ctx.all_keys.extend(
+        static_keys
+            .iter()
+            .map(|a| Pubkey::new_from_array(*a))
+    );
+    
     for a in &meta.loaded_writable_addresses {
         if a.len() == 32 {
             if let Ok(arr) = <[u8; 32]>::try_from(a.as_slice()) {
-                all_keys.push(Pubkey::new_from_array(arr));
+                ctx.all_keys.push(Pubkey::new_from_array(arr));
             }
         }
     }
     for a in &meta.loaded_readonly_addresses {
         if a.len() == 32 {
             if let Ok(arr) = <[u8; 32]>::try_from(a.as_slice()) {
-                all_keys.push(Pubkey::new_from_array(arr));
+                ctx.all_keys.push(Pubkey::new_from_array(arr));
             }
         }
     }
 
-    let compact_meta = make_compact_meta(meta, &all_keys, reg)?;
+    let compact_meta = make_compact_meta(meta, &ctx.all_keys, reg)?;
 
     let version = match vt.message {
         VersionedMessage::Legacy(_) => 0,
@@ -418,7 +472,7 @@ fn build_compact_tx<R: RegistryAccess>(
     Ok(CompactTransaction {
         signatures,
         message_header,
-        account_keys,
+        account_keys: ctx.account_keys.clone(),
         recent_blockhash,
         instructions,
         address_table_lookups,
@@ -426,6 +480,7 @@ fn build_compact_tx<R: RegistryAccess>(
         version,
     })
 }
+
 fn make_compact_meta<R: RegistryAccess>(
     meta: confirmed_block::TransactionStatusMeta,
     all_keys: &[Pubkey],
@@ -644,27 +699,15 @@ fn extract_rewards<R: RegistryAccess>(block: &CarBlock, reg: &mut R) -> Result<V
     Ok(rewards)
 }
 
-fn has_local_epoch(cache_dir: &str, epoch: u64) -> bool {
-    Path::new(&format!("{cache_dir}/epoch-{epoch}.car")).exists()
-}
-
-async fn download_epoch_to_disk(cache_dir: &str, epoch: u64) -> Result<PathBuf> {
-    tokio::fs::create_dir_all(cache_dir).await.ok();
-    let out = PathBuf::from(format!("{cache_dir}/epoch-{epoch}.car"));
-    if !out.exists() {
-        crate::file_downloader::download_epoch(epoch, cache_dir, 3).await?;
-    }
-    Ok(out)
-}
-
 pub async fn run_car_optimizer(
     cache_dir: &str,
     epoch: u64,
     output_dir: &str,
     registry_dir: Option<&str>,
-    zstd_level: i32,
 ) -> Result<()> {
-    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
+    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
+        .await
+        .with_context(|| format!("opening epoch {} from {}", epoch, cache_dir))?;
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
 
@@ -691,7 +734,8 @@ pub async fn run_car_optimizer(
     );
 
     let registry_base = registry_dir.unwrap_or(output_dir);
-    let mut reg = OrderedPubkeyRegistry::load(registry_base, epoch)?;
+    let mut reg = OrderedPubkeyRegistry::load(registry_base, epoch)
+        .with_context(|| format!("loading registry for epoch {}", epoch))?;
 
     let start = Instant::now();
     let mut last_log = start;
@@ -699,25 +743,29 @@ pub async fn run_car_optimizer(
     let mut current_offset = 0u64;
     let mut total_bytes = 0u64;
 
-    let mut ser_buf = Vec::with_capacity(2 * 1024 * 1024);
+    // Reusable context to avoid allocations
+    let mut ctx = BlockProcessingContext::new();
 
     while let Some(accessor) = car.next_block().await? {
-        let t1 = Instant::now();
-        let compact = cb_to_compact_block(&accessor, &mut reg)?;
-        let serialized = postcard::to_allocvec(&compact)?;
-        ser_buf.clear();
-        zstd::stream::copy_encode(&serialized[..], &mut ser_buf, zstd_level)?;
+        ctx.reset();
 
-        let t2 = Instant::now();
+        let compact = cb_to_compact_block(&accessor, &mut reg, &mut ctx)?;
 
-        let len = ser_buf.len() as u32;
-        bin.write_all(&len.to_le_bytes())?;
-        bin.write_all(&ser_buf)?;
+        // Serialize without compression. Layout: [len: u32][postcard bytes...]
+        let serialized: Vec<u8> = postcard::to_allocvec(&compact)
+            .context("postcard serialize compact block")?;
+        let ser_len_u32 = u32::try_from(serialized.len())
+            .map_err(|_| anyhow!("serialized block too large (>4GB)"))?;
+
+        bin.write_all(&ser_len_u32.to_le_bytes())?;
+        bin.write_all(&serialized)?;
+
+        // Write index entry: (slot, offset)
         idx.write_all(&compact.slot.to_le_bytes())?;
         idx.write_all(&current_offset.to_le_bytes())?;
 
-        current_offset += 4 + ser_buf.len() as u64;
-        total_bytes += ser_buf.len() as u64;
+        current_offset += 4 + serialized.len() as u64;
+        total_bytes += serialized.len() as u64;
         blocks += 1;
 
         let now = Instant::now();
@@ -727,11 +775,11 @@ pub async fn run_car_optimizer(
             let elapsed = now.duration_since(start).as_secs_f64().max(0.001);
             let blkps = blocks as f64 / elapsed;
             println!(
-                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>8} keys | frame {:.1} ms",
+                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>8} keys | avg {:>7.1} B/blk",
                 blocks,
                 blkps,
                 reg.len(),
-                (t2 - t1).as_secs_f64() * 1000.0,
+                (total_bytes as f64 / blocks.max(1) as f64)
             );
             last_log = now;
         }

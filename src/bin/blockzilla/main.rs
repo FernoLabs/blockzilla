@@ -109,8 +109,6 @@ enum OptimizeCommand {
         registry_dir: Option<String>,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
-        #[arg(short = 'z', long, default_value_t = 0)]
-        zstd_level: i32,
     },
 
     /// Runs download → registry → optimize for a single epoch
@@ -124,8 +122,6 @@ enum OptimizeCommand {
         registry_dir: String,
         #[arg(long, default_value = DEFAULT_OPTIMIZED_DIR)]
         optimized_dir: String,
-        #[arg(short = 'z', long, default_value_t = 0)]
-        zstd_level: i32,
         #[arg(long, default_value_t = false)]
         force: bool,
     },
@@ -144,8 +140,6 @@ enum OptimizeCommand {
         registry_dir: String,
         #[arg(long, default_value = DEFAULT_OPTIMIZED_DIR)]
         optimized_dir: String,
-        #[arg(short = 'z', long, default_value_t = 0)]
-        zstd_level: i32,
         #[arg(long, default_value_t = false)]
         force: bool,
     },
@@ -223,14 +217,12 @@ async fn main() -> Result<()> {
                 results_dir,
                 registry_dir,
                 epoch,
-                zstd_level,
             } => {
                 optimizer::run_car_optimizer(
                     &cache_dir,
                     epoch,
                     &results_dir,
                     registry_dir.as_deref(),
-                    zstd_level,
                 )
                 .await?
             }
@@ -240,7 +232,6 @@ async fn main() -> Result<()> {
                 cache_dir,
                 registry_dir,
                 optimized_dir,
-                zstd_level,
                 force,
             } => {
                 match run_epoch_optimize(
@@ -248,7 +239,6 @@ async fn main() -> Result<()> {
                     &registry_dir,
                     &optimized_dir,
                     epoch,
-                    zstd_level,
                     force,
                 )
                 .await?
@@ -268,7 +258,6 @@ async fn main() -> Result<()> {
                 cache_dir,
                 registry_dir,
                 optimized_dir,
-                zstd_level,
                 force,
             } => {
                 if start_epoch > end_epoch {
@@ -285,7 +274,6 @@ async fn main() -> Result<()> {
                         &registry_dir,
                         &optimized_dir,
                         epoch,
-                        zstd_level,
                         force,
                     )
                     .await
@@ -371,7 +359,6 @@ async fn run_epoch_optimize(
     registry_dir: &str,
     optimized_dir: &str,
     epoch: u64,
-    zstd_level: i32,
     force: bool,
 ) -> Result<OptimizeOutcome> {
     if !force && outputs_exist(registry_dir, optimized_dir, epoch) {
@@ -387,7 +374,6 @@ async fn run_epoch_optimize(
         epoch,
         optimized_dir,
         Some(registry_dir),
-        zstd_level,
     )
     .await?;
 

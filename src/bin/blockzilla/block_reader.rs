@@ -4,7 +4,6 @@ use blockzilla::{
     node::Node,
     open_epoch::{self, FetchMode},
 };
-use clap::{Parser, Subcommand};
 use indicatif::ProgressBar;
 use std::{
     io::Read,
@@ -16,10 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, mpsc};
-use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use wincode::Deserialize;
 
-use crate::build_registry::build_registry_auto;
 use crate::transaction_parser::VersionedTransaction;
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
