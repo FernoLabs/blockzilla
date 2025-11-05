@@ -25,7 +25,8 @@ use tokio::{
 };
 
 use crate::{
-    LOG_INTERVAL_SECS, file_downloader::download_epoch,
+    LOG_INTERVAL_SECS,
+    file_downloader::download_epoch,
     transaction_parser::parse_account_keys_only_fast,
 };
 
@@ -33,10 +34,12 @@ use crate::{
 struct PubkeyHasher(u64);
 
 impl Hasher for PubkeyHasher {
+    #[inline(always)]
     fn finish(&self) -> u64 {
         self.0
     }
 
+    #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
         if bytes.len() >= 8 {
             self.0 = u64::from_le_bytes([
@@ -50,14 +53,17 @@ impl Hasher for PubkeyHasher {
 struct NoOpHasher(u64);
 
 impl Hasher for NoOpHasher {
+    #[inline(always)]
     fn finish(&self) -> u64 {
         self.0
     }
 
+    #[inline(always)]
     fn write_u64(&mut self, i: u64) {
         self.0 = i;
     }
 
+    #[inline(always)]
     fn write(&mut self, _: &[u8]) {}
 }
 
@@ -79,6 +85,39 @@ async fn remove_if_exists(path: &Path) -> Result<()> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
     }
+}
+
+/// Clean up temporary keys file for a specific epoch
+async fn cleanup_keys_tmp_for_epoch(results_dir: &str, epoch: u64) -> Result<()> {
+    let tmp_path = Path::new(results_dir).join(format!("keys-{epoch:04}.tmp"));
+    remove_if_exists(&tmp_path).await
+}
+
+/// Clean up ALL temporary keys files in the results directory
+pub async fn cleanup_all_keys_tmp(results_dir: &str) -> Result<usize> {
+    let mut removed = 0usize;
+    let mut read_dir = match fs::read_dir(results_dir).await {
+        Ok(rd) => rd,
+        Err(_) => return Ok(0),
+    };
+    
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        
+        if name_str.starts_with("keys-") && name_str.ends_with(".tmp") {
+            if fs::remove_file(entry.path()).await.is_ok() {
+                removed += 1;
+                tracing::debug!("🧹 Removed temporary file: {}", name_str);
+            }
+        }
+    }
+    
+    if removed > 0 {
+        tracing::info!("🧹 Cleaned up {} temporary keys files", removed);
+    }
+    
+    Ok(removed)
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -109,7 +148,6 @@ impl CompactKeyData {
 
     #[inline(always)]
     fn update(&mut self, idx: usize, fee_payer_id: u32, slot: u64) {
-        // Safe because we pre-allocate based on key count
         if idx < self.counts.len() {
             unsafe {
                 let c = self.counts.get_unchecked_mut(idx);
@@ -156,14 +194,17 @@ fn assign_order_ids_from_arrays(
     counts: &[u32],
     keys_total: usize,
 ) -> Vec<Pubkey> {
+    // Build id->key mapping once
     let mut id_to_key: HashMap<u32, Pubkey> = HashMap::with_capacity(registry.len());
     for (key, stats) in registry.iter() {
         id_to_key.insert(stats.id, *key);
     }
 
+    // Sort indices by count (descending)
     let mut idxs: Vec<u32> = (0..keys_total as u32).collect();
     idxs.sort_unstable_by(|&a, &b| counts[b as usize].cmp(&counts[a as usize]));
 
+    // Assign order_ids and build ordered list
     let mut ordered_keys = Vec::with_capacity(registry.len());
     for (order_id, idx) in idxs.into_iter().enumerate() {
         if let Some(key) = id_to_key.get(&idx) {
@@ -184,11 +225,13 @@ async fn write_registry_to_disk<P: AsRef<Path>>(
     let path = path.as_ref();
     let tmp = path.with_extension("tmp");
     remove_if_exists(&tmp).await?;
+    
     let data = postcard::to_allocvec(registry)?;
     let f = fs::File::create(&tmp).await?;
     let mut w = BufWriter::new(f);
     w.write_all(&data).await?;
     w.flush().await?;
+    
     if let Err(err) = fs::rename(&tmp, path).await {
         let _ = remove_if_exists(&tmp).await;
         return Err(err.into());
@@ -203,30 +246,19 @@ async fn write_ordered_pubkeys_to_disk<P: AsRef<Path>>(
     let path = path.as_ref();
     let tmp = path.with_extension("tmp");
     remove_if_exists(&tmp).await?;
+    
     let f = fs::File::create(&tmp).await?;
     let mut w = BufWriter::new(f);
     for key in ordered_pubkeys {
         w.write_all(key.as_ref()).await?;
     }
     w.flush().await?;
+    
     if let Err(err) = fs::rename(&tmp, path).await {
         let _ = remove_if_exists(&tmp).await;
         return Err(err.into());
     }
     Ok(())
-}
-
-fn has_local_epoch(cache_dir: &str, epoch: u64) -> bool {
-    Path::new(&format!("{cache_dir}/epoch-{epoch}.car")).exists()
-}
-
-async fn download_epoch_to_disk(cache_dir: &str, epoch: u64) -> Result<PathBuf> {
-    tokio::fs::create_dir_all(cache_dir).await.ok();
-    let out = PathBuf::from(format!("{cache_dir}/epoch-{epoch}.car"));
-    if !out.exists() {
-        download_epoch(epoch, cache_dir, 3).await?;
-    }
-    Ok(out)
 }
 
 async fn process_epoch_one_pass(
@@ -237,7 +269,10 @@ async fn process_epoch_one_pass(
 ) -> Result<(AHashMap<Pubkey, KeyStats>, Vec<u32>, usize)> {
     let keys_path = Path::new(results_dir).join(format!("keys-{epoch:04}.bin"));
     let keys_tmp = keys_path.with_extension("tmp");
+    
+    // Clean up any existing tmp file before starting
     remove_if_exists(&keys_tmp).await?;
+    
     let f = File::create(&keys_tmp).await?;
     let mut keys_writer = BufWriter::with_capacity(32 * 1024 * 1024, f);
 
@@ -335,11 +370,13 @@ async fn process_epoch_one_pass(
         }
     }
 
+    // Flush remaining keys
     if !key_batch.is_empty() {
         keys_writer.write_all(&key_batch).await?;
     }
-
     keys_writer.flush().await?;
+
+    // Atomic rename from tmp to final file
     if let Err(err) = fs::rename(&keys_tmp, &keys_path).await {
         let _ = remove_if_exists(&keys_tmp).await;
         return Err(err.into());
@@ -358,8 +395,16 @@ pub async fn build_registry_auto(
     workers: usize,
 ) -> Result<()> {
     fs::create_dir_all(results_dir).await.ok();
+
+    // Clean up any leftover tmp files from previous runs
+    let cleaned = cleanup_all_keys_tmp(results_dir).await?;
+    if cleaned > 0 {
+        tracing::info!("🧹 Cleaned up {} stale temporary files", cleaned);
+    }
+
     let start_total = Instant::now();
 
+    // Find completed epochs
     let mut completed_epochs = HashSet::new();
     if let Ok(mut entries) = fs::read_dir(results_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -428,20 +473,26 @@ pub async fn build_registry_auto(
                 match process_epoch_one_pass(&cache, &out, epoch, &pb).await {
                     Ok((mut reg, counts, total)) => {
                         pb.set_message(format!("epoch {epoch:04} sorting..."));
-                        let ordered_pubkeys = assign_order_ids_from_arrays(&mut reg, &counts, total);
+                        let ordered_pubkeys =
+                            assign_order_ids_from_arrays(&mut reg, &counts, total);
 
                         pb.set_message(format!("epoch {epoch:04} writing..."));
                         let registry_path = Path::new(&out).join(format!("registry-{epoch:04}.bin"));
                         let pubkeys_path =
                             Path::new(&out).join(format!("registry-pubkeys-{epoch:04}.bin"));
+
                         let write_res = async {
                             write_registry_to_disk(&registry_path, &reg).await?;
                             write_ordered_pubkeys_to_disk(&pubkeys_path, &ordered_pubkeys).await?;
                             Ok::<(), anyhow::Error>(())
                         }
                         .await;
+
                         match write_res {
                             Ok(_) => {
+                                // Clean up tmp file for this epoch
+                                let _ = cleanup_keys_tmp_for_epoch(&out, epoch).await;
+
                                 processed += 1;
                                 pb.set_message(format!(
                                     "✅ epoch {epoch:04} | {:>8} keys | {processed} done, {failed} failed",
@@ -465,12 +516,20 @@ pub async fn build_registry_auto(
                 }
             }
 
-            pb.finish_with_message(format!("✅ W{w} finished: {processed} processed, {failed} failed"));
+            pb.finish_with_message(format!(
+                "✅ W{w} finished: {processed} processed, {failed} failed"
+            ));
         }));
     }
 
     for h in handles {
         let _ = h.await;
+    }
+
+    // Final cleanup of any remaining tmp files
+    let final_cleaned = cleanup_all_keys_tmp(results_dir).await?;
+    if final_cleaned > 0 {
+        tracing::info!("🧹 Final cleanup: removed {} temporary files", final_cleaned);
     }
 
     tracing::info!(
@@ -500,6 +559,9 @@ pub async fn build_registry_single(cache_dir: &str, results_dir: &str, epoch: u6
     let pubkeys_out = dir.join(format!("registry-pubkeys-{epoch:04}.bin"));
     write_registry_to_disk(&registry_out, &reg).await?;
     write_ordered_pubkeys_to_disk(&pubkeys_out, &ordered_pubkeys).await?;
+
+    // Clean up tmp file
+    let _ = cleanup_keys_tmp_for_epoch(results_dir, epoch).await;
 
     tracing::info!(
         "✅ Finished epoch {epoch:04} | {} keys | {:.1}s",
@@ -544,15 +606,13 @@ pub async fn inspect_registry(registry_dir: &str, epoch: u64) -> Result<()> {
 
         if top.len() < 5 {
             top.push((*pk, stats));
-        } else {
-            if let Some((idx, _)) = top
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.1.count)
-            {
-                if stats.count > top[idx].1.count {
-                    top[idx] = (*pk, stats);
-                }
+        } else if let Some((idx, _)) = top
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.1.count)
+        {
+            if stats.count > top[idx].1.count {
+                top[idx] = (*pk, stats);
             }
         }
     }
