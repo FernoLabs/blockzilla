@@ -23,10 +23,7 @@ use tokio::{
 
 use crate::LOG_INTERVAL_SECS;
 use crate::build_registry::{epoch_dir, fp128_from_bytes, keys_bin};
-use blockzilla::carblock_to_compact::{
-    CompactBlock,
-    carblock_to_compactblock_inplace,
-};
+use blockzilla::carblock_to_compact::{CompactBlock, carblock_to_compactblock_inplace};
 
 /// ========================================================================
 /// Paths (optimizer-specific)
@@ -52,10 +49,10 @@ fn unique_tmp(dir: &Path, name: &str) -> PathBuf {
 fn is_soft_eof(e: &anyhow::Error) -> bool {
     let mut cur: Option<&(dyn StdError + 'static)> = Some(e.as_ref());
     while let Some(err) = cur {
-        if let Some(ioe) = err.downcast_ref::<std::io::Error>() {
-            if ioe.kind() == std::io::ErrorKind::UnexpectedEof {
-                return true;
-            }
+        if let Some(ioe) = err.downcast_ref::<std::io::Error>()
+            && ioe.kind() == std::io::ErrorKind::UnexpectedEof
+        {
+            return true;
         }
         let msg = err.to_string();
         if msg.contains("unexpected EOF") || msg.contains("without BlockNode") {
@@ -160,8 +157,8 @@ pub async fn optimize_epoch(
     let tmp_path = unique_tmp(&outdir, "blocks");
 
     // Bigger buffers and batched writes to saturate disk
-    const OUT_BUF_CAP: usize    = 128 << 20; // 128 MiB writer buffer
-    const BATCH_TARGET: usize   = 128 << 20; // flush when reaching this size
+    const OUT_BUF_CAP: usize = 128 << 20; // 128 MiB writer buffer
+    const BATCH_TARGET: usize = 128 << 20; // flush when reaching this size
     const BATCH_SOFT_MAX: usize = 160 << 20; // guard flush
 
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
@@ -173,7 +170,7 @@ pub async fn optimize_epoch(
         txs: Vec::with_capacity(512),
         rewards: Vec::with_capacity(64),
     };
-    let mut buf_tx   = Vec::<u8>::with_capacity(128 << 10);
+    let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
     let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
 
     let start = Instant::now();
@@ -269,20 +266,16 @@ pub async fn optimize_auto(
     if let Ok(mut rd) = fs::read_dir(out_base).await {
         while let Ok(Some(ent)) = rd.next_entry().await {
             let p = ent.path();
-            if p.is_dir() {
-                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                    if let Some(num) = name
-                        .strip_prefix("epoch-")
-                        .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        if fs::metadata(optimized_blocks_file(&p.join("optimized")))
-                            .await
-                            .is_ok()
-                        {
-                            completed.insert(num);
-                        }
-                    }
-                }
+            if p.is_dir()
+                && let Some(name) = p.file_name().and_then(|s| s.to_str())
+                && let Some(num) = name
+                    .strip_prefix("epoch-")
+                    .and_then(|s| s.parse::<u64>().ok())
+                && fs::metadata(optimized_blocks_file(&p.join("optimized")))
+                    .await
+                    .is_ok()
+            {
+                completed.insert(num);
             }
         }
     }

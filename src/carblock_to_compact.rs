@@ -320,16 +320,16 @@ fn decode_rewards_via_node(
     if let Ok(v) = wincode::deserialize::<Vec<ClientRewardStringPk>>(bytes) {
         out.reserve(v.len());
         for r in v {
-            if let Ok(pk) = Pubkey::try_from(r.pubkey.as_str()) {
-                if let Some(account_id) = id_for_pubkey(fp2id, &pk.to_bytes()) {
-                    out.push(CompactReward {
-                        account_id,
-                        lamports: r.lamports,
-                        post_balance: r.post_balance,
-                        reward_type: reward_tag_to_compact(r.reward_type),
-                        commission: r.commission,
-                    });
-                }
+            if let Ok(pk) = Pubkey::try_from(r.pubkey.as_str())
+                && let Some(account_id) = id_for_pubkey(fp2id, &pk.to_bytes())
+            {
+                out.push(CompactReward {
+                    account_id,
+                    lamports: r.lamports,
+                    post_balance: r.post_balance,
+                    reward_type: reward_tag_to_compact(r.reward_type),
+                    commission: r.commission,
+                });
             }
         }
         return Ok(out);
@@ -530,30 +530,26 @@ fn meta_to_compact(
     let mut loaded_writable_ids = Vec::new();
     let mut loaded_readonly_ids = Vec::new();
     for addr in &meta.loaded_writable_addresses {
-        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
-            if let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes()) {
-                loaded_writable_ids.push(id);
-            }
+        if let Ok(pk) = Pubkey::try_from(addr.as_slice())
+            && let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes())
+        {
+            loaded_writable_ids.push(id);
         }
     }
     for addr in &meta.loaded_readonly_addresses {
-        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
-            if let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes()) {
-                loaded_readonly_ids.push(id);
-            }
+        if let Ok(pk) = Pubkey::try_from(addr.as_slice())
+            && let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes())
+        {
+            loaded_readonly_ids.push(id);
         }
     }
 
     let return_data = if let Some(rd) = &meta.return_data {
         if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
-            if let Some(pid) = id_for_pubkey(fp2id, &pk.to_bytes()) {
-                Some(CompactReturnData {
-                    program_id_id: pid,
-                    data: rd.data.clone(),
-                })
-            } else {
-                None
-            }
+            id_for_pubkey(fp2id, &pk.to_bytes()).map(|pid| CompactReturnData {
+                program_id_id: pid,
+                data: rd.data.clone(),
+            })
         } else {
             None
         }
@@ -570,14 +566,14 @@ fn meta_to_compact(
                 .instructions
                 .into_iter()
                 .map(|instr| CompactInnerInstruction {
-                    program_id_index: instr.program_id_index as u32,
+                    program_id_index: instr.program_id_index,
                     accounts: instr.accounts,
                     data: instr.data,
                     stack_height: instr.stack_height,
                 })
                 .collect::<Vec<_>>();
             CompactInnerInstructions {
-                index: ii.index as u32,
+                index: ii.index,
                 instructions,
             }
         })
@@ -592,7 +588,7 @@ fn meta_to_compact(
     let err = tx_error_from_meta(meta);
 
     CompactMetadata {
-        fee: meta.fee as u64,
+        fee: meta.fee,
         err,
         pre_balances,
         post_balances,

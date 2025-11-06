@@ -94,10 +94,10 @@ pub fn fp128_from_bytes(b: &[u8; 32]) -> u128 {
 fn is_soft_eof(e: &anyhow::Error) -> bool {
     let mut cur: Option<&(dyn StdError + 'static)> = Some(e.as_ref());
     while let Some(err) = cur {
-        if let Some(ioe) = err.downcast_ref::<io::Error>() {
-            if ioe.kind() == io::ErrorKind::UnexpectedEof {
-                return true;
-            }
+        if let Some(ioe) = err.downcast_ref::<io::Error>()
+            && ioe.kind() == io::ErrorKind::UnexpectedEof
+        {
+            return true;
         }
         let msg = err.to_string();
         if msg.contains("unexpected EOF") || msg.contains("without BlockNode") {
@@ -319,17 +319,14 @@ pub async fn build_registry_auto(
             if !p.is_dir() {
                 continue;
             }
-            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                if let Some(num) = name
+            if let Some(name) = p.file_name().and_then(|s| s.to_str())
+                && let Some(num) = name
                     .strip_prefix("epoch-")
                     .and_then(|s| s.parse::<u64>().ok())
-                {
-                    if fs::metadata(keys_bin(&p)).await.is_ok()
-                        && fs::metadata(fp2key_bin(&p)).await.is_ok()
-                    {
-                        completed.insert(num);
-                    }
-                }
+                && fs::metadata(keys_bin(&p)).await.is_ok()
+                && fs::metadata(fp2key_bin(&p)).await.is_ok()
+            {
+                completed.insert(num);
             }
         }
     }

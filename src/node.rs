@@ -223,11 +223,11 @@ impl<'b, T> CborArrayView<'b, T>
 where
     T: Decode<'b, ()>,
 {
-    pub fn len(&self)-> usize {
+    pub fn len(&self) -> usize {
         let mut d = minicbor::Decoder::new(self.slice);
         d.array().unwrap_or(Some(0)).unwrap_or(0) as usize
-    }   
- 
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = Result<T, minicbor::decode::Error>> + 'b {
         let mut d = minicbor::Decoder::new(self.slice);
         let n = d.array().unwrap_or(Some(0)).unwrap_or(0);
