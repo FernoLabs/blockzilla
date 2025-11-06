@@ -116,6 +116,7 @@ pub async fn optimize_epoch(
     registry_dir: &str, // registry root containing epoch-####/keys.bin
     out_base: &str,     // outputs go to epoch-####/optimized
     epoch: u64,
+    include_metadata: bool,
 ) -> Result<()> {
     let outdir = optimized_dir(Path::new(out_base), epoch);
     fs::create_dir_all(&outdir).await?;
@@ -155,16 +156,17 @@ pub async fn optimize_epoch(
         }
 
         // Convert whole block using the carblock_to_compact pipeline
-        let compact: CompactBlock = match carblock_to_compactblock(&block, &reg.map) {
-            Ok(cb) => cb,
-            Err(e) => {
-                if is_soft_eof(&e) {
-                    break 'epoch;
+        let compact: CompactBlock =
+            match carblock_to_compactblock(&block, &reg.map, include_metadata) {
+                Ok(cb) => cb,
+                Err(e) => {
+                    if is_soft_eof(&e) {
+                        break 'epoch;
+                    }
+                    // Keep strict behavior on real errors (for example, registry miss)
+                    return Err(e);
                 }
-                // Keep strict behavior on real errors (for example, registry miss)
-                return Err(e);
-            }
-        };
+            };
 
         // Serialize as length-prefixed postcard frame
         let bytes =
@@ -209,6 +211,7 @@ pub async fn optimize_auto(
     out_base: &str,
     max_epoch: u64,
     workers: usize,
+    include_metadata: bool,
 ) -> Result<()> {
     fs::create_dir_all(out_base).await.ok();
 
@@ -264,7 +267,7 @@ pub async fn optimize_auto(
                 };
                 let Some(e) = epoch else { break };
                 pb.set_message(format!("optimize epoch {e:04}..."));
-                match optimize_epoch(&cache, &reg, &out, e).await {
+                match optimize_epoch(&cache, &reg, &out, e, include_metadata).await {
                     Ok(_) => pb.set_message(format!("ok epoch {e:04}")),
                     Err(err) => pb.set_message(format!("fail epoch {e:04}: {err}")),
                 }
@@ -285,11 +288,19 @@ pub async fn run_car_optimizer(
     epoch: u64,
     optimized_dir: &str,
     registry_dir: Option<&str>,
+    include_metadata: bool,
 ) -> anyhow::Result<()> {
     let registry_root = registry_dir.unwrap_or(optimized_dir);
     tracing::info!("Optimizing epoch {epoch:04}");
     let start = Instant::now();
-    optimize_epoch(cache_dir, registry_root, optimized_dir, epoch).await?;
+    optimize_epoch(
+        cache_dir,
+        registry_root,
+        optimized_dir,
+        epoch,
+        include_metadata,
+    )
+    .await?;
     tracing::info!(
         "Done epoch {epoch:04} in {:.1}s",
         start.elapsed().as_secs_f64()
