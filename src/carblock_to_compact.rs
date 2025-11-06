@@ -179,6 +179,12 @@ pub struct CompactMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+pub enum CompactMetadataPayload {
+    Compact(CompactMetadata),
+    Raw(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub struct CompactVersionedTx {
     pub signatures: Vec<CompactSignature>,
     pub header: CompactMessageHeader,
@@ -187,7 +193,7 @@ pub struct CompactVersionedTx {
     pub instructions: Vec<CompactInstruction>,
     pub address_table_lookups: Option<Vec<CompactAddressTableLookup>>,
     pub is_versioned: bool,
-    pub metadata: Option<CompactMetadata>,
+    pub metadata: Option<CompactMetadataPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
@@ -383,7 +389,7 @@ fn decode_rewards_via_node(
 }
 
 /// ===============================
-/// TransactionError / Metadata compaction
+/// Metadata extraction helpers
 /// ===============================
 fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<CompactTxError> {
     let err = meta.err.as_ref()?;
@@ -466,8 +472,7 @@ fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<C
         }
     }
 
-    if dbg.contains("ProgramError") || dbg.contains("ProgramFailed") || dbg.contains("RuntimeError")
-    {
+    if dbg.contains("ProgramError") || dbg.contains("ProgramFailed") || dbg.contains("RuntimeError") {
         return Some(CompactTxError::ProgramError);
     }
 
@@ -610,24 +615,19 @@ fn meta_to_compact(
     }
 }
 
-/// Decode protobuf meta (zstd or raw) — input comes from a dataframe
-fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
-    // Try fast-path bulk first
-    let decompressed = match zstd::bulk::decompress(bytes, 512 * 1024) {
+fn metadata_proto_bytes(bytes: &[u8]) -> Vec<u8> {
+    match zstd::bulk::decompress(bytes, 512 * 1024) {
         Ok(buf) => buf,
         Err(_) => {
             let mut tmp = Vec::new();
             if let Ok(mut dec) = zstd::stream::read::Decoder::new(bytes) {
-                let _ = std::io::copy(&mut dec, &mut tmp);
-                tmp
-            } else {
-                bytes.to_vec()
+                if std::io::copy(&mut dec, &mut tmp).is_ok() {
+                    return tmp;
+                }
             }
+            bytes.to_vec()
         }
-    };
-    Ok(confirmed_block::TransactionStatusMeta::decode(
-        &decompressed[..],
-    )?)
+    }
 }
 
 /// ===============================
@@ -637,6 +637,7 @@ pub fn tx_decoded_to_compact_full(
     tx: &VersionedTransaction,
     fp2id: &AHashMap<u128, u32>,
     meta_bytes_opt: Option<&[u8]>,
+    include_compact_metadata: bool,
 ) -> Result<CompactVersionedTx> {
     let signatures = tx
         .signatures
@@ -659,9 +660,14 @@ pub fn tx_decoded_to_compact_full(
     };
 
     let metadata = if let Some(meta_bytes) = meta_bytes_opt {
-        match decode_protobuf_meta(meta_bytes) {
-            Ok(parsed) => Some(meta_to_compact(&parsed, fp2id)),
-            Err(_) => None,
+        let raw_proto = metadata_proto_bytes(meta_bytes);
+        if include_compact_metadata {
+            match confirmed_block::TransactionStatusMeta::decode(&raw_proto[..]) {
+                Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(&parsed, fp2id))),
+                Err(_) => Some(CompactMetadataPayload::Raw(raw_proto)),
+            }
+        } else {
+            Some(CompactMetadataPayload::Raw(raw_proto))
         }
     } else {
         None
@@ -685,6 +691,7 @@ pub fn tx_decoded_to_compact_full(
 pub fn carblock_to_compactblock(
     block: &CarBlock,
     fp2id: &AHashMap<u128, u32>,
+    include_metadata: bool,
 ) -> Result<CompactBlock> {
     let slot = block.block()?.slot;
 
@@ -741,7 +748,7 @@ pub fn carblock_to_compactblock(
             };
 
             // Build compact tx
-            let compact_tx = tx_decoded_to_compact_full(tx_ref, fp2id, meta_bytes_opt)?;
+            let compact_tx = tx_decoded_to_compact_full(tx_ref, fp2id, meta_bytes_opt, include_metadata)?;
 
             // Drop decoded tx in-place (we reused its memory)
             unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
