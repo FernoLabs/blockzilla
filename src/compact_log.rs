@@ -1,77 +1,90 @@
-// src/compact_log.rs
-//! Compact, lossless encoding for Solana logs with structured patterns.
-//!
-//! Structured patterns (round-trippable):
-//!   - Program <PK> invoke [n]
-//!   - Program <PK> consumed X of Y compute units
-//!   - Program <PK> success
-//!   - Program <PK> failed: <reason>
-//!   - Program return: <PK> <base64>
-//!   - Program data: <base64>
-//!   - Program log: <free text>   (all "Program log: ..." captured as free text)
-//!
-//! Anything we cannot parse is recorded as **UNPARSED** and we `tracing::warn!`
-//! with the original line for observability.
-
-use std::collections::HashMap;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use postcard::{from_bytes, to_allocvec};
+use serde::{Deserialize, Serialize};
+use ahash::AHashMap;
 
-/// Event kind tags.
-const K_INVOKE:       u8 = 0;
-const K_CONSUMED:     u8 = 1;
-const K_SUCCESS:      u8 = 2;
-const K_FAILURE:      u8 = 3;
-const K_CB_INVOKE:    u8 = 4; // compute-budget shorthand
-const K_CB_SUCCESS:   u8 = 5; // compute-budget shorthand
-const K_MSG:          u8 = 6; // "Program log: <text>"
-const K_RETURN:       u8 = 7; // "Program return: <PK> <base64-bytes>"
-const K_DATA:         u8 = 8; // "Program data: <base64-bytes>"
-const K_UNPARSED:     u8 = 9; // fallback for any unrecognized/undecodable line
+/// Well-known ComputeBudget program id (base58).
+const CB_PK: &str = "ComputeBudget111111111111111111111111111111";
 
-/// Compact stream: event bytes plus a string table (reasons/free text/unparsed).
-#[derive(Debug, Clone)]
+/// Typed events stored via postcard.
+/// References to free text are via indices into `CompactLogStream.strings`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LogEvent {
+    /// "Program <PK> invoke [n]"
+    /// - `pid`: usage-id from registry if known
+    /// - `is_cb`: marks ComputeBudget by well-known base58
+    /// - `pk_str_idx`: present when pid is unknown so we can print the original base58
+    Invoke { pid: Option<u32>, is_cb: bool, pk_str_idx: Option<u16> },
+
+    /// "Program <PK> consumed used of limit compute units" (absolute values).
+    Consumed { used: u32, limit: u32 },
+
+    /// "Program <PK> success"
+    Success,
+
+    /// "Program <PK> failed: <reason>" — `reason_idx` is in the shared string table.
+    Failure { reason_idx: u16 },
+
+    /// "Program log: <text>"
+    Msg { str_idx: u16 },
+
+    /// "Program return: <PK> <bytes...>" decoded from one or more base64 chunks
+    Return { pid: u32, data: Vec<u8> },
+
+    /// "Program data: <bytes...>" decoded from one or more base64 chunks
+    Data { data: Vec<u8> },
+
+    /// "Program consumption: <num> units remaining"
+    Consumption { units: u32 },
+
+    /// "Transfer: insufficient lamports <have>, need <need>"
+    TransferInsufficient { have: u64, need: u64 },
+
+    /// "Create Account: account Address { <fields> } already in use"
+    CreateAccountAlreadyInUse { addr_fields_idx: u16 },
+
+    /// "Allocate: account Address { <fields> } already in use"
+    AllocateAlreadyInUse { addr_fields_idx: u16 },
+
+    /// Plain line (no "Program " prefix) — preserved as-is, no warning.
+    Plain { str_idx: u16 },
+
+    /// Full original line for truly malformed structured cases we chose not to parse.
+    Unparsed { str_idx: u16 },
+}
+
+/// Compact stream with postcard-encoded events + shared string table.
+/// `bytes` is `postcard::to_allocvec(&Vec<LogEvent>)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactLogStream {
     pub bytes: Vec<u8>,
     pub strings: Vec<String>,
 }
 
-/// Encoder configuration.
+/// Encoder configuration (kept for forward-compat; currently empty).
 #[derive(Debug, Clone, Copy, Default)]
-pub struct EncodeConfig {
-    /// Program-id index of ComputeBudget; when set, its invoke/success elide pid.
-    pub compute_budget_program_id: Option<u32>,
-    /// If false, we still store unparsed lines as UNPARSED but we won't attempt
-    /// other passthrough shapes. (Kept for back-compat of intent; UNPARSED is always kept.)
-    pub keep_unknown_lines: bool,
-}
+pub struct EncodeConfig {}
 
 /// Decoder configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecodeConfig {
-    /// Same value used at encode time for ComputeBudget (if any).
-    pub compute_budget_program_id: Option<u32>,
     /// Emit UNPARSED lines on decode; if false, skip them.
     pub emit_unparsed_lines: bool,
 }
 
-/// Encode a list of legacy log lines into a compact, lossless stream.
+/// Encode a list of legacy log lines into a compact stream with postcard.
 /// `lookup_pid`: base58 program pubkey -> u32 id (from your registry).
 pub fn encode_logs<F>(
     lines: &[String],
     mut lookup_pid: F,
-    cfg: EncodeConfig,
+    _cfg: EncodeConfig,
 ) -> CompactLogStream
 where
     F: FnMut(&str) -> Option<u32>,
 {
-    let mut out = Vec::<u8>::with_capacity(lines.len() * 2);
     let mut strings = Vec::<String>::new();
-    let mut str_ix = HashMap::<String, u16>::new();
-
-    // call stack frames: (pid, used_so_far, last_limit)
-    let mut stack: Vec<(u32, u32, u32)> = Vec::with_capacity(8);
-
-    // intern helper
+    // OPTIMIZATION 1: Use AHashMap instead of std HashMap for faster hashing
+    let mut str_ix = AHashMap::<String, u16>::new();
     let mut intern = |s: &str| -> u16 {
         if let Some(&ix) = str_ix.get(s) {
             ix
@@ -83,149 +96,237 @@ where
         }
     };
 
-    for line in lines {
-        // Fast path: Program-prefixed lines
+    let mut events = Vec::<LogEvent>::with_capacity(lines.len());
+
+    // Resolve CB pid if present in the registry (optional).
+    let cb_pid_auto = lookup_pid(CB_PK);
+
+    'lines: for line in lines {
+        // OPTIMIZATION 2: Use as_bytes() for prefix checks when possible
+        let line_bytes = line.as_bytes();
+        
+        // Known non-Program shapes first
+        // Create Account: account Address { ... } already in use
+        if line_bytes.starts_with(b"Create Account: account Address { ")
+            && line_bytes.ends_with(b" } already in use")
+        {
+            let pfx_len = "Create Account: account Address { ".len();
+            let sfx_len = " } already in use".len();
+            let inner = &line[pfx_len..line.len() - sfx_len];
+            let idx = intern(inner);
+            events.push(LogEvent::CreateAccountAlreadyInUse {
+                addr_fields_idx: idx,
+            });
+            continue 'lines;
+        }
+
+        // Allocate: account Address { ... } already in use
+        if line_bytes.starts_with(b"Allocate: account Address { ")
+            && line_bytes.ends_with(b" } already in use")
+        {
+            let pfx_len = "Allocate: account Address { ".len();
+            let sfx_len = " } already in use".len();
+            let inner = &line[pfx_len..line.len() - sfx_len];
+            let idx = intern(inner);
+            events.push(LogEvent::AllocateAlreadyInUse {
+                addr_fields_idx: idx,
+            });
+            continue 'lines;
+        }
+
+        // 1) Standalone transfer error: "Transfer: insufficient lamports <have>, need <need>"
+        if let Some(rest) = line.strip_prefix("Transfer: insufficient lamports ") {
+            if let Some(need_pos) = rest.find(", need ") {
+                let have_str = &rest[..need_pos];
+                let need_str = &rest[need_pos + 7..];
+                
+                // OPTIMIZATION 3: Parse numbers without string allocation when no commas
+                let have_result = if have_str.contains(',') {
+                    have_str.replace(',', "").parse::<u64>()
+                } else {
+                    have_str.parse::<u64>()
+                };
+                
+                let need_result = if need_str.contains(',') {
+                    need_str.replace(',', "").parse::<u64>()
+                } else {
+                    need_str.parse::<u64>()
+                };
+                
+                if let (Ok(have), Ok(need)) = (have_result, need_result) {
+                    events.push(LogEvent::TransferInsufficient { have, need });
+                    continue 'lines;
+                }
+            }
+            // Malformed → keep lossless
+            tracing::warn!(target: "compact_log", "malformed Transfer insufficient lamports line: {}", line);
+            events.push(LogEvent::Unparsed { str_idx: intern(line) });
+            continue 'lines;
+        }
+
+        // 2) "Program log: <text>" first so it never becomes "Program <PK> ..." with pk="log:"
+        if let Some(text) = line.strip_prefix("Program log: ") {
+            events.push(LogEvent::Msg { str_idx: intern(text) });
+            continue 'lines;
+        }
+
+        // 3) "Program ..." umbrella
         if let Some(rest) = line.strip_prefix("Program ") {
-            // Handle "return" and "data" first (different header)
+            // 3a) Consumption lines (no PK): "Program consumption: <num> units remaining"
+            if let Some(rem) = rest.strip_prefix("consumption: ") {
+                if let Some(pos) = rem.find(" units remaining") {
+                    let num_str = &rem[..pos];
+                    // OPTIMIZATION 4: Avoid allocation for comma removal when not needed
+                    let units_result = if num_str.contains(',') {
+                        num_str.replace(',', "").parse::<u32>()
+                    } else {
+                        num_str.parse::<u32>()
+                    };
+                    
+                    if let Ok(units) = units_result {
+                        events.push(LogEvent::Consumption { units });
+                        continue 'lines;
+                    }
+                }
+                tracing::warn!(target: "compact_log", "malformed Program consumption line: {}", line);
+                events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                continue 'lines;
+            }
+
+            // 3b) Return lines: "Program return: <PK> <b64> [<b64> ...]"
             if let Some(ret_tail) = rest.strip_prefix("return: ") {
-                // Format: "<PK> <b64>"
                 if let Some(space) = ret_tail.find(' ') {
                     let pk = &ret_tail[..space];
-                    let b64 = &ret_tail[space + 1..];
-                    match (lookup_pid(pk), B64.decode(b64.as_bytes())) {
-                        (Some(pid), Ok(bytes)) => {
-                            out.push(K_RETURN);
-                            put_u32(&mut out, pid);
-                            put_bytes(&mut out, &bytes);
-                            continue;
+                    let b64_tail = &ret_tail[space + 1..];
+                    if let Some(pid) = lookup_pid(pk) {
+                        let mut buf = Vec::<u8>::new();
+                        let mut ok = true;
+                        for token in b64_tail.split_whitespace() {
+                            match B64.decode(token.as_bytes()) {
+                                Ok(bytes) => buf.extend_from_slice(&bytes),
+                                Err(e) => {
+                                    tracing::warn!(target: "compact_log",
+                                        "base64 decode failed for Program return line: {} (err: {})",
+                                        line, e);
+                                    events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                                    ok = false;
+                                    break;
+                                }
+                            }
                         }
-                        (Some(_pid), Err(e)) => {
-                            tracing::warn!(target: "compact_log", "base64 decode failed for Program return: {} …: {}", pk, e);
+                        if ok {
+                            events.push(LogEvent::Return { pid, data: buf });
                         }
-                        (None, _) => {
-                            tracing::warn!(target: "compact_log", "unknown program id for Program return: {}", pk);
-                        }
-                    }
-                } else {
-                    tracing::warn!(target: "compact_log", "malformed Program return: {}", line);
-                }
-                // fallthrough → UNPARSED
-            } else if let Some(data_tail) = rest.strip_prefix("data: ") {
-                // Format: "<b64>"
-                match B64.decode(data_tail.as_bytes()) {
-                    Ok(bytes) => {
-                        out.push(K_DATA);
-                        put_bytes(&mut out, &bytes);
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "compact_log", "base64 decode failed for Program data: {} …", e);
+                        continue 'lines;
+                    } else {
+                        // Unknown PK for return: cannot reconstruct the PK w/o pid; keep lossless.
+                        tracing::warn!(target: "compact_log", "unknown program id in Program return line: {}", line);
+                        events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                        continue 'lines;
                     }
                 }
-                // fallthrough → UNPARSED
-            } else if let Some(space_pos) = rest.find(' ') {
-                // Handle common "Program <PK> ..." forms
+                // malformed
+                events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                continue 'lines;
+            }
+
+            // 3c) Data lines: "Program data: <b64> [<b64> ...]"
+            if let Some(data_tail) = rest.strip_prefix("data: ") {
+                let mut buf = Vec::<u8>::new();
+                let mut ok = true;
+                for token in data_tail.split_whitespace() {
+                    match B64.decode(token.as_bytes()) {
+                        Ok(bytes) => buf.extend_from_slice(&bytes),
+                        Err(e) => {
+                            tracing::warn!(target: "compact_log",
+                                "base64 decode failed for Program data line: {} (err: {})",
+                                line, e);
+                            events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok && !buf.is_empty() {
+                    events.push(LogEvent::Data { data: buf });
+                } else if ok {
+                    events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                }
+                continue 'lines;
+            }
+
+            // 3d) Generic "Program <PK> ...": invoke, consumed, success, failed
+            if let Some(space_pos) = rest.find(' ') {
                 let pk = &rest[..space_pos];
                 let after_pk = &rest[space_pos + 1..];
 
-                match lookup_pid(pk) {
-                    Some(pid) => {
-                        // invoke
-                        if let Some(depth_str) = after_pk.strip_prefix("invoke [") {
-                            if depth_str.ends_with(']') {
-                                if Some(pid) == cfg.compute_budget_program_id {
-                                    out.push(K_CB_INVOKE);
-                                } else {
-                                    out.push(K_INVOKE);
-                                    put_u32(&mut out, pid);
-                                }
-                                stack.push((pid, 0, 0));
-                                continue;
-                            }
-                        }
+                // Try resolve pid; if missing, keep pk string index so we can still format exactly.
+                let pid_res = lookup_pid(pk);
+                let is_cb = pid_res == cb_pid_auto || pk == CB_PK;
+                let pk_idx_opt = if pid_res.is_none() { Some(intern(pk)) } else { None };
 
-                        // consumed
-                        if let Some(consumed_tail) = after_pk.strip_prefix("consumed ") {
-                            if let Some(of_pos) = consumed_tail.find(" of ") {
-                                let used_str = &consumed_tail[..of_pos];
-                                let rest2 = &consumed_tail[of_pos + 4..];
-                                if let Some(cu_pos) = rest2.find(" compute units") {
-                                    let limit_str = &rest2[..cu_pos];
-                                    if let (Ok(used), Ok(limit)) =
-                                        (used_str.parse::<u32>(), limit_str.parse::<u32>())
-                                    {
-                                        if let Some((_pid, used_so_far, last_limit)) =
-                                            stack.last_mut()
-                                        {
-                                            let delta = used.saturating_sub(*used_so_far);
-                                            *used_so_far = used;
+                // REQUIREMENT: unknown program id is an error and should be logged
+                if pid_res.is_none() && pk != CB_PK {
+                    tracing::warn!(target: "compact_log", "unknown program id in line: {}", line);
+                }
 
-                                            out.push(K_CONSUMED);
-                                            put_u32(&mut out, delta);
-
-                                            // encode limit: 0 = same as previous; else (limit+1)
-                                            if limit == *last_limit {
-                                                put_u32(&mut out, 0);
-                                            } else {
-                                                put_u32(&mut out, limit.wrapping_add(1));
-                                                *last_limit = limit;
-                                            }
-                                            continue;
-                                        } else {
-                                            // no frame: encode as absolute (delta from 0)
-                                            out.push(K_CONSUMED);
-                                            put_u32(&mut out, used);
-                                            put_u32(&mut out, limit.wrapping_add(1));
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // success
-                        if after_pk == "success" {
-                            if Some(pid) == cfg.compute_budget_program_id {
-                                out.push(K_CB_SUCCESS);
-                            } else {
-                                out.push(K_SUCCESS);
-                            }
-                            let _ = stack.pop();
-                            continue;
-                        }
-
-                        // failed: <reason>
-                        if let Some(reason) = after_pk.strip_prefix("failed: ") {
-                            out.push(K_FAILURE);
-                            put_u16(&mut out, intern(reason));
-                            let _ = stack.pop();
-                            continue;
-                        }
-                    }
-                    None => {
-                        tracing::warn!(target: "compact_log", "unknown program id: {}", pk);
+                // invoke
+                if let Some(depth_str) = after_pk.strip_prefix("invoke [") {
+                    if depth_str.ends_with(']') {
+                        events.push(LogEvent::Invoke {
+                            pid: pid_res,
+                            is_cb,
+                            pk_str_idx: pk_idx_opt,
+                        });
+                        continue 'lines;
                     }
                 }
-                // fallthrough → UNPARSED
+
+                // consumed
+                if let Some(consumed_tail) = after_pk.strip_prefix("consumed ") {
+                    if let Some(of_pos) = consumed_tail.find(" of ") {
+                        let used_str = &consumed_tail[..of_pos];
+                        let rest2 = &consumed_tail[of_pos + 4..];
+                        if let Some(cu_pos) = rest2.find(" compute units") {
+                            let limit_str = &rest2[..cu_pos];
+                            if let (Ok(used), Ok(limit)) =
+                                (used_str.parse::<u32>(), limit_str.parse::<u32>())
+                            {
+                                events.push(LogEvent::Consumed { used, limit });
+                                continue 'lines;
+                            }
+                        }
+                    }
+                }
+
+                // success
+                if after_pk == "success" {
+                    events.push(LogEvent::Success);
+                    continue 'lines;
+                }
+
+                // failed: <reason>
+                if let Some(reason) = after_pk.strip_prefix("failed: ") {
+                    events.push(LogEvent::Failure { reason_idx: intern(reason) });
+                    continue 'lines;
+                }
+
+                // known-ish pk but unknown suffix → keep as plain to avoid warning spam
+                events.push(LogEvent::Plain { str_idx: intern(line) });
+                continue 'lines;
             }
+
+            // "Program " but not a known shape — keep as plain
+            events.push(LogEvent::Plain { str_idx: intern(line) });
+            continue 'lines;
         }
 
-        // "Program log: <text>"   (everything is free text)
-        if let Some(text) = line.strip_prefix("Program log: ") {
-            out.push(K_MSG);
-            put_u16(&mut out, intern(text));
-            continue;
-        }
-
-        // Fallback: UNPARSED (always kept; also logged)
-        tracing::warn!(target: "compact_log", "unparsed log line: {}", line);
-        out.push(K_UNPARSED);
-        put_u16(&mut out, intern(line));
-        // If caller set keep_unknown_lines=false, we still store as UNPARSED to be lossless.
-        let _ = cfg.keep_unknown_lines;
+        // 4) Plain, non-Program line — keep as Plain (no warning)
+        events.push(LogEvent::Plain { str_idx: intern(line) });
     }
 
-    CompactLogStream { bytes: out, strings }
+    let bytes = to_allocvec(&events).expect("postcard serialize");
+    CompactLogStream { bytes, strings }
 }
 
 /// Decode a compact stream back to legacy lines.
@@ -238,228 +339,154 @@ pub fn decode_logs<G>(
 where
     G: FnMut(u32) -> String,
 {
-    let mut cur = 0usize;
-    let mut out = Vec::<String>::new();
-    let mut stack: Vec<(u32, u32, u32)> = Vec::with_capacity(8); // (pid, used, last_limit)
+    let events: Vec<LogEvent> = from_bytes(&cls.bytes).expect("postcard decode");
+    let mut out = Vec::<String>::with_capacity(events.len());
 
-    let cb_pk_string = cfg
-        .compute_budget_program_id
-        .map(|pid| pid_to_string(pid))
-        .unwrap_or_else(|| "ComputeBudget111111111111111111111111111111".to_string());
+    // Track call stack: (pid, is_cb, pk_str_idx) to format consumed/success/failure.
+    let mut stack: Vec<(Option<u32>, bool, Option<u16>)> = Vec::with_capacity(8);
 
-    while cur < cls.bytes.len() {
-        let kind = cls.bytes[cur];
-        cur += 1;
-        match kind {
-            K_INVOKE => {
-                if let Some(pid) = get_u32(&cls.bytes, &mut cur) {
-                    let depth = stack.len() + 1;
-                    let pk = pid_to_string(pid);
-                    out.push(format!("Program {} invoke [{}]", pk, depth));
-                    stack.push((pid, 0, 0));
-                } else { break; }
-            }
-            K_CB_INVOKE => {
+    for ev in events {
+        match ev {
+            LogEvent::Invoke { pid, is_cb, pk_str_idx } => {
                 let depth = stack.len() + 1;
-                out.push(format!("Program {} invoke [{}]", cb_pk_string, depth));
-                let pid = cfg.compute_budget_program_id.unwrap_or(0);
-                stack.push((pid, 0, 0));
-            }
-            K_CONSUMED => {
-                if let (Some(delta), Some(limit_enc)) =
-                    (get_u32(&cls.bytes, &mut cur), get_u32(&cls.bytes, &mut cur))
-                {
-                    if let Some((pid, used_so_far, last_limit)) = stack.last_mut() {
-                        let used_now = used_so_far.saturating_add(delta);
-                        let limit = if limit_enc == 0 { *last_limit } else { limit_enc - 1 };
-                        let pk = pid_to_string(*pid);
-                        out.push(format!(
-                            "Program {} consumed {} of {} compute units",
-                            pk, used_now, limit
-                        ));
-                        *used_so_far = used_now;
-                        *last_limit = limit;
-                    }
-                } else { break; }
-            }
-            K_SUCCESS => {
-                if let Some((pid, _u, _l)) = stack.pop() {
-                    let pk = pid_to_string(pid);
-                    out.push(format!("Program {} success", pk));
+                let who = if is_cb {
+                    CB_PK.to_string()
+                } else if let Some(pidv) = pid {
+                    pid_to_string(pidv)
+                } else if let Some(ix) = pk_str_idx {
+                    cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into())
                 } else {
-                    out.push("Program ? success".to_string());
+                    "?".into()
+                };
+                // OPTIMIZATION 5: Use format! directly instead of intermediate String
+                out.push(format!("Program {} invoke [{}]", who, depth));
+                stack.push((pid, is_cb, pk_str_idx));
+            }
+
+            LogEvent::Consumed { used, limit } => {
+                let who = match stack.last().cloned() {
+                    Some((Some(pidv), false, _)) => pid_to_string(pidv),
+                    Some((_, true, _)) => CB_PK.to_string(),
+                    Some((None, false, Some(ix))) => cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into()),
+                    _ => "?".into(),
+                };
+                out.push(format!("Program {} consumed {} of {} compute units", who, used, limit));
+            }
+
+            LogEvent::Success => {
+                let ctx = stack.pop();
+                let who = match ctx {
+                    Some((Some(pidv), false, _)) => pid_to_string(pidv),
+                    Some((_, true, _)) => CB_PK.to_string(),
+                    Some((None, false, Some(ix))) => cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into()),
+                    _ => "?".into(),
+                };
+                out.push(format!("Program {} success", who));
+            }
+
+            LogEvent::Failure { reason_idx } => {
+                let reason = cls.strings.get(reason_idx as usize).cloned().unwrap_or_else(|| "?".into());
+                let ctx = stack.pop();
+                let who = match ctx {
+                    Some((Some(pidv), false, _)) => pid_to_string(pidv),
+                    Some((_, true, _)) => CB_PK.to_string(),
+                    Some((None, false, Some(ix))) => cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into()),
+                    _ => "?".into(),
+                };
+                out.push(format!("Program {} failed: {}", who, reason));
+            }
+
+            LogEvent::Msg { str_idx } => {
+                if let Some(s) = cls.strings.get(str_idx as usize) {
+                    out.push(format!("Program log: {}", s));
                 }
             }
-            K_CB_SUCCESS => {
-                let _ = stack.pop();
-                out.push(format!("Program {} success", cb_pk_string));
+
+            LogEvent::Return { pid, data } => {
+                let b64 = B64.encode(&data);
+                out.push(format!("Program return: {} {}", pid_to_string(pid), b64));
             }
-            K_FAILURE => {
-                if let Some(idx) = get_u16(&cls.bytes, &mut cur) {
-                    let reason = cls.strings.get(idx as usize).cloned().unwrap_or_else(|| "?".into());
-                    if let Some((pid, _u, _l)) = stack.pop() {
-                        let pk = pid_to_string(pid);
-                        out.push(format!("Program {} failed: {}", pk, reason));
-                    } else {
-                        out.push(format!("Program ? failed: {}", reason));
+
+            LogEvent::Data { data } => {
+                let b64 = B64.encode(&data);
+                out.push(format!("Program data: {}", b64));
+            }
+
+            LogEvent::Consumption { units } => {
+                out.push(format!("Program consumption: {} units remaining", units));
+            }
+
+            LogEvent::TransferInsufficient { have, need } => {
+                out.push(format!("Transfer: insufficient lamports {}, need {}", have, need));
+            }
+
+            LogEvent::CreateAccountAlreadyInUse { addr_fields_idx } => {
+                if let Some(inner) = cls.strings.get(addr_fields_idx as usize) {
+                    out.push(format!("Create Account: account Address {{ {} }} already in use", inner));
+                } else {
+                    out.push("Create Account: account Address { ? } already in use".to_string());
+                }
+            }
+
+            LogEvent::AllocateAlreadyInUse { addr_fields_idx } => {
+                if let Some(inner) = cls.strings.get(addr_fields_idx as usize) {
+                    out.push(format!("Allocate: account Address {{ {} }} already in use", inner));
+                } else {
+                    out.push("Allocate: account Address { ? } already in use".to_string());
+                }
+            }
+
+            LogEvent::Plain { str_idx } => {
+                if let Some(s) = cls.strings.get(str_idx as usize) {
+                    out.push(s.clone());
+                }
+            }
+
+            LogEvent::Unparsed { str_idx } => {
+                if cfg.emit_unparsed_lines {
+                    if let Some(s) = cls.strings.get(str_idx as usize) {
+                        out.push(s.clone());
                     }
-                } else { break; }
+                }
             }
-            K_MSG => {
-                if let Some(idx) = get_u16(&cls.bytes, &mut cur) {
-                    if let Some(s) = cls.strings.get(idx as usize) {
-                        out.push(format!("Program log: {}", s));
-                    }
-                } else { break; }
-            }
-            K_RETURN => {
-                if let Some(pid) = get_u32(&cls.bytes, &mut cur) {
-                    if let Some(bytes) = get_bytes(&cls.bytes, &mut cur) {
-                        let pk = pid_to_string(pid);
-                        let b64 = B64.encode(bytes);
-                        out.push(format!("Program return: {} {}", pk, b64));
-                    } else { break; }
-                } else { break; }
-            }
-            K_DATA => {
-                if let Some(bytes) = get_bytes(&cls.bytes, &mut cur) {
-                    let b64 = B64.encode(bytes);
-                    out.push(format!("Program data: {}", b64));
-                } else { break; }
-            }
-            K_UNPARSED => {
-                if let Some(idx) = get_u16(&cls.bytes, &mut cur) {
-                    if cfg.emit_unparsed_lines {
-                        if let Some(s) = cls.strings.get(idx as usize) {
-                            out.push(s.clone());
-                        }
-                    }
-                } else { break; }
-            }
-            _ => break,
         }
     }
 
     out
 }
 
-//
-// ----------------------------- low-level helpers -----------------------------
-//
-
-#[inline]
-fn put_u32(dst: &mut Vec<u8>, mut v: u32) {
-    while v >= 0x80 {
-        dst.push(((v as u8) & 0x7F) | 0x80);
-        v >>= 7;
-    }
-    dst.push(v as u8);
-}
-
-#[inline]
-fn get_u32(src: &[u8], cur: &mut usize) -> Option<u32> {
-    let mut shift = 0u32;
-    let mut out = 0u32;
-    while *cur < src.len() && shift <= 28 {
-        let b = src[*cur];
-        *cur += 1;
-        out |= ((b & 0x7F) as u32) << shift;
-        if b & 0x80 == 0 { return Some(out); }
-        shift += 7;
-    }
-    None
-}
-
-#[inline]
-fn put_u16(dst: &mut Vec<u8>, mut v: u16) {
-    while v >= 0x80 {
-        dst.push(((v as u8) & 0x7F) | 0x80);
-        v >>= 7;
-    }
-    dst.push(v as u8);
-}
-
-#[inline]
-fn get_u16(src: &[u8], cur: &mut usize) -> Option<u16> {
-    let mut shift = 0u32;
-    let mut out = 0u16;
-    while *cur < src.len() && shift <= 14 {
-        let b = src[*cur];
-        *cur += 1;
-        out |= (((b & 0x7F) as u16) << shift) as u16;
-        if b & 0x80 == 0 { return Some(out); }
-        shift += 7;
-    }
-    None
-}
-
-#[inline]
-fn put_bytes(dst: &mut Vec<u8>, bytes: &[u8]) {
-    put_u32(dst, bytes.len() as u32);
-    dst.extend_from_slice(bytes);
-}
-
-#[inline]
-fn get_bytes<'a>(src: &'a [u8], cur: &mut usize) -> Option<&'a [u8]> {
-    let Some(len) = get_u32(src, cur) else { return None; };
-    let len = len as usize;
-    if *cur + len > src.len() { return None; }
-    let s = &src[*cur .. *cur + len];
-    *cur += len;
-    Some(s)
-}
-
-//
-// ----------------------------------- tests -----------------------------------
-//
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use ahash::AHashMap;
 
-    fn pid_lookup() -> HashMap<String, u32> {
-        let mut map = HashMap::new();
-        map.insert("ComputeBudget111111111111111111111111111111".into(), 1);
-        map.insert("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".into(), 2);
-        map.insert("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".into(), 3);
-        map.insert("11111111111111111111111111111111".into(), 4);
-        map.insert("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".into(), 5);
-        map.insert("AxiomfHaWDemCFBLBayqnEnNwE6b7B2Qz3UmzMpgbMG6".into(), 6);
+    fn pid_lookup() -> AHashMap<String, u32> {
+        let mut map = AHashMap::new();
+        map.insert(CB_PK.into(), 1);
+        map.insert("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".into(), 2);
+        map.insert("11111111111111111111111111111111".into(), 3);
         map
     }
 
     #[test]
-    fn roundtrip_with_return_data_and_unparsed() {
+    fn roundtrip_unknown_pid_and_plain_and_inuse() {
         let logs = vec![
-            "Program ComputeBudget111111111111111111111111111111 invoke [1]".into(),
-            "Program ComputeBudget111111111111111111111111111111 success".into(),
-            "Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL invoke [1]".into(),
-            "Program log: CreateIdempotent".into(),
-            "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]".into(),
-            "Program log: Instruction: GetAccountDataSize".into(),
-            "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 1569 of 94295 compute units".into(),
-            "Program return: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA pQAAAAAAAAA=".into(),
-            "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success".into(),
-            "Program 11111111111111111111111111111111 invoke [2]".into(),
-            "Program 11111111111111111111111111111111 success".into(),
-            "Program log: Initialize the associated token account".into(),
-            "Program data: AQIDBAU=".into(),
-            // an intentionally weird/unparsed line:
-            "Program ??? mystery".into(),
+            // unknown id program — should parse structurally and WARN:
+            "Program G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha invoke [2]".into(),
+            "Program G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha consumed 69464 of 185153 compute units".into(),
+            "Program G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha success".into(),
+            // plain, non-Program lines:
+            "Checking if destination stake is mergeable".into(),
+            "Checking if source stake is mergeable".into(),
+            "Merging stake accounts".into(),
+            // in-use shapes:
+            "Create Account: account Address { address: HQ1Z9F6..., base: None } already in use".into(),
+            "Allocate: account Address { address: J7oxhNg..., base: None } already in use".into(),
         ];
 
         let map = pid_lookup();
 
-        let cls = encode_logs(
-            &logs,
-            |s| map.get(s).copied(),
-            EncodeConfig {
-                compute_budget_program_id: Some(1),
-                keep_unknown_lines: true,
-            },
-        );
-
+        let cls = encode_logs(&logs, |s| map.get(s).copied(), EncodeConfig::default());
         let back = decode_logs(
             &cls,
             |id| {
@@ -468,10 +495,7 @@ mod tests {
                 }
                 format!("PID{}", id)
             },
-            DecodeConfig {
-                compute_budget_program_id: Some(1),
-                emit_unparsed_lines: true,
-            },
+            DecodeConfig { emit_unparsed_lines: true },
         );
 
         assert_eq!(back, logs);

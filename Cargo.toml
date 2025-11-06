@@ -49,8 +49,6 @@ zstd = "0.13.3"
 solana-signature = "3.1.0"
 memmap2 = "0.9.9"
 
-
-
 [build-dependencies]
 prost-build = "0.14.1"
 

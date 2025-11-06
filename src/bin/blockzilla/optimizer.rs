@@ -7,6 +7,7 @@ use blockzilla::{
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use postcard::to_allocvec;
+use solana_pubkey::Pubkey;
 use std::{
     collections::HashSet,
     error::Error as StdError,
@@ -24,8 +25,11 @@ use tokio::{
 use crate::LOG_INTERVAL_SECS;
 use crate::build_registry::{epoch_dir, fp128_from_bytes, keys_bin};
 use blockzilla::carblock_to_compact::{
-    CompactBlock, MetadataMode, carblock_to_compactblock_inplace,
+    CompactBlock, CompactMetadataPayload, MetadataMode, carblock_to_compactblock_inplace,
 };
+
+// If your compact log module lives elsewhere, adjust this use accordingly.
+use blockzilla::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
 
 /// ========================================================================
 /// Paths (optimizer-specific)
@@ -128,6 +132,74 @@ fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Resu
 }
 
 /// ========================================================================
+/// In-place log compaction shim (no schema change):
+/// - Only runs when tx.metadata is Compact
+/// - Encodes CompactLogStream via postcard
+/// - Stores as tagged blob in metadata.return_data.data ("CLZ\0" + blob)
+/// - Drops verbose log_messages to realize savings
+/// ========================================================================
+fn compact_logs_inplace(cblk: &mut CompactBlock, fp2id: &AHashMap<u128, u32>, enable: bool) {
+    if !enable {
+        return;
+    }
+
+    // Map base58 -> usage id (u32) using registry
+    let mut lookup_pid = |base58: &str| -> Option<u32> {
+        Pubkey::try_from(base58).ok().and_then(|pk| {
+            let b = pk.to_bytes();
+            let a = u128::from_le_bytes([
+                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12],
+                b[13], b[14], b[15],
+            ]);
+            let c = u128::from_le_bytes([
+                b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23], b[24], b[25], b[26], b[27],
+                b[28], b[29], b[30], b[31],
+            ]);
+            let fp = a ^ c.rotate_left(64);
+            fp2id.get(&fp).copied()
+        })
+    };
+
+    for tx in &mut cblk.txs {
+        let Some(CompactMetadataPayload::Compact(ref mut meta)) = tx.metadata else {
+            continue;
+        };
+        let Some(ref logs) = meta.log_messages else {
+            continue;
+        };
+
+        let cls: CompactLogStream = encode_logs(logs, &mut lookup_pid, EncodeConfig::default());
+
+        // tag + postcard-encode and stash into return_data
+        const TAG: &[u8] = b"CLZ\0";
+        if let Ok(mut blob) = postcard::to_allocvec(&cls) {
+            let mut tagged = Vec::with_capacity(TAG.len() + blob.len());
+            tagged.extend_from_slice(TAG);
+            tagged.append(&mut blob);
+
+            // place into return_data (create or overwrite)
+            match meta.return_data {
+                Some(ref mut rd) => {
+                    rd.data = tagged;
+                }
+                None => {
+                    meta.return_data = Some(blockzilla::carblock_to_compact::CompactReturnData {
+                        program_id_id: 0, // reserved/ignored (shim)
+                        data: tagged,
+                    });
+                }
+            }
+
+            // remove verbose logs — this realizes the size savings
+            meta.log_messages = None;
+        } else {
+            // If we fail to encode for any reason, keep original logs to avoid data loss.
+            tracing::warn!("compact_logs: postcard encode failed; keeping original logs");
+        }
+    }
+}
+
+/// ========================================================================
 /// Optimize an epoch using usage-ordered registry (keys.bin only)
 /// Writes a length-prefixed stream of `CompactBlock` (postcard)
 /// ========================================================================
@@ -166,7 +238,7 @@ pub async fn optimize_epoch(
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
 
-    // Reusable CompactBlock and scratch buffers (this is the key change)
+    // Reusable CompactBlock and scratch buffers
     let mut cblk = CompactBlock {
         slot: 0,
         txs: Vec::with_capacity(512),
@@ -179,6 +251,10 @@ pub async fn optimize_epoch(
     let mut last_log = start;
     let mut blocks = 0u64;
     let mut msg = String::with_capacity(128);
+
+    // Enable log compaction iff we actually parsed metadata to `Compact` structures.
+    // If metadata_mode is Raw/None, there are no String logs to compact here.
+    let enable_log_compaction = matches!(metadata_mode, MetadataMode::Compact);
 
     'epoch: while let Some(block) = car.next_block().await? {
         // Ensure the block node exists, but keep soft-EOF tolerant behavior
@@ -204,6 +280,9 @@ pub async fn optimize_epoch(
             }
             return Err(e);
         }
+
+        // Post-process: compact logs (shim) only when metadata is parsed
+        compact_logs_inplace(&mut cblk, &reg.map, enable_log_compaction);
 
         // Serialize directly into the batch
         push_block_into_batch(&mut frame_batch, &cblk)?;
