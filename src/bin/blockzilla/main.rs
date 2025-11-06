@@ -106,6 +106,8 @@ enum OptimizeCommand {
         results_dir: String,
         #[arg(short, long, default_value = DEFAULT_REGISTRY_DIR)]
         registry_dir: Option<String>,
+        #[arg(long)]
+        include_metadata: bool,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
     },
@@ -123,6 +125,8 @@ enum OptimizeCommand {
         optimized_dir: String,
         #[arg(long, default_value_t = false)]
         force: bool,
+        #[arg(long)]
+        include_metadata: bool,
     },
 
     /// Runs download → registry → optimize for a range of epochs
@@ -141,6 +145,8 @@ enum OptimizeCommand {
         optimized_dir: String,
         #[arg(long, default_value_t = false)]
         force: bool,
+        #[arg(long)]
+        include_metadata: bool,
     },
 
     /// Reads compressed BlockWithIds format
@@ -216,6 +222,7 @@ async fn main() -> Result<()> {
                 cache_dir,
                 results_dir,
                 registry_dir,
+                include_metadata,
                 epoch,
             } => {
                 optimizer::run_car_optimizer(
@@ -223,6 +230,7 @@ async fn main() -> Result<()> {
                     epoch,
                     &results_dir,
                     registry_dir.as_deref(),
+                    include_metadata,
                 )
                 .await?
             }
@@ -233,9 +241,17 @@ async fn main() -> Result<()> {
                 registry_dir,
                 optimized_dir,
                 force,
+                include_metadata,
             } => {
-                match run_epoch_optimize(&cache_dir, &registry_dir, &optimized_dir, epoch, force)
-                    .await?
+                match run_epoch_optimize(
+                    &cache_dir,
+                    &registry_dir,
+                    &optimized_dir,
+                    epoch,
+                    include_metadata,
+                    force,
+                )
+                .await?
                 {
                     OptimizeOutcome::Completed => {
                         info!("✅ epoch {epoch:04} processed");
@@ -253,6 +269,7 @@ async fn main() -> Result<()> {
                 registry_dir,
                 optimized_dir,
                 force,
+                include_metadata,
             } => {
                 if start_epoch > end_epoch {
                     return Err(anyhow!(
@@ -268,6 +285,7 @@ async fn main() -> Result<()> {
                         &registry_dir,
                         &optimized_dir,
                         epoch,
+                        include_metadata,
                         force,
                     )
                     .await
@@ -353,6 +371,7 @@ async fn run_epoch_optimize(
     registry_dir: &str,
     optimized_dir: &str,
     epoch: u64,
+    include_metadata: bool,
     force: bool,
 ) -> Result<OptimizeOutcome> {
     if !force && outputs_exist(registry_dir, optimized_dir, epoch) {
@@ -363,7 +382,14 @@ async fn run_epoch_optimize(
 
     build_registry_single(cache_dir, registry_dir, epoch).await?;
 
-    optimizer::run_car_optimizer(cache_dir, epoch, optimized_dir, Some(registry_dir)).await?;
+    optimizer::run_car_optimizer(
+        cache_dir,
+        epoch,
+        optimized_dir,
+        Some(registry_dir),
+        include_metadata,
+    )
+    .await?;
 
     if downloaded {
         if let Err(err) = tokio::fs::remove_file(&car_path).await {
