@@ -6,7 +6,7 @@ use blockzilla::{
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
-use postcard::{serialize_with_flavor, to_allocvec};
+use postcard::to_allocvec;
 use std::{
     collections::HashSet,
     error::Error as StdError,
@@ -23,7 +23,10 @@ use tokio::{
 
 use crate::LOG_INTERVAL_SECS;
 use crate::build_registry::{epoch_dir, fp128_from_bytes, keys_bin};
-use blockzilla::carblock_to_compact::{CompactBlock, carblock_to_compactblock};
+use blockzilla::carblock_to_compact::{
+    CompactBlock,
+    carblock_to_compactblock_inplace,
+};
 
 /// ========================================================================
 /// Paths (optimizer-specific)
@@ -110,23 +113,20 @@ impl RegistryIndex {
 }
 
 /// ========================================================================
-/// Postcard: write length-prefixed frames directly into a batch buffer
+/// Postcard: write length-prefixed frames into a batch buffer (simple/robust)
 /// ========================================================================
 #[inline]
 fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
-    // Serialize to a temporary Vec (simple & robust)
+    // Serialize to a temporary Vec (keeps code straightforward; the big win
+    // here is that `cb` and all scratch buffers are reused across iterations).
     let bytes = to_allocvec(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
 
     // Length prefix + payload
-    let start_len = batch.len();
     batch.reserve(4 + bytes.len());
     batch.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     batch.extend_from_slice(&bytes);
-
-    debug_assert_eq!(batch.len() - start_len - 4, bytes.len());
     Ok(())
 }
-
 
 /// ========================================================================
 /// Optimize an epoch using usage-ordered registry (keys.bin only)
@@ -160,12 +160,21 @@ pub async fn optimize_epoch(
     let tmp_path = unique_tmp(&outdir, "blocks");
 
     // Bigger buffers and batched writes to saturate disk
-    const OUT_BUF_CAP: usize   = 128 << 20; // 128 MiB writer buffer
-    const BATCH_TARGET: usize  = 128 << 20; // flush when reaching this size
-    const BATCH_SOFT_MAX: usize= 160 << 20; // guard flush
+    const OUT_BUF_CAP: usize    = 128 << 20; // 128 MiB writer buffer
+    const BATCH_TARGET: usize   = 128 << 20; // flush when reaching this size
+    const BATCH_SOFT_MAX: usize = 160 << 20; // guard flush
 
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
+
+    // Reusable CompactBlock and scratch buffers (this is the key change)
+    let mut cblk = CompactBlock {
+        slot: 0,
+        txs: Vec::with_capacity(512),
+        rewards: Vec::with_capacity(64),
+    };
+    let mut buf_tx   = Vec::<u8>::with_capacity(128 << 10);
+    let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
 
     let start = Instant::now();
     let mut last_log = start;
@@ -182,26 +191,26 @@ pub async fn optimize_epoch(
             }
         }
 
-        // Convert whole block using the carblock_to_compact pipeline
-        let compact: CompactBlock =
-            match carblock_to_compactblock(&block, &reg.map, include_metadata) {
-                Ok(cb) => cb,
-                Err(e) => {
-                    if is_soft_eof(&e) {
-                        break 'epoch;
-                    }
-                    return Err(e);
-                }
-            };
+        // Convert whole block using the in-place builder (reuses `cblk`, `buf_tx`, `buf_meta`)
+        if let Err(e) = carblock_to_compactblock_inplace(
+            &block,
+            &reg.map,
+            include_metadata,
+            &mut buf_tx,
+            &mut buf_meta,
+            &mut cblk,
+        ) {
+            if is_soft_eof(&e) {
+                break 'epoch;
+            }
+            return Err(e);
+        }
 
-        // Serialize directly into the batch (no per-block Vec allocation)
-        push_block_into_batch(&mut frame_batch, &compact)?;
+        // Serialize directly into the batch
+        push_block_into_batch(&mut frame_batch, &cblk)?;
 
         // Flush large chunks to reduce syscalls and keep NVMe busy
-        if frame_batch.len() >= BATCH_TARGET {
-            out.write_all(&frame_batch).await?;
-            frame_batch.clear();
-        } else if frame_batch.len() >= BATCH_SOFT_MAX {
+        if frame_batch.len() >= BATCH_TARGET || frame_batch.len() >= BATCH_SOFT_MAX {
             out.write_all(&frame_batch).await?;
             frame_batch.clear();
         }

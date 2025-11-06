@@ -1,13 +1,14 @@
 use ahash::AHashMap;
 use anyhow::{Result, anyhow};
+use cid::Cid;
 use prost::Message;
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use std::{io::Read, mem::MaybeUninit};
 use wincode::Deserialize as WincodeDeserialize;
 use wincode::SchemaRead;
 
+use crate::transaction_parser::Signature;
 use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
 
 use crate::transaction_parser::{
@@ -15,60 +16,48 @@ use crate::transaction_parser::{
     VersionedTransaction,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead)]
-#[repr(transparent)]
-pub struct CompactSignature(pub [u8; 64]);
+/// =========================================================================
+/// Zero-copy helpers on CarBlock (coalesce DataFrame chains with one alloc)
+/// =========================================================================
 
-// Fully-qualified serde impls; avoids `use serde::*`
-impl serde::Serialize for CompactSignature {
-    #[inline]
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_bytes(&self.0)
-    }
+trait CarBlockExt {
+    /// Copy a DataFrame `next` chain into `dst`. If `inline_prefix` is Some, it is
+    /// copied first (used when a small inline segment precedes the chain).
+    fn dataframe_copy_into(
+        &self,
+        cid: &Cid,
+        dst: &mut Vec<u8>,
+        inline_prefix: Option<&[u8]>,
+    ) -> anyhow::Result<()>;
 }
-impl<'de> serde::Deserialize<'de> for CompactSignature {
-    #[inline]
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct SigVisitor;
-        impl<'de> serde::de::Visitor<'de> for SigVisitor {
-            type Value = CompactSignature;
-            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-                write!(f, "a 64-byte signature")
-            }
-            fn visit_bytes<E>(self, v: &[u8]) -> std::result::Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if v.len() != 64 {
-                    return Err(E::invalid_length(v.len(), &self));
-                }
-                let mut arr = [0u8; 64];
-                arr.copy_from_slice(v);
-                Ok(CompactSignature(arr))
-            }
-            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut arr = [0u8; 64];
-                for i in 0..64 {
-                    arr[i] = seq
-                        .next_element()?
-                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
-                }
-                Ok(CompactSignature(arr))
-            }
+
+impl CarBlockExt for CarBlock {
+    fn dataframe_copy_into(
+        &self,
+        cid: &Cid,
+        dst: &mut Vec<u8>,
+        inline_prefix: Option<&[u8]>,
+    ) -> anyhow::Result<()> {
+        // We don't know the total length without a separate walk; keep it simple:
+        // reserve once for prefix + 64 KiB to cut growth steps, then stream-copy.
+        let prefix_len = inline_prefix.map_or(0, |p| p.len());
+        dst.clear();
+        dst.reserve(prefix_len + (64 << 10));
+
+        if let Some(p) = inline_prefix {
+            dst.extend_from_slice(p);
         }
-        deserializer.deserialize_bytes(SigVisitor)
+
+        let mut rdr = self.dataframe_reader(cid);
+        rdr.read_to_end(dst)
+            .map_err(|e| anyhow!("read dataframe chain: {e}"))?;
+        Ok(())
     }
 }
 
+/// =========================================================================
+/// Types (unchanged shapes)
+/// =========================================================================
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum CompactRewardType {
@@ -87,20 +76,6 @@ pub struct CompactReward {
     pub post_balance: u64,
     pub reward_type: CompactRewardType,
     pub commission: Option<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
-pub struct CompactMessageHeader {
-    pub num_required_signatures: u8,
-    pub num_readonly_signed_accounts: u8,
-    pub num_readonly_unsigned_accounts: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
-pub struct CompactInstruction {
-    pub program_id_index: u8,
-    pub accounts: Vec<u8>,
-    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
@@ -160,7 +135,15 @@ pub struct CompactReturnData {
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub struct CompactInnerInstructions {
     pub index: u32,
-    pub instructions: Vec<CompactInstruction>,
+    pub instructions: Vec<CompactInnerInstruction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+pub struct CompactInnerInstruction {
+    pub program_id_index: u32,
+    pub accounts: Vec<u8>,
+    pub data: Vec<u8>,
+    pub stack_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
@@ -186,11 +169,11 @@ pub enum CompactMetadataPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub struct CompactVersionedTx {
-    pub signatures: Vec<CompactSignature>,
-    pub header: CompactMessageHeader,
+    pub signatures: Vec<Signature>,
+    pub header: MessageHeader,
     pub account_ids: Vec<u32>,
     pub recent_blockhash: [u8; 32],
-    pub instructions: Vec<CompactInstruction>,
+    pub instructions: Vec<CompiledInstruction>,
     pub address_table_lookups: Option<Vec<CompactAddressTableLookup>>,
     pub is_versioned: bool,
     pub metadata: Option<CompactMetadataPayload>,
@@ -201,18 +184,6 @@ pub struct CompactBlock {
     pub slot: u64,
     pub txs: Vec<CompactVersionedTx>,
     pub rewards: Vec<CompactReward>,
-}
-
-/// ===============================
-/// Helpers
-/// ===============================
-#[inline(always)]
-fn header_to_compact(h: &MessageHeader) -> CompactMessageHeader {
-    CompactMessageHeader {
-        num_required_signatures: h.num_required_signatures,
-        num_readonly_signed_accounts: h.num_readonly_signed_accounts,
-        num_readonly_unsigned_accounts: h.num_readonly_unsigned_accounts,
-    }
 }
 
 #[inline(always)]
@@ -252,21 +223,6 @@ fn map_static_keys_to_ids(
 }
 
 #[inline(always)]
-fn copy_instructions<'a>(
-    ixs: impl Iterator<Item = &'a CompiledInstruction>,
-) -> Vec<CompactInstruction> {
-    let mut out = Vec::with_capacity(8);
-    for ix in ixs {
-        out.push(CompactInstruction {
-            program_id_index: ix.program_id_index,
-            accounts: ix.accounts.clone(),
-            data: ix.data.clone(),
-        });
-    }
-    out
-}
-
-#[inline(always)]
 fn map_lookups_to_ids(
     lookups: &[MessageAddressTableLookup],
     fp2id: &AHashMap<u128, u32>,
@@ -293,7 +249,6 @@ fn map_lookups_to_ids(
 /// Rewards — decode via Rewards node (CarBlock pattern)
 /// ===============================
 
-/// Client reward payloads we expect to read with wincode + SchemaRead.
 #[derive(Debug, Clone, SchemaRead)]
 struct ClientRewardBytesPk {
     pub pubkey: [u8; 32],
@@ -337,7 +292,6 @@ fn decode_rewards_via_node(
         return Ok(out);
     };
 
-    // DataFrame chaining exactly as you had
     buf.clear();
     let bytes: &[u8] = if let Some(next) = reward_node.data.next {
         let mut rdr = block.dataframe_reader(&next.to_cid()?);
@@ -347,7 +301,6 @@ fn decode_rewards_via_node(
         reward_node.data.data
     };
 
-    // 1) Try bytes-pubkey payloads
     if let Ok(v) = wincode::deserialize::<Vec<ClientRewardBytesPk>>(bytes) {
         out.reserve(v.len());
         for r in v {
@@ -364,7 +317,6 @@ fn decode_rewards_via_node(
         return Ok(out);
     }
 
-    // 2) Fallback to string-pubkey payloads
     if let Ok(v) = wincode::deserialize::<Vec<ClientRewardStringPk>>(bytes) {
         out.reserve(v.len());
         for r in v {
@@ -391,92 +343,132 @@ fn decode_rewards_via_node(
 /// ===============================
 /// Metadata extraction helpers
 /// ===============================
+
+#[inline(always)]
+fn looks_like_zstd(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && bytes[0] == 0x28 && bytes[1] == 0xB5 && bytes[2] == 0x2F && bytes[3] == 0xFD
+}
+
+/// Fill `buf` with decompressed (or raw) metadata and return a slice into it.
+/// Zero extra allocs: `buf` is reused; when you later want to store, move it with `mem::take`.
+fn metadata_proto_into<'a>(src: &[u8], buf: &'a mut Vec<u8>) -> &'a [u8] {
+    buf.clear();
+    if looks_like_zstd(src) {
+        if let Ok(out) = zstd::bulk::decompress(src, 512 * 1024) {
+            *buf = out; // take ownership without extra copy
+            return buf.as_slice();
+        }
+        if let Ok(mut dec) = zstd::stream::read::Decoder::new(src) {
+            let _ = std::io::copy(&mut dec, buf);
+            return buf.as_slice();
+        }
+    }
+    buf.extend_from_slice(src);
+    buf.as_slice()
+}
+
 fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<CompactTxError> {
     let err = meta.err.as_ref()?;
-    let dbg = format!("{err:?}");
+    let raw = err.err.as_slice();
 
-    if dbg.contains("AccountInUse") {
-        return Some(CompactTxError::AccountInUse);
+    if raw.is_empty() {
+        return None;
     }
-    if dbg.contains("AccountLoadedTwice") {
-        return Some(CompactTxError::AccountLoadedTwice);
+
+    #[inline(always)]
+    fn has(hay: &[u8], needle: &str) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
     }
-    if dbg.contains("AccountNotFound") && !dbg.contains("ProgramAccountNotFound") {
+
+    macro_rules! chk {
+        ($s:literal, $e:expr) => {
+            if has(raw, $s) {
+                return Some($e);
+            }
+        };
+    }
+
+    chk!("AccountInUse", CompactTxError::AccountInUse);
+    chk!("AccountLoadedTwice", CompactTxError::AccountLoadedTwice);
+    chk!(
+        "ProgramAccountNotFound",
+        CompactTxError::ProgramAccountNotFound
+    );
+    if has(raw, "AccountNotFound") {
         return Some(CompactTxError::AccountNotFound);
     }
-    if dbg.contains("ProgramAccountNotFound") {
-        return Some(CompactTxError::ProgramAccountNotFound);
-    }
-    if dbg.contains("InsufficientFundsForFee") {
-        return Some(CompactTxError::InsufficientFundsForFee);
-    }
-    if dbg.contains("InvalidAccountForFee") {
-        return Some(CompactTxError::InvalidAccountForFee);
-    }
-    if dbg.contains("AlreadyProcessed") {
-        return Some(CompactTxError::AlreadyProcessed);
-    }
-    if dbg.contains("BlockhashNotFound") {
-        return Some(CompactTxError::BlockhashNotFound);
-    }
-    if dbg.contains("CallChainTooDeep") {
-        return Some(CompactTxError::CallChainTooDeep);
-    }
-    if dbg.contains("MissingSignatureForFee") {
-        return Some(CompactTxError::MissingSignatureForFee);
-    }
-    if dbg.contains("InvalidAccountIndex") {
-        return Some(CompactTxError::InvalidAccountIndex);
-    }
-    if dbg.contains("SignatureFailure") {
-        return Some(CompactTxError::SignatureFailure);
-    }
-    if dbg.contains("SanitizedTransaction") {
-        return Some(CompactTxError::SanitizedTransactionError);
-    }
+    chk!(
+        "InsufficientFundsForFee",
+        CompactTxError::InsufficientFundsForFee
+    );
+    chk!("InvalidAccountForFee", CompactTxError::InvalidAccountForFee);
+    chk!("AlreadyProcessed", CompactTxError::AlreadyProcessed);
+    chk!("BlockhashNotFound", CompactTxError::BlockhashNotFound);
+    chk!("CallChainTooDeep", CompactTxError::CallChainTooDeep);
+    chk!(
+        "MissingSignatureForFee",
+        CompactTxError::MissingSignatureForFee
+    );
+    chk!("InvalidAccountIndex", CompactTxError::InvalidAccountIndex);
+    chk!("SignatureFailure", CompactTxError::SignatureFailure);
+    chk!(
+        "SanitizedTransaction",
+        CompactTxError::SanitizedTransactionError
+    );
 
-    if let Some(start) = dbg.find("InstructionError(") {
-        if let Some(rest) = dbg.get(start + "InstructionError(".len()..) {
-            if let Some(end) = rest.find(')') {
-                let body = &rest[..end];
-                if let Some((idx_s, code_s)) = body.split_once(',') {
-                    let idx = idx_s.trim().parse::<u32>().unwrap_or(0);
-                    let code_s = code_s.trim();
-                    let error = if let Some(cust) = code_s
-                        .strip_prefix("Custom(")
-                        .and_then(|s| s.strip_suffix(')'))
-                    {
-                        CompactInstructionError::Custom(cust.parse::<u32>().unwrap_or(0))
-                    } else {
-                        let builtin_code = match code_s {
-                            "InvalidArgument" => 1,
-                            "InvalidInstructionData" => 2,
-                            "MissingRequiredSignature" => 3,
-                            "IncorrectProgramId" => 4,
-                            "AccountNotRentExempt" => 5,
-                            "UninitializedAccount" => 6,
-                            "InvalidAccountData" => 7,
-                            "InsufficientFunds" => 8,
-                            "ProgramFailedToComplete" => 9,
-                            "ProgramFailedToCompile" => 10,
-                            "Immutable" => 11,
-                            "ArithmeticOverflow" => 12,
-                            "DuplicateInstruction" => 13,
-                            _ => 0,
-                        };
-                        CompactInstructionError::Builtin(builtin_code)
+    if let Some(pos) = raw
+        .windows(b"InstructionError(".len())
+        .position(|w| w == b"InstructionError(")
+    {
+        let rest = &raw[pos + "InstructionError(".len()..];
+        if let Some(end) = rest.iter().position(|&b| b == b')') {
+            let body = &rest[..end];
+            if let Some(comma) = body.iter().position(|&b| b == b',') {
+                let idx = std::str::from_utf8(&body[..comma])
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                let code_str = std::str::from_utf8(&body[comma + 1..]).unwrap_or("").trim();
+                let error = if let Some(cust) = code_str
+                    .strip_prefix("Custom(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    CompactInstructionError::Custom(cust.parse::<u32>().unwrap_or(0))
+                } else {
+                    let builtin = match code_str {
+                        "InvalidArgument" => 1,
+                        "InvalidInstructionData" => 2,
+                        "MissingRequiredSignature" => 3,
+                        "IncorrectProgramId" => 4,
+                        "AccountNotRentExempt" => 5,
+                        "UninitializedAccount" => 6,
+                        "InvalidAccountData" => 7,
+                        "InsufficientFunds" => 8,
+                        "ProgramFailedToComplete" => 9,
+                        "ProgramFailedToCompile" => 10,
+                        "Immutable" => 11,
+                        "ArithmeticOverflow" => 12,
+                        "DuplicateInstruction" => 13,
+                        _ => 0,
                     };
-                    return Some(CompactTxError::InstructionError { index: idx, error });
-                }
+                    CompactInstructionError::Builtin(builtin)
+                };
+                return Some(CompactTxError::InstructionError { index: idx, error });
             }
         }
     }
 
-    if dbg.contains("ProgramError") || dbg.contains("ProgramFailed") || dbg.contains("RuntimeError") {
+    if has(raw, "ProgramError") || has(raw, "ProgramFailed") || has(raw, "RuntimeError") {
         return Some(CompactTxError::ProgramError);
     }
 
-    Some(CompactTxError::Other { name: dbg })
+    Some(CompactTxError::Other {
+        name: if raw.len() <= 64 {
+            String::from_utf8_lossy(raw).to_string()
+        } else {
+            format!("err[{} bytes]", raw.len())
+        },
+    })
 }
 
 #[inline(always)]
@@ -552,7 +544,6 @@ fn meta_to_compact(
         }
     }
 
-    // Return data (avoid turbofish inference issues)
     let return_data = if let Some(rd) = &meta.return_data {
         if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
             if let Some(pid) = id_for_pubkey(fp2id, &pk.to_bytes()) {
@@ -570,18 +561,19 @@ fn meta_to_compact(
         None
     };
 
-    // Inner instructions (give the compiler the exact type)
     let inner_instructions: Vec<CompactInnerInstructions> = meta
         .inner_instructions
-        .iter()
+        .clone()
+        .into_iter()
         .map(|ii| {
             let instructions = ii
                 .instructions
-                .iter()
-                .map(|ci| CompactInstruction {
-                    program_id_index: ci.program_id_index as u8,
-                    accounts: ci.accounts.clone(),
-                    data: ci.data.clone(),
+                .into_iter()
+                .map(|instr| CompactInnerInstruction {
+                    program_id_index: instr.program_id_index as u32,
+                    accounts: instr.accounts,
+                    data: instr.data,
+                    stack_height: instr.stack_height,
                 })
                 .collect::<Vec<_>>();
             CompactInnerInstructions {
@@ -591,7 +583,6 @@ fn meta_to_compact(
         })
         .collect::<Vec<_>>();
 
-    // Your generated meta.log_messages is Vec<String>; wrap to Option
     let log_messages = if meta.log_messages.is_empty() {
         None
     } else {
@@ -615,97 +606,45 @@ fn meta_to_compact(
     }
 }
 
-fn metadata_proto_bytes(bytes: &[u8]) -> Vec<u8> {
-    match zstd::bulk::decompress(bytes, 512 * 1024) {
-        Ok(buf) => buf,
-        Err(_) => {
-            let mut tmp = Vec::new();
-            if let Ok(mut dec) = zstd::stream::read::Decoder::new(bytes) {
-                if std::io::copy(&mut dec, &mut tmp).is_ok() {
-                    return tmp;
-                }
-            }
-            bytes.to_vec()
-        }
-    }
-}
-
 /// ===============================
-/// tx (already decoded) -> CompactVersionedTx
+/// In-place builder (reuse the same CompactBlock across iterations)
 /// ===============================
-pub fn tx_decoded_to_compact_full(
-    tx: &VersionedTransaction,
-    fp2id: &AHashMap<u128, u32>,
-    meta_bytes_opt: Option<&[u8]>,
-    include_compact_metadata: bool,
-) -> Result<CompactVersionedTx> {
-    let signatures = tx
-        .signatures
-        .iter()
-        .map(|s| CompactSignature(s.0))
-        .collect::<Vec<_>>();
-
-    let header = header_to_compact(tx.message.header());
-    let is_versioned = matches!(tx.message, VersionedMessage::V0(_));
-    let static_keys = tx.message.static_account_keys();
-    let account_ids = map_static_keys_to_ids(static_keys, fp2id)?;
-    let recent_blockhash = match &tx.message {
-        VersionedMessage::Legacy(m) => m.recent_blockhash,
-        VersionedMessage::V0(m) => m.recent_blockhash,
-    };
-    let instructions = copy_instructions(tx.message.instructions_iter());
-    let address_table_lookups = match tx.message.address_table_lookups() {
-        None => None,
-        Some(lookups) => Some(map_lookups_to_ids(lookups, fp2id)?),
-    };
-
-    let metadata = if let Some(meta_bytes) = meta_bytes_opt {
-        let raw_proto = metadata_proto_bytes(meta_bytes);
-        if include_compact_metadata {
-            match confirmed_block::TransactionStatusMeta::decode(&raw_proto[..]) {
-                Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(&parsed, fp2id))),
-                Err(_) => Some(CompactMetadataPayload::Raw(raw_proto)),
-            }
-        } else {
-            Some(CompactMetadataPayload::Raw(raw_proto))
-        }
-    } else {
-        None
-    };
-
-    Ok(CompactVersionedTx {
-        signatures,
-        header,
-        account_ids,
-        recent_blockhash,
-        instructions,
-        address_table_lookups,
-        is_versioned,
-        metadata,
-    })
-}
-
-/// ===============================
-/// CarBlock -> CompactBlock (EXACT reader pattern)
-/// ===============================
-pub fn carblock_to_compactblock(
+pub fn carblock_to_compactblock_inplace(
     block: &CarBlock,
     fp2id: &AHashMap<u128, u32>,
     include_metadata: bool,
-) -> Result<CompactBlock> {
-    let slot = block.block()?.slot;
+    buf_tx: &mut Vec<u8>,
+    buf_meta: &mut Vec<u8>,
+    out: &mut CompactBlock,
+) -> Result<()> {
+    out.slot = block.block()?.slot;
 
-    // Rewards via Rewards node
-    let mut rewards_buf = Vec::<u8>::with_capacity(64 * 1024);
-    let rewards = decode_rewards_via_node(block, fp2id, &mut rewards_buf).unwrap_or_default();
+    // -------- rewards --------
+    out.rewards.clear();
+    {
+        let mut rewards_buf = Vec::<u8>::with_capacity(64 << 10);
+        let rewards = decode_rewards_via_node(block, fp2id, &mut rewards_buf).unwrap_or_default();
+        out.rewards.reserve(rewards.len());
+        out.rewards.extend(rewards);
+    }
 
-    // Transactions
-    let mut txs: Vec<CompactVersionedTx> = Vec::new();
+    // -------- transactions --------
+    // Pre-count to reserve tx slots
+    let mut target_len = 0usize;
+    for entry_cid_res in block.block()?.entries.iter() {
+        let entry_cid = entry_cid_res?;
+        let Node::Entry(entry) = block.decode(entry_cid.hash_bytes())? else {
+            continue;
+        };
+        target_len += entry.transactions.len();
+    }
+    if out.txs.capacity() < target_len {
+        out.txs.reserve(target_len - out.txs.len());
+    }
+    let mut written = 0usize;
+
     let mut reusable_tx = MaybeUninit::<VersionedTransaction>::uninit();
-    let mut buf_tx = Vec::<u8>::with_capacity(128 * 1024);
-    let mut buf_meta = Vec::<u8>::with_capacity(128 * 1024);
 
-    // EXACT iteration pattern as in your `read_block` example
     for entry_cid_res in block.block()?.entries.iter() {
         let entry_cid = entry_cid_res?;
         let Node::Entry(entry) = block.decode(entry_cid.hash_bytes())? else {
@@ -718,44 +657,192 @@ pub fn carblock_to_compactblock(
                 continue;
             };
 
-            // tx bytes: inline or streamed
+            // tx bytes: inline or chained
             let tx_bytes: &[u8] = match tx_node.data.next {
                 None => tx_node.data.data,
                 Some(df_cbor) => {
                     let df_cid = df_cbor.to_cid()?;
-                    let mut rdr = block.dataframe_reader(&df_cid);
                     buf_tx.clear();
-                    rdr.read_to_end(&mut buf_tx)?;
-                    &buf_tx
+                    block.dataframe_copy_into(&df_cid, buf_tx, None)?;
+                    &*buf_tx
                 }
             };
 
-            // Decode VersionedTransaction into reusable slot
             VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)
                 .map_err(|_| anyhow!("failed to decode VersionedTransaction"))?;
             let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
-            // Metadata bytes come from TransactionNode.metadata (DataFrame)
-            let df = &tx_node.metadata;
-            let meta_bytes_opt: Option<&[u8]> = if let Some(next) = df.next {
-                let df_cid = next.to_cid()?;
-                let mut rdr = block.dataframe_reader(&df_cid);
-                buf_meta.clear();
-                rdr.read_to_end(&mut buf_meta)?;
-                Some(&buf_meta)
-            } else {
-                Some(df.data)
+            // ensure tx slot
+            if out.txs.len() == written {
+                out.txs.push(CompactVersionedTx {
+                    signatures: Vec::with_capacity(2),
+                    header: MessageHeader {
+                        num_required_signatures: 0,
+                        num_readonly_signed_accounts: 0,
+                        num_readonly_unsigned_accounts: 0,
+                    },
+                    account_ids: Vec::with_capacity(32),
+                    recent_blockhash: [0; 32],
+                    instructions: Vec::with_capacity(8),
+                    address_table_lookups: None,
+                    is_versioned: false,
+                    metadata: None,
+                });
+            }
+            let vtx = &mut out.txs[written];
+
+            // clear inner vecs to reuse capacity
+            vtx.signatures.clear();
+            vtx.account_ids.clear();
+            vtx.instructions.clear();
+            if let Some(ref mut v) = vtx.address_table_lookups {
+                v.clear();
+            }
+            vtx.metadata = None;
+
+            // signatures
+            vtx.signatures.reserve(tx_ref.signatures.len());
+            for s in &tx_ref.signatures {
+                vtx.signatures.push(Signature(s.0));
+            }
+
+            // header, hash, version
+            vtx.header = *tx_ref.message.header();
+            vtx.is_versioned = matches!(tx_ref.message, VersionedMessage::V0(_));
+            vtx.recent_blockhash = match &tx_ref.message {
+                VersionedMessage::Legacy(m) => m.recent_blockhash,
+                VersionedMessage::V0(m) => m.recent_blockhash,
             };
 
-            // Build compact tx
-            let compact_tx = tx_decoded_to_compact_full(tx_ref, fp2id, meta_bytes_opt, include_metadata)?;
+            // account ids
+            let static_keys = tx_ref.message.static_account_keys();
+            vtx.account_ids.reserve(static_keys.len());
+            for k in static_keys {
+                if let Some(uid) = id_for_pubkey(fp2id, k) {
+                    vtx.account_ids.push(uid);
+                } else {
+                    return Err(anyhow!(
+                        "registry miss for pubkey {}",
+                        Pubkey::new_from_array(*k)
+                    ));
+                }
+            }
 
-            // Drop decoded tx in-place (we reused its memory)
+            // instructions
+            {
+                vtx.instructions.reserve(tx_ref.message.instructions_len());
+                for ix in tx_ref.message.instructions_iter() {
+                    vtx.instructions.push(ix.clone());
+                }
+            }
+
+            // address table lookups
+            vtx.address_table_lookups = match tx_ref.message.address_table_lookups() {
+                None => None,
+                Some(lookups) => {
+                    let mut vec = vtx
+                        .address_table_lookups
+                        .take()
+                        .unwrap_or_else(|| Vec::with_capacity(2));
+                    for l in lookups {
+                        if let Some(uid) = id_for_pubkey(fp2id, &l.account_key) {
+                            vec.push(CompactAddressTableLookup {
+                                table_account_id: uid,
+                                writable_indexes: l.writable_indexes.clone(),
+                                readonly_indexes: l.readonly_indexes.clone(),
+                            });
+                        } else {
+                            return Err(anyhow!(
+                                "registry miss for address table account {}",
+                                Pubkey::new_from_array(l.account_key)
+                            ));
+                        }
+                    }
+                    Some(vec)
+                }
+            };
+
+            // ---- metadata (fixed to avoid E0502 borrow conflict) ----
+            let df = &tx_node.metadata;
+
+            vtx.metadata = if let Some(next) = df.next {
+                // Chained case: first coalesce chain into buf_meta (including inline df.data)
+                let df_cid = next.to_cid()?;
+                buf_meta.clear();
+                block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
+
+                // Now the source is buf_meta; use buf_tx as the decompression scratch
+                let raw_slice = metadata_proto_into(&*buf_meta, buf_tx); // fills buf_tx
+
+                if include_metadata {
+                    match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
+                        Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
+                            &parsed, fp2id,
+                        ))),
+                        Err(_) => {
+                            let owned = std::mem::take(buf_tx);
+                            Some(CompactMetadataPayload::Raw(owned))
+                        }
+                    }
+                } else {
+                    let owned = std::mem::take(buf_tx);
+                    Some(CompactMetadataPayload::Raw(owned))
+                }
+            } else {
+                // Inline case: df.data is the source; we can safely use buf_meta as scratch
+                let raw_slice = metadata_proto_into(df.data, buf_meta); // fills buf_meta
+
+                if include_metadata {
+                    match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
+                        Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
+                            &parsed, fp2id,
+                        ))),
+                        Err(_) => {
+                            let owned = std::mem::take(buf_meta);
+                            Some(CompactMetadataPayload::Raw(owned))
+                        }
+                    }
+                } else {
+                    let owned = std::mem::take(buf_meta);
+                    Some(CompactMetadataPayload::Raw(owned))
+                }
+            };
+
+            // drop decoded tx in-place (we reused its memory)
             unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
 
-            txs.push(compact_tx);
+            written += 1;
         }
     }
 
-    Ok(CompactBlock { slot, txs, rewards })
+    out.txs.truncate(written);
+    Ok(())
+}
+
+/// ===============================
+/// Wrapper returning a fresh CompactBlock (for existing call sites)
+/// ===============================
+pub fn carblock_to_compactblock(
+    block: &CarBlock,
+    fp2id: &AHashMap<u128, u32>,
+    include_metadata: bool,
+) -> Result<CompactBlock> {
+    // Reasonable starting capacities; they’ll grow to fit the biggest block seen.
+    let mut out = CompactBlock {
+        slot: 0,
+        txs: Vec::with_capacity(512),
+        rewards: Vec::with_capacity(64),
+    };
+    let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
+    let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
+
+    carblock_to_compactblock_inplace(
+        block,
+        fp2id,
+        include_metadata,
+        &mut buf_tx,
+        &mut buf_meta,
+        &mut out,
+    )?;
+    Ok(out)
 }

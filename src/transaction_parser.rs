@@ -1,4 +1,6 @@
 use anyhow::Result;
+use serde::Deserialize;
+use serde::Serialize;
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::mem::MaybeUninit;
@@ -179,7 +181,7 @@ impl<'de> serde::Deserialize<'de> for Signature {
 
 pub const PUBKEY_BYTES: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub struct CompiledInstruction {
     pub program_id_index: u8,
     #[wincode(with = "containers::Vec<Pod<u8>, ShortU16Len>")]
@@ -188,7 +190,7 @@ pub struct CompiledInstruction {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub struct MessageHeader {
     pub num_required_signatures: u8,
     pub num_readonly_signed_accounts: u8,
