@@ -12,9 +12,15 @@ use crate::transaction_parser::Signature;
 use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
 
 use crate::transaction_parser::{
-    CompiledInstruction, MessageHeader, VersionedMessage,
-    VersionedTransaction,
+    CompiledInstruction, MessageHeader, VersionedMessage, VersionedTransaction,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataMode {
+    Compact,
+    Raw,
+    None,
+}
 
 trait CarBlockExt {
     /// Copy a DataFrame `next` chain into `dst`. If `inline_prefix` is Some, it is
@@ -561,7 +567,7 @@ fn meta_to_compact(
 pub fn carblock_to_compactblock_inplace(
     block: &CarBlock,
     fp2id: &AHashMap<u128, u32>,
-    include_metadata: bool,
+    metadata_mode: MetadataMode,
     buf_tx: &mut Vec<u8>,
     buf_meta: &mut Vec<u8>,
     out: &mut CompactBlock,
@@ -714,7 +720,9 @@ pub fn carblock_to_compactblock_inplace(
             // ---- metadata (fixed to avoid E0502 borrow conflict) ----
             let df = &tx_node.metadata;
 
-            vtx.metadata = if let Some(next) = df.next {
+            vtx.metadata = if matches!(metadata_mode, MetadataMode::None) {
+                None
+            } else if let Some(next) = df.next {
                 // Chained case: first coalesce chain into buf_meta (including inline df.data)
                 let df_cid = next.to_cid()?;
                 buf_meta.clear();
@@ -723,37 +731,45 @@ pub fn carblock_to_compactblock_inplace(
                 // Now the source is buf_meta; use buf_tx as the decompression scratch
                 let raw_slice = metadata_proto_into(&*buf_meta, buf_tx); // fills buf_tx
 
-                if include_metadata {
-                    match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
-                        Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
-                            &parsed, fp2id,
-                        ))),
-                        Err(_) => {
-                            let owned = std::mem::take(buf_tx);
-                            Some(CompactMetadataPayload::Raw(owned))
+                match metadata_mode {
+                    MetadataMode::Compact => {
+                        match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
+                            Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
+                                &parsed, fp2id,
+                            ))),
+                            Err(_) => {
+                                let owned = std::mem::take(buf_tx);
+                                Some(CompactMetadataPayload::Raw(owned))
+                            }
                         }
                     }
-                } else {
-                    let owned = std::mem::take(buf_tx);
-                    Some(CompactMetadataPayload::Raw(owned))
+                    MetadataMode::Raw => {
+                        let owned = std::mem::take(buf_tx);
+                        Some(CompactMetadataPayload::Raw(owned))
+                    }
+                    MetadataMode::None => None,
                 }
             } else {
                 // Inline case: df.data is the source; we can safely use buf_meta as scratch
                 let raw_slice = metadata_proto_into(df.data, buf_meta); // fills buf_meta
 
-                if include_metadata {
-                    match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
-                        Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
-                            &parsed, fp2id,
-                        ))),
-                        Err(_) => {
-                            let owned = std::mem::take(buf_meta);
-                            Some(CompactMetadataPayload::Raw(owned))
+                match metadata_mode {
+                    MetadataMode::Compact => {
+                        match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
+                            Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
+                                &parsed, fp2id,
+                            ))),
+                            Err(_) => {
+                                let owned = std::mem::take(buf_meta);
+                                Some(CompactMetadataPayload::Raw(owned))
+                            }
                         }
                     }
-                } else {
-                    let owned = std::mem::take(buf_meta);
-                    Some(CompactMetadataPayload::Raw(owned))
+                    MetadataMode::Raw => {
+                        let owned = std::mem::take(buf_meta);
+                        Some(CompactMetadataPayload::Raw(owned))
+                    }
+                    MetadataMode::None => None,
                 }
             };
 
@@ -767,4 +783,3 @@ pub fn carblock_to_compactblock_inplace(
     out.txs.truncate(written);
     Ok(())
 }
-

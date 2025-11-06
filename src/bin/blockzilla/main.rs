@@ -5,7 +5,7 @@ mod optimized_block_reader;
 mod optimizer;
 
 use anyhow::{Result, anyhow};
-use blockzilla::open_epoch::FetchMode;
+use blockzilla::{carblock_to_compact::MetadataMode, open_epoch::FetchMode};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::{
     block_reader::{read_block, read_block_par},
-    build_registry::{build_registry_auto, build_registry_single},
+    build_registry::{build_registry_auto, build_registry_single, merge_registries},
     optimized_block_reader::{
         analyze_compressed_blocks, read_compressed_blocks, read_compressed_blocks_par,
     },
@@ -94,6 +94,17 @@ enum RegistryCommand {
         #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
         registry_dir: String,
     },
+
+    /// Merge all per-epoch registry outputs into a single directory
+    Merge {
+        #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
+        registry_dir: String,
+        #[arg(
+            long,
+            help = "Directory to write the merged registry (defaults to <registry-dir>/merged)"
+        )]
+        output_dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -108,9 +119,16 @@ enum OptimizeCommand {
         registry_dir: Option<String>,
         #[arg(
             long,
-            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)"
+            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            conflicts_with = "drop_metadata"
         )]
         include_metadata: bool,
+        #[arg(
+            long,
+            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
+            conflicts_with = "include_metadata"
+        )]
+        drop_metadata: bool,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
     },
@@ -130,9 +148,16 @@ enum OptimizeCommand {
         force: bool,
         #[arg(
             long,
-            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)"
+            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            conflicts_with = "drop_metadata"
         )]
         include_metadata: bool,
+        #[arg(
+            long,
+            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
+            conflicts_with = "include_metadata"
+        )]
+        drop_metadata: bool,
     },
 
     /// Runs download → registry → optimize for a range of epochs
@@ -153,9 +178,16 @@ enum OptimizeCommand {
         force: bool,
         #[arg(
             long,
-            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)"
+            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            conflicts_with = "drop_metadata"
         )]
         include_metadata: bool,
+        #[arg(
+            long,
+            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
+            conflicts_with = "include_metadata"
+        )]
+        drop_metadata: bool,
     },
 
     /// Reads compressed BlockWithIds format
@@ -217,12 +249,26 @@ async fn main() -> Result<()> {
                 build_registry_single(&cache_dir, &results_dir, epoch).await?;
             }
 
-            RegistryCommand::Info {
-                epoch,
-                registry_dir,
-            } => {
+            RegistryCommand::Info { .. } => {
                 todo!()
                 //inspect_registry(&registry_dir, epoch).await?;
+            }
+
+            RegistryCommand::Merge {
+                registry_dir,
+                output_dir,
+            } => {
+                let out_dir = output_dir.unwrap_or_else(|| {
+                    Path::new(&registry_dir)
+                        .join("merged")
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let total = merge_registries(&registry_dir, &out_dir).await?;
+                info!(
+                    "🧩 merged registries from {} into {} ({} unique keys)",
+                    registry_dir, out_dir, total
+                );
             }
         },
 
@@ -232,14 +278,16 @@ async fn main() -> Result<()> {
                 results_dir,
                 registry_dir,
                 include_metadata,
+                drop_metadata,
                 epoch,
             } => {
+                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
                 optimizer::run_car_optimizer(
                     &cache_dir,
                     epoch,
                     &results_dir,
                     registry_dir.as_deref(),
-                    include_metadata,
+                    metadata_mode,
                 )
                 .await?
             }
@@ -251,13 +299,15 @@ async fn main() -> Result<()> {
                 optimized_dir,
                 force,
                 include_metadata,
+                drop_metadata,
             } => {
+                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
                 match run_epoch_optimize(
                     &cache_dir,
                     &registry_dir,
                     &optimized_dir,
                     epoch,
-                    include_metadata,
+                    metadata_mode,
                     force,
                 )
                 .await?
@@ -279,6 +329,7 @@ async fn main() -> Result<()> {
                 optimized_dir,
                 force,
                 include_metadata,
+                drop_metadata,
             } => {
                 if start_epoch > end_epoch {
                     return Err(anyhow!(
@@ -286,6 +337,7 @@ async fn main() -> Result<()> {
                     ));
                 }
 
+                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
                 let mut completed = 0usize;
                 let mut skipped = 0usize;
                 for epoch in start_epoch..=end_epoch {
@@ -294,7 +346,7 @@ async fn main() -> Result<()> {
                         &registry_dir,
                         &optimized_dir,
                         epoch,
-                        include_metadata,
+                        metadata_mode,
                         force,
                     )
                     .await
@@ -364,6 +416,16 @@ fn outputs_exist(registry_dir: &str, optimized_dir: &str, epoch: u64) -> bool {
         && optimized_idx.exists()
 }
 
+fn metadata_mode_from_flags(include_metadata: bool, drop_metadata: bool) -> MetadataMode {
+    if include_metadata {
+        MetadataMode::Compact
+    } else if drop_metadata {
+        MetadataMode::None
+    } else {
+        MetadataMode::Raw
+    }
+}
+
 async fn ensure_epoch_car(cache_dir: &str, epoch: u64) -> Result<(PathBuf, bool)> {
     let path = Path::new(cache_dir).join(format!("epoch-{epoch}.car"));
     if path.exists() {
@@ -380,7 +442,7 @@ async fn run_epoch_optimize(
     registry_dir: &str,
     optimized_dir: &str,
     epoch: u64,
-    include_metadata: bool,
+    metadata_mode: MetadataMode,
     force: bool,
 ) -> Result<OptimizeOutcome> {
     if !force && outputs_exist(registry_dir, optimized_dir, epoch) {
@@ -396,7 +458,7 @@ async fn run_epoch_optimize(
         epoch,
         optimized_dir,
         Some(registry_dir),
-        include_metadata,
+        metadata_mode,
     )
     .await?;
 
