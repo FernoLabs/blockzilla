@@ -279,7 +279,7 @@ pub async fn analyze_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()
             .map(|t| t.instructions.len() as u64)
             .sum::<u64>();
 
-        if blocks % 1000 == 0 {
+        if blocks.is_multiple_of(1000) {
             pb.set_message(format!("Analyzed {} blocks...", blocks));
         }
     }
