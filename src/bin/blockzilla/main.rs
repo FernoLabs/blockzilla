@@ -145,6 +145,28 @@ enum OptimizeCommand {
         epoch: u64,
     },
 
+    /// Optimizes a CAR epoch and assigns pubkey ids on the fly (no registry)
+    CarNoRegistry {
+        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
+        cache_dir: String,
+        #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
+        results_dir: String,
+        #[arg(
+            long,
+            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            conflicts_with = "drop_metadata"
+        )]
+        include_metadata: bool,
+        #[arg(
+            long,
+            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
+            conflicts_with = "include_metadata"
+        )]
+        drop_metadata: bool,
+        #[arg(value_name = "EPOCH")]
+        epoch: u64,
+    },
+
     /// Runs download → registry → optimize for a single epoch
     Epoch {
         /// Epoch number to process
@@ -303,6 +325,23 @@ async fn main() -> Result<()> {
                     epoch,
                     &results_dir,
                     registry_dir.as_deref(),
+                    metadata_mode,
+                )
+                .await?
+            }
+
+            OptimizeCommand::CarNoRegistry {
+                cache_dir,
+                results_dir,
+                include_metadata,
+                drop_metadata,
+                epoch,
+            } => {
+                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
+                optimizer::optimize_epoch_without_registry(
+                    &cache_dir,
+                    &results_dir,
+                    epoch,
                     metadata_mode,
                 )
                 .await?

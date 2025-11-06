@@ -11,6 +11,36 @@ use wincode::SchemaRead;
 use crate::transaction_parser::Signature;
 use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
 
+/// Trait used by compact conversion helpers to translate 32-byte pubkeys into
+/// compact u32 identifiers. Implementations can be backed by a static registry
+/// (lookup-only) or dynamically assign identifiers as new keys are observed.
+pub trait PubkeyIdProvider {
+    /// Returns the identifier for `key`, inserting it if required. Providers
+    /// that do not support insertion should return `None` for missing keys.
+    fn resolve(&mut self, key: &[u8; 32]) -> Option<u32>;
+}
+
+/// Adapter that exposes an `AHashMap<u128, u32>` (fingerprint → id) as a
+/// `PubkeyIdProvider`. This never inserts new entries; callers receive `None`
+/// for unknown keys.
+pub struct StaticPubkeyIdProvider<'a> {
+    map: &'a AHashMap<u128, u32>,
+}
+
+impl<'a> StaticPubkeyIdProvider<'a> {
+    pub fn new(map: &'a AHashMap<u128, u32>) -> Self {
+        Self { map }
+    }
+}
+
+impl<'a> PubkeyIdProvider for StaticPubkeyIdProvider<'a> {
+    #[inline(always)]
+    fn resolve(&mut self, key: &[u8; 32]) -> Option<u32> {
+        let fp = fp128_from_bytes(key);
+        self.map.get(&fp).copied()
+    }
+}
+
 use crate::transaction_parser::{
     CompiledInstruction, MessageHeader, VersionedMessage, VersionedTransaction,
 };
@@ -201,8 +231,8 @@ fn fp128_from_bytes(b: &[u8; 32]) -> u128 {
     a ^ c.rotate_left(64)
 }
 #[inline(always)]
-fn id_for_pubkey(fp2id: &AHashMap<u128, u32>, key: &[u8; 32]) -> Option<u32> {
-    fp2id.get(&fp128_from_bytes(key)).copied()
+fn id_for_pubkey<P: PubkeyIdProvider>(resolver: &mut P, key: &[u8; 32]) -> Option<u32> {
+    resolver.resolve(key)
 }
 
 /// ===============================
@@ -236,9 +266,9 @@ fn reward_tag_to_compact(tag: u8) -> CompactRewardType {
         _ => CompactRewardType::Unspecified,
     }
 }
-fn decode_rewards_via_node(
+fn decode_rewards_via_node<P: PubkeyIdProvider>(
     block: &CarBlock,
-    fp2id: &AHashMap<u128, u32>,
+    resolver: &mut P,
     buf: &mut Vec<u8>,
 ) -> Result<Vec<CompactReward>> {
     let mut out = Vec::new();
@@ -263,7 +293,7 @@ fn decode_rewards_via_node(
     if let Ok(v) = wincode::deserialize::<Vec<ClientRewardBytesPk>>(bytes) {
         out.reserve(v.len());
         for r in v {
-            if let Some(account_id) = id_for_pubkey(fp2id, &r.pubkey) {
+            if let Some(account_id) = id_for_pubkey(resolver, &r.pubkey) {
                 out.push(CompactReward {
                     account_id,
                     lamports: r.lamports,
@@ -280,7 +310,7 @@ fn decode_rewards_via_node(
         out.reserve(v.len());
         for r in v {
             if let Ok(pk) = Pubkey::try_from(r.pubkey.as_str())
-                && let Some(account_id) = id_for_pubkey(fp2id, &pk.to_bytes())
+                && let Some(account_id) = id_for_pubkey(resolver, &pk.to_bytes())
             {
                 out.push(CompactReward {
                     account_id,
@@ -435,19 +465,19 @@ fn parse_ui_amount_to_int(amount_str: &str) -> Option<u128> {
     amount_str.parse::<u128>().ok()
 }
 
-fn token_balance_to_compact(
+fn token_balance_to_compact<P: PubkeyIdProvider>(
     tb: &confirmed_block::TokenBalance,
-    fp2id: &AHashMap<u128, u32>,
+    resolver: &mut P,
 ) -> Option<CompactTokenBalanceMeta> {
     let mint_id = Pubkey::try_from(tb.mint.as_str())
         .ok()
-        .and_then(|p| id_for_pubkey(fp2id, &p.to_bytes()))?;
+        .and_then(|p| id_for_pubkey(resolver, &p.to_bytes()))?;
     let owner_id = Pubkey::try_from(tb.owner.as_str())
         .ok()
-        .and_then(|p| id_for_pubkey(fp2id, &p.to_bytes()))?;
+        .and_then(|p| id_for_pubkey(resolver, &p.to_bytes()))?;
     let program_id_id = Pubkey::try_from(tb.program_id.as_str())
         .ok()
-        .and_then(|p| id_for_pubkey(fp2id, &p.to_bytes()))?;
+        .and_then(|p| id_for_pubkey(resolver, &p.to_bytes()))?;
 
     let (amount, decimals) = match &tb.ui_token_amount {
         Some(uta) => {
@@ -467,9 +497,9 @@ fn token_balance_to_compact(
     })
 }
 
-fn meta_to_compact(
+fn meta_to_compact<P: PubkeyIdProvider>(
     meta: &confirmed_block::TransactionStatusMeta,
-    fp2id: &AHashMap<u128, u32>,
+    resolver: &mut P,
 ) -> CompactMetadata {
     let pre_balances = meta.pre_balances.clone();
     let post_balances = meta.post_balances.clone();
@@ -477,27 +507,27 @@ fn meta_to_compact(
     let pre_token_balances = meta
         .pre_token_balances
         .iter()
-        .filter_map(|tb| token_balance_to_compact(tb, fp2id))
+        .filter_map(|tb| token_balance_to_compact(tb, resolver))
         .collect();
 
     let post_token_balances = meta
         .post_token_balances
         .iter()
-        .filter_map(|tb| token_balance_to_compact(tb, fp2id))
+        .filter_map(|tb| token_balance_to_compact(tb, resolver))
         .collect();
 
     let mut loaded_writable_ids = Vec::new();
     let mut loaded_readonly_ids = Vec::new();
     for addr in &meta.loaded_writable_addresses {
         if let Ok(pk) = Pubkey::try_from(addr.as_slice())
-            && let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes())
+            && let Some(id) = id_for_pubkey(resolver, &pk.to_bytes())
         {
             loaded_writable_ids.push(id);
         }
     }
     for addr in &meta.loaded_readonly_addresses {
         if let Ok(pk) = Pubkey::try_from(addr.as_slice())
-            && let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes())
+            && let Some(id) = id_for_pubkey(resolver, &pk.to_bytes())
         {
             loaded_readonly_ids.push(id);
         }
@@ -505,7 +535,7 @@ fn meta_to_compact(
 
     let return_data = if let Some(rd) = &meta.return_data {
         if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
-            id_for_pubkey(fp2id, &pk.to_bytes()).map(|pid| CompactReturnData {
+            id_for_pubkey(resolver, &pk.to_bytes()).map(|pid| CompactReturnData {
                 program_id_id: pid,
                 data: rd.data.clone(),
             })
@@ -564,9 +594,9 @@ fn meta_to_compact(
 /// ===============================
 /// In-place builder (reuse the same CompactBlock across iterations)
 /// ===============================
-pub fn carblock_to_compactblock_inplace(
+pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
     block: &CarBlock,
-    fp2id: &AHashMap<u128, u32>,
+    resolver: &mut P,
     metadata_mode: MetadataMode,
     buf_tx: &mut Vec<u8>,
     buf_meta: &mut Vec<u8>,
@@ -578,7 +608,8 @@ pub fn carblock_to_compactblock_inplace(
     out.rewards.clear();
     {
         let mut rewards_buf = Vec::<u8>::with_capacity(64 << 10);
-        let rewards = decode_rewards_via_node(block, fp2id, &mut rewards_buf).unwrap_or_default();
+        let rewards =
+            decode_rewards_via_node(block, resolver, &mut rewards_buf).unwrap_or_default();
         out.rewards.reserve(rewards.len());
         out.rewards.extend(rewards);
     }
@@ -673,7 +704,7 @@ pub fn carblock_to_compactblock_inplace(
             let static_keys = tx_ref.message.static_account_keys();
             vtx.account_ids.reserve(static_keys.len());
             for k in static_keys {
-                if let Some(uid) = id_for_pubkey(fp2id, k) {
+                if let Some(uid) = id_for_pubkey(resolver, k) {
                     vtx.account_ids.push(uid);
                 } else {
                     return Err(anyhow!(
@@ -700,7 +731,7 @@ pub fn carblock_to_compactblock_inplace(
                         .take()
                         .unwrap_or_else(|| Vec::with_capacity(2));
                     for l in lookups {
-                        if let Some(uid) = id_for_pubkey(fp2id, &l.account_key) {
+                        if let Some(uid) = id_for_pubkey(resolver, &l.account_key) {
                             vec.push(CompactAddressTableLookup {
                                 table_account_id: uid,
                                 writable_indexes: l.writable_indexes.clone(),
@@ -735,7 +766,7 @@ pub fn carblock_to_compactblock_inplace(
                     MetadataMode::Compact => {
                         match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
                             Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
-                                &parsed, fp2id,
+                                &parsed, resolver,
                             ))),
                             Err(_) => {
                                 let owned = std::mem::take(buf_tx);
@@ -757,7 +788,7 @@ pub fn carblock_to_compactblock_inplace(
                     MetadataMode::Compact => {
                         match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
                             Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
-                                &parsed, fp2id,
+                                &parsed, resolver,
                             ))),
                             Err(_) => {
                                 let owned = std::mem::take(buf_meta);

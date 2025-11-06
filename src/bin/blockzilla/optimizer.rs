@@ -25,7 +25,8 @@ use tokio::{
 use crate::LOG_INTERVAL_SECS;
 use crate::build_registry::{epoch_dir, fp128_from_bytes, keys_bin};
 use blockzilla::carblock_to_compact::{
-    CompactBlock, CompactMetadataPayload, MetadataMode, carblock_to_compactblock_inplace,
+    CompactBlock, CompactMetadataPayload, MetadataMode, PubkeyIdProvider, StaticPubkeyIdProvider,
+    carblock_to_compactblock_inplace,
 };
 
 // If your compact log module lives elsewhere, adjust this use accordingly.
@@ -47,6 +48,23 @@ fn unique_tmp(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     dir.join(format!("{name}.tmp.{pid}.{ts}"))
+}
+
+async fn write_dynamic_keys(dir: &Path, provider: &DynamicPubkeyIdProvider) -> Result<()> {
+    let keys_path = keys_bin(dir);
+    let tmp_path = unique_tmp(dir, "keys");
+
+    let mut writer = BufWriter::with_capacity(16 << 20, File::create(&tmp_path).await?);
+    for key in provider.keys() {
+        writer.write_all(key).await?;
+    }
+    writer.flush().await?;
+
+    if fs::metadata(&keys_path).await.is_ok() {
+        let _ = fs::remove_file(&keys_path).await;
+    }
+    fs::rename(&tmp_path, &keys_path).await?;
+    Ok(())
 }
 
 /// ========================================================================
@@ -138,26 +156,20 @@ fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Resu
 /// - Stores as tagged blob in metadata.return_data.data ("CLZ\0" + blob)
 /// - Drops verbose log_messages to realize savings
 /// ========================================================================
-fn compact_logs_inplace(cblk: &mut CompactBlock, fp2id: &AHashMap<u128, u32>, enable: bool) {
+fn compact_logs_inplace<P: PubkeyIdProvider>(
+    cblk: &mut CompactBlock,
+    resolver: &mut P,
+    enable: bool,
+) {
     if !enable {
         return;
     }
 
     // Map base58 -> usage id (u32) using registry
     let mut lookup_pid = |base58: &str| -> Option<u32> {
-        Pubkey::try_from(base58).ok().and_then(|pk| {
-            let b = pk.to_bytes();
-            let a = u128::from_le_bytes([
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12],
-                b[13], b[14], b[15],
-            ]);
-            let c = u128::from_le_bytes([
-                b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23], b[24], b[25], b[26], b[27],
-                b[28], b[29], b[30], b[31],
-            ]);
-            let fp = a ^ c.rotate_left(64);
-            fp2id.get(&fp).copied()
-        })
+        Pubkey::try_from(base58)
+            .ok()
+            .and_then(|pk| resolver.resolve(&pk.to_bytes()))
     };
 
     for tx in &mut cblk.txs {
@@ -200,9 +212,182 @@ fn compact_logs_inplace(cblk: &mut CompactBlock, fp2id: &AHashMap<u128, u32>, en
 }
 
 /// ========================================================================
+/// Dynamic pubkey id provider (assigns ids on first sight)
+/// ========================================================================
+#[derive(Default)]
+struct DynamicPubkeyIdProvider {
+    fp_to_id: AHashMap<u128, u32>,
+    collisions: Option<AHashMap<[u8; 32], u32>>,
+    ids: Vec<[u8; 32]>,
+}
+
+impl DynamicPubkeyIdProvider {
+    fn new() -> Self {
+        Self {
+            fp_to_id: AHashMap::with_capacity(1 << 17),
+            collisions: None,
+            ids: Vec::with_capacity(1 << 17),
+        }
+    }
+
+    fn keys(&self) -> &[[u8; 32]] {
+        self.ids.as_slice()
+    }
+}
+
+impl PubkeyIdProvider for DynamicPubkeyIdProvider {
+    fn resolve(&mut self, key: &[u8; 32]) -> Option<u32> {
+        let fp = fp128_from_bytes(key);
+        if let Some(&id) = self.fp_to_id.get(&fp) {
+            if let Some(stored) = self.ids.get(id as usize) {
+                if stored == key {
+                    return Some(id);
+                }
+            }
+            if let Some(extra) = &self.collisions {
+                if let Some(&cid) = extra.get(key) {
+                    return Some(cid);
+                }
+            }
+        } else if let Some(extra) = &self.collisions {
+            if let Some(&cid) = extra.get(key) {
+                return Some(cid);
+            }
+        }
+
+        if self.ids.len() >= u32::MAX as usize {
+            return None;
+        }
+
+        let id = self.ids.len() as u32;
+        self.ids.push(*key);
+        if self.fp_to_id.contains_key(&fp) {
+            self.collisions
+                .get_or_insert_with(|| AHashMap::with_capacity(4))
+                .insert(*key, id);
+        } else {
+            self.fp_to_id.insert(fp, id);
+        }
+        Some(id)
+    }
+}
+
+/// ========================================================================
 /// Optimize an epoch using usage-ordered registry (keys.bin only)
 /// Writes a length-prefixed stream of `CompactBlock` (postcard)
 /// ========================================================================
+pub async fn optimize_epoch_without_registry(
+    cache_dir: &str,
+    out_base: &str,
+    epoch: u64,
+    metadata_mode: MetadataMode,
+) -> Result<()> {
+    let outdir = optimized_dir(Path::new(out_base), epoch);
+    fs::create_dir_all(&outdir).await?;
+
+    let blocks_path = optimized_blocks_file(&outdir);
+
+    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
+    let mut car = CarBlockReader::new(reader);
+    car.read_header().await?;
+
+    let tmp_path = unique_tmp(&outdir, "blocks");
+
+    const OUT_BUF_CAP: usize = 128 << 20;
+    const BATCH_TARGET: usize = 128 << 20;
+    const BATCH_SOFT_MAX: usize = 160 << 20;
+
+    let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
+    let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
+
+    let mut cblk = CompactBlock {
+        slot: 0,
+        txs: Vec::with_capacity(512),
+        rewards: Vec::with_capacity(64),
+    };
+    let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
+    let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
+    let mut provider = DynamicPubkeyIdProvider::new();
+
+    let start = Instant::now();
+    let mut last_log = start;
+    let mut blocks = 0u64;
+    let mut msg = String::with_capacity(128);
+
+    let enable_log_compaction = matches!(metadata_mode, MetadataMode::Compact);
+
+    'epoch: while let Some(block) = car.next_block().await? {
+        if let Err(e) = block.block() {
+            if is_soft_eof(&e) {
+                break 'epoch;
+            } else {
+                return Err(e);
+            }
+        }
+
+        if let Err(e) = carblock_to_compactblock_inplace(
+            &block,
+            &mut provider,
+            metadata_mode,
+            &mut buf_tx,
+            &mut buf_meta,
+            &mut cblk,
+        ) {
+            if is_soft_eof(&e) {
+                break 'epoch;
+            }
+            return Err(e);
+        }
+
+        compact_logs_inplace(&mut cblk, &mut provider, enable_log_compaction);
+
+        push_block_into_batch(&mut frame_batch, &cblk)?;
+
+        if frame_batch.len() >= BATCH_TARGET || frame_batch.len() >= BATCH_SOFT_MAX {
+            out.write_all(&frame_batch).await?;
+            frame_batch.clear();
+        }
+
+        blocks += 1;
+
+        let now = Instant::now();
+        if now.duration_since(last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
+            msg.clear();
+            let elapsed = now.duration_since(start).as_secs_f64().max(0.001);
+            let blkps = blocks as f64 / elapsed;
+            use std::fmt::Write as _;
+            let _ = write!(
+                &mut msg,
+                "opt-nr epoch {epoch:04} | {blocks:>7} blk | {blkps:>7.1} blk/s",
+            );
+            tracing::info!("{}", msg);
+            last_log = now;
+        }
+    }
+
+    if !frame_batch.is_empty() {
+        out.write_all(&frame_batch).await?;
+        frame_batch.clear();
+    }
+
+    out.flush().await?;
+
+    if fs::metadata(&blocks_path).await.is_ok() {
+        let _ = fs::remove_file(&blocks_path).await;
+    }
+    fs::rename(&tmp_path, &blocks_path).await?;
+
+    write_dynamic_keys(&outdir, &provider).await?;
+
+    tracing::info!(
+        "optimizer: wrote {} (postcard CompactBlock stream, assigned {} unique keys)",
+        blocks_path.display(),
+        provider.keys().len()
+    );
+
+    Ok(())
+}
+
 pub async fn optimize_epoch(
     cache_dir: &str,
     registry_dir: &str, // registry root containing epoch-####/keys.bin
@@ -255,6 +440,7 @@ pub async fn optimize_epoch(
     // Enable log compaction iff we actually parsed metadata to `Compact` structures.
     // If metadata_mode is Raw/None, there are no String logs to compact here.
     let enable_log_compaction = matches!(metadata_mode, MetadataMode::Compact);
+    let mut id_provider = StaticPubkeyIdProvider::new(&reg.map);
 
     'epoch: while let Some(block) = car.next_block().await? {
         // Ensure the block node exists, but keep soft-EOF tolerant behavior
@@ -269,7 +455,7 @@ pub async fn optimize_epoch(
         // Convert whole block using the in-place builder (reuses `cblk`, `buf_tx`, `buf_meta`)
         if let Err(e) = carblock_to_compactblock_inplace(
             &block,
-            &reg.map,
+            &mut id_provider,
             metadata_mode,
             &mut buf_tx,
             &mut buf_meta,
@@ -282,7 +468,7 @@ pub async fn optimize_epoch(
         }
 
         // Post-process: compact logs (shim) only when metadata is parsed
-        compact_logs_inplace(&mut cblk, &reg.map, enable_log_compaction);
+        compact_logs_inplace(&mut cblk, &mut id_provider, enable_log_compaction);
 
         // Serialize directly into the batch
         push_block_into_batch(&mut frame_batch, &cblk)?;
