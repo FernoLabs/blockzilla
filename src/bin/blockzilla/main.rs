@@ -3,7 +3,6 @@ mod build_registry;
 mod file_downloader;
 mod optimized_block_reader;
 mod optimizer;
-mod transaction_parser;
 
 use anyhow::{Result, anyhow};
 use blockzilla::open_epoch::FetchMode;
@@ -15,7 +14,7 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::{
     block_reader::{read_block, read_block_par},
-    build_registry::{build_registry_auto, build_registry_single, inspect_registry},
+    build_registry::{build_registry_auto, build_registry_single},
     optimized_block_reader::{
         analyze_compressed_blocks, read_compressed_blocks, read_compressed_blocks_par,
     },
@@ -105,7 +104,7 @@ enum OptimizeCommand {
         cache_dir: String,
         #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
         results_dir: String,
-        #[arg(long)]
+        #[arg(short, long, default_value = DEFAULT_REGISTRY_DIR)]
         registry_dir: Option<String>,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
@@ -207,7 +206,8 @@ async fn main() -> Result<()> {
                 epoch,
                 registry_dir,
             } => {
-                inspect_registry(&registry_dir, epoch).await?;
+                todo!()
+                //inspect_registry(&registry_dir, epoch).await?;
             }
         },
 
