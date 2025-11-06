@@ -23,7 +23,9 @@ use tokio::{
 
 use crate::LOG_INTERVAL_SECS;
 use crate::build_registry::{epoch_dir, fp128_from_bytes, keys_bin};
-use blockzilla::carblock_to_compact::{CompactBlock, carblock_to_compactblock_inplace};
+use blockzilla::carblock_to_compact::{
+    CompactBlock, MetadataMode, carblock_to_compactblock_inplace,
+};
 
 /// ========================================================================
 /// Paths (optimizer-specific)
@@ -134,7 +136,7 @@ pub async fn optimize_epoch(
     registry_dir: &str, // registry root containing epoch-####/keys.bin
     out_base: &str,     // outputs go to epoch-####/optimized
     epoch: u64,
-    include_metadata: bool,
+    metadata_mode: MetadataMode,
 ) -> Result<()> {
     let outdir = optimized_dir(Path::new(out_base), epoch);
     fs::create_dir_all(&outdir).await?;
@@ -192,7 +194,7 @@ pub async fn optimize_epoch(
         if let Err(e) = carblock_to_compactblock_inplace(
             &block,
             &reg.map,
-            include_metadata,
+            metadata_mode,
             &mut buf_tx,
             &mut buf_meta,
             &mut cblk,
@@ -251,13 +253,14 @@ pub async fn optimize_epoch(
 }
 
 /// Optimize multiple epochs concurrently
+#[allow(dead_code)]
 pub async fn optimize_auto(
     cache_dir: &str,
     registry_dir: &str,
     out_base: &str,
     max_epoch: u64,
     workers: usize,
-    include_metadata: bool,
+    metadata_mode: MetadataMode,
 ) -> Result<()> {
     fs::create_dir_all(out_base).await.ok();
 
@@ -309,7 +312,7 @@ pub async fn optimize_auto(
                 };
                 let Some(e) = epoch else { break };
                 pb.set_message(format!("optimize epoch {e:04}..."));
-                match optimize_epoch(&cache, &reg, &out, e, include_metadata).await {
+                match optimize_epoch(&cache, &reg, &out, e, metadata_mode).await {
                     Ok(_) => pb.set_message(format!("ok epoch {e:04}")),
                     Err(err) => pb.set_message(format!("fail epoch {e:04}: {err}")),
                 }
@@ -330,7 +333,7 @@ pub async fn run_car_optimizer(
     epoch: u64,
     optimized_dir: &str,
     registry_dir: Option<&str>,
-    include_metadata: bool,
+    metadata_mode: MetadataMode,
 ) -> anyhow::Result<()> {
     let registry_root = registry_dir.unwrap_or(optimized_dir);
     tracing::info!("Optimizing epoch {epoch:04}");
@@ -340,7 +343,7 @@ pub async fn run_car_optimizer(
         registry_root,
         optimized_dir,
         epoch,
-        include_metadata,
+        metadata_mode,
     )
     .await?;
     tracing::info!(
