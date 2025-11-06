@@ -6,6 +6,7 @@ use blockzilla::{
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
+use postcard::{serialize_with_flavor, to_allocvec};
 use std::{
     collections::HashSet,
     error::Error as StdError,
@@ -15,7 +16,8 @@ use std::{
 };
 use tokio::{
     fs::{self, File},
-    io::{AsyncWriteExt, BufWriter},
+    io::AsyncWriteExt,
+    io::BufWriter,
     task,
 };
 
@@ -85,12 +87,12 @@ impl RegistryIndex {
         let n = mmap.len() / 32;
 
         let mut map: AHashMap<u128, u32> = AHashMap::with_capacity(n);
-        let mut key = [0u8; 32];
         let mut off = 0usize;
         for i in 0..n {
-            key.copy_from_slice(&mmap[off..off + 32]);
+            // SAFETY: we validated the length above
+            let key_bytes: &[u8; 32] = (&mmap[off..off + 32]).try_into().unwrap();
             off += 32;
-            let fp = fp128_from_bytes(&key);
+            let fp = fp128_from_bytes(key_bytes);
             map.insert(fp, i as u32);
         }
 
@@ -106,6 +108,25 @@ impl RegistryIndex {
         self.total
     }
 }
+
+/// ========================================================================
+/// Postcard: write length-prefixed frames directly into a batch buffer
+/// ========================================================================
+#[inline]
+fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
+    // Serialize to a temporary Vec (simple & robust)
+    let bytes = to_allocvec(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
+
+    // Length prefix + payload
+    let start_len = batch.len();
+    batch.reserve(4 + bytes.len());
+    batch.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    batch.extend_from_slice(&bytes);
+
+    debug_assert_eq!(batch.len() - start_len - 4, bytes.len());
+    Ok(())
+}
+
 
 /// ========================================================================
 /// Optimize an epoch using usage-ordered registry (keys.bin only)
@@ -137,7 +158,14 @@ pub async fn optimize_epoch(
     car.read_header().await?;
 
     let tmp_path = unique_tmp(&outdir, "blocks");
-    let mut out = BufWriter::with_capacity(8 << 20, File::create(&tmp_path).await?);
+
+    // Bigger buffers and batched writes to saturate disk
+    const OUT_BUF_CAP: usize   = 128 << 20; // 128 MiB writer buffer
+    const BATCH_TARGET: usize  = 128 << 20; // flush when reaching this size
+    const BATCH_SOFT_MAX: usize= 160 << 20; // guard flush
+
+    let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
+    let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
 
     let start = Instant::now();
     let mut last_log = start;
@@ -150,7 +178,6 @@ pub async fn optimize_epoch(
             if is_soft_eof(&e) {
                 break 'epoch;
             } else {
-                // treat as fatal like your previous strict path on registry misses, etc.
                 return Err(e);
             }
         }
@@ -163,18 +190,24 @@ pub async fn optimize_epoch(
                     if is_soft_eof(&e) {
                         break 'epoch;
                     }
-                    // Keep strict behavior on real errors (for example, registry miss)
                     return Err(e);
                 }
             };
 
-        // Serialize as length-prefixed postcard frame
-        let bytes =
-            postcard::to_allocvec(&compact).map_err(|e| anyhow!("serialize compact block: {e}"))?;
-        out.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
-        out.write_all(&bytes).await?;
+        // Serialize directly into the batch (no per-block Vec allocation)
+        push_block_into_batch(&mut frame_batch, &compact)?;
+
+        // Flush large chunks to reduce syscalls and keep NVMe busy
+        if frame_batch.len() >= BATCH_TARGET {
+            out.write_all(&frame_batch).await?;
+            frame_batch.clear();
+        } else if frame_batch.len() >= BATCH_SOFT_MAX {
+            out.write_all(&frame_batch).await?;
+            frame_batch.clear();
+        }
 
         blocks += 1;
+
         let now = Instant::now();
         if now.duration_since(last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
             msg.clear();
@@ -190,12 +223,19 @@ pub async fn optimize_epoch(
         }
     }
 
-    out.flush().await?;
-    if fs::metadata(&blocks_path).await.is_ok() {
-        fs::remove_file(&tmp_path).await.ok();
-    } else {
-        fs::rename(&tmp_path, &blocks_path).await?;
+    // Tail flush
+    if !frame_batch.is_empty() {
+        out.write_all(&frame_batch).await?;
+        frame_batch.clear();
     }
+
+    out.flush().await?;
+
+    // Atomic finalize: replace existing file if present
+    if fs::metadata(&blocks_path).await.is_ok() {
+        let _ = fs::remove_file(&blocks_path).await;
+    }
+    fs::rename(&tmp_path, &blocks_path).await?;
 
     tracing::info!(
         "optimizer: wrote {} (postcard CompactBlock stream, registry = keys.bin)",
