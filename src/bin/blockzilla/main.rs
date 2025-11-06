@@ -106,7 +106,7 @@ enum OptimizeCommand {
         results_dir: String,
         #[arg(short, long, default_value = DEFAULT_REGISTRY_DIR)]
         registry_dir: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)")]
         include_metadata: bool,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
@@ -125,7 +125,7 @@ enum OptimizeCommand {
         optimized_dir: String,
         #[arg(long, default_value_t = false)]
         force: bool,
-        #[arg(long)]
+        #[arg(long, help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)")]
         include_metadata: bool,
     },
 
@@ -145,7 +145,7 @@ enum OptimizeCommand {
         optimized_dir: String,
         #[arg(long, default_value_t = false)]
         force: bool,
-        #[arg(long)]
+        #[arg(long, help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)")]
         include_metadata: bool,
     },
 
