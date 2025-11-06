@@ -4,7 +4,7 @@ mod file_downloader;
 mod optimized_block_reader;
 mod optimizer;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use blockzilla::{carblock_to_compact::MetadataMode, open_epoch::FetchMode};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,12 @@ enum RegistryCommand {
         results_dir: String,
         #[arg(long, default_value_t = 900)]
         max_epoch: u64,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Skip parsing transaction rewards and metadata when building the registry"
+        )]
+        skip_metadata: bool,
     },
 
     /// Builds the registry for a single epoch
@@ -84,6 +90,12 @@ enum RegistryCommand {
         cache_dir: String,
         #[arg(short, long, default_value = DEFAULT_REGISTRY_DIR)]
         results_dir: String,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Skip parsing transaction rewards and metadata when building the registry"
+        )]
+        skip_metadata: bool,
     },
 
     /// Prints basic statistics about a registry
@@ -261,14 +273,18 @@ async fn main() -> Result<()> {
                 cache_dir,
                 results_dir,
                 max_epoch,
-            } => build_registry_auto(&cache_dir, &results_dir, max_epoch, 4).await?,
+                skip_metadata,
+            } => {
+                build_registry_auto(&cache_dir, &results_dir, max_epoch, 4, !skip_metadata).await?
+            }
 
             RegistryCommand::Build {
                 epoch,
                 cache_dir,
                 results_dir,
+                skip_metadata,
             } => {
-                build_registry_single(&cache_dir, &results_dir, epoch).await?;
+                build_registry_single(&cache_dir, &results_dir, epoch, !skip_metadata).await?;
             }
 
             RegistryCommand::Info { .. } => {
@@ -490,7 +506,7 @@ async fn run_epoch_optimize(
 
     let (car_path, downloaded) = ensure_epoch_car(cache_dir, epoch).await?;
 
-    build_registry_single(cache_dir, registry_dir, epoch).await?;
+    build_registry_single(cache_dir, registry_dir, epoch, true).await?;
 
     optimizer::run_car_optimizer(
         cache_dir,
