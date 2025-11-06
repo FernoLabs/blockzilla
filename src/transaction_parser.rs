@@ -118,10 +118,64 @@ pub struct VersionedTransaction {
     pub signatures: Vec<Signature>,
     pub message: VersionedMessage,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, wincode::SchemaRead, wincode::SchemaWrite)]
 #[repr(transparent)]
 pub struct Signature(pub [u8; 64]);
+
+impl serde::Serialize for Signature {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Signature {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SigVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SigVisitor {
+            type Value = Signature;
+
+            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                write!(f, "a 64-byte signature")
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if v.len() != 64 {
+                    return Err(E::invalid_length(v.len(), &self));
+                }
+                let mut arr = [0u8; 64];
+                arr.copy_from_slice(v);
+                Ok(Signature(arr))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut arr = [0u8; 64];
+                for i in 0..64 {
+                    arr[i] = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                }
+                Ok(Signature(arr))
+            }
+        }
+
+        deserializer.deserialize_bytes(SigVisitor)
+    }
+}
 
 pub const PUBKEY_BYTES: usize = 32;
 

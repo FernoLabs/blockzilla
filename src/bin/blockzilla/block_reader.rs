@@ -3,6 +3,7 @@ use blockzilla::{
     car_block_reader::CarBlockReader,
     node::Node,
     open_epoch::{self, FetchMode},
+    transaction_parser::VersionedTransaction,
 };
 use indicatif::ProgressBar;
 use std::{
@@ -16,8 +17,6 @@ use std::{
 };
 use tokio::sync::{Mutex, mpsc};
 use wincode::Deserialize;
-
-use crate::transaction_parser::VersionedTransaction;
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
 
