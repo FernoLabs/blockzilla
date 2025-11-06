@@ -1,5 +1,5 @@
 use ahash::{AHashMap, AHashSet};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use blockzilla::transaction_parser::parse_account_keys_only;
 use blockzilla::{
     car_block_reader::CarBlockReader,
@@ -213,8 +213,8 @@ fn extract_metadata_pubkeys(meta_zstd: &[u8], out: &mut SmallVec<[Pubkey; 256]>)
         return Ok(());
     }
 
-    let decompressed = zstd::decode_all(meta_zstd)
-        .context("failed to decompress metadata with zstd")?;
+    let decompressed =
+        zstd::decode_all(meta_zstd).context("failed to decompress metadata with zstd")?;
 
     meta_walk_pubkey_strs(&decompressed, |s_bytes| {
         if let Ok(st) = core::str::from_utf8(s_bytes) {
@@ -497,11 +497,7 @@ pub async fn build_registry_auto(
     Ok(())
 }
 
-pub async fn build_registry_single(
-    cache_dir: &str,
-    results_dir: &str,
-    epoch: u64,
-) -> Result<()> {
+pub async fn build_registry_single(cache_dir: &str, results_dir: &str, epoch: u64) -> Result<()> {
     fs::create_dir_all(results_dir).await.ok();
     let pb = ProgressBar::new_spinner();
     pb.set_prefix("SINGLE");
