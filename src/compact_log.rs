@@ -1,7 +1,7 @@
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use ahash::AHashMap;
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
-use ahash::AHashMap;
 
 /// Well-known ComputeBudget program id (base58).
 const CB_PK: &str = "ComputeBudget111111111111111111111111111111";
@@ -14,7 +14,11 @@ pub enum LogEvent {
     /// - `pid`: usage-id from registry if known
     /// - `is_cb`: marks ComputeBudget by well-known base58
     /// - `pk_str_idx`: present when pid is unknown so we can print the original base58
-    Invoke { pid: Option<u32>, is_cb: bool, pk_str_idx: Option<u16> },
+    Invoke {
+        pid: Option<u32>,
+        is_cb: bool,
+        pk_str_idx: Option<u16>,
+    },
 
     /// "Program <PK> consumed used of limit compute units" (absolute values).
     Consumed { used: u32, limit: u32 },
@@ -74,11 +78,7 @@ pub struct DecodeConfig {
 
 /// Encode a list of legacy log lines into a compact stream with postcard.
 /// `lookup_pid`: base58 program pubkey -> u32 id (from your registry).
-pub fn encode_logs<F>(
-    lines: &[String],
-    mut lookup_pid: F,
-    _cfg: EncodeConfig,
-) -> CompactLogStream
+pub fn encode_logs<F>(lines: &[String], mut lookup_pid: F, _cfg: EncodeConfig) -> CompactLogStream
 where
     F: FnMut(&str) -> Option<u32>,
 {
@@ -104,7 +104,7 @@ where
     'lines: for line in lines {
         // OPTIMIZATION 2: Use as_bytes() for prefix checks when possible
         let line_bytes = line.as_bytes();
-        
+
         // Known non-Program shapes first
         // Create Account: account Address { ... } already in use
         if line_bytes.starts_with(b"Create Account: account Address { ")
@@ -139,20 +139,20 @@ where
             if let Some(need_pos) = rest.find(", need ") {
                 let have_str = &rest[..need_pos];
                 let need_str = &rest[need_pos + 7..];
-                
+
                 // OPTIMIZATION 3: Parse numbers without string allocation when no commas
                 let have_result = if have_str.contains(',') {
                     have_str.replace(',', "").parse::<u64>()
                 } else {
                     have_str.parse::<u64>()
                 };
-                
+
                 let need_result = if need_str.contains(',') {
                     need_str.replace(',', "").parse::<u64>()
                 } else {
                     need_str.parse::<u64>()
                 };
-                
+
                 if let (Ok(have), Ok(need)) = (have_result, need_result) {
                     events.push(LogEvent::TransferInsufficient { have, need });
                     continue 'lines;
@@ -160,13 +160,17 @@ where
             }
             // Malformed → keep lossless
             tracing::warn!(target: "compact_log", "malformed Transfer insufficient lamports line: {}", line);
-            events.push(LogEvent::Unparsed { str_idx: intern(line) });
+            events.push(LogEvent::Unparsed {
+                str_idx: intern(line),
+            });
             continue 'lines;
         }
 
         // 2) "Program log: <text>" first so it never becomes "Program <PK> ..." with pk="log:"
         if let Some(text) = line.strip_prefix("Program log: ") {
-            events.push(LogEvent::Msg { str_idx: intern(text) });
+            events.push(LogEvent::Msg {
+                str_idx: intern(text),
+            });
             continue 'lines;
         }
 
@@ -182,14 +186,16 @@ where
                     } else {
                         num_str.parse::<u32>()
                     };
-                    
+
                     if let Ok(units) = units_result {
                         events.push(LogEvent::Consumption { units });
                         continue 'lines;
                     }
                 }
                 tracing::warn!(target: "compact_log", "malformed Program consumption line: {}", line);
-                events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                events.push(LogEvent::Unparsed {
+                    str_idx: intern(line),
+                });
                 continue 'lines;
             }
 
@@ -208,7 +214,9 @@ where
                                     tracing::warn!(target: "compact_log",
                                         "base64 decode failed for Program return line: {} (err: {})",
                                         line, e);
-                                    events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                                    events.push(LogEvent::Unparsed {
+                                        str_idx: intern(line),
+                                    });
                                     ok = false;
                                     break;
                                 }
@@ -221,12 +229,16 @@ where
                     } else {
                         // Unknown PK for return: cannot reconstruct the PK w/o pid; keep lossless.
                         tracing::warn!(target: "compact_log", "unknown program id in Program return line: {}", line);
-                        events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                        events.push(LogEvent::Unparsed {
+                            str_idx: intern(line),
+                        });
                         continue 'lines;
                     }
                 }
                 // malformed
-                events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                events.push(LogEvent::Unparsed {
+                    str_idx: intern(line),
+                });
                 continue 'lines;
             }
 
@@ -241,7 +253,9 @@ where
                             tracing::warn!(target: "compact_log",
                                 "base64 decode failed for Program data line: {} (err: {})",
                                 line, e);
-                            events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                            events.push(LogEvent::Unparsed {
+                                str_idx: intern(line),
+                            });
                             ok = false;
                             break;
                         }
@@ -250,7 +264,9 @@ where
                 if ok && !buf.is_empty() {
                     events.push(LogEvent::Data { data: buf });
                 } else if ok {
-                    events.push(LogEvent::Unparsed { str_idx: intern(line) });
+                    events.push(LogEvent::Unparsed {
+                        str_idx: intern(line),
+                    });
                 }
                 continue 'lines;
             }
@@ -263,7 +279,11 @@ where
                 // Try resolve pid; if missing, keep pk string index so we can still format exactly.
                 let pid_res = lookup_pid(pk);
                 let is_cb = pid_res == cb_pid_auto || pk == CB_PK;
-                let pk_idx_opt = if pid_res.is_none() { Some(intern(pk)) } else { None };
+                let pk_idx_opt = if pid_res.is_none() {
+                    Some(intern(pk))
+                } else {
+                    None
+                };
 
                 // REQUIREMENT: unknown program id is an error and should be logged
                 if pid_res.is_none() && pk != CB_PK {
@@ -307,22 +327,30 @@ where
 
                 // failed: <reason>
                 if let Some(reason) = after_pk.strip_prefix("failed: ") {
-                    events.push(LogEvent::Failure { reason_idx: intern(reason) });
+                    events.push(LogEvent::Failure {
+                        reason_idx: intern(reason),
+                    });
                     continue 'lines;
                 }
 
                 // known-ish pk but unknown suffix → keep as plain to avoid warning spam
-                events.push(LogEvent::Plain { str_idx: intern(line) });
+                events.push(LogEvent::Plain {
+                    str_idx: intern(line),
+                });
                 continue 'lines;
             }
 
             // "Program " but not a known shape — keep as plain
-            events.push(LogEvent::Plain { str_idx: intern(line) });
+            events.push(LogEvent::Plain {
+                str_idx: intern(line),
+            });
             continue 'lines;
         }
 
         // 4) Plain, non-Program line — keep as Plain (no warning)
-        events.push(LogEvent::Plain { str_idx: intern(line) });
+        events.push(LogEvent::Plain {
+            str_idx: intern(line),
+        });
     }
 
     let bytes = to_allocvec(&events).expect("postcard serialize");
@@ -347,14 +375,21 @@ where
 
     for ev in events {
         match ev {
-            LogEvent::Invoke { pid, is_cb, pk_str_idx } => {
+            LogEvent::Invoke {
+                pid,
+                is_cb,
+                pk_str_idx,
+            } => {
                 let depth = stack.len() + 1;
                 let who = if is_cb {
                     CB_PK.to_string()
                 } else if let Some(pidv) = pid {
                     pid_to_string(pidv)
                 } else if let Some(ix) = pk_str_idx {
-                    cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into())
+                    cls.strings
+                        .get(ix as usize)
+                        .cloned()
+                        .unwrap_or_else(|| "?".into())
                 } else {
                     "?".into()
                 };
@@ -367,10 +402,17 @@ where
                 let who = match stack.last().cloned() {
                     Some((Some(pidv), false, _)) => pid_to_string(pidv),
                     Some((_, true, _)) => CB_PK.to_string(),
-                    Some((None, false, Some(ix))) => cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into()),
+                    Some((None, false, Some(ix))) => cls
+                        .strings
+                        .get(ix as usize)
+                        .cloned()
+                        .unwrap_or_else(|| "?".into()),
                     _ => "?".into(),
                 };
-                out.push(format!("Program {} consumed {} of {} compute units", who, used, limit));
+                out.push(format!(
+                    "Program {} consumed {} of {} compute units",
+                    who, used, limit
+                ));
             }
 
             LogEvent::Success => {
@@ -378,19 +420,31 @@ where
                 let who = match ctx {
                     Some((Some(pidv), false, _)) => pid_to_string(pidv),
                     Some((_, true, _)) => CB_PK.to_string(),
-                    Some((None, false, Some(ix))) => cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into()),
+                    Some((None, false, Some(ix))) => cls
+                        .strings
+                        .get(ix as usize)
+                        .cloned()
+                        .unwrap_or_else(|| "?".into()),
                     _ => "?".into(),
                 };
                 out.push(format!("Program {} success", who));
             }
 
             LogEvent::Failure { reason_idx } => {
-                let reason = cls.strings.get(reason_idx as usize).cloned().unwrap_or_else(|| "?".into());
+                let reason = cls
+                    .strings
+                    .get(reason_idx as usize)
+                    .cloned()
+                    .unwrap_or_else(|| "?".into());
                 let ctx = stack.pop();
                 let who = match ctx {
                     Some((Some(pidv), false, _)) => pid_to_string(pidv),
                     Some((_, true, _)) => CB_PK.to_string(),
-                    Some((None, false, Some(ix))) => cls.strings.get(ix as usize).cloned().unwrap_or_else(|| "?".into()),
+                    Some((None, false, Some(ix))) => cls
+                        .strings
+                        .get(ix as usize)
+                        .cloned()
+                        .unwrap_or_else(|| "?".into()),
                     _ => "?".into(),
                 };
                 out.push(format!("Program {} failed: {}", who, reason));
@@ -417,12 +471,18 @@ where
             }
 
             LogEvent::TransferInsufficient { have, need } => {
-                out.push(format!("Transfer: insufficient lamports {}, need {}", have, need));
+                out.push(format!(
+                    "Transfer: insufficient lamports {}, need {}",
+                    have, need
+                ));
             }
 
             LogEvent::CreateAccountAlreadyInUse { addr_fields_idx } => {
                 if let Some(inner) = cls.strings.get(addr_fields_idx as usize) {
-                    out.push(format!("Create Account: account Address {{ {} }} already in use", inner));
+                    out.push(format!(
+                        "Create Account: account Address {{ {} }} already in use",
+                        inner
+                    ));
                 } else {
                     out.push("Create Account: account Address { ? } already in use".to_string());
                 }
@@ -430,7 +490,10 @@ where
 
             LogEvent::AllocateAlreadyInUse { addr_fields_idx } => {
                 if let Some(inner) = cls.strings.get(addr_fields_idx as usize) {
-                    out.push(format!("Allocate: account Address {{ {} }} already in use", inner));
+                    out.push(format!(
+                        "Allocate: account Address {{ {} }} already in use",
+                        inner
+                    ));
                 } else {
                     out.push("Allocate: account Address { ? } already in use".to_string());
                 }
@@ -491,11 +554,15 @@ mod tests {
             &cls,
             |id| {
                 for (k, v) in map.iter() {
-                    if *v == id { return k.clone(); }
+                    if *v == id {
+                        return k.clone();
+                    }
                 }
                 format!("PID{}", id)
             },
-            DecodeConfig { emit_unparsed_lines: true },
+            DecodeConfig {
+                emit_unparsed_lines: true,
+            },
         );
 
         assert_eq!(back, logs);
