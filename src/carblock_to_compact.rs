@@ -1,5 +1,6 @@
 use ahash::AHashMap;
 use anyhow::{Result, anyhow};
+use prost::Message;
 use serde::Deserialize;
 use serde::Serialize;
 use solana_pubkey::Pubkey;
@@ -7,7 +8,7 @@ use std::{io::Read, mem::MaybeUninit};
 use wincode::Deserialize as WincodeDeserialize;
 use wincode::SchemaRead;
 
-use crate::{car_block_reader::CarBlock, node::Node};
+use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
 
 use crate::transaction_parser::{
     CompiledInstruction, MessageAddressTableLookup, MessageHeader, VersionedMessage,
@@ -178,6 +179,12 @@ pub struct CompactMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+pub enum CompactMetadataPayload {
+    Compact(CompactMetadata),
+    Raw(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub struct CompactVersionedTx {
     pub signatures: Vec<CompactSignature>,
     pub header: CompactMessageHeader,
@@ -186,7 +193,7 @@ pub struct CompactVersionedTx {
     pub instructions: Vec<CompactInstruction>,
     pub address_table_lookups: Option<Vec<CompactAddressTableLookup>>,
     pub is_versioned: bool,
-    pub metadata: Option<Vec<u8>>,
+    pub metadata: Option<CompactMetadataPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
@@ -384,6 +391,230 @@ fn decode_rewards_via_node(
 /// ===============================
 /// Metadata extraction helpers
 /// ===============================
+fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<CompactTxError> {
+    let err = meta.err.as_ref()?;
+    let dbg = format!("{err:?}");
+
+    if dbg.contains("AccountInUse") {
+        return Some(CompactTxError::AccountInUse);
+    }
+    if dbg.contains("AccountLoadedTwice") {
+        return Some(CompactTxError::AccountLoadedTwice);
+    }
+    if dbg.contains("AccountNotFound") && !dbg.contains("ProgramAccountNotFound") {
+        return Some(CompactTxError::AccountNotFound);
+    }
+    if dbg.contains("ProgramAccountNotFound") {
+        return Some(CompactTxError::ProgramAccountNotFound);
+    }
+    if dbg.contains("InsufficientFundsForFee") {
+        return Some(CompactTxError::InsufficientFundsForFee);
+    }
+    if dbg.contains("InvalidAccountForFee") {
+        return Some(CompactTxError::InvalidAccountForFee);
+    }
+    if dbg.contains("AlreadyProcessed") {
+        return Some(CompactTxError::AlreadyProcessed);
+    }
+    if dbg.contains("BlockhashNotFound") {
+        return Some(CompactTxError::BlockhashNotFound);
+    }
+    if dbg.contains("CallChainTooDeep") {
+        return Some(CompactTxError::CallChainTooDeep);
+    }
+    if dbg.contains("MissingSignatureForFee") {
+        return Some(CompactTxError::MissingSignatureForFee);
+    }
+    if dbg.contains("InvalidAccountIndex") {
+        return Some(CompactTxError::InvalidAccountIndex);
+    }
+    if dbg.contains("SignatureFailure") {
+        return Some(CompactTxError::SignatureFailure);
+    }
+    if dbg.contains("SanitizedTransaction") {
+        return Some(CompactTxError::SanitizedTransactionError);
+    }
+
+    if let Some(start) = dbg.find("InstructionError(") {
+        if let Some(rest) = dbg.get(start + "InstructionError(".len()..) {
+            if let Some(end) = rest.find(')') {
+                let body = &rest[..end];
+                if let Some((idx_s, code_s)) = body.split_once(',') {
+                    let idx = idx_s.trim().parse::<u32>().unwrap_or(0);
+                    let code_s = code_s.trim();
+                    let error = if let Some(cust) = code_s
+                        .strip_prefix("Custom(")
+                        .and_then(|s| s.strip_suffix(')'))
+                    {
+                        CompactInstructionError::Custom(cust.parse::<u32>().unwrap_or(0))
+                    } else {
+                        let builtin_code = match code_s {
+                            "InvalidArgument" => 1,
+                            "InvalidInstructionData" => 2,
+                            "MissingRequiredSignature" => 3,
+                            "IncorrectProgramId" => 4,
+                            "AccountNotRentExempt" => 5,
+                            "UninitializedAccount" => 6,
+                            "InvalidAccountData" => 7,
+                            "InsufficientFunds" => 8,
+                            "ProgramFailedToComplete" => 9,
+                            "ProgramFailedToCompile" => 10,
+                            "Immutable" => 11,
+                            "ArithmeticOverflow" => 12,
+                            "DuplicateInstruction" => 13,
+                            _ => 0,
+                        };
+                        CompactInstructionError::Builtin(builtin_code)
+                    };
+                    return Some(CompactTxError::InstructionError { index: idx, error });
+                }
+            }
+        }
+    }
+
+    if dbg.contains("ProgramError") || dbg.contains("ProgramFailed") || dbg.contains("RuntimeError") {
+        return Some(CompactTxError::ProgramError);
+    }
+
+    Some(CompactTxError::Other { name: dbg })
+}
+
+#[inline(always)]
+fn parse_ui_amount_to_int(amount_str: &str) -> Option<u128> {
+    amount_str.parse::<u128>().ok()
+}
+
+fn token_balance_to_compact(
+    tb: &confirmed_block::TokenBalance,
+    fp2id: &AHashMap<u128, u32>,
+) -> Option<CompactTokenBalanceMeta> {
+    let mint_id = Pubkey::try_from(tb.mint.as_str())
+        .ok()
+        .and_then(|p| id_for_pubkey(fp2id, &p.to_bytes()))?;
+    let owner_id = Pubkey::try_from(tb.owner.as_str())
+        .ok()
+        .and_then(|p| id_for_pubkey(fp2id, &p.to_bytes()))?;
+    let program_id_id = Pubkey::try_from(tb.program_id.as_str())
+        .ok()
+        .and_then(|p| id_for_pubkey(fp2id, &p.to_bytes()))?;
+
+    let (amount, decimals) = match &tb.ui_token_amount {
+        Some(uta) => {
+            let amt = parse_ui_amount_to_int(&uta.amount).unwrap_or(0);
+            let dec = uta.decimals as u8;
+            (amt, dec)
+        }
+        None => (0, 0),
+    };
+
+    Some(CompactTokenBalanceMeta {
+        mint_id,
+        owner_id,
+        program_id_id,
+        amount,
+        decimals,
+    })
+}
+
+fn meta_to_compact(
+    meta: &confirmed_block::TransactionStatusMeta,
+    fp2id: &AHashMap<u128, u32>,
+) -> CompactMetadata {
+    let pre_balances = meta.pre_balances.clone();
+    let post_balances = meta.post_balances.clone();
+
+    let pre_token_balances = meta
+        .pre_token_balances
+        .iter()
+        .filter_map(|tb| token_balance_to_compact(tb, fp2id))
+        .collect();
+
+    let post_token_balances = meta
+        .post_token_balances
+        .iter()
+        .filter_map(|tb| token_balance_to_compact(tb, fp2id))
+        .collect();
+
+    let mut loaded_writable_ids = Vec::new();
+    let mut loaded_readonly_ids = Vec::new();
+    for addr in &meta.loaded_writable_addresses {
+        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
+            if let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes()) {
+                loaded_writable_ids.push(id);
+            }
+        }
+    }
+    for addr in &meta.loaded_readonly_addresses {
+        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
+            if let Some(id) = id_for_pubkey(fp2id, &pk.to_bytes()) {
+                loaded_readonly_ids.push(id);
+            }
+        }
+    }
+
+    // Return data (avoid turbofish inference issues)
+    let return_data = if let Some(rd) = &meta.return_data {
+        if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
+            if let Some(pid) = id_for_pubkey(fp2id, &pk.to_bytes()) {
+                Some(CompactReturnData {
+                    program_id_id: pid,
+                    data: rd.data.clone(),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Inner instructions (give the compiler the exact type)
+    let inner_instructions: Vec<CompactInnerInstructions> = meta
+        .inner_instructions
+        .iter()
+        .map(|ii| {
+            let instructions = ii
+                .instructions
+                .iter()
+                .map(|ci| CompactInstruction {
+                    program_id_index: ci.program_id_index as u8,
+                    accounts: ci.accounts.clone(),
+                    data: ci.data.clone(),
+                })
+                .collect::<Vec<_>>();
+            CompactInnerInstructions {
+                index: ii.index as u32,
+                instructions,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // Your generated meta.log_messages is Vec<String>; wrap to Option
+    let log_messages = if meta.log_messages.is_empty() {
+        None
+    } else {
+        Some(meta.log_messages.clone())
+    };
+
+    let err = tx_error_from_meta(meta);
+
+    CompactMetadata {
+        fee: meta.fee as u64,
+        err,
+        pre_balances,
+        post_balances,
+        pre_token_balances,
+        post_token_balances,
+        loaded_writable_ids,
+        loaded_readonly_ids,
+        return_data,
+        inner_instructions: Some(inner_instructions),
+        log_messages,
+    }
+}
+
 fn metadata_proto_bytes(bytes: &[u8]) -> Vec<u8> {
     match zstd::bulk::decompress(bytes, 512 * 1024) {
         Ok(buf) => buf,
@@ -406,6 +637,7 @@ pub fn tx_decoded_to_compact_full(
     tx: &VersionedTransaction,
     fp2id: &AHashMap<u128, u32>,
     meta_bytes_opt: Option<&[u8]>,
+    include_compact_metadata: bool,
 ) -> Result<CompactVersionedTx> {
     let signatures = tx
         .signatures
@@ -427,7 +659,19 @@ pub fn tx_decoded_to_compact_full(
         Some(lookups) => Some(map_lookups_to_ids(lookups, fp2id)?),
     };
 
-    let metadata = meta_bytes_opt.map(metadata_proto_bytes);
+    let metadata = if let Some(meta_bytes) = meta_bytes_opt {
+        let raw_proto = metadata_proto_bytes(meta_bytes);
+        if include_compact_metadata {
+            match confirmed_block::TransactionStatusMeta::decode(&raw_proto[..]) {
+                Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(&parsed, fp2id))),
+                Err(_) => Some(CompactMetadataPayload::Raw(raw_proto)),
+            }
+        } else {
+            Some(CompactMetadataPayload::Raw(raw_proto))
+        }
+    } else {
+        None
+    };
 
     Ok(CompactVersionedTx {
         signatures,
@@ -492,23 +736,19 @@ pub fn carblock_to_compactblock(
             let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
             // Metadata bytes come from TransactionNode.metadata (DataFrame)
-            let meta_bytes_opt: Option<&[u8]> = if include_metadata {
-                let df = &tx_node.metadata;
-                if let Some(next) = df.next {
-                    let df_cid = next.to_cid()?;
-                    let mut rdr = block.dataframe_reader(&df_cid);
-                    buf_meta.clear();
-                    rdr.read_to_end(&mut buf_meta)?;
-                    Some(&buf_meta)
-                } else {
-                    Some(df.data)
-                }
+            let df = &tx_node.metadata;
+            let meta_bytes_opt: Option<&[u8]> = if let Some(next) = df.next {
+                let df_cid = next.to_cid()?;
+                let mut rdr = block.dataframe_reader(&df_cid);
+                buf_meta.clear();
+                rdr.read_to_end(&mut buf_meta)?;
+                Some(&buf_meta)
             } else {
-                None
+                Some(df.data)
             };
 
             // Build compact tx
-            let compact_tx = tx_decoded_to_compact_full(tx_ref, fp2id, meta_bytes_opt)?;
+            let compact_tx = tx_decoded_to_compact_full(tx_ref, fp2id, meta_bytes_opt, include_metadata)?;
 
             // Drop decoded tx in-place (we reused its memory)
             unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
