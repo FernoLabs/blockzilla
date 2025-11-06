@@ -234,6 +234,7 @@ pub async fn process_epoch_one_pass(
     cache_dir: &str,
     results_dir: &str,
     epoch: u64,
+    parse_metadata: bool,
     pb: &ProgressBar,
 ) -> Result<usize> {
     let base = Path::new(results_dir);
@@ -343,29 +344,31 @@ pub async fn process_epoch_one_pass(
                     continue;
                 }
 
-                // Decode metadata fully and walk
-                let meta_res = (|| -> anyhow::Result<()> {
-                    let meta_bytes: &[u8] = match tx_node.metadata.next {
-                        None => tx_node.metadata.data,
-                        Some(df_cid) => {
-                            buf_meta.clear();
-                            let df = df_cid.to_cid()?;
-                            let mut rdr = block.dataframe_reader(&df);
-                            rdr.read_to_end(&mut buf_meta)?;
-                            &buf_meta
+                if parse_metadata {
+                    // Decode metadata fully and walk
+                    let meta_res = (|| -> anyhow::Result<()> {
+                        let meta_bytes: &[u8] = match tx_node.metadata.next {
+                            None => tx_node.metadata.data,
+                            Some(df_cid) => {
+                                buf_meta.clear();
+                                let df = df_cid.to_cid()?;
+                                let mut rdr = block.dataframe_reader(&df);
+                                rdr.read_to_end(&mut buf_meta)?;
+                                &buf_meta
+                            }
+                        };
+
+                        if !meta_bytes.is_empty() {
+                            extract_metadata_pubkeys(meta_bytes, &mut keys_vec)?;
+                            txs_with_meta += 1;
                         }
-                    };
+                        Ok(())
+                    })();
 
-                    if !meta_bytes.is_empty() {
-                        extract_metadata_pubkeys(meta_bytes, &mut keys_vec)?;
-                        txs_with_meta += 1;
-                    }
-                    Ok(())
-                })();
-
-                if let Err(e) = meta_res {
-                    if blocks_done == 0 {
-                        tracing::debug!("metadata parse failed: {e}");
+                    if let Err(e) = meta_res {
+                        if blocks_done == 0 {
+                            tracing::debug!("metadata parse failed: {e}");
+                        }
                     }
                 }
 
@@ -436,6 +439,7 @@ pub async fn build_registry_auto(
     results_dir: &str,
     max_epoch: u64,
     _workers: usize,
+    parse_metadata: bool,
 ) -> Result<()> {
     fs::create_dir_all(results_dir).await.ok();
 
@@ -476,7 +480,7 @@ pub async fn build_registry_auto(
 
     for epoch in queue {
         pb.set_message(format!("starting epoch {epoch:04}..."));
-        match process_epoch_one_pass(cache_dir, results_dir, epoch, &pb).await {
+        match process_epoch_one_pass(cache_dir, results_dir, epoch, parse_metadata, &pb).await {
             Ok(total) => {
                 done += 1;
                 pb.set_message(format!(
@@ -497,7 +501,12 @@ pub async fn build_registry_auto(
     Ok(())
 }
 
-pub async fn build_registry_single(cache_dir: &str, results_dir: &str, epoch: u64) -> Result<()> {
+pub async fn build_registry_single(
+    cache_dir: &str,
+    results_dir: &str,
+    epoch: u64,
+    parse_metadata: bool,
+) -> Result<()> {
     fs::create_dir_all(results_dir).await.ok();
     let pb = ProgressBar::new_spinner();
     pb.set_prefix("SINGLE");
@@ -506,7 +515,7 @@ pub async fn build_registry_single(cache_dir: &str, results_dir: &str, epoch: u6
 
     tracing::info!("Building fp2key and keys for epoch {epoch:04}");
     let start = Instant::now();
-    let total = process_epoch_one_pass(cache_dir, results_dir, epoch, &pb).await?;
+    let total = process_epoch_one_pass(cache_dir, results_dir, epoch, parse_metadata, &pb).await?;
     tracing::info!(
         "Finished epoch {epoch:04} | {} keys | {:.1}s",
         total,
