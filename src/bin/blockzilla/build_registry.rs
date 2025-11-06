@@ -1,5 +1,5 @@
-use ahash::AHashMap;
-use anyhow::Result;
+use ahash::{AHashMap, AHashSet};
+use anyhow::{Context, Result, anyhow};
 use blockzilla::transaction_parser::parse_account_keys_only;
 use blockzilla::{
     car_block_reader::CarBlockReader,
@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::{
     fs::{self, File},
-    io::{AsyncWriteExt, BufWriter},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
 };
 
 use crate::LOG_INTERVAL_SECS;
@@ -385,4 +385,105 @@ pub async fn build_registry_single(cache_dir: &str, results_dir: &str, epoch: u6
     );
     pb.finish_with_message(format!("epoch {epoch:04} complete | {} keys", total));
     Ok(())
+}
+
+pub async fn merge_registries(registry_dir: &str, output_dir: &str) -> Result<usize> {
+    let mut epochs: Vec<(u64, PathBuf)> = Vec::new();
+    let mut rd = fs::read_dir(registry_dir)
+        .await
+        .with_context(|| format!("read registry dir {registry_dir}"))?;
+    while let Some(entry) = rd.next_entry().await? {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(epoch) = name
+            .strip_prefix("epoch-")
+            .and_then(|s| s.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if fs::metadata(keys_bin(&path)).await.is_err() {
+            continue;
+        }
+        if fs::metadata(fp2key_bin(&path)).await.is_err() {
+            continue;
+        }
+        epochs.push((epoch, path));
+    }
+
+    epochs.sort_by_key(|(epoch, _)| *epoch);
+
+    let mut seen = AHashSet::new();
+    let mut ordered: Vec<(u128, [u8; 32])> = Vec::new();
+
+    for (_, dir) in epochs.into_iter() {
+        let fp_path = fp2key_bin(&dir);
+        let meta = match fs::metadata(&fp_path).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let len = meta.len();
+        if len == 0 {
+            continue;
+        }
+        if len % 48 != 0 {
+            return Err(anyhow!(
+                "fp2key file {} has length {} which is not a multiple of 48",
+                fp_path.display(),
+                len
+            ));
+        }
+        let mut reader = BufReader::new(File::open(&fp_path).await?);
+        let entries = len / 48;
+        for _ in 0..entries {
+            let mut chunk = [0u8; 48];
+            reader.read_exact(&mut chunk).await?;
+            let mut fp_bytes = [0u8; 16];
+            fp_bytes.copy_from_slice(&chunk[..16]);
+            let fp = u128::from_le_bytes(fp_bytes);
+            if seen.insert(fp) {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&chunk[16..]);
+                ordered.push((fp, key));
+            }
+        }
+    }
+
+    let out_dir = Path::new(output_dir);
+    fs::create_dir_all(out_dir).await?;
+
+    let tmp_fp = unique_tmp_file(out_dir, "fp2key-merged");
+    let tmp_keys = unique_tmp_file(out_dir, "keys-merged");
+    let mut fp_writer = BufWriter::with_capacity(BUF_WRITER_BYTES, File::create(&tmp_fp).await?);
+    let mut keys_writer =
+        BufWriter::with_capacity(BUF_WRITER_BYTES, File::create(&tmp_keys).await?);
+
+    for (fp, key) in &ordered {
+        fp_writer.write_all(&fp.to_le_bytes()).await?;
+        fp_writer.write_all(key).await?;
+        keys_writer.write_all(key).await?;
+    }
+
+    fp_writer.flush().await?;
+    keys_writer.flush().await?;
+    drop(fp_writer);
+    drop(keys_writer);
+
+    let final_fp = fp2key_bin(out_dir);
+    let final_keys = keys_bin(out_dir);
+    if fs::metadata(&final_fp).await.is_ok() {
+        let _ = fs::remove_file(&final_fp).await;
+    }
+    if fs::metadata(&final_keys).await.is_ok() {
+        let _ = fs::remove_file(&final_keys).await;
+    }
+    fs::rename(&tmp_fp, &final_fp).await?;
+    fs::rename(&tmp_keys, &final_keys).await?;
+
+    Ok(ordered.len())
 }
