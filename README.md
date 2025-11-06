@@ -43,6 +43,12 @@ Inspect summary information about an existing registry:
 cargo run --release --bin blockzilla registry info 839
 ```
 
+Merge all per-epoch registries into a single directory (defaults to `./registry/merged`):
+
+```bash
+cargo run --release --bin blockzilla registry merge --registry-dir registry
+```
+
 ## Legacy archive builder flow
 
 The older, more manual steps are still available if you want to drive each stage
@@ -56,6 +62,8 @@ curl -fSL https://files.old-faithful.net/0/epoch-0.car -o cache/epoch-0.car # /!
 cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized
 # parse and embed compact transaction metadata (omit the flag to store raw protobuf bytes)
 cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized --include-metadata
+# drop metadata entirely from the output
+cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized --drop-metadata
 
 # read the optimized archive (sequential by default, or parallel with --jobs)
 cargo run --release --bin blockzilla optimize read 0 --input-dir optimized --jobs 4
