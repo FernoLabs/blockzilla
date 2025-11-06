@@ -12,13 +12,9 @@ use crate::transaction_parser::Signature;
 use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
 
 use crate::transaction_parser::{
-    CompiledInstruction, MessageAddressTableLookup, MessageHeader, VersionedMessage,
+    CompiledInstruction, MessageHeader, VersionedMessage,
     VersionedTransaction,
 };
-
-/// =========================================================================
-/// Zero-copy helpers on CarBlock (coalesce DataFrame chains with one alloc)
-/// =========================================================================
 
 trait CarBlockExt {
     /// Copy a DataFrame `next` chain into `dst`. If `inline_prefix` is Some, it is
@@ -203,52 +199,9 @@ fn id_for_pubkey(fp2id: &AHashMap<u128, u32>, key: &[u8; 32]) -> Option<u32> {
     fp2id.get(&fp128_from_bytes(key)).copied()
 }
 
-#[inline(always)]
-fn map_static_keys_to_ids(
-    static_keys: &[[u8; 32]],
-    fp2id: &AHashMap<u128, u32>,
-) -> Result<Vec<u32>> {
-    let mut ids = Vec::with_capacity(static_keys.len());
-    for k in static_keys {
-        if let Some(uid) = id_for_pubkey(fp2id, k) {
-            ids.push(uid);
-        } else {
-            return Err(anyhow!(
-                "registry miss for pubkey {}",
-                Pubkey::new_from_array(*k)
-            ));
-        }
-    }
-    Ok(ids)
-}
-
-#[inline(always)]
-fn map_lookups_to_ids(
-    lookups: &[MessageAddressTableLookup],
-    fp2id: &AHashMap<u128, u32>,
-) -> Result<Vec<CompactAddressTableLookup>> {
-    let mut out = Vec::with_capacity(lookups.len());
-    for l in lookups {
-        if let Some(uid) = id_for_pubkey(fp2id, &l.account_key) {
-            out.push(CompactAddressTableLookup {
-                table_account_id: uid,
-                writable_indexes: l.writable_indexes.clone(),
-                readonly_indexes: l.readonly_indexes.clone(),
-            });
-        } else {
-            return Err(anyhow!(
-                "registry miss for address table account {}",
-                Pubkey::new_from_array(l.account_key)
-            ));
-        }
-    }
-    Ok(out)
-}
-
 /// ===============================
 /// Rewards — decode via Rewards node (CarBlock pattern)
 /// ===============================
-
 #[derive(Debug, Clone, SchemaRead)]
 struct ClientRewardBytesPk {
     pub pubkey: [u8; 32],
@@ -815,30 +768,3 @@ pub fn carblock_to_compactblock_inplace(
     Ok(())
 }
 
-/// ===============================
-/// Wrapper returning a fresh CompactBlock (for existing call sites)
-/// ===============================
-pub fn carblock_to_compactblock(
-    block: &CarBlock,
-    fp2id: &AHashMap<u128, u32>,
-    include_metadata: bool,
-) -> Result<CompactBlock> {
-    // Reasonable starting capacities; they’ll grow to fit the biggest block seen.
-    let mut out = CompactBlock {
-        slot: 0,
-        txs: Vec::with_capacity(512),
-        rewards: Vec::with_capacity(64),
-    };
-    let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
-    let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
-
-    carblock_to_compactblock_inplace(
-        block,
-        fp2id,
-        include_metadata,
-        &mut buf_tx,
-        &mut buf_meta,
-        &mut out,
-    )?;
-    Ok(out)
-}
