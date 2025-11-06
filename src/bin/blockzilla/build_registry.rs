@@ -1,5 +1,6 @@
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Context, Result, anyhow};
+use blockzilla::partial_meta::extract_metadata_pubkeys;
 use blockzilla::transaction_parser::parse_account_keys_only;
 use blockzilla::{
     car_block_reader::CarBlockReader,
@@ -7,7 +8,6 @@ use blockzilla::{
     open_epoch::{self, FetchMode},
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use prost::encoding::decode_varint;
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::collections::hash_map::Entry;
@@ -16,7 +16,6 @@ use std::{
     error::Error as StdError,
     io::{self, ErrorKind, Read},
     path::{Path, PathBuf},
-    str::FromStr,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -108,128 +107,6 @@ fn is_soft_eof(e: &anyhow::Error) -> bool {
     false
 }
 
-// ===============================
-// Protobuf wire walker helpers
-// ===============================
-#[inline]
-fn skip_value(cur: &mut std::io::Cursor<&[u8]>, wire: u64) -> anyhow::Result<()> {
-    match wire {
-        0 => {
-            let _ = decode_varint(cur)?;
-        }
-        1 => {
-            cur.set_position(cur.position() + 8);
-        }
-        2 => {
-            let len = decode_varint(cur)? as u64;
-            cur.set_position(cur.position().saturating_add(len));
-        }
-        5 => {
-            cur.set_position(cur.position() + 4);
-        }
-        _ => return Err(anyhow!("unsupported wire type {wire}")),
-    }
-    Ok(())
-}
-
-#[inline]
-fn read_len_slice<'a>(
-    cur: &mut std::io::Cursor<&'a [u8]>,
-    whole: &'a [u8],
-) -> anyhow::Result<&'a [u8]> {
-    let len = decode_varint(cur)? as usize;
-    let start = cur.position() as usize;
-    let end = start
-        .checked_add(len)
-        .ok_or_else(|| anyhow!("overflow"))?
-        .min(whole.len());
-    let s = &whole[start..end];
-    cur.set_position((start + len) as u64);
-    Ok(s)
-}
-
-/// reward message: only take field 1 (string pubkey)
-fn reward_take_pubkey_bytes<'a>(reward: &'a [u8]) -> Option<&'a [u8]> {
-    let mut c = std::io::Cursor::new(reward);
-    while (c.position() as usize) < reward.len() {
-        let tag = decode_varint(&mut c).ok()?;
-        let f = tag >> 3;
-        let w = tag & 0x7;
-        if f == 1 && w == 2 {
-            return read_len_slice(&mut c, reward).ok();
-        }
-        if skip_value(&mut c, w).is_err() {
-            break;
-        }
-    }
-    None
-}
-
-/// Walk TransactionStatusMeta and push pubkey strings (as bytes) into callback.
-fn meta_walk_pubkey_strs<'a>(
-    meta: &'a [u8],
-    mut on_pubkey_str_bytes: impl FnMut(&'a [u8]),
-) -> anyhow::Result<()> {
-    let mut cur = std::io::Cursor::new(meta);
-    while (cur.position() as usize) < meta.len() {
-        let start = cur.position();
-        let tag = match decode_varint(&mut cur) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
-        let field = tag >> 3;
-        let wire = tag & 0x7;
-
-        match (field, wire) {
-            // rewards (repeated message)
-            (9, 2) => {
-                let msg = read_len_slice(&mut cur, meta)?;
-                if let Some(pk) = reward_take_pubkey_bytes(msg) {
-                    on_pubkey_str_bytes(pk);
-                }
-            }
-            // loaded_{writable,readonly}_addresses (strings)
-            (10, 2) | (11, 2) => {
-                let s = read_len_slice(&mut cur, meta)?;
-                on_pubkey_str_bytes(s);
-            }
-            _ => {
-                skip_value(&mut cur, wire)?;
-            }
-        }
-
-        if cur.position() == start {
-            break;
-        }
-    }
-    Ok(())
-}
-
-// ===============================
-// Metadata decoder (full zstd decode)
-// ===============================
-fn extract_metadata_pubkeys(meta_zstd: &[u8], out: &mut SmallVec<[Pubkey; 256]>) -> Result<()> {
-    if meta_zstd.is_empty() {
-        return Ok(());
-    }
-
-    let decompressed =
-        zstd::decode_all(meta_zstd).context("failed to decompress metadata with zstd")?;
-
-    meta_walk_pubkey_strs(&decompressed, |s_bytes| {
-        if let Ok(st) = core::str::from_utf8(s_bytes) {
-            if let Ok(pk) = Pubkey::from_str(st) {
-                out.push(pk);
-            }
-        }
-    })?;
-
-    Ok(())
-}
-
-// ===============================
-// Single-thread epoch builder
-// ===============================
 pub async fn process_epoch_one_pass(
     cache_dir: &str,
     results_dir: &str,
