@@ -149,13 +149,6 @@ fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Resu
     Ok(())
 }
 
-/// ========================================================================
-/// In-place log compaction shim (no schema change):
-/// - Only runs when tx.metadata is Compact
-/// - Encodes CompactLogStream via postcard
-/// - Stores as tagged blob in metadata.return_data.data ("CLZ\0" + blob)
-/// - Drops verbose log_messages to realize savings
-/// ========================================================================
 fn compact_logs_inplace<P: PubkeyIdProvider>(
     cblk: &mut CompactBlock,
     resolver: &mut P,
@@ -239,21 +232,18 @@ impl PubkeyIdProvider for DynamicPubkeyIdProvider {
     fn resolve(&mut self, key: &[u8; 32]) -> Option<u32> {
         let fp = fp128_from_bytes(key);
         if let Some(&id) = self.fp_to_id.get(&fp) {
-            if let Some(stored) = self.ids.get(id as usize) {
-                if stored == key {
+            if let Some(stored) = self.ids.get(id as usize)
+                && stored == key {
                     return Some(id);
                 }
-            }
-            if let Some(extra) = &self.collisions {
-                if let Some(&cid) = extra.get(key) {
+            if let Some(extra) = &self.collisions
+                && let Some(&cid) = extra.get(key) {
                     return Some(cid);
                 }
-            }
-        } else if let Some(extra) = &self.collisions {
-            if let Some(&cid) = extra.get(key) {
+        } else if let Some(extra) = &self.collisions
+            && let Some(&cid) = extra.get(key) {
                 return Some(cid);
             }
-        }
 
         if self.ids.len() >= u32::MAX as usize {
             return None;

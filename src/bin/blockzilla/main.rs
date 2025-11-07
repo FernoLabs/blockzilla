@@ -4,7 +4,7 @@ mod file_downloader;
 mod optimized_block_reader;
 mod optimizer;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use blockzilla::{carblock_to_compact::MetadataMode, open_epoch::FetchMode};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
