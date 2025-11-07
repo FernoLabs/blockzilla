@@ -257,15 +257,16 @@ fn decode_rewards_via_node<P: PubkeyIdProvider>(
     block: &CarBlock,
     resolver: &mut P,
     buf: &mut Vec<u8>,
-) -> Result<Vec<CompactReward>> {
-    let mut out = Vec::new();
+    out: &mut Vec<CompactReward>,
+) -> Result<()> {
+    out.clear();
 
     let Some(reward_cid) = block.block()?.rewards else {
-        return Ok(out);
+        return Ok(());
     };
 
     let Node::Rewards(reward_node) = block.decode(reward_cid.hash_bytes())? else {
-        return Ok(out);
+        return Ok(());
     };
 
     buf.clear();
@@ -290,7 +291,7 @@ fn decode_rewards_via_node<P: PubkeyIdProvider>(
                 });
             }
         }
-        return Ok(out);
+        return Ok(());
     }
 
     if let Ok(v) = wincode::deserialize::<Vec<ClientRewardStringPk>>(bytes) {
@@ -308,7 +309,7 @@ fn decode_rewards_via_node<P: PubkeyIdProvider>(
                 });
             }
         }
-        return Ok(out);
+        return Ok(());
     }
 
     Err(anyhow!(
@@ -607,6 +608,7 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
     metadata_mode: MetadataMode,
     buf_tx: &mut Vec<u8>,
     buf_meta: &mut Vec<u8>,
+    buf_rewards: &mut Vec<u8>,
     out: &mut CompactBlock,
 ) -> Result<()> {
     // Cache the block to avoid multiple decodes
@@ -618,11 +620,8 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
     out.txs.clear();
 
     // Decode rewards
-    {
-        let mut rewards_buf = Vec::<u8>::with_capacity(64 << 10);
-        let rewards =
-            decode_rewards_via_node(block, resolver, &mut rewards_buf).unwrap_or_default();
-        out.rewards = rewards;
+    if decode_rewards_via_node(block, resolver, buf_rewards, &mut out.rewards).is_err() {
+        out.rewards.clear();
     }
 
     // Pre-calculate total transaction count for better allocation
