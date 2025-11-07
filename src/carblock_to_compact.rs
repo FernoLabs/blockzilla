@@ -224,17 +224,19 @@ fn id_for_pubkey<P: PubkeyIdProvider>(resolver: &mut P, key: &[u8; 32]) -> Optio
 }
 
 #[derive(Debug, Clone, SchemaRead)]
-struct ClientRewardBytesPk {
+struct ClientRewardBytesPk<'a> {
     pub pubkey: [u8; 32],
     pub lamports: i64,
     pub post_balance: u64,
     pub reward_type: u8,
     pub commission: Option<u8>,
+    #[allow(dead_code)]
+    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 #[derive(Debug, Clone, SchemaRead)]
-struct ClientRewardStringPk {
-    pub pubkey: String,
+struct ClientRewardStringPk<'a> {
+    pub pubkey: &'a str,
     pub lamports: i64,
     pub post_balance: u64,
     pub reward_type: u8,
@@ -297,7 +299,8 @@ fn decode_rewards_via_node<P: PubkeyIdProvider>(
     if let Ok(v) = wincode::deserialize::<Vec<ClientRewardStringPk>>(bytes) {
         out.reserve(v.len());
         for r in v {
-            if let Ok(pk) = Pubkey::try_from(r.pubkey.as_str())
+            // FromStr doesn't allocate for parsing, just validates
+            if let Ok(pk) = Pubkey::from_str(r.pubkey)
                 && let Some(account_id) = id_for_pubkey(resolver, &pk.to_bytes())
             {
                 out.push(CompactReward {
@@ -453,110 +456,11 @@ fn parse_ui_amount_to_int(amount_str: &str) -> Option<u64> {
     amount_str.parse::<u64>().ok()
 }
 
-fn meta_to_compact<P: PubkeyIdProvider>(
-    mut meta: confirmed_block::TransactionStatusMeta,
-    resolver: &mut P,
-) -> CompactMetadata {
-    // Compute err BEFORE any field moves
-    let err = tx_error_from_meta(&meta);
-
-    // Resolve loaded writable/readable without constructing Pubkey
-    let mut loaded_writable_ids = Vec::with_capacity(meta.loaded_writable_addresses.len());
-    for addr in meta.loaded_writable_addresses.into_iter() {
-        if let Ok(key) = <&[u8; 32]>::try_from(addr.as_slice()) {
-            if let Some(id) = resolver.resolve(key) {
-                loaded_writable_ids.push(id);
-            }
-        }
-    }
-
-    let mut loaded_readonly_ids = Vec::with_capacity(meta.loaded_readonly_addresses.len());
-    for addr in meta.loaded_readonly_addresses.into_iter() {
-        if let Ok(key) = <&[u8; 32]>::try_from(addr.as_slice()) {
-            if let Some(id) = resolver.resolve(key) {
-                loaded_readonly_ids.push(id);
-            }
-        }
-    }
-
-    // Move out return_data and only parse the program id, avoid extra cloning
-    let return_data = meta.return_data.take().and_then(|rd| {
-        if let Ok(key) = <&[u8; 32]>::try_from(rd.program_id.as_slice()) {
-            resolver.resolve(key).map(|pid| CompactReturnData {
-                program_id_id: pid,
-                data: rd.data, // moved
-            })
-        } else {
-            None
-        }
-    });
-
-    // Inner instructions: move, do not clone
-    let inner_instructions: Vec<CompactInnerInstructions> = meta
-        .inner_instructions
-        .into_iter()
-        .map(|ii| {
-            let instructions = ii
-                .instructions
-                .into_iter()
-                .map(|instr| {
-                    CompactInnerInstruction {
-                        program_id_index: instr.program_id_index,
-                        accounts: instr.accounts, // moved
-                        data: instr.data,         // moved
-                        stack_height: instr.stack_height,
-                    }
-                })
-                .collect();
-
-            CompactInnerInstructions {
-                index: ii.index,
-                instructions,
-            }
-        })
-        .collect();
-
-    CompactMetadata {
-        fee: meta.fee,
-        err,
-        pre_balances: std::mem::take(&mut meta.pre_balances), // move
-        post_balances: std::mem::take(&mut meta.post_balances), // move
-        pre_token_balances: meta
-            .pre_token_balances
-            .into_iter()
-            .filter_map(|tb| token_balance_to_compact_moved(tb, resolver))
-            .collect(),
-        post_token_balances: meta
-            .post_token_balances
-            .into_iter()
-            .filter_map(|tb| token_balance_to_compact_moved(tb, resolver))
-            .collect(),
-        loaded_writable_ids,
-        loaded_readonly_ids,
-        return_data,
-        inner_instructions: Some(inner_instructions),
-        log_messages: if meta.log_messages.is_empty() {
-            None
-        } else {
-            let mut lookup_pid = |base58: &str| -> Option<u32> {
-                solana_pubkey::Pubkey::from_str(base58)
-                    .ok()
-                    .and_then(|pk| resolver.resolve(&pk.to_bytes()))
-            };
-            Some(encode_logs(
-                &meta.log_messages,
-                &mut lookup_pid,
-                EncodeConfig::default(),
-            ))
-        },
-    }
-}
-
-// Take by value to avoid clones and align types with CompactTokenBalanceMeta
 fn token_balance_to_compact_moved<P: PubkeyIdProvider>(
     tb: confirmed_block::TokenBalance,
     resolver: &mut P,
 ) -> Option<CompactTokenBalanceMeta> {
+    // Use from_str which is more efficient than try_from for string inputs
     let mint_id = Pubkey::from_str(tb.mint.as_str())
         .ok()
         .and_then(|p| id_for_pubkey(resolver, &p.to_bytes()))?;
@@ -582,6 +486,103 @@ fn token_balance_to_compact_moved<P: PubkeyIdProvider>(
         amount,
         decimals,
     })
+}
+
+fn meta_to_compact<P: PubkeyIdProvider>(
+    mut meta: confirmed_block::TransactionStatusMeta,
+    resolver: &mut P,
+) -> CompactMetadata {
+    // Compute err BEFORE any field moves
+    let err = tx_error_from_meta(&meta);
+
+    let mut loaded_writable_ids = Vec::with_capacity(meta.loaded_writable_addresses.len());
+    for addr in meta.loaded_writable_addresses.into_iter() {
+        if let Ok(key) = <&[u8; 32]>::try_from(addr.as_slice()) {
+            if let Some(id) = resolver.resolve(key) {
+                loaded_writable_ids.push(id);
+            }
+        }
+    }
+
+    let mut loaded_readonly_ids = Vec::with_capacity(meta.loaded_readonly_addresses.len());
+    for addr in meta.loaded_readonly_addresses.into_iter() {
+        if let Ok(key) = <&[u8; 32]>::try_from(addr.as_slice()) {
+            if let Some(id) = resolver.resolve(key) {
+                loaded_readonly_ids.push(id);
+            }
+        }
+    }
+
+    let return_data = meta.return_data.take().and_then(|rd| {
+        if let Ok(key) = <&[u8; 32]>::try_from(rd.program_id.as_slice()) {
+            resolver.resolve(key).map(|pid| CompactReturnData {
+                program_id_id: pid,
+                data: rd.data,
+            })
+        } else {
+            None
+        }
+    });
+
+    let inner_instructions: Vec<CompactInnerInstructions> = meta
+        .inner_instructions
+        .into_iter()
+        .map(|ii| {
+            let instructions = ii
+                .instructions
+                .into_iter()
+                .map(|instr| CompactInnerInstruction {
+                    program_id_index: instr.program_id_index,
+                    accounts: instr.accounts,
+                    data: instr.data,
+                    stack_height: instr.stack_height,
+                })
+                .collect();
+
+            CompactInnerInstructions {
+                index: ii.index,
+                instructions,
+            }
+        })
+        .collect();
+
+    let log_messages = if meta.log_messages.is_empty() {
+        None
+    } else {
+        let mut lookup_pid = |base58: &str| -> Option<u32> {
+            Pubkey::from_str(base58)
+                .ok()
+                .and_then(|pk| resolver.resolve(&pk.to_bytes()))
+        };
+
+        Some(encode_logs(
+            &meta.log_messages,
+            &mut lookup_pid,
+            EncodeConfig::default(),
+        ))
+    };
+
+    CompactMetadata {
+        fee: meta.fee,
+        err,
+        pre_balances: std::mem::take(&mut meta.pre_balances), // move, not clone
+        post_balances: std::mem::take(&mut meta.post_balances), // move, not clone
+        pre_token_balances: meta
+            .pre_token_balances
+            .into_iter()
+            .filter_map(|tb| token_balance_to_compact_moved(tb, resolver))
+            .collect(),
+        post_token_balances: meta
+            .post_token_balances
+            .into_iter()
+            .filter_map(|tb| token_balance_to_compact_moved(tb, resolver))
+            .collect(),
+        loaded_writable_ids,
+        loaded_readonly_ids,
+        return_data,
+        inner_instructions: Some(inner_instructions),
+        log_messages,
+    }
 }
 
 #[inline]
