@@ -8,7 +8,7 @@ use std::convert::TryFrom;
 use std::str::FromStr;
 use std::{io::Read, mem::MaybeUninit};
 use wincode::Deserialize as WincodeDeserialize;
-use wincode::SchemaRead;
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
 use crate::transaction_parser::Signature;
@@ -78,7 +78,7 @@ impl CarBlockExt for CarBlock {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum CompactRewardType {
     Fee = 0,
@@ -89,7 +89,7 @@ pub enum CompactRewardType {
     Unspecified = 255,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactReward {
     pub account_id: u32,
     pub lamports: i64,
@@ -98,20 +98,20 @@ pub struct CompactReward {
     pub commission: Option<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactAddressTableLookup {
     pub table_account_id: u32,
     pub writable_indexes: Vec<u8>,
     pub readonly_indexes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub enum CompactInstructionError {
     Builtin(u32),
     Custom(u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub enum CompactTxError {
     InstructionError {
         index: u32,
@@ -136,7 +136,7 @@ pub enum CompactTxError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactTokenBalanceMeta {
     pub mint_id: u32,
     pub owner_id: u32,
@@ -145,19 +145,19 @@ pub struct CompactTokenBalanceMeta {
     pub decimals: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactReturnData {
     pub program_id_id: u32,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactInnerInstructions {
     pub index: u32,
     pub instructions: Vec<CompactInnerInstruction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactInnerInstruction {
     pub program_id_index: u32,
     pub accounts: Vec<u8>,
@@ -165,7 +165,7 @@ pub struct CompactInnerInstruction {
     pub stack_height: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactMetadata {
     pub fee: u64,
     pub err: Option<CompactTxError>,
@@ -180,13 +180,13 @@ pub struct CompactMetadata {
     pub log_messages: Option<CompactLogStream>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub enum CompactMetadataPayload {
     Compact(CompactMetadata),
     Raw(Vec<u8>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactVersionedTx {
     pub signatures: Vec<Signature>,
     pub header: MessageHeader,
@@ -198,7 +198,7 @@ pub struct CompactVersionedTx {
     pub metadata: Option<CompactMetadataPayload>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactBlock {
     pub slot: u64,
     pub txs: Vec<CompactVersionedTx>,
