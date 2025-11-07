@@ -16,7 +16,7 @@ use crate::{
     block_reader::{read_block, read_block_par},
     build_registry::{build_registry_auto, build_registry_single, merge_registries},
     optimized_block_reader::{
-        analyze_compressed_blocks, read_compressed_blocks, read_compressed_blocks_par,
+        analyze_compressed_blocks, dump_logs, read_compressed_blocks, read_compressed_blocks_par,
     },
 };
 
@@ -223,6 +223,15 @@ enum OptimizeCommand {
         #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
         input_dir: String,
     },
+
+    Logs {
+        #[arg(value_name = "EPOCH")]
+        epoch: u64,
+        #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
+        input_dir: String,
+        #[arg(short, long)]
+        signature: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -421,6 +430,12 @@ async fn main() -> Result<()> {
             OptimizeCommand::Analyze { epoch, input_dir } => {
                 analyze_compressed_blocks(epoch, &input_dir).await?
             }
+
+            OptimizeCommand::Logs {
+                epoch,
+                input_dir,
+                signature,
+            } => dump_logs(epoch, &input_dir, signature.as_deref()).await?,
         },
     }
 

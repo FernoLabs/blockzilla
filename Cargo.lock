@@ -248,6 +248,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "base64",
+ "bs58",
  "bytes",
  "cid",
  "clap",
