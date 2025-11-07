@@ -29,12 +29,8 @@ use blockzilla::carblock_to_compact::{
     carblock_to_compactblock_inplace,
 };
 
-// If your compact log module lives elsewhere, adjust this use accordingly.
 use blockzilla::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
 
-/// ========================================================================
-/// Paths (optimizer-specific)
-/// ========================================================================
 fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
     base.join(format!("epoch-{epoch:04}/optimized"))
 }
@@ -67,9 +63,6 @@ async fn write_dynamic_keys(dir: &Path, provider: &DynamicPubkeyIdProvider) -> R
     Ok(())
 }
 
-/// ========================================================================
-/// Soft EOF detection (same behavior as registry)
-/// ========================================================================
 fn is_soft_eof(e: &anyhow::Error) -> bool {
     let mut cur: Option<&(dyn StdError + 'static)> = Some(e.as_ref());
     while let Some(err) = cur {
@@ -87,11 +80,8 @@ fn is_soft_eof(e: &anyhow::Error) -> bool {
     false
 }
 
-/// ========================================================================
-/// Registry index: build fp128→usage_id from keys.bin (usage order)
-/// ========================================================================
 struct RegistryIndex {
-    _mmap: Mmap, // keep mmap alive
+    _mmap: Mmap,
     map: AHashMap<u128, u32>,
     total: usize,
 }
@@ -133,16 +123,10 @@ impl RegistryIndex {
     }
 }
 
-/// ========================================================================
-/// Postcard: write length-prefixed frames into a batch buffer (simple/robust)
-/// ========================================================================
 #[inline]
 fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
-    // Serialize to a temporary Vec (keeps code straightforward; the big win
-    // here is that `cb` and all scratch buffers are reused across iterations).
     let bytes = to_allocvec(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
 
-    // Length prefix + payload
     batch.reserve(4 + bytes.len());
     batch.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     batch.extend_from_slice(&bytes);
@@ -158,7 +142,6 @@ fn compact_logs_inplace<P: PubkeyIdProvider>(
         return;
     }
 
-    // Map base58 -> usage id (u32) using registry
     let mut lookup_pid = |base58: &str| -> Option<u32> {
         Pubkey::try_from(base58)
             .ok()
@@ -175,38 +158,31 @@ fn compact_logs_inplace<P: PubkeyIdProvider>(
 
         let cls: CompactLogStream = encode_logs(logs, &mut lookup_pid, EncodeConfig::default());
 
-        // tag + postcard-encode and stash into return_data
         const TAG: &[u8] = b"CLZ\0";
         if let Ok(mut blob) = postcard::to_allocvec(&cls) {
             let mut tagged = Vec::with_capacity(TAG.len() + blob.len());
             tagged.extend_from_slice(TAG);
             tagged.append(&mut blob);
 
-            // place into return_data (create or overwrite)
             match meta.return_data {
                 Some(ref mut rd) => {
                     rd.data = tagged;
                 }
                 None => {
                     meta.return_data = Some(blockzilla::carblock_to_compact::CompactReturnData {
-                        program_id_id: 0, // reserved/ignored (shim)
+                        program_id_id: 0,
                         data: tagged,
                     });
                 }
             }
 
-            // remove verbose logs — this realizes the size savings
             meta.log_messages = None;
         } else {
-            // If we fail to encode for any reason, keep original logs to avoid data loss.
             tracing::warn!("compact_logs: postcard encode failed; keeping original logs");
         }
     }
 }
 
-/// ========================================================================
-/// Dynamic pubkey id provider (assigns ids on first sight)
-/// ========================================================================
 #[derive(Default)]
 struct DynamicPubkeyIdProvider {
     fp_to_id: AHashMap<u128, u32>,
@@ -233,17 +209,20 @@ impl PubkeyIdProvider for DynamicPubkeyIdProvider {
         let fp = fp128_from_bytes(key);
         if let Some(&id) = self.fp_to_id.get(&fp) {
             if let Some(stored) = self.ids.get(id as usize)
-                && stored == key {
-                    return Some(id);
-                }
+                && stored == key
+            {
+                return Some(id);
+            }
             if let Some(extra) = &self.collisions
-                && let Some(&cid) = extra.get(key) {
-                    return Some(cid);
-                }
-        } else if let Some(extra) = &self.collisions
-            && let Some(&cid) = extra.get(key) {
+                && let Some(&cid) = extra.get(key)
+            {
                 return Some(cid);
             }
+        } else if let Some(extra) = &self.collisions
+            && let Some(&cid) = extra.get(key)
+        {
+            return Some(cid);
+        }
 
         if self.ids.len() >= u32::MAX as usize {
             return None;
@@ -262,10 +241,6 @@ impl PubkeyIdProvider for DynamicPubkeyIdProvider {
     }
 }
 
-/// ========================================================================
-/// Optimize an epoch using usage-ordered registry (keys.bin only)
-/// Writes a length-prefixed stream of `CompactBlock` (postcard)
-/// ========================================================================
 pub async fn optimize_epoch_without_registry(
     cache_dir: &str,
     out_base: &str,
@@ -380,8 +355,8 @@ pub async fn optimize_epoch_without_registry(
 
 pub async fn optimize_epoch(
     cache_dir: &str,
-    registry_dir: &str, // registry root containing epoch-####/keys.bin
-    out_base: &str,     // outputs go to epoch-####/optimized
+    registry_dir: &str,
+    out_base: &str,
     epoch: u64,
     metadata_mode: MetadataMode,
 ) -> Result<()> {
@@ -390,7 +365,6 @@ pub async fn optimize_epoch(
 
     let blocks_path = optimized_blocks_file(&outdir);
 
-    // Build fp128→usage_id map from keys.bin
     let reg = RegistryIndex::open(Path::new(registry_dir), epoch)
         .with_context(|| "open usage-ordered registry (keys.bin)")?;
     tracing::info!(
@@ -398,22 +372,19 @@ pub async fn optimize_epoch(
         reg.total()
     );
 
-    // Stream CAR and write compact frames
     let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
 
     let tmp_path = unique_tmp(&outdir, "blocks");
 
-    // Bigger buffers and batched writes to saturate disk
-    const OUT_BUF_CAP: usize = 128 << 20; // 128 MiB writer buffer
-    const BATCH_TARGET: usize = 128 << 20; // flush when reaching this size
-    const BATCH_SOFT_MAX: usize = 160 << 20; // guard flush
+    const OUT_BUF_CAP: usize = 128 << 20;
+    const BATCH_TARGET: usize = 128 << 20;
+    const BATCH_SOFT_MAX: usize = 160 << 20;
 
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
 
-    // Reusable CompactBlock and scratch buffers
     let mut cblk = CompactBlock {
         slot: 0,
         txs: Vec::with_capacity(512),
@@ -427,13 +398,10 @@ pub async fn optimize_epoch(
     let mut blocks = 0u64;
     let mut msg = String::with_capacity(128);
 
-    // Enable log compaction iff we actually parsed metadata to `Compact` structures.
-    // If metadata_mode is Raw/None, there are no String logs to compact here.
     let enable_log_compaction = matches!(metadata_mode, MetadataMode::Compact);
     let mut id_provider = StaticPubkeyIdProvider::new(&reg.map);
 
     'epoch: while let Some(block) = car.next_block().await? {
-        // Ensure the block node exists, but keep soft-EOF tolerant behavior
         if let Err(e) = block.block() {
             if is_soft_eof(&e) {
                 break 'epoch;
@@ -442,7 +410,6 @@ pub async fn optimize_epoch(
             }
         }
 
-        // Convert whole block using the in-place builder (reuses `cblk`, `buf_tx`, `buf_meta`)
         if let Err(e) = carblock_to_compactblock_inplace(
             &block,
             &mut id_provider,
@@ -457,13 +424,10 @@ pub async fn optimize_epoch(
             return Err(e);
         }
 
-        // Post-process: compact logs (shim) only when metadata is parsed
         compact_logs_inplace(&mut cblk, &mut id_provider, enable_log_compaction);
 
-        // Serialize directly into the batch
         push_block_into_batch(&mut frame_batch, &cblk)?;
 
-        // Flush large chunks to reduce syscalls and keep NVMe busy
         if frame_batch.len() >= BATCH_TARGET || frame_batch.len() >= BATCH_SOFT_MAX {
             out.write_all(&frame_batch).await?;
             frame_batch.clear();
@@ -486,7 +450,6 @@ pub async fn optimize_epoch(
         }
     }
 
-    // Tail flush
     if !frame_batch.is_empty() {
         out.write_all(&frame_batch).await?;
         frame_batch.clear();
@@ -494,7 +457,6 @@ pub async fn optimize_epoch(
 
     out.flush().await?;
 
-    // Atomic finalize: replace existing file if present
     if fs::metadata(&blocks_path).await.is_ok() {
         let _ = fs::remove_file(&blocks_path).await;
     }
@@ -507,7 +469,6 @@ pub async fn optimize_epoch(
     Ok(())
 }
 
-/// Optimize multiple epochs concurrently
 #[allow(dead_code)]
 pub async fn optimize_auto(
     cache_dir: &str,
@@ -519,7 +480,6 @@ pub async fn optimize_auto(
 ) -> Result<()> {
     fs::create_dir_all(out_base).await.ok();
 
-    // already optimized if blocks.bin present
     let mut completed = HashSet::new();
     if let Ok(mut rd) = fs::read_dir(out_base).await {
         while let Ok(Some(ent)) = rd.next_entry().await {
@@ -582,7 +542,6 @@ pub async fn optimize_auto(
     Ok(())
 }
 
-/// Back-compat wrapper expected by main.rs (`run_car_optimizer`)
 pub async fn run_car_optimizer(
     cache_dir: &str,
     epoch: u64,

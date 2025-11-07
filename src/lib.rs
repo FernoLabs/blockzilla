@@ -5,7 +5,6 @@ pub mod node;
 pub mod open_epoch;
 pub mod partial_meta;
 pub mod transaction_parser;
-//pub mod rpc_block;
 
 pub mod confirmed_block {
     include!(concat!(

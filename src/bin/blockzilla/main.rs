@@ -42,7 +42,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Reads and parses a single epoch from CAR format (optionally multi-threaded)
     Block {
         #[arg(short, long)]
         epoch: u64,
@@ -54,18 +53,15 @@ enum Commands {
         jobs: usize,
     },
 
-    /// Registry utilities
     #[command(subcommand)]
     Registry(RegistryCommand),
 
-    /// Optimize workflows for CAR epochs and compressed archives
     #[command(subcommand)]
     Optimize(OptimizeCommand),
 }
 
 #[derive(Subcommand, Debug)]
 enum RegistryCommand {
-    /// Builds the registry automatically, downloading and cleaning up each epoch
     Auto {
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
         cache_dir: String,
@@ -81,9 +77,7 @@ enum RegistryCommand {
         skip_metadata: bool,
     },
 
-    /// Builds the registry for a single epoch
     Build {
-        /// Epoch number to process
         #[arg(value_name = "EPOCH")]
         epoch: u64,
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
@@ -98,16 +92,13 @@ enum RegistryCommand {
         skip_metadata: bool,
     },
 
-    /// Prints basic statistics about a registry
     Info {
-        /// Epoch number to inspect
         #[arg(value_name = "EPOCH")]
         epoch: u64,
         #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
         registry_dir: String,
     },
 
-    /// Merge all per-epoch registry outputs into a single directory
     Merge {
         #[arg(long, default_value = DEFAULT_REGISTRY_DIR)]
         registry_dir: String,
@@ -121,7 +112,6 @@ enum RegistryCommand {
 
 #[derive(Subcommand, Debug)]
 enum OptimizeCommand {
-    /// Optimizes a CAR epoch into compressed BlockWithIds format
     Car {
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
         cache_dir: String,
@@ -145,7 +135,6 @@ enum OptimizeCommand {
         epoch: u64,
     },
 
-    /// Optimizes a CAR epoch and assigns pubkey ids on the fly (no registry)
     CarNoRegistry {
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
         cache_dir: String,
@@ -167,9 +156,7 @@ enum OptimizeCommand {
         epoch: u64,
     },
 
-    /// Runs download → registry → optimize for a single epoch
     Epoch {
-        /// Epoch number to process
         #[arg(value_name = "EPOCH")]
         epoch: u64,
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
@@ -194,12 +181,9 @@ enum OptimizeCommand {
         drop_metadata: bool,
     },
 
-    /// Runs download → registry → optimize for a range of epochs
     Range {
-        /// First epoch in the range
         #[arg(value_name = "START")]
         start_epoch: u64,
-        /// Last epoch in the range (inclusive)
         #[arg(value_name = "END")]
         end_epoch: u64,
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
@@ -224,7 +208,6 @@ enum OptimizeCommand {
         drop_metadata: bool,
     },
 
-    /// Reads compressed BlockWithIds format
     Read {
         #[arg(value_name = "EPOCH")]
         epoch: u64,
@@ -234,7 +217,6 @@ enum OptimizeCommand {
         jobs: usize,
     },
 
-    /// Analyzes compressed BlockWithIds and shows statistics
     Analyze {
         #[arg(value_name = "EPOCH")]
         epoch: u64,
@@ -289,7 +271,6 @@ async fn main() -> Result<()> {
 
             RegistryCommand::Info { .. } => {
                 todo!()
-                //inspect_registry(&registry_dir, epoch).await?;
             }
 
             RegistryCommand::Merge {
