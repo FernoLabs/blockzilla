@@ -4,6 +4,7 @@ use blockzilla::{
     car_block_reader::CarBlockReader,
     open_epoch::{self, FetchMode},
 };
+use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use postcard::to_allocvec;
@@ -27,12 +28,16 @@ use blockzilla::carblock_to_compact::{
     CompactBlock, MetadataMode, PubkeyIdProvider, StaticPubkeyIdProvider,
     carblock_to_compactblock_inplace,
 };
+use blockzilla::optimized_cbor::encode_compact_block_to_vec;
 
 fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
     base.join(format!("epoch-{epoch:04}/optimized"))
 }
-fn optimized_blocks_file(dir: &Path) -> PathBuf {
-    dir.join("blocks.bin")
+fn optimized_blocks_file(dir: &Path, format: OptimizedFormat) -> PathBuf {
+    match format {
+        OptimizedFormat::Postcard => dir.join("blocks.bin"),
+        OptimizedFormat::Cbor => dir.join("blocks.cbor"),
+    }
 }
 fn unique_tmp(dir: &Path, name: &str) -> PathBuf {
     let pid = std::process::id();
@@ -41,6 +46,12 @@ fn unique_tmp(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     dir.join(format!("{name}.tmp.{pid}.{ts}"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OptimizedFormat {
+    Postcard,
+    Cbor,
 }
 
 async fn write_dynamic_keys(dir: &Path, provider: &DynamicPubkeyIdProvider) -> Result<()> {
@@ -78,12 +89,40 @@ fn is_soft_eof(e: &anyhow::Error) -> bool {
 }
 
 #[inline]
-fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
+fn push_postcard_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
     let bytes = to_allocvec(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
 
     batch.reserve(4 + bytes.len());
     batch.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     batch.extend_from_slice(&bytes);
+    Ok(())
+}
+
+#[inline]
+fn write_varint(mut value: usize, out: &mut Vec<u8>) {
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            break;
+        } else {
+            out.push(byte | 0x80);
+        }
+    }
+}
+
+#[inline]
+fn push_cbor_block_into_batch(
+    batch: &mut Vec<u8>,
+    scratch: &mut Vec<u8>,
+    cb: &CompactBlock,
+) -> anyhow::Result<()> {
+    scratch.clear();
+    encode_compact_block_to_vec(cb, scratch)
+        .map_err(|e| anyhow!("encode compact block to cbor: {e}"))?;
+    write_varint(scratch.len(), batch);
+    batch.extend_from_slice(scratch);
     Ok(())
 }
 
@@ -193,11 +232,12 @@ pub async fn optimize_epoch_without_registry(
     out_base: &str,
     epoch: u64,
     metadata_mode: MetadataMode,
+    format: OptimizedFormat,
 ) -> Result<()> {
     let outdir = optimized_dir(Path::new(out_base), epoch);
     fs::create_dir_all(&outdir).await?;
 
-    let blocks_path = optimized_blocks_file(&outdir);
+    let blocks_path = optimized_blocks_file(&outdir, format);
 
     let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
     let mut car = CarBlockReader::new(reader);
@@ -211,6 +251,7 @@ pub async fn optimize_epoch_without_registry(
 
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
+    let mut cbor_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
 
     let mut cblk = CompactBlock {
         slot: 0,
@@ -249,7 +290,14 @@ pub async fn optimize_epoch_without_registry(
             return Err(e);
         }
 
-        push_block_into_batch(&mut frame_batch, &cblk)?;
+        match format {
+            OptimizedFormat::Postcard => {
+                push_postcard_block_into_batch(&mut frame_batch, &cblk)?;
+            }
+            OptimizedFormat::Cbor => {
+                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, &cblk)?;
+            }
+        }
 
         if frame_batch.len() >= BATCH_TARGET || frame_batch.len() >= BATCH_SOFT_MAX {
             out.write_all(&frame_batch).await?;
@@ -287,9 +335,14 @@ pub async fn optimize_epoch_without_registry(
 
     write_dynamic_keys(&outdir, &provider).await?;
 
+    let format_label = match format {
+        OptimizedFormat::Postcard => "postcard",
+        OptimizedFormat::Cbor => "cbor",
+    };
     tracing::info!(
-        "optimizer: wrote {} (postcard CompactBlock stream, assigned {} unique keys)",
+        "optimizer: wrote {} ({} CompactBlock stream, assigned {} unique keys)",
         blocks_path.display(),
+        format_label,
         provider.keys().len()
     );
 
@@ -302,11 +355,12 @@ pub async fn optimize_epoch(
     out_base: &str,
     epoch: u64,
     metadata_mode: MetadataMode,
+    format: OptimizedFormat,
 ) -> Result<()> {
     let outdir = optimized_dir(Path::new(out_base), epoch);
     fs::create_dir_all(&outdir).await?;
 
-    let blocks_path = optimized_blocks_file(&outdir);
+    let blocks_path = optimized_blocks_file(&outdir, format);
 
     let reg = RegistryIndex::open(Path::new(registry_dir), epoch)
         .with_context(|| "open usage-ordered registry (keys.bin)")?;
@@ -327,6 +381,7 @@ pub async fn optimize_epoch(
 
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
+    let mut cbor_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
 
     let mut cblk = CompactBlock {
         slot: 0,
@@ -366,7 +421,14 @@ pub async fn optimize_epoch(
             return Err(e);
         }
 
-        push_block_into_batch(&mut frame_batch, &cblk)?;
+        match format {
+            OptimizedFormat::Postcard => {
+                push_postcard_block_into_batch(&mut frame_batch, &cblk)?;
+            }
+            OptimizedFormat::Cbor => {
+                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, &cblk)?;
+            }
+        }
 
         if frame_batch.len() >= BATCH_TARGET || frame_batch.len() >= BATCH_SOFT_MAX {
             out.write_all(&frame_batch).await?;
@@ -402,9 +464,14 @@ pub async fn optimize_epoch(
     }
     fs::rename(&tmp_path, &blocks_path).await?;
 
+    let format_label = match format {
+        OptimizedFormat::Postcard => "postcard",
+        OptimizedFormat::Cbor => "cbor",
+    };
     tracing::info!(
-        "optimizer: wrote {} (postcard CompactBlock stream, registry = keys.bin)",
-        blocks_path.display()
+        "optimizer: wrote {} ({} CompactBlock stream, registry = keys.bin)",
+        blocks_path.display(),
+        format_label
     );
     Ok(())
 }
@@ -417,6 +484,7 @@ pub async fn optimize_auto(
     max_epoch: u64,
     workers: usize,
     metadata_mode: MetadataMode,
+    format: OptimizedFormat,
 ) -> Result<()> {
     fs::create_dir_all(out_base).await.ok();
 
@@ -429,7 +497,7 @@ pub async fn optimize_auto(
                 && let Some(num) = name
                     .strip_prefix("epoch-")
                     .and_then(|s| s.parse::<u64>().ok())
-                && fs::metadata(optimized_blocks_file(&p.join("optimized")))
+                && fs::metadata(optimized_blocks_file(&p.join("optimized"), format))
                     .await
                     .is_ok()
             {
@@ -467,7 +535,7 @@ pub async fn optimize_auto(
                 };
                 let Some(e) = epoch else { break };
                 pb.set_message(format!("optimize epoch {e:04}..."));
-                match optimize_epoch(&cache, &reg, &out, e, metadata_mode).await {
+                match optimize_epoch(&cache, &reg, &out, e, metadata_mode, format).await {
                     Ok(_) => pb.set_message(format!("ok epoch {e:04}")),
                     Err(err) => pb.set_message(format!("fail epoch {e:04}: {err}")),
                 }
@@ -488,6 +556,7 @@ pub async fn run_car_optimizer(
     optimized_dir: &str,
     registry_dir: Option<&str>,
     metadata_mode: MetadataMode,
+    format: OptimizedFormat,
 ) -> anyhow::Result<()> {
     let registry_root = registry_dir.unwrap_or(optimized_dir);
     tracing::info!("Optimizing epoch {epoch:04}");
@@ -498,6 +567,7 @@ pub async fn run_car_optimizer(
         optimized_dir,
         epoch,
         metadata_mode,
+        format,
     )
     .await?;
     tracing::info!(

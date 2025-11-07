@@ -1,6 +1,5 @@
+use crate::cbor_utils::CborArrayView;
 use cid::Cid;
-use core::marker::PhantomData;
-use minicbor::decode::Error as CborError;
 use minicbor::{Decode, Decoder, Encode, data::Type};
 
 #[derive(Debug, Decode)]
@@ -191,41 +190,5 @@ impl<'b, C> Decode<'b, C> for CborCidRef<'b> {
             return Err(minicbor::decode::Error::message("invalid CID bytes"));
         }
         Ok(Self { bytes })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CborArrayView<'b, T> {
-    slice: &'b [u8],
-    _t: PhantomData<T>,
-}
-
-impl<'b, C, T> Decode<'b, C> for CborArrayView<'b, T> {
-    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
-        let start = d.position();
-        d.skip()?;
-        let end = d.position();
-        let input = d.input();
-
-        Ok(Self {
-            slice: &input[start..end],
-            _t: PhantomData,
-        })
-    }
-}
-
-impl<'b, T> CborArrayView<'b, T>
-where
-    T: Decode<'b, ()>,
-{
-    pub fn len(&self) -> usize {
-        let mut d = minicbor::Decoder::new(self.slice);
-        d.array().unwrap_or(Some(0)).unwrap_or(0) as usize
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = Result<T, minicbor::decode::Error>> + 'b {
-        let mut d = minicbor::Decoder::new(self.slice);
-        let n = d.array().unwrap_or(Some(0)).unwrap_or(0);
-        (0..n).map(move |_| d.decode_with(&mut ()))
     }
 }

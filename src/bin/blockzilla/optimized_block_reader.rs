@@ -10,14 +10,16 @@ use std::{
 };
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, BufReader},
     sync::{Mutex, mpsc},
     task,
 };
 
+use crate::optimizer::OptimizedFormat;
 use blockzilla::{
     carblock_to_compact::{CompactBlock, CompactMetadataPayload},
     compact_log::{self, DecodeConfig},
+    optimized_cbor::decode_owned_compact_block,
     transaction_parser::Signature,
 };
 use bs58;
@@ -28,51 +30,127 @@ pub const LOG_INTERVAL_SECS: u64 = 2;
 fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
     base.join(format!("epoch-{epoch:04}/optimized"))
 }
-fn optimized_blocks_file(dir: &Path) -> PathBuf {
-    dir.join("blocks.bin")
+fn optimized_blocks_file(dir: &Path, format: OptimizedFormat) -> PathBuf {
+    match format {
+        OptimizedFormat::Postcard => dir.join("blocks.bin"),
+        OptimizedFormat::Cbor => dir.join("blocks.cbor"),
+    }
 }
 
-fn resolve_blocks_path(input_dir: &str, epoch: u64) -> PathBuf {
-    let direct = Path::new(input_dir).join(format!("epoch-{epoch:04}.bin"));
-    if direct.exists() {
-        return direct;
+fn resolve_blocks_path(input_dir: &str, epoch: u64) -> Option<(PathBuf, OptimizedFormat)> {
+    let base = Path::new(input_dir);
+    let direct_cbor = base.join(format!("epoch-{epoch:04}.cbor"));
+    if direct_cbor.exists() {
+        return Some((direct_cbor, OptimizedFormat::Cbor));
     }
-    optimized_blocks_file(&optimized_dir(Path::new(input_dir), epoch))
+
+    let direct_bin = base.join(format!("epoch-{epoch:04}.bin"));
+    if direct_bin.exists() {
+        return Some((direct_bin, OptimizedFormat::Postcard));
+    }
+
+    let nested = optimized_dir(base, epoch);
+    let cbor_nested = optimized_blocks_file(&nested, OptimizedFormat::Cbor);
+    if cbor_nested.exists() {
+        return Some((cbor_nested, OptimizedFormat::Cbor));
+    }
+
+    let bin_nested = optimized_blocks_file(&nested, OptimizedFormat::Postcard);
+    if bin_nested.exists() {
+        return Some((bin_nested, OptimizedFormat::Postcard));
+    }
+
+    None
 }
 
 struct OptimizedStream {
     rdr: BufReader<File>,
+    format: OptimizedFormat,
+    scratch: Vec<u8>,
+}
+
+async fn read_varint_async<R>(reader: &mut R) -> Result<Option<(usize, usize)>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut value: usize = 0;
+    let mut shift = 0usize;
+    let mut bytes = 0usize;
+    loop {
+        let mut byte = [0u8; 1];
+        match reader.read_exact(&mut byte).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                if bytes == 0 {
+                    return Ok(None);
+                } else {
+                    return Err(e.into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        bytes += 1;
+        if bytes > 10 {
+            anyhow::bail!("varint too long");
+        }
+        let b = byte[0];
+        value |= ((b & 0x7F) as usize) << shift;
+        if (b & 0x80) == 0 {
+            return Ok(Some((value, bytes)));
+        }
+        shift += 7;
+        if shift >= usize::BITS as usize {
+            anyhow::bail!("varint overflow");
+        }
+    }
 }
 
 impl OptimizedStream {
     async fn open(input_dir: &str, epoch: u64) -> Result<Self> {
-        let path = resolve_blocks_path(input_dir, epoch);
-        if !path.exists() {
-            anyhow::bail!("Blocks file not found: {}", path.display());
-        }
+        let (path, format) = resolve_blocks_path(input_dir, epoch)
+            .with_context(|| format!("Blocks file not found in {input_dir}"))?;
         let f = File::open(&path)
             .await
             .with_context(|| format!("open {}", path.display()))?;
         Ok(Self {
             rdr: BufReader::with_capacity(32 * 1024 * 1024, f),
+            format,
+            scratch: Vec::with_capacity(256 << 10),
         })
     }
 
-    async fn next_block(&mut self) -> Result<Option<(CompactBlock, usize)>> {
-        let mut len_bytes = [0u8; 4];
-        match self.rdr.read_exact(&mut len_bytes).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
+    async fn next_block(&mut self) -> Result<Option<(CompactBlock, usize, usize)>> {
+        match self.format {
+            OptimizedFormat::Postcard => {
+                let mut len_bytes = [0u8; 4];
+                match self.rdr.read_exact(&mut len_bytes).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                }
+                let len = u32::from_le_bytes(len_bytes) as usize;
+
+                self.scratch.resize(len, 0);
+                self.rdr.read_exact(&mut self.scratch).await?;
+
+                let block: CompactBlock = postcard::from_bytes(&self.scratch)
+                    .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))?;
+                Ok(Some((block, len, len + 4)))
+            }
+            OptimizedFormat::Cbor => {
+                let (len, header_len) = match read_varint_async(&mut self.rdr).await? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+
+                self.scratch.resize(len, 0);
+                self.rdr.read_exact(&mut self.scratch).await?;
+
+                let block = decode_owned_compact_block(&self.scratch)
+                    .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))?;
+                Ok(Some((block, len, len + header_len)))
+            }
         }
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        let mut buf = vec![0u8; len];
-        self.rdr.read_exact(&mut buf).await?;
-
-        let block: CompactBlock =
-            postcard::from_bytes(&buf).map_err(|e| anyhow!("deserialize CompactBlock: {e}"))?;
-        Ok(Some((block, len)))
     }
 }
 
@@ -175,7 +253,7 @@ pub async fn read_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()> {
     let mut tx_count = 0u64;
     let mut reward_count = 0u64;
 
-    while let Some((block, _frame_len)) = stream.next_block().await? {
+    while let Some((block, _payload_len, _frame_len)) = stream.next_block().await? {
         tx_count += block.txs.len() as u64;
         reward_count += block.rewards.len() as u64;
         instr_count += block
@@ -217,10 +295,8 @@ pub async fn read_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()> {
 }
 
 pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize) -> Result<()> {
-    let path = resolve_blocks_path(input_dir, epoch);
-    if !path.exists() {
-        anyhow::bail!("Blocks file not found: {}", path.display());
-    }
+    let (path, format) = resolve_blocks_path(input_dir, epoch)
+        .with_context(|| format!("Blocks file not found in {input_dir}"))?;
 
     let blocks_count = Arc::new(AtomicU64::new(0));
     let instr_count = Arc::new(AtomicU64::new(0));
@@ -237,6 +313,7 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
         let tx_count = Arc::clone(&tx_count);
         let reward_count = Arc::clone(&reward_count);
 
+        let format = format;
         task::spawn(async move {
             loop {
                 let frame_opt = {
@@ -245,7 +322,14 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                 };
                 let Some(frame) = frame_opt else { break };
 
-                match postcard::from_bytes::<CompactBlock>(&frame) {
+                let decoded = match format {
+                    OptimizedFormat::Postcard => postcard::from_bytes::<CompactBlock>(&frame)
+                        .map_err(|e| anyhow!("deserialize CompactBlock: {e}")),
+                    OptimizedFormat::Cbor => decode_owned_compact_block(&frame)
+                        .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}")),
+                };
+
+                match decoded {
                     Ok(block) => {
                         let ixs_in_block: u64 =
                             block.txs.iter().map(|t| t.instructions.len() as u64).sum();
@@ -268,13 +352,21 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
     let mut last_log = start;
 
     loop {
-        let mut len_bytes = [0u8; 4];
-        match rdr.read_exact(&mut len_bytes).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
-        }
-        let len = u32::from_le_bytes(len_bytes) as usize;
+        let (len, _header_len) = match format {
+            OptimizedFormat::Postcard => {
+                let mut len_bytes = [0u8; 4];
+                match rdr.read_exact(&mut len_bytes).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => return Err(e.into()),
+                }
+                (u32::from_le_bytes(len_bytes) as usize, 4usize)
+            }
+            OptimizedFormat::Cbor => match read_varint_async(&mut rdr).await? {
+                Some(v) => v,
+                None => break,
+            },
+        };
 
         let mut buf = vec![0u8; len];
         rdr.read_exact(&mut buf).await?;
@@ -337,10 +429,10 @@ pub async fn analyze_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()
     let start = Instant::now();
     let mut last_log = start;
 
-    while let Some((block, payload_len)) = stream.next_block().await? {
+    while let Some((block, payload_len, frame_len)) = stream.next_block().await? {
         stats.blocks += 1;
         stats.total_block_bytes += payload_len as u64;
-        stats.total_frame_bytes += payload_len as u64 + 4;
+        stats.total_frame_bytes += frame_len as u64;
         stats.total_txs += block.txs.len() as u64;
         stats.total_rewards += block.rewards.len() as u64;
         stats.total_instructions += block
@@ -448,7 +540,7 @@ pub async fn analyze_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()
         stats.total_block_bytes
     );
     println!(
-        "  Total Block Bytes:     {} (payload + length prefix)",
+        "  Total Block Bytes:     {} (payload + frame prefix)",
         stats.total_frame_bytes
     );
     if stats.blocks > 0 {
@@ -648,7 +740,7 @@ pub async fn dump_logs(epoch: u64, input_dir: &str, signature: Option<&str>) -> 
     let mut txs_with_logs = 0u64;
     let mut total_log_lines = 0u64;
 
-    while let Some((block, _payload_len)) = stream.next_block().await? {
+    while let Some((block, _payload_len, _frame_len)) = stream.next_block().await? {
         for tx in &block.txs {
             scanned_txs += 1;
 
