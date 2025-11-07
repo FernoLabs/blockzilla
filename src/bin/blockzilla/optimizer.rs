@@ -297,6 +297,7 @@ pub async fn optimize_epoch_without_registry(
     let mut reusable_block = ReusableCompactBlock::new();
     let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
     let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
+    let mut buf_rewards = Vec::<u8>::with_capacity(64 << 10);
     let mut provider = DynamicPubkeyIdProvider::new();
 
     let start = Instant::now();
@@ -320,6 +321,7 @@ pub async fn optimize_epoch_without_registry(
             metadata_mode,
             &mut buf_tx,
             &mut buf_meta,
+            &mut buf_rewards,
             compact_block,
         ) {
             if is_soft_eof(&e) {
@@ -424,6 +426,7 @@ pub async fn optimize_epoch(
     let mut reusable_block = ReusableCompactBlock::new();
     let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
     let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
+    let mut buf_rewards = Vec::<u8>::with_capacity(64 << 10);
 
     let start = Instant::now();
     let mut last_log = start;
@@ -448,6 +451,7 @@ pub async fn optimize_epoch(
             metadata_mode,
             &mut buf_tx,
             &mut buf_meta,
+            &mut buf_rewards,
             compact_block,
         ) {
             if is_soft_eof(&e) {
