@@ -18,6 +18,7 @@ use crate::{
     optimized_block_reader::{
         analyze_compressed_blocks, dump_logs, read_compressed_blocks, read_compressed_blocks_par,
     },
+    optimizer::OptimizedFormat,
 };
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
@@ -133,6 +134,8 @@ enum OptimizeCommand {
         drop_metadata: bool,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        format: OptimizedFormat,
     },
 
     CarNoRegistry {
@@ -154,6 +157,8 @@ enum OptimizeCommand {
         drop_metadata: bool,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        format: OptimizedFormat,
     },
 
     Epoch {
@@ -179,6 +184,8 @@ enum OptimizeCommand {
             conflicts_with = "include_metadata"
         )]
         drop_metadata: bool,
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        format: OptimizedFormat,
     },
 
     Range {
@@ -206,6 +213,8 @@ enum OptimizeCommand {
             conflicts_with = "include_metadata"
         )]
         drop_metadata: bool,
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        format: OptimizedFormat,
     },
 
     Read {
@@ -308,6 +317,7 @@ async fn main() -> Result<()> {
                 include_metadata,
                 drop_metadata,
                 epoch,
+                format,
             } => {
                 let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
                 optimizer::run_car_optimizer(
@@ -316,6 +326,7 @@ async fn main() -> Result<()> {
                     &results_dir,
                     registry_dir.as_deref(),
                     metadata_mode,
+                    format,
                 )
                 .await?
             }
@@ -326,6 +337,7 @@ async fn main() -> Result<()> {
                 include_metadata,
                 drop_metadata,
                 epoch,
+                format,
             } => {
                 let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
                 optimizer::optimize_epoch_without_registry(
@@ -333,6 +345,7 @@ async fn main() -> Result<()> {
                     &results_dir,
                     epoch,
                     metadata_mode,
+                    format,
                 )
                 .await?
             }
@@ -345,6 +358,7 @@ async fn main() -> Result<()> {
                 force,
                 include_metadata,
                 drop_metadata,
+                format,
             } => {
                 let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
                 match run_epoch_optimize(
@@ -354,6 +368,7 @@ async fn main() -> Result<()> {
                     epoch,
                     metadata_mode,
                     force,
+                    format,
                 )
                 .await?
                 {
@@ -375,6 +390,7 @@ async fn main() -> Result<()> {
                 force,
                 include_metadata,
                 drop_metadata,
+                format,
             } => {
                 if start_epoch > end_epoch {
                     return Err(anyhow!(
@@ -393,6 +409,7 @@ async fn main() -> Result<()> {
                         epoch,
                         metadata_mode,
                         force,
+                        format,
                     )
                     .await
                     {
@@ -450,17 +467,25 @@ fn registry_paths(registry_dir: &str, epoch: u64) -> (PathBuf, PathBuf) {
     )
 }
 
-fn optimized_paths(optimized_dir: &str, epoch: u64) -> (PathBuf, PathBuf) {
+fn optimized_paths(optimized_dir: &str, epoch: u64, format: OptimizedFormat) -> (PathBuf, PathBuf) {
     let base = Path::new(optimized_dir);
     (
-        base.join(format!("epoch-{epoch:04}.bin")),
+        match format {
+            OptimizedFormat::Postcard => base.join(format!("epoch-{epoch:04}.bin")),
+            OptimizedFormat::Cbor => base.join(format!("epoch-{epoch:04}.cbor")),
+        },
         base.join(format!("epoch-{epoch:04}.idx")),
     )
 }
 
-fn outputs_exist(registry_dir: &str, optimized_dir: &str, epoch: u64) -> bool {
+fn outputs_exist(
+    registry_dir: &str,
+    optimized_dir: &str,
+    epoch: u64,
+    format: OptimizedFormat,
+) -> bool {
     let (registry_bin, registry_keys) = registry_paths(registry_dir, epoch);
-    let (optimized_bin, optimized_idx) = optimized_paths(optimized_dir, epoch);
+    let (optimized_bin, optimized_idx) = optimized_paths(optimized_dir, epoch, format);
     registry_bin.exists()
         && registry_keys.exists()
         && optimized_bin.exists()
@@ -495,8 +520,9 @@ async fn run_epoch_optimize(
     epoch: u64,
     metadata_mode: MetadataMode,
     force: bool,
+    format: OptimizedFormat,
 ) -> Result<OptimizeOutcome> {
-    if !force && outputs_exist(registry_dir, optimized_dir, epoch) {
+    if !force && outputs_exist(registry_dir, optimized_dir, epoch, format) {
         return Ok(OptimizeOutcome::Skipped);
     }
 
@@ -510,6 +536,7 @@ async fn run_epoch_optimize(
         optimized_dir,
         Some(registry_dir),
         metadata_mode,
+        format,
     )
     .await?;
 
