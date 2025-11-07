@@ -122,14 +122,14 @@ enum OptimizeCommand {
         registry_dir: Option<String>,
         #[arg(
             long,
-            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            help = "Store raw transaction metadata instead of compact encoding",
             conflicts_with = "drop_metadata"
         )]
-        include_metadata: bool,
+        raw_metadata: bool,
         #[arg(
             long,
-            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
-            conflicts_with = "include_metadata"
+            help = "Drop transaction metadata entirely",
+            conflicts_with = "raw_metadata"
         )]
         drop_metadata: bool,
         #[arg(value_name = "EPOCH")]
@@ -145,14 +145,14 @@ enum OptimizeCommand {
         results_dir: String,
         #[arg(
             long,
-            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            help = "Store raw transaction metadata instead of compact encoding",
             conflicts_with = "drop_metadata"
         )]
-        include_metadata: bool,
+        raw_metadata: bool,
         #[arg(
             long,
-            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
-            conflicts_with = "include_metadata"
+            help = "Drop transaction metadata entirely",
+            conflicts_with = "raw_metadata"
         )]
         drop_metadata: bool,
         #[arg(value_name = "EPOCH")]
@@ -174,14 +174,14 @@ enum OptimizeCommand {
         force: bool,
         #[arg(
             long,
-            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            help = "Store raw transaction metadata instead of compact encoding",
             conflicts_with = "drop_metadata"
         )]
-        include_metadata: bool,
+        raw_metadata: bool,
         #[arg(
             long,
-            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
-            conflicts_with = "include_metadata"
+            help = "Drop transaction metadata entirely",
+            conflicts_with = "raw_metadata"
         )]
         drop_metadata: bool,
         #[arg(long, value_enum, default_value_t = OptimizedFormat::Wincode)]
@@ -203,14 +203,14 @@ enum OptimizeCommand {
         force: bool,
         #[arg(
             long,
-            help = "Parse and embed compact transaction metadata (omit for raw protobuf bytes)",
+            help = "Store raw transaction metadata instead of compact encoding",
             conflicts_with = "drop_metadata"
         )]
-        include_metadata: bool,
+        raw_metadata: bool,
         #[arg(
             long,
-            help = "Drop transaction metadata entirely (overrides raw protobuf storage)",
-            conflicts_with = "include_metadata"
+            help = "Drop transaction metadata entirely",
+            conflicts_with = "raw_metadata"
         )]
         drop_metadata: bool,
         #[arg(long, value_enum, default_value_t = OptimizedFormat::Wincode)]
@@ -314,12 +314,12 @@ async fn main() -> Result<()> {
                 cache_dir,
                 results_dir,
                 registry_dir,
-                include_metadata,
+                raw_metadata,
                 drop_metadata,
                 epoch,
                 format,
             } => {
-                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
+                let metadata_mode = metadata_mode_from_flags(raw_metadata, drop_metadata);
                 optimizer::run_car_optimizer(
                     &cache_dir,
                     epoch,
@@ -334,12 +334,12 @@ async fn main() -> Result<()> {
             OptimizeCommand::CarNoRegistry {
                 cache_dir,
                 results_dir,
-                include_metadata,
+                raw_metadata,
                 drop_metadata,
                 epoch,
                 format,
             } => {
-                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
+                let metadata_mode = metadata_mode_from_flags(raw_metadata, drop_metadata);
                 optimizer::optimize_epoch_without_registry(
                     &cache_dir,
                     &results_dir,
@@ -356,11 +356,11 @@ async fn main() -> Result<()> {
                 registry_dir,
                 optimized_dir,
                 force,
-                include_metadata,
+                raw_metadata,
                 drop_metadata,
                 format,
             } => {
-                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
+                let metadata_mode = metadata_mode_from_flags(raw_metadata, drop_metadata);
                 match run_epoch_optimize(
                     &cache_dir,
                     &registry_dir,
@@ -388,7 +388,7 @@ async fn main() -> Result<()> {
                 registry_dir,
                 optimized_dir,
                 force,
-                include_metadata,
+                raw_metadata,
                 drop_metadata,
                 format,
             } => {
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
                     ));
                 }
 
-                let metadata_mode = metadata_mode_from_flags(include_metadata, drop_metadata);
+                let metadata_mode = metadata_mode_from_flags(raw_metadata, drop_metadata);
                 let mut completed = 0usize;
                 let mut skipped = 0usize;
                 for epoch in start_epoch..=end_epoch {
@@ -492,13 +492,13 @@ fn outputs_exist(
         && optimized_idx.exists()
 }
 
-fn metadata_mode_from_flags(include_metadata: bool, drop_metadata: bool) -> MetadataMode {
-    if include_metadata {
-        MetadataMode::Compact
-    } else if drop_metadata {
+fn metadata_mode_from_flags(raw_metadata: bool, drop_metadata: bool) -> MetadataMode {
+    if drop_metadata {
         MetadataMode::None
-    } else {
+    } else if raw_metadata {
         MetadataMode::Raw
+    } else {
+        MetadataMode::Compact
     }
 }
 
