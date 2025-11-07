@@ -291,8 +291,8 @@ where
                 }
 
                 // invoke
-                if let Some(depth_str) = after_pk.strip_prefix("invoke [") {
-                    if depth_str.ends_with(']') {
+                if let Some(depth_str) = after_pk.strip_prefix("invoke [")
+                    && depth_str.ends_with(']') {
                         events.push(LogEvent::Invoke {
                             pid: pid_res,
                             is_cb,
@@ -300,11 +300,10 @@ where
                         });
                         continue 'lines;
                     }
-                }
 
                 // consumed
-                if let Some(consumed_tail) = after_pk.strip_prefix("consumed ") {
-                    if let Some(of_pos) = consumed_tail.find(" of ") {
+                if let Some(consumed_tail) = after_pk.strip_prefix("consumed ")
+                    && let Some(of_pos) = consumed_tail.find(" of ") {
                         let used_str = &consumed_tail[..of_pos];
                         let rest2 = &consumed_tail[of_pos + 4..];
                         if let Some(cu_pos) = rest2.find(" compute units") {
@@ -317,7 +316,6 @@ where
                             }
                         }
                     }
-                }
 
                 // success
                 if after_pk == "success" {
@@ -506,11 +504,10 @@ where
             }
 
             LogEvent::Unparsed { str_idx } => {
-                if cfg.emit_unparsed_lines {
-                    if let Some(s) = cls.strings.get(str_idx as usize) {
+                if cfg.emit_unparsed_lines
+                    && let Some(s) = cls.strings.get(str_idx as usize) {
                         out.push(s.clone());
                     }
-                }
             }
         }
     }

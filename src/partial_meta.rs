@@ -1,4 +1,3 @@
-use ahash::AHashSet;
 use anyhow::{Context, Result};
 use prost::Message;
 use smallvec::SmallVec;
@@ -22,7 +21,10 @@ fn push_pk_bytes32(b: &[u8], out: &mut SmallVec<[Pubkey; 256]>) {
         arr.copy_from_slice(b);
         out.push(Pubkey::new_from_array(arr));
     } else {
-        warn!("invalid loaded address length: expected 32 bytes, got {}", b.len());
+        warn!(
+            "invalid loaded address length: expected 32 bytes, got {}",
+            b.len()
+        );
     }
 }
 

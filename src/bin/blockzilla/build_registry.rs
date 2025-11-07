@@ -242,11 +242,10 @@ pub async fn process_epoch_one_pass(
                         Ok(())
                     })();
 
-                    if let Err(e) = meta_res {
-                        if blocks_done == 0 {
+                    if let Err(e) = meta_res
+                        && blocks_done == 0 {
                             tracing::debug!("metadata parse failed: {e}");
                         }
-                    }
                 }
 
                 // Process all collected keys
@@ -332,11 +331,9 @@ pub async fn build_registry_auto(
                 && name.starts_with("epoch-")
                 && fs::metadata(keys_bin(&p)).await.is_ok()
                 && fs::metadata(fp2key_bin(&p)).await.is_ok()
-            {
-                if let Some(num) = name.trim_start_matches("epoch-").parse::<u64>().ok() {
+                && let Ok(num) = name.trim_start_matches("epoch-").parse::<u64>() {
                     completed.insert(num);
                 }
-            }
         }
     }
 
