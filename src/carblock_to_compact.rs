@@ -4,6 +4,8 @@ use cid::Cid;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
+use std::convert::TryFrom;
+use std::str::FromStr;
 use std::{io::Read, mem::MaybeUninit};
 use wincode::Deserialize as WincodeDeserialize;
 use wincode::SchemaRead;
@@ -356,7 +358,7 @@ fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<C
                     .and_then(|s| s.trim().parse::<u32>().ok())
                     .unwrap_or(0);
                 let code_str = std::str::from_utf8(&body[comma + 1..]).unwrap_or("").trim();
-                
+
                 let error = if let Some(cust) = code_str
                     .strip_prefix("Custom(")
                     .and_then(|s| s.strip_suffix(')'))
@@ -392,20 +394,46 @@ fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<C
     }
 
     // Check errors in order of likelihood
-    if has(raw, b"AccountInUse") { return Some(CompactTxError::AccountInUse); }
-    if has(raw, b"AccountLoadedTwice") { return Some(CompactTxError::AccountLoadedTwice); }
-    if has(raw, b"ProgramAccountNotFound") { return Some(CompactTxError::ProgramAccountNotFound); }
-    if has(raw, b"AccountNotFound") { return Some(CompactTxError::AccountNotFound); }
-    if has(raw, b"InsufficientFundsForFee") { return Some(CompactTxError::InsufficientFundsForFee); }
-    if has(raw, b"InvalidAccountForFee") { return Some(CompactTxError::InvalidAccountForFee); }
-    if has(raw, b"AlreadyProcessed") { return Some(CompactTxError::AlreadyProcessed); }
-    if has(raw, b"BlockhashNotFound") { return Some(CompactTxError::BlockhashNotFound); }
-    if has(raw, b"CallChainTooDeep") { return Some(CompactTxError::CallChainTooDeep); }
-    if has(raw, b"MissingSignatureForFee") { return Some(CompactTxError::MissingSignatureForFee); }
-    if has(raw, b"InvalidAccountIndex") { return Some(CompactTxError::InvalidAccountIndex); }
-    if has(raw, b"SignatureFailure") { return Some(CompactTxError::SignatureFailure); }
-    if has(raw, b"SanitizedTransaction") { return Some(CompactTxError::SanitizedTransactionError); }
-    
+    if has(raw, b"AccountInUse") {
+        return Some(CompactTxError::AccountInUse);
+    }
+    if has(raw, b"AccountLoadedTwice") {
+        return Some(CompactTxError::AccountLoadedTwice);
+    }
+    if has(raw, b"ProgramAccountNotFound") {
+        return Some(CompactTxError::ProgramAccountNotFound);
+    }
+    if has(raw, b"AccountNotFound") {
+        return Some(CompactTxError::AccountNotFound);
+    }
+    if has(raw, b"InsufficientFundsForFee") {
+        return Some(CompactTxError::InsufficientFundsForFee);
+    }
+    if has(raw, b"InvalidAccountForFee") {
+        return Some(CompactTxError::InvalidAccountForFee);
+    }
+    if has(raw, b"AlreadyProcessed") {
+        return Some(CompactTxError::AlreadyProcessed);
+    }
+    if has(raw, b"BlockhashNotFound") {
+        return Some(CompactTxError::BlockhashNotFound);
+    }
+    if has(raw, b"CallChainTooDeep") {
+        return Some(CompactTxError::CallChainTooDeep);
+    }
+    if has(raw, b"MissingSignatureForFee") {
+        return Some(CompactTxError::MissingSignatureForFee);
+    }
+    if has(raw, b"InvalidAccountIndex") {
+        return Some(CompactTxError::InvalidAccountIndex);
+    }
+    if has(raw, b"SignatureFailure") {
+        return Some(CompactTxError::SignatureFailure);
+    }
+    if has(raw, b"SanitizedTransaction") {
+        return Some(CompactTxError::SanitizedTransactionError);
+    }
+
     if has(raw, b"ProgramError") || has(raw, b"ProgramFailed") || has(raw, b"RuntimeError") {
         return Some(CompactTxError::ProgramError);
     }
@@ -424,22 +452,121 @@ fn parse_ui_amount_to_int(amount_str: &str) -> Option<u64> {
     amount_str.parse::<u64>().ok()
 }
 
-#[inline]
-fn token_balance_to_compact<P: PubkeyIdProvider>(
-    tb: &confirmed_block::TokenBalance,
+fn meta_to_compact<P: PubkeyIdProvider>(
+    mut meta: confirmed_block::TransactionStatusMeta,
+    resolver: &mut P,
+) -> CompactMetadata {
+    // Compute err BEFORE any field moves
+    let err = tx_error_from_meta(&meta);
+
+    // Resolve loaded writable/readable without constructing Pubkey
+    let mut loaded_writable_ids = Vec::with_capacity(meta.loaded_writable_addresses.len());
+    for addr in meta.loaded_writable_addresses.into_iter() {
+        if let Ok(key) = <&[u8; 32]>::try_from(addr.as_slice()) {
+            if let Some(id) = resolver.resolve(key) {
+                loaded_writable_ids.push(id);
+            }
+        }
+    }
+
+    let mut loaded_readonly_ids = Vec::with_capacity(meta.loaded_readonly_addresses.len());
+    for addr in meta.loaded_readonly_addresses.into_iter() {
+        if let Ok(key) = <&[u8; 32]>::try_from(addr.as_slice()) {
+            if let Some(id) = resolver.resolve(key) {
+                loaded_readonly_ids.push(id);
+            }
+        }
+    }
+
+    // Move out return_data and only parse the program id, avoid extra cloning
+    let return_data = meta.return_data.take().and_then(|rd| {
+        if let Ok(key) = <&[u8; 32]>::try_from(rd.program_id.as_slice()) {
+            resolver.resolve(key).map(|pid| CompactReturnData {
+                program_id_id: pid,
+                data: rd.data, // moved
+            })
+        } else {
+            None
+        }
+    });
+
+    // Inner instructions: move, do not clone
+    let inner_instructions: Vec<CompactInnerInstructions> = meta
+        .inner_instructions
+        .into_iter()
+        .map(|ii| {
+            let instructions = ii
+                .instructions
+                .into_iter()
+                .map(|instr| {
+                    CompactInnerInstruction {
+                        program_id_index: instr.program_id_index,
+                        accounts: instr.accounts, // moved
+                        data: instr.data,         // moved
+                        stack_height: instr.stack_height,
+                    }
+                })
+                .collect();
+
+            CompactInnerInstructions {
+                index: ii.index,
+                instructions,
+            }
+        })
+        .collect();
+
+    CompactMetadata {
+        fee: meta.fee,
+        err,
+        pre_balances: std::mem::take(&mut meta.pre_balances), // move
+        post_balances: std::mem::take(&mut meta.post_balances), // move
+        pre_token_balances: meta
+            .pre_token_balances
+            .into_iter()
+            .filter_map(|tb| token_balance_to_compact_moved(tb, resolver))
+            .collect(),
+        post_token_balances: meta
+            .post_token_balances
+            .into_iter()
+            .filter_map(|tb| token_balance_to_compact_moved(tb, resolver))
+            .collect(),
+        loaded_writable_ids,
+        loaded_readonly_ids,
+        return_data,
+        inner_instructions: Some(inner_instructions),
+        log_messages: if meta.log_messages.is_empty() {
+            None
+        } else {
+            let mut lookup_pid = |base58: &str| -> Option<u32> {
+                solana_pubkey::Pubkey::from_str(base58)
+                    .ok()
+                    .and_then(|pk| resolver.resolve(&pk.to_bytes()))
+            };
+            Some(encode_logs(
+                &meta.log_messages,
+                &mut lookup_pid,
+                EncodeConfig::default(),
+            ))
+        },
+    }
+}
+
+// Take by value to avoid clones and align types with CompactTokenBalanceMeta
+fn token_balance_to_compact_moved<P: PubkeyIdProvider>(
+    tb: confirmed_block::TokenBalance,
     resolver: &mut P,
 ) -> Option<CompactTokenBalanceMeta> {
-    let mint_id = Pubkey::try_from(tb.mint.as_str())
+    let mint_id = Pubkey::from_str(tb.mint.as_str())
         .ok()
         .and_then(|p| id_for_pubkey(resolver, &p.to_bytes()))?;
-    let owner_id = Pubkey::try_from(tb.owner.as_str())
+    let owner_id = Pubkey::from_str(tb.owner.as_str())
         .ok()
         .and_then(|p| id_for_pubkey(resolver, &p.to_bytes()))?;
-    let program_id_id = Pubkey::try_from(tb.program_id.as_str())
+    let program_id_id = Pubkey::from_str(tb.program_id.as_str())
         .ok()
         .and_then(|p| id_for_pubkey(resolver, &p.to_bytes()))?;
 
-    let (amount, decimals) = match &tb.ui_token_amount {
+    let (amount, decimals) = match tb.ui_token_amount {
         Some(uta) => {
             let amt = parse_ui_amount_to_int(&uta.amount).unwrap_or(0);
             (amt, uta.decimals as u8)
@@ -456,95 +583,6 @@ fn token_balance_to_compact<P: PubkeyIdProvider>(
     })
 }
 
-fn meta_to_compact<P: PubkeyIdProvider>(
-    meta: &confirmed_block::TransactionStatusMeta,
-    resolver: &mut P,
-) -> CompactMetadata {
-    // Pre-allocate with exact sizes where possible
-    let mut loaded_writable_ids = Vec::with_capacity(meta.loaded_writable_addresses.len());
-    let mut loaded_readonly_ids = Vec::with_capacity(meta.loaded_readonly_addresses.len());
-    
-    for addr in &meta.loaded_writable_addresses {
-        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
-            if let Some(id) = id_for_pubkey(resolver, &pk.to_bytes()) {
-                loaded_writable_ids.push(id);
-            }
-        }
-    }
-    
-    for addr in &meta.loaded_readonly_addresses {
-        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
-            if let Some(id) = id_for_pubkey(resolver, &pk.to_bytes()) {
-                loaded_readonly_ids.push(id);
-            }
-        }
-    }
-
-    let return_data = meta.return_data.as_ref().and_then(|rd| {
-        Pubkey::try_from(rd.program_id.as_slice())
-            .ok()
-            .and_then(|pk| id_for_pubkey(resolver, &pk.to_bytes()))
-            .map(|pid| CompactReturnData {
-                program_id_id: pid,
-                data: rd.data.clone(),
-            })
-    });
-
-    let inner_instructions: Vec<CompactInnerInstructions> = meta
-        .inner_instructions
-        .iter()
-        .map(|ii| CompactInnerInstructions {
-            index: ii.index,
-            instructions: ii.instructions.iter().map(|instr| CompactInnerInstruction {
-                program_id_index: instr.program_id_index,
-                accounts: instr.accounts.clone(),
-                data: instr.data.clone(),
-                stack_height: instr.stack_height,
-            }).collect(),
-        })
-        .collect();
-
-    let log_messages = if meta.log_messages.is_empty() {
-        None
-    } else {
-        let mut lookup_pid = |base58: &str| -> Option<u32> {
-            Pubkey::try_from(base58)
-                .ok()
-                .and_then(|pk| resolver.resolve(&pk.to_bytes()))
-        };
-
-        Some(encode_logs(
-            &meta.log_messages,
-            &mut lookup_pid,
-            EncodeConfig::default(),
-        ))
-    };
-
-    let err = tx_error_from_meta(meta);
-
-    CompactMetadata {
-        fee: meta.fee,
-        err,
-        pre_balances: meta.pre_balances.clone(),
-        post_balances: meta.post_balances.clone(),
-        pre_token_balances: meta
-            .pre_token_balances
-            .iter()
-            .filter_map(|tb| token_balance_to_compact(tb, resolver))
-            .collect(),
-        post_token_balances: meta
-            .post_token_balances
-            .iter()
-            .filter_map(|tb| token_balance_to_compact(tb, resolver))
-            .collect(),
-        loaded_writable_ids,
-        loaded_readonly_ids,
-        return_data,
-        inner_instructions: Some(inner_instructions),
-        log_messages,
-    }
-}
-
 #[inline]
 fn process_metadata<P: PubkeyIdProvider>(
     metadata_mode: MetadataMode,
@@ -552,14 +590,12 @@ fn process_metadata<P: PubkeyIdProvider>(
     resolver: &mut P,
 ) -> Option<CompactMetadataPayload> {
     match metadata_mode {
-        MetadataMode::Compact => {
-            match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
-                Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
-                    &parsed, resolver,
-                ))),
-                Err(_) => Some(CompactMetadataPayload::Raw(raw_slice.to_vec()))
-            }
-        }
+        MetadataMode::Compact => match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
+            Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
+                parsed, resolver,
+            ))),
+            Err(_) => Some(CompactMetadataPayload::Raw(raw_slice.to_vec())),
+        },
         MetadataMode::Raw => Some(CompactMetadataPayload::Raw(raw_slice.to_vec())),
         MetadataMode::None => None,
     }
@@ -597,7 +633,7 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
             target_len += entry.transactions.len();
         }
     }
-    
+
     out.txs.reserve(target_len);
 
     let mut reusable_tx = MaybeUninit::<VersionedTransaction>::uninit();
@@ -652,7 +688,9 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 if let Some(uid) = id_for_pubkey(resolver, k) {
                     account_ids.push(uid);
                 } else {
-                    unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
+                    unsafe {
+                        std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction)
+                    };
                     return Err(anyhow!(
                         "registry miss for pubkey {}",
                         Pubkey::new_from_array(*k)
@@ -679,7 +717,11 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                                 readonly_indexes: l.readonly_indexes.clone(),
                             });
                         } else {
-                            unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
+                            unsafe {
+                                std::ptr::drop_in_place(
+                                    tx_ref as *const _ as *mut VersionedTransaction,
+                                )
+                            };
                             return Err(anyhow!(
                                 "registry miss for address table account {}",
                                 Pubkey::new_from_array(l.account_key)
