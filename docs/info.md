@@ -7,6 +7,9 @@
 -rw-r--r-- 1 ach admin 1.2G Nov  7 02:37 registry/epoch-0800/keys.bin
 -rw-r--r-- 1 ach admin 768G Oct 22 23:29 /volume1/blockzilla/epoch-800.car
 
+### CBOR encoded
+-rw-r--r-- 1 ach admin 674G Nov  7 17:22 optimized/epoch-0800/optimized/blocks.bin
+
 ## what composed a compressed epoch
 
 📊 Analysis Results:
