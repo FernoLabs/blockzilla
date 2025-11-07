@@ -271,7 +271,11 @@ where
     CompactLogStream { bytes, strings }
 }
 
-fn decode_logs<G>(cls: &CompactLogStream, mut pid_to_string: G, cfg: DecodeConfig) -> Vec<String>
+pub fn decode_logs<G>(
+    cls: &CompactLogStream,
+    mut pid_to_string: G,
+    cfg: DecodeConfig,
+) -> Vec<String>
 where
     G: FnMut(u32) -> String,
 {
