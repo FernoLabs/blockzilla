@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use indicatif::ProgressBar;
 use std::{
+    mem::MaybeUninit,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -66,6 +68,38 @@ struct OptimizedStream {
     rdr: BufReader<File>,
     format: OptimizedFormat,
     scratch: Vec<u8>,
+    reusable_block: MaybeUninit<CompactBlock>,
+    block_initialized: bool,
+}
+
+struct CompactBlockGuard<'a> {
+    ptr: *mut CompactBlock,
+    initialized: &'a mut bool,
+}
+
+impl<'a> Deref for CompactBlockGuard<'a> {
+    type Target = CompactBlock;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `ptr` is initialized whenever the guard is constructed and
+        // remains valid for the guard's lifetime. The guard guarantees unique
+        // access until it drops, at which point the block is dropped and the
+        // initialized flag is reset.
+        unsafe { &*self.ptr }
+    }
+}
+
+impl<'a> Drop for CompactBlockGuard<'a> {
+    fn drop(&mut self) {
+        if *self.initialized {
+            // SAFETY: the block was initialized before the guard was created,
+            // and no other references exist while the guard is alive.
+            unsafe {
+                std::ptr::drop_in_place(self.ptr);
+            }
+            *self.initialized = false;
+        }
+    }
 }
 
 async fn read_varint_async<R>(reader: &mut R) -> Result<Option<(usize, usize)>>
@@ -115,10 +149,12 @@ impl OptimizedStream {
             rdr: BufReader::with_capacity(32 * 1024 * 1024, f),
             format,
             scratch: Vec::with_capacity(256 << 10),
+            reusable_block: MaybeUninit::uninit(),
+            block_initialized: false,
         })
     }
 
-    async fn next_block(&mut self) -> Result<Option<(CompactBlock, usize, usize)>> {
+    async fn next_block(&mut self) -> Result<Option<(CompactBlockGuard<'_>, usize, usize)>> {
         match self.format {
             OptimizedFormat::Wincode => {
                 let mut len_bytes = [0u8; 4];
@@ -131,10 +167,22 @@ impl OptimizedStream {
 
                 self.scratch.resize(len, 0);
                 self.rdr.read_exact(&mut self.scratch).await?;
+                // Drop any previously held block before reusing the buffer.
+                if self.block_initialized {
+                    unsafe {
+                        std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
+                    }
+                    self.block_initialized = false;
+                }
 
-                let block: CompactBlock = wincode::deserialize(&self.scratch)
+                wincode::deserialize_into(&self.scratch, &mut self.reusable_block)
                     .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))?;
-                Ok(Some((block, len, len + 4)))
+                self.block_initialized = true;
+                let guard = CompactBlockGuard {
+                    ptr: self.reusable_block.as_mut_ptr(),
+                    initialized: &mut self.block_initialized,
+                };
+                Ok(Some((guard, len, len + 4)))
             }
             OptimizedFormat::Cbor => {
                 let (len, header_len) = match read_varint_async(&mut self.rdr).await? {
@@ -144,11 +192,36 @@ impl OptimizedStream {
 
                 self.scratch.resize(len, 0);
                 self.rdr.read_exact(&mut self.scratch).await?;
+                if self.block_initialized {
+                    unsafe {
+                        std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
+                    }
+                    self.block_initialized = false;
+                }
 
                 let block = decode_owned_compact_block(&self.scratch)
                     .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))?;
-                Ok(Some((block, len, len + header_len)))
+                unsafe {
+                    self.reusable_block.as_mut_ptr().write(block);
+                }
+                self.block_initialized = true;
+                let guard = CompactBlockGuard {
+                    ptr: self.reusable_block.as_mut_ptr(),
+                    initialized: &mut self.block_initialized,
+                };
+                Ok(Some((guard, len, len + header_len)))
             }
+        }
+    }
+}
+
+impl Drop for OptimizedStream {
+    fn drop(&mut self) {
+        if self.block_initialized {
+            unsafe {
+                std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
+            }
+            self.block_initialized = false;
         }
     }
 }
@@ -317,6 +390,7 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
 
         let format = format;
         task::spawn(async move {
+            let mut reusable_block = MaybeUninit::<CompactBlock>::uninit();
             loop {
                 let frame_opt = {
                     let mut guard = rx.lock().await;
@@ -325,10 +399,17 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                 let Some(frame) = frame_opt else { break };
 
                 let decoded = match format {
-                    OptimizedFormat::Wincode => wincode::deserialize::<CompactBlock>(&frame)
-                        .map_err(|e| anyhow!("deserialize CompactBlock: {e}")),
+                    OptimizedFormat::Wincode => {
+                        wincode::deserialize_into(&frame, &mut reusable_block)
+                            .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))
+                            .map(|()| unsafe { reusable_block.assume_init_ref() })
+                    }
                     OptimizedFormat::Cbor => decode_owned_compact_block(&frame)
-                        .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}")),
+                        .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))
+                        .map(|block| unsafe {
+                            reusable_block.as_mut_ptr().write(block);
+                            reusable_block.assume_init_ref()
+                        }),
                 };
 
                 match decoded {
@@ -339,6 +420,9 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                         tx_count.fetch_add(block.txs.len() as u64, Ordering::Relaxed);
                         reward_count.fetch_add(block.rewards.len() as u64, Ordering::Relaxed);
                         blocks_count.fetch_add(1, Ordering::Relaxed);
+                        unsafe {
+                            std::ptr::drop_in_place(reusable_block.as_mut_ptr());
+                        }
                     }
                     Err(e) => eprintln!("Deserialization error: {e}"),
                 }
