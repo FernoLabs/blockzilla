@@ -7,7 +7,6 @@ use blockzilla::{
 use clap::ValueEnum;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
-use postcard::to_allocvec;
 use std::{
     collections::HashSet,
     error::Error as StdError,
@@ -35,7 +34,7 @@ fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
 }
 fn optimized_blocks_file(dir: &Path, format: OptimizedFormat) -> PathBuf {
     match format {
-        OptimizedFormat::Postcard => dir.join("blocks.bin"),
+        OptimizedFormat::Wincode => dir.join("blocks.bin"),
         OptimizedFormat::Cbor => dir.join("blocks.cbor"),
     }
 }
@@ -50,7 +49,7 @@ fn unique_tmp(dir: &Path, name: &str) -> PathBuf {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OptimizedFormat {
-    Postcard,
+    Wincode,
     Cbor,
 }
 
@@ -89,8 +88,8 @@ fn is_soft_eof(e: &anyhow::Error) -> bool {
 }
 
 #[inline]
-fn push_postcard_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
-    let bytes = to_allocvec(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
+fn push_wincode_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
+    let bytes = wincode::serialize(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
 
     batch.reserve(4 + bytes.len());
     batch.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -291,8 +290,8 @@ pub async fn optimize_epoch_without_registry(
         }
 
         match format {
-            OptimizedFormat::Postcard => {
-                push_postcard_block_into_batch(&mut frame_batch, &cblk)?;
+            OptimizedFormat::Wincode => {
+                push_wincode_block_into_batch(&mut frame_batch, &cblk)?;
             }
             OptimizedFormat::Cbor => {
                 push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, &cblk)?;
@@ -336,7 +335,7 @@ pub async fn optimize_epoch_without_registry(
     write_dynamic_keys(&outdir, &provider).await?;
 
     let format_label = match format {
-        OptimizedFormat::Postcard => "postcard",
+        OptimizedFormat::Wincode => "wincode",
         OptimizedFormat::Cbor => "cbor",
     };
     tracing::info!(
@@ -422,8 +421,8 @@ pub async fn optimize_epoch(
         }
 
         match format {
-            OptimizedFormat::Postcard => {
-                push_postcard_block_into_batch(&mut frame_batch, &cblk)?;
+            OptimizedFormat::Wincode => {
+                push_wincode_block_into_batch(&mut frame_batch, &cblk)?;
             }
             OptimizedFormat::Cbor => {
                 push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, &cblk)?;
@@ -465,7 +464,7 @@ pub async fn optimize_epoch(
     fs::rename(&tmp_path, &blocks_path).await?;
 
     let format_label = match format {
-        OptimizedFormat::Postcard => "postcard",
+        OptimizedFormat::Wincode => "wincode",
         OptimizedFormat::Cbor => "cbor",
     };
     tracing::info!(

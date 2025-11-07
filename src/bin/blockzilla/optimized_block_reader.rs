@@ -23,7 +23,6 @@ use blockzilla::{
     transaction_parser::Signature,
 };
 use bs58;
-use serde::Serialize;
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
 
@@ -32,7 +31,7 @@ fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
 }
 fn optimized_blocks_file(dir: &Path, format: OptimizedFormat) -> PathBuf {
     match format {
-        OptimizedFormat::Postcard => dir.join("blocks.bin"),
+        OptimizedFormat::Wincode => dir.join("blocks.bin"),
         OptimizedFormat::Cbor => dir.join("blocks.cbor"),
     }
 }
@@ -46,7 +45,7 @@ fn resolve_blocks_path(input_dir: &str, epoch: u64) -> Option<(PathBuf, Optimize
 
     let direct_bin = base.join(format!("epoch-{epoch:04}.bin"));
     if direct_bin.exists() {
-        return Some((direct_bin, OptimizedFormat::Postcard));
+        return Some((direct_bin, OptimizedFormat::Wincode));
     }
 
     let nested = optimized_dir(base, epoch);
@@ -55,9 +54,9 @@ fn resolve_blocks_path(input_dir: &str, epoch: u64) -> Option<(PathBuf, Optimize
         return Some((cbor_nested, OptimizedFormat::Cbor));
     }
 
-    let bin_nested = optimized_blocks_file(&nested, OptimizedFormat::Postcard);
+    let bin_nested = optimized_blocks_file(&nested, OptimizedFormat::Wincode);
     if bin_nested.exists() {
-        return Some((bin_nested, OptimizedFormat::Postcard));
+        return Some((bin_nested, OptimizedFormat::Wincode));
     }
 
     None
@@ -121,7 +120,7 @@ impl OptimizedStream {
 
     async fn next_block(&mut self) -> Result<Option<(CompactBlock, usize, usize)>> {
         match self.format {
-            OptimizedFormat::Postcard => {
+            OptimizedFormat::Wincode => {
                 let mut len_bytes = [0u8; 4];
                 match self.rdr.read_exact(&mut len_bytes).await {
                     Ok(_) => {}
@@ -133,7 +132,7 @@ impl OptimizedStream {
                 self.scratch.resize(len, 0);
                 self.rdr.read_exact(&mut self.scratch).await?;
 
-                let block: CompactBlock = postcard::from_bytes(&self.scratch)
+                let block: CompactBlock = wincode::deserialize(&self.scratch)
                     .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))?;
                 Ok(Some((block, len, len + 4)))
             }
@@ -199,8 +198,11 @@ struct AnalyzeStats {
     tx_with_logs: u64,
 }
 
-fn serialized_size<T: Serialize>(value: &T) -> usize {
-    postcard::to_allocvec(value)
+fn serialized_size<T>(value: &T) -> usize
+where
+    T: wincode::SchemaWrite<Src = T> + ?Sized,
+{
+    wincode::serialize(value)
         .expect("serialize for sizing")
         .len()
 }
@@ -323,7 +325,7 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                 let Some(frame) = frame_opt else { break };
 
                 let decoded = match format {
-                    OptimizedFormat::Postcard => postcard::from_bytes::<CompactBlock>(&frame)
+                    OptimizedFormat::Wincode => wincode::deserialize::<CompactBlock>(&frame)
                         .map_err(|e| anyhow!("deserialize CompactBlock: {e}")),
                     OptimizedFormat::Cbor => decode_owned_compact_block(&frame)
                         .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}")),
@@ -353,7 +355,7 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
 
     loop {
         let (len, _header_len) = match format {
-            OptimizedFormat::Postcard => {
+            OptimizedFormat::Wincode => {
                 let mut len_bytes = [0u8; 4];
                 match rdr.read_exact(&mut len_bytes).await {
                     Ok(_) => {}
