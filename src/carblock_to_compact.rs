@@ -224,19 +224,17 @@ fn id_for_pubkey<P: PubkeyIdProvider>(resolver: &mut P, key: &[u8; 32]) -> Optio
 }
 
 #[derive(Debug, Clone, SchemaRead)]
-struct ClientRewardBytesPk<'a> {
+struct ClientRewardBytesPk {
     pub pubkey: [u8; 32],
     pub lamports: i64,
     pub post_balance: u64,
     pub reward_type: u8,
     pub commission: Option<u8>,
-    #[allow(dead_code)]
-    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 #[derive(Debug, Clone, SchemaRead)]
-struct ClientRewardStringPk<'a> {
-    pub pubkey: &'a str,
+struct ClientRewardStringPk {
+    pub pubkey: String,
     pub lamports: i64,
     pub post_balance: u64,
     pub reward_type: u8,
@@ -300,7 +298,7 @@ fn decode_rewards_via_node<P: PubkeyIdProvider>(
         out.reserve(v.len());
         for r in v {
             // FromStr doesn't allocate for parsing, just validates
-            if let Ok(pk) = Pubkey::from_str(r.pubkey)
+            if let Ok(pk) = Pubkey::from_str(&r.pubkey)
                 && let Some(account_id) = id_for_pubkey(resolver, &pk.to_bytes())
             {
                 out.push(CompactReward {
