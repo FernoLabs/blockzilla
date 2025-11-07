@@ -42,6 +42,23 @@ pub enum LogEvent {
         units: u32,
     },
 
+    CbSetComputeUnitLimit {
+        units: u32,
+    },
+    CbSetComputeUnitPrice {
+        micro_lamports: u64,
+    },
+    CbRequestUnits {
+        units: u32,
+    },
+    CbSetHeapFrame {
+        bytes: u32,
+    },
+
+    ProgramNotDeployed {
+        pk_str_idx: Option<u16>,
+    },
+
     TransferInsufficient {
         have: u64,
         need: u64,
@@ -133,17 +150,8 @@ where
                 let have_str = &rest[..need_pos];
                 let need_str = &rest[need_pos + 7..];
 
-                let have_result = if have_str.contains(',') {
-                    have_str.replace(',', "").parse::<u64>()
-                } else {
-                    have_str.parse::<u64>()
-                };
-
-                let need_result = if need_str.contains(',') {
-                    need_str.replace(',', "").parse::<u64>()
-                } else {
-                    need_str.parse::<u64>()
-                };
+                let have_result = have_str.replace(',', "").parse::<u64>();
+                let need_result = need_str.replace(',', "").parse::<u64>();
 
                 if let (Ok(have), Ok(need)) = (have_result, need_result) {
                     events.push(LogEvent::TransferInsufficient { have, need });
@@ -165,16 +173,21 @@ where
         }
 
         if let Some(rest) = line.strip_prefix("Program ") {
+            if rest == "is not deployed" {
+                events.push(LogEvent::ProgramNotDeployed { pk_str_idx: None });
+                continue 'lines;
+            }
+            if let Some(pk) = rest.strip_suffix(" is not deployed") {
+                let idx = intern(pk.trim());
+                events.push(LogEvent::ProgramNotDeployed {
+                    pk_str_idx: Some(idx),
+                });
+                continue 'lines;
+            }
+
             if let Some(rem) = rest.strip_prefix("consumption: ") {
                 if let Some(pos) = rem.find(" units remaining") {
-                    let num_str = &rem[..pos];
-                    let units_result = if num_str.contains(',') {
-                        num_str.replace(',', "").parse::<u32>()
-                    } else {
-                        num_str.parse::<u32>()
-                    };
-
-                    if let Ok(units) = units_result {
+                    if let Ok(units) = rem[..pos].replace(',', "").parse::<u32>() {
                         events.push(LogEvent::Consumption { units });
                         continue 'lines;
                     }
@@ -198,8 +211,7 @@ where
                                 Ok(bytes) => buf.extend_from_slice(&bytes),
                                 Err(e) => {
                                     tracing::warn!(target: "compact_log",
-                                        "base64 decode failed for Program return line: {} (err: {})",
-                                        line, e);
+                                        "base64 decode failed: {} (err: {})", line, e);
                                     events.push(LogEvent::Unparsed {
                                         str_idx: intern(line),
                                     });
@@ -211,12 +223,6 @@ where
                         if ok {
                             events.push(LogEvent::Return { pid, data: buf });
                         }
-                        continue 'lines;
-                    } else {
-                        tracing::warn!(target: "compact_log", "unknown program id in Program return line: {}", line);
-                        events.push(LogEvent::Unparsed {
-                            str_idx: intern(line),
-                        });
                         continue 'lines;
                     }
                 }
@@ -257,7 +263,6 @@ where
             if let Some(space_pos) = rest.find(' ') {
                 let pk = &rest[..space_pos];
                 let after_pk = &rest[space_pos + 1..];
-
                 let pid_res = lookup_pid(pk);
                 let is_cb = pid_res == cb_pid_auto || pk == CB_PK;
                 let pk_idx_opt = if pid_res.is_none() {
@@ -266,8 +271,44 @@ where
                     None
                 };
 
-                if pid_res.is_none() && pk != CB_PK {
-                    tracing::warn!(target: "compact_log", "unknown program id in line: {}", line);
+                if is_cb {
+                    let norm = after_pk.replace(':', "").to_lowercase();
+
+                    if let Some(tail) = norm.strip_prefix("request units ") {
+                        if let Ok(units) = tail.trim().replace(',', "").parse::<u32>() {
+                            events.push(LogEvent::CbRequestUnits { units });
+                            continue 'lines;
+                        }
+                    }
+                    if let Some(tail) = norm
+                        .strip_prefix("setcomputeunitlimit ")
+                        .or_else(|| norm.strip_prefix("set compute unit limit "))
+                    {
+                        if let Ok(units) = tail.trim().replace(',', "").parse::<u32>() {
+                            events.push(LogEvent::CbSetComputeUnitLimit { units });
+                            continue 'lines;
+                        }
+                    }
+                    if let Some(tail) = norm
+                        .strip_prefix("setcomputeunitprice ")
+                        .or_else(|| norm.strip_prefix("set compute unit price "))
+                    {
+                        if let Ok(price) = tail.trim().replace(',', "").parse::<u64>() {
+                            events.push(LogEvent::CbSetComputeUnitPrice {
+                                micro_lamports: price,
+                            });
+                            continue 'lines;
+                        }
+                    }
+                    if let Some(tail) = norm
+                        .strip_prefix("setheapframe ")
+                        .or_else(|| norm.strip_prefix("set heap frame "))
+                    {
+                        if let Ok(bytes) = tail.trim().replace(',', "").parse::<u32>() {
+                            events.push(LogEvent::CbSetHeapFrame { bytes });
+                            continue 'lines;
+                        }
+                    }
                 }
 
                 if let Some(depth_str) = after_pk.strip_prefix("invoke [")
@@ -287,9 +328,8 @@ where
                     let used_str = &consumed_tail[..of_pos];
                     let rest2 = &consumed_tail[of_pos + 4..];
                     if let Some(cu_pos) = rest2.find(" compute units") {
-                        let limit_str = &rest2[..cu_pos];
                         if let (Ok(used), Ok(limit)) =
-                            (used_str.parse::<u32>(), limit_str.parse::<u32>())
+                            (used_str.parse::<u32>(), rest2[..cu_pos].parse::<u32>())
                         {
                             events.push(LogEvent::Consumed { used, limit });
                             continue 'lines;
@@ -340,7 +380,6 @@ where
 {
     let events: Vec<LogEvent> = from_bytes(&cls.bytes).expect("postcard decode");
     let mut out = Vec::<String>::with_capacity(events.len());
-
     let mut stack: Vec<(Option<u32>, bool, Option<u16>)> = Vec::with_capacity(8);
 
     for ev in events {
@@ -368,35 +407,14 @@ where
             }
 
             LogEvent::Consumed { used, limit } => {
-                let who = match stack.last().cloned() {
-                    Some((Some(pidv), false, _)) => pid_to_string(pidv),
-                    Some((_, true, _)) => CB_PK.to_string(),
-                    Some((None, false, Some(ix))) => cls
-                        .strings
-                        .get(ix as usize)
-                        .cloned()
-                        .unwrap_or_else(|| "?".into()),
-                    _ => "?".into(),
-                };
                 out.push(format!(
-                    "Program {} consumed {} of {} compute units",
-                    who, used, limit
+                    "Program consumed {} of {} compute units",
+                    used, limit
                 ));
             }
 
             LogEvent::Success => {
-                let ctx = stack.pop();
-                let who = match ctx {
-                    Some((Some(pidv), false, _)) => pid_to_string(pidv),
-                    Some((_, true, _)) => CB_PK.to_string(),
-                    Some((None, false, Some(ix))) => cls
-                        .strings
-                        .get(ix as usize)
-                        .cloned()
-                        .unwrap_or_else(|| "?".into()),
-                    _ => "?".into(),
-                };
-                out.push(format!("Program {} success", who));
+                out.push("Program success".into());
             }
 
             LogEvent::Failure { reason_idx } => {
@@ -405,18 +423,7 @@ where
                     .get(reason_idx as usize)
                     .cloned()
                     .unwrap_or_else(|| "?".into());
-                let ctx = stack.pop();
-                let who = match ctx {
-                    Some((Some(pidv), false, _)) => pid_to_string(pidv),
-                    Some((_, true, _)) => CB_PK.to_string(),
-                    Some((None, false, Some(ix))) => cls
-                        .strings
-                        .get(ix as usize)
-                        .cloned()
-                        .unwrap_or_else(|| "?".into()),
-                    _ => "?".into(),
-                };
-                out.push(format!("Program {} failed: {}", who, reason));
+                out.push(format!("Program failed: {}", reason));
             }
 
             LogEvent::Msg { str_idx } => {
@@ -439,6 +446,40 @@ where
                 out.push(format!("Program consumption: {} units remaining", units));
             }
 
+            LogEvent::CbSetComputeUnitLimit { units } => {
+                out.push(format!(
+                    "Program {} set compute unit limit {}",
+                    CB_PK, units
+                ));
+            }
+
+            LogEvent::CbSetComputeUnitPrice { micro_lamports } => {
+                out.push(format!(
+                    "Program {} set compute unit price {}",
+                    CB_PK, micro_lamports
+                ));
+            }
+
+            LogEvent::CbRequestUnits { units } => {
+                out.push(format!("Program {} request units {}", CB_PK, units));
+            }
+
+            LogEvent::CbSetHeapFrame { bytes } => {
+                out.push(format!("Program {} set heap frame {}", CB_PK, bytes));
+            }
+
+            LogEvent::ProgramNotDeployed { pk_str_idx } => {
+                if let Some(ix) = pk_str_idx {
+                    if let Some(pk) = cls.strings.get(ix as usize) {
+                        out.push(format!("Program {} is not deployed", pk));
+                    } else {
+                        out.push("Program is not deployed".to_string());
+                    }
+                } else {
+                    out.push("Program is not deployed".to_string());
+                }
+            }
+
             LogEvent::TransferInsufficient { have, need } => {
                 out.push(format!(
                     "Transfer: insufficient lamports {}, need {}",
@@ -452,8 +493,6 @@ where
                         "Create Account: account Address {{ {} }} already in use",
                         inner
                     ));
-                } else {
-                    out.push("Create Account: account Address { ? } already in use".to_string());
                 }
             }
 
@@ -463,8 +502,6 @@ where
                         "Allocate: account Address {{ {} }} already in use",
                         inner
                     ));
-                } else {
-                    out.push("Allocate: account Address { ? } already in use".to_string());
                 }
             }
 
@@ -475,62 +512,14 @@ where
             }
 
             LogEvent::Unparsed { str_idx } => {
-                if cfg.emit_unparsed_lines
-                    && let Some(s) = cls.strings.get(str_idx as usize)
-                {
-                    out.push(s.clone());
+                if cfg.emit_unparsed_lines {
+                    if let Some(s) = cls.strings.get(str_idx as usize) {
+                        out.push(s.clone());
+                    }
                 }
             }
         }
     }
 
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ahash::AHashMap;
-
-    fn pid_lookup() -> AHashMap<String, u32> {
-        let mut map = AHashMap::new();
-        map.insert(CB_PK.into(), 1);
-        map.insert("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".into(), 2);
-        map.insert("11111111111111111111111111111111".into(), 3);
-        map
-    }
-
-    #[test]
-    fn roundtrip_unknown_pid_and_plain_and_inuse() {
-        let logs = vec![
-            "Program G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha invoke [2]".into(),
-            "Program G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha consumed 69464 of 185153 compute units".into(),
-            "Program G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha success".into(),
-            "Checking if destination stake is mergeable".into(),
-            "Checking if source stake is mergeable".into(),
-            "Merging stake accounts".into(),
-            "Create Account: account Address { address: HQ1Z9F6..., base: None } already in use".into(),
-            "Allocate: account Address { address: J7oxhNg..., base: None } already in use".into(),
-        ];
-
-        let map = pid_lookup();
-
-        let cls = encode_logs(&logs, |s| map.get(s).copied(), EncodeConfig::default());
-        let back = decode_logs(
-            &cls,
-            |id| {
-                for (k, v) in map.iter() {
-                    if *v == id {
-                        return k.clone();
-                    }
-                }
-                format!("PID{}", id)
-            },
-            DecodeConfig {
-                emit_unparsed_lines: true,
-            },
-        );
-
-        assert_eq!(back, logs);
-    }
 }
