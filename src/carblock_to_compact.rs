@@ -8,6 +8,7 @@ use std::{io::Read, mem::MaybeUninit};
 use wincode::Deserialize as WincodeDeserialize;
 use wincode::SchemaRead;
 
+use crate::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
 use crate::transaction_parser::Signature;
 use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
 
@@ -174,7 +175,7 @@ pub struct CompactMetadata {
     pub loaded_readonly_ids: Vec<u32>,
     pub return_data: Option<CompactReturnData>,
     pub inner_instructions: Option<Vec<CompactInnerInstructions>>,
-    pub log_messages: Option<Vec<String>>,
+    pub log_messages: Option<CompactLogStream>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
@@ -546,7 +547,17 @@ fn meta_to_compact<P: PubkeyIdProvider>(
     let log_messages = if meta.log_messages.is_empty() {
         None
     } else {
-        Some(meta.log_messages.clone())
+        let mut lookup_pid = |base58: &str| -> Option<u32> {
+            Pubkey::try_from(base58)
+                .ok()
+                .and_then(|pk| resolver.resolve(&pk.to_bytes()))
+        };
+
+        Some(encode_logs(
+            &meta.log_messages,
+            &mut lookup_pid,
+            EncodeConfig::default(),
+        ))
     };
 
     let err = tx_error_from_meta(meta);

@@ -7,7 +7,6 @@ use blockzilla::{
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use postcard::to_allocvec;
-use solana_pubkey::Pubkey;
 use std::{
     collections::HashSet,
     error::Error as StdError,
@@ -25,11 +24,9 @@ use tokio::{
 use crate::LOG_INTERVAL_SECS;
 use crate::build_registry::{epoch_dir, fp128_from_bytes, keys_bin};
 use blockzilla::carblock_to_compact::{
-    CompactBlock, CompactMetadataPayload, MetadataMode, PubkeyIdProvider, StaticPubkeyIdProvider,
+    CompactBlock, MetadataMode, PubkeyIdProvider, StaticPubkeyIdProvider,
     carblock_to_compactblock_inplace,
 };
-
-use blockzilla::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
 
 fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
     base.join(format!("epoch-{epoch:04}/optimized"))
@@ -80,6 +77,16 @@ fn is_soft_eof(e: &anyhow::Error) -> bool {
     false
 }
 
+#[inline]
+fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
+    let bytes = to_allocvec(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
+
+    batch.reserve(4 + bytes.len());
+    batch.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    batch.extend_from_slice(&bytes);
+    Ok(())
+}
+
 struct RegistryIndex {
     _mmap: Mmap,
     map: AHashMap<u128, u32>,
@@ -120,66 +127,6 @@ impl RegistryIndex {
     #[inline(always)]
     fn total(&self) -> usize {
         self.total
-    }
-}
-
-#[inline]
-fn push_block_into_batch(batch: &mut Vec<u8>, cb: &CompactBlock) -> anyhow::Result<()> {
-    let bytes = to_allocvec(cb).map_err(|e| anyhow!("serialize compact block: {e}"))?;
-
-    batch.reserve(4 + bytes.len());
-    batch.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    batch.extend_from_slice(&bytes);
-    Ok(())
-}
-
-fn compact_logs_inplace<P: PubkeyIdProvider>(
-    cblk: &mut CompactBlock,
-    resolver: &mut P,
-    enable: bool,
-) {
-    if !enable {
-        return;
-    }
-
-    let mut lookup_pid = |base58: &str| -> Option<u32> {
-        Pubkey::try_from(base58)
-            .ok()
-            .and_then(|pk| resolver.resolve(&pk.to_bytes()))
-    };
-
-    for tx in &mut cblk.txs {
-        let Some(CompactMetadataPayload::Compact(ref mut meta)) = tx.metadata else {
-            continue;
-        };
-        let Some(ref logs) = meta.log_messages else {
-            continue;
-        };
-
-        let cls: CompactLogStream = encode_logs(logs, &mut lookup_pid, EncodeConfig::default());
-
-        const TAG: &[u8] = b"CLZ\0";
-        if let Ok(mut blob) = postcard::to_allocvec(&cls) {
-            let mut tagged = Vec::with_capacity(TAG.len() + blob.len());
-            tagged.extend_from_slice(TAG);
-            tagged.append(&mut blob);
-
-            match meta.return_data {
-                Some(ref mut rd) => {
-                    rd.data = tagged;
-                }
-                None => {
-                    meta.return_data = Some(blockzilla::carblock_to_compact::CompactReturnData {
-                        program_id_id: 0,
-                        data: tagged,
-                    });
-                }
-            }
-
-            meta.log_messages = None;
-        } else {
-            tracing::warn!("compact_logs: postcard encode failed; keeping original logs");
-        }
     }
 }
 
@@ -279,8 +226,6 @@ pub async fn optimize_epoch_without_registry(
     let mut blocks = 0u64;
     let mut msg = String::with_capacity(128);
 
-    let enable_log_compaction = matches!(metadata_mode, MetadataMode::Compact);
-
     'epoch: while let Some(block) = car.next_block().await? {
         if let Err(e) = block.block() {
             if is_soft_eof(&e) {
@@ -303,8 +248,6 @@ pub async fn optimize_epoch_without_registry(
             }
             return Err(e);
         }
-
-        compact_logs_inplace(&mut cblk, &mut provider, enable_log_compaction);
 
         push_block_into_batch(&mut frame_batch, &cblk)?;
 
@@ -398,7 +341,6 @@ pub async fn optimize_epoch(
     let mut blocks = 0u64;
     let mut msg = String::with_capacity(128);
 
-    let enable_log_compaction = matches!(metadata_mode, MetadataMode::Compact);
     let mut id_provider = StaticPubkeyIdProvider::new(&reg.map);
 
     'epoch: while let Some(block) = car.next_block().await? {
@@ -423,8 +365,6 @@ pub async fn optimize_epoch(
             }
             return Err(e);
         }
-
-        compact_logs_inplace(&mut cblk, &mut id_provider, enable_log_compaction);
 
         push_block_into_batch(&mut frame_batch, &cblk)?;
 
