@@ -9,14 +9,8 @@ use tokio::{
     time::{Duration, sleep},
 };
 
-/// Base URL for all epochs.
-/// Customize this if you ever mirror data elsewhere.
 const BASE_URL: &str = "https://files.old-faithful.net";
 
-/// Main entrypoint:
-/// Download a given epoch file (e.g. 800) into a given cache directory.
-/// Automatically builds the URL and output path.
-/// Uses aria2c with high-performance flags.
 pub async fn download_epoch(epoch: u64, cache_dir: &str, retries: usize) -> Result<PathBuf> {
     let url = format!("{}/{}/epoch-{}.car", BASE_URL, epoch, epoch);
     let out_path = Path::new(cache_dir).join(format!("epoch-{}.car", epoch));
@@ -25,7 +19,6 @@ pub async fn download_epoch(epoch: u64, cache_dir: &str, retries: usize) -> Resu
     Ok(out_path)
 }
 
-/// Run aria2c to download a single file with tuned performance flags.
 async fn download_with_aria2(url: &str, out_path: &Path) -> Result<()> {
     if which::which("aria2c").is_err() {
         return Err(anyhow!("aria2c not found in PATH"));
@@ -103,7 +96,6 @@ async fn download_with_aria2(url: &str, out_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Retry wrapper with exponential backoff
 async fn download_with_retry(url: &str, out_path: &Path, retries: usize) -> Result<()> {
     for attempt in 1..=retries {
         match download_with_aria2(url, out_path).await {

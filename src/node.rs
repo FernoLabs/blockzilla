@@ -161,22 +161,17 @@ pub fn peek_node_type(data: &[u8]) -> anyhow::Result<u64> {
     let kind = peek.u64()?;
     Ok(kind)
 }
-/// Raw CID bytes - avoids allocation during decode
 #[derive(Debug, Clone, Copy)]
 pub struct CborCidRef<'a> {
     pub bytes: &'a [u8],
 }
 
 impl<'a> CborCidRef<'a> {
-    /// Decode to actual CID only when needed
     #[inline]
     pub fn to_cid(&self) -> Result<Cid, cid::Error> {
-        // Skip the first byte (multicodec prefix)
-        //Cid::try_from(&self.bytes[1..])
         Cid::read_bytes(&self.bytes[1..])
     }
 
-    /// Get hash bytes for HashMap key without full CID decode
     #[inline]
     pub fn hash_bytes(&self) -> &[u8] {
         &self.bytes[1..]

@@ -29,7 +29,6 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
     type Error = anyhow::Error;
 
     fn try_into(self) -> Result<EncodedConfirmedBlock, Self::Error> {
-        // Constant strings to avoid allocation
         const MISSING_HASH: &str = "missing";
 
         let parent_slot = self
@@ -38,8 +37,7 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             .parent_slot
             .ok_or_else(|| anyhow!("missing parent block"))?;
 
-        // Pre-allocate with estimated capacity
-        let estimated_tx_count = 0; //self.block.entries.len() * 4; // Rough estimate
+        let estimated_tx_count = 0;
         let mut transactions: Vec<EncodedTransactionWithStatusMeta> =
             Vec::with_capacity(estimated_tx_count);
 
@@ -51,7 +49,6 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             for tx_cid in &entry.transactions {
                 match self.entries.get(&tx_cid.0) {
                     Some(Node::Transaction(tx)) => {
-                        // Merge dataframes
                         let meta_bytes = self
                             .merge_dataframe(&tx.metadata)
                             .context("merge_dataframe(meta) failed")?;
@@ -59,17 +56,14 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
                             .merge_dataframe(&tx.data)
                             .context("merge_dataframe(tx) failed")?;
 
-                        // Decode VersionedTransaction (bincode)
                         let (bincode::serde::Compat(vt), _len): (
                             bincode::serde::Compat<VersionedTransaction>,
                             usize,
                         ) = bincode::decode_from_slice(&tx_bytes, bincode::config::legacy())
                             .map_err(|err| anyhow!("cant decode {err}"))?;
 
-                        // Decode metadata (zstd + prost) with buffer reuse
                         let meta = decode_meta(&meta_bytes);
 
-                        // Re-encode transaction with buffer reuse
                         let encoded_tx = encode_transaction_base64(&vt)?;
 
                         transactions.push(EncodedTransactionWithStatusMeta {
@@ -89,7 +83,6 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
             }
         }
 
-        // Decode rewards efficiently
         let rewards = match self
             .block
             .rewards
@@ -108,17 +101,16 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
         Ok(EncodedConfirmedBlock {
             previous_blockhash: MISSING_HASH.to_string(),
             blockhash: MISSING_HASH.to_string(),
-            parent_slot: 0, //parent_slot,
+            parent_slot: 0,
             transactions,
             rewards,
             num_partitions: None,
-            block_time: None,   //self.block.meta.blocktime,
-            block_height: None, // self.block.meta.block_height,
+            block_time: None,
+            block_height: None,
         })
     }
 }
 
-/// Encode VersionedTransaction to base64 using thread-local buffer reuse
 #[inline]
 fn encode_transaction_base64(vt: &VersionedTransaction) -> Result<String> {
     TL_BINCODE_BUF.with(|bincode_cell| {
@@ -138,7 +130,6 @@ fn encode_transaction_base64(vt: &VersionedTransaction) -> Result<String> {
     })
 }
 
-/// Decode and convert protobuf bytes into UiTransactionStatusMeta
 #[inline]
 pub fn decode_meta(meta_bytes: &[u8]) -> Option<UiTransactionStatusMeta> {
     decode_protobuf_meta(meta_bytes)
@@ -146,20 +137,17 @@ pub fn decode_meta(meta_bytes: &[u8]) -> Option<UiTransactionStatusMeta> {
         .ok()
 }
 
-/// Decode zstd-compressed protobuf using thread-local reusable buffer
 fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStatusMeta> {
     TL_META_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear();
 
-        // Streaming zstd decode
         let mut decoder =
             ZstdDecoder::new(Cursor::new(bytes)).context("zstd stream open failed")?;
         decoder
             .read_to_end(&mut buf)
             .context("zstd decode failed")?;
 
-        // Prost decode from reused buffer
         confirmed_block::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
             .context("prost decode failed")
     })
