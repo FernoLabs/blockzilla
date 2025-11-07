@@ -2,6 +2,7 @@ use ahash::AHashMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
+use wincode::SchemaRead;
 
 const CB_PK: &str = "ComputeBudget111111111111111111111111111111";
 
@@ -63,7 +64,7 @@ pub enum LogEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub struct CompactLogStream {
     pub bytes: Vec<u8>,
     pub strings: Vec<String>,
