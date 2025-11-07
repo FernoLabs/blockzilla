@@ -63,8 +63,8 @@ curl -fSL https://files.old-faithful.net/0/epoch-0.car -o cache/epoch-0.car # /!
 
 # convert the cached CAR without running the downloader/cleanup workflow
 cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized
-# parse and embed compact transaction metadata (omit the flag to store raw protobuf bytes)
-cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized --include-metadata
+# store raw transaction metadata instead of compact encoding
+cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized --raw-metadata
 # drop metadata entirely from the output
 cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized --drop-metadata
 
