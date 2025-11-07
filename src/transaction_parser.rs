@@ -6,10 +6,10 @@ use solana_pubkey::Pubkey;
 use std::mem::MaybeUninit;
 use std::ptr::copy_nonoverlapping;
 use wincode::ReadResult;
-use wincode::SchemaRead;
 use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
 use wincode::len::ShortU16Len;
+use wincode::{SchemaRead, SchemaWrite};
 
 #[inline(always)]
 fn read_short_u16_len(buf: &[u8], pos: &mut usize) -> anyhow::Result<usize> {
@@ -180,7 +180,7 @@ impl<'de> serde::Deserialize<'de> for Signature {
 
 pub const PUBKEY_BYTES: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompiledInstruction {
     pub program_id_index: u8,
     #[wincode(with = "containers::Vec<Pod<u8>, ShortU16Len>")]
@@ -189,14 +189,14 @@ pub struct CompiledInstruction {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct MessageHeader {
     pub num_required_signatures: u8,
     pub num_readonly_signed_accounts: u8,
     pub num_readonly_unsigned_accounts: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub struct MessageAddressTableLookup {
     pub account_key: [u8; PUBKEY_BYTES],
     #[wincode(with = "containers::Vec<Pod<u8>, ShortU16Len>")]
@@ -205,7 +205,7 @@ pub struct MessageAddressTableLookup {
     pub readonly_indexes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub struct LegacyMessage {
     pub header: MessageHeader,
     #[wincode(with = "containers::Vec<Pod<[u8; PUBKEY_BYTES]>, ShortU16Len>")]
@@ -215,7 +215,7 @@ pub struct LegacyMessage {
     pub instructions: Vec<CompiledInstruction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub struct V0Message {
     pub header: MessageHeader,
     #[wincode(with = "containers::Vec<Pod<[u8; PUBKEY_BYTES]>, ShortU16Len>")]

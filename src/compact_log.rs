@@ -1,12 +1,11 @@
 use ahash::AHashMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use postcard::from_bytes;
 use serde::{Deserialize, Serialize};
-use wincode::SchemaRead;
+use wincode::{SchemaRead, SchemaWrite};
 
 const CB_PK: &str = "ComputeBudget111111111111111111111111111111";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub enum LogEvent {
     Invoke {
         pid: Option<u32>,
@@ -81,7 +80,7 @@ pub enum LogEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct CompactLogStream {
     pub bytes: Vec<u8>,
     pub strings: Vec<String>,
@@ -93,6 +92,12 @@ pub struct EncodeConfig {}
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecodeConfig {
     pub emit_unparsed_lines: bool,
+}
+
+#[inline(always)]
+fn append_event(ev_bytes: &mut Vec<u8>, ev: &LogEvent) {
+    let encoded = wincode::serialize(ev).expect("encode event");
+    ev_bytes.extend_from_slice(&encoded);
 }
 
 pub fn encode_logs<F>(lines: &[String], mut lookup_pid: F, _cfg: EncodeConfig) -> CompactLogStream
@@ -129,7 +134,7 @@ where
             let ev = LogEvent::CreateAccountAlreadyInUse {
                 addr_fields_idx: idx,
             };
-            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            append_event(&mut ev_bytes, &ev);
             count += 1;
             continue 'lines;
         }
@@ -144,7 +149,7 @@ where
             let ev = LogEvent::AllocateAlreadyInUse {
                 addr_fields_idx: idx,
             };
-            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            append_event(&mut ev_bytes, &ev);
             count += 1;
             continue 'lines;
         }
@@ -157,7 +162,7 @@ where
                 let need_result = need_str.replace(',', "").parse::<u64>();
                 if let (Ok(have), Ok(need)) = (have_result, need_result) {
                     let ev = LogEvent::TransferInsufficient { have, need };
-                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    append_event(&mut ev_bytes, &ev);
                     count += 1;
                     continue 'lines;
                 }
@@ -166,7 +171,7 @@ where
             let ev = LogEvent::Unparsed {
                 str_idx: intern(line),
             };
-            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            append_event(&mut ev_bytes, &ev);
             count += 1;
             continue 'lines;
         }
@@ -175,7 +180,7 @@ where
             let ev = LogEvent::Msg {
                 str_idx: intern(text),
             };
-            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            append_event(&mut ev_bytes, &ev);
             count += 1;
             continue 'lines;
         }
@@ -183,7 +188,7 @@ where
         if let Some(rest) = line.strip_prefix("Program ") {
             if rest == "is not deployed" {
                 let ev = LogEvent::ProgramNotDeployed { pk_str_idx: None };
-                ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                append_event(&mut ev_bytes, &ev);
                 count += 1;
                 continue 'lines;
             }
@@ -191,7 +196,7 @@ where
                 let ev = LogEvent::ProgramNotDeployed {
                     pk_str_idx: Some(intern(pk.trim())),
                 };
-                ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                append_event(&mut ev_bytes, &ev);
                 count += 1;
                 continue 'lines;
             }
@@ -201,14 +206,14 @@ where
                     && let Ok(units) = rem[..pos].replace(',', "").parse::<u32>()
                 {
                     let ev = LogEvent::Consumption { units };
-                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    append_event(&mut ev_bytes, &ev);
                     count += 1;
                     continue 'lines;
                 }
                 let ev = LogEvent::Unparsed {
                     str_idx: intern(line),
                 };
-                ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                append_event(&mut ev_bytes, &ev);
                 count += 1;
                 continue 'lines;
             }
@@ -231,7 +236,7 @@ where
                         && let Ok(units) = tail.trim().replace(',', "").parse::<u32>()
                     {
                         let ev = LogEvent::CbRequestUnits { units };
-                        ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                        append_event(&mut ev_bytes, &ev);
                         count += 1;
                         continue 'lines;
                     }
@@ -245,14 +250,14 @@ where
                         is_cb,
                         pk_str_idx: pk_idx_opt,
                     };
-                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    append_event(&mut ev_bytes, &ev);
                     count += 1;
                     continue 'lines;
                 }
 
                 if after_pk == "success" {
                     let ev = LogEvent::Success;
-                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    append_event(&mut ev_bytes, &ev);
                     count += 1;
                     continue 'lines;
                 }
@@ -261,11 +266,11 @@ where
         let ev = LogEvent::Plain {
             str_idx: intern(line),
         };
-        ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+        append_event(&mut ev_bytes, &ev);
         count += 1;
     }
 
-    let mut bytes = postcard::to_allocvec(&count).expect("encode length");
+    let mut bytes = wincode::serialize(&count).expect("encode length");
     bytes.extend_from_slice(&ev_bytes);
 
     CompactLogStream { bytes, strings }
@@ -279,7 +284,7 @@ pub fn decode_logs<G>(
 where
     G: FnMut(u32) -> String,
 {
-    let events: Vec<LogEvent> = from_bytes(&cls.bytes).expect("postcard decode");
+    let events: Vec<LogEvent> = wincode::deserialize(&cls.bytes).expect("wincode decode");
     let mut out = Vec::<String>::with_capacity(events.len());
     let mut stack: Vec<(Option<u32>, bool, Option<u16>)> = Vec::with_capacity(8);
 

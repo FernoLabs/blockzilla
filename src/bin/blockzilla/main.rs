@@ -134,7 +134,7 @@ enum OptimizeCommand {
         drop_metadata: bool,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
-        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Wincode)]
         format: OptimizedFormat,
     },
 
@@ -157,7 +157,7 @@ enum OptimizeCommand {
         drop_metadata: bool,
         #[arg(value_name = "EPOCH")]
         epoch: u64,
-        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Wincode)]
         format: OptimizedFormat,
     },
 
@@ -184,7 +184,7 @@ enum OptimizeCommand {
             conflicts_with = "include_metadata"
         )]
         drop_metadata: bool,
-        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Wincode)]
         format: OptimizedFormat,
     },
 
@@ -213,7 +213,7 @@ enum OptimizeCommand {
             conflicts_with = "include_metadata"
         )]
         drop_metadata: bool,
-        #[arg(long, value_enum, default_value_t = OptimizedFormat::Postcard)]
+        #[arg(long, value_enum, default_value_t = OptimizedFormat::Wincode)]
         format: OptimizedFormat,
     },
 
@@ -471,7 +471,7 @@ fn optimized_paths(optimized_dir: &str, epoch: u64, format: OptimizedFormat) -> 
     let base = Path::new(optimized_dir);
     (
         match format {
-            OptimizedFormat::Postcard => base.join(format!("epoch-{epoch:04}.bin")),
+            OptimizedFormat::Wincode => base.join(format!("epoch-{epoch:04}.bin")),
             OptimizedFormat::Cbor => base.join(format!("epoch-{epoch:04}.cbor")),
         },
         base.join(format!("epoch-{epoch:04}.idx")),
