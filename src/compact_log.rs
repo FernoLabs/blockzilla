@@ -95,9 +95,8 @@ pub struct DecodeConfig {
 }
 
 #[inline(always)]
-fn append_event(ev_bytes: &mut Vec<u8>, ev: &LogEvent) {
-    let encoded = wincode::serialize(ev).expect("encode event");
-    ev_bytes.extend_from_slice(&encoded);
+fn append_event(events: &mut Vec<LogEvent>, ev: LogEvent) {
+    events.push(ev);
 }
 
 pub fn encode_logs<F>(lines: &[String], mut lookup_pid: F, _cfg: EncodeConfig) -> CompactLogStream
@@ -118,8 +117,7 @@ where
     };
 
     let cb_pid_auto = lookup_pid(CB_PK);
-    let mut ev_bytes = Vec::<u8>::new();
-    let mut count: u32 = 0;
+    let mut events = Vec::<LogEvent>::new();
 
     'lines: for line in lines {
         let line_bytes = line.as_bytes();
@@ -134,8 +132,7 @@ where
             let ev = LogEvent::CreateAccountAlreadyInUse {
                 addr_fields_idx: idx,
             };
-            append_event(&mut ev_bytes, &ev);
-            count += 1;
+            append_event(&mut events, ev);
             continue 'lines;
         }
 
@@ -149,8 +146,7 @@ where
             let ev = LogEvent::AllocateAlreadyInUse {
                 addr_fields_idx: idx,
             };
-            append_event(&mut ev_bytes, &ev);
-            count += 1;
+            append_event(&mut events, ev);
             continue 'lines;
         }
 
@@ -162,8 +158,7 @@ where
                 let need_result = need_str.replace(',', "").parse::<u64>();
                 if let (Ok(have), Ok(need)) = (have_result, need_result) {
                     let ev = LogEvent::TransferInsufficient { have, need };
-                    append_event(&mut ev_bytes, &ev);
-                    count += 1;
+                    append_event(&mut events, ev);
                     continue 'lines;
                 }
             }
@@ -171,8 +166,7 @@ where
             let ev = LogEvent::Unparsed {
                 str_idx: intern(line),
             };
-            append_event(&mut ev_bytes, &ev);
-            count += 1;
+            append_event(&mut events, ev);
             continue 'lines;
         }
 
@@ -180,24 +174,21 @@ where
             let ev = LogEvent::Msg {
                 str_idx: intern(text),
             };
-            append_event(&mut ev_bytes, &ev);
-            count += 1;
+            append_event(&mut events, ev);
             continue 'lines;
         }
 
         if let Some(rest) = line.strip_prefix("Program ") {
             if rest == "is not deployed" {
                 let ev = LogEvent::ProgramNotDeployed { pk_str_idx: None };
-                append_event(&mut ev_bytes, &ev);
-                count += 1;
+                append_event(&mut events, ev);
                 continue 'lines;
             }
             if let Some(pk) = rest.strip_suffix(" is not deployed") {
                 let ev = LogEvent::ProgramNotDeployed {
                     pk_str_idx: Some(intern(pk.trim())),
                 };
-                append_event(&mut ev_bytes, &ev);
-                count += 1;
+                append_event(&mut events, ev);
                 continue 'lines;
             }
 
@@ -206,15 +197,13 @@ where
                     && let Ok(units) = rem[..pos].replace(',', "").parse::<u32>()
                 {
                     let ev = LogEvent::Consumption { units };
-                    append_event(&mut ev_bytes, &ev);
-                    count += 1;
+                    append_event(&mut events, ev);
                     continue 'lines;
                 }
                 let ev = LogEvent::Unparsed {
                     str_idx: intern(line),
                 };
-                append_event(&mut ev_bytes, &ev);
-                count += 1;
+                append_event(&mut events, ev);
                 continue 'lines;
             }
 
@@ -236,8 +225,7 @@ where
                         && let Ok(units) = tail.trim().replace(',', "").parse::<u32>()
                     {
                         let ev = LogEvent::CbRequestUnits { units };
-                        append_event(&mut ev_bytes, &ev);
-                        count += 1;
+                        append_event(&mut events, ev);
                         continue 'lines;
                     }
                 }
@@ -250,15 +238,13 @@ where
                         is_cb,
                         pk_str_idx: pk_idx_opt,
                     };
-                    append_event(&mut ev_bytes, &ev);
-                    count += 1;
+                    append_event(&mut events, ev);
                     continue 'lines;
                 }
 
                 if after_pk == "success" {
                     let ev = LogEvent::Success;
-                    append_event(&mut ev_bytes, &ev);
-                    count += 1;
+                    append_event(&mut events, ev);
                     continue 'lines;
                 }
             }
@@ -266,12 +252,10 @@ where
         let ev = LogEvent::Plain {
             str_idx: intern(line),
         };
-        append_event(&mut ev_bytes, &ev);
-        count += 1;
+        append_event(&mut events, ev);
     }
 
-    let mut bytes = wincode::serialize(&count).expect("encode length");
-    bytes.extend_from_slice(&ev_bytes);
+    let bytes = wincode::serialize(&events).expect("encode events");
 
     CompactLogStream { bytes, strings }
 }
