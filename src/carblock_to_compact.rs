@@ -11,18 +11,10 @@ use wincode::SchemaRead;
 use crate::transaction_parser::Signature;
 use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
 
-/// Trait used by compact conversion helpers to translate 32-byte pubkeys into
-/// compact u32 identifiers. Implementations can be backed by a static registry
-/// (lookup-only) or dynamically assign identifiers as new keys are observed.
 pub trait PubkeyIdProvider {
-    /// Returns the identifier for `key`, inserting it if required. Providers
-    /// that do not support insertion should return `None` for missing keys.
     fn resolve(&mut self, key: &[u8; 32]) -> Option<u32>;
 }
 
-/// Adapter that exposes an `AHashMap<u128, u32>` (fingerprint → id) as a
-/// `PubkeyIdProvider`. This never inserts new entries; callers receive `None`
-/// for unknown keys.
 pub struct StaticPubkeyIdProvider<'a> {
     map: &'a AHashMap<u128, u32>,
 }
@@ -53,8 +45,6 @@ pub enum MetadataMode {
 }
 
 trait CarBlockExt {
-    /// Copy a DataFrame `next` chain into `dst`. If `inline_prefix` is Some, it is
-    /// copied first (used when a small inline segment precedes the chain).
     fn dataframe_copy_into(
         &self,
         cid: &Cid,
@@ -70,8 +60,6 @@ impl CarBlockExt for CarBlock {
         dst: &mut Vec<u8>,
         inline_prefix: Option<&[u8]>,
     ) -> anyhow::Result<()> {
-        // We don't know the total length without a separate walk; keep it simple:
-        // reserve once for prefix + 64 KiB to cut growth steps, then stream-copy.
         let prefix_len = inline_prefix.map_or(0, |p| p.len());
         dst.clear();
         dst.reserve(prefix_len + (64 << 10));
@@ -87,9 +75,6 @@ impl CarBlockExt for CarBlock {
     }
 }
 
-/// =========================================================================
-/// Types (unchanged shapes)
-/// =========================================================================
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum CompactRewardType {
@@ -117,7 +102,6 @@ pub struct CompactAddressTableLookup {
     pub readonly_indexes: Vec<u8>,
 }
 
-/// ===== TransactionError (compact) =====
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, Serialize, Deserialize)]
 pub enum CompactInstructionError {
     Builtin(u32),
@@ -235,15 +219,12 @@ fn id_for_pubkey<P: PubkeyIdProvider>(resolver: &mut P, key: &[u8; 32]) -> Optio
     resolver.resolve(key)
 }
 
-/// ===============================
-/// Rewards — decode via Rewards node (CarBlock pattern)
-/// ===============================
 #[derive(Debug, Clone, SchemaRead)]
 struct ClientRewardBytesPk {
     pub pubkey: [u8; 32],
     pub lamports: i64,
     pub post_balance: u64,
-    pub reward_type: u8, // 0..=4 or 255
+    pub reward_type: u8,
     pub commission: Option<u8>,
 }
 #[derive(Debug, Clone, SchemaRead)]
@@ -329,22 +310,16 @@ fn decode_rewards_via_node<P: PubkeyIdProvider>(
     ))
 }
 
-/// ===============================
-/// Metadata extraction helpers
-/// ===============================
-
 #[inline(always)]
 fn looks_like_zstd(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && bytes[0] == 0x28 && bytes[1] == 0xB5 && bytes[2] == 0x2F && bytes[3] == 0xFD
 }
 
-/// Fill `buf` with decompressed (or raw) metadata and return a slice into it.
-/// Zero extra allocs: `buf` is reused; when you later want to store, move it with `mem::take`.
 fn metadata_proto_into<'a>(src: &[u8], buf: &'a mut Vec<u8>) -> &'a [u8] {
     buf.clear();
     if looks_like_zstd(src) {
         if let Ok(out) = zstd::bulk::decompress(src, 512 * 1024) {
-            *buf = out; // take ownership without extra copy
+            *buf = out;
             return buf.as_slice();
         }
         if let Ok(mut dec) = zstd::stream::read::Decoder::new(src) {
@@ -591,9 +566,6 @@ fn meta_to_compact<P: PubkeyIdProvider>(
     }
 }
 
-/// ===============================
-/// In-place builder (reuse the same CompactBlock across iterations)
-/// ===============================
 pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
     block: &CarBlock,
     resolver: &mut P,
@@ -604,7 +576,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
 ) -> Result<()> {
     out.slot = block.block()?.slot;
 
-    // -------- rewards --------
     out.rewards.clear();
     {
         let mut rewards_buf = Vec::<u8>::with_capacity(64 << 10);
@@ -614,8 +585,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
         out.rewards.extend(rewards);
     }
 
-    // -------- transactions --------
-    // Pre-count to reserve tx slots
     let mut target_len = 0usize;
     for entry_cid_res in block.block()?.entries.iter() {
         let entry_cid = entry_cid_res?;
@@ -643,7 +612,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 continue;
             };
 
-            // tx bytes: inline or chained
             let tx_bytes: &[u8] = match tx_node.data.next {
                 None => tx_node.data.data,
                 Some(df_cbor) => {
@@ -658,7 +626,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 .map_err(|_| anyhow!("failed to decode VersionedTransaction"))?;
             let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
-            // ensure tx slot
             if out.txs.len() == written {
                 out.txs.push(CompactVersionedTx {
                     signatures: Vec::with_capacity(2),
@@ -677,7 +644,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
             }
             let vtx = &mut out.txs[written];
 
-            // clear inner vecs to reuse capacity
             vtx.signatures.clear();
             vtx.account_ids.clear();
             vtx.instructions.clear();
@@ -686,13 +652,11 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
             }
             vtx.metadata = None;
 
-            // signatures
             vtx.signatures.reserve(tx_ref.signatures.len());
             for s in &tx_ref.signatures {
                 vtx.signatures.push(Signature(s.0));
             }
 
-            // header, hash, version
             vtx.header = *tx_ref.message.header();
             vtx.is_versioned = matches!(tx_ref.message, VersionedMessage::V0(_));
             vtx.recent_blockhash = match &tx_ref.message {
@@ -700,7 +664,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 VersionedMessage::V0(m) => m.recent_blockhash,
             };
 
-            // account ids
             let static_keys = tx_ref.message.static_account_keys();
             vtx.account_ids.reserve(static_keys.len());
             for k in static_keys {
@@ -714,7 +677,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 }
             }
 
-            // instructions
             {
                 vtx.instructions.reserve(tx_ref.message.instructions_len());
                 for ix in tx_ref.message.instructions_iter() {
@@ -722,7 +684,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 }
             }
 
-            // address table lookups
             vtx.address_table_lookups = match tx_ref.message.address_table_lookups() {
                 None => None,
                 Some(lookups) => {
@@ -748,19 +709,16 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 }
             };
 
-            // ---- metadata (fixed to avoid E0502 borrow conflict) ----
             let df = &tx_node.metadata;
 
             vtx.metadata = if matches!(metadata_mode, MetadataMode::None) {
                 None
             } else if let Some(next) = df.next {
-                // Chained case: first coalesce chain into buf_meta (including inline df.data)
                 let df_cid = next.to_cid()?;
                 buf_meta.clear();
                 block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
 
-                // Now the source is buf_meta; use buf_tx as the decompression scratch
-                let raw_slice = metadata_proto_into(&*buf_meta, buf_tx); // fills buf_tx
+                let raw_slice = metadata_proto_into(&*buf_meta, buf_tx);
 
                 match metadata_mode {
                     MetadataMode::Compact => {
@@ -781,8 +739,7 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                     MetadataMode::None => None,
                 }
             } else {
-                // Inline case: df.data is the source; we can safely use buf_meta as scratch
-                let raw_slice = metadata_proto_into(df.data, buf_meta); // fills buf_meta
+                let raw_slice = metadata_proto_into(df.data, buf_meta);
 
                 match metadata_mode {
                     MetadataMode::Compact => {
@@ -804,7 +761,6 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 }
             };
 
-            // drop decoded tx in-place (we reused its memory)
             unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
 
             written += 1;

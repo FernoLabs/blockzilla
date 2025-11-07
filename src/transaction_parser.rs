@@ -11,7 +11,6 @@ use wincode::containers::{self, Elem, Pod};
 use wincode::io::Reader;
 use wincode::len::ShortU16Len;
 
-/// Solana shortvec decoder
 #[inline(always)]
 fn read_short_u16_len(buf: &[u8], pos: &mut usize) -> anyhow::Result<usize> {
     let mut len = 0usize;

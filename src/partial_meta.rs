@@ -45,7 +45,6 @@ pub fn extract_metadata_pubkeys(
         return Ok(());
     }
 
-    // 1) Decompress if needed
     let raw = if is_zstd(meta_zstd_or_raw) {
         match zstd::decode_all(meta_zstd_or_raw) {
             Ok(data) => data,
@@ -58,7 +57,6 @@ pub fn extract_metadata_pubkeys(
         meta_zstd_or_raw.to_vec()
     };
 
-    // 2) Decode protobuf
     let pb: TransactionStatusMeta = match TransactionStatusMeta::decode(raw.as_slice()) {
         Ok(v) => v,
         Err(e) => {
@@ -67,7 +65,6 @@ pub fn extract_metadata_pubkeys(
         }
     };
 
-    // 3) Collect keys
     for r in &pb.rewards {
         if r.pubkey.is_empty() {
             warn!("reward entry missing pubkey");

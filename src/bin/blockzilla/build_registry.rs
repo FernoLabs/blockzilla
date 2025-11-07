@@ -25,15 +25,9 @@ use tokio::{
 
 use crate::LOG_INTERVAL_SECS;
 
-// ===============================
-// Config
-// ===============================
 const BUF_WRITER_BYTES: usize = 16 * 1024 * 1024;
 const EXPECTED_UNIQUE_FP: usize = 12_000_000;
 
-// ===============================
-// Paths
-// ===============================
 pub fn epoch_dir(base: &Path, epoch: u64) -> PathBuf {
     base.join(format!("epoch-{epoch:04}"))
 }
@@ -71,9 +65,6 @@ async fn release_epoch_lock(dir: &Path) {
     let _ = fs::remove_file(lock_path(dir)).await;
 }
 
-// ===============================
-// Fingerprint (u128 from 32B pubkey)
-// ===============================
 #[inline(always)]
 pub fn fp128_from_bytes(b: &[u8; 32]) -> u128 {
     let a = u128::from_le_bytes([
@@ -87,9 +78,6 @@ pub fn fp128_from_bytes(b: &[u8; 32]) -> u128 {
     a ^ c.rotate_left(64)
 }
 
-// ===============================
-// Soft EOF detection
-// ===============================
 fn is_soft_eof(e: &anyhow::Error) -> bool {
     let mut cur: Option<&(dyn StdError + 'static)> = Some(e.as_ref());
     while let Some(err) = cur {
@@ -125,7 +113,6 @@ pub async fn process_epoch_one_pass(
         return Ok(0);
     }
 
-    // Lock
     let _lock = match try_epoch_lock(&edir).await? {
         Some(f) => Some(f),
         None => {
@@ -134,7 +121,6 @@ pub async fn process_epoch_one_pass(
         }
     };
 
-    // Temp writers
     let tmp_fp_path = unique_tmp_file(&edir, "fp2key");
     let tmp_keys_path = unique_tmp_file(&edir, "keys");
     let mut fp_writer =
@@ -142,10 +128,8 @@ pub async fn process_epoch_one_pass(
     let mut keys_writer =
         BufWriter::with_capacity(BUF_WRITER_BYTES, File::create(&tmp_keys_path).await?);
 
-    // Counts
     let mut counts: AHashMap<u128, u16> = AHashMap::with_capacity(EXPECTED_UNIQUE_FP);
 
-    // Reader
     let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline).await?;
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
@@ -169,7 +153,6 @@ pub async fn process_epoch_one_pass(
         };
 
         for entry_cid in info.entries.iter() {
-            // Decode Entry
             let entry = match (|| -> anyhow::Result<_> {
                 let block_node = block.decode(entry_cid?.hash_bytes())?;
                 let Node::Entry(entry) = block_node else {
@@ -183,7 +166,6 @@ pub async fn process_epoch_one_pass(
             };
 
             for tx_cid in entry.transactions.iter() {
-                // Decode Transaction
                 let tx_node = match (|| -> anyhow::Result<_> {
                     let tcid = tx_cid?;
                     let block_node = block.decode(tcid.hash_bytes())?;
@@ -199,7 +181,6 @@ pub async fn process_epoch_one_pass(
 
                 total_txs += 1;
 
-                // Transaction bytes
                 let tx_bytes: &[u8] = match tx_node.data.next {
                     None => tx_node.data.data,
                     Some(df_cid) => {
@@ -211,7 +192,6 @@ pub async fn process_epoch_one_pass(
                     }
                 };
 
-                // parse account keys from transaction
                 keys_vec.clear();
                 if parse_account_keys_only(tx_bytes, &mut keys_vec)
                     .ok()
@@ -222,7 +202,6 @@ pub async fn process_epoch_one_pass(
                 }
 
                 if parse_metadata {
-                    // Decode metadata fully and walk
                     let meta_res = (|| -> anyhow::Result<()> {
                         let meta_bytes: &[u8] = match tx_node.metadata.next {
                             None => tx_node.metadata.data,
@@ -243,12 +222,12 @@ pub async fn process_epoch_one_pass(
                     })();
 
                     if let Err(e) = meta_res
-                        && blocks_done == 0 {
-                            tracing::debug!("metadata parse failed: {e}");
-                        }
+                        && blocks_done == 0
+                    {
+                        tracing::debug!("metadata parse failed: {e}");
+                    }
                 }
 
-                // Process all collected keys
                 for &pk in keys_vec.iter() {
                     let kb = pk.to_bytes();
                     let fp = fp128_from_bytes(&kb);
@@ -282,7 +261,6 @@ pub async fn process_epoch_one_pass(
         }
     }
 
-    // Final flush and move
     fp_writer.flush().await?;
     keys_writer.flush().await?;
     if fs::metadata(&final_fp).await.is_ok() {
@@ -294,7 +272,6 @@ pub async fn process_epoch_one_pass(
     fs::rename(&tmp_fp_path, &final_fp).await?;
     fs::rename(&tmp_keys_path, &final_keys).await?;
 
-    // Final progress line
     let elapsed = start.elapsed().as_secs_f64().max(0.001);
     let blkps = blocks_done as f64 / elapsed;
     let tps = total_txs as f64 / elapsed;
@@ -307,9 +284,6 @@ pub async fn process_epoch_one_pass(
     Ok(counts.len())
 }
 
-// ===============================
-// Orchestration (public API)
-// ===============================
 pub async fn build_registry_auto(
     cache_dir: &str,
     results_dir: &str,
@@ -319,7 +293,6 @@ pub async fn build_registry_auto(
 ) -> Result<()> {
     fs::create_dir_all(results_dir).await.ok();
 
-    // detect already-completed epochs (skip those)
     let mut completed = HashSet::new();
     if let Ok(mut rd) = fs::read_dir(results_dir).await {
         while let Ok(Some(ent)) = rd.next_entry().await {
@@ -331,9 +304,10 @@ pub async fn build_registry_auto(
                 && name.starts_with("epoch-")
                 && fs::metadata(keys_bin(&p)).await.is_ok()
                 && fs::metadata(fp2key_bin(&p)).await.is_ok()
-                && let Ok(num) = name.trim_start_matches("epoch-").parse::<u64>() {
-                    completed.insert(num);
-                }
+                && let Ok(num) = name.trim_start_matches("epoch-").parse::<u64>()
+            {
+                completed.insert(num);
+            }
         }
     }
 
@@ -400,7 +374,6 @@ pub async fn build_registry_single(
 }
 
 pub async fn merge_registries(registry_dir: &str, output_dir: &str) -> Result<usize> {
-    // collect per-epoch dirs that have both files
     let mut epochs: Vec<(u64, PathBuf)> = Vec::new();
     let mut rd = fs::read_dir(registry_dir)
         .await
@@ -430,7 +403,6 @@ pub async fn merge_registries(registry_dir: &str, output_dir: &str) -> Result<us
 
     epochs.sort_by_key(|(epoch, _)| *epoch);
 
-    // merge preserving first-seen order across epochs
     let mut seen = AHashSet::new();
     let mut ordered: Vec<(u128, [u8; 32])> = Vec::new();
 
@@ -468,7 +440,6 @@ pub async fn merge_registries(registry_dir: &str, output_dir: &str) -> Result<us
         }
     }
 
-    // write merged outputs atomically
     let out_dir = Path::new(output_dir);
     fs::create_dir_all(out_dir).await?;
 

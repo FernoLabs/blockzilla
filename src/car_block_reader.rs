@@ -19,7 +19,6 @@ impl CarBlock {
         Ok(block)
     }
 
-    /// Zero-copy decode by raw CID bytes (binary search).
     pub fn decode(&self, key: &[u8]) -> Result<Node<'_>> {
         let idx = self
             .entries
@@ -28,7 +27,6 @@ impl CarBlock {
         decode_node(&self.entries[idx].1)
     }
 
-    /// Build a streaming reader over concatenated DataFrames by CID (binary search lookup).
     pub fn dataframe_reader(&self, cid: &Cid) -> DataFrameReader<'_> {
         DataFrameReader {
             blk: self,
@@ -38,7 +36,6 @@ impl CarBlock {
     }
 }
 
-/// Metadata gathered while reading entries (no CID parsing).
 #[derive(Debug, Clone, Copy)]
 struct EntryMeta {
     cid_start: usize,
@@ -47,8 +44,6 @@ struct EntryMeta {
     payload_end: usize,
 }
 
-/// Streams a CAR file and yields CarBlocks.
-/// Buffering and allocations tuned for ~1–2 MB average block sizes.
 pub struct CarBlockReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
     buf: Vec<u8>,
@@ -68,7 +63,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
         }
     }
 
-    /// Read and discard the CAR header (length-prefixed blob).
     pub async fn read_header(&mut self) -> Result<()> {
         let len = read_varint(&mut self.reader).await?;
         let mut remaining = len;
@@ -81,8 +75,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
         Ok(())
     }
 
-    /// Reads entries until a BlockNode (kind == 2) is found.
-    /// Returns a CarBlock with shared `Bytes` slices.
     pub async fn next_block(&mut self) -> Result<Option<CarBlock>> {
         loop {
             let Some((entry_start, entry_end, payload_start)) = self.read_next_entry().await?
@@ -94,7 +86,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 return Ok(None);
             };
 
-            // Some datasets store a multicodec varint *before* CBOR.
             let mut cbor_start = payload_start;
             let payload = &self.buf[payload_start..entry_end];
             let is_cbor = matches!(payload.first(), Some(b) if (0x80..=0xBF).contains(b));
@@ -110,7 +101,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
             };
 
             if kind_is_block {
-                // Freeze the whole buffer as an immutable Bytes view.
                 let frozen = Bytes::copy_from_slice(&self.buf);
                 let block_bytes = frozen.slice(cbor_start..entry_end);
 
@@ -122,10 +112,8 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                     ));
                 }
 
-                // Sort once by raw CID bytes for binary-search lookups.
                 entries.sort_unstable_by(|(a, _), (b, _)| a.as_ref().cmp(b.as_ref()));
 
-                // Clear reusable buffer for next block.
                 self.buf.clear();
                 self.entry_offsets.clear();
 
@@ -135,7 +123,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 }));
             }
 
-            // Not a BlockNode → remember this entry's offsets.
             self.entry_offsets.push(EntryMeta {
                 cid_start: entry_start,
                 cid_end: payload_start,
@@ -145,7 +132,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
         }
     }
 
-    /// Reads one CAR entry into `buf`; returns (entry_start, entry_end, payload_start).
     async fn read_next_entry(&mut self) -> Result<Option<(usize, usize, usize)>> {
         let len = match read_varint(&mut self.reader).await {
             Ok(l) => l,
@@ -167,7 +153,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
     }
 }
 
-/// Synchronous reader over chained DataFrames inside a CarBlock.
 pub struct DataFrameReader<'b> {
     blk: &'b CarBlock,
     current_index: Option<Vec<u8>>,
@@ -182,7 +167,6 @@ impl<'b> Read for DataFrameReader<'b> {
                 break;
             };
 
-            // Binary search by raw CID bytes.
             let idx = match self
                 .blk
                 .entries

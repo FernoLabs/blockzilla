@@ -212,7 +212,6 @@ async fn stream_epoch_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Se
     Ok(Box::new(ChannelReader::new(rx)))
 }
 
-// Network: adaptive multi-client H2 with byte-based window + stash guard
 async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + Unpin + Send>> {
     let slice_mb = env_u64("BZ_SLICE_MB", 16);
     let workers_min = env_usize("BZ_WORKERS_MIN", 28);
@@ -284,7 +283,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                     continue;
                 }
 
-                // stash guard: pause if backlog too high
                 while stash_ref.load(Ordering::Relaxed) > stash_guard {
                     tokio::time::sleep(Duration::from_millis(2)).await;
                     if stop_flag.load(Ordering::Relaxed) {
@@ -292,7 +290,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                     }
                 }
 
-                // schedule contiguous index
                 let idx = loop {
                     let cur = next_idx.load(Ordering::Relaxed);
                     if cur >= total_slices {
@@ -309,7 +306,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                     break;
                 }
 
-                // enforce byte-based reordering window
                 loop {
                     let drained_i = drained.load(Ordering::Relaxed);
                     let ahead_bytes =
@@ -323,7 +319,6 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                     }
                 }
 
-                // compute range
                 let start = idx * slice_bytes;
                 let need = if idx == total_slices - 1 {
                     (total - start) as usize
@@ -331,14 +326,12 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                     slice_bytes as usize
                 };
 
-                // memory permit
                 let units = need.div_ceil(unit_bytes).max(1) as u32;
                 let permit = match mem_sem.clone().acquire_many_owned(units).await {
                     Ok(p) => p,
                     Err(_) => break,
                 };
 
-                // perform request
                 let range = if idx == total_slices - 1 {
                     format!("bytes={}-{}", start, start + need as u64 - 1)
                 } else {
@@ -382,9 +375,7 @@ async fn stream_epoch_h2_multi_safe(url: String) -> Result<Box<dyn AsyncRead + U
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                if !sent {
-                    //drop(permit);
-                }
+                if !sent {}
             }
         });
     }
