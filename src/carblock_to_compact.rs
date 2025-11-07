@@ -139,7 +139,7 @@ pub struct CompactTokenBalanceMeta {
     pub mint_id: u32,
     pub owner_id: u32,
     pub program_id_id: u32,
-    pub amount: u128,
+    pub amount: u64,
     pub decimals: u8,
 }
 
@@ -215,6 +215,7 @@ fn fp128_from_bytes(b: &[u8; 32]) -> u128 {
     ]);
     a ^ c.rotate_left(64)
 }
+
 #[inline(always)]
 fn id_for_pubkey<P: PubkeyIdProvider>(resolver: &mut P, key: &[u8; 32]) -> Option<u32> {
     resolver.resolve(key)
@@ -228,6 +229,7 @@ struct ClientRewardBytesPk {
     pub reward_type: u8,
     pub commission: Option<u8>,
 }
+
 #[derive(Debug, Clone, SchemaRead)]
 struct ClientRewardStringPk {
     pub pubkey: String,
@@ -248,6 +250,7 @@ fn reward_tag_to_compact(tag: u8) -> CompactRewardType {
         _ => CompactRewardType::Unspecified,
     }
 }
+
 fn decode_rewards_via_node<P: PubkeyIdProvider>(
     block: &CarBlock,
     resolver: &mut P,
@@ -340,47 +343,6 @@ fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<C
         return None;
     }
 
-    #[inline(always)]
-    fn has(hay: &[u8], needle: &str) -> bool {
-        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
-    }
-
-    macro_rules! chk {
-        ($s:literal, $e:expr) => {
-            if has(raw, $s) {
-                return Some($e);
-            }
-        };
-    }
-
-    chk!("AccountInUse", CompactTxError::AccountInUse);
-    chk!("AccountLoadedTwice", CompactTxError::AccountLoadedTwice);
-    chk!(
-        "ProgramAccountNotFound",
-        CompactTxError::ProgramAccountNotFound
-    );
-    if has(raw, "AccountNotFound") {
-        return Some(CompactTxError::AccountNotFound);
-    }
-    chk!(
-        "InsufficientFundsForFee",
-        CompactTxError::InsufficientFundsForFee
-    );
-    chk!("InvalidAccountForFee", CompactTxError::InvalidAccountForFee);
-    chk!("AlreadyProcessed", CompactTxError::AlreadyProcessed);
-    chk!("BlockhashNotFound", CompactTxError::BlockhashNotFound);
-    chk!("CallChainTooDeep", CompactTxError::CallChainTooDeep);
-    chk!(
-        "MissingSignatureForFee",
-        CompactTxError::MissingSignatureForFee
-    );
-    chk!("InvalidAccountIndex", CompactTxError::InvalidAccountIndex);
-    chk!("SignatureFailure", CompactTxError::SignatureFailure);
-    chk!(
-        "SanitizedTransaction",
-        CompactTxError::SanitizedTransactionError
-    );
-
     if let Some(pos) = raw
         .windows(b"InstructionError(".len())
         .position(|w| w == b"InstructionError(")
@@ -394,6 +356,7 @@ fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<C
                     .and_then(|s| s.trim().parse::<u32>().ok())
                     .unwrap_or(0);
                 let code_str = std::str::from_utf8(&body[comma + 1..]).unwrap_or("").trim();
+                
                 let error = if let Some(cust) = code_str
                     .strip_prefix("Custom(")
                     .and_then(|s| s.strip_suffix(')'))
@@ -423,7 +386,27 @@ fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<C
         }
     }
 
-    if has(raw, "ProgramError") || has(raw, "ProgramFailed") || has(raw, "RuntimeError") {
+    #[inline(always)]
+    fn has(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // Check errors in order of likelihood
+    if has(raw, b"AccountInUse") { return Some(CompactTxError::AccountInUse); }
+    if has(raw, b"AccountLoadedTwice") { return Some(CompactTxError::AccountLoadedTwice); }
+    if has(raw, b"ProgramAccountNotFound") { return Some(CompactTxError::ProgramAccountNotFound); }
+    if has(raw, b"AccountNotFound") { return Some(CompactTxError::AccountNotFound); }
+    if has(raw, b"InsufficientFundsForFee") { return Some(CompactTxError::InsufficientFundsForFee); }
+    if has(raw, b"InvalidAccountForFee") { return Some(CompactTxError::InvalidAccountForFee); }
+    if has(raw, b"AlreadyProcessed") { return Some(CompactTxError::AlreadyProcessed); }
+    if has(raw, b"BlockhashNotFound") { return Some(CompactTxError::BlockhashNotFound); }
+    if has(raw, b"CallChainTooDeep") { return Some(CompactTxError::CallChainTooDeep); }
+    if has(raw, b"MissingSignatureForFee") { return Some(CompactTxError::MissingSignatureForFee); }
+    if has(raw, b"InvalidAccountIndex") { return Some(CompactTxError::InvalidAccountIndex); }
+    if has(raw, b"SignatureFailure") { return Some(CompactTxError::SignatureFailure); }
+    if has(raw, b"SanitizedTransaction") { return Some(CompactTxError::SanitizedTransactionError); }
+    
+    if has(raw, b"ProgramError") || has(raw, b"ProgramFailed") || has(raw, b"RuntimeError") {
         return Some(CompactTxError::ProgramError);
     }
 
@@ -436,11 +419,12 @@ fn tx_error_from_meta(meta: &confirmed_block::TransactionStatusMeta) -> Option<C
     })
 }
 
-#[inline(always)]
-fn parse_ui_amount_to_int(amount_str: &str) -> Option<u128> {
-    amount_str.parse::<u128>().ok()
+#[inline]
+fn parse_ui_amount_to_int(amount_str: &str) -> Option<u64> {
+    amount_str.parse::<u64>().ok()
 }
 
+#[inline]
 fn token_balance_to_compact<P: PubkeyIdProvider>(
     tb: &confirmed_block::TokenBalance,
     resolver: &mut P,
@@ -458,8 +442,7 @@ fn token_balance_to_compact<P: PubkeyIdProvider>(
     let (amount, decimals) = match &tb.ui_token_amount {
         Some(uta) => {
             let amt = parse_ui_amount_to_int(&uta.amount).unwrap_or(0);
-            let dec = uta.decimals as u8;
-            (amt, dec)
+            (amt, uta.decimals as u8)
         }
         None => (0, 0),
     };
@@ -477,72 +460,49 @@ fn meta_to_compact<P: PubkeyIdProvider>(
     meta: &confirmed_block::TransactionStatusMeta,
     resolver: &mut P,
 ) -> CompactMetadata {
-    let pre_balances = meta.pre_balances.clone();
-    let post_balances = meta.post_balances.clone();
-
-    let pre_token_balances = meta
-        .pre_token_balances
-        .iter()
-        .filter_map(|tb| token_balance_to_compact(tb, resolver))
-        .collect();
-
-    let post_token_balances = meta
-        .post_token_balances
-        .iter()
-        .filter_map(|tb| token_balance_to_compact(tb, resolver))
-        .collect();
-
-    let mut loaded_writable_ids = Vec::new();
-    let mut loaded_readonly_ids = Vec::new();
+    // Pre-allocate with exact sizes where possible
+    let mut loaded_writable_ids = Vec::with_capacity(meta.loaded_writable_addresses.len());
+    let mut loaded_readonly_ids = Vec::with_capacity(meta.loaded_readonly_addresses.len());
+    
     for addr in &meta.loaded_writable_addresses {
-        if let Ok(pk) = Pubkey::try_from(addr.as_slice())
-            && let Some(id) = id_for_pubkey(resolver, &pk.to_bytes())
-        {
-            loaded_writable_ids.push(id);
+        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
+            if let Some(id) = id_for_pubkey(resolver, &pk.to_bytes()) {
+                loaded_writable_ids.push(id);
+            }
         }
     }
+    
     for addr in &meta.loaded_readonly_addresses {
-        if let Ok(pk) = Pubkey::try_from(addr.as_slice())
-            && let Some(id) = id_for_pubkey(resolver, &pk.to_bytes())
-        {
-            loaded_readonly_ids.push(id);
+        if let Ok(pk) = Pubkey::try_from(addr.as_slice()) {
+            if let Some(id) = id_for_pubkey(resolver, &pk.to_bytes()) {
+                loaded_readonly_ids.push(id);
+            }
         }
     }
 
-    let return_data = if let Some(rd) = &meta.return_data {
-        if let Ok(pk) = Pubkey::try_from(rd.program_id.as_slice()) {
-            id_for_pubkey(resolver, &pk.to_bytes()).map(|pid| CompactReturnData {
+    let return_data = meta.return_data.as_ref().and_then(|rd| {
+        Pubkey::try_from(rd.program_id.as_slice())
+            .ok()
+            .and_then(|pk| id_for_pubkey(resolver, &pk.to_bytes()))
+            .map(|pid| CompactReturnData {
                 program_id_id: pid,
                 data: rd.data.clone(),
             })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    });
 
     let inner_instructions: Vec<CompactInnerInstructions> = meta
         .inner_instructions
-        .clone()
-        .into_iter()
-        .map(|ii| {
-            let instructions = ii
-                .instructions
-                .into_iter()
-                .map(|instr| CompactInnerInstruction {
-                    program_id_index: instr.program_id_index,
-                    accounts: instr.accounts,
-                    data: instr.data,
-                    stack_height: instr.stack_height,
-                })
-                .collect::<Vec<_>>();
-            CompactInnerInstructions {
-                index: ii.index,
-                instructions,
-            }
+        .iter()
+        .map(|ii| CompactInnerInstructions {
+            index: ii.index,
+            instructions: ii.instructions.iter().map(|instr| CompactInnerInstruction {
+                program_id_index: instr.program_id_index,
+                accounts: instr.accounts.clone(),
+                data: instr.data.clone(),
+                stack_height: instr.stack_height,
+            }).collect(),
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     let log_messages = if meta.log_messages.is_empty() {
         None
@@ -565,15 +525,43 @@ fn meta_to_compact<P: PubkeyIdProvider>(
     CompactMetadata {
         fee: meta.fee,
         err,
-        pre_balances,
-        post_balances,
-        pre_token_balances,
-        post_token_balances,
+        pre_balances: meta.pre_balances.clone(),
+        post_balances: meta.post_balances.clone(),
+        pre_token_balances: meta
+            .pre_token_balances
+            .iter()
+            .filter_map(|tb| token_balance_to_compact(tb, resolver))
+            .collect(),
+        post_token_balances: meta
+            .post_token_balances
+            .iter()
+            .filter_map(|tb| token_balance_to_compact(tb, resolver))
+            .collect(),
         loaded_writable_ids,
         loaded_readonly_ids,
         return_data,
         inner_instructions: Some(inner_instructions),
         log_messages,
+    }
+}
+
+#[inline]
+fn process_metadata<P: PubkeyIdProvider>(
+    metadata_mode: MetadataMode,
+    raw_slice: &[u8],
+    resolver: &mut P,
+) -> Option<CompactMetadataPayload> {
+    match metadata_mode {
+        MetadataMode::Compact => {
+            match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
+                Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
+                    &parsed, resolver,
+                ))),
+                Err(_) => Some(CompactMetadataPayload::Raw(raw_slice.to_vec()))
+            }
+        }
+        MetadataMode::Raw => Some(CompactMetadataPayload::Raw(raw_slice.to_vec())),
+        MetadataMode::None => None,
     }
 }
 
@@ -585,33 +573,37 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
     buf_meta: &mut Vec<u8>,
     out: &mut CompactBlock,
 ) -> Result<()> {
-    out.slot = block.block()?.slot;
+    // Cache the block to avoid multiple decodes
+    let block_data = block.block()?;
+    out.slot = block_data.slot;
 
+    // Clear all fields
     out.rewards.clear();
+    out.txs.clear();
+
+    // Decode rewards
     {
         let mut rewards_buf = Vec::<u8>::with_capacity(64 << 10);
         let rewards =
             decode_rewards_via_node(block, resolver, &mut rewards_buf).unwrap_or_default();
-        out.rewards.reserve(rewards.len());
-        out.rewards.extend(rewards);
+        out.rewards = rewards;
     }
 
+    // Pre-calculate total transaction count for better allocation
     let mut target_len = 0usize;
-    for entry_cid_res in block.block()?.entries.iter() {
+    for entry_cid_res in block_data.entries.iter() {
         let entry_cid = entry_cid_res?;
-        let Node::Entry(entry) = block.decode(entry_cid.hash_bytes())? else {
-            continue;
-        };
-        target_len += entry.transactions.len();
+        if let Node::Entry(entry) = block.decode(entry_cid.hash_bytes())? {
+            target_len += entry.transactions.len();
+        }
     }
-    if out.txs.capacity() < target_len {
-        out.txs.reserve(target_len - out.txs.len());
-    }
-    let mut written = 0usize;
+    
+    out.txs.reserve(target_len);
 
     let mut reusable_tx = MaybeUninit::<VersionedTransaction>::uninit();
 
-    for entry_cid_res in block.block()?.entries.iter() {
+    // Single iteration through entries
+    for entry_cid_res in block_data.entries.iter() {
         let entry_cid = entry_cid_res?;
         let Node::Entry(entry) = block.decode(entry_cid.hash_bytes())? else {
             continue;
@@ -623,6 +615,7 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 continue;
             };
 
+            // Get transaction bytes
             let tx_bytes: &[u8] = match tx_node.data.next {
                 None => tx_node.data.data,
                 Some(df_cbor) => {
@@ -633,54 +626,33 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 }
             };
 
+            // Deserialize transaction
             VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)
                 .map_err(|_| anyhow!("failed to decode VersionedTransaction"))?;
             let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
-            if out.txs.len() == written {
-                out.txs.push(CompactVersionedTx {
-                    signatures: Vec::with_capacity(2),
-                    header: MessageHeader {
-                        num_required_signatures: 0,
-                        num_readonly_signed_accounts: 0,
-                        num_readonly_unsigned_accounts: 0,
-                    },
-                    account_ids: Vec::with_capacity(32),
-                    recent_blockhash: [0; 32],
-                    instructions: Vec::with_capacity(8),
-                    address_table_lookups: None,
-                    is_versioned: false,
-                    metadata: None,
-                });
-            }
-            let vtx = &mut out.txs[written];
-
-            vtx.signatures.clear();
-            vtx.account_ids.clear();
-            vtx.instructions.clear();
-            if let Some(ref mut v) = vtx.address_table_lookups {
-                v.clear();
-            }
-            vtx.metadata = None;
-
-            vtx.signatures.reserve(tx_ref.signatures.len());
-            for s in &tx_ref.signatures {
-                vtx.signatures.push(Signature(s.0));
-            }
-
-            vtx.header = *tx_ref.message.header();
-            vtx.is_versioned = matches!(tx_ref.message, VersionedMessage::V0(_));
-            vtx.recent_blockhash = match &tx_ref.message {
+            // Get message components
+            let static_keys = tx_ref.message.static_account_keys();
+            let header = tx_ref.message.header();
+            let is_versioned = matches!(tx_ref.message, VersionedMessage::V0(_));
+            let recent_blockhash = match &tx_ref.message {
                 VersionedMessage::Legacy(m) => m.recent_blockhash,
                 VersionedMessage::V0(m) => m.recent_blockhash,
             };
 
-            let static_keys = tx_ref.message.static_account_keys();
-            vtx.account_ids.reserve(static_keys.len());
+            // Build signatures
+            let mut signatures = Vec::with_capacity(tx_ref.signatures.len());
+            for s in &tx_ref.signatures {
+                signatures.push(Signature(s.0));
+            }
+
+            // Resolve account IDs
+            let mut account_ids = Vec::with_capacity(static_keys.len());
             for k in static_keys {
                 if let Some(uid) = id_for_pubkey(resolver, k) {
-                    vtx.account_ids.push(uid);
+                    account_ids.push(uid);
                 } else {
+                    unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
                     return Err(anyhow!(
                         "registry miss for pubkey {}",
                         Pubkey::new_from_array(*k)
@@ -688,20 +660,17 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 }
             }
 
-            {
-                vtx.instructions.reserve(tx_ref.message.instructions_len());
-                for ix in tx_ref.message.instructions_iter() {
-                    vtx.instructions.push(ix.clone());
-                }
+            // Build instructions
+            let mut instructions = Vec::with_capacity(tx_ref.message.instructions_len());
+            for ix in tx_ref.message.instructions_iter() {
+                instructions.push(ix.clone());
             }
 
-            vtx.address_table_lookups = match tx_ref.message.address_table_lookups() {
+            // Process address table lookups
+            let address_table_lookups = match tx_ref.message.address_table_lookups() {
                 None => None,
                 Some(lookups) => {
-                    let mut vec = vtx
-                        .address_table_lookups
-                        .take()
-                        .unwrap_or_else(|| Vec::with_capacity(2));
+                    let mut vec = Vec::with_capacity(lookups.len());
                     for l in lookups {
                         if let Some(uid) = id_for_pubkey(resolver, &l.account_key) {
                             vec.push(CompactAddressTableLookup {
@@ -710,6 +679,7 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                                 readonly_indexes: l.readonly_indexes.clone(),
                             });
                         } else {
+                            unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
                             return Err(anyhow!(
                                 "registry miss for address table account {}",
                                 Pubkey::new_from_array(l.account_key)
@@ -720,64 +690,37 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 }
             };
 
+            // Process metadata
             let df = &tx_node.metadata;
-
-            vtx.metadata = if matches!(metadata_mode, MetadataMode::None) {
+            let metadata = if matches!(metadata_mode, MetadataMode::None) {
                 None
             } else if let Some(next) = df.next {
                 let df_cid = next.to_cid()?;
                 buf_meta.clear();
                 block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
-
                 let raw_slice = metadata_proto_into(&*buf_meta, buf_tx);
-
-                match metadata_mode {
-                    MetadataMode::Compact => {
-                        match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
-                            Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
-                                &parsed, resolver,
-                            ))),
-                            Err(_) => {
-                                let owned = std::mem::take(buf_tx);
-                                Some(CompactMetadataPayload::Raw(owned))
-                            }
-                        }
-                    }
-                    MetadataMode::Raw => {
-                        let owned = std::mem::take(buf_tx);
-                        Some(CompactMetadataPayload::Raw(owned))
-                    }
-                    MetadataMode::None => None,
-                }
+                process_metadata(metadata_mode, raw_slice, resolver)
             } else {
                 let raw_slice = metadata_proto_into(df.data, buf_meta);
-
-                match metadata_mode {
-                    MetadataMode::Compact => {
-                        match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
-                            Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
-                                &parsed, resolver,
-                            ))),
-                            Err(_) => {
-                                let owned = std::mem::take(buf_meta);
-                                Some(CompactMetadataPayload::Raw(owned))
-                            }
-                        }
-                    }
-                    MetadataMode::Raw => {
-                        let owned = std::mem::take(buf_meta);
-                        Some(CompactMetadataPayload::Raw(owned))
-                    }
-                    MetadataMode::None => None,
-                }
+                process_metadata(metadata_mode, raw_slice, resolver)
             };
 
+            // Clean up transaction reference
             unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
 
-            written += 1;
+            // Push completed transaction
+            out.txs.push(CompactVersionedTx {
+                signatures,
+                header: *header,
+                account_ids,
+                recent_blockhash,
+                instructions,
+                address_table_lookups,
+                is_versioned,
+                metadata,
+            });
         }
     }
 
-    out.txs.truncate(written);
     Ok(())
 }
