@@ -10,6 +10,7 @@ use memmap2::Mmap;
 use std::{
     collections::HashSet,
     error::Error as StdError,
+    mem::MaybeUninit,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -226,6 +227,47 @@ impl PubkeyIdProvider for DynamicPubkeyIdProvider {
     }
 }
 
+struct ReusableCompactBlock {
+    block: MaybeUninit<CompactBlock>,
+    initialized: bool,
+}
+
+impl ReusableCompactBlock {
+    fn new() -> Self {
+        Self {
+            block: MaybeUninit::uninit(),
+            initialized: false,
+        }
+    }
+
+    #[inline]
+    fn get_mut(&mut self) -> &mut CompactBlock {
+        if !self.initialized {
+            let block = CompactBlock {
+                slot: 0,
+                txs: Vec::with_capacity(512),
+                rewards: Vec::with_capacity(64),
+            };
+            unsafe {
+                self.block.as_mut_ptr().write(block);
+            }
+            self.initialized = true;
+        }
+        unsafe { self.block.assume_init_mut() }
+    }
+}
+
+impl Drop for ReusableCompactBlock {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe {
+                std::ptr::drop_in_place(self.block.as_mut_ptr());
+            }
+            self.initialized = false;
+        }
+    }
+}
+
 pub async fn optimize_epoch_without_registry(
     cache_dir: &str,
     out_base: &str,
@@ -252,11 +294,7 @@ pub async fn optimize_epoch_without_registry(
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
     let mut cbor_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
 
-    let mut cblk = CompactBlock {
-        slot: 0,
-        txs: Vec::with_capacity(512),
-        rewards: Vec::with_capacity(64),
-    };
+    let mut reusable_block = ReusableCompactBlock::new();
     let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
     let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
     let mut provider = DynamicPubkeyIdProvider::new();
@@ -275,13 +313,14 @@ pub async fn optimize_epoch_without_registry(
             }
         }
 
+        let compact_block = reusable_block.get_mut();
         if let Err(e) = carblock_to_compactblock_inplace(
             &block,
             &mut provider,
             metadata_mode,
             &mut buf_tx,
             &mut buf_meta,
-            &mut cblk,
+            compact_block,
         ) {
             if is_soft_eof(&e) {
                 break 'epoch;
@@ -291,10 +330,10 @@ pub async fn optimize_epoch_without_registry(
 
         match format {
             OptimizedFormat::Wincode => {
-                push_wincode_block_into_batch(&mut frame_batch, &cblk)?;
+                push_wincode_block_into_batch(&mut frame_batch, compact_block)?;
             }
             OptimizedFormat::Cbor => {
-                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, &cblk)?;
+                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, compact_block)?;
             }
         }
 
@@ -382,11 +421,7 @@ pub async fn optimize_epoch(
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
     let mut cbor_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
 
-    let mut cblk = CompactBlock {
-        slot: 0,
-        txs: Vec::with_capacity(512),
-        rewards: Vec::with_capacity(64),
-    };
+    let mut reusable_block = ReusableCompactBlock::new();
     let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
     let mut buf_meta = Vec::<u8>::with_capacity(128 << 10);
 
@@ -406,13 +441,14 @@ pub async fn optimize_epoch(
             }
         }
 
+        let compact_block = reusable_block.get_mut();
         if let Err(e) = carblock_to_compactblock_inplace(
             &block,
             &mut id_provider,
             metadata_mode,
             &mut buf_tx,
             &mut buf_meta,
-            &mut cblk,
+            compact_block,
         ) {
             if is_soft_eof(&e) {
                 break 'epoch;
@@ -422,10 +458,10 @@ pub async fn optimize_epoch(
 
         match format {
             OptimizedFormat::Wincode => {
-                push_wincode_block_into_batch(&mut frame_batch, &cblk)?;
+                push_wincode_block_into_batch(&mut frame_batch, compact_block)?;
             }
             OptimizedFormat::Cbor => {
-                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, &cblk)?;
+                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, compact_block)?;
             }
         }
 
