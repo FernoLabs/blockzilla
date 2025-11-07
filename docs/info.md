@@ -10,6 +10,9 @@
 ### CBOR encoded
 -rw-r--r-- 1 ach admin 674G Nov  7 17:22 optimized/epoch-0800/optimized/blocks.bin
 
+### wincode
+-rw-r--r-- 1 ach admin 675G Nov  7 19:31 optimized/epoch-0800/optimized/blocks.bin
+
 ## what composed a compressed epoch
 
 📊 Analysis Results:
