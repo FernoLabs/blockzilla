@@ -734,17 +734,26 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
 
             // Process metadata
             let df = &tx_node.metadata;
-            let metadata = if matches!(metadata_mode, MetadataMode::None) {
-                None
-            } else if let Some(next) = df.next {
-                let df_cid = next.to_cid()?;
-                buf_meta.clear();
-                block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
-                let raw_slice = metadata_proto_into(&*buf_meta, buf_tx);
-                process_metadata(metadata_mode, raw_slice, resolver)
-            } else {
-                let raw_slice = metadata_proto_into(df.data, buf_meta);
-                process_metadata(metadata_mode, raw_slice, resolver)
+            let metadata = match metadata_mode {
+                MetadataMode::None => None,
+                mode @ (MetadataMode::Compact | MetadataMode::Raw) => {
+                    let src = if let Some(next) = df.next {
+                        let df_cid = next.to_cid()?;
+                        buf_meta.clear();
+                        block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
+                        &*buf_meta
+                    } else {
+                        df.data
+                    };
+
+                    let raw_slice = match mode {
+                        MetadataMode::Compact => metadata_proto_into(src, buf_tx),
+                        MetadataMode::Raw => src,
+                        MetadataMode::None => unreachable!(),
+                    };
+
+                    process_metadata(mode, raw_slice, resolver)
+                }
             };
 
             // Clean up transaction reference
