@@ -19,6 +19,9 @@ By default the workflow stores CAR files in `./cache`, registries in
 `./registry`, and optimized blocks in `./optimized`. Use `--cache-dir`,
 `--registry-dir`, or `--optimized-dir` to override the directories. Pass
 `--force` to rebuild an epoch even when all four outputs already exist.
+Select the on-disk encoding with `--format postcard|cbor` (defaults to
+`postcard`). The CBOR variant writes `blocks.cbor` files that support the
+zero-copy readers used by the analyzer and log tooling.
 
 ### Optimize multiple epochs
 
