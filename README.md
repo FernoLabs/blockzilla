@@ -19,8 +19,8 @@ By default the workflow stores CAR files in `./cache`, registries in
 `./registry`, and optimized blocks in `./optimized`. Use `--cache-dir`,
 `--registry-dir`, or `--optimized-dir` to override the directories. Pass
 `--force` to rebuild an epoch even when all four outputs already exist.
-Select the on-disk encoding with `--format postcard|cbor` (defaults to
-`postcard`). The CBOR variant writes `blocks.cbor` files that support the
+Select the on-disk encoding with `--format wincode|cbor` (defaults to
+`wincode`). The CBOR variant writes `blocks.cbor` files that support the
 zero-copy readers used by the analyzer and log tooling.
 
 ### Optimize multiple epochs
@@ -75,7 +75,7 @@ cargo run --release --bin blockzilla optimize read 0 --input-dir optimized --job
 ## Registry outputs
 
 The `blockzilla registry` workflows now produce two artifacts per epoch: the existing
-`registry-<epoch>.bin` postcard map and a companion `registry-pubkeys-<epoch>.bin`
+`registry-<epoch>.bin` wincode map and a companion `registry-pubkeys-<epoch>.bin`
 file that lists every pubkey sorted by the usage-derived `order_id`. The legacy
 `registry-splitter` helper binary has been removed. The optimizer now consumes this
 ordered pubkey file: point `blockzilla optimize` at the directory containing
