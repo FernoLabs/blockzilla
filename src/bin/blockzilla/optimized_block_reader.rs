@@ -19,9 +19,6 @@ use blockzilla::carblock_to_compact::CompactBlock;
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
 
-// ===============================
-// Paths (optimized stream)
-// ===============================
 fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
     base.join(format!("epoch-{epoch:04}/optimized"))
 }
@@ -29,9 +26,6 @@ fn optimized_blocks_file(dir: &Path) -> PathBuf {
     dir.join("blocks.bin")
 }
 
-/// Resolve where to read blocks from:
-/// - `<input_dir>/epoch-####.bin` (legacy flat), or
-/// - `<input_dir>/epoch-####/optimized/blocks.bin`
 fn resolve_blocks_path(input_dir: &str, epoch: u64) -> PathBuf {
     let direct = Path::new(input_dir).join(format!("epoch-{epoch:04}.bin"));
     if direct.exists() {
@@ -40,9 +34,6 @@ fn resolve_blocks_path(input_dir: &str, epoch: u64) -> PathBuf {
     optimized_blocks_file(&optimized_dir(Path::new(input_dir), epoch))
 }
 
-// ===============================
-// Length prefixed optimized stream reader (no compression)
-// ===============================
 struct OptimizedStream {
     rdr: BufReader<File>,
 }
@@ -61,7 +52,6 @@ impl OptimizedStream {
         })
     }
 
-    /// Read next block frame: [u32 length][postcard CompactBlock bytes]
     async fn next_block(&mut self) -> Result<Option<CompactBlock>> {
         let mut len_bytes = [0u8; 4];
         match self.rdr.read_exact(&mut len_bytes).await {
@@ -80,9 +70,6 @@ impl OptimizedStream {
     }
 }
 
-// ===============================
-// Public API — sequential reader
-// ===============================
 pub async fn read_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()> {
     let mut stream = OptimizedStream::open(input_dir, epoch).await?;
 
@@ -96,7 +83,6 @@ pub async fn read_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()> {
     let mut reward_count = 0u64;
 
     while let Some(block) = stream.next_block().await? {
-        // Count per new CompactBlock shape
         tx_count += block.txs.len() as u64;
         reward_count += block.rewards.len() as u64;
         instr_count += block
@@ -137,26 +123,20 @@ pub async fn read_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()> {
     Ok(())
 }
 
-// ===============================
-// Public API — parallel reader (Receiver is NOT Clone)
-// ===============================
 pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize) -> Result<()> {
     let path = resolve_blocks_path(input_dir, epoch);
     if !path.exists() {
         anyhow::bail!("Blocks file not found: {}", path.display());
     }
 
-    // counters
     let blocks_count = Arc::new(AtomicU64::new(0));
     let instr_count = Arc::new(AtomicU64::new(0));
     let tx_count = Arc::new(AtomicU64::new(0));
     let reward_count = Arc::new(AtomicU64::new(0));
 
-    // channel of frames; single shared receiver behind a Mutex
     let (tx, rx) = mpsc::channel::<Vec<u8>>(jobs.max(1) * 8);
     let rx = Arc::new(Mutex::new(rx));
 
-    // workers
     for _ in 0..jobs.max(1) {
         let rx = Arc::clone(&rx);
         let blocks_count = Arc::clone(&blocks_count);
@@ -187,7 +167,6 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
         });
     }
 
-    // producer
     let file = File::open(&path).await?;
     let mut rdr = BufReader::with_capacity(32 * 1024 * 1024, file);
 
@@ -233,7 +212,7 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
         }
     }
 
-    drop(tx); // let workers drain and exit
+    drop(tx);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let elapsed = start.elapsed().as_secs_f64().max(0.001);
@@ -256,9 +235,6 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
     Ok(())
 }
 
-// ===============================
-// Public API — analyze contents
-// ===============================
 pub async fn analyze_compressed_blocks(epoch: u64, input_dir: &str) -> Result<()> {
     let mut stream = OptimizedStream::open(input_dir, epoch).await?;
 
