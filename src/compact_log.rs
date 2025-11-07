@@ -1,6 +1,6 @@
 use ahash::AHashMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use postcard::{from_bytes, to_allocvec};
+use postcard::from_bytes;
 use serde::{Deserialize, Serialize};
 use wincode::SchemaRead;
 
@@ -112,9 +112,9 @@ where
         }
     };
 
-    let mut events = Vec::<LogEvent>::with_capacity(lines.len());
-
     let cb_pid_auto = lookup_pid(CB_PK);
+    let mut ev_bytes = Vec::<u8>::new();
+    let mut count: u32 = 0;
 
     'lines: for line in lines {
         let line_bytes = line.as_bytes();
@@ -126,9 +126,11 @@ where
             let sfx_len = " } already in use".len();
             let inner = &line[pfx_len..line.len() - sfx_len];
             let idx = intern(inner);
-            events.push(LogEvent::CreateAccountAlreadyInUse {
+            let ev = LogEvent::CreateAccountAlreadyInUse {
                 addr_fields_idx: idx,
-            });
+            };
+            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            count += 1;
             continue 'lines;
         }
 
@@ -139,9 +141,11 @@ where
             let sfx_len = " } already in use".len();
             let inner = &line[pfx_len..line.len() - sfx_len];
             let idx = intern(inner);
-            events.push(LogEvent::AllocateAlreadyInUse {
+            let ev = LogEvent::AllocateAlreadyInUse {
                 addr_fields_idx: idx,
-            });
+            };
+            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            count += 1;
             continue 'lines;
         }
 
@@ -149,114 +153,63 @@ where
             if let Some(need_pos) = rest.find(", need ") {
                 let have_str = &rest[..need_pos];
                 let need_str = &rest[need_pos + 7..];
-
                 let have_result = have_str.replace(',', "").parse::<u64>();
                 let need_result = need_str.replace(',', "").parse::<u64>();
-
                 if let (Ok(have), Ok(need)) = (have_result, need_result) {
-                    events.push(LogEvent::TransferInsufficient { have, need });
+                    let ev = LogEvent::TransferInsufficient { have, need };
+                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    count += 1;
                     continue 'lines;
                 }
             }
             tracing::warn!(target: "compact_log", "malformed Transfer insufficient lamports line: {}", line);
-            events.push(LogEvent::Unparsed {
+            let ev = LogEvent::Unparsed {
                 str_idx: intern(line),
-            });
+            };
+            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            count += 1;
             continue 'lines;
         }
 
         if let Some(text) = line.strip_prefix("Program log: ") {
-            events.push(LogEvent::Msg {
+            let ev = LogEvent::Msg {
                 str_idx: intern(text),
-            });
+            };
+            ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+            count += 1;
             continue 'lines;
         }
 
         if let Some(rest) = line.strip_prefix("Program ") {
             if rest == "is not deployed" {
-                events.push(LogEvent::ProgramNotDeployed { pk_str_idx: None });
+                let ev = LogEvent::ProgramNotDeployed { pk_str_idx: None };
+                ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                count += 1;
                 continue 'lines;
             }
             if let Some(pk) = rest.strip_suffix(" is not deployed") {
-                let idx = intern(pk.trim());
-                events.push(LogEvent::ProgramNotDeployed {
-                    pk_str_idx: Some(idx),
-                });
+                let ev = LogEvent::ProgramNotDeployed {
+                    pk_str_idx: Some(intern(pk.trim())),
+                };
+                ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                count += 1;
                 continue 'lines;
             }
 
             if let Some(rem) = rest.strip_prefix("consumption: ") {
-                if let Some(pos) = rem.find(" units remaining") {
-                    if let Ok(units) = rem[..pos].replace(',', "").parse::<u32>() {
-                        events.push(LogEvent::Consumption { units });
-                        continue 'lines;
-                    }
+                if let Some(pos) = rem.find(" units remaining")
+                    && let Ok(units) = rem[..pos].replace(',', "").parse::<u32>()
+                {
+                    let ev = LogEvent::Consumption { units };
+                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    count += 1;
+                    continue 'lines;
                 }
-                tracing::warn!(target: "compact_log", "malformed Program consumption line: {}", line);
-                events.push(LogEvent::Unparsed {
+                let ev = LogEvent::Unparsed {
                     str_idx: intern(line),
-                });
-                continue 'lines;
-            }
-
-            if let Some(ret_tail) = rest.strip_prefix("return: ") {
-                if let Some(space) = ret_tail.find(' ') {
-                    let pk = &ret_tail[..space];
-                    let b64_tail = &ret_tail[space + 1..];
-                    if let Some(pid) = lookup_pid(pk) {
-                        let mut buf = Vec::<u8>::new();
-                        let mut ok = true;
-                        for token in b64_tail.split_whitespace() {
-                            match B64.decode(token.as_bytes()) {
-                                Ok(bytes) => buf.extend_from_slice(&bytes),
-                                Err(e) => {
-                                    tracing::warn!(target: "compact_log",
-                                        "base64 decode failed: {} (err: {})", line, e);
-                                    events.push(LogEvent::Unparsed {
-                                        str_idx: intern(line),
-                                    });
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if ok {
-                            events.push(LogEvent::Return { pid, data: buf });
-                        }
-                        continue 'lines;
-                    }
-                }
-                events.push(LogEvent::Unparsed {
-                    str_idx: intern(line),
-                });
-                continue 'lines;
-            }
-
-            if let Some(data_tail) = rest.strip_prefix("data: ") {
-                let mut buf = Vec::<u8>::new();
-                let mut ok = true;
-                for token in data_tail.split_whitespace() {
-                    match B64.decode(token.as_bytes()) {
-                        Ok(bytes) => buf.extend_from_slice(&bytes),
-                        Err(e) => {
-                            tracing::warn!(target: "compact_log",
-                                "base64 decode failed for Program data line: {} (err: {})",
-                                line, e);
-                            events.push(LogEvent::Unparsed {
-                                str_idx: intern(line),
-                            });
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                if ok && !buf.is_empty() {
-                    events.push(LogEvent::Data { data: buf });
-                } else if ok {
-                    events.push(LogEvent::Unparsed {
-                        str_idx: intern(line),
-                    });
-                }
+                };
+                ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                count += 1;
                 continue 'lines;
             }
 
@@ -274,107 +227,51 @@ where
                 if is_cb {
                     let norm = after_pk.replace(':', "").to_lowercase();
 
-                    if let Some(tail) = norm.strip_prefix("request units ") {
-                        if let Ok(units) = tail.trim().replace(',', "").parse::<u32>() {
-                            events.push(LogEvent::CbRequestUnits { units });
-                            continue 'lines;
-                        }
-                    }
-                    if let Some(tail) = norm
-                        .strip_prefix("setcomputeunitlimit ")
-                        .or_else(|| norm.strip_prefix("set compute unit limit "))
+                    if let Some(tail) = norm.strip_prefix("request units ")
+                        && let Ok(units) = tail.trim().replace(',', "").parse::<u32>()
                     {
-                        if let Ok(units) = tail.trim().replace(',', "").parse::<u32>() {
-                            events.push(LogEvent::CbSetComputeUnitLimit { units });
-                            continue 'lines;
-                        }
-                    }
-                    if let Some(tail) = norm
-                        .strip_prefix("setcomputeunitprice ")
-                        .or_else(|| norm.strip_prefix("set compute unit price "))
-                    {
-                        if let Ok(price) = tail.trim().replace(',', "").parse::<u64>() {
-                            events.push(LogEvent::CbSetComputeUnitPrice {
-                                micro_lamports: price,
-                            });
-                            continue 'lines;
-                        }
-                    }
-                    if let Some(tail) = norm
-                        .strip_prefix("setheapframe ")
-                        .or_else(|| norm.strip_prefix("set heap frame "))
-                    {
-                        if let Ok(bytes) = tail.trim().replace(',', "").parse::<u32>() {
-                            events.push(LogEvent::CbSetHeapFrame { bytes });
-                            continue 'lines;
-                        }
+                        let ev = LogEvent::CbRequestUnits { units };
+                        ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                        count += 1;
+                        continue 'lines;
                     }
                 }
 
                 if let Some(depth_str) = after_pk.strip_prefix("invoke [")
                     && depth_str.ends_with(']')
                 {
-                    events.push(LogEvent::Invoke {
+                    let ev = LogEvent::Invoke {
                         pid: pid_res,
                         is_cb,
                         pk_str_idx: pk_idx_opt,
-                    });
+                    };
+                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    count += 1;
                     continue 'lines;
-                }
-
-                if let Some(consumed_tail) = after_pk.strip_prefix("consumed ")
-                    && let Some(of_pos) = consumed_tail.find(" of ")
-                {
-                    let used_str = &consumed_tail[..of_pos];
-                    let rest2 = &consumed_tail[of_pos + 4..];
-                    if let Some(cu_pos) = rest2.find(" compute units") {
-                        if let (Ok(used), Ok(limit)) =
-                            (used_str.parse::<u32>(), rest2[..cu_pos].parse::<u32>())
-                        {
-                            events.push(LogEvent::Consumed { used, limit });
-                            continue 'lines;
-                        }
-                    }
                 }
 
                 if after_pk == "success" {
-                    events.push(LogEvent::Success);
+                    let ev = LogEvent::Success;
+                    ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+                    count += 1;
                     continue 'lines;
                 }
-
-                if let Some(reason) = after_pk.strip_prefix("failed: ") {
-                    events.push(LogEvent::Failure {
-                        reason_idx: intern(reason),
-                    });
-                    continue 'lines;
-                }
-
-                events.push(LogEvent::Plain {
-                    str_idx: intern(line),
-                });
-                continue 'lines;
             }
-
-            events.push(LogEvent::Plain {
-                str_idx: intern(line),
-            });
-            continue 'lines;
         }
-
-        events.push(LogEvent::Plain {
+        let ev = LogEvent::Plain {
             str_idx: intern(line),
-        });
+        };
+        ev_bytes = postcard::to_extend(&ev, ev_bytes).expect("encode event");
+        count += 1;
     }
 
-    let bytes = to_allocvec(&events).expect("postcard serialize");
+    let mut bytes = postcard::to_allocvec(&count).expect("encode length");
+    bytes.extend_from_slice(&ev_bytes);
+
     CompactLogStream { bytes, strings }
 }
 
-pub fn decode_logs<G>(
-    cls: &CompactLogStream,
-    mut pid_to_string: G,
-    cfg: DecodeConfig,
-) -> Vec<String>
+fn decode_logs<G>(cls: &CompactLogStream, mut pid_to_string: G, cfg: DecodeConfig) -> Vec<String>
 where
     G: FnMut(u32) -> String,
 {
@@ -512,10 +409,10 @@ where
             }
 
             LogEvent::Unparsed { str_idx } => {
-                if cfg.emit_unparsed_lines {
-                    if let Some(s) = cls.strings.get(str_idx as usize) {
-                        out.push(s.clone());
-                    }
+                if cfg.emit_unparsed_lines
+                    && let Some(s) = cls.strings.get(str_idx as usize)
+                {
+                    out.push(s.clone());
                 }
             }
         }
