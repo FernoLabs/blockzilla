@@ -3,6 +3,7 @@ mod build_registry;
 mod file_downloader;
 mod optimized_block_reader;
 mod optimizer;
+mod token_dump;
 
 use anyhow::{Result, anyhow};
 use blockzilla::{carblock_to_compact::MetadataMode, open_epoch::FetchMode};
@@ -59,6 +60,9 @@ enum Commands {
 
     #[command(subcommand)]
     Optimize(OptimizeCommand),
+
+    #[command(subcommand)]
+    Token(TokenCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -240,6 +244,22 @@ enum OptimizeCommand {
         input_dir: String,
         #[arg(short, long)]
         signature: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommand {
+    Dump {
+        #[arg(value_name = "EPOCH")]
+        epoch: u64,
+        #[arg(long, value_name = "SLOT")]
+        start_slot: u64,
+        #[arg(long, value_name = "MINT")]
+        mint: String,
+        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
+        cache_dir: String,
+        #[arg(short, long, default_value = "token_transaction_dump.bin")]
+        output: PathBuf,
     },
 }
 
@@ -453,6 +473,19 @@ async fn main() -> Result<()> {
                 input_dir,
                 signature,
             } => dump_logs(epoch, &input_dir, signature.as_deref()).await?,
+        },
+
+        Commands::Token(cmd) => match cmd {
+            TokenCommand::Dump {
+                epoch,
+                start_slot,
+                mint,
+                cache_dir,
+                output,
+            } => {
+                token_dump::dump_token_transactions(epoch, start_slot, &cache_dir, &mint, &output)
+                    .await?;
+            }
         },
     }
 
