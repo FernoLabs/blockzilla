@@ -469,6 +469,7 @@ fn optimized_outputs_exist(optimized_dir: &str, epoch: u64, format: OptimizedFor
 
     let direct_blocks = match format {
         OptimizedFormat::Wincode => base.join(format!("epoch-{epoch:04}.bin")),
+        OptimizedFormat::Postcard => base.join(format!("epoch-{epoch:04}.postcard")),
         OptimizedFormat::Cbor => base.join(format!("epoch-{epoch:04}.cbor")),
     };
 
@@ -481,6 +482,7 @@ fn optimized_outputs_exist(optimized_dir: &str, epoch: u64, format: OptimizedFor
     let nested_dir = base.join(format!("epoch-{epoch:04}/optimized"));
     let nested_blocks = match format {
         OptimizedFormat::Wincode => nested_dir.join("blocks.bin"),
+        OptimizedFormat::Postcard => nested_dir.join("blocks.postcard"),
         OptimizedFormat::Cbor => nested_dir.join("blocks.cbor"),
     };
 
