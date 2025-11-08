@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use async_compression::tokio::bufread::ZstdDecoder;
 use bytes::{Bytes, BytesMut};
 use clap::ValueEnum;
 use futures::StreamExt;
@@ -17,7 +18,7 @@ use std::{
 };
 use tokio::{
     fs,
-    io::{AsyncRead, ReadBuf},
+    io::{AsyncRead, BufReader, ReadBuf},
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc},
 };
 
@@ -497,14 +498,24 @@ pub async fn open_epoch(
     fs::create_dir_all(&cache_dir).await?;
     let file = format!("epoch-{epoch}.car");
     let cached_path = cache_dir.as_ref().join(&file);
+    let compressed_path = cache_dir.as_ref().join(format!("{file}.zst"));
     let url = format!("https://files.old-faithful.net/{epoch}/{file}");
 
     match mode {
         FetchMode::Offline => {
             if cached_path.exists() {
                 Ok(Box::new(tokio::fs::File::open(&cached_path).await?))
+            } else if compressed_path.exists() {
+                let file = tokio::fs::File::open(&compressed_path).await?;
+                let reader = BufReader::new(file);
+                let decoder = ZstdDecoder::new(reader);
+                Ok(Box::new(decoder))
             } else {
-                Err(anyhow!("Cache missing: {}", cached_path.display()))
+                Err(anyhow!(
+                    "Cache missing: {} or {}",
+                    cached_path.display(),
+                    compressed_path.display()
+                ))
             }
         }
         FetchMode::SafeNetwork => stream_epoch_safe(url).await,
