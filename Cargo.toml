@@ -48,6 +48,7 @@ zstd = "0.13.3"
 solana-signature = "3.1.0"
 memmap2 = "0.9.9"
 bs58 = "0.5"
+postcard = { version = "1.0", features = ["use-std"] }
 
 [build-dependencies]
 prost-build = "0.14.1"

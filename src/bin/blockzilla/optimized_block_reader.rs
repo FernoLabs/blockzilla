@@ -34,31 +34,42 @@ fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
 fn optimized_blocks_file(dir: &Path, format: OptimizedFormat) -> PathBuf {
     match format {
         OptimizedFormat::Wincode => dir.join("blocks.bin"),
+        OptimizedFormat::Postcard => dir.join("blocks.postcard"),
         OptimizedFormat::Cbor => dir.join("blocks.cbor"),
     }
 }
 
 fn resolve_blocks_path(input_dir: &str, epoch: u64) -> Option<(PathBuf, OptimizedFormat)> {
     let base = Path::new(input_dir);
-    let direct_cbor = base.join(format!("epoch-{epoch:04}.cbor"));
-    if direct_cbor.exists() {
-        return Some((direct_cbor, OptimizedFormat::Cbor));
-    }
-
     let direct_bin = base.join(format!("epoch-{epoch:04}.bin"));
     if direct_bin.exists() {
         return Some((direct_bin, OptimizedFormat::Wincode));
     }
 
-    let nested = optimized_dir(base, epoch);
-    let cbor_nested = optimized_blocks_file(&nested, OptimizedFormat::Cbor);
-    if cbor_nested.exists() {
-        return Some((cbor_nested, OptimizedFormat::Cbor));
+    let direct_postcard = base.join(format!("epoch-{epoch:04}.postcard"));
+    if direct_postcard.exists() {
+        return Some((direct_postcard, OptimizedFormat::Postcard));
     }
 
+    let direct_cbor = base.join(format!("epoch-{epoch:04}.cbor"));
+    if direct_cbor.exists() {
+        return Some((direct_cbor, OptimizedFormat::Cbor));
+    }
+
+    let nested = optimized_dir(base, epoch);
     let bin_nested = optimized_blocks_file(&nested, OptimizedFormat::Wincode);
     if bin_nested.exists() {
         return Some((bin_nested, OptimizedFormat::Wincode));
+    }
+
+    let postcard_nested = optimized_blocks_file(&nested, OptimizedFormat::Postcard);
+    if postcard_nested.exists() {
+        return Some((postcard_nested, OptimizedFormat::Postcard));
+    }
+
+    let cbor_nested = optimized_blocks_file(&nested, OptimizedFormat::Cbor);
+    if cbor_nested.exists() {
+        return Some((cbor_nested, OptimizedFormat::Cbor));
     }
 
     None
@@ -183,6 +194,34 @@ impl OptimizedStream {
                     initialized: &mut self.block_initialized,
                 };
                 Ok(Some((guard, len, len + 4)))
+            }
+            OptimizedFormat::Postcard => {
+                let (len, header_len) = match read_varint_async(&mut self.rdr).await? {
+                    Some(v) => v,
+                    None => return Ok(None),
+                };
+
+                self.scratch.resize(len, 0);
+                self.rdr.read_exact(&mut self.scratch).await?;
+                if self.block_initialized {
+                    unsafe {
+                        std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
+                    }
+                    self.block_initialized = false;
+                }
+
+                let block =
+                    blockzilla::optimized_postcard::decode_owned_compact_block(&self.scratch)
+                        .map_err(|e| anyhow!("deserialize CompactBlock postcard: {e}"))?;
+                unsafe {
+                    self.reusable_block.as_mut_ptr().write(block);
+                }
+                self.block_initialized = true;
+                let guard = CompactBlockGuard {
+                    ptr: self.reusable_block.as_mut_ptr(),
+                    initialized: &mut self.block_initialized,
+                };
+                Ok(Some((guard, len, len + header_len)))
             }
             OptimizedFormat::Cbor => {
                 let (len, header_len) = match read_varint_async(&mut self.rdr).await? {
@@ -404,6 +443,14 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                             .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))
                             .map(|()| unsafe { reusable_block.assume_init_ref() })
                     }
+                    OptimizedFormat::Postcard => {
+                        blockzilla::optimized_postcard::decode_owned_compact_block(&frame)
+                            .map_err(|e| anyhow!("deserialize CompactBlock postcard: {e}"))
+                            .map(|block| unsafe {
+                                reusable_block.as_mut_ptr().write(block);
+                                reusable_block.assume_init_ref()
+                            })
+                    }
                     OptimizedFormat::Cbor => decode_owned_compact_block(&frame)
                         .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))
                         .map(|block| unsafe {
@@ -448,6 +495,10 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                 }
                 (u32::from_le_bytes(len_bytes) as usize, 4usize)
             }
+            OptimizedFormat::Postcard => match read_varint_async(&mut rdr).await? {
+                Some(v) => v,
+                None => break,
+            },
             OptimizedFormat::Cbor => match read_varint_async(&mut rdr).await? {
                 Some(v) => v,
                 None => break,
