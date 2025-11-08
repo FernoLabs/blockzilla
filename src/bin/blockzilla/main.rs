@@ -514,9 +514,14 @@ async fn ensure_epoch_car(cache_dir: &str, epoch: u64) -> Result<(PathBuf, bool)
     if path.exists() {
         Ok((path, false))
     } else {
-        info!("📥 downloading epoch {epoch:04} to {}", path.display());
-        let downloaded = crate::file_downloader::download_epoch(epoch, cache_dir, 3).await?;
-        Ok((downloaded, true))
+        let compressed = Path::new(cache_dir).join(format!("epoch-{epoch}.car.zst"));
+        if compressed.exists() {
+            Ok((compressed, false))
+        } else {
+            info!("📥 downloading epoch {epoch:04} to {}", path.display());
+            let downloaded = crate::file_downloader::download_epoch(epoch, cache_dir, 3).await?;
+            Ok((downloaded, true))
+        }
     }
 }
 
