@@ -5,6 +5,7 @@ pub mod compact_log;
 pub mod node;
 pub mod open_epoch;
 pub mod optimized_cbor;
+pub mod optimized_postcard;
 pub mod partial_meta;
 pub mod transaction_parser;
 

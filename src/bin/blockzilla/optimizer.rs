@@ -28,7 +28,7 @@ use blockzilla::carblock_to_compact::{
     CompactBlock, MetadataMode, PubkeyIdProvider, StaticPubkeyIdProvider,
     carblock_to_compactblock_inplace,
 };
-use blockzilla::optimized_cbor::encode_compact_block_to_vec;
+use blockzilla::{optimized_cbor, optimized_postcard};
 
 fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
     base.join(format!("epoch-{epoch:04}/optimized"))
@@ -36,6 +36,7 @@ fn optimized_dir(base: &Path, epoch: u64) -> PathBuf {
 fn optimized_blocks_file(dir: &Path, format: OptimizedFormat) -> PathBuf {
     match format {
         OptimizedFormat::Wincode => dir.join("blocks.bin"),
+        OptimizedFormat::Postcard => dir.join("blocks.postcard"),
         OptimizedFormat::Cbor => dir.join("blocks.cbor"),
     }
 }
@@ -51,6 +52,7 @@ fn unique_tmp(dir: &Path, name: &str) -> PathBuf {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OptimizedFormat {
     Wincode,
+    Postcard,
     Cbor,
 }
 
@@ -119,8 +121,22 @@ fn push_cbor_block_into_batch(
     cb: &CompactBlock,
 ) -> anyhow::Result<()> {
     scratch.clear();
-    encode_compact_block_to_vec(cb, scratch)
+    optimized_cbor::encode_compact_block_to_vec(cb, scratch)
         .map_err(|e| anyhow!("encode compact block to cbor: {e}"))?;
+    write_varint(scratch.len(), batch);
+    batch.extend_from_slice(scratch);
+    Ok(())
+}
+
+#[inline]
+fn push_postcard_block_into_batch(
+    batch: &mut Vec<u8>,
+    scratch: &mut Vec<u8>,
+    cb: &CompactBlock,
+) -> anyhow::Result<()> {
+    scratch.clear();
+    optimized_postcard::encode_compact_block_to_vec(cb, scratch)
+        .map_err(|e| anyhow!("encode compact block to postcard: {e}"))?;
     write_varint(scratch.len(), batch);
     batch.extend_from_slice(scratch);
     Ok(())
@@ -292,7 +308,7 @@ pub async fn optimize_epoch_without_registry(
 
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
-    let mut cbor_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
+    let mut encode_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
 
     let mut reusable_block = ReusableCompactBlock::new();
     let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
@@ -334,8 +350,15 @@ pub async fn optimize_epoch_without_registry(
             OptimizedFormat::Wincode => {
                 push_wincode_block_into_batch(&mut frame_batch, compact_block)?;
             }
+            OptimizedFormat::Postcard => {
+                push_postcard_block_into_batch(
+                    &mut frame_batch,
+                    &mut encode_scratch,
+                    compact_block,
+                )?;
+            }
             OptimizedFormat::Cbor => {
-                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, compact_block)?;
+                push_cbor_block_into_batch(&mut frame_batch, &mut encode_scratch, compact_block)?;
             }
         }
 
@@ -377,6 +400,7 @@ pub async fn optimize_epoch_without_registry(
 
     let format_label = match format {
         OptimizedFormat::Wincode => "wincode",
+        OptimizedFormat::Postcard => "postcard",
         OptimizedFormat::Cbor => "cbor",
     };
     tracing::info!(
@@ -421,7 +445,7 @@ pub async fn optimize_epoch(
 
     let mut out = BufWriter::with_capacity(OUT_BUF_CAP, File::create(&tmp_path).await?);
     let mut frame_batch: Vec<u8> = Vec::with_capacity(BATCH_TARGET + (8 << 20));
-    let mut cbor_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
+    let mut encode_scratch: Vec<u8> = Vec::with_capacity(256 << 10);
 
     let mut reusable_block = ReusableCompactBlock::new();
     let mut buf_tx = Vec::<u8>::with_capacity(128 << 10);
@@ -464,8 +488,15 @@ pub async fn optimize_epoch(
             OptimizedFormat::Wincode => {
                 push_wincode_block_into_batch(&mut frame_batch, compact_block)?;
             }
+            OptimizedFormat::Postcard => {
+                push_postcard_block_into_batch(
+                    &mut frame_batch,
+                    &mut encode_scratch,
+                    compact_block,
+                )?;
+            }
             OptimizedFormat::Cbor => {
-                push_cbor_block_into_batch(&mut frame_batch, &mut cbor_scratch, compact_block)?;
+                push_cbor_block_into_batch(&mut frame_batch, &mut encode_scratch, compact_block)?;
             }
         }
 
@@ -505,6 +536,7 @@ pub async fn optimize_epoch(
 
     let format_label = match format {
         OptimizedFormat::Wincode => "wincode",
+        OptimizedFormat::Postcard => "postcard",
         OptimizedFormat::Cbor => "cbor",
     };
     tracing::info!(
