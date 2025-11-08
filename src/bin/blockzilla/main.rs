@@ -459,23 +459,32 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn registry_paths(registry_dir: &str, epoch: u64) -> (PathBuf, PathBuf) {
-    let base = Path::new(registry_dir);
-    (
-        base.join(format!("registry-{epoch:04}.bin")),
-        base.join(format!("registry-pubkeys-{epoch:04}.bin")),
-    )
+fn registry_outputs_exist(registry_dir: &str, epoch: u64) -> bool {
+    let epoch_dir = Path::new(registry_dir).join(format!("epoch-{epoch:04}"));
+    epoch_dir.join("keys.bin").exists() && epoch_dir.join("fp2key.bin").exists()
 }
 
-fn optimized_paths(optimized_dir: &str, epoch: u64, format: OptimizedFormat) -> (PathBuf, PathBuf) {
+fn optimized_outputs_exist(optimized_dir: &str, epoch: u64, format: OptimizedFormat) -> bool {
     let base = Path::new(optimized_dir);
-    (
-        match format {
-            OptimizedFormat::Wincode => base.join(format!("epoch-{epoch:04}.bin")),
-            OptimizedFormat::Cbor => base.join(format!("epoch-{epoch:04}.cbor")),
-        },
-        base.join(format!("epoch-{epoch:04}.idx")),
-    )
+
+    let direct_blocks = match format {
+        OptimizedFormat::Wincode => base.join(format!("epoch-{epoch:04}.bin")),
+        OptimizedFormat::Cbor => base.join(format!("epoch-{epoch:04}.cbor")),
+    };
+
+    if direct_blocks.exists() {
+        // Older layouts produced a sidecar index file alongside the flat blocks file.
+        let direct_idx = base.join(format!("epoch-{epoch:04}.idx"));
+        return direct_idx.exists();
+    }
+
+    let nested_dir = base.join(format!("epoch-{epoch:04}/optimized"));
+    let nested_blocks = match format {
+        OptimizedFormat::Wincode => nested_dir.join("blocks.bin"),
+        OptimizedFormat::Cbor => nested_dir.join("blocks.cbor"),
+    };
+
+    nested_blocks.exists()
 }
 
 fn outputs_exist(
@@ -484,12 +493,8 @@ fn outputs_exist(
     epoch: u64,
     format: OptimizedFormat,
 ) -> bool {
-    let (registry_bin, registry_keys) = registry_paths(registry_dir, epoch);
-    let (optimized_bin, optimized_idx) = optimized_paths(optimized_dir, epoch, format);
-    registry_bin.exists()
-        && registry_keys.exists()
-        && optimized_bin.exists()
-        && optimized_idx.exists()
+    registry_outputs_exist(registry_dir, epoch)
+        && optimized_outputs_exist(optimized_dir, epoch, format)
 }
 
 fn metadata_mode_from_flags(raw_metadata: bool, drop_metadata: bool) -> MetadataMode {
