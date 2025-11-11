@@ -8,7 +8,7 @@ pub fn encode_compact_block_to_vec(
     buf: &mut Vec<u8>,
 ) -> Result<(), EncodeError> {
     buf.clear();
-    postcard::to_writer(buf, block)?;
+    postcard::to_io(block, buf)?;
     Ok(())
 }
 

@@ -161,8 +161,9 @@ pub async fn dump_token_transactions(
     let encoded = wincode::serialize(&dump)?;
     fs::write(output_path, encoded).await?;
 
+    let tracked_accounts_len = tracked_accounts.len();
     info!(
-        "🪙 token dump complete: epoch={epoch:04} start_slot={start_slot} blocks_scanned={blocks_scanned} txs_seen={txs_seen} txs_kept={txs_kept} tracked_accounts={tracked_accounts.len()} new_accounts={accounts_tracked} output={}",
+        "🪙 token dump complete: epoch={epoch:04} start_slot={start_slot} blocks_scanned={blocks_scanned} txs_seen={txs_seen} txs_kept={txs_kept} tracked_accounts={tracked_accounts_len} new_accounts={accounts_tracked} output={}",
         output_path.display()
     );
 
