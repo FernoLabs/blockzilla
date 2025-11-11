@@ -8,13 +8,16 @@ use blockzilla::{
     },
     open_epoch::{self, FetchMode},
 };
+use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
+use std::time::{Duration, Instant};
 use std::{path::Path, str::FromStr};
 use tokio::fs;
-use tracing::info;
 use wincode::{SchemaRead, SchemaWrite};
+
+use crate::LOG_INTERVAL_SECS;
 
 #[derive(Debug, Default)]
 struct DynamicRegistry {
@@ -96,12 +99,27 @@ pub async fn dump_token_transactions(
 
     let token_program_bytes = spl_token::ID.to_bytes();
 
+    // logging totals
+    let start = Instant::now();
+    let mut last_log = start;
+    let pb = ProgressBar::new_spinner();
+
     let mut blocks_scanned = 0u64;
-    let mut txs_seen = 0u64;
-    let mut txs_kept = 0u64;
-    let mut accounts_tracked = 0u64;
+    let mut txs_seen = 0u64;      // total transactions scanned
+    let mut txs_kept = 0u64;      // transactions where instruction matched our filter
+    let mut accounts_tracked_new = 0u64; // number of new tracked accounts discovered
+    let mut bytes_count = 0u64;
+    let mut entry_count = 0u64;
 
     while let Some(block) = car.next_block().await? {
+        // align metrics with block reader
+        entry_count += block.entries.len() as u64;
+        bytes_count += block
+            .entries
+            .iter()
+            .map(|(_, a)| a.len())
+            .sum::<usize>() as u64;
+
         let slot = match block.block() {
             Ok(b) => b.slot,
             Err(e) => {
@@ -137,12 +155,40 @@ pub async fn dump_token_transactions(
                     &registry,
                 );
                 if added > 0 {
-                    accounts_tracked += added as u64;
+                    accounts_tracked_new += added as u64;
                 }
 
                 collected.push(TokenTransactionRecord { slot, tx });
                 txs_kept += 1;
             }
+        }
+
+        // periodic log - same style as block reader, but with tx stats
+        let now = Instant::now();
+        if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+            last_log = now;
+            let elapsed = now.duration_since(start);
+            let secs = elapsed.as_secs_f64().max(1e-6);
+
+            let blk_s = blocks_scanned as f64 / secs;
+            let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+            let tps = if elapsed.as_secs() > 0 {
+                txs_seen / elapsed.as_secs()
+            } else {
+                0
+            };
+            let tracked_accounts_len = tracked_accounts.len();
+
+            pb.set_message(format!(
+                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
+                blocks_scanned,
+                blk_s,
+                mb_s,
+                tps,
+                txs_seen,
+                txs_kept,
+                tracked_accounts_len
+            ));
         }
     }
 
@@ -161,10 +207,23 @@ pub async fn dump_token_transactions(
     let encoded = wincode::serialize(&dump)?;
     fs::write(output_path, encoded).await?;
 
+    // final line like block reader, with tx stats
+    let elapsed = start.elapsed();
+    let secs = elapsed.as_secs_f64().max(1e-6);
+    let blk_s = blocks_scanned as f64 / secs;
+    let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+    let tps = if elapsed.as_secs() > 0 { txs_seen / elapsed.as_secs() } else { 0 };
     let tracked_accounts_len = tracked_accounts.len();
-    info!(
-        "🪙 token dump complete: epoch={epoch:04} start_slot={start_slot} blocks_scanned={blocks_scanned} txs_seen={txs_seen} txs_kept={txs_kept} tracked_accounts={tracked_accounts_len} new_accounts={accounts_tracked} output={}",
-        output_path.display()
+
+    tracing::info!(
+        "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
+        blocks_scanned,
+        blk_s,
+        mb_s,
+        tps,
+        txs_seen,
+        txs_kept,
+        tracked_accounts_len
     );
 
     Ok(())
