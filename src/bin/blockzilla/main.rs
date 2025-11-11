@@ -250,8 +250,8 @@ enum OptimizeCommand {
 #[derive(Subcommand, Debug)]
 enum TokenCommand {
     Dump {
-        #[arg(value_name = "EPOCH")]
-        epoch: u64,
+        #[arg(value_name = "START_EPOCH", help = "Starting epoch to scan, inclusive")]
+        start_epoch: u64,
         #[arg(long, value_name = "SLOT")]
         start_slot: u64,
         #[arg(long, value_name = "MINT")]
@@ -477,14 +477,20 @@ async fn main() -> Result<()> {
 
         Commands::Token(cmd) => match cmd {
             TokenCommand::Dump {
-                epoch,
+                start_epoch,
                 start_slot,
                 mint,
                 cache_dir,
                 output,
             } => {
-                token_dump::dump_token_transactions(epoch, start_slot, &cache_dir, &mint, &output)
-                    .await?;
+                token_dump::dump_token_transactions(
+                    start_epoch,
+                    start_slot,
+                    &cache_dir,
+                    &mint,
+                    &output,
+                )
+                .await?;
             }
         },
     }

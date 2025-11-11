@@ -152,8 +152,8 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 .await?;
 
             let entry_slice = &self.buf[start..start + len];
-            let cid_len = read_cid_len(entry_slice)
-                .map_err(|e| anyhow!("CID parse/len error: {e}"))?;
+            let cid_len =
+                read_cid_len(entry_slice).map_err(|e| anyhow!("CID parse/len error: {e}"))?;
             let payload_start = start + cid_len;
 
             return Ok(Some((start, start + len, payload_start)));
