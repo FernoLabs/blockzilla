@@ -133,23 +133,31 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
     }
 
     async fn read_next_entry(&mut self) -> Result<Option<(usize, usize, usize)>> {
-        let len = match read_varint(&mut self.reader).await {
-            Ok(l) => l,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
+        loop {
+            let len = match read_varint(&mut self.reader).await {
+                Ok(l) => l,
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
 
-        let start = self.buf.len();
-        self.buf.resize(start + len, 0);
-        self.reader
-            .read_exact(&mut self.buf[start..start + len])
-            .await?;
+            if len == 0 {
+                tracing::warn!("encountered zero-length CAR entry; skipping");
+                continue;
+            }
 
-        let entry_slice = &self.buf[start..start + len];
-        let cid_len = read_cid_len(entry_slice).map_err(|e| anyhow!("CID parse/len error: {e}"))?;
-        let payload_start = start + cid_len;
+            let start = self.buf.len();
+            self.buf.resize(start + len, 0);
+            self.reader
+                .read_exact(&mut self.buf[start..start + len])
+                .await?;
 
-        Ok(Some((start, start + len, payload_start)))
+            let entry_slice = &self.buf[start..start + len];
+            let cid_len = read_cid_len(entry_slice)
+                .map_err(|e| anyhow!("CID parse/len error: {e}"))?;
+            let payload_start = start + cid_len;
+
+            return Ok(Some((start, start + len, payload_start)));
+        }
     }
 }
 
