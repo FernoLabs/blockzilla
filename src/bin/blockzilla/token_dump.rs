@@ -12,6 +12,7 @@ use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
+use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 use std::{path::Path, str::FromStr};
 use tokio::fs;
@@ -66,7 +67,7 @@ pub struct TokenTransactionDump {
 }
 
 pub async fn dump_token_transactions(
-    epoch: u64,
+    start_epoch: u64,
     start_slot: u64,
     cache_dir: &str,
     mint_str: &str,
@@ -79,11 +80,19 @@ pub async fn dump_token_transactions(
     let mut registry = DynamicRegistry::default();
     let mint_id = registry.ensure_id(&mint_bytes);
 
-    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
-        .await
-        .with_context(|| format!("failed to open epoch {epoch:04} from {cache_dir}"))?;
-    let mut car = CarBlockReader::new(reader);
-    car.read_header().await?;
+    let cache_path = Path::new(cache_dir);
+    let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
+        return Err(anyhow!(
+            "no cached epochs found in {}",
+            cache_path.display()
+        ));
+    };
+
+    if start_epoch > last_epoch {
+        return Err(anyhow!(
+            "start epoch {start_epoch:04} is beyond last cached epoch {last_epoch:04}"
+        ));
+    }
 
     let mut block_buf = CompactBlock {
         slot: 0,
@@ -107,86 +116,106 @@ pub async fn dump_token_transactions(
     let mut blocks_scanned = 0u64;
     let mut txs_seen = 0u64; // total transactions scanned
     let mut txs_kept = 0u64; // transactions where instruction matched our filter
-    let mut accounts_tracked_new = 0u64; // number of new tracked accounts discovered
+    let mut _accounts_tracked_new = 0u64; // number of new tracked accounts discovered
     let mut bytes_count = 0u64;
-    let mut entry_count = 0u64;
+    let mut _entry_count = 0u64;
 
-    while let Some(block) = car.next_block().await? {
-        // align metrics with block reader
-        entry_count += block.entries.len() as u64;
-        bytes_count += block.entries.iter().map(|(_, a)| a.len()).sum::<usize>() as u64;
+    let mut min_slot = start_slot;
+    let mut last_epoch_processed = None;
 
-        let slot = match peek_block_slot(&block) {
-            Ok(slot) => slot,
-            Err(e) => {
-                tracing::warn!("failed to decode block: {e}");
+    for epoch in start_epoch..=last_epoch {
+        let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
+            .await
+            .with_context(|| format!("failed to open epoch {epoch:04} from {cache_dir}"))?;
+        let mut car = CarBlockReader::new(reader);
+        car.read_header().await?;
+        last_epoch_processed = Some(epoch);
+
+        while let Some(block) = car.next_block().await? {
+            // align metrics with block reader
+            _entry_count += block.entries.len() as u64;
+            bytes_count += block.entries.iter().map(|(_, a)| a.len()).sum::<usize>() as u64;
+
+            let slot = match peek_block_slot(&block) {
+                Ok(slot) => slot,
+                Err(e) => {
+                    tracing::warn!("failed to decode block: {e}");
+                    continue;
+                }
+            };
+
+            if slot < min_slot {
                 continue;
             }
-        };
 
-        if slot < start_slot {
-            continue;
-        }
+            carblock_to_compactblock_inplace(
+                &block,
+                &mut registry,
+                MetadataMode::Compact,
+                &mut buf_tx,
+                &mut buf_meta,
+                &mut buf_rewards,
+                &mut block_buf,
+            )?;
 
-        carblock_to_compactblock_inplace(
-            &block,
-            &mut registry,
-            MetadataMode::Compact,
-            &mut buf_tx,
-            &mut buf_meta,
-            &mut buf_rewards,
-            &mut block_buf,
-        )?;
+            blocks_scanned += 1;
+            txs_seen += block_buf.txs.len() as u64;
 
-        blocks_scanned += 1;
-        txs_seen += block_buf.txs.len() as u64;
+            for tx in block_buf.txs.drain(..) {
+                if transaction_matches(&tx, mint_id, &tracked_accounts) {
+                    let added = update_tracked_accounts(
+                        &tx,
+                        mint_id,
+                        &token_program_bytes,
+                        &mut tracked_accounts,
+                        &registry,
+                    );
+                    if added > 0 {
+                        _accounts_tracked_new += added as u64;
+                    }
 
-        for tx in block_buf.txs.drain(..) {
-            if transaction_matches(&tx, mint_id, &tracked_accounts) {
-                let added = update_tracked_accounts(
-                    &tx,
-                    mint_id,
-                    &token_program_bytes,
-                    &mut tracked_accounts,
-                    &registry,
-                );
-                if added > 0 {
-                    accounts_tracked_new += added as u64;
+                    collected.push(TokenTransactionRecord { slot, tx });
+                    txs_kept += 1;
                 }
+            }
 
-                collected.push(TokenTransactionRecord { slot, tx });
-                txs_kept += 1;
+            // periodic log - same style as block reader, but with tx stats
+            let now = Instant::now();
+            if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+                last_log = now;
+                let elapsed = now.duration_since(start);
+                let secs = elapsed.as_secs_f64().max(1e-6);
+
+                let blk_s = blocks_scanned as f64 / secs;
+                let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+                let tps = if elapsed.as_secs() > 0 {
+                    txs_seen / elapsed.as_secs()
+                } else {
+                    0
+                };
+                let tracked_accounts_len = tracked_accounts.len();
+
+                pb.set_message(format!(
+                    "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
+                    blocks_scanned,
+                    blk_s,
+                    mb_s,
+                    tps,
+                    txs_seen,
+                    txs_kept,
+                    tracked_accounts_len
+                ));
             }
         }
 
-        // periodic log - same style as block reader, but with tx stats
-        let now = Instant::now();
-        if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
-            last_log = now;
-            let elapsed = now.duration_since(start);
-            let secs = elapsed.as_secs_f64().max(1e-6);
-
-            let blk_s = blocks_scanned as f64 / secs;
-            let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-            let tps = if elapsed.as_secs() > 0 {
-                txs_seen / elapsed.as_secs()
-            } else {
-                0
-            };
-            let tracked_accounts_len = tracked_accounts.len();
-
-            pb.set_message(format!(
-                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
-                blocks_scanned,
-                blk_s,
-                mb_s,
-                tps,
-                txs_seen,
-                txs_kept,
-                tracked_accounts_len
-            ));
-        }
+        min_slot = 0;
     }
+
+    let Some(last_epoch_processed) = last_epoch_processed else {
+        return Err(anyhow!(
+            "no epochs processed between {start_epoch:04} and {last_epoch:04}"
+        ));
+    };
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -215,8 +244,14 @@ pub async fn dump_token_transactions(
     };
     let tracked_accounts_len = tracked_accounts.len();
 
+    let range_label = if start_epoch == last_epoch_processed {
+        format!("epoch {start_epoch:04}")
+    } else {
+        format!("epochs {start_epoch:04}-{last_epoch_processed:04}")
+    };
+
     tracing::info!(
-        "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
+        "{range_label} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
         blocks_scanned,
         blk_s,
         mb_s,
@@ -227,6 +262,44 @@ pub async fn dump_token_transactions(
     );
 
     Ok(())
+}
+
+async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
+    let mut rd = match fs::read_dir(cache_dir).await {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut max_epoch = None;
+    while let Some(entry) = rd.next_entry().await? {
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+
+        let Some(epoch_str) = name.strip_prefix("epoch-").and_then(|s| {
+            s.strip_suffix(".car")
+                .or_else(|| s.strip_suffix(".car.zst"))
+        }) else {
+            continue;
+        };
+
+        let Ok(epoch) = epoch_str.parse::<u64>() else {
+            continue;
+        };
+
+        max_epoch = Some(max_epoch.map_or(epoch, |current: u64| current.max(epoch)));
+    }
+
+    Ok(max_epoch)
 }
 
 fn peek_block_slot(block: &CarBlock) -> Result<u64> {
