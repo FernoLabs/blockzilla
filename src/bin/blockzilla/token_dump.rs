@@ -1,7 +1,7 @@
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Context, Result, anyhow};
 use blockzilla::{
-    car_block_reader::CarBlockReader,
+    car_block_reader::{CarBlock, CarBlockReader},
     carblock_to_compact::{
         CompactBlock, CompactMetadataPayload, CompactVersionedTx, MetadataMode, PubkeyIdProvider,
         carblock_to_compactblock_inplace,
@@ -105,8 +105,8 @@ pub async fn dump_token_transactions(
     let pb = ProgressBar::new_spinner();
 
     let mut blocks_scanned = 0u64;
-    let mut txs_seen = 0u64;      // total transactions scanned
-    let mut txs_kept = 0u64;      // transactions where instruction matched our filter
+    let mut txs_seen = 0u64; // total transactions scanned
+    let mut txs_kept = 0u64; // transactions where instruction matched our filter
     let mut accounts_tracked_new = 0u64; // number of new tracked accounts discovered
     let mut bytes_count = 0u64;
     let mut entry_count = 0u64;
@@ -114,14 +114,10 @@ pub async fn dump_token_transactions(
     while let Some(block) = car.next_block().await? {
         // align metrics with block reader
         entry_count += block.entries.len() as u64;
-        bytes_count += block
-            .entries
-            .iter()
-            .map(|(_, a)| a.len())
-            .sum::<usize>() as u64;
+        bytes_count += block.entries.iter().map(|(_, a)| a.len()).sum::<usize>() as u64;
 
-        let slot = match block.block() {
-            Ok(b) => b.slot,
+        let slot = match peek_block_slot(&block) {
+            Ok(slot) => slot,
             Err(e) => {
                 tracing::warn!("failed to decode block: {e}");
                 continue;
@@ -212,7 +208,11 @@ pub async fn dump_token_transactions(
     let secs = elapsed.as_secs_f64().max(1e-6);
     let blk_s = blocks_scanned as f64 / secs;
     let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-    let tps = if elapsed.as_secs() > 0 { txs_seen / elapsed.as_secs() } else { 0 };
+    let tps = if elapsed.as_secs() > 0 {
+        txs_seen / elapsed.as_secs()
+    } else {
+        0
+    };
     let tracked_accounts_len = tracked_accounts.len();
 
     tracing::info!(
@@ -227,6 +227,23 @@ pub async fn dump_token_transactions(
     );
 
     Ok(())
+}
+
+fn peek_block_slot(block: &CarBlock) -> Result<u64> {
+    let mut decoder = minicbor::Decoder::new(block.block_bytes.as_ref());
+    decoder
+        .array()
+        .map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
+    let kind = decoder
+        .u64()
+        .map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
+    if kind != 2 {
+        return Err(anyhow!("unexpected block kind {kind}, expected Block"));
+    }
+    let slot = decoder
+        .u64()
+        .map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
+    Ok(slot)
 }
 
 fn transaction_matches(tx: &CompactVersionedTx, mint_id: u32, tracked: &AHashSet<u32>) -> bool {
