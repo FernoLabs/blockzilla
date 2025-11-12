@@ -3,6 +3,7 @@ mod build_registry;
 mod file_downloader;
 mod optimized_block_reader;
 mod optimizer;
+mod program_stats;
 mod token_dump;
 
 use anyhow::{Result, anyhow};
@@ -63,6 +64,9 @@ enum Commands {
 
     #[command(subcommand)]
     Token(TokenCommand),
+
+    #[command(subcommand)]
+    Stats(StatsCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -260,6 +264,26 @@ enum TokenCommand {
         cache_dir: String,
         #[arg(short, long, default_value = "token_transaction_dump.bin")]
         output: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StatsCommand {
+    Program {
+        #[arg(value_name = "START_EPOCH", help = "Starting epoch to scan, inclusive")]
+        start_epoch: u64,
+        #[arg(long, value_name = "SLOT", default_value_t = 0)]
+        start_slot: u64,
+        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
+        cache_dir: String,
+        #[arg(short, long, default_value = "program_usage_stats.json")]
+        output: PathBuf,
+        #[arg(
+            long,
+            value_name = "LIMIT",
+            help = "Limit number of programs written to output"
+        )]
+        limit: Option<usize>,
     },
 }
 
@@ -489,6 +513,25 @@ async fn main() -> Result<()> {
                     &cache_dir,
                     &mint,
                     &output,
+                )
+                .await?;
+            }
+        },
+
+        Commands::Stats(cmd) => match cmd {
+            StatsCommand::Program {
+                start_epoch,
+                start_slot,
+                cache_dir,
+                output,
+                limit,
+            } => {
+                program_stats::dump_program_stats(
+                    start_epoch,
+                    start_slot,
+                    &cache_dir,
+                    &output,
+                    limit,
                 )
                 .await?;
             }
