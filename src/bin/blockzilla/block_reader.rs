@@ -73,7 +73,7 @@ pub async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> Result<
         }
 
         blocks_count += 1;
-        bytes_count += block.entries.iter().map(|(_, a)| a.len()).sum::<usize>();
+        bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>();
         drop(block);
 
         let now = Instant::now();
@@ -202,7 +202,7 @@ pub async fn read_block_par(
                 }
 
                 bytes_count.fetch_add(
-                    block.entries.iter().map(|(_, a)| a.len()).sum::<usize>() as u64,
+                    block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64,
                     Ordering::Relaxed,
                 );
                 blocks_count.fetch_add(1, Ordering::Relaxed);
