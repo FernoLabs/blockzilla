@@ -1,20 +1,80 @@
-use ahash::{AHashMap, AHashSet};
+// Extract new token accounts from InitializeAccount instructions
+// account_keys_buf is already parsed and reused
+fn extract_new_tracked_accounts(
+    tx: &VersionedTransaction,
+    account_keys: &[Pubkey],
+    mint_bytes: &[u8; 32],
+    token_program_bytes: &[u8; 32],
+    tracked: &mut AHashSet<[u8; 32]>,
+    added: &mut Vec<[u8; 32]>,
+) {
+    added.clear();
+
+    let mut handle_instruction = |program_idx: usize, accounts: &[u8], data: &[u8]| {
+        if program_idx >= account_keys.len() {
+            return;
+        }
+        
+        let program_key = account_keys[program_idx].to_bytes();
+        if &program_key != token_program_bytes {
+            return;
+        }
+
+        if let Ok(instr) = TokenInstruction::unpack(data) {
+            match instr {
+                TokenInstruction::InitializeAccount
+                | TokenInstruction::InitializeAccount2 { .. }
+                | TokenInstruction::InitializeAccount3 { .. } => {
+                    if accounts.len() < 2 {
+                        return;
+                    }
+                    let account_idx = accounts[0] as usize;
+                    let mint_idx = accounts[1] as usize;
+
+                    if account_idx >= account_keys.len() || mint_idx >= account_keys.len() {
+                        return;
+                    }
+
+                    let candidate_key = account_keys[account_idx].to_bytes();
+                    let mint_key = account_keys[mint_idx].to_bytes();
+                    
+                    if &mint_key != mint_bytes {
+                        return;
+                    }
+
+                    if tracked.insert(candidate_key) {
+                        added.push(candidate_key);
+                    }
+                }
+                _ => {}
+            }
+        }
+    };
+
+    // Handle top-level instructions using message API
+    for ix in tx.message.instructions_iter() {
+        handle_instruction(
+            ix.program_id_index as usize,
+            &ix.accounts,
+            &ix.data,
+        );
+    }
+}use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
-    carblock_to_compact::{
-        CompactMetadataPayload, CompactVersionedTx, MetadataMode, PubkeyIdProvider,
-        transaction_involves_token, versioned_transaction_to_compact,
-    },
     node::{Node, TransactionNode},
     open_epoch::{self, FetchMode},
-    transaction_parser::VersionedTransaction,
+    partial_meta::extract_metadata_pubkeys,
+    transaction_parser::{VersionedTransaction, parse_account_keys_only},
 };
 use cid::Cid;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
+use std::fmt::Write as FmtWrite;
 use std::io::{ErrorKind, IsTerminal, Read};
 use std::time::{Duration, Instant};
 use std::{
@@ -30,65 +90,15 @@ use crate::LOG_INTERVAL_SECS;
 
 const BLOCK_LOG_CHUNK: u64 = 500;
 
-#[derive(Debug, Default)]
-struct DynamicRegistry {
-    map: AHashMap<[u8; 32], u32>,
-    keys: Vec<[u8; 32]>,
-}
-
-impl DynamicRegistry {
-    fn ensure_id(&mut self, key: &[u8; 32]) -> u32 {
-        if let Some(id) = self.map.get(key) {
-            *id
-        } else {
-            let id = self.keys.len() as u32;
-            self.keys.push(*key);
-            self.map.insert(*key, id);
-            id
-        }
-    }
-
-    fn key_for(&self, id: u32) -> Option<&[u8; 32]> {
-        self.keys.get(id as usize)
-    }
-
-    fn id_for(&self, key: &[u8; 32]) -> Option<u32> {
-        self.map.get(key).copied()
-    }
-
-    fn from_keys(keys: Vec<[u8; 32]>) -> Self {
-        let mut map = AHashMap::with_capacity(keys.len());
-        for (idx, key) in keys.iter().enumerate() {
-            map.insert(*key, idx as u32);
-        }
-        Self { map, keys }
-    }
-
-    fn clone_registry(&self) -> Vec<[u8; 32]> {
-        self.keys.clone()
-    }
-
-    fn into_registry(self) -> Vec<[u8; 32]> {
-        self.keys
-    }
-}
-
-impl PubkeyIdProvider for DynamicRegistry {
-    fn resolve(&mut self, key: &[u8; 32]) -> Option<u32> {
-        Some(self.ensure_id(key))
-    }
-}
-
 #[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct TokenTransactionRecord {
     pub slot: u64,
-    pub tx: CompactVersionedTx,
+    pub tx_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct TokenTransactionDump {
     pub mint: [u8; 32],
-    pub registry: Vec<[u8; 32]>,
     pub transactions: Vec<TokenTransactionRecord>,
 }
 
@@ -97,7 +107,6 @@ struct TokenTransactionEpochDump {
     pub mint: [u8; 32],
     pub epoch: u64,
     pub last_slot: u64,
-    pub registry: Vec<[u8; 32]>,
     pub tracked_account_keys: Vec<[u8; 32]>,
     pub transactions: Vec<TokenTransactionRecord>,
 }
@@ -112,9 +121,6 @@ pub async fn dump_token_transactions(
     let mint =
         Pubkey::from_str(mint_str).map_err(|e| anyhow!("invalid mint pubkey '{mint_str}': {e}"))?;
     let mint_bytes = mint.to_bytes();
-
-    let mut registry = DynamicRegistry::default();
-    let mut mint_id = registry.ensure_id(&mint_bytes);
 
     let parts_dir = output_path.with_extension("parts");
 
@@ -135,10 +141,15 @@ pub async fn dump_token_transactions(
     let mut buf_tx = Vec::with_capacity(128 * 1024);
     let mut buf_meta = Vec::with_capacity(128 * 1024);
 
-    let mut tracked_account_ids: AHashSet<u32> = AHashSet::new();
-    let mut tracked_account_keys: AHashSet<[u8; 32]> = AHashSet::new();
-    let mut collected: Vec<TokenTransactionRecord> = Vec::new();
-    let mut processed_epochs: AHashSet<u64> = AHashSet::new();
+    // Pre-allocate collections
+    let mut tracked_account_keys: AHashSet<[u8; 32]> = AHashSet::with_capacity(10_000);
+    
+    // Estimate capacity
+    let epoch_span = (last_epoch - start_epoch + 1) as usize;
+    let estimated_capacity = (epoch_span * 500_000).min(10_000_000);
+    let mut collected: Vec<TokenTransactionRecord> = Vec::with_capacity(estimated_capacity);
+    
+    let mut processed_epochs: AHashSet<u64> = AHashSet::with_capacity(epoch_span);
     let mut blocks_scanned = 0u64;
     let mut txs_seen = 0u64;
     let mut txs_kept = 0u64;
@@ -150,6 +161,12 @@ pub async fn dump_token_transactions(
 
     let token_program_bytes = spl_token::ID.to_bytes();
 
+    // Reusable buffers
+    let mut added_keys_buf = Vec::with_capacity(64);
+    let mut msg_buf = String::with_capacity(256);
+    let mut account_keys_buf = SmallVec::<[Pubkey; 256]>::new();
+
+    // Load cached epoch dumps
     if let Ok(mut rd) = fs::read_dir(&parts_dir).await {
         let mut part_entries: Vec<(u64, PathBuf)> = Vec::new();
         while let Some(entry) = rd.next_entry().await? {
@@ -174,7 +191,7 @@ pub async fn dump_token_transactions(
             };
             part_entries.push((epoch, entry.path()));
         }
-        part_entries.sort_by_key(|(epoch, _)| *epoch);
+        part_entries.sort_unstable_by_key(|(epoch, _)| *epoch);
 
         for (epoch, path) in part_entries {
             if epoch < start_epoch || epoch > last_epoch {
@@ -208,24 +225,14 @@ pub async fn dump_token_transactions(
                 ));
             }
 
-            registry = DynamicRegistry::from_keys(part.registry.clone());
-            let mid = registry.ensure_id(&mint_bytes);
-            if mid != mint_id {
-                // ensure mint id stays consistent across reloads
-                mint_id = mid;
-            }
-
-            tracked_account_keys = part.tracked_account_keys.iter().copied().collect();
-            tracked_account_ids = part
-                .tracked_account_keys
-                .iter()
-                .filter_map(|key| registry.id_for(key))
-                .collect();
+            tracked_account_keys.clear();
+            tracked_account_keys.extend(part.tracked_account_keys.iter().copied());
 
             last_processed_slot = part.last_slot;
-            txs_kept += part.transactions.len() as u64;
-            txs_seen += part.transactions.len() as u64;
-            collected.extend(part.transactions.into_iter());
+            let new_txs = part.transactions.len() as u64;
+            txs_kept += new_txs;
+            txs_seen += new_txs;
+            collected.extend(part.transactions);
             processed_epochs.insert(epoch);
             last_epoch_processed = Some(epoch);
         }
@@ -243,7 +250,6 @@ pub async fn dump_token_transactions(
 
     // timers and counters
     let start = Instant::now();
-    // force first log immediately
     let mut last_log = start - Duration::from_secs(LOG_INTERVAL_SECS);
 
     // skip-phase controls for first epoch
@@ -259,9 +265,13 @@ pub async fn dump_token_transactions(
     let mut last_skipped_slot = 0u64;
     let mut printed_skipped_summary = false;
 
-    pb.set_message(format!(
-        "starting dump | mint={mint_str} | start_epoch={start_epoch:04} start_slot={start_slot} | scanning up to {last_epoch:04}"
-    ));
+    msg_buf.clear();
+    write!(
+        &mut msg_buf,
+        "starting dump | mint={} | start_epoch={:04} start_slot={} | scanning up to {:04}",
+        mint_str, start_epoch, start_slot, last_epoch
+    ).unwrap();
+    pb.set_message(msg_buf.clone());
 
     for epoch in start_epoch..=last_epoch {
         if processed_epochs.contains(&epoch) {
@@ -313,37 +323,40 @@ pub async fn dump_token_transactions(
                 skipped_bytes += block_bytes;
                 last_skipped_slot = slot;
 
-                let eta_text = if let (Some(s0), Some(t0)) = (skip_first_slot, skip_first_instant) {
-                    let s_delta = slot.saturating_sub(s0);
-                    let secs = Instant::now().saturating_duration_since(t0).as_secs_f64();
-                    if s_delta > 0 && secs > 0.0 && min_slot > slot {
-                        let rate = s_delta as f64 / secs; // slots per sec observed while skipping
-                        if rate > 0.0 {
-                            let remain = (min_slot - slot) as f64;
-                            human_eta(remain / rate)
-                        } else {
-                            "eta n/a".to_string()
-                        }
-                    } else {
-                        "eta n/a".to_string()
-                    }
-                } else {
-                    "eta n/a".to_string()
-                };
-
                 let now = Instant::now();
                 if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
                     last_log = now;
-                    let line = format!(
-                        "epoch {epoch:04} | skipping... slot={slot} -> start_slot={min_slot} | skipped={} ({:.2} MB) | {eta}",
-                        skipped_blocks,
-                        skipped_bytes as f64 / (1024.0 * 1024.0),
-                        eta = eta_text
-                    );
-                    if pb.is_hidden() {
-                        tracing::info!("{line}");
+                    
+                    msg_buf.clear();
+                    write!(
+                        &mut msg_buf,
+                        "epoch {:04} | skipping... slot={} -> start_slot={} | skipped={} ({:.2} MB) | ",
+                        epoch, slot, min_slot, skipped_blocks,
+                        skipped_bytes as f64 / (1024.0 * 1024.0)
+                    ).unwrap();
+
+                    if let (Some(s0), Some(t0)) = (skip_first_slot, skip_first_instant) {
+                        let s_delta = slot.saturating_sub(s0);
+                        let secs = now.saturating_duration_since(t0).as_secs_f64();
+                        if s_delta > 0 && secs > 0.0 && min_slot > slot {
+                            let rate = s_delta as f64 / secs;
+                            if rate > 0.0 {
+                                let remain = (min_slot - slot) as f64;
+                                write_human_eta(&mut msg_buf, remain / rate).unwrap();
+                            } else {
+                                msg_buf.push_str("eta n/a");
+                            }
+                        } else {
+                            msg_buf.push_str("eta n/a");
+                        }
                     } else {
-                        pb.set_message(line);
+                        msg_buf.push_str("eta n/a");
+                    }
+
+                    if pb.is_hidden() {
+                        tracing::info!("{}", msg_buf);
+                    } else {
+                        pb.set_message(msg_buf.clone());
                         pb.tick();
                     }
                 }
@@ -413,7 +426,8 @@ pub async fn dump_token_transactions(
                         }
                     };
 
-                    let tx_bytes = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                    // Read transaction bytes into buf_tx (reusable buffer)
+                    let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             tracing::warn!("failed to read transaction bytes: {e}");
@@ -423,8 +437,47 @@ pub async fn dump_token_transactions(
 
                     txs_seen += 1;
 
+                    // PASS 1: Fast path - parse account keys only (cheap)
+                    account_keys_buf.clear();
+                    if parse_account_keys_only(tx_bytes_slice, &mut account_keys_buf)
+                        .ok()
+                        .flatten()
+                        .is_none()
+                    {
+                        continue;
+                    }
+
+                    // For V0 transactions, also extract loaded addresses from metadata
+                    if let Some(_lookups) = tx_bytes_slice.get(0).filter(|&&b| b & 0x80 != 0) {
+                        // This is a V0 transaction, need to load addresses from metadata
+                        let meta_bytes = match metadata_bytes(&block, &tx_node, &mut buf_meta) {
+                            Ok(bytes) => bytes,
+                            Err(_) => &[][..],
+                        };
+                        
+                        if !meta_bytes.is_empty() {
+                            let _ = extract_metadata_pubkeys(meta_bytes, &mut account_keys_buf);
+                        }
+                    }
+
+                    // Now account_keys_buf has ALL keys: static + loaded
+                    // Quick check: does transaction reference mint or any tracked account?
+                    let mut involves_token = false;
+                    for key in &account_keys_buf {
+                        let key_bytes = key.to_bytes();
+                        if &key_bytes == &mint_bytes || tracked_account_keys.contains(&key_bytes) {
+                            involves_token = true;
+                            break;
+                        }
+                    }
+
+                    if !involves_token {
+                        continue;
+                    }
+
+                    // PASS 2: Full deserialization only for token-involved transactions
                     if let Err(e) =
-                        VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)
+                        VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
                     {
                         tracing::warn!("failed to parse transaction: {e}");
                         continue;
@@ -432,51 +485,29 @@ pub async fn dump_token_transactions(
 
                     let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
-                    if !transaction_involves_token(
+                    // Extract new tracked accounts from InitializeAccount instructions
+                    // account_keys_buf already has ALL keys (static + loaded)
+                    extract_new_tracked_accounts(
                         tx_ref,
+                        &account_keys_buf,
                         &mint_bytes,
-                        &tracked_account_keys,
                         &token_program_bytes,
-                    ) {
-                        unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
-                        continue;
-                    }
-
-                    let tx = match versioned_transaction_to_compact(
-                        tx_ref,
-                        &mut registry,
-                        MetadataMode::Compact,
-                        &block,
-                        &tx_node,
-                        &mut buf_meta,
-                        &mut buf_tx,
-                    ) {
-                        Ok(tx) => {
-                            unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
-                            tx
-                        }
-                        Err(e) => {
-                            unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
-                            tracing::warn!("failed to compact transaction: {e}");
-                            continue;
-                        }
-                    };
-
-                    let added_keys = update_tracked_accounts(
-                        &tx,
-                        mint_id,
-                        &token_program_bytes,
-                        &mut tracked_account_ids,
-                        &registry,
+                        &mut tracked_account_keys,
+                        &mut added_keys_buf,
                     );
-                    if !added_keys.is_empty() {
-                        accounts_tracked_new_win += added_keys.len() as u64;
-                        for key in added_keys {
-                            tracked_account_keys.insert(key);
-                        }
+
+                    unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
+
+                    if !added_keys_buf.is_empty() {
+                        accounts_tracked_new_win += added_keys_buf.len() as u64;
+                        added_keys_buf.clear();
                     }
 
-                    collected.push(TokenTransactionRecord { slot, tx });
+                    // Store the raw transaction bytes (copy from buf_tx which still has them)
+                    collected.push(TokenTransactionRecord {
+                        slot,
+                        tx_bytes: tx_bytes_slice.to_vec(),
+                    });
                     txs_kept += 1;
                 }
             }
@@ -501,8 +532,11 @@ pub async fn dump_token_transactions(
                 };
                 let tracked_accounts_len = tracked_account_keys.len();
 
-                let line = format!(
-                    "epoch {epoch:04} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={} (+{} new)",
+                msg_buf.clear();
+                write!(
+                    &mut msg_buf,
+                    "epoch {:04} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={} (+{} new)",
+                    epoch,
                     last_processed_slot,
                     blocks_scanned,
                     blk_s,
@@ -512,18 +546,19 @@ pub async fn dump_token_transactions(
                     txs_kept,
                     tracked_accounts_len,
                     accounts_tracked_new_win
-                );
+                ).unwrap();
 
                 if pb.is_hidden() {
-                    tracing::info!("{line}");
+                    tracing::info!("{}", msg_buf);
                 } else {
-                    pb.set_message(line);
+                    pb.set_message(msg_buf.clone());
                     pb.tick();
                 }
                 accounts_tracked_new_win = 0;
             }
         }
 
+        // Save epoch checkpoint
         let mut tracked_keys_vec: Vec<[u8; 32]> = tracked_account_keys.iter().copied().collect();
         tracked_keys_vec.sort_unstable();
         let epoch_transactions = collected[epoch_start_idx..].to_vec();
@@ -531,7 +566,6 @@ pub async fn dump_token_transactions(
             mint: mint_bytes,
             epoch,
             last_slot: last_processed_slot,
-            registry: registry.clone_registry(),
             tracked_account_keys: tracked_keys_vec,
             transactions: epoch_transactions,
         };
@@ -546,7 +580,6 @@ pub async fn dump_token_transactions(
 
         // after the first epoch, clear min_slot so next epochs start from 0
         min_slot = 0;
-        // reset skip-phase stats so a later epoch does not reuse them
         skip_first_slot = None;
         skip_first_instant = None;
         skipped_blocks = 0;
@@ -569,7 +602,6 @@ pub async fn dump_token_transactions(
 
     let dump = TokenTransactionDump {
         mint: mint_bytes,
-        registry: registry.into_registry(),
         transactions: collected,
     };
     let total_transactions = dump.transactions.len() as u64;
@@ -659,6 +691,7 @@ async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
     Ok(max_epoch)
 }
 
+#[inline]
 fn peek_block_slot(block: &CarBlock) -> Result<u64> {
     let mut decoder = minicbor::Decoder::new(block.block_bytes.as_ref());
     decoder
@@ -676,6 +709,7 @@ fn peek_block_slot(block: &CarBlock) -> Result<u64> {
     Ok(slot)
 }
 
+#[inline]
 fn copy_dataframe_into<'a>(
     block: &CarBlock,
     cid: &Cid,
@@ -696,6 +730,7 @@ fn copy_dataframe_into<'a>(
     Ok(&*dst)
 }
 
+#[inline]
 fn transaction_bytes<'a>(
     block: &CarBlock,
     tx_node: &TransactionNode<'_>,
@@ -714,27 +749,60 @@ fn transaction_bytes<'a>(
     }
 }
 
-fn update_tracked_accounts(
-    tx: &CompactVersionedTx,
-    mint_id: u32,
+#[inline]
+fn metadata_bytes<'a>(
+    block: &CarBlock,
+    tx_node: &TransactionNode<'a>,
+    buf: &'a mut Vec<u8>,
+) -> Result<&'a [u8]> {
+    match tx_node.metadata.next {
+        None => Ok(tx_node.metadata.data),
+        Some(df_cbor) => {
+            let df_cid = df_cbor.to_cid()?;
+            copy_dataframe_into(block, &df_cid, buf, None)
+        }
+    }
+}
+
+// Single-pass: check if transaction involves token AND extract new tracked accounts
+// Returns true if transaction should be kept
+// NOTE: This function is not currently used - we use the fast path with parse_account_keys_only instead
+#[allow(dead_code)]
+fn check_and_extract_accounts(
+    tx: &VersionedTransaction,
+    account_keys: &[Pubkey],
+    mint_bytes: &[u8; 32],
     token_program_bytes: &[u8; 32],
-    tracked: &mut AHashSet<u32>,
-    registry: &DynamicRegistry,
-) -> Vec<[u8; 32]> {
-    let mut added = Vec::new();
+    tracked: &mut AHashSet<[u8; 32]>,
+    added: &mut Vec<[u8; 32]>,
+) -> bool {
+    added.clear();
+    let mut involves_token = false;
 
+    // Quick check: does transaction reference mint or any tracked account?
+    for key in account_keys {
+        let key_bytes = key.to_bytes();
+        if &key_bytes == mint_bytes || tracked.contains(&key_bytes) {
+            involves_token = true;
+            break;
+        }
+    }
+
+    // Process instructions to find new accounts and confirm token program usage
     let mut handle_instruction = |program_idx: usize, accounts: &[u8], data: &[u8]| {
-        if program_idx >= tx.account_ids.len() {
+        if program_idx >= account_keys.len() {
             return;
         }
-        let program_account_id = tx.account_ids[program_idx];
-        let Some(program_key) = registry.key_for(program_account_id) else {
-            return;
-        };
-        if program_key != token_program_bytes {
+        
+        let program_key = account_keys[program_idx].to_bytes();
+        if &program_key != token_program_bytes {
             return;
         }
 
+        // Found token program - transaction is involved
+        involves_token = true;
+
+        // Try to extract InitializeAccount instructions
         if let Ok(instr) = TokenInstruction::unpack(data) {
             match instr {
                 TokenInstruction::InitializeAccount
@@ -746,20 +814,19 @@ fn update_tracked_accounts(
                     let account_idx = accounts[0] as usize;
                     let mint_idx = accounts[1] as usize;
 
-                    if account_idx >= tx.account_ids.len() || mint_idx >= tx.account_ids.len() {
+                    if account_idx >= account_keys.len() || mint_idx >= account_keys.len() {
                         return;
                     }
 
-                    let candidate_id = tx.account_ids[account_idx];
-                    let mint_account_id = tx.account_ids[mint_idx];
-                    if mint_account_id != mint_id {
+                    let candidate_key = account_keys[account_idx].to_bytes();
+                    let mint_key = account_keys[mint_idx].to_bytes();
+                    
+                    if &mint_key != mint_bytes {
                         return;
                     }
 
-                    if tracked.insert(candidate_id) {
-                        if let Some(candidate_key) = registry.key_for(candidate_id) {
-                            added.push(*candidate_key);
-                        }
+                    if tracked.insert(candidate_key) {
+                        added.push(candidate_key);
                     }
                 }
                 _ => {}
@@ -767,35 +834,30 @@ fn update_tracked_accounts(
         }
     };
 
-    for ix in &tx.instructions {
-        handle_instruction(ix.program_id_index as usize, &ix.accounts, &ix.data);
+    // Handle top-level instructions
+    for ix in tx.message.instructions_iter() {
+        handle_instruction(
+            ix.program_id_index as usize,
+            &ix.accounts,
+            &ix.data,
+        );
     }
 
-    if let Some(CompactMetadataPayload::Compact(meta)) = &tx.metadata {
-        if let Some(inner_sets) = &meta.inner_instructions {
-            for inner in inner_sets {
-                for ix in &inner.instructions {
-                    handle_instruction(ix.program_id_index as usize, &ix.accounts, &ix.data);
-                }
-            }
-        }
-    }
-
-    added
+    involves_token
 }
 
-// format ETA like 1h23m45s, 12m03s, or 42s
-fn human_eta(secs: f64) -> String {
+// Write ETA directly to formatter to avoid allocation
+fn write_human_eta(f: &mut impl FmtWrite, secs: f64) -> std::fmt::Result {
     let mut s = secs.max(0.0) as u64;
     let h = s / 3600;
     s %= 3600;
     let m = s / 60;
     let sec = s % 60;
     if h > 0 {
-        format!("eta ~ {}h{:02}m{:02}s", h, m, sec)
+        write!(f, "eta ~ {}h{:02}m{:02}s", h, m, sec)
     } else if m > 0 {
-        format!("eta ~ {}m{:02}s", m, sec)
+        write!(f, "eta ~ {}m{:02}s", m, sec)
     } else {
-        format!("eta ~ {}s", sec)
+        write!(f, "eta ~ {}s", sec)
     }
 }
