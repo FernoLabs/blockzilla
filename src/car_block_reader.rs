@@ -8,7 +8,8 @@ use crate::node::{BlockNode, Node, decode_node, peek_node_type};
 
 pub struct CarBlock {
     pub block_bytes: Bytes,
-    pub entries: Vec<(Bytes, Bytes)>,
+    pub entries: Vec<Bytes>,
+    pub entry_index: Vec<(Bytes, usize)>,
 }
 
 impl CarBlock {
@@ -21,10 +22,11 @@ impl CarBlock {
 
     pub fn decode(&self, key: &[u8]) -> Result<Node<'_>> {
         let idx = self
-            .entries
+            .entry_index
             .binary_search_by(|(raw, _)| raw.as_ref().cmp(key))
             .map_err(|_| anyhow!("CID not found in block index"))?;
-        decode_node(&self.entries[idx].1)
+        let entry_idx = self.entry_index[idx].1;
+        decode_node(&self.entries[entry_idx])
     }
 
     pub fn dataframe_reader(&self, cid: &Cid) -> DataFrameReader<'_> {
@@ -105,12 +107,15 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 let block_bytes = frozen.slice(cbor_start..entry_end);
 
                 let mut entries = Vec::with_capacity(self.entry_offsets.len());
-                for m in self.entry_offsets.drain(..) {
-                    entries.push((
-                        frozen.slice(m.cid_start..m.cid_end),
-                        frozen.slice(m.payload_start..m.payload_end),
-                    ));
+                let mut entry_index = Vec::with_capacity(self.entry_offsets.len());
+                for (idx, m) in self.entry_offsets.drain(..).enumerate() {
+                    let cid = frozen.slice(m.cid_start..m.cid_end);
+                    let payload = frozen.slice(m.payload_start..m.payload_end);
+                    entries.push(payload);
+                    entry_index.push((cid, idx));
                 }
+
+                entry_index.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
 
                 self.buf.clear();
                 self.entry_offsets.clear();
@@ -118,6 +123,7 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 return Ok(Some(CarBlock {
                     block_bytes,
                     entries,
+                    entry_index,
                 }));
             }
 
@@ -173,16 +179,16 @@ impl<'b> Read for DataFrameReader<'b> {
                 break;
             };
 
-            let idx = match self
+            let entry_idx = match self
                 .blk
-                .entries
+                .entry_index
                 .binary_search_by(|(raw, _)| raw.as_ref().cmp(key.as_slice()))
             {
-                Ok(i) => i,
+                Ok(i) => self.blk.entry_index[i].1,
                 Err(_) => return Ok(written),
             };
 
-            let node = decode_node(&self.blk.entries[idx].1).map_err(io::Error::other)?;
+            let node = decode_node(&self.blk.entries[entry_idx]).map_err(io::Error::other)?;
 
             let df = match node {
                 Node::DataFrame(df) => df,
