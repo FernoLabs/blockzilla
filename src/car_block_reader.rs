@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use cid::Cid;
 use std::io::{self, Read};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
@@ -32,7 +32,7 @@ impl CarBlock {
     pub fn dataframe_reader(&self, cid: &Cid) -> DataFrameReader<'_> {
         DataFrameReader {
             blk: self,
-            current_index: Some(cid.to_bytes()),
+            current_index: Some(Bytes::from(cid.to_bytes())),
             offset: 0,
         }
     }
@@ -48,8 +48,9 @@ struct EntryMeta {
 
 pub struct CarBlockReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
-    buf: Vec<u8>,
+    buf: BytesMut,               // streaming accumulation buffer
     entry_offsets: Vec<EntryMeta>,
+    scratch: Vec<u8>,            // reusable scratch for header and discards
 }
 
 impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
@@ -60,18 +61,21 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
     pub fn with_capacity(inner: R, read_capacity: usize) -> Self {
         Self {
             reader: BufReader::with_capacity(read_capacity, inner),
-            buf: Vec::with_capacity(512 << 10),
+            buf: BytesMut::with_capacity(512 << 10),
             entry_offsets: Vec::with_capacity(8192),
+            scratch: Vec::with_capacity(64 << 10),
         }
     }
 
     pub async fn read_header(&mut self) -> Result<()> {
         let len = read_varint(&mut self.reader).await?;
         let mut remaining = len;
-        let mut discard_buf = vec![0u8; (64 << 10).min(len)];
+        if self.scratch.is_empty() {
+            self.scratch.resize(64 << 10, 0);
+        }
         while remaining > 0 {
-            let to_read = remaining.min(discard_buf.len());
-            self.reader.read_exact(&mut discard_buf[..to_read]).await?;
+            let to_read = remaining.min(self.scratch.len());
+            self.reader.read_exact(&mut self.scratch[..to_read]).await?;
             remaining -= to_read;
         }
         Ok(())
@@ -84,11 +88,16 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 if self.entry_offsets.is_empty() {
                     return Ok(None);
                 }
+                // We saw entries but never encountered a Block node
                 tracing::error!("unexpected EOF: block without BlockNode");
+                self.entry_offsets.clear();
+                self.buf.clear();
                 return Ok(None);
             };
 
+            // Fast path: try to identify a Block node without fully decoding
             let mut cbor_start = payload_start;
+            // Safety: entry_end was produced by read_next_entry, so in-bounds
             let payload = &self.buf[payload_start..entry_end];
             let is_cbor = matches!(payload.first(), Some(b) if (0x80..=0xBF).contains(b));
 
@@ -103,22 +112,28 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
             };
 
             if kind_is_block {
-                let frozen = Bytes::copy_from_slice(&self.buf);
+                // Zero-copy: detach the entire prefix that belongs to this block
+                // entry_end is the end of the last entry in this block
+                let prefix = self.buf.split_to(entry_end); // no copy
+                let frozen: Bytes = prefix.freeze();       // no copy
+
+                // Build zero-copy views for the block body and entries
                 let block_bytes = frozen.slice(cbor_start..entry_end);
 
                 let mut entries = Vec::with_capacity(self.entry_offsets.len());
                 let mut entry_index = Vec::with_capacity(self.entry_offsets.len());
                 for (idx, m) in self.entry_offsets.drain(..).enumerate() {
-                    let cid = frozen.slice(m.cid_start..m.cid_end);
+                    let cid     = frozen.slice(m.cid_start..m.cid_end);
                     let payload = frozen.slice(m.payload_start..m.payload_end);
                     entries.push(payload);
                     entry_index.push((cid, idx));
                 }
 
+                // Sort the index by CID bytes
                 entry_index.sort_unstable_by(|(a, _), (b, _)| a.as_ref().cmp(b.as_ref()));
 
-                self.buf.clear();
-                self.entry_offsets.clear();
+                // self.buf now contains only data after this block
+                // entry_offsets already drained
 
                 return Ok(Some(CarBlock {
                     block_bytes,
@@ -127,6 +142,7 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 }));
             }
 
+            // Not a Block node yet, keep the entry metadata
             self.entry_offsets.push(EntryMeta {
                 cid_start: entry_start,
                 cid_end: payload_start,
@@ -150,6 +166,7 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
             }
 
             let start = self.buf.len();
+            // Grow the BytesMut and read directly into the newly extended region
             self.buf.resize(start + len, 0);
             self.reader
                 .read_exact(&mut self.buf[start..start + len])
@@ -167,7 +184,7 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
 
 pub struct DataFrameReader<'b> {
     blk: &'b CarBlock,
-    current_index: Option<Vec<u8>>,
+    current_index: Option<Bytes>, // zero-copy current CID bytes
     offset: usize,
 }
 
@@ -182,7 +199,7 @@ impl<'b> Read for DataFrameReader<'b> {
             let entry_idx = match self
                 .blk
                 .entry_index
-                .binary_search_by(|(raw, _)| raw.as_ref().cmp(key.as_slice()))
+                .binary_search_by(|(raw, _)| raw.as_ref().cmp(key.as_ref()))
             {
                 Ok(i) => self.blk.entry_index[i].1,
                 Err(_) => return Ok(written),
@@ -210,7 +227,8 @@ impl<'b> Read for DataFrameReader<'b> {
                 self.offset = 0;
                 if let Some(next_cbor_cid) = df.next {
                     if let Ok(next) = next_cbor_cid.to_cid() {
-                        self.current_index = Some(next.to_bytes());
+                        // Move to the next frame CID, zero-copy
+                        self.current_index = Some(Bytes::from(next.to_bytes()));
                     } else {
                         self.current_index = None;
                     }
