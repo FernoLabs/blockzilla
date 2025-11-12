@@ -12,7 +12,11 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
 use crate::transaction_parser::Signature;
-use crate::{car_block_reader::CarBlock, confirmed_block, node::Node};
+use crate::{
+    car_block_reader::CarBlock,
+    confirmed_block,
+    node::{Node, TransactionNode},
+};
 
 pub trait PubkeyIdProvider {
     fn resolve(&mut self, key: &[u8; 32]) -> Option<u32>;
@@ -601,6 +605,122 @@ fn process_metadata<P: PubkeyIdProvider>(
     }
 }
 
+pub fn transaction_node_to_compact<P: PubkeyIdProvider>(
+    block: &CarBlock,
+    tx_node: &TransactionNode<'_>,
+    resolver: &mut P,
+    metadata_mode: MetadataMode,
+    buf_tx: &mut Vec<u8>,
+    buf_meta: &mut Vec<u8>,
+    reusable_tx: &mut MaybeUninit<VersionedTransaction>,
+) -> Result<CompactVersionedTx> {
+    let tx_bytes: &[u8] = match tx_node.data.next {
+        None => tx_node.data.data,
+        Some(df_cbor) => {
+            let df_cid = df_cbor.to_cid()?;
+            buf_tx.clear();
+            block.dataframe_copy_into(&df_cid, buf_tx, None)?;
+            &*buf_tx
+        }
+    };
+
+    VersionedTransaction::deserialize_into(tx_bytes, reusable_tx)
+        .map_err(|_| anyhow!("failed to decode VersionedTransaction"))?;
+    let tx_ref = unsafe { reusable_tx.assume_init_ref() };
+
+    let static_keys = tx_ref.message.static_account_keys();
+    let header = tx_ref.message.header();
+    let is_versioned = matches!(tx_ref.message, VersionedMessage::V0(_));
+    let recent_blockhash = match &tx_ref.message {
+        VersionedMessage::Legacy(m) => m.recent_blockhash,
+        VersionedMessage::V0(m) => m.recent_blockhash,
+    };
+
+    let mut signatures = Vec::with_capacity(tx_ref.signatures.len());
+    for s in &tx_ref.signatures {
+        signatures.push(Signature(s.0));
+    }
+
+    let mut account_ids = Vec::with_capacity(static_keys.len());
+    for k in static_keys {
+        if let Some(uid) = id_for_pubkey(resolver, k) {
+            account_ids.push(uid);
+        } else {
+            unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
+            return Err(anyhow!(
+                "registry miss for pubkey {}",
+                Pubkey::new_from_array(*k)
+            ));
+        }
+    }
+
+    let mut instructions = Vec::with_capacity(tx_ref.message.instructions_len());
+    for ix in tx_ref.message.instructions_iter() {
+        instructions.push(ix.clone());
+    }
+
+    let address_table_lookups = match tx_ref.message.address_table_lookups() {
+        None => None,
+        Some(lookups) => {
+            let mut vec = Vec::with_capacity(lookups.len());
+            for l in lookups {
+                if let Some(uid) = id_for_pubkey(resolver, &l.account_key) {
+                    vec.push(CompactAddressTableLookup {
+                        table_account_id: uid,
+                        writable_indexes: l.writable_indexes.clone(),
+                        readonly_indexes: l.readonly_indexes.clone(),
+                    });
+                } else {
+                    unsafe {
+                        std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction)
+                    };
+                    return Err(anyhow!(
+                        "registry miss for address table account {}",
+                        Pubkey::new_from_array(l.account_key)
+                    ));
+                }
+            }
+            Some(vec)
+        }
+    };
+
+    let df = &tx_node.metadata;
+    let metadata = match metadata_mode {
+        MetadataMode::None => None,
+        mode @ (MetadataMode::Compact | MetadataMode::Raw) => {
+            let src = if let Some(next) = df.next {
+                let df_cid = next.to_cid()?;
+                buf_meta.clear();
+                block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
+                &*buf_meta
+            } else {
+                df.data
+            };
+
+            let raw_slice = match mode {
+                MetadataMode::Compact => metadata_proto_into(src, buf_tx),
+                MetadataMode::Raw => src,
+                MetadataMode::None => unreachable!(),
+            };
+
+            process_metadata(mode, raw_slice, resolver)
+        }
+    };
+
+    unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
+
+    Ok(CompactVersionedTx {
+        signatures,
+        header: *header,
+        account_ids,
+        recent_blockhash,
+        instructions,
+        address_table_lookups,
+        is_versioned,
+        metadata,
+    })
+}
+
 pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
     block: &CarBlock,
     resolver: &mut P,
@@ -649,125 +769,17 @@ pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
                 continue;
             };
 
-            // Get transaction bytes
-            let tx_bytes: &[u8] = match tx_node.data.next {
-                None => tx_node.data.data,
-                Some(df_cbor) => {
-                    let df_cid = df_cbor.to_cid()?;
-                    buf_tx.clear();
-                    block.dataframe_copy_into(&df_cid, buf_tx, None)?;
-                    &*buf_tx
-                }
-            };
+            let compact_tx = transaction_node_to_compact(
+                block,
+                &tx_node,
+                resolver,
+                metadata_mode,
+                buf_tx,
+                buf_meta,
+                &mut reusable_tx,
+            )?;
 
-            // Deserialize transaction
-            VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)
-                .map_err(|_| anyhow!("failed to decode VersionedTransaction"))?;
-            let tx_ref = unsafe { reusable_tx.assume_init_ref() };
-
-            // Get message components
-            let static_keys = tx_ref.message.static_account_keys();
-            let header = tx_ref.message.header();
-            let is_versioned = matches!(tx_ref.message, VersionedMessage::V0(_));
-            let recent_blockhash = match &tx_ref.message {
-                VersionedMessage::Legacy(m) => m.recent_blockhash,
-                VersionedMessage::V0(m) => m.recent_blockhash,
-            };
-
-            // Build signatures
-            let mut signatures = Vec::with_capacity(tx_ref.signatures.len());
-            for s in &tx_ref.signatures {
-                signatures.push(Signature(s.0));
-            }
-
-            // Resolve account IDs
-            let mut account_ids = Vec::with_capacity(static_keys.len());
-            for k in static_keys {
-                if let Some(uid) = id_for_pubkey(resolver, k) {
-                    account_ids.push(uid);
-                } else {
-                    unsafe {
-                        std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction)
-                    };
-                    return Err(anyhow!(
-                        "registry miss for pubkey {}",
-                        Pubkey::new_from_array(*k)
-                    ));
-                }
-            }
-
-            // Build instructions
-            let mut instructions = Vec::with_capacity(tx_ref.message.instructions_len());
-            for ix in tx_ref.message.instructions_iter() {
-                instructions.push(ix.clone());
-            }
-
-            // Process address table lookups
-            let address_table_lookups = match tx_ref.message.address_table_lookups() {
-                None => None,
-                Some(lookups) => {
-                    let mut vec = Vec::with_capacity(lookups.len());
-                    for l in lookups {
-                        if let Some(uid) = id_for_pubkey(resolver, &l.account_key) {
-                            vec.push(CompactAddressTableLookup {
-                                table_account_id: uid,
-                                writable_indexes: l.writable_indexes.clone(),
-                                readonly_indexes: l.readonly_indexes.clone(),
-                            });
-                        } else {
-                            unsafe {
-                                std::ptr::drop_in_place(
-                                    tx_ref as *const _ as *mut VersionedTransaction,
-                                )
-                            };
-                            return Err(anyhow!(
-                                "registry miss for address table account {}",
-                                Pubkey::new_from_array(l.account_key)
-                            ));
-                        }
-                    }
-                    Some(vec)
-                }
-            };
-
-            // Process metadata
-            let df = &tx_node.metadata;
-            let metadata = match metadata_mode {
-                MetadataMode::None => None,
-                mode @ (MetadataMode::Compact | MetadataMode::Raw) => {
-                    let src = if let Some(next) = df.next {
-                        let df_cid = next.to_cid()?;
-                        buf_meta.clear();
-                        block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
-                        &*buf_meta
-                    } else {
-                        df.data
-                    };
-
-                    let raw_slice = match mode {
-                        MetadataMode::Compact => metadata_proto_into(src, buf_tx),
-                        MetadataMode::Raw => src,
-                        MetadataMode::None => unreachable!(),
-                    };
-
-                    process_metadata(mode, raw_slice, resolver)
-                }
-            };
-
-            // Clean up transaction reference
-            unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
-
-            // Push completed transaction
-            out.txs.push(CompactVersionedTx {
-                signatures,
-                header: *header,
-                account_ids,
-                recent_blockhash,
-                instructions,
-                address_table_lookups,
-                is_versioned,
-                metadata,
-            });
+            out.txs.push(compact_tx);
         }
     }
 
