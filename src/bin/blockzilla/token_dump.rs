@@ -11,18 +11,20 @@ use blockzilla::{
     transaction_parser::{VersionedTransaction, parse_account_keys_only},
 };
 use cid::Cid;
-use indicatif::ProgressBar;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, IsTerminal};
 use std::time::{Duration, Instant};
 use std::{mem::MaybeUninit, path::Path, str::FromStr};
 use tokio::fs;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::LOG_INTERVAL_SECS;
+
+const BLOCK_LOG_CHUNK: u64 = 500;
 
 #[derive(Debug, Default)]
 struct DynamicRegistry {
@@ -86,10 +88,7 @@ pub async fn dump_token_transactions(
 
     let cache_path = Path::new(cache_dir);
     let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
-        return Err(anyhow!(
-            "no cached epochs found in {}",
-            cache_path.display()
-        ));
+        return Err(anyhow!("no cached epochs found in {}", cache_path.display()));
     };
 
     if start_epoch > last_epoch {
@@ -107,22 +106,52 @@ pub async fn dump_token_transactions(
 
     let token_program_bytes = spl_token::ID.to_bytes();
 
-    // logging totals
+    // progress bar setup
+    let draw_target = if std::io::stdout().is_terminal() {
+        ProgressDrawTarget::stderr_with_hz(8)
+    } else {
+        ProgressDrawTarget::hidden()
+    };
+    let pb = ProgressBar::with_draw_target(Some(0), draw_target);
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
+    pb.enable_steady_tick(Duration::from_millis(120));
+
+    // timers and counters
     let start = Instant::now();
-    let mut last_log = start;
-    let pb = ProgressBar::new_spinner();
+    // force first log immediately
+    let mut last_log = start - Duration::from_secs(LOG_INTERVAL_SECS);
 
     let mut blocks_scanned = 0u64;
-    let mut txs_seen = 0u64; // total transactions scanned
-    let mut txs_kept = 0u64; // transactions where instruction matched our filter
-    let mut _accounts_tracked_new = 0u64; // number of new tracked accounts discovered
+    let mut txs_seen = 0u64;
+    let mut txs_kept = 0u64;
+    let mut accounts_tracked_new_win = 0u64;
     let mut bytes_count = 0u64;
     let mut _entry_count = 0u64;
+    let mut last_processed_slot = 0u64;
 
+    // skip-phase controls for first epoch
     let mut min_slot = start_slot;
+    let mut skip_first_slot: Option<u64> = None;
+    let mut skip_first_instant: Option<Instant> = None;
+    let mut skipped_blocks = 0u64;
+    let mut skipped_bytes = 0u64;
+    let mut last_skipped_slot = 0u64;
+    let mut printed_skipped_summary = false;
+
     let mut last_epoch_processed = None;
 
+    pb.set_message(format!(
+        "starting dump | mint={mint_str} | start_epoch={start_epoch:04} start_slot={start_slot} | scanning up to {last_epoch:04}"
+    ));
+
     for epoch in start_epoch..=last_epoch {
+        // announce epoch
+        if pb.is_hidden() {
+            tracing::info!("opening epoch {epoch:04}");
+        } else {
+            pb.println(format!("opening epoch {epoch:04}"));
+        }
+
         let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
             .await
             .with_context(|| format!("failed to open epoch {epoch:04} from {cache_dir}"))?;
@@ -131,9 +160,9 @@ pub async fn dump_token_transactions(
         last_epoch_processed = Some(epoch);
 
         while let Some(block) = car.next_block().await? {
-            // align metrics with block reader
             _entry_count += block.entries.len() as u64;
-            bytes_count += block.entries.iter().map(|(_, a)| a.len()).sum::<usize>() as u64;
+            let block_bytes = block.entries.iter().map(|(_, a)| a.len()).sum::<usize>() as u64;
+            bytes_count += block_bytes;
 
             let slot = match peek_block_slot(&block) {
                 Ok(slot) => slot,
@@ -143,8 +172,57 @@ pub async fn dump_token_transactions(
                 }
             };
 
-            if slot < min_slot {
+            // skip phase until start_slot in the first epoch
+            if min_slot > 0 && slot < min_slot {
+                if skip_first_slot.is_none() {
+                    skip_first_slot = Some(slot);
+                    skip_first_instant = Some(Instant::now());
+                }
+                skipped_blocks += 1;
+                skipped_bytes += block_bytes;
+                last_skipped_slot = slot;
+
+                let eta_text = if let (Some(s0), Some(t0)) = (skip_first_slot, skip_first_instant) {
+                    let s_delta = slot.saturating_sub(s0);
+                    let secs = Instant::now().saturating_duration_since(t0).as_secs_f64();
+                    if s_delta > 0 && secs > 0.0 && min_slot > slot {
+                        let rate = s_delta as f64 / secs; // slots per sec observed while skipping
+                        if rate > 0.0 {
+                            let remain = (min_slot - slot) as f64;
+                            human_eta(remain / rate)
+                        } else {
+                            "eta n/a".to_string()
+                        }
+                    } else {
+                        "eta n/a".to_string()
+                    }
+                } else {
+                    "eta n/a".to_string()
+                };
+
+                let now = Instant::now();
+                if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+                    last_log = now;
+                    let line = format!(
+                        "epoch {epoch:04} | skipping... slot={slot} -> start_slot={min_slot} | skipped={} ({:.2} MB) | {eta}",
+                        skipped_blocks,
+                        skipped_bytes as f64 / (1024.0 * 1024.0),
+                        eta = eta_text
+                    );
+                    if pb.is_hidden() { tracing::info!("{line}"); } else { pb.set_message(line); pb.tick(); }
+                }
                 continue;
+            }
+
+            // we just reached the start slot
+            if !printed_skipped_summary && skipped_blocks > 0 {
+                printed_skipped_summary = true;
+                let line = format!(
+                    "reached start_slot={min_slot} | skipped {} blocks ({:.2} MB), last skipped slot {last_skipped_slot}",
+                    skipped_blocks,
+                    skipped_bytes as f64 / (1024.0 * 1024.0)
+                );
+                if pb.is_hidden() { tracing::info!("{line}"); } else { pb.println(line); }
             }
 
             blocks_scanned += 1;
@@ -245,7 +323,7 @@ pub async fn dump_token_transactions(
                         &registry,
                     );
                     if !added_keys.is_empty() {
-                        _accounts_tracked_new += added_keys.len() as u64;
+                        accounts_tracked_new_win += added_keys.len() as u64;
                         for key in added_keys {
                             tracked_account_keys.insert(key);
                         }
@@ -256,42 +334,53 @@ pub async fn dump_token_transactions(
                 }
             }
 
-            // periodic log - same style as block reader, but with tx stats
+            last_processed_slot = slot;
+
+            // periodic metrics by time or every N blocks
             let now = Instant::now();
-            if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+            let time_due = now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS);
+            let chunk_due = blocks_scanned % BLOCK_LOG_CHUNK == 0;
+            if time_due || chunk_due {
                 last_log = now;
                 let elapsed = now.duration_since(start);
                 let secs = elapsed.as_secs_f64().max(1e-6);
 
                 let blk_s = blocks_scanned as f64 / secs;
                 let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-                let tps = if elapsed.as_secs() > 0 {
-                    txs_seen / elapsed.as_secs()
-                } else {
-                    0
-                };
+                let tps = if elapsed.as_secs() > 0 { txs_seen / elapsed.as_secs() } else { 0 };
                 let tracked_accounts_len = tracked_account_keys.len();
 
-                pb.set_message(format!(
-                    "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
+                let line = format!(
+                    "epoch {epoch:04} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={} (+{} new)",
+                    last_processed_slot,
                     blocks_scanned,
                     blk_s,
                     mb_s,
                     tps,
                     txs_seen,
                     txs_kept,
-                    tracked_accounts_len
-                ));
+                    tracked_accounts_len,
+                    accounts_tracked_new_win
+                );
+
+                if pb.is_hidden() { tracing::info!("{line}"); } else { pb.set_message(line); pb.tick(); }
+                accounts_tracked_new_win = 0;
             }
         }
 
+        // after the first epoch, clear min_slot so next epochs start from 0
         min_slot = 0;
+        // reset skip-phase stats so a later epoch does not reuse them
+        skip_first_slot = None;
+        skip_first_instant = None;
+        skipped_blocks = 0;
+        skipped_bytes = 0;
+        last_skipped_slot = 0;
+        printed_skipped_summary = false;
     }
 
     let Some(last_epoch_processed) = last_epoch_processed else {
-        return Err(anyhow!(
-            "no epochs processed between {start_epoch:04} and {last_epoch:04}"
-        ));
+        return Err(anyhow!("no epochs processed between {start_epoch:04} and {last_epoch:04}"));
     };
 
     if let Some(parent) = output_path.parent() {
@@ -309,16 +398,12 @@ pub async fn dump_token_transactions(
     let encoded = wincode::serialize(&dump)?;
     fs::write(output_path, encoded).await?;
 
-    // final line like block reader, with tx stats
+    // final summary
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64().max(1e-6);
     let blk_s = blocks_scanned as f64 / secs;
     let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-    let tps = if elapsed.as_secs() > 0 {
-        txs_seen / elapsed.as_secs()
-    } else {
-        0
-    };
+    let tps = if elapsed.as_secs() > 0 { txs_seen / elapsed.as_secs() } else { 0 };
     let tracked_accounts_len = tracked_account_keys.len();
 
     let range_label = if start_epoch == last_epoch_processed {
@@ -327,8 +412,9 @@ pub async fn dump_token_transactions(
         format!("epochs {start_epoch:04}-{last_epoch_processed:04}")
     };
 
-    tracing::info!(
-        "{range_label} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
+    let final_line = format!(
+        "{range_label} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
+        last_processed_slot,
         blocks_scanned,
         blk_s,
         mb_s,
@@ -337,6 +423,13 @@ pub async fn dump_token_transactions(
         txs_kept,
         tracked_accounts_len
     );
+
+    if pb.is_hidden() {
+        tracing::info!("{final_line}");
+    } else {
+        pb.finish_and_clear();
+        eprintln!("{final_line}");
+    }
 
     Ok(())
 }
@@ -350,28 +443,16 @@ async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
 
     let mut max_epoch = None;
     while let Some(entry) = rd.next_entry().await? {
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
+        let Ok(file_type) = entry.file_type().await else { continue; };
+        if !file_type.is_file() { continue; }
 
         let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
+        let Some(name) = name.to_str() else { continue; };
 
-        let Some(epoch_str) = name.strip_prefix("epoch-").and_then(|s| {
-            s.strip_suffix(".car")
-                .or_else(|| s.strip_suffix(".car.zst"))
-        }) else {
-            continue;
-        };
+        let Some(epoch_str) = name.strip_prefix("epoch-")
+            .and_then(|s| s.strip_suffix(".car").or_else(|| s.strip_suffix(".car.zst"))) else { continue; };
 
-        let Ok(epoch) = epoch_str.parse::<u64>() else {
-            continue;
-        };
+        let Ok(epoch) = epoch_str.parse::<u64>() else { continue; };
 
         max_epoch = Some(max_epoch.map_or(epoch, |current: u64| current.max(epoch)));
     }
@@ -381,18 +462,12 @@ async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
 
 fn peek_block_slot(block: &CarBlock) -> Result<u64> {
     let mut decoder = minicbor::Decoder::new(block.block_bytes.as_ref());
-    decoder
-        .array()
-        .map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
-    let kind = decoder
-        .u64()
-        .map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
+    decoder.array().map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
+    let kind = decoder.u64().map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
     if kind != 2 {
         return Err(anyhow!("unexpected block kind {kind}, expected Block"));
     }
-    let slot = decoder
-        .u64()
-        .map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
+    let slot = decoder.u64().map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
     Ok(slot)
 }
 
@@ -513,4 +588,20 @@ fn update_tracked_accounts(
     }
 
     added
+}
+
+// format ETA like 1h23m45s, 12m03s, or 42s
+fn human_eta(secs: f64) -> String {
+    let mut s = secs.max(0.0) as u64;
+    let h = s / 3600;
+    s %= 3600;
+    let m = s / 60;
+    let sec = s % 60;
+    if h > 0 {
+        format!("eta ~ {}h{:02}m{:02}s", h, m, sec)
+    } else if m > 0 {
+        format!("eta ~ {}m{:02}s", m, sec)
+    } else {
+        format!("eta ~ {}s", sec)
+    }
 }
