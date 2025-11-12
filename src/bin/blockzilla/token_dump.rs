@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
-use std::io::{ErrorKind, Read, IsTerminal};
+use std::io::{ErrorKind, IsTerminal, Read};
 use std::time::{Duration, Instant};
 use std::{mem::MaybeUninit, path::Path, str::FromStr};
 use tokio::fs;
@@ -88,7 +88,10 @@ pub async fn dump_token_transactions(
 
     let cache_path = Path::new(cache_dir);
     let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
-        return Err(anyhow!("no cached epochs found in {}", cache_path.display()));
+        return Err(anyhow!(
+            "no cached epochs found in {}",
+            cache_path.display()
+        ));
     };
 
     if start_epoch > last_epoch {
@@ -209,7 +212,12 @@ pub async fn dump_token_transactions(
                         skipped_bytes as f64 / (1024.0 * 1024.0),
                         eta = eta_text
                     );
-                    if pb.is_hidden() { tracing::info!("{line}"); } else { pb.set_message(line); pb.tick(); }
+                    if pb.is_hidden() {
+                        tracing::info!("{line}");
+                    } else {
+                        pb.set_message(line);
+                        pb.tick();
+                    }
                 }
                 continue;
             }
@@ -222,7 +230,11 @@ pub async fn dump_token_transactions(
                     skipped_blocks,
                     skipped_bytes as f64 / (1024.0 * 1024.0)
                 );
-                if pb.is_hidden() { tracing::info!("{line}"); } else { pb.println(line); }
+                if pb.is_hidden() {
+                    tracing::info!("{line}");
+                } else {
+                    pb.println(line);
+                }
             }
 
             blocks_scanned += 1;
@@ -347,7 +359,11 @@ pub async fn dump_token_transactions(
 
                 let blk_s = blocks_scanned as f64 / secs;
                 let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-                let tps = if elapsed.as_secs() > 0 { txs_seen / elapsed.as_secs() } else { 0 };
+                let tps = if elapsed.as_secs() > 0 {
+                    txs_seen / elapsed.as_secs()
+                } else {
+                    0
+                };
                 let tracked_accounts_len = tracked_account_keys.len();
 
                 let line = format!(
@@ -363,7 +379,12 @@ pub async fn dump_token_transactions(
                     accounts_tracked_new_win
                 );
 
-                if pb.is_hidden() { tracing::info!("{line}"); } else { pb.set_message(line); pb.tick(); }
+                if pb.is_hidden() {
+                    tracing::info!("{line}");
+                } else {
+                    pb.set_message(line);
+                    pb.tick();
+                }
                 accounts_tracked_new_win = 0;
             }
         }
@@ -380,7 +401,9 @@ pub async fn dump_token_transactions(
     }
 
     let Some(last_epoch_processed) = last_epoch_processed else {
-        return Err(anyhow!("no epochs processed between {start_epoch:04} and {last_epoch:04}"));
+        return Err(anyhow!(
+            "no epochs processed between {start_epoch:04} and {last_epoch:04}"
+        ));
     };
 
     if let Some(parent) = output_path.parent() {
@@ -403,7 +426,11 @@ pub async fn dump_token_transactions(
     let secs = elapsed.as_secs_f64().max(1e-6);
     let blk_s = blocks_scanned as f64 / secs;
     let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-    let tps = if elapsed.as_secs() > 0 { txs_seen / elapsed.as_secs() } else { 0 };
+    let tps = if elapsed.as_secs() > 0 {
+        txs_seen / elapsed.as_secs()
+    } else {
+        0
+    };
     let tracked_accounts_len = tracked_account_keys.len();
 
     let range_label = if start_epoch == last_epoch_processed {
@@ -443,16 +470,28 @@ async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
 
     let mut max_epoch = None;
     while let Some(entry) = rd.next_entry().await? {
-        let Ok(file_type) = entry.file_type().await else { continue; };
-        if !file_type.is_file() { continue; }
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
 
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue; };
+        let Some(name) = name.to_str() else {
+            continue;
+        };
 
-        let Some(epoch_str) = name.strip_prefix("epoch-")
-            .and_then(|s| s.strip_suffix(".car").or_else(|| s.strip_suffix(".car.zst"))) else { continue; };
+        let Some(epoch_str) = name.strip_prefix("epoch-").and_then(|s| {
+            s.strip_suffix(".car")
+                .or_else(|| s.strip_suffix(".car.zst"))
+        }) else {
+            continue;
+        };
 
-        let Ok(epoch) = epoch_str.parse::<u64>() else { continue; };
+        let Ok(epoch) = epoch_str.parse::<u64>() else {
+            continue;
+        };
 
         max_epoch = Some(max_epoch.map_or(epoch, |current: u64| current.max(epoch)));
     }
@@ -462,12 +501,18 @@ async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
 
 fn peek_block_slot(block: &CarBlock) -> Result<u64> {
     let mut decoder = minicbor::Decoder::new(block.block_bytes.as_ref());
-    decoder.array().map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
-    let kind = decoder.u64().map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
+    decoder
+        .array()
+        .map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
+    let kind = decoder
+        .u64()
+        .map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
     if kind != 2 {
         return Err(anyhow!("unexpected block kind {kind}, expected Block"));
     }
-    let slot = decoder.u64().map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
+    let slot = decoder
+        .u64()
+        .map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
     Ok(slot)
 }
 
