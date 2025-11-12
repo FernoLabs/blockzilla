@@ -4,22 +4,22 @@ use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
     carblock_to_compact::{
         CompactMetadataPayload, CompactVersionedTx, MetadataMode, PubkeyIdProvider,
-        transaction_node_to_compact,
+        transaction_involves_token, versioned_transaction_to_compact,
     },
     node::{Node, TransactionNode},
     open_epoch::{self, FetchMode},
-    transaction_parser::{VersionedTransaction, parse_account_keys_only},
+    transaction_parser::VersionedTransaction,
 };
 use cid::Cid;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
 use std::io::{ErrorKind, IsTerminal, Read};
 use std::time::{Duration, Instant};
 use std::{mem::MaybeUninit, path::Path, str::FromStr};
 use tokio::fs;
+use wincode::Deserialize as _;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::LOG_INTERVAL_SECS;
@@ -248,7 +248,6 @@ pub async fn dump_token_transactions(
             };
 
             let mut reusable_tx = MaybeUninit::<VersionedTransaction>::uninit();
-            let mut account_keys = SmallVec::<[Pubkey; 256]>::new();
 
             for entry_cid_res in block_node.entries.iter() {
                 let entry_cid = match entry_cid_res {
@@ -286,42 +285,50 @@ pub async fn dump_token_transactions(
                         }
                     };
 
-                    let keep_tx = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
-                        Ok(tx_bytes) => {
-                            txs_seen += 1;
-
-                            if let Err(e) = parse_account_keys_only(tx_bytes, &mut account_keys) {
-                                tracing::warn!("failed to parse account keys: {e}");
-                                false
-                            } else {
-                                transaction_matches(
-                                    &account_keys,
-                                    &mint_bytes,
-                                    &tracked_account_keys,
-                                )
-                            }
-                        }
+                    let tx_bytes = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                        Ok(bytes) => bytes,
                         Err(e) => {
                             tracing::warn!("failed to read transaction bytes: {e}");
                             continue;
                         }
                     };
 
-                    if !keep_tx {
+                    txs_seen += 1;
+
+                    if let Err(e) =
+                        VersionedTransaction::deserialize_into(tx_bytes, &mut reusable_tx)
+                    {
+                        tracing::warn!("failed to parse transaction: {e}");
                         continue;
                     }
 
-                    let tx = match transaction_node_to_compact(
-                        &block,
-                        &tx_node,
+                    let tx_ref = unsafe { reusable_tx.assume_init_ref() };
+
+                    if !transaction_involves_token(
+                        tx_ref,
+                        &mint_bytes,
+                        &tracked_account_keys,
+                        &token_program_bytes,
+                    ) {
+                        unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
+                        continue;
+                    }
+
+                    let tx = match versioned_transaction_to_compact(
+                        tx_ref,
                         &mut registry,
                         MetadataMode::Compact,
-                        &mut buf_tx,
+                        &block,
+                        &tx_node,
                         &mut buf_meta,
-                        &mut reusable_tx,
+                        &mut buf_tx,
                     ) {
-                        Ok(tx) => tx,
+                        Ok(tx) => {
+                            unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
+                            tx
+                        }
                         Err(e) => {
+                            unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
                             tracing::warn!("failed to compact transaction: {e}");
                             continue;
                         }
@@ -552,17 +559,6 @@ fn transaction_bytes<'a>(
             copy_dataframe_into(block, &df_cid, buf, None)
         }
     }
-}
-
-fn transaction_matches(
-    account_keys: &[Pubkey],
-    mint: &[u8; 32],
-    tracked: &AHashSet<[u8; 32]>,
-) -> bool {
-    account_keys.iter().any(|pk| {
-        let key = pk.to_bytes();
-        key == *mint || tracked.contains(&key)
-    })
 }
 
 fn update_tracked_accounts(
