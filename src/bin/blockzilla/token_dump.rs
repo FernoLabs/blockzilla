@@ -1,8 +1,7 @@
 // Extract new token accounts from InitializeAccount instructions
-// account_keys_buf is already parsed and reused
 fn extract_new_tracked_accounts(
     tx: &VersionedTransaction,
-    account_keys: &[Pubkey],
+    metadata_bytes: Option<&[u8]>,
     mint_bytes: &[u8; 32],
     token_program_bytes: &[u8; 32],
     tracked: &mut AHashSet<[u8; 32]>,
@@ -10,12 +9,31 @@ fn extract_new_tracked_accounts(
 ) {
     added.clear();
 
+    let static_keys = tx.message.static_account_keys();
+    let mut resolved_keys = SmallVec::<[Pubkey; 512]>::with_capacity(static_keys.len() + 16);
+    for key in static_keys {
+        resolved_keys.push(Pubkey::new_from_array(*key));
+    }
+
+    let mut inner_instructions = None;
+
+    if let Some(bytes) = metadata_bytes {
+        if let Some(meta) = decode_transaction_meta(bytes) {
+            extend_with_loaded_addresses(&mut resolved_keys, &meta.loaded_writable_addresses);
+            extend_with_loaded_addresses(&mut resolved_keys, &meta.loaded_readonly_addresses);
+
+            if !meta.inner_instructions_none && !meta.inner_instructions.is_empty() {
+                inner_instructions = Some(meta.inner_instructions);
+            }
+        }
+    }
+
     let mut handle_instruction = |program_idx: usize, accounts: &[u8], data: &[u8]| {
-        if program_idx >= account_keys.len() {
+        if program_idx >= resolved_keys.len() {
             return;
         }
-        
-        let program_key = account_keys[program_idx].to_bytes();
+
+        let program_key = resolved_keys[program_idx].to_bytes();
         if &program_key != token_program_bytes {
             return;
         }
@@ -31,13 +49,13 @@ fn extract_new_tracked_accounts(
                     let account_idx = accounts[0] as usize;
                     let mint_idx = accounts[1] as usize;
 
-                    if account_idx >= account_keys.len() || mint_idx >= account_keys.len() {
+                    if account_idx >= resolved_keys.len() || mint_idx >= resolved_keys.len() {
                         return;
                     }
 
-                    let candidate_key = account_keys[account_idx].to_bytes();
-                    let mint_key = account_keys[mint_idx].to_bytes();
-                    
+                    let candidate_key = resolved_keys[account_idx].to_bytes();
+                    let mint_key = resolved_keys[mint_idx].to_bytes();
+
                     if &mint_key != mint_bytes {
                         return;
                     }
@@ -51,18 +69,24 @@ fn extract_new_tracked_accounts(
         }
     };
 
-    // Handle top-level instructions using message API
     for ix in tx.message.instructions_iter() {
-        handle_instruction(
-            ix.program_id_index as usize,
-            &ix.accounts,
-            &ix.data,
-        );
+        handle_instruction(ix.program_id_index as usize, &ix.accounts, &ix.data);
     }
-}use ahash::AHashSet;
+
+    if let Some(groups) = inner_instructions {
+        for group in groups {
+            for ix in group.instructions {
+                handle_instruction(ix.program_id_index as usize, &ix.accounts, &ix.data);
+            }
+        }
+    }
+}
+
+use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
+    confirmed_block::TransactionStatusMeta,
     node::{Node, TransactionNode},
     open_epoch::{self, FetchMode},
     partial_meta::extract_metadata_pubkeys,
@@ -70,6 +94,7 @@ use blockzilla::{
 };
 use cid::Cid;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
@@ -143,12 +168,12 @@ pub async fn dump_token_transactions(
 
     // Pre-allocate collections
     let mut tracked_account_keys: AHashSet<[u8; 32]> = AHashSet::with_capacity(10_000);
-    
+
     // Estimate capacity
     let epoch_span = (last_epoch - start_epoch + 1) as usize;
     let estimated_capacity = (epoch_span * 500_000).min(10_000_000);
     let mut collected: Vec<TokenTransactionRecord> = Vec::with_capacity(estimated_capacity);
-    
+
     let mut processed_epochs: AHashSet<u64> = AHashSet::with_capacity(epoch_span);
     let mut blocks_scanned = 0u64;
     let mut txs_seen = 0u64;
@@ -270,7 +295,8 @@ pub async fn dump_token_transactions(
         &mut msg_buf,
         "starting dump | mint={} | start_epoch={:04} start_slot={} | scanning up to {:04}",
         mint_str, start_epoch, start_slot, last_epoch
-    ).unwrap();
+    )
+    .unwrap();
     pb.set_message(msg_buf.clone());
 
     for epoch in start_epoch..=last_epoch {
@@ -326,7 +352,7 @@ pub async fn dump_token_transactions(
                 let now = Instant::now();
                 if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
                     last_log = now;
-                    
+
                     msg_buf.clear();
                     write!(
                         &mut msg_buf,
@@ -454,7 +480,7 @@ pub async fn dump_token_transactions(
                             Ok(bytes) => bytes,
                             Err(_) => &[][..],
                         };
-                        
+
                         if !meta_bytes.is_empty() {
                             let _ = extract_metadata_pubkeys(meta_bytes, &mut account_keys_buf);
                         }
@@ -485,11 +511,12 @@ pub async fn dump_token_transactions(
 
                     let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
+                    let meta_bytes_opt = metadata_bytes(&block, &tx_node, &mut buf_meta).ok();
+
                     // Extract new tracked accounts from InitializeAccount instructions
-                    // account_keys_buf already has ALL keys (static + loaded)
                     extract_new_tracked_accounts(
                         tx_ref,
-                        &account_keys_buf,
+                        meta_bytes_opt,
                         &mint_bytes,
                         &token_program_bytes,
                         &mut tracked_account_keys,
@@ -764,6 +791,54 @@ fn metadata_bytes<'a>(
     }
 }
 
+fn extend_with_loaded_addresses(dest: &mut SmallVec<[Pubkey; 512]>, addrs: &[Vec<u8>]) {
+    for addr in addrs {
+        if addr.len() == 32 {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(addr);
+            dest.push(Pubkey::new_from_array(bytes));
+        } else {
+            tracing::warn!(
+                "loaded address has invalid length: expected 32 bytes, got {}",
+                addr.len()
+            );
+        }
+    }
+}
+
+fn decode_transaction_meta(bytes: &[u8]) -> Option<TransactionStatusMeta> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let raw = if is_zstd(bytes) {
+        match zstd::decode_all(bytes) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!("failed to decompress metadata: {e}");
+                return None;
+            }
+        }
+    } else {
+        bytes.to_vec()
+    };
+
+    match TransactionStatusMeta::decode(raw.as_slice()) {
+        Ok(meta) => Some(meta),
+        Err(e) => {
+            tracing::warn!("failed to decode TransactionStatusMeta protobuf: {e}");
+            None
+        }
+    }
+}
+
+#[inline]
+fn is_zstd(buf: &[u8]) -> bool {
+    buf.get(0..4)
+        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
+        .unwrap_or(false)
+}
+
 // Single-pass: check if transaction involves token AND extract new tracked accounts
 // Returns true if transaction should be kept
 // NOTE: This function is not currently used - we use the fast path with parse_account_keys_only instead
@@ -793,7 +868,7 @@ fn check_and_extract_accounts(
         if program_idx >= account_keys.len() {
             return;
         }
-        
+
         let program_key = account_keys[program_idx].to_bytes();
         if &program_key != token_program_bytes {
             return;
@@ -820,7 +895,7 @@ fn check_and_extract_accounts(
 
                     let candidate_key = account_keys[account_idx].to_bytes();
                     let mint_key = account_keys[mint_idx].to_bytes();
-                    
+
                     if &mint_key != mint_bytes {
                         return;
                     }
@@ -836,11 +911,7 @@ fn check_and_extract_accounts(
 
     // Handle top-level instructions
     for ix in tx.message.instructions_iter() {
-        handle_instruction(
-            ix.program_id_index as usize,
-            &ix.accounts,
-            &ix.data,
-        );
+        handle_instruction(ix.program_id_index as usize, &ix.accounts, &ix.data);
     }
 
     involves_token
