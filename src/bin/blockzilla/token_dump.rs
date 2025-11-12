@@ -164,7 +164,7 @@ pub async fn dump_token_transactions(
 
         while let Some(block) = car.next_block().await? {
             _entry_count += block.entries.len() as u64;
-            let block_bytes = block.entries.iter().map(|(_, a)| a.len()).sum::<usize>() as u64;
+            let block_bytes = block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
             bytes_count += block_bytes;
 
             let slot = match peek_block_slot(&block) {
