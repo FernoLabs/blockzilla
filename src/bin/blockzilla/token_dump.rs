@@ -17,7 +17,11 @@ use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
 use std::io::{ErrorKind, IsTerminal, Read};
 use std::time::{Duration, Instant};
-use std::{mem::MaybeUninit, path::Path, str::FromStr};
+use std::{
+    mem::MaybeUninit,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 use tokio::fs;
 use wincode::Deserialize as _;
 use wincode::{SchemaRead, SchemaWrite};
@@ -48,6 +52,22 @@ impl DynamicRegistry {
         self.keys.get(id as usize)
     }
 
+    fn id_for(&self, key: &[u8; 32]) -> Option<u32> {
+        self.map.get(key).copied()
+    }
+
+    fn from_keys(keys: Vec<[u8; 32]>) -> Self {
+        let mut map = AHashMap::with_capacity(keys.len());
+        for (idx, key) in keys.iter().enumerate() {
+            map.insert(*key, idx as u32);
+        }
+        Self { map, keys }
+    }
+
+    fn clone_registry(&self) -> Vec<[u8; 32]> {
+        self.keys.clone()
+    }
+
     fn into_registry(self) -> Vec<[u8; 32]> {
         self.keys
     }
@@ -72,6 +92,16 @@ pub struct TokenTransactionDump {
     pub transactions: Vec<TokenTransactionRecord>,
 }
 
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
+struct TokenTransactionEpochDump {
+    pub mint: [u8; 32],
+    pub epoch: u64,
+    pub last_slot: u64,
+    pub registry: Vec<[u8; 32]>,
+    pub tracked_account_keys: Vec<[u8; 32]>,
+    pub transactions: Vec<TokenTransactionRecord>,
+}
+
 pub async fn dump_token_transactions(
     start_epoch: u64,
     start_slot: u64,
@@ -84,7 +114,9 @@ pub async fn dump_token_transactions(
     let mint_bytes = mint.to_bytes();
 
     let mut registry = DynamicRegistry::default();
-    let mint_id = registry.ensure_id(&mint_bytes);
+    let mut mint_id = registry.ensure_id(&mint_bytes);
+
+    let parts_dir = output_path.with_extension("parts");
 
     let cache_path = Path::new(cache_dir);
     let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
@@ -106,8 +138,98 @@ pub async fn dump_token_transactions(
     let mut tracked_account_ids: AHashSet<u32> = AHashSet::new();
     let mut tracked_account_keys: AHashSet<[u8; 32]> = AHashSet::new();
     let mut collected: Vec<TokenTransactionRecord> = Vec::new();
+    let mut processed_epochs: AHashSet<u64> = AHashSet::new();
+    let mut blocks_scanned = 0u64;
+    let mut txs_seen = 0u64;
+    let mut txs_kept = 0u64;
+    let mut accounts_tracked_new_win = 0u64;
+    let mut bytes_count = 0u64;
+    let mut _entry_count = 0u64;
+    let mut last_processed_slot = 0u64;
+    let mut last_epoch_processed = None;
 
     let token_program_bytes = spl_token::ID.to_bytes();
+
+    if let Ok(mut rd) = fs::read_dir(&parts_dir).await {
+        let mut part_entries: Vec<(u64, PathBuf)> = Vec::new();
+        while let Some(entry) = rd.next_entry().await? {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(epoch_str) = name
+                .strip_prefix("epoch-")
+                .and_then(|s| s.strip_suffix(".bin"))
+            else {
+                continue;
+            };
+            let Ok(epoch) = epoch_str.parse::<u64>() else {
+                continue;
+            };
+            part_entries.push((epoch, entry.path()));
+        }
+        part_entries.sort_by_key(|(epoch, _)| *epoch);
+
+        for (epoch, path) in part_entries {
+            if epoch < start_epoch || epoch > last_epoch {
+                continue;
+            }
+
+            let data = match fs::read(&path).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!("failed to read cached epoch dump {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            let part: TokenTransactionEpochDump = match wincode::deserialize(&data) {
+                Ok(part) => part,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to decode cached epoch dump {}: {}",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            if part.mint != mint_bytes {
+                return Err(anyhow!(
+                    "cached epoch dump mint mismatch for {}",
+                    path.display()
+                ));
+            }
+
+            registry = DynamicRegistry::from_keys(part.registry.clone());
+            let mid = registry.ensure_id(&mint_bytes);
+            if mid != mint_id {
+                // ensure mint id stays consistent across reloads
+                mint_id = mid;
+            }
+
+            tracked_account_keys = part.tracked_account_keys.iter().copied().collect();
+            tracked_account_ids = part
+                .tracked_account_keys
+                .iter()
+                .filter_map(|key| registry.id_for(key))
+                .collect();
+
+            last_processed_slot = part.last_slot;
+            txs_kept += part.transactions.len() as u64;
+            txs_seen += part.transactions.len() as u64;
+            collected.extend(part.transactions.into_iter());
+            processed_epochs.insert(epoch);
+            last_epoch_processed = Some(epoch);
+        }
+    }
 
     // progress bar setup
     let draw_target = if std::io::stdout().is_terminal() {
@@ -124,16 +246,12 @@ pub async fn dump_token_transactions(
     // force first log immediately
     let mut last_log = start - Duration::from_secs(LOG_INTERVAL_SECS);
 
-    let mut blocks_scanned = 0u64;
-    let mut txs_seen = 0u64;
-    let mut txs_kept = 0u64;
-    let mut accounts_tracked_new_win = 0u64;
-    let mut bytes_count = 0u64;
-    let mut _entry_count = 0u64;
-    let mut last_processed_slot = 0u64;
-
     // skip-phase controls for first epoch
-    let mut min_slot = start_slot;
+    let mut min_slot = if processed_epochs.contains(&start_epoch) {
+        0
+    } else {
+        start_slot
+    };
     let mut skip_first_slot: Option<u64> = None;
     let mut skip_first_instant: Option<Instant> = None;
     let mut skipped_blocks = 0u64;
@@ -141,13 +259,23 @@ pub async fn dump_token_transactions(
     let mut last_skipped_slot = 0u64;
     let mut printed_skipped_summary = false;
 
-    let mut last_epoch_processed = None;
-
     pb.set_message(format!(
         "starting dump | mint={mint_str} | start_epoch={start_epoch:04} start_slot={start_slot} | scanning up to {last_epoch:04}"
     ));
 
     for epoch in start_epoch..=last_epoch {
+        if processed_epochs.contains(&epoch) {
+            if pb.is_hidden() {
+                tracing::info!("skipping epoch {epoch:04} (already cached)");
+            } else {
+                pb.println(format!("skipping epoch {epoch:04} (already cached)"));
+            }
+            last_epoch_processed = Some(epoch);
+            continue;
+        }
+
+        let epoch_start_idx = collected.len();
+
         // announce epoch
         if pb.is_hidden() {
             tracing::info!("opening epoch {epoch:04}");
@@ -396,6 +524,26 @@ pub async fn dump_token_transactions(
             }
         }
 
+        let mut tracked_keys_vec: Vec<[u8; 32]> = tracked_account_keys.iter().copied().collect();
+        tracked_keys_vec.sort_unstable();
+        let epoch_transactions = collected[epoch_start_idx..].to_vec();
+        let epoch_dump = TokenTransactionEpochDump {
+            mint: mint_bytes,
+            epoch,
+            last_slot: last_processed_slot,
+            registry: registry.clone_registry(),
+            tracked_account_keys: tracked_keys_vec,
+            transactions: epoch_transactions,
+        };
+
+        fs::create_dir_all(&parts_dir).await?;
+        let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
+        let tmp_path = part_path.with_extension("bin.tmp");
+        let encoded_epoch = wincode::serialize(&epoch_dump)?;
+        fs::write(&tmp_path, &encoded_epoch).await?;
+        fs::rename(&tmp_path, &part_path).await?;
+        processed_epochs.insert(epoch);
+
         // after the first epoch, clear min_slot so next epochs start from 0
         min_slot = 0;
         // reset skip-phase stats so a later epoch does not reuse them
@@ -424,11 +572,16 @@ pub async fn dump_token_transactions(
         registry: registry.into_registry(),
         transactions: collected,
     };
+    let total_transactions = dump.transactions.len() as u64;
 
     let encoded = wincode::serialize(&dump)?;
     fs::write(output_path, encoded).await?;
 
     // final summary
+    txs_kept = total_transactions;
+    if txs_seen < txs_kept {
+        txs_seen = txs_kept;
+    }
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64().max(1e-6);
     let blk_s = blocks_scanned as f64 / secs;
