@@ -112,8 +112,6 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                     ));
                 }
 
-                entries.sort_unstable_by(|(a, _), (b, _)| a.as_ref().cmp(b.as_ref()));
-
                 self.buf.clear();
                 self.entry_offsets.clear();
 
