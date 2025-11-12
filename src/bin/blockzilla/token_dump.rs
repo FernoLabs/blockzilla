@@ -3,18 +3,22 @@ use anyhow::{Context, Result, anyhow};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
     carblock_to_compact::{
-        CompactBlock, CompactMetadataPayload, CompactVersionedTx, MetadataMode, PubkeyIdProvider,
-        carblock_to_compactblock_inplace,
+        CompactMetadataPayload, CompactVersionedTx, MetadataMode, PubkeyIdProvider,
+        transaction_node_to_compact,
     },
+    node::{Node, TransactionNode},
     open_epoch::{self, FetchMode},
+    transaction_parser::{VersionedTransaction, parse_account_keys_only},
 };
+use cid::Cid;
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use spl_token::instruction::TokenInstruction;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::time::{Duration, Instant};
-use std::{path::Path, str::FromStr};
+use std::{mem::MaybeUninit, path::Path, str::FromStr};
 use tokio::fs;
 use wincode::{SchemaRead, SchemaWrite};
 
@@ -94,16 +98,11 @@ pub async fn dump_token_transactions(
         ));
     }
 
-    let mut block_buf = CompactBlock {
-        slot: 0,
-        txs: Vec::new(),
-        rewards: Vec::new(),
-    };
     let mut buf_tx = Vec::with_capacity(128 * 1024);
     let mut buf_meta = Vec::with_capacity(128 * 1024);
-    let mut buf_rewards = Vec::new();
 
-    let mut tracked_accounts: AHashSet<u32> = AHashSet::new();
+    let mut tracked_account_ids: AHashSet<u32> = AHashSet::new();
+    let mut tracked_account_keys: AHashSet<[u8; 32]> = AHashSet::new();
     let mut collected: Vec<TokenTransactionRecord> = Vec::new();
 
     let token_program_bytes = spl_token::ID.to_bytes();
@@ -148,30 +147,108 @@ pub async fn dump_token_transactions(
                 continue;
             }
 
-            carblock_to_compactblock_inplace(
-                &block,
-                &mut registry,
-                MetadataMode::Compact,
-                &mut buf_tx,
-                &mut buf_meta,
-                &mut buf_rewards,
-                &mut block_buf,
-            )?;
-
             blocks_scanned += 1;
-            txs_seen += block_buf.txs.len() as u64;
 
-            for tx in block_buf.txs.drain(..) {
-                if transaction_matches(&tx, mint_id, &tracked_accounts) {
-                    let added = update_tracked_accounts(
+            let block_node = match block.block() {
+                Ok(node) => node,
+                Err(e) => {
+                    tracing::warn!("failed to decode block: {e}");
+                    continue;
+                }
+            };
+
+            let mut reusable_tx = MaybeUninit::<VersionedTransaction>::uninit();
+            let mut account_keys = SmallVec::<[Pubkey; 256]>::new();
+
+            for entry_cid_res in block_node.entries.iter() {
+                let entry_cid = match entry_cid_res {
+                    Ok(cid) => cid,
+                    Err(e) => {
+                        tracing::warn!("failed to decode entry cid: {e}");
+                        continue;
+                    }
+                };
+
+                let entry = match block.decode(entry_cid.hash_bytes()) {
+                    Ok(Node::Entry(entry)) => entry,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::warn!("failed to decode entry: {e}");
+                        continue;
+                    }
+                };
+
+                for tx_cid_res in entry.transactions.iter() {
+                    let tx_cid = match tx_cid_res {
+                        Ok(cid) => cid,
+                        Err(e) => {
+                            tracing::warn!("failed to decode transaction cid: {e}");
+                            continue;
+                        }
+                    };
+
+                    let tx_node = match block.decode(tx_cid.hash_bytes()) {
+                        Ok(Node::Transaction(tx_node)) => tx_node,
+                        Ok(_) => continue,
+                        Err(e) => {
+                            tracing::warn!("failed to decode transaction node: {e}");
+                            continue;
+                        }
+                    };
+
+                    let keep_tx = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                        Ok(tx_bytes) => {
+                            txs_seen += 1;
+
+                            if let Err(e) = parse_account_keys_only(tx_bytes, &mut account_keys) {
+                                tracing::warn!("failed to parse account keys: {e}");
+                                false
+                            } else {
+                                transaction_matches(
+                                    &account_keys,
+                                    &mint_bytes,
+                                    &tracked_account_keys,
+                                )
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to read transaction bytes: {e}");
+                            continue;
+                        }
+                    };
+
+                    if !keep_tx {
+                        continue;
+                    }
+
+                    let tx = match transaction_node_to_compact(
+                        &block,
+                        &tx_node,
+                        &mut registry,
+                        MetadataMode::Compact,
+                        &mut buf_tx,
+                        &mut buf_meta,
+                        &mut reusable_tx,
+                    ) {
+                        Ok(tx) => tx,
+                        Err(e) => {
+                            tracing::warn!("failed to compact transaction: {e}");
+                            continue;
+                        }
+                    };
+
+                    let added_keys = update_tracked_accounts(
                         &tx,
                         mint_id,
                         &token_program_bytes,
-                        &mut tracked_accounts,
+                        &mut tracked_account_ids,
                         &registry,
                     );
-                    if added > 0 {
-                        _accounts_tracked_new += added as u64;
+                    if !added_keys.is_empty() {
+                        _accounts_tracked_new += added_keys.len() as u64;
+                        for key in added_keys {
+                            tracked_account_keys.insert(key);
+                        }
                     }
 
                     collected.push(TokenTransactionRecord { slot, tx });
@@ -193,7 +270,7 @@ pub async fn dump_token_transactions(
                 } else {
                     0
                 };
-                let tracked_accounts_len = tracked_accounts.len();
+                let tracked_accounts_len = tracked_account_keys.len();
 
                 pb.set_message(format!(
                     "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | tx={} kept={} tracked={}",
@@ -242,7 +319,7 @@ pub async fn dump_token_transactions(
     } else {
         0
     };
-    let tracked_accounts_len = tracked_accounts.len();
+    let tracked_accounts_len = tracked_account_keys.len();
 
     let range_label = if start_epoch == last_epoch_processed {
         format!("epoch {start_epoch:04}")
@@ -319,10 +396,53 @@ fn peek_block_slot(block: &CarBlock) -> Result<u64> {
     Ok(slot)
 }
 
-fn transaction_matches(tx: &CompactVersionedTx, mint_id: u32, tracked: &AHashSet<u32>) -> bool {
-    tx.account_ids
-        .iter()
-        .any(|id| *id == mint_id || tracked.contains(id))
+fn copy_dataframe_into<'a>(
+    block: &CarBlock,
+    cid: &Cid,
+    dst: &'a mut Vec<u8>,
+    inline_prefix: Option<&[u8]>,
+) -> Result<&'a [u8]> {
+    let prefix_len = inline_prefix.map_or(0, |p| p.len());
+    dst.clear();
+    dst.reserve(prefix_len + (64 << 10));
+
+    if let Some(prefix) = inline_prefix {
+        dst.extend_from_slice(prefix);
+    }
+
+    let mut rdr = block.dataframe_reader(cid);
+    rdr.read_to_end(dst)
+        .map_err(|e| anyhow!("read dataframe chain: {e}"))?;
+    Ok(&*dst)
+}
+
+fn transaction_bytes<'a>(
+    block: &CarBlock,
+    tx_node: &TransactionNode<'_>,
+    buf: &'a mut Vec<u8>,
+) -> Result<&'a [u8]> {
+    match tx_node.data.next {
+        None => {
+            buf.clear();
+            buf.extend_from_slice(tx_node.data.data);
+            Ok(&*buf)
+        }
+        Some(df_cbor) => {
+            let df_cid = df_cbor.to_cid()?;
+            copy_dataframe_into(block, &df_cid, buf, None)
+        }
+    }
+}
+
+fn transaction_matches(
+    account_keys: &[Pubkey],
+    mint: &[u8; 32],
+    tracked: &AHashSet<[u8; 32]>,
+) -> bool {
+    account_keys.iter().any(|pk| {
+        let key = pk.to_bytes();
+        key == *mint || tracked.contains(&key)
+    })
 }
 
 fn update_tracked_accounts(
@@ -331,8 +451,8 @@ fn update_tracked_accounts(
     token_program_bytes: &[u8; 32],
     tracked: &mut AHashSet<u32>,
     registry: &DynamicRegistry,
-) -> usize {
-    let mut added = 0usize;
+) -> Vec<[u8; 32]> {
+    let mut added = Vec::new();
 
     let mut handle_instruction = |program_idx: usize, accounts: &[u8], data: &[u8]| {
         if program_idx >= tx.account_ids.len() {
@@ -368,7 +488,9 @@ fn update_tracked_accounts(
                     }
 
                     if tracked.insert(candidate_id) {
-                        added += 1;
+                        if let Some(candidate_key) = registry.key_for(candidate_id) {
+                            added.push(*candidate_key);
+                        }
                     }
                 }
                 _ => {}
