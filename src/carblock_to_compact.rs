@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use anyhow::{Result, anyhow};
 use cid::Cid;
 use prost::Message;
@@ -11,12 +11,14 @@ use wincode::Deserialize as WincodeDeserialize;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
+use crate::partial_meta::extract_metadata_pubkeys;
 use crate::transaction_parser::Signature;
 use crate::{
     car_block_reader::CarBlock,
     confirmed_block,
     node::{Node, TransactionNode},
 };
+use smallvec::SmallVec;
 
 pub trait PubkeyIdProvider {
     fn resolve(&mut self, key: &[u8; 32]) -> Option<u32>;
@@ -207,6 +209,179 @@ pub struct CompactBlock {
     pub slot: u64,
     pub txs: Vec<CompactVersionedTx>,
     pub rewards: Vec<CompactReward>,
+}
+
+/// Fast filter that checks if a parsed transaction involves the target mint or tracked accounts
+/// This checks:
+/// 1. Static account keys (always present)
+/// 2. Address table lookup accounts (v0 transactions)
+/// 3. Loaded addresses from metadata (requires parsing metadata)
+#[inline]
+pub fn transaction_involves_token(
+    tx: &VersionedTransaction,
+    mint: &[u8; 32],
+    tracked_accounts: &AHashSet<[u8; 32]>,
+    token_program: &[u8; 32],
+) -> bool {
+    let static_keys = tx.message.static_account_keys();
+
+    // Fast reject: check if token program is even present
+    let has_token_program = static_keys.iter().any(|k| k == token_program);
+    if !has_token_program {
+        return false;
+    }
+
+    // Check static keys for mint or tracked accounts
+    for key in static_keys {
+        if key == mint || tracked_accounts.contains(key) {
+            return true;
+        }
+    }
+
+    // Check address table lookups if this is a versioned transaction
+    if let VersionedMessage::V0(msg) = &tx.message {
+        for lookup in &msg.address_table_lookups {
+            if &lookup.account_key == mint || tracked_accounts.contains(&lookup.account_key) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// More comprehensive filter that also checks loaded addresses from metadata
+/// This is slower but catches all possible token interactions including those
+/// that use address lookup tables to load the mint or token accounts
+pub fn transaction_involves_token_with_metadata(
+    tx: &VersionedTransaction,
+    metadata_bytes: &[u8],
+    mint: &[u8; 32],
+    tracked_accounts: &AHashSet<[u8; 32]>,
+    token_program: &[u8; 32],
+    keys_buffer: &mut SmallVec<[Pubkey; 256]>,
+) -> bool {
+    let static_keys = tx.message.static_account_keys();
+    if !static_keys.iter().any(|k| k == token_program) {
+        return false;
+    }
+
+    if transaction_involves_token(tx, mint, tracked_accounts, token_program) {
+        return true;
+    }
+
+    // The fast path already covers static keys and address table accounts
+    // If it fails, we only need to inspect metadata
+    keys_buffer.clear();
+    if extract_metadata_pubkeys(metadata_bytes, keys_buffer).is_ok() {
+        for pk in keys_buffer.iter() {
+            let key = pk.to_bytes();
+            if key == *mint || tracked_accounts.contains(&key) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Optimized version that converts parsed VersionedTransaction to CompactVersionedTx
+/// Assumes the transaction has already been filtered
+pub fn versioned_transaction_to_compact<P: PubkeyIdProvider>(
+    tx: &VersionedTransaction,
+    resolver: &mut P,
+    metadata_mode: MetadataMode,
+    block: &CarBlock,
+    tx_node: &TransactionNode<'_>,
+    buf_meta: &mut Vec<u8>,
+    buf_tx: &mut Vec<u8>,
+) -> Result<CompactVersionedTx> {
+    let static_keys = tx.message.static_account_keys();
+    let header = tx.message.header();
+    let is_versioned = matches!(tx.message, VersionedMessage::V0(_));
+    let recent_blockhash = match &tx.message {
+        VersionedMessage::Legacy(m) => m.recent_blockhash,
+        VersionedMessage::V0(m) => m.recent_blockhash,
+    };
+
+    let mut signatures = Vec::with_capacity(tx.signatures.len());
+    for s in &tx.signatures {
+        signatures.push(Signature(s.0));
+    }
+
+    let mut account_ids = Vec::with_capacity(static_keys.len());
+    for k in static_keys {
+        if let Some(uid) = resolver.resolve(k) {
+            account_ids.push(uid);
+        } else {
+            return Err(anyhow!(
+                "registry miss for pubkey {}",
+                Pubkey::new_from_array(*k)
+            ));
+        }
+    }
+
+    let mut instructions = Vec::with_capacity(tx.message.instructions_len());
+    for ix in tx.message.instructions_iter() {
+        instructions.push(ix.clone());
+    }
+
+    let address_table_lookups = match tx.message.address_table_lookups() {
+        None => None,
+        Some(lookups) => {
+            let mut vec = Vec::with_capacity(lookups.len());
+            for l in lookups {
+                if let Some(uid) = resolver.resolve(&l.account_key) {
+                    vec.push(CompactAddressTableLookup {
+                        table_account_id: uid,
+                        writable_indexes: l.writable_indexes.clone(),
+                        readonly_indexes: l.readonly_indexes.clone(),
+                    });
+                } else {
+                    return Err(anyhow!(
+                        "registry miss for address table account {}",
+                        Pubkey::new_from_array(l.account_key)
+                    ));
+                }
+            }
+            Some(vec)
+        }
+    };
+
+    // Handle metadata
+    let df = &tx_node.metadata;
+    let metadata = match metadata_mode {
+        MetadataMode::None => None,
+        mode @ (MetadataMode::Compact | MetadataMode::Raw) => {
+            let src = if let Some(next) = df.next {
+                let df_cid = next.to_cid()?;
+                buf_meta.clear();
+                block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
+                &*buf_meta
+            } else {
+                df.data
+            };
+
+            let raw_slice = match mode {
+                MetadataMode::Compact => metadata_proto_into(src, buf_tx),
+                MetadataMode::Raw => src,
+                MetadataMode::None => unreachable!(),
+            };
+
+            process_metadata(mode, raw_slice, resolver)
+        }
+    };
+
+    Ok(CompactVersionedTx {
+        signatures,
+        header: *header,
+        account_ids,
+        recent_blockhash,
+        instructions,
+        address_table_lookups,
+        is_versioned,
+        metadata,
+    })
 }
 
 #[inline(always)]
@@ -628,97 +803,19 @@ pub fn transaction_node_to_compact<P: PubkeyIdProvider>(
         .map_err(|_| anyhow!("failed to decode VersionedTransaction"))?;
     let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
-    let static_keys = tx_ref.message.static_account_keys();
-    let header = tx_ref.message.header();
-    let is_versioned = matches!(tx_ref.message, VersionedMessage::V0(_));
-    let recent_blockhash = match &tx_ref.message {
-        VersionedMessage::Legacy(m) => m.recent_blockhash,
-        VersionedMessage::V0(m) => m.recent_blockhash,
-    };
-
-    let mut signatures = Vec::with_capacity(tx_ref.signatures.len());
-    for s in &tx_ref.signatures {
-        signatures.push(Signature(s.0));
-    }
-
-    let mut account_ids = Vec::with_capacity(static_keys.len());
-    for k in static_keys {
-        if let Some(uid) = id_for_pubkey(resolver, k) {
-            account_ids.push(uid);
-        } else {
-            unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
-            return Err(anyhow!(
-                "registry miss for pubkey {}",
-                Pubkey::new_from_array(*k)
-            ));
-        }
-    }
-
-    let mut instructions = Vec::with_capacity(tx_ref.message.instructions_len());
-    for ix in tx_ref.message.instructions_iter() {
-        instructions.push(ix.clone());
-    }
-
-    let address_table_lookups = match tx_ref.message.address_table_lookups() {
-        None => None,
-        Some(lookups) => {
-            let mut vec = Vec::with_capacity(lookups.len());
-            for l in lookups {
-                if let Some(uid) = id_for_pubkey(resolver, &l.account_key) {
-                    vec.push(CompactAddressTableLookup {
-                        table_account_id: uid,
-                        writable_indexes: l.writable_indexes.clone(),
-                        readonly_indexes: l.readonly_indexes.clone(),
-                    });
-                } else {
-                    unsafe {
-                        std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction)
-                    };
-                    return Err(anyhow!(
-                        "registry miss for address table account {}",
-                        Pubkey::new_from_array(l.account_key)
-                    ));
-                }
-            }
-            Some(vec)
-        }
-    };
-
-    let df = &tx_node.metadata;
-    let metadata = match metadata_mode {
-        MetadataMode::None => None,
-        mode @ (MetadataMode::Compact | MetadataMode::Raw) => {
-            let src = if let Some(next) = df.next {
-                let df_cid = next.to_cid()?;
-                buf_meta.clear();
-                block.dataframe_copy_into(&df_cid, buf_meta, Some(df.data))?;
-                &*buf_meta
-            } else {
-                df.data
-            };
-
-            let raw_slice = match mode {
-                MetadataMode::Compact => metadata_proto_into(src, buf_tx),
-                MetadataMode::Raw => src,
-                MetadataMode::None => unreachable!(),
-            };
-
-            process_metadata(mode, raw_slice, resolver)
-        }
-    };
+    let result = versioned_transaction_to_compact(
+        tx_ref,
+        resolver,
+        metadata_mode,
+        block,
+        tx_node,
+        buf_meta,
+        buf_tx,
+    );
 
     unsafe { std::ptr::drop_in_place(tx_ref as *const _ as *mut VersionedTransaction) };
 
-    Ok(CompactVersionedTx {
-        signatures,
-        header: *header,
-        account_ids,
-        recent_blockhash,
-        instructions,
-        address_table_lookups,
-        is_versioned,
-        metadata,
-    })
+    result
 }
 
 pub fn carblock_to_compactblock_inplace<P: PubkeyIdProvider>(
