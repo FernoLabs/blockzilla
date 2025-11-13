@@ -8,6 +8,7 @@ use blockzilla::{
     transaction_parser::VersionedTransaction,
 };
 use cid::Cid;
+use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,7 @@ use crate::LOG_INTERVAL_SECS;
 
 const BLOCK_LOG_CHUNK: u64 = 500;
 
+#[derive(Clone)]
 struct BlockProgramUsage {
     pub epoch: u64,
     pub slot: u64,
@@ -35,6 +37,23 @@ struct BlockProgramUsage {
 struct ProgramStatsCollection {
     pub aggregated: Vec<ProgramUsageRecord>,
     pub per_block: Option<Vec<BlockProgramUsage>>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct EpochMetrics {
+    pub blocks_scanned: u64,
+    pub txs_seen: u64,
+    pub instructions_seen: u64,
+    pub inner_instructions_seen: u64,
+    pub bytes_count: u64,
+}
+
+struct EpochProcessSummary {
+    pub epoch: u64,
+    pub last_slot: u64,
+    pub records: Vec<ProgramUsageRecord>,
+    pub per_block: Option<Vec<BlockProgramUsage>>,
+    pub metrics: EpochMetrics,
 }
 
 #[derive(Debug, Clone, Copy, Default, SchemaRead, SchemaWrite, Serialize, Deserialize)]
@@ -63,6 +82,327 @@ struct ProgramUsageEpochDump {
     pub epoch: u64,
     pub last_slot: u64,
     pub records: Vec<ProgramUsageRecord>,
+}
+
+async fn process_epoch(
+    epoch: u64,
+    cache_dir: &str,
+    parts_dir: &Path,
+    collect_per_block: bool,
+    top_level_only: bool,
+    min_slot: u64,
+) -> Result<EpochProcessSummary> {
+    tracing::info!("opening epoch {epoch:04}");
+
+    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
+        .await
+        .with_context(|| format!("failed to open epoch {epoch:04}"))?;
+    let mut car = CarBlockReader::new(reader);
+    car.read_header().await?;
+
+    let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
+    let mut epoch_last_slot = 0u64;
+
+    let mut per_block_records = if collect_per_block {
+        Some(Vec::new())
+    } else {
+        None
+    };
+
+    let epoch_start = Instant::now();
+    let mut last_log = epoch_start - Duration::from_secs(LOG_INTERVAL_SECS);
+
+    let mut metrics = EpochMetrics::default();
+
+    let mut skipped_blocks = 0u64;
+    let mut skipped_bytes = 0u64;
+    let mut last_skipped_slot = 0u64;
+    let mut printed_skipped_summary = false;
+
+    let mut buf_tx = Vec::with_capacity(128 * 1024);
+    let mut buf_meta = Vec::with_capacity(128 * 1024);
+    let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
+    let mut resolved_keys = SmallVec::<[Pubkey; 512]>::new();
+    let mut tx_programs = SmallVec::<[[u8; 32]; 64]>::new();
+    let mut msg_buf = String::with_capacity(256);
+
+    while let Some(block) = car.next_block().await? {
+        metrics.bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
+
+        let mut block_stats = if collect_per_block {
+            Some(AHashMap::<[u8; 32], ProgramUsageStats>::with_capacity(128))
+        } else {
+            None
+        };
+
+        let slot = match peek_block_slot(&block) {
+            Ok(slot) => slot,
+            Err(e) => {
+                tracing::warn!("failed to peek block slot: {e}");
+                continue;
+            }
+        };
+
+        if slot < min_slot {
+            skipped_blocks += 1;
+            skipped_bytes += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
+            last_skipped_slot = slot;
+            continue;
+        }
+
+        if !printed_skipped_summary && skipped_blocks > 0 {
+            printed_skipped_summary = true;
+            tracing::info!(
+                "reached start_slot={min_slot} | skipped {} blocks ({:.2} MB), last skipped slot {last_skipped_slot}",
+                skipped_blocks,
+                skipped_bytes as f64 / (1024.0 * 1024.0)
+            );
+        }
+
+        let block_node = match block.block() {
+            Ok(node) => node,
+            Err(e) => {
+                tracing::warn!("failed to decode block: {e}");
+                continue;
+            }
+        };
+
+        for entry_cid_res in block_node.entries.iter() {
+            let entry_cid = match entry_cid_res {
+                Ok(cid) => cid,
+                Err(e) => {
+                    tracing::warn!("failed to decode entry cid: {e}");
+                    continue;
+                }
+            };
+
+            let entry = match block.decode(entry_cid.hash_bytes()) {
+                Ok(Node::Entry(entry)) => entry,
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!("failed to decode entry: {e}");
+                    continue;
+                }
+            };
+
+            for tx_cid_res in entry.transactions.iter() {
+                let tx_cid = match tx_cid_res {
+                    Ok(cid) => cid,
+                    Err(e) => {
+                        tracing::warn!("failed to decode transaction cid: {e}");
+                        continue;
+                    }
+                };
+
+                let tx_node = match block.decode(tx_cid.hash_bytes()) {
+                    Ok(Node::Transaction(tx_node)) => tx_node,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::warn!("failed to decode transaction node: {e}");
+                        continue;
+                    }
+                };
+
+                let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!("failed to read transaction bytes: {e}");
+                        continue;
+                    }
+                };
+
+                metrics.txs_seen += 1;
+
+                if let Err(e) =
+                    VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
+                {
+                    tracing::warn!("failed to parse transaction: {e}");
+                    continue;
+                }
+
+                let tx_ref = unsafe { reusable_tx.assume_init_ref() };
+
+                resolved_keys.clear();
+                resolved_keys.reserve(
+                    tx_ref.message.static_account_keys().len()
+                        + if top_level_only { 0 } else { 16 },
+                );
+                for key in tx_ref.message.static_account_keys() {
+                    resolved_keys.push(Pubkey::new_from_array(*key));
+                }
+
+                let mut inner_instruction_groups = None;
+
+                if !top_level_only {
+                    if let Ok(meta_bytes) = metadata_bytes(&block, &tx_node, &mut buf_meta) {
+                        if let Some(meta) = decode_transaction_meta(meta_bytes) {
+                            extend_with_loaded_addresses(
+                                &mut resolved_keys,
+                                &meta.loaded_writable_addresses,
+                            );
+                            extend_with_loaded_addresses(
+                                &mut resolved_keys,
+                                &meta.loaded_readonly_addresses,
+                            );
+
+                            if !meta.inner_instructions_none && !meta.inner_instructions.is_empty()
+                            {
+                                inner_instruction_groups = Some(meta.inner_instructions);
+                            }
+                        }
+                    }
+                }
+
+                for ix in tx_ref.message.instructions_iter() {
+                    let program_idx = ix.program_id_index as usize;
+                    if program_idx >= resolved_keys.len() {
+                        continue;
+                    }
+                    let program_key = resolved_keys[program_idx].to_bytes();
+                    let entry = epoch_stats
+                        .entry(program_key)
+                        .or_insert_with(ProgramUsageStats::default);
+                    entry.tx_count += 1;
+                    entry.instruction_count += 1;
+
+                    if let Some(block_stats) = block_stats.as_mut() {
+                        block_stats
+                            .entry(program_key)
+                            .or_insert_with(ProgramUsageStats::default)
+                            .instruction_count += 1;
+                    }
+
+                    if !tx_programs.iter().any(|existing| existing == &program_key) {
+                        tx_programs.push(program_key);
+                    }
+                    metrics.instructions_seen += 1;
+                }
+
+                if let Some(groups) = inner_instruction_groups.as_ref() {
+                    for group in groups {
+                        for inner_ix in group.instructions.iter() {
+                            let program_idx = inner_ix.program_id_index as usize;
+                            if program_idx >= resolved_keys.len() {
+                                continue;
+                            }
+                            let program_key = resolved_keys[program_idx].to_bytes();
+                            let entry = epoch_stats
+                                .entry(program_key)
+                                .or_insert_with(ProgramUsageStats::default);
+                            entry.inner_instruction_count += 1;
+
+                            if let Some(block_stats) = block_stats.as_mut() {
+                                block_stats
+                                    .entry(program_key)
+                                    .or_insert_with(ProgramUsageStats::default)
+                                    .inner_instruction_count += 1;
+                            }
+
+                            if !tx_programs.iter().any(|existing| existing == &program_key) {
+                                tx_programs.push(program_key);
+                            }
+                            metrics.inner_instructions_seen += 1;
+                        }
+                    }
+                }
+
+                for program_key in tx_programs.iter() {
+                    if let Some(block_stats) = block_stats.as_mut() {
+                        block_stats
+                            .entry(*program_key)
+                            .or_insert_with(ProgramUsageStats::default)
+                            .tx_count += 1;
+                    }
+                }
+                tx_programs.clear();
+
+                unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
+            }
+        }
+
+        epoch_last_slot = slot;
+        metrics.blocks_scanned += 1;
+
+        if let (Some(block_stats), Some(per_block_records)) =
+            (block_stats, per_block_records.as_mut())
+        {
+            let mut records: Vec<ProgramUsageRecord> = block_stats
+                .into_iter()
+                .map(|(program, stats)| ProgramUsageRecord { program, stats })
+                .collect();
+            records
+                .sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
+            per_block_records.push(BlockProgramUsage {
+                epoch,
+                slot,
+                records,
+            });
+        }
+
+        let now = Instant::now();
+        let time_due = now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS);
+        let chunk_due = metrics.blocks_scanned % BLOCK_LOG_CHUNK == 0;
+        if time_due || chunk_due {
+            last_log = now;
+            let elapsed = now.duration_since(epoch_start);
+            let secs = elapsed.as_secs_f64().max(1e-6);
+            let blk_s = metrics.blocks_scanned as f64 / secs;
+            let mb_s = (metrics.bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+            let tps = if elapsed.as_secs() > 0 {
+                metrics.txs_seen / elapsed.as_secs()
+            } else {
+                0
+            };
+
+            msg_buf.clear();
+            write!(
+                &mut msg_buf,
+                "epoch {:04} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
+                epoch,
+                epoch_last_slot,
+                metrics.blocks_scanned,
+                blk_s,
+                mb_s,
+                tps,
+                metrics.instructions_seen,
+                metrics.inner_instructions_seen
+            )
+            .unwrap();
+
+            tracing::info!("{}", msg_buf);
+        }
+    }
+
+    fs::create_dir_all(parts_dir).await?;
+    let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
+    let tmp_path = part_path.with_extension("bin.tmp");
+
+    let mut records: Vec<ProgramUsageRecord> = epoch_stats
+        .into_iter()
+        .map(|(program, stats)| ProgramUsageRecord { program, stats })
+        .collect();
+    records.sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
+
+    let epoch_dump = ProgramUsageEpochDump {
+        epoch,
+        last_slot: epoch_last_slot,
+        records: records.clone(),
+    };
+    let encoded_epoch = wincode::serialize(&epoch_dump)?;
+    fs::write(&tmp_path, &encoded_epoch).await?;
+    fs::rename(&tmp_path, &part_path).await?;
+
+    if let Some(per_block_records) = per_block_records.as_mut() {
+        per_block_records.sort_by(|a, b| a.slot.cmp(&b.slot));
+    }
+
+    Ok(EpochProcessSummary {
+        epoch,
+        last_slot: epoch_last_slot,
+        records,
+        per_block: per_block_records,
+        metrics,
+    })
 }
 
 async fn collect_program_stats(
@@ -103,6 +443,7 @@ async fn collect_program_stats(
     };
 
     let mut last_processed_slot = 0u64;
+    let mut epoch_last_slots: AHashMap<u64, u64> = AHashMap::with_capacity(256);
 
     if let Ok(mut rd) = fs::read_dir(&parts_dir).await {
         let mut part_entries: Vec<(u64, PathBuf)> = Vec::new();
@@ -167,6 +508,7 @@ async fn collect_program_stats(
             }
 
             processed_epochs.insert(part.epoch);
+            epoch_last_slots.insert(part.epoch, part.last_slot);
             if part.epoch == start_epoch {
                 last_processed_slot = part.last_slot;
             }
@@ -183,7 +525,6 @@ async fn collect_program_stats(
     pb.enable_steady_tick(Duration::from_millis(120));
 
     let start = Instant::now();
-    let mut last_log = start - Duration::from_secs(LOG_INTERVAL_SECS);
 
     let mut blocks_scanned = 0u64;
     let mut txs_seen = 0u64;
@@ -192,7 +533,6 @@ async fn collect_program_stats(
     let mut bytes_count = 0u64;
 
     let mut msg_buf = String::with_capacity(256);
-    msg_buf.clear();
     write!(
         &mut msg_buf,
         "starting program stats | start_epoch={:04} start_slot={} | scanning up to {:04}",
@@ -201,24 +541,15 @@ async fn collect_program_stats(
     .unwrap();
     pb.set_message(msg_buf.clone());
 
-    let mut buf_tx = Vec::with_capacity(128 * 1024);
-    let mut buf_meta = Vec::with_capacity(128 * 1024);
-    let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
-    let mut resolved_keys = SmallVec::<[Pubkey; 512]>::new();
-    let mut tx_programs = SmallVec::<[[u8; 32]; 64]>::new();
+    let mut last_epoch_processed = processed_epochs.iter().copied().max();
 
-    let mut last_epoch_processed = None;
-
-    let mut min_slot = if processed_epochs.contains(&start_epoch) {
+    let start_epoch_min_slot = if processed_epochs.contains(&start_epoch) {
         0
     } else {
         start_slot
     };
-    let mut skipped_blocks = 0u64;
-    let mut skipped_bytes = 0u64;
-    let mut last_skipped_slot = 0u64;
-    let mut printed_skipped_summary = false;
 
+    let mut epochs_to_process: Vec<(u64, u64)> = Vec::new();
     for epoch in start_epoch..=last_epoch {
         if processed_epochs.contains(&epoch) {
             if pb.is_hidden() {
@@ -226,317 +557,107 @@ async fn collect_program_stats(
             } else {
                 pb.println(format!("skipping epoch {epoch:04} (already cached)"));
             }
-            last_epoch_processed = Some(epoch);
+            last_epoch_processed = Some(last_epoch_processed.map_or(epoch, |cur| cur.max(epoch)));
             continue;
         }
 
-        if pb.is_hidden() {
-            tracing::info!("opening epoch {epoch:04}");
+        let min_slot = if epoch == start_epoch {
+            start_epoch_min_slot
         } else {
-            pb.println(format!("opening epoch {epoch:04}"));
-        }
-
-        let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
-            .await
-            .with_context(|| format!("failed to open epoch {epoch:04}"))?;
-        let mut car = CarBlockReader::new(reader);
-        car.read_header().await?;
-
-        let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
-        let mut epoch_last_slot = 0u64;
-
-        while let Some(block) = car.next_block().await? {
-            bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
-
-            let mut block_stats = if collect_per_block {
-                Some(AHashMap::<[u8; 32], ProgramUsageStats>::with_capacity(128))
-            } else {
-                None
-            };
-
-            let slot = match peek_block_slot(&block) {
-                Ok(slot) => slot,
-                Err(e) => {
-                    tracing::warn!("failed to peek block slot: {e}");
-                    continue;
-                }
-            };
-
-            if slot < min_slot {
-                skipped_blocks += 1;
-                skipped_bytes +=
-                    block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
-                last_skipped_slot = slot;
-                continue;
-            }
-
-            if !printed_skipped_summary && skipped_blocks > 0 {
-                printed_skipped_summary = true;
-                let line = format!(
-                    "reached start_slot={min_slot} | skipped {} blocks ({:.2} MB), last skipped slot {last_skipped_slot}",
-                    skipped_blocks,
-                    skipped_bytes as f64 / (1024.0 * 1024.0)
-                );
-                if pb.is_hidden() {
-                    tracing::info!("{line}");
-                } else {
-                    pb.println(line);
-                }
-            }
-
-            let block_node = match block.block() {
-                Ok(node) => node,
-                Err(e) => {
-                    tracing::warn!("failed to decode block: {e}");
-                    continue;
-                }
-            };
-
-            for entry_cid_res in block_node.entries.iter() {
-                let entry_cid = match entry_cid_res {
-                    Ok(cid) => cid,
-                    Err(e) => {
-                        tracing::warn!("failed to decode entry cid: {e}");
-                        continue;
-                    }
-                };
-
-                let entry = match block.decode(entry_cid.hash_bytes()) {
-                    Ok(Node::Entry(entry)) => entry,
-                    Ok(_) => continue,
-                    Err(e) => {
-                        tracing::warn!("failed to decode entry: {e}");
-                        continue;
-                    }
-                };
-
-                for tx_cid_res in entry.transactions.iter() {
-                    let tx_cid = match tx_cid_res {
-                        Ok(cid) => cid,
-                        Err(e) => {
-                            tracing::warn!("failed to decode transaction cid: {e}");
-                            continue;
-                        }
-                    };
-
-                    let tx_node = match block.decode(tx_cid.hash_bytes()) {
-                        Ok(Node::Transaction(tx_node)) => tx_node,
-                        Ok(_) => continue,
-                        Err(e) => {
-                            tracing::warn!("failed to decode transaction node: {e}");
-                            continue;
-                        }
-                    };
-
-                    let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            tracing::warn!("failed to read transaction bytes: {e}");
-                            continue;
-                        }
-                    };
-
-                    txs_seen += 1;
-
-                    if let Err(e) =
-                        VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
-                    {
-                        tracing::warn!("failed to parse transaction: {e}");
-                        continue;
-                    }
-
-                    let tx_ref = unsafe { reusable_tx.assume_init_ref() };
-
-                    resolved_keys.clear();
-                    resolved_keys.reserve(
-                        tx_ref.message.static_account_keys().len()
-                            + if top_level_only { 0 } else { 16 },
-                    );
-                    for key in tx_ref.message.static_account_keys() {
-                        resolved_keys.push(Pubkey::new_from_array(*key));
-                    }
-
-                    let mut inner_instruction_groups = None;
-
-                    if !top_level_only {
-                        if let Ok(meta_bytes) = metadata_bytes(&block, &tx_node, &mut buf_meta) {
-                            if let Some(meta) = decode_transaction_meta(meta_bytes) {
-                                extend_with_loaded_addresses(
-                                    &mut resolved_keys,
-                                    &meta.loaded_writable_addresses,
-                                );
-                                extend_with_loaded_addresses(
-                                    &mut resolved_keys,
-                                    &meta.loaded_readonly_addresses,
-                                );
-
-                                if !meta.inner_instructions_none
-                                    && !meta.inner_instructions.is_empty()
-                                {
-                                    inner_instruction_groups = Some(meta.inner_instructions);
-                                }
-                            }
-                        }
-                    }
-
-                    for ix in tx_ref.message.instructions_iter() {
-                        let program_idx = ix.program_id_index as usize;
-                        if program_idx >= resolved_keys.len() {
-                            continue;
-                        }
-                        let program_key = resolved_keys[program_idx].to_bytes();
-                        let entry = epoch_stats
-                            .entry(program_key)
-                            .or_insert_with(ProgramUsageStats::default);
-                        entry.instruction_count += 1;
-                        instructions_seen += 1;
-                        if let Some(block_stats) = block_stats.as_mut() {
-                            block_stats
-                                .entry(program_key)
-                                .or_insert_with(ProgramUsageStats::default)
-                                .instruction_count += 1;
-                        }
-                        if !tx_programs.iter().any(|existing| existing == &program_key) {
-                            tx_programs.push(program_key);
-                        }
-                    }
-
-                    if let Some(groups) = inner_instruction_groups.as_ref() {
-                        for group in groups {
-                            for inner_ix in group.instructions.iter() {
-                                let program_idx = inner_ix.program_id_index as usize;
-                                if program_idx >= resolved_keys.len() {
-                                    continue;
-                                }
-                                let program_key = resolved_keys[program_idx].to_bytes();
-                                let entry = epoch_stats
-                                    .entry(program_key)
-                                    .or_insert_with(ProgramUsageStats::default);
-                                entry.inner_instruction_count += 1;
-                                inner_instructions_seen += 1;
-                                if let Some(block_stats) = block_stats.as_mut() {
-                                    block_stats
-                                        .entry(program_key)
-                                        .or_insert_with(ProgramUsageStats::default)
-                                        .inner_instruction_count += 1;
-                                }
-                                if !tx_programs.iter().any(|existing| existing == &program_key) {
-                                    tx_programs.push(program_key);
-                                }
-                            }
-                        }
-                    }
-
-                    for program_key in tx_programs.iter() {
-                        let entry = epoch_stats
-                            .entry(*program_key)
-                            .or_insert_with(ProgramUsageStats::default);
-                        entry.tx_count += 1;
-                        if let Some(block_stats) = block_stats.as_mut() {
-                            block_stats
-                                .entry(*program_key)
-                                .or_insert_with(ProgramUsageStats::default)
-                                .tx_count += 1;
-                        }
-                    }
-                    tx_programs.clear();
-
-                    unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
-                }
-            }
-
-            epoch_last_slot = slot;
-            blocks_scanned += 1;
-
-            if let (Some(block_stats), Some(per_block_records)) =
-                (block_stats, per_block_records.as_mut())
-            {
-                let mut records: Vec<ProgramUsageRecord> = block_stats
-                    .into_iter()
-                    .map(|(program, stats)| ProgramUsageRecord { program, stats })
-                    .collect();
-                records.sort_unstable_by(|a, b| {
-                    b.stats.instruction_count.cmp(&a.stats.instruction_count)
-                });
-                per_block_records.push(BlockProgramUsage {
-                    epoch,
-                    slot,
-                    records,
-                });
-            }
-
-            let now = Instant::now();
-            let time_due = now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS);
-            let chunk_due = blocks_scanned % BLOCK_LOG_CHUNK == 0;
-            if time_due || chunk_due {
-                last_log = now;
-                let elapsed = now.duration_since(start);
-                let secs = elapsed.as_secs_f64().max(1e-6);
-                let blk_s = blocks_scanned as f64 / secs;
-                let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-                let tps = if elapsed.as_secs() > 0 {
-                    txs_seen / elapsed.as_secs()
-                } else {
-                    0
-                };
-
-                msg_buf.clear();
-                write!(
-                    &mut msg_buf,
-                    "epoch {:04} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
-                    epoch,
-                    epoch_last_slot,
-                    blocks_scanned,
-                    blk_s,
-                    mb_s,
-                    tps,
-                    instructions_seen,
-                    inner_instructions_seen
-                )
-                .unwrap();
-
-                if pb.is_hidden() {
-                    tracing::info!("{}", msg_buf);
-                } else {
-                    pb.set_message(msg_buf.clone());
-                    pb.tick();
-                }
-            }
-        }
-
-        fs::create_dir_all(&parts_dir).await?;
-        let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
-        let tmp_path = part_path.with_extension("bin.tmp");
-
-        let mut records: Vec<ProgramUsageRecord> = epoch_stats
-            .into_iter()
-            .map(|(program, stats)| ProgramUsageRecord { program, stats })
-            .collect();
-        records.sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
-
-        let epoch_dump = ProgramUsageEpochDump {
-            epoch,
-            last_slot: epoch_last_slot,
-            records: records.clone(),
+            0
         };
-        let encoded_epoch = wincode::serialize(&epoch_dump)?;
-        fs::write(&tmp_path, &encoded_epoch).await?;
-        fs::rename(&tmp_path, &part_path).await?;
+        epochs_to_process.push((epoch, min_slot));
+    }
 
-        for record in records {
-            aggregated
-                .entry(record.program)
-                .or_insert_with(ProgramUsageStats::default)
-                .accumulate(&record.stats);
+    if !epochs_to_process.is_empty() {
+        let parallelism = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .max(1);
+        let concurrency = parallelism.min(epochs_to_process.len().max(1));
+
+        let mut stream = stream::iter(epochs_to_process.into_iter().map(|(epoch, min_slot)| {
+            let parts_dir = parts_dir.clone();
+            async move {
+                process_epoch(
+                    epoch,
+                    cache_dir,
+                    &parts_dir,
+                    collect_per_block,
+                    top_level_only,
+                    min_slot,
+                )
+                .await
+            }
+        }))
+        .buffer_unordered(concurrency);
+
+        while let Some(result) = stream.next().await {
+            let summary = result?;
+
+            bytes_count += summary.metrics.bytes_count;
+            blocks_scanned += summary.metrics.blocks_scanned;
+            txs_seen += summary.metrics.txs_seen;
+            instructions_seen += summary.metrics.instructions_seen;
+            inner_instructions_seen += summary.metrics.inner_instructions_seen;
+
+            for record in summary.records.iter() {
+                aggregated
+                    .entry(record.program)
+                    .or_insert_with(ProgramUsageStats::default)
+                    .accumulate(&record.stats);
+            }
+
+            if let (Some(blocks), Some(per_block_records)) =
+                (summary.per_block, per_block_records.as_mut())
+            {
+                per_block_records.extend(blocks);
+            }
+
+            processed_epochs.insert(summary.epoch);
+            epoch_last_slots.insert(summary.epoch, summary.last_slot);
+            last_epoch_processed =
+                Some(last_epoch_processed.map_or(summary.epoch, |cur| cur.max(summary.epoch)));
+
+            msg_buf.clear();
+            let elapsed = start.elapsed();
+            let secs = elapsed.as_secs_f64().max(1e-6);
+            let blk_s = blocks_scanned as f64 / secs;
+            let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+            let tps = if elapsed.as_secs() > 0 {
+                txs_seen / elapsed.as_secs()
+            } else {
+                0
+            };
+
+            write!(
+                &mut msg_buf,
+                "epoch {:04} done | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
+                summary.epoch,
+                summary.last_slot,
+                blocks_scanned,
+                blk_s,
+                mb_s,
+                tps,
+                instructions_seen,
+                inner_instructions_seen
+            )
+            .unwrap();
+
+            if pb.is_hidden() {
+                tracing::info!("{}", msg_buf);
+            } else {
+                pb.set_message(msg_buf.clone());
+                pb.tick();
+            }
         }
+    }
 
-        processed_epochs.insert(epoch);
-        last_processed_slot = epoch_last_slot;
-        last_epoch_processed = Some(epoch);
-        min_slot = 0;
-        skipped_blocks = 0;
-        skipped_bytes = 0;
-        printed_skipped_summary = false;
+    if let Some(per_block_records) = per_block_records.as_mut() {
+        per_block_records.sort_by(|a, b| match a.epoch.cmp(&b.epoch) {
+            std::cmp::Ordering::Equal => a.slot.cmp(&b.slot),
+            other => other,
+        });
     }
 
     let Some(last_epoch_processed) = last_epoch_processed else {
@@ -544,6 +665,10 @@ async fn collect_program_stats(
             "no epochs processed between {start_epoch:04} and {last_epoch:04}"
         ));
     };
+
+    if let Some(slot) = epoch_last_slots.get(&last_epoch_processed) {
+        last_processed_slot = *slot;
+    }
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
