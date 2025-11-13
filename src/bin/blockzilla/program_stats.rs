@@ -1,5 +1,5 @@
 use ahash::{AHashMap, AHashSet};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
     confirmed_block::TransactionStatusMeta,
@@ -71,6 +71,7 @@ async fn collect_program_stats(
     cache_dir: &str,
     output_path: &Path,
     collect_per_block: bool,
+    top_level_only: bool,
 ) -> Result<ProgramStatsCollection> {
     let cache_path = Path::new(cache_dir);
     let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
@@ -86,7 +87,11 @@ async fn collect_program_stats(
         ));
     }
 
-    let parts_dir = output_path.with_extension("parts");
+    let parts_dir = if top_level_only {
+        output_path.with_extension("parts.top_level")
+    } else {
+        output_path.with_extension("parts")
+    };
 
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
     let mut processed_epochs: AHashSet<u64> = AHashSet::with_capacity(256);
@@ -343,27 +348,33 @@ async fn collect_program_stats(
                     let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
                     resolved_keys.clear();
-                    resolved_keys.reserve(tx_ref.message.static_account_keys().len() + 16);
+                    resolved_keys.reserve(
+                        tx_ref.message.static_account_keys().len()
+                            + if top_level_only { 0 } else { 16 },
+                    );
                     for key in tx_ref.message.static_account_keys() {
                         resolved_keys.push(Pubkey::new_from_array(*key));
                     }
 
                     let mut inner_instruction_groups = None;
 
-                    if let Ok(meta_bytes) = metadata_bytes(&block, &tx_node, &mut buf_meta) {
-                        if let Some(meta) = decode_transaction_meta(meta_bytes) {
-                            extend_with_loaded_addresses(
-                                &mut resolved_keys,
-                                &meta.loaded_writable_addresses,
-                            );
-                            extend_with_loaded_addresses(
-                                &mut resolved_keys,
-                                &meta.loaded_readonly_addresses,
-                            );
+                    if !top_level_only {
+                        if let Ok(meta_bytes) = metadata_bytes(&block, &tx_node, &mut buf_meta) {
+                            if let Some(meta) = decode_transaction_meta(meta_bytes) {
+                                extend_with_loaded_addresses(
+                                    &mut resolved_keys,
+                                    &meta.loaded_writable_addresses,
+                                );
+                                extend_with_loaded_addresses(
+                                    &mut resolved_keys,
+                                    &meta.loaded_readonly_addresses,
+                                );
 
-                            if !meta.inner_instructions_none && !meta.inner_instructions.is_empty()
-                            {
-                                inner_instruction_groups = Some(meta.inner_instructions);
+                                if !meta.inner_instructions_none
+                                    && !meta.inner_instructions.is_empty()
+                                {
+                                    inner_instruction_groups = Some(meta.inner_instructions);
+                                }
                             }
                         }
                     }
@@ -594,9 +605,17 @@ pub async fn dump_program_stats(
     cache_dir: &str,
     output_path: &Path,
     limit: Option<usize>,
+    top_level_only: bool,
 ) -> Result<()> {
-    let collection =
-        collect_program_stats(start_epoch, start_slot, cache_dir, output_path, false).await?;
+    let collection = collect_program_stats(
+        start_epoch,
+        start_slot,
+        cache_dir,
+        output_path,
+        false,
+        top_level_only,
+    )
+    .await?;
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -630,9 +649,17 @@ pub async fn dump_program_stats_csv(
     cache_dir: &str,
     output_path: &Path,
     limit: Option<usize>,
+    top_level_only: bool,
 ) -> Result<()> {
-    let mut collection =
-        collect_program_stats(start_epoch, start_slot, cache_dir, output_path, true).await?;
+    let mut collection = collect_program_stats(
+        start_epoch,
+        start_slot,
+        cache_dir,
+        output_path,
+        true,
+        top_level_only,
+    )
+    .await?;
 
     let Some(blocks) = collection.per_block.take() else {
         return Err(anyhow!("per-block program statistics were not collected"));
