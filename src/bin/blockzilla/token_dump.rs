@@ -323,6 +323,18 @@ pub async fn dump_token_transactions(
         Pubkey::from_str(mint_str).map_err(|e| anyhow!("invalid mint pubkey '{mint_str}': {e}"))?;
     let mint_bytes = mint.to_bytes();
 
+    let output_file_name = output_path
+        .file_name()
+        .ok_or_else(|| anyhow!("output path must include a file name"))?;
+
+    let base_output_dir = match output_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+
+    let mint_dir = base_output_dir.join(mint_str);
+    let output_path = mint_dir.join(output_file_name);
+
     let parts_dir = output_path.with_extension("parts");
 
     let cache_path = Path::new(cache_dir);
