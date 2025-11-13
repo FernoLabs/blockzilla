@@ -6,7 +6,7 @@ mod optimizer;
 mod program_stats;
 mod token_dump;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use blockzilla::{carblock_to_compact::MetadataMode, open_epoch::FetchMode};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -284,6 +284,11 @@ enum StatsCommand {
             help = "Limit number of programs written to output"
         )]
         limit: Option<usize>,
+        #[arg(
+            long,
+            help = "Only count top-level program instructions (skip metadata and inner instructions)"
+        )]
+        top_level_only: bool,
     },
     ProgramCsv {
         #[arg(value_name = "START_EPOCH", help = "Starting epoch to scan, inclusive")]
@@ -300,6 +305,11 @@ enum StatsCommand {
             help = "Limit number of programs written to output"
         )]
         limit: Option<usize>,
+        #[arg(
+            long,
+            help = "Only count top-level program instructions (skip metadata and inner instructions)"
+        )]
+        top_level_only: bool,
     },
 }
 
@@ -541,6 +551,7 @@ async fn main() -> Result<()> {
                 cache_dir,
                 output,
                 limit,
+                top_level_only,
             } => {
                 program_stats::dump_program_stats(
                     start_epoch,
@@ -548,6 +559,7 @@ async fn main() -> Result<()> {
                     &cache_dir,
                     &output,
                     limit,
+                    top_level_only,
                 )
                 .await?;
             }
@@ -557,6 +569,7 @@ async fn main() -> Result<()> {
                 cache_dir,
                 output,
                 limit,
+                top_level_only,
             } => {
                 program_stats::dump_program_stats_csv(
                     start_epoch,
@@ -564,6 +577,7 @@ async fn main() -> Result<()> {
                     &cache_dir,
                     &output,
                     limit,
+                    top_level_only,
                 )
                 .await?;
             }
