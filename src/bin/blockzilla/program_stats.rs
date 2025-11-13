@@ -1,5 +1,5 @@
 use ahash::{AHashMap, AHashSet};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
     confirmed_block::TransactionStatusMeta,
@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::fmt::Write as FmtWrite;
+use std::io::Write as IoWrite;
 use std::io::{ErrorKind, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -24,6 +25,17 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::LOG_INTERVAL_SECS;
 
 const BLOCK_LOG_CHUNK: u64 = 500;
+
+struct BlockProgramUsage {
+    pub epoch: u64,
+    pub slot: u64,
+    pub records: Vec<ProgramUsageRecord>,
+}
+
+struct ProgramStatsCollection {
+    pub aggregated: Vec<ProgramUsageRecord>,
+    pub per_block: Option<Vec<BlockProgramUsage>>,
+}
 
 #[derive(Debug, Clone, Copy, Default, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 pub struct ProgramUsageStats {
@@ -53,13 +65,13 @@ struct ProgramUsageEpochDump {
     pub records: Vec<ProgramUsageRecord>,
 }
 
-pub async fn dump_program_stats(
+async fn collect_program_stats(
     start_epoch: u64,
     start_slot: u64,
     cache_dir: &str,
     output_path: &Path,
-    limit: Option<usize>,
-) -> Result<()> {
+    collect_per_block: bool,
+) -> Result<ProgramStatsCollection> {
     let cache_path = Path::new(cache_dir);
     let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
         return Err(anyhow!(
@@ -78,6 +90,12 @@ pub async fn dump_program_stats(
 
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
     let mut processed_epochs: AHashSet<u64> = AHashSet::with_capacity(256);
+
+    let mut per_block_records = if collect_per_block {
+        Some(Vec::new())
+    } else {
+        None
+    };
 
     let mut last_processed_slot = 0u64;
 
@@ -225,6 +243,12 @@ pub async fn dump_program_stats(
         while let Some(block) = car.next_block().await? {
             bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
 
+            let mut block_stats = if collect_per_block {
+                Some(AHashMap::<[u8; 32], ProgramUsageStats>::with_capacity(128))
+            } else {
+                None
+            };
+
             let slot = match peek_block_slot(&block) {
                 Ok(slot) => slot,
                 Err(e) => {
@@ -355,6 +379,12 @@ pub async fn dump_program_stats(
                             .or_insert_with(ProgramUsageStats::default);
                         entry.instruction_count += 1;
                         instructions_seen += 1;
+                        if let Some(block_stats) = block_stats.as_mut() {
+                            block_stats
+                                .entry(program_key)
+                                .or_insert_with(ProgramUsageStats::default)
+                                .instruction_count += 1;
+                        }
                         if !tx_programs.iter().any(|existing| existing == &program_key) {
                             tx_programs.push(program_key);
                         }
@@ -373,6 +403,12 @@ pub async fn dump_program_stats(
                                     .or_insert_with(ProgramUsageStats::default);
                                 entry.inner_instruction_count += 1;
                                 inner_instructions_seen += 1;
+                                if let Some(block_stats) = block_stats.as_mut() {
+                                    block_stats
+                                        .entry(program_key)
+                                        .or_insert_with(ProgramUsageStats::default)
+                                        .inner_instruction_count += 1;
+                                }
                                 if !tx_programs.iter().any(|existing| existing == &program_key) {
                                     tx_programs.push(program_key);
                                 }
@@ -385,6 +421,12 @@ pub async fn dump_program_stats(
                             .entry(*program_key)
                             .or_insert_with(ProgramUsageStats::default);
                         entry.tx_count += 1;
+                        if let Some(block_stats) = block_stats.as_mut() {
+                            block_stats
+                                .entry(*program_key)
+                                .or_insert_with(ProgramUsageStats::default)
+                                .tx_count += 1;
+                        }
                     }
                     tx_programs.clear();
 
@@ -394,6 +436,23 @@ pub async fn dump_program_stats(
 
             epoch_last_slot = slot;
             blocks_scanned += 1;
+
+            if let (Some(block_stats), Some(per_block_records)) =
+                (block_stats, per_block_records.as_mut())
+            {
+                let mut records: Vec<ProgramUsageRecord> = block_stats
+                    .into_iter()
+                    .map(|(program, stats)| ProgramUsageRecord { program, stats })
+                    .collect();
+                records.sort_unstable_by(|a, b| {
+                    b.stats.instruction_count.cmp(&a.stats.instruction_count)
+                });
+                per_block_records.push(BlockProgramUsage {
+                    epoch,
+                    slot,
+                    records,
+                });
+            }
 
             let now = Instant::now();
             let time_due = now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS);
@@ -488,23 +547,6 @@ pub async fn dump_program_stats(
     aggregated_records
         .sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
 
-    let limit = limit.unwrap_or(aggregated_records.len());
-    let export_records = aggregated_records.iter().take(limit).collect::<Vec<_>>();
-
-    let mut output_rows = Vec::with_capacity(export_records.len());
-    for record in export_records {
-        let program_str = bs58::encode(record.program).into_string();
-        output_rows.push(serde_json::json!({
-            "program": program_str,
-            "tx_count": record.stats.tx_count,
-            "instruction_count": record.stats.instruction_count,
-            "inner_instruction_count": record.stats.inner_instruction_count,
-        }));
-    }
-
-    let json_output = serde_json::to_string_pretty(&output_rows)?;
-    fs::write(output_path, json_output).await?;
-
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64().max(1e-6);
     let blk_s = blocks_scanned as f64 / secs;
@@ -539,6 +581,109 @@ pub async fn dump_program_stats(
         pb.finish_and_clear();
         eprintln!("{final_line}");
     }
+
+    Ok(ProgramStatsCollection {
+        aggregated: aggregated_records,
+        per_block: per_block_records,
+    })
+}
+
+pub async fn dump_program_stats(
+    start_epoch: u64,
+    start_slot: u64,
+    cache_dir: &str,
+    output_path: &Path,
+    limit: Option<usize>,
+) -> Result<()> {
+    let collection =
+        collect_program_stats(start_epoch, start_slot, cache_dir, output_path, false).await?;
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let limit = limit.unwrap_or(collection.aggregated.len());
+    let export_records = collection.aggregated.iter().take(limit).collect::<Vec<_>>();
+
+    let mut output_rows = Vec::with_capacity(export_records.len());
+    for record in export_records {
+        let program_str = bs58::encode(record.program).into_string();
+        output_rows.push(serde_json::json!({
+            "program": program_str,
+            "tx_count": record.stats.tx_count,
+            "instruction_count": record.stats.instruction_count,
+            "inner_instruction_count": record.stats.inner_instruction_count,
+        }));
+    }
+
+    let json_output = serde_json::to_string_pretty(&output_rows)?;
+    fs::write(output_path, json_output).await?;
+
+    Ok(())
+}
+
+pub async fn dump_program_stats_csv(
+    start_epoch: u64,
+    start_slot: u64,
+    cache_dir: &str,
+    output_path: &Path,
+    limit: Option<usize>,
+) -> Result<()> {
+    let mut collection =
+        collect_program_stats(start_epoch, start_slot, cache_dir, output_path, true).await?;
+
+    let Some(blocks) = collection.per_block.take() else {
+        return Err(anyhow!("per-block program statistics were not collected"));
+    };
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let limit = limit.unwrap_or(collection.aggregated.len());
+    let selected_programs = collection
+        .aggregated
+        .iter()
+        .take(limit)
+        .map(|record| (record.program, bs58::encode(record.program).into_string()))
+        .collect::<Vec<_>>();
+
+    let mut csv_bytes = Vec::with_capacity(blocks.len() * (selected_programs.len() + 2) * 8);
+    let mut line_buf = String::new();
+
+    line_buf.clear();
+    line_buf.push_str("slot,epoch");
+    for (_, program_str) in selected_programs.iter() {
+        line_buf.push(',');
+        line_buf.push_str(program_str);
+    }
+    line_buf.push('\n');
+    csv_bytes.write_all(line_buf.as_bytes())?;
+
+    for block in blocks.iter() {
+        line_buf.clear();
+        write!(&mut line_buf, "{},{}", block.slot, block.epoch).unwrap();
+
+        let mut totals = AHashMap::with_capacity(block.records.len());
+        for record in block.records.iter() {
+            let total = record.stats.instruction_count + record.stats.inner_instruction_count;
+            totals.insert(record.program, total);
+        }
+
+        for (program, _) in selected_programs.iter() {
+            let count = totals.get(program).copied().unwrap_or(0);
+            write!(&mut line_buf, ",{}", count).unwrap();
+        }
+
+        line_buf.push('\n');
+        csv_bytes.write_all(line_buf.as_bytes())?;
+    }
+
+    fs::write(output_path, csv_bytes).await?;
 
     Ok(())
 }
