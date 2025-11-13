@@ -276,7 +276,7 @@ enum StatsCommand {
         start_slot: u64,
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
         cache_dir: String,
-        #[arg(short, long, default_value = "program_usage_stats.json")]
+        #[arg(short, long, default_value = "program_usage_stats.bin")]
         output: PathBuf,
         #[arg(
             long,
@@ -291,25 +291,26 @@ enum StatsCommand {
         top_level_only: bool,
     },
     ProgramCsv {
-        #[arg(value_name = "START_EPOCH", help = "Starting epoch to scan, inclusive")]
-        start_epoch: u64,
-        #[arg(long, value_name = "SLOT", default_value_t = 0)]
-        start_slot: u64,
-        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
-        cache_dir: String,
-        #[arg(short, long, default_value = "program_usage_stats.csv")]
+        #[arg(
+            short,
+            long,
+            value_name = "INPUT",
+            default_value = "program_usage_stats.bin"
+        )]
+        input: PathBuf,
+        #[arg(
+            short,
+            long,
+            value_name = "OUTPUT",
+            default_value = "program_usage_stats.csv"
+        )]
         output: PathBuf,
         #[arg(
             long,
             value_name = "LIMIT",
-            help = "Limit number of programs written to output"
+            help = "Limit number of programs written to the CSV"
         )]
         limit: Option<usize>,
-        #[arg(
-            long,
-            help = "Only count top-level program instructions (skip metadata and inner instructions)"
-        )]
-        top_level_only: bool,
     },
 }
 
@@ -564,22 +565,11 @@ async fn main() -> Result<()> {
                 .await?;
             }
             StatsCommand::ProgramCsv {
-                start_epoch,
-                start_slot,
-                cache_dir,
+                input,
                 output,
                 limit,
-                top_level_only,
             } => {
-                program_stats::dump_program_stats_csv(
-                    start_epoch,
-                    start_slot,
-                    &cache_dir,
-                    &output,
-                    limit,
-                    top_level_only,
-                )
-                .await?;
+                program_stats::dump_program_stats_csv(&input, &output, limit).await?;
             }
         },
     }
