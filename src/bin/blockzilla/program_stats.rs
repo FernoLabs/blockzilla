@@ -8,7 +8,6 @@ use blockzilla::{
     transaction_parser::VersionedTransaction,
 };
 use cid::Cid;
-use futures::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -28,15 +27,20 @@ use crate::LOG_INTERVAL_SECS;
 const BLOCK_LOG_CHUNK: u64 = 500;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct BlockProgramUsage {
     pub epoch: u64,
     pub slot: u64,
+    pub block_time: Option<i64>,
     pub records: Vec<ProgramUsageRecord>,
 }
 
 struct ProgramStatsCollection {
     pub aggregated: Vec<ProgramUsageRecord>,
+    #[allow(dead_code)]
     pub per_block: Option<Vec<BlockProgramUsage>>,
+    pub per_epoch: Vec<ProgramUsageEpochPart>,
+    pub processed_epochs: Vec<u64>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -51,6 +55,7 @@ struct EpochMetrics {
 struct EpochProcessSummary {
     pub epoch: u64,
     pub last_slot: u64,
+    pub last_blocktime: Option<i64>,
     pub records: Vec<ProgramUsageRecord>,
     pub per_block: Option<Vec<BlockProgramUsage>>,
     pub metrics: EpochMetrics,
@@ -78,10 +83,90 @@ struct ProgramUsageRecord {
 }
 
 #[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-struct ProgramUsageEpochDump {
+struct ProgramUsageEpochPartV1 {
     pub epoch: u64,
     pub last_slot: u64,
     pub records: Vec<ProgramUsageRecord>,
+}
+
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
+struct ProgramUsageEpochPart {
+    pub epoch: u64,
+    pub last_slot: u64,
+    pub last_blocktime: Option<i64>,
+    pub records: Vec<ProgramUsageRecord>,
+}
+
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
+struct ProgramStatsProgress {
+    pub processed_epochs: Vec<u64>,
+}
+
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
+struct ProgramUsageExport {
+    pub version: u32,
+    pub start_epoch: u64,
+    pub start_slot: u64,
+    pub top_level_only: bool,
+    pub processed_epochs: Vec<u64>,
+    pub aggregated: Vec<ProgramUsageRecord>,
+    pub epochs: Vec<ProgramUsageEpochPart>,
+}
+
+const PROGRAM_USAGE_EXPORT_VERSION: u32 = 1;
+const PROGRESS_FILE_NAME: &str = "progress.bin";
+
+fn decode_epoch_part(bytes: &[u8]) -> Result<ProgramUsageEpochPart> {
+    if let Ok(part) = wincode::deserialize::<ProgramUsageEpochPart>(bytes) {
+        return Ok(part);
+    }
+
+    let legacy = wincode::deserialize::<ProgramUsageEpochPartV1>(bytes)?;
+    Ok(ProgramUsageEpochPart {
+        epoch: legacy.epoch,
+        last_slot: legacy.last_slot,
+        last_blocktime: None,
+        records: legacy.records,
+    })
+}
+
+async fn load_progress(parts_dir: &Path) -> Result<AHashSet<u64>> {
+    let path = parts_dir.join(PROGRESS_FILE_NAME);
+    let mut processed = AHashSet::with_capacity(256);
+
+    match fs::read(&path).await {
+        Ok(bytes) => match wincode::deserialize::<ProgramStatsProgress>(&bytes) {
+            Ok(progress) => {
+                for epoch in progress.processed_epochs {
+                    processed.insert(epoch);
+                }
+            }
+            Err(err) => {
+                tracing::warn!("failed to decode progress file {}: {}", path.display(), err);
+            }
+        },
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    Ok(processed)
+}
+
+async fn persist_progress(parts_dir: &Path, processed: &AHashSet<u64>) -> Result<()> {
+    fs::create_dir_all(parts_dir).await?;
+
+    let mut epochs: Vec<u64> = processed.iter().copied().collect();
+    epochs.sort_unstable();
+    let progress = ProgramStatsProgress {
+        processed_epochs: epochs,
+    };
+
+    let encoded = wincode::serialize(&progress)?;
+    let path = parts_dir.join(PROGRESS_FILE_NAME);
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, &encoded).await?;
+    fs::rename(&tmp_path, &path).await?;
+    Ok(())
 }
 
 async fn process_epoch(
@@ -102,6 +187,7 @@ async fn process_epoch(
 
     let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
     let mut epoch_last_slot = 0u64;
+    let mut epoch_last_blocktime = None;
 
     let mut per_block_records = if collect_per_block {
         Some(Vec::new())
@@ -166,6 +252,10 @@ async fn process_epoch(
                 continue;
             }
         };
+
+        if let Some(blocktime) = block_node.meta.blocktime {
+            epoch_last_blocktime = Some(blocktime);
+        }
 
         for entry_cid_res in block_node.entries.iter() {
             let entry_cid = match entry_cid_res {
@@ -335,6 +425,7 @@ async fn process_epoch(
             per_block_records.push(BlockProgramUsage {
                 epoch,
                 slot,
+                block_time: block_node.meta.blocktime,
                 records,
             });
         }
@@ -383,9 +474,10 @@ async fn process_epoch(
         .collect();
     records.sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
 
-    let epoch_dump = ProgramUsageEpochDump {
+    let epoch_dump = ProgramUsageEpochPart {
         epoch,
         last_slot: epoch_last_slot,
+        last_blocktime: epoch_last_blocktime,
         records: records.clone(),
     };
     let encoded_epoch = wincode::serialize(&epoch_dump)?;
@@ -399,6 +491,7 @@ async fn process_epoch(
     Ok(EpochProcessSummary {
         epoch,
         last_slot: epoch_last_slot,
+        last_blocktime: epoch_last_blocktime,
         records,
         per_block: per_block_records,
         metrics,
@@ -434,7 +527,8 @@ async fn collect_program_stats(
     };
 
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
-    let mut processed_epochs: AHashSet<u64> = AHashSet::with_capacity(256);
+    let mut processed_epochs = load_progress(&parts_dir).await?;
+    let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
 
     let mut per_block_records = if collect_per_block {
         Some(Vec::new())
@@ -488,7 +582,7 @@ async fn collect_program_stats(
                 }
             };
 
-            let part: ProgramUsageEpochDump = match wincode::deserialize(&data) {
+            let part = match decode_epoch_part(&data) {
                 Ok(part) => part,
                 Err(e) => {
                     tracing::warn!(
@@ -509,11 +603,14 @@ async fn collect_program_stats(
 
             processed_epochs.insert(part.epoch);
             epoch_last_slots.insert(part.epoch, part.last_slot);
+            epoch_summaries.insert(part.epoch, part.clone());
             if part.epoch == start_epoch {
                 last_processed_slot = part.last_slot;
             }
         }
     }
+
+    persist_progress(&parts_dir, &processed_epochs).await?;
 
     let draw_target = if std::io::stdout().is_terminal() {
         ProgressDrawTarget::stderr_with_hz(8)
@@ -570,38 +667,33 @@ async fn collect_program_stats(
     }
 
     if !epochs_to_process.is_empty() {
-        let parallelism = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1)
-            .max(1);
-        let concurrency = parallelism.min(epochs_to_process.len().max(1));
+        for (epoch, min_slot) in epochs_to_process {
+            let summary = process_epoch(
+                epoch,
+                cache_dir,
+                &parts_dir,
+                collect_per_block,
+                top_level_only,
+                min_slot,
+            )
+            .await?;
 
-        let mut stream = stream::iter(epochs_to_process.into_iter().map(|(epoch, min_slot)| {
-            let parts_dir = parts_dir.clone();
-            async move {
-                process_epoch(
-                    epoch,
-                    cache_dir,
-                    &parts_dir,
-                    collect_per_block,
-                    top_level_only,
-                    min_slot,
-                )
-                .await
-            }
-        }))
-        .buffer_unordered(concurrency);
+            let EpochProcessSummary {
+                epoch: summary_epoch,
+                last_slot: summary_last_slot,
+                last_blocktime: summary_last_blocktime,
+                records: summary_records,
+                per_block: summary_per_block,
+                metrics: summary_metrics,
+            } = summary;
 
-        while let Some(result) = stream.next().await {
-            let summary = result?;
+            bytes_count += summary_metrics.bytes_count;
+            blocks_scanned += summary_metrics.blocks_scanned;
+            txs_seen += summary_metrics.txs_seen;
+            instructions_seen += summary_metrics.instructions_seen;
+            inner_instructions_seen += summary_metrics.inner_instructions_seen;
 
-            bytes_count += summary.metrics.bytes_count;
-            blocks_scanned += summary.metrics.blocks_scanned;
-            txs_seen += summary.metrics.txs_seen;
-            instructions_seen += summary.metrics.instructions_seen;
-            inner_instructions_seen += summary.metrics.inner_instructions_seen;
-
-            for record in summary.records.iter() {
+            for record in summary_records.iter() {
                 aggregated
                     .entry(record.program)
                     .or_insert_with(ProgramUsageStats::default)
@@ -609,15 +701,25 @@ async fn collect_program_stats(
             }
 
             if let (Some(blocks), Some(per_block_records)) =
-                (summary.per_block, per_block_records.as_mut())
+                (summary_per_block, per_block_records.as_mut())
             {
                 per_block_records.extend(blocks);
             }
 
-            processed_epochs.insert(summary.epoch);
-            epoch_last_slots.insert(summary.epoch, summary.last_slot);
+            processed_epochs.insert(summary_epoch);
+            epoch_last_slots.insert(summary_epoch, summary_last_slot);
+            epoch_summaries.insert(
+                summary_epoch,
+                ProgramUsageEpochPart {
+                    epoch: summary_epoch,
+                    last_slot: summary_last_slot,
+                    last_blocktime: summary_last_blocktime,
+                    records: summary_records,
+                },
+            );
+            persist_progress(&parts_dir, &processed_epochs).await?;
             last_epoch_processed =
-                Some(last_epoch_processed.map_or(summary.epoch, |cur| cur.max(summary.epoch)));
+                Some(last_epoch_processed.map_or(summary_epoch, |cur| cur.max(summary_epoch)));
 
             msg_buf.clear();
             let elapsed = start.elapsed();
@@ -633,8 +735,8 @@ async fn collect_program_stats(
             write!(
                 &mut msg_buf,
                 "epoch {:04} done | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
-                summary.epoch,
-                summary.last_slot,
+                summary_epoch,
+                summary_last_slot,
                 blocks_scanned,
                 blk_s,
                 mb_s,
@@ -718,9 +820,17 @@ async fn collect_program_stats(
         eprintln!("{final_line}");
     }
 
+    let mut per_epoch: Vec<ProgramUsageEpochPart> = epoch_summaries.into_values().collect();
+    per_epoch.sort_unstable_by_key(|part| part.epoch);
+
+    let mut processed_epochs_list: Vec<u64> = processed_epochs.into_iter().collect();
+    processed_epochs_list.sort_unstable();
+
     Ok(ProgramStatsCollection {
         aggregated: aggregated_records,
         per_block: per_block_records,
+        per_epoch,
+        processed_epochs: processed_epochs_list,
     })
 }
 
@@ -748,47 +858,66 @@ pub async fn dump_program_stats(
         }
     }
 
-    let limit = limit.unwrap_or(collection.aggregated.len());
-    let export_records = collection.aggregated.iter().take(limit).collect::<Vec<_>>();
+    let mut aggregated = collection.aggregated;
+    let limit = limit.unwrap_or(aggregated.len());
+    aggregated.truncate(limit);
 
-    let mut output_rows = Vec::with_capacity(export_records.len());
-    for record in export_records {
-        let program_str = bs58::encode(record.program).into_string();
-        output_rows.push(serde_json::json!({
-            "program": program_str,
-            "tx_count": record.stats.tx_count,
-            "instruction_count": record.stats.instruction_count,
-            "inner_instruction_count": record.stats.inner_instruction_count,
-        }));
+    let program_order = aggregated
+        .iter()
+        .enumerate()
+        .map(|(idx, record)| (record.program, idx))
+        .collect::<AHashMap<_, _>>();
+
+    let mut per_epoch = collection.per_epoch;
+    for epoch in per_epoch.iter_mut() {
+        epoch
+            .records
+            .retain(|record| program_order.contains_key(&record.program));
+        epoch.records.sort_unstable_by_key(|record| {
+            program_order
+                .get(&record.program)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
     }
 
-    let json_output = serde_json::to_string_pretty(&output_rows)?;
-    fs::write(output_path, json_output).await?;
+    let export = ProgramUsageExport {
+        version: PROGRAM_USAGE_EXPORT_VERSION,
+        start_epoch,
+        start_slot,
+        top_level_only,
+        processed_epochs: collection.processed_epochs,
+        aggregated,
+        epochs: per_epoch,
+    };
+
+    let encoded = wincode::serialize(&export)?;
+    let tmp_path = output_path.with_extension("tmp");
+    fs::write(&tmp_path, &encoded).await?;
+    fs::rename(&tmp_path, output_path).await?;
 
     Ok(())
 }
 
 pub async fn dump_program_stats_csv(
-    start_epoch: u64,
-    start_slot: u64,
-    cache_dir: &str,
+    input_path: &Path,
     output_path: &Path,
     limit: Option<usize>,
-    top_level_only: bool,
 ) -> Result<()> {
-    let mut collection = collect_program_stats(
-        start_epoch,
-        start_slot,
-        cache_dir,
-        output_path,
-        true,
-        top_level_only,
-    )
-    .await?;
+    let data = fs::read(input_path).await.with_context(|| {
+        format!(
+            "failed to read program usage export {}",
+            input_path.display()
+        )
+    })?;
 
-    let Some(blocks) = collection.per_block.take() else {
-        return Err(anyhow!("per-block program statistics were not collected"));
-    };
+    let export: ProgramUsageExport = wincode::deserialize(&data)?;
+    if export.version != PROGRAM_USAGE_EXPORT_VERSION {
+        return Err(anyhow!(
+            "unsupported program usage export version {}",
+            export.version
+        ));
+    }
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -796,37 +925,50 @@ pub async fn dump_program_stats_csv(
         }
     }
 
-    let limit = limit.unwrap_or(collection.aggregated.len());
-    let selected_programs = collection
-        .aggregated
+    let mut aggregated = export.aggregated;
+    let limit = limit.unwrap_or(aggregated.len());
+    aggregated.truncate(limit);
+
+    let program_keys = aggregated
         .iter()
-        .take(limit)
-        .map(|record| (record.program, bs58::encode(record.program).into_string()))
+        .map(|record| record.program)
+        .collect::<Vec<_>>();
+    let program_labels = aggregated
+        .iter()
+        .map(|record| bs58::encode(record.program).into_string())
         .collect::<Vec<_>>();
 
-    let mut csv_bytes = Vec::with_capacity(blocks.len() * (selected_programs.len() + 2) * 8);
+    let mut csv_bytes = Vec::with_capacity(export.epochs.len() * (program_keys.len() + 3) * 8);
     let mut line_buf = String::new();
 
     line_buf.clear();
-    line_buf.push_str("slot,epoch");
-    for (_, program_str) in selected_programs.iter() {
+    line_buf.push_str("epoch,last_slot,block_time");
+    for program_str in program_labels.iter() {
         line_buf.push(',');
         line_buf.push_str(program_str);
     }
     line_buf.push('\n');
     csv_bytes.write_all(line_buf.as_bytes())?;
 
-    for block in blocks.iter() {
+    for epoch in export.epochs.iter() {
         line_buf.clear();
-        write!(&mut line_buf, "{},{}", block.slot, block.epoch).unwrap();
+        let block_time = epoch
+            .last_blocktime
+            .map(|ts| ts.to_string())
+            .unwrap_or_default();
+        write!(
+            &mut line_buf,
+            "{},{},{}",
+            epoch.epoch, epoch.last_slot, block_time
+        )
+        .unwrap();
 
-        let mut totals = AHashMap::with_capacity(block.records.len());
-        for record in block.records.iter() {
-            let total = record.stats.instruction_count + record.stats.inner_instruction_count;
-            totals.insert(record.program, total);
+        let mut totals = AHashMap::with_capacity(epoch.records.len());
+        for record in epoch.records.iter() {
+            totals.insert(record.program, record.stats.tx_count);
         }
 
-        for (program, _) in selected_programs.iter() {
+        for program in program_keys.iter() {
             let count = totals.get(program).copied().unwrap_or(0);
             write!(&mut line_buf, ",{}", count).unwrap();
         }
