@@ -6,7 +6,7 @@ mod optimizer;
 mod program_stats;
 mod token_dump;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use blockzilla::{carblock_to_compact::MetadataMode, open_epoch::FetchMode};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -285,6 +285,22 @@ enum StatsCommand {
         )]
         limit: Option<usize>,
     },
+    ProgramCsv {
+        #[arg(value_name = "START_EPOCH", help = "Starting epoch to scan, inclusive")]
+        start_epoch: u64,
+        #[arg(long, value_name = "SLOT", default_value_t = 0)]
+        start_slot: u64,
+        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
+        cache_dir: String,
+        #[arg(short, long, default_value = "program_usage_stats.csv")]
+        output: PathBuf,
+        #[arg(
+            long,
+            value_name = "LIMIT",
+            help = "Limit number of programs written to output"
+        )]
+        limit: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -527,6 +543,22 @@ async fn main() -> Result<()> {
                 limit,
             } => {
                 program_stats::dump_program_stats(
+                    start_epoch,
+                    start_slot,
+                    &cache_dir,
+                    &output,
+                    limit,
+                )
+                .await?;
+            }
+            StatsCommand::ProgramCsv {
+                start_epoch,
+                start_slot,
+                cache_dir,
+                output,
+                limit,
+            } => {
+                program_stats::dump_program_stats_csv(
                     start_epoch,
                     start_slot,
                     &cache_dir,
