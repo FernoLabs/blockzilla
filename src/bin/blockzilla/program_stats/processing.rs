@@ -68,9 +68,9 @@ async fn process_epoch(
     let mut buf_meta_df = Vec::with_capacity(64 * 1024);
     // scratch buffer for zstd/prost decoding
     let mut meta_scratch = Vec::with_capacity(64 * 1024);
-    let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
     // raw 32-byte keys (static + loaded)
     let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
+    let mut msg_buf = String::with_capacity(256);
 
     // Error counters (log once at end instead of spamming)
     let mut decode_errors = 0u64;
@@ -89,18 +89,20 @@ async fn process_epoch(
                 0
             };
 
-            let msg = format!(
-                "epoch {:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | {} programs",
-                epoch,
-                metrics.blocks_scanned,
-                blk_s,
-                mb_s,
-                tps,
-                epoch_stats.len()
-            );
-
             if !pb.is_hidden() {
-                pb.set_message(msg);
+                msg_buf.clear();
+                write!(
+                    &mut msg_buf,
+                    "E{:04} | {} blk | {:.0} blk/s | {:.1} MB/s | {} TPS | {} programs",
+                    epoch,
+                    metrics.blocks_scanned,
+                    blk_s,
+                    mb_s,
+                    tps,
+                    epoch_stats.len()
+                )
+                .unwrap();
+                pb.set_message(msg_buf.clone());
                 pb.tick();
             }
         }
@@ -184,14 +186,14 @@ async fn process_epoch(
 
                 metrics.txs_seen += 1;
 
-                if let Err(_) =
-                    VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
-                {
-                    decode_errors += 1;
-                    continue;
-                }
+                let tx = match VersionedTransaction::deserialize(tx_bytes_slice) {
+                    Ok(tx) => tx,
+                    Err(_) => {
+                        decode_errors += 1;
+                        continue;
+                    }
+                };
 
-                let tx = unsafe { reusable_tx.assume_init_read() };
                 let message = &tx.message;
 
                 // tx_count: +1 per static account key
@@ -210,11 +212,10 @@ async fn process_epoch(
                 }
 
                 // Build resolved_keys: static only by default
+                let static_keys = message.static_account_keys();
                 resolved_keys.clear();
-                resolved_keys.extend_from_slice(message.static_account_keys());
-                if !top_level_only {
-                    resolved_keys.reserve(16);
-                }
+                resolved_keys.reserve(static_keys.len() + if top_level_only { 0 } else { 16 });
+                resolved_keys.extend_from_slice(static_keys);
 
                 if top_level_only {
                     // Top level only, no metadata, no inner instructions
@@ -320,17 +321,24 @@ async fn process_epoch(
         epoch_last_slot = slot;
         metrics.blocks_scanned += 1;
 
-        if buf_tx.capacity() > 256 * 1024 {
-            buf_tx.shrink_to(128 * 1024);
-        }
-        if buf_meta_df.capacity() > 128 * 1024 {
-            buf_meta_df.shrink_to(64 * 1024);
-        }
-        if meta_scratch.capacity() > 128 * 1024 {
-            meta_scratch.shrink_to(64 * 1024);
-        }
-        if resolved_keys.capacity() > 1024 {
-            resolved_keys.shrink_to(512);
+        if metrics.blocks_scanned % 1000 == 0 {
+            if buf_tx.capacity() > 256 * 1024 {
+                buf_tx.shrink_to(128 * 1024);
+            }
+            if buf_meta_df.capacity() > 128 * 1024 {
+                buf_meta_df.shrink_to(64 * 1024);
+            }
+            if meta_scratch.capacity() > 128 * 1024 {
+                meta_scratch.shrink_to(64 * 1024);
+            }
+            if resolved_keys.capacity() > 1024 {
+                resolved_keys.shrink_to(512);
+            }
+            if let Some(map) = per_block_map.as_mut() {
+                if map.capacity() > 8192 {
+                    map.shrink_to(4096);
+                }
+            }
         }
 
         if let (Some(map), Some(per_block_stats)) =
@@ -506,11 +514,11 @@ async fn process_epoch_par(
             let mut buf_tx = Vec::with_capacity(128 * 1024);
             let mut buf_meta_df = Vec::with_capacity(64 * 1024);
             let mut meta_scratch = Vec::with_capacity(64 * 1024);
-            let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
             let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
             let mut block_stats: AHashMap<[u8; 32], ProgramUsageStats> =
                 AHashMap::with_capacity(4096);
-            let mut processed_blocks = 0usize;
+            let mut stats_vec = Vec::with_capacity(4096);
+            let mut block_count = 0u64;
 
             loop {
                 let block = {
@@ -635,14 +643,13 @@ async fn process_epoch_par(
 
                         block_metrics.txs_seen += 1;
 
-                        if let Err(_) =
-                            VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
-                        {
-                            block_decode_errors += 1;
-                            continue;
-                        }
-
-                        let tx = unsafe { reusable_tx.assume_init_read() };
+                        let tx = match VersionedTransaction::deserialize(tx_bytes_slice) {
+                            Ok(tx) => tx,
+                            Err(_) => {
+                                block_decode_errors += 1;
+                                continue;
+                            }
+                        };
                         let message = &tx.message;
 
                         for key in message.static_account_keys() {
@@ -653,11 +660,12 @@ async fn process_epoch_par(
                             entry.tx_count += 1;
                         }
 
+                        let static_keys = message.static_account_keys();
                         resolved_keys.clear();
-                        resolved_keys.extend_from_slice(message.static_account_keys());
-                        if !worker_top_level_only {
-                            resolved_keys.reserve(16);
-                        }
+                        resolved_keys.reserve(
+                            static_keys.len() + if worker_top_level_only { 0 } else { 16 },
+                        );
+                        resolved_keys.extend_from_slice(static_keys);
 
                         if worker_top_level_only {
                             for ix in message.instructions_iter() {
@@ -740,37 +748,48 @@ async fn process_epoch_par(
                 }
 
                 block_metrics.blocks_scanned += 1;
-                let stats = block_stats
-                    .iter()
-                    .map(|(program, stats)| (*program, *stats))
-                    .collect::<Vec<_>>();
+                stats_vec.clear();
+                stats_vec.extend(
+                    block_stats
+                        .iter()
+                        .map(|(program, stats)| (*program, *stats)),
+                );
 
                 result_tx
                     .send(BlockProcessResult {
                         slot: block_slot,
                         block_time,
-                        stats,
+                        stats: std::mem::take(&mut stats_vec),
                         metrics: block_metrics,
                         decode_errors: block_decode_errors,
                     })
                     .await
                     .map_err(|_| anyhow!("result channel closed"))?;
 
-                processed_blocks += 1;
-                if processed_blocks % 256 == 0 && block_stats.capacity() > 8192 {
-                    block_stats.shrink_to(4096);
+                if stats_vec.capacity() < 4096 {
+                    stats_vec.reserve(4096 - stats_vec.capacity());
                 }
-                if buf_tx.capacity() > 256 * 1024 {
-                    buf_tx.shrink_to(128 * 1024);
-                }
-                if buf_meta_df.capacity() > 128 * 1024 {
-                    buf_meta_df.shrink_to(64 * 1024);
-                }
-                if meta_scratch.capacity() > 128 * 1024 {
-                    meta_scratch.shrink_to(64 * 1024);
-                }
-                if resolved_keys.capacity() > 1024 {
-                    resolved_keys.shrink_to(512);
+
+                block_count += 1;
+                if block_count % 500 == 0 {
+                    if block_stats.capacity() > 8192 {
+                        block_stats.shrink_to(4096);
+                    }
+                    if buf_tx.capacity() > 256 * 1024 {
+                        buf_tx.shrink_to(128 * 1024);
+                    }
+                    if buf_meta_df.capacity() > 128 * 1024 {
+                        buf_meta_df.shrink_to(64 * 1024);
+                    }
+                    if meta_scratch.capacity() > 128 * 1024 {
+                        meta_scratch.shrink_to(64 * 1024);
+                    }
+                    if resolved_keys.capacity() > 1024 {
+                        resolved_keys.shrink_to(512);
+                    }
+                    if stats_vec.capacity() > 8192 {
+                        stats_vec.shrink_to(4096);
+                    }
                 }
             }
 
@@ -1012,8 +1031,11 @@ async fn collect_program_stats(
         None
     };
 
-    if !epochs_to_process.is_empty() {
-        for (epoch, min_slot) in epochs_to_process {
+    let total_epochs = epochs_to_process.len();
+
+    if total_epochs > 0 {
+        let mut persist_counter = 0usize;
+        for (idx, (epoch, min_slot)) in epochs_to_process.into_iter().enumerate() {
             let summary = process_epoch(
                 epoch,
                 cache_dir,
@@ -1071,7 +1093,10 @@ async fn collect_program_stats(
                     records: summary_records,
                 },
             );
-            reading::persist_progress(&parts_dir, &processed_epochs).await?;
+            persist_counter += 1;
+            if persist_counter % 10 == 0 || idx == total_epochs - 1 {
+                reading::persist_progress(&parts_dir, &processed_epochs).await?;
+            }
             last_epoch_processed =
                 Some(last_epoch_processed.map_or(summary_epoch, |cur| cur.max(summary_epoch)));
 
@@ -1080,22 +1105,15 @@ async fn collect_program_stats(
             let secs = elapsed.as_secs_f64().max(1e-6);
             let blk_s = blocks_scanned as f64 / secs;
             let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-            let tps = if elapsed.as_secs() > 0 {
-                txs_seen / elapsed.as_secs()
-            } else {
-                0
-            };
-
             write!(
                 &mut msg_buf,
-                "epoch {:04} done | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
+                "E{:04}✓ ({}/{}) | {} blk | {:.0} blk/s | {:.1} MB/s",
                 summary_epoch,
+                processed_epochs.len(),
+                last_epoch - start_epoch + 1,
                 summary_metrics.blocks_scanned,
                 blk_s,
-                mb_s,
-                tps,
-                summary_metrics.instructions_seen,
-                summary_metrics.inner_instructions_seen
+                mb_s
             )
             .unwrap();
 
@@ -1343,7 +1361,6 @@ async fn collect_program_stats_par(
 
     if !epochs_to_process.is_empty() {
         let total_epochs = epochs_to_process.len();
-        let mut completed_in_run = 0usize;
         let mut epochs_since_progress_persist = 0usize;
         let max_inflight = std::cmp::min(total_epochs, MAX_PAR_EPOCH_CONCURRENCY);
         let mut pending = epochs_to_process.into_iter();
@@ -1407,7 +1424,6 @@ async fn collect_program_stats_par(
                     records: summary_records,
                 },
             );
-            completed_in_run += 1;
             epochs_since_progress_persist += 1;
             last_epoch_processed =
                 Some(last_epoch_processed.map_or(summary_epoch, |cur| cur.max(summary_epoch)));
@@ -1420,12 +1436,18 @@ async fn collect_program_stats_par(
 
             let active = join_set.len();
             let queued = pending.len();
-            let remaining = active + queued;
+            let overall_total = (last_epoch - start_epoch + 1) as usize;
 
             write!(
                 &mut msg_buf,
-                "E{:04}\u{2713} ({}/{}) | {} active | {} remaining | {:.1} blk/s | {:.1} MB/s",
-                summary_epoch, completed_in_run, total_epochs, active, remaining, blk_s, mb_s
+                "E{:04}✓ ({}/{}) | {} active | {} queued | {:.0} blk/s | {:.1} MB/s",
+                summary_epoch,
+                processed_epochs.len(),
+                overall_total,
+                active,
+                queued,
+                blk_s,
+                mb_s
             )
             .unwrap();
 
