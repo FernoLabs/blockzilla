@@ -112,6 +112,31 @@ struct ProgramUsageExport {
     pub epochs: Vec<ProgramUsageEpochPart>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramUsagePartsPreference {
+    Auto,
+    TopLevelOnly,
+    IncludeInner,
+}
+
+impl ProgramUsagePartsPreference {
+    fn ensure_matches(self, top_level_only: bool, source: &Path) -> Result<()> {
+        match self {
+            ProgramUsagePartsPreference::Auto => Ok(()),
+            ProgramUsagePartsPreference::TopLevelOnly if top_level_only => Ok(()),
+            ProgramUsagePartsPreference::IncludeInner if !top_level_only => Ok(()),
+            ProgramUsagePartsPreference::TopLevelOnly => Err(anyhow!(
+                "top-level stats were requested but {} contains full stats",
+                source.display()
+            )),
+            ProgramUsagePartsPreference::IncludeInner => Err(anyhow!(
+                "full stats were requested but {} only contains top-level stats",
+                source.display()
+            )),
+        }
+    }
+}
+
 const PROGRAM_USAGE_EXPORT_VERSION: u32 = 1;
 const PROGRESS_FILE_NAME: &str = "progress.bin";
 
@@ -168,7 +193,10 @@ async fn persist_progress(parts_dir: &Path, processed: &AHashSet<u64>) -> Result
     Ok(())
 }
 
-async fn load_program_usage_export(input_path: &Path) -> Result<ProgramUsageExport> {
+async fn load_program_usage_export(
+    input_path: &Path,
+    parts_preference: ProgramUsagePartsPreference,
+) -> Result<ProgramUsageExport> {
     match fs::read(input_path).await {
         Ok(data) => {
             let export: ProgramUsageExport = wincode::deserialize(&data)?;
@@ -178,16 +206,20 @@ async fn load_program_usage_export(input_path: &Path) -> Result<ProgramUsageExpo
                     export.version
                 ));
             }
+            parts_preference.ensure_matches(export.top_level_only, input_path)?;
             Ok(export)
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            load_program_usage_export_from_parts(input_path).await
+            load_program_usage_export_from_parts(input_path, parts_preference).await
         }
         Err(e) => Err(e.into()),
     }
 }
 
-async fn load_program_usage_export_from_parts(input_path: &Path) -> Result<ProgramUsageExport> {
+async fn load_program_usage_export_from_parts(
+    input_path: &Path,
+    parts_preference: ProgramUsagePartsPreference,
+) -> Result<ProgramUsageExport> {
     async fn collect_part_entries(parts_dir: &Path) -> Result<Option<Vec<(u64, PathBuf)>>> {
         let mut rd = match fs::read_dir(parts_dir).await {
             Ok(rd) => rd,
@@ -232,19 +264,56 @@ async fn load_program_usage_export_from_parts(input_path: &Path) -> Result<Progr
     let parts_path = input_path.with_extension("parts");
     let parts_top_level_path = input_path.with_extension("parts.top_level");
 
-    let (parts_dir, top_level_only, part_entries) = match collect_part_entries(&parts_path).await? {
-        Some(entries) => (parts_path, false, entries),
-        None => match collect_part_entries(&parts_top_level_path).await? {
-            Some(entries) => (parts_top_level_path, true, entries),
+    let (parts_dir, top_level_only, part_entries) = match parts_preference {
+        ProgramUsagePartsPreference::Auto => match collect_part_entries(&parts_path).await? {
+            Some(entries) => (parts_path, false, entries),
+            None => match collect_part_entries(&parts_top_level_path).await? {
+                Some(entries) => (parts_top_level_path, true, entries),
+                None => {
+                    return Err(anyhow!(
+                        "no program usage export found at {} or {}",
+                        parts_path.display(),
+                        parts_top_level_path.display()
+                    ));
+                }
+            },
+        },
+        ProgramUsagePartsPreference::IncludeInner => match collect_part_entries(&parts_path).await?
+        {
+            Some(entries) => (parts_path, false, entries),
             None => {
+                if collect_part_entries(&parts_top_level_path).await?.is_some() {
+                    return Err(anyhow!(
+                        "full stats were requested but only top-level parts are available in {}",
+                        parts_top_level_path.display()
+                    ));
+                }
                 return Err(anyhow!(
-                    "no program usage export found at {} or {}",
-                    parts_path.display(),
-                    parts_top_level_path.display()
+                    "no program usage export parts found in {}",
+                    parts_path.display()
                 ));
             }
         },
+        ProgramUsagePartsPreference::TopLevelOnly => {
+            match collect_part_entries(&parts_top_level_path).await? {
+                Some(entries) => (parts_top_level_path, true, entries),
+                None => {
+                    if collect_part_entries(&parts_path).await?.is_some() {
+                        return Err(anyhow!(
+                            "top-level stats were requested but only full parts are available in {}",
+                            parts_path.display()
+                        ));
+                    }
+                    return Err(anyhow!(
+                        "no top-level program usage export parts found in {}",
+                        parts_top_level_path.display()
+                    ));
+                }
+            }
+        }
     };
+
+    parts_preference.ensure_matches(top_level_only, parts_dir.as_path())?;
 
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
     let mut epochs = Vec::with_capacity(part_entries.len());
@@ -1072,8 +1141,9 @@ pub async fn dump_program_stats_csv(
     input_path: &Path,
     output_path: &Path,
     limit: Option<usize>,
+    parts_preference: ProgramUsagePartsPreference,
 ) -> Result<()> {
-    let export = load_program_usage_export(input_path)
+    let export = load_program_usage_export(input_path, parts_preference)
         .await
         .with_context(|| {
             format!(
