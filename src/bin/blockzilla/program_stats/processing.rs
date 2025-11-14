@@ -1,433 +1,27 @@
+use super::{
+    BlockProgramUsage, EpochMetrics, EpochProcessSummary, PROGRAM_USAGE_EXPORT_VERSION,
+    PerBlockStats, ProgramStatsCollection, ProgramUsageEpochPart, ProgramUsageExport,
+    ProgramUsagePartsPreference, ProgramUsageRecord, ProgramUsageStats, Result, reading,
+};
+use crate::LOG_INTERVAL_SECS;
 use ahash::{AHashMap, AHashSet};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, anyhow};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
-    confirmed_block::TransactionStatusMeta,
-    node::{Node, TransactionNode},
+    node::Node,
     open_epoch::{self, FetchMode},
     transaction_parser::VersionedTransaction,
 };
-use cid::Cid;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use prost::Message;
-use serde::{Deserialize, Serialize};
 use std::fmt::Write as FmtWrite;
-use std::io::Write as IoWrite;
-use std::io::{ErrorKind, IsTerminal, Read};
+use std::io::{IsTerminal, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use wincode::Deserialize as _;
-use wincode::{SchemaRead, SchemaWrite};
-
-use crate::LOG_INTERVAL_SECS;
-
-#[derive(Clone)]
-#[allow(dead_code)]
-struct BlockProgramUsage {
-    pub epoch: u64,
-    pub slot: u64,
-    pub block_time: Option<i64>,
-    // inclusive range into a pooled records vec
-    pub start: usize,
-    pub len: usize,
-}
-
-struct PerBlockStats {
-    pub blocks: Vec<BlockProgramUsage>,
-    pub records: Vec<ProgramUsageRecord>,
-}
-
-struct ProgramStatsCollection {
-    pub aggregated: Vec<ProgramUsageRecord>,
-    #[allow(dead_code)]
-    pub per_block: Option<PerBlockStats>,
-    pub per_epoch: Vec<ProgramUsageEpochPart>,
-    pub processed_epochs: Vec<u64>,
-}
-
-#[derive(Default, Clone, Copy)]
-struct EpochMetrics {
-    pub blocks_scanned: u64,
-    pub txs_seen: u64,
-    pub instructions_seen: u64,
-    pub inner_instructions_seen: u64,
-    pub bytes_count: u64,
-}
-
-struct EpochProcessSummary {
-    pub epoch: u64,
-    pub last_slot: u64,
-    pub last_blocktime: Option<i64>,
-    pub records: Vec<ProgramUsageRecord>,
-    pub per_block: Option<PerBlockStats>,
-    pub metrics: EpochMetrics,
-}
-
-#[derive(Debug, Clone, Copy, Default, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-pub struct ProgramUsageStats {
-    pub tx_count: u64,
-    pub instruction_count: u64,
-    pub inner_instruction_count: u64,
-}
-
-impl ProgramUsageStats {
-    fn accumulate(&mut self, other: &ProgramUsageStats) {
-        self.tx_count += other.tx_count;
-        self.instruction_count += other.instruction_count;
-        self.inner_instruction_count += other.inner_instruction_count;
-    }
-}
-
-const PROGRAM_USAGE_RECORDS_PREALLOCATION_LIMIT: usize = 512 << 20; // 512 MiB
-const PROGRAM_USAGE_EPOCHS_PREALLOCATION_LIMIT: usize = 64 << 20; // 64 MiB
-
-mod program_usage_wincode {
-    use super::*;
-
-    pub type RecordVec = wincode::containers::Vec<
-        wincode::containers::Elem<ProgramUsageRecord>,
-        wincode::len::BincodeLen<{ PROGRAM_USAGE_RECORDS_PREALLOCATION_LIMIT }>,
-    >;
-
-    pub type EpochVec = wincode::containers::Vec<
-        wincode::containers::Elem<ProgramUsageEpochPart>,
-        wincode::len::BincodeLen<{ PROGRAM_USAGE_EPOCHS_PREALLOCATION_LIMIT }>,
-    >;
-}
-
-#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-struct ProgramUsageRecord {
-    pub program: [u8; 32],
-    pub stats: ProgramUsageStats,
-}
-
-#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-struct ProgramUsageEpochPartV1 {
-    pub epoch: u64,
-    pub last_slot: u64,
-    #[wincode(with = "program_usage_wincode::RecordVec")]
-    pub records: Vec<ProgramUsageRecord>,
-}
-
-#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-struct ProgramUsageEpochPart {
-    pub epoch: u64,
-    pub last_slot: u64,
-    pub last_blocktime: Option<i64>,
-    #[wincode(with = "program_usage_wincode::RecordVec")]
-    pub records: Vec<ProgramUsageRecord>,
-}
-
-#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-struct ProgramStatsProgress {
-    pub processed_epochs: Vec<u64>,
-}
-
-#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-struct ProgramUsageExport {
-    pub version: u32,
-    pub start_epoch: u64,
-    pub start_slot: u64,
-    pub top_level_only: bool,
-    pub processed_epochs: Vec<u64>,
-    #[wincode(with = "program_usage_wincode::RecordVec")]
-    pub aggregated: Vec<ProgramUsageRecord>,
-    #[wincode(with = "program_usage_wincode::EpochVec")]
-    pub epochs: Vec<ProgramUsageEpochPart>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProgramUsagePartsPreference {
-    Auto,
-    TopLevelOnly,
-    IncludeInner,
-}
-
-impl ProgramUsagePartsPreference {
-    fn ensure_matches(self, top_level_only: bool, source: &Path) -> Result<()> {
-        match self {
-            ProgramUsagePartsPreference::Auto => Ok(()),
-            ProgramUsagePartsPreference::TopLevelOnly if top_level_only => Ok(()),
-            ProgramUsagePartsPreference::IncludeInner if !top_level_only => Ok(()),
-            ProgramUsagePartsPreference::TopLevelOnly => Err(anyhow!(
-                "top-level stats were requested but {} contains full stats",
-                source.display()
-            )),
-            ProgramUsagePartsPreference::IncludeInner => Err(anyhow!(
-                "full stats were requested but {} only contains top-level stats",
-                source.display()
-            )),
-        }
-    }
-}
-
-const PROGRAM_USAGE_EXPORT_VERSION: u32 = 1;
-const PROGRESS_FILE_NAME: &str = "progress.bin";
-
-fn decode_epoch_part(bytes: &[u8]) -> Result<ProgramUsageEpochPart> {
-    if let Ok(part) = wincode::deserialize::<ProgramUsageEpochPart>(bytes) {
-        return Ok(part);
-    }
-
-    let legacy = wincode::deserialize::<ProgramUsageEpochPartV1>(bytes)?;
-    Ok(ProgramUsageEpochPart {
-        epoch: legacy.epoch,
-        last_slot: legacy.last_slot,
-        last_blocktime: None,
-        records: legacy.records,
-    })
-}
-
-async fn load_progress(parts_dir: &Path) -> Result<AHashSet<u64>> {
-    let path = parts_dir.join(PROGRESS_FILE_NAME);
-    let mut processed = AHashSet::with_capacity(256);
-
-    match fs::read(&path).await {
-        Ok(bytes) => match wincode::deserialize::<ProgramStatsProgress>(&bytes) {
-            Ok(progress) => {
-                for epoch in progress.processed_epochs {
-                    processed.insert(epoch);
-                }
-            }
-            Err(err) => {
-                tracing::warn!("failed to decode progress file {}: {}", path.display(), err);
-            }
-        },
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-
-    Ok(processed)
-}
-
-async fn persist_progress(parts_dir: &Path, processed: &AHashSet<u64>) -> Result<()> {
-    fs::create_dir_all(parts_dir).await?;
-
-    let mut epochs: Vec<u64> = processed.iter().copied().collect();
-    epochs.sort_unstable();
-    let progress = ProgramStatsProgress {
-        processed_epochs: epochs,
-    };
-
-    let encoded = wincode::serialize(&progress)?;
-    let path = parts_dir.join(PROGRESS_FILE_NAME);
-    let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, &encoded).await?;
-    fs::rename(&tmp_path, &path).await?;
-    Ok(())
-}
-
-async fn load_program_usage_export(
-    input_path: &Path,
-    parts_preference: ProgramUsagePartsPreference,
-) -> Result<ProgramUsageExport> {
-    match fs::read(input_path).await {
-        Ok(data) => {
-            let export: ProgramUsageExport = wincode::deserialize(&data)?;
-            if export.version != PROGRAM_USAGE_EXPORT_VERSION {
-                return Err(anyhow!(
-                    "unsupported program usage export version {}",
-                    export.version
-                ));
-            }
-            parts_preference.ensure_matches(export.top_level_only, input_path)?;
-            Ok(export)
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            load_program_usage_export_from_parts(input_path, parts_preference).await
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-async fn load_program_usage_export_from_parts(
-    input_path: &Path,
-    parts_preference: ProgramUsagePartsPreference,
-) -> Result<ProgramUsageExport> {
-    async fn collect_part_entries(parts_dir: &Path) -> Result<Option<Vec<(u64, PathBuf)>>> {
-        let mut rd = match fs::read_dir(parts_dir).await {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-
-        let mut entries = Vec::new();
-        while let Some(entry) = rd.next_entry().await? {
-            let Ok(file_type) = entry.file_type().await else {
-                continue;
-            };
-            if !file_type.is_file() {
-                continue;
-            }
-
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let Some(epoch_str) = name
-                .strip_prefix("epoch-")
-                .and_then(|s| s.strip_suffix(".bin"))
-            else {
-                continue;
-            };
-            let Ok(epoch) = epoch_str.parse::<u64>() else {
-                continue;
-            };
-
-            entries.push((epoch, entry.path()));
-        }
-
-        if entries.is_empty() {
-            return Ok(None);
-        }
-
-        entries.sort_unstable_by_key(|(epoch, _)| *epoch);
-        Ok(Some(entries))
-    }
-
-    let parts_path = input_path.with_extension("parts");
-    let parts_top_level_path = input_path.with_extension("parts.top_level");
-
-    let (parts_dir, top_level_only, part_entries) = match parts_preference {
-        ProgramUsagePartsPreference::Auto => match collect_part_entries(&parts_path).await? {
-            Some(entries) => (parts_path, false, entries),
-            None => match collect_part_entries(&parts_top_level_path).await? {
-                Some(entries) => (parts_top_level_path, true, entries),
-                None => {
-                    return Err(anyhow!(
-                        "no program usage export found at {} or {}",
-                        parts_path.display(),
-                        parts_top_level_path.display()
-                    ));
-                }
-            },
-        },
-        ProgramUsagePartsPreference::IncludeInner => match collect_part_entries(&parts_path).await?
-        {
-            Some(entries) => (parts_path, false, entries),
-            None => {
-                if collect_part_entries(&parts_top_level_path).await?.is_some() {
-                    return Err(anyhow!(
-                        "full stats were requested but only top-level parts are available in {}",
-                        parts_top_level_path.display()
-                    ));
-                }
-                return Err(anyhow!(
-                    "no program usage export parts found in {}",
-                    parts_path.display()
-                ));
-            }
-        },
-        ProgramUsagePartsPreference::TopLevelOnly => {
-            match collect_part_entries(&parts_top_level_path).await? {
-                Some(entries) => (parts_top_level_path, true, entries),
-                None => {
-                    if collect_part_entries(&parts_path).await?.is_some() {
-                        return Err(anyhow!(
-                            "top-level stats were requested but only full parts are available in {}",
-                            parts_path.display()
-                        ));
-                    }
-                    return Err(anyhow!(
-                        "no top-level program usage export parts found in {}",
-                        parts_top_level_path.display()
-                    ));
-                }
-            }
-        }
-    };
-
-    parts_preference.ensure_matches(top_level_only, parts_dir.as_path())?;
-
-    let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
-    let mut epochs = Vec::with_capacity(part_entries.len());
-
-    for (expected_epoch, path) in part_entries {
-        let data = match fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!(
-                    "failed to read cached epoch stats {}: {}",
-                    path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-
-        let part = match decode_epoch_part(&data) {
-            Ok(part) => part,
-            Err(e) => {
-                tracing::warn!(
-                    "failed to decode cached epoch stats {}: {}",
-                    path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-
-        for record in part.records.iter() {
-            aggregated
-                .entry(record.program)
-                .or_insert_with(ProgramUsageStats::default)
-                .accumulate(&record.stats);
-        }
-
-        if part.epoch != expected_epoch {
-            tracing::warn!(
-                "cached epoch stats {} has mismatched epoch {} (expected {})",
-                path.display(),
-                part.epoch,
-                expected_epoch
-            );
-        }
-
-        epochs.push(part);
-    }
-
-    if epochs.is_empty() {
-        return Err(anyhow!(
-            "no program usage export parts found in {}",
-            parts_dir.display()
-        ));
-    }
-
-    epochs.sort_unstable_by_key(|part| part.epoch);
-
-    let mut aggregated_records: Vec<ProgramUsageRecord> = aggregated
-        .into_iter()
-        .map(|(program, stats)| ProgramUsageRecord { program, stats })
-        .collect();
-    aggregated_records
-        .sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
-
-    let processed_epochs_set = load_progress(&parts_dir).await?;
-    let mut processed_epochs: Vec<u64> = processed_epochs_set.iter().copied().collect();
-    for part in epochs.iter() {
-        if !processed_epochs_set.contains(&part.epoch) {
-            processed_epochs.push(part.epoch);
-        }
-    }
-    processed_epochs.sort_unstable();
-    processed_epochs.dedup();
-
-    let start_epoch = epochs.first().map(|part| part.epoch).unwrap_or(0);
-
-    Ok(ProgramUsageExport {
-        version: PROGRAM_USAGE_EXPORT_VERSION,
-        start_epoch,
-        start_slot: 0,
-        top_level_only,
-        processed_epochs,
-        aggregated: aggregated_records,
-        epochs,
-    })
-}
 
 async fn process_epoch(
     epoch: u64,
@@ -523,7 +117,7 @@ async fn process_epoch(
             map.clear();
         }
 
-        let slot = match peek_block_slot(&block) {
+        let slot = match reading::peek_block_slot(&block) {
             Ok(slot) => slot,
             Err(_) => {
                 decode_errors += 1;
@@ -586,7 +180,8 @@ async fn process_epoch(
                     }
                 };
 
-                let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                let tx_bytes_slice = match reading::transaction_bytes(&block, &tx_node, &mut buf_tx)
+                {
                     Ok(bytes) => bytes,
                     Err(_) => {
                         decode_errors += 1;
@@ -655,15 +250,15 @@ async fn process_epoch(
                 } else {
                     // Full mode: load metadata, extend loaded addresses, count inner
                     let inner_instruction_groups =
-                        match metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
+                        match reading::metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
                             Ok(meta_bytes) => {
-                                decode_transaction_meta(meta_bytes, &mut meta_scratch).and_then(
-                                    |meta| {
-                                        extend_with_loaded_addresses(
+                                reading::decode_transaction_meta(meta_bytes, &mut meta_scratch)
+                                    .and_then(|meta| {
+                                        reading::extend_with_loaded_addresses(
                                             &mut resolved_keys,
                                             &meta.loaded_writable_addresses,
                                         );
-                                        extend_with_loaded_addresses(
+                                        reading::extend_with_loaded_addresses(
                                             &mut resolved_keys,
                                             &meta.loaded_readonly_addresses,
                                         );
@@ -675,8 +270,7 @@ async fn process_epoch(
                                         } else {
                                             None
                                         }
-                                    },
-                                )
+                                    })
                             }
                             Err(_) => None,
                         };
@@ -813,6 +407,8 @@ async fn consume_epoch_results(
     let start = Instant::now();
     let mut last_log = start;
 
+    tracing::info!("[epoch {epoch:04}] aggregator worker started");
+
     let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
     let mut metrics = EpochMetrics::default();
     let mut epoch_last_slot = 0u64;
@@ -856,8 +452,7 @@ async fn consume_epoch_results(
             let mb_s = (metrics.bytes_count as f64 / (1024.0 * 1024.0)) / secs;
 
             tracing::info!(
-                "epoch {:04} | processed {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
-                epoch,
+                "[epoch {epoch:04}] aggregator processed {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
                 metrics.blocks_scanned,
                 blk_s,
                 mb_s
@@ -868,6 +463,11 @@ async fn consume_epoch_results(
     if decode_errors_total > 0 {
         tracing::warn!("epoch {epoch:04} had {decode_errors_total} decode errors (parallel)");
     }
+
+    tracing::info!(
+        "[epoch {epoch:04}] aggregator worker finished with {} blocks",
+        metrics.blocks_scanned
+    );
 
     fs::create_dir_all(&parts_dir).await?;
     let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
@@ -907,11 +507,7 @@ async fn process_epoch_par(
     min_slot: u64,
     jobs: usize,
 ) -> Result<EpochProcessSummary> {
-    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
-        .await
-        .with_context(|| format!("failed to open epoch {epoch:04}"))?;
-    let mut car = CarBlockReader::new(reader);
-    car.read_header().await?;
+    tracing::info!("[epoch {epoch:04}] starting parallel processing with {jobs} block workers");
 
     let (block_tx, block_rx) = mpsc::channel::<CarBlock>(jobs * 2);
     let block_rx = Arc::new(Mutex::new(block_rx));
@@ -925,11 +521,13 @@ async fn process_epoch_par(
 
     let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(jobs);
 
-    for _ in 0..jobs {
+    for worker_idx in 0..jobs {
         let rx = Arc::clone(&block_rx);
         let result_tx = result_tx.clone();
-
+        let worker_epoch = epoch;
+        let worker_top_level_only = top_level_only;
         let handle = tokio::spawn(async move {
+            tracing::info!("[epoch {worker_epoch:04}] processor worker #{worker_idx} started");
             let mut buf_tx = Vec::with_capacity(128 * 1024);
             let mut buf_meta_df = Vec::with_capacity(64 * 1024);
             let mut meta_scratch = Vec::with_capacity(64 * 1024);
@@ -937,6 +535,7 @@ async fn process_epoch_par(
             let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
             let mut block_stats: AHashMap<[u8; 32], ProgramUsageStats> =
                 AHashMap::with_capacity(4096);
+            let mut worker_totals = EpochMetrics::default();
 
             loop {
                 let block = {
@@ -958,7 +557,7 @@ async fn process_epoch_par(
                 let mut block_decode_errors = 0u64;
                 let mut block_time: Option<i64> = None;
 
-                let slot = match peek_block_slot(&block) {
+                let slot = match reading::peek_block_slot(&block) {
                     Ok(slot) => slot,
                     Err(_) => {
                         block_decode_errors += 1;
@@ -1050,14 +649,14 @@ async fn process_epoch_par(
                             }
                         };
 
-                        let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx)
-                        {
-                            Ok(bytes) => bytes,
-                            Err(_) => {
-                                block_decode_errors += 1;
-                                continue;
-                            }
-                        };
+                        let tx_bytes_slice =
+                            match reading::transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                                Ok(bytes) => bytes,
+                                Err(_) => {
+                                    block_decode_errors += 1;
+                                    continue;
+                                }
+                            };
 
                         block_metrics.txs_seen += 1;
 
@@ -1070,7 +669,6 @@ async fn process_epoch_par(
 
                         let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
-                        // tx_count: +1 per static account key
                         for key in tx_ref.message.static_account_keys() {
                             let program_key: [u8; 32] = *key;
                             let entry = block_stats
@@ -1079,18 +677,16 @@ async fn process_epoch_par(
                             entry.tx_count += 1;
                         }
 
-                        // Build resolved_keys
                         resolved_keys.clear();
                         resolved_keys.reserve(
                             tx_ref.message.static_account_keys().len()
-                                + if top_level_only { 0 } else { 16 },
+                                + if worker_top_level_only { 0 } else { 16 },
                         );
                         for key in tx_ref.message.static_account_keys() {
                             resolved_keys.push(*key);
                         }
 
-                        if top_level_only {
-                            // Top-level only
+                        if worker_top_level_only {
                             for ix in tx_ref.message.instructions_iter() {
                                 let program_idx = ix.program_id_index as usize;
                                 if program_idx >= resolved_keys.len() {
@@ -1106,34 +702,33 @@ async fn process_epoch_par(
                                 block_metrics.instructions_seen += 1;
                             }
                         } else {
-                            // Full mode with inner instructions
                             let inner_instruction_groups =
-                                match metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
-                                    Ok(meta_bytes) => {
-                                        decode_transaction_meta(meta_bytes, &mut meta_scratch)
-                                            .and_then(|meta| {
-                                                extend_with_loaded_addresses(
-                                                    &mut resolved_keys,
-                                                    &meta.loaded_writable_addresses,
-                                                );
-                                                extend_with_loaded_addresses(
-                                                    &mut resolved_keys,
-                                                    &meta.loaded_readonly_addresses,
-                                                );
+                                match reading::metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
+                                    Ok(meta_bytes) => reading::decode_transaction_meta(
+                                        meta_bytes,
+                                        &mut meta_scratch,
+                                    )
+                                    .and_then(|meta| {
+                                        reading::extend_with_loaded_addresses(
+                                            &mut resolved_keys,
+                                            &meta.loaded_writable_addresses,
+                                        );
+                                        reading::extend_with_loaded_addresses(
+                                            &mut resolved_keys,
+                                            &meta.loaded_readonly_addresses,
+                                        );
 
-                                                if !meta.inner_instructions_none
-                                                    && !meta.inner_instructions.is_empty()
-                                                {
-                                                    Some(meta.inner_instructions)
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                    }
+                                        if !meta.inner_instructions_none
+                                            && !meta.inner_instructions.is_empty()
+                                        {
+                                            Some(meta.inner_instructions)
+                                        } else {
+                                            None
+                                        }
+                                    }),
                                     Err(_) => None,
                                 };
 
-                            // Top-level
                             for ix in tx_ref.message.instructions_iter() {
                                 let program_idx = ix.program_id_index as usize;
                                 if program_idx >= resolved_keys.len() {
@@ -1149,7 +744,6 @@ async fn process_epoch_par(
                                 block_metrics.instructions_seen += 1;
                             }
 
-                            // Inner
                             if let Some(groups) = inner_instruction_groups.as_ref() {
                                 for group in groups {
                                     for inner_ix in group.instructions.iter() {
@@ -1177,6 +771,11 @@ async fn process_epoch_par(
                 }
 
                 block_metrics.blocks_scanned += 1;
+                worker_totals.blocks_scanned += block_metrics.blocks_scanned;
+                worker_totals.txs_seen += block_metrics.txs_seen;
+                worker_totals.instructions_seen += block_metrics.instructions_seen;
+                worker_totals.inner_instructions_seen += block_metrics.inner_instructions_seen;
+                worker_totals.bytes_count += block_metrics.bytes_count;
 
                 let stats = block_stats
                     .iter()
@@ -1195,6 +794,11 @@ async fn process_epoch_par(
                     .map_err(|_| anyhow!("result channel closed"))?;
             }
 
+            tracing::info!(
+                "[epoch {worker_epoch:04}] processor worker #{worker_idx} finished after {} blocks",
+                worker_totals.blocks_scanned
+            );
+
             Ok(())
         });
 
@@ -1203,38 +807,62 @@ async fn process_epoch_par(
 
     drop(result_tx);
 
-    let epoch_start = Instant::now();
-    let mut last_log = epoch_start;
-    let mut blocks_sent = 0u64;
-    let mut bytes_sent = 0u64;
+    let cache_dir_owned = cache_dir.to_string();
+    let reader_sender = block_tx.clone();
+    let reader_handle = tokio::spawn(async move {
+        tracing::info!("[epoch {epoch:04}] reader worker started");
+        let reader = open_epoch::open_epoch(epoch, &cache_dir_owned, FetchMode::Offline)
+            .await
+            .with_context(|| format!("failed to open epoch {epoch:04}"))?;
+        let mut car = CarBlockReader::new(reader);
+        car.read_header().await?;
 
-    while let Some(block) = car.next_block().await? {
-        bytes_sent += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
-        blocks_sent += 1;
+        let start = Instant::now();
+        let mut last_log = start;
+        let mut blocks_sent = 0u64;
+        let mut bytes_sent = 0u64;
 
-        if block_tx.send(block).await.is_err() {
-            break;
+        while let Some(block) = car.next_block().await? {
+            bytes_sent += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
+            blocks_sent += 1;
+
+            if reader_sender.send(block).await.is_err() {
+                tracing::warn!(
+                    "[epoch {epoch:04}] reader worker encountered closed channel, stopping early"
+                );
+                break;
+            }
+
+            let now = Instant::now();
+            if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+                last_log = now;
+                let secs = now.duration_since(start).as_secs_f64().max(1e-6);
+                let blk_s = blocks_sent as f64 / secs;
+                let mb_s = (bytes_sent as f64 / (1024.0 * 1024.0)) / secs;
+                tracing::info!(
+                    "[epoch {epoch:04}] reader sent {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
+                    blocks_sent,
+                    blk_s,
+                    mb_s
+                );
+            }
         }
 
-        let now = Instant::now();
-        if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
-            last_log = now;
-            let elapsed = now.duration_since(epoch_start);
-            let secs = elapsed.as_secs_f64().max(1e-6);
-            let blk_s = blocks_sent as f64 / secs;
-            let mb_s = (bytes_sent as f64 / (1024.0 * 1024.0)) / secs;
+        drop(reader_sender);
 
-            tracing::info!(
-                "epoch {:04} | sent {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
-                epoch,
-                blocks_sent,
-                blk_s,
-                mb_s
-            );
-        }
-    }
+        tracing::info!(
+            "[epoch {epoch:04}] reader worker finished after {} blocks",
+            blocks_sent
+        );
+
+        Ok::<_, anyhow::Error>(())
+    });
 
     drop(block_tx);
+
+    reader_handle
+        .await
+        .map_err(|e| anyhow!("reader join error: {e}"))??;
 
     for handle in handles {
         handle
@@ -1256,7 +884,7 @@ async fn collect_program_stats(
     top_level_only: bool,
 ) -> Result<ProgramStatsCollection> {
     let cache_path = Path::new(cache_dir);
-    let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
+    let Some(last_epoch) = reading::find_last_cached_epoch(cache_path).await? else {
         return Err(anyhow!(
             "no cached epochs found in {}",
             cache_path.display()
@@ -1276,7 +904,7 @@ async fn collect_program_stats(
     };
 
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
-    let mut processed_epochs: AHashSet<u64> = load_progress(&parts_dir).await?;
+    let mut processed_epochs: AHashSet<u64> = reading::load_progress(&parts_dir).await?;
     let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
 
     let mut last_processed_slot = 0u64;
@@ -1325,7 +953,7 @@ async fn collect_program_stats(
                 }
             };
 
-            let part = match decode_epoch_part(&data) {
+            let part = match reading::decode_epoch_part(&data) {
                 Ok(part) => part,
                 Err(e) => {
                     tracing::warn!(
@@ -1353,7 +981,7 @@ async fn collect_program_stats(
         }
     }
 
-    persist_progress(&parts_dir, &processed_epochs).await?;
+    reading::persist_progress(&parts_dir, &processed_epochs).await?;
 
     let draw_target = if std::io::stdout().is_terminal() {
         ProgressDrawTarget::stderr_with_hz(8)
@@ -1479,7 +1107,7 @@ async fn collect_program_stats(
                     records: summary_records,
                 },
             );
-            persist_progress(&parts_dir, &processed_epochs).await?;
+            reading::persist_progress(&parts_dir, &processed_epochs).await?;
             last_epoch_processed =
                 Some(last_epoch_processed.map_or(summary_epoch, |cur| cur.max(summary_epoch)));
 
@@ -1597,7 +1225,7 @@ async fn collect_program_stats_par(
     jobs: usize,
 ) -> Result<ProgramStatsCollection> {
     let cache_path = Path::new(cache_dir);
-    let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
+    let Some(last_epoch) = reading::find_last_cached_epoch(cache_path).await? else {
         return Err(anyhow!(
             "no cached epochs found in {}",
             cache_path.display()
@@ -1617,7 +1245,7 @@ async fn collect_program_stats_par(
     };
 
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
-    let mut processed_epochs: AHashSet<u64> = load_progress(&parts_dir).await?;
+    let mut processed_epochs: AHashSet<u64> = reading::load_progress(&parts_dir).await?;
     let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
 
     let mut last_processed_slot = 0u64;
@@ -1667,7 +1295,7 @@ async fn collect_program_stats_par(
                 }
             };
 
-            let part = match decode_epoch_part(&data) {
+            let part = match reading::decode_epoch_part(&data) {
                 Ok(part) => part,
                 Err(e) => {
                     tracing::warn!(
@@ -1695,7 +1323,7 @@ async fn collect_program_stats_par(
         }
     }
 
-    persist_progress(&parts_dir, &processed_epochs).await?;
+    reading::persist_progress(&parts_dir, &processed_epochs).await?;
 
     let draw_target = if std::io::stdout().is_terminal() {
         ProgressDrawTarget::stderr_with_hz(8)
@@ -1754,10 +1382,35 @@ async fn collect_program_stats_par(
     }
 
     if !epochs_to_process.is_empty() {
-        for (epoch, min_slot) in epochs_to_process {
-            let summary =
-                process_epoch_par(epoch, cache_dir, &parts_dir, top_level_only, min_slot, jobs)
-                    .await?;
+        let total_epochs = epochs_to_process.len();
+        let max_inflight = std::cmp::min(total_epochs, std::cmp::max(2, jobs));
+        let mut pending = epochs_to_process.into_iter();
+        let mut join_set: JoinSet<Result<EpochProcessSummary>> = JoinSet::new();
+
+        let spawn_epoch = |join_set: &mut JoinSet<Result<EpochProcessSummary>>, epoch, min_slot| {
+            let cache_dir_owned = cache_dir.to_string();
+            let parts_dir_buf = parts_dir.clone();
+            join_set.spawn(async move {
+                process_epoch_par(
+                    epoch,
+                    cache_dir_owned.as_str(),
+                    parts_dir_buf.as_path(),
+                    top_level_only,
+                    min_slot,
+                    jobs,
+                )
+                .await
+            });
+        };
+
+        for _ in 0..max_inflight {
+            if let Some((epoch, min_slot)) = pending.next() {
+                spawn_epoch(&mut join_set, epoch, min_slot);
+            }
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            let summary = result.map_err(|e| anyhow!("epoch task join error: {e}"))??;
 
             let EpochProcessSummary {
                 epoch: summary_epoch,
@@ -1792,7 +1445,7 @@ async fn collect_program_stats_par(
                     records: summary_records,
                 },
             );
-            persist_progress(&parts_dir, &processed_epochs).await?;
+            reading::persist_progress(&parts_dir, &processed_epochs).await?;
             last_epoch_processed =
                 Some(last_epoch_processed.map_or(summary_epoch, |cur| cur.max(summary_epoch)));
 
@@ -1807,22 +1460,31 @@ async fn collect_program_stats_par(
                 0
             };
 
+            let active = join_set.len();
+            let queued = pending.len();
+
             write!(
                 &mut msg_buf,
-                "[par] epoch {:04} done | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
+                "[par] epoch {:04} done | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={} | active={} queued={}",
                 summary_epoch,
                 summary_metrics.blocks_scanned,
                 blk_s,
                 mb_s,
                 tps,
                 summary_metrics.instructions_seen,
-                summary_metrics.inner_instructions_seen
+                summary_metrics.inner_instructions_seen,
+                active,
+                queued
             )
             .unwrap();
 
             if !pb.is_hidden() {
                 pb.set_message(msg_buf.clone());
                 pb.tick();
+            }
+
+            if let Some((epoch, min_slot)) = pending.next() {
+                spawn_epoch(&mut join_set, epoch, min_slot);
             }
         }
     }
@@ -2021,7 +1683,7 @@ pub async fn dump_program_stats_csv(
     limit: Option<usize>,
     parts_preference: ProgramUsagePartsPreference,
 ) -> Result<()> {
-    let export = load_program_usage_export(input_path, parts_preference)
+    let export = reading::load_program_usage_export(input_path, parts_preference)
         .await
         .with_context(|| {
             format!(
@@ -2107,149 +1769,4 @@ pub async fn dump_program_stats_csv(
     fs::write(output_path, csv_bytes).await?;
 
     Ok(())
-}
-
-async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
-    let mut rd = match fs::read_dir(cache_dir).await {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-
-    let mut max_epoch = None;
-    while let Some(entry) = rd.next_entry().await? {
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-
-        let Some(epoch_str) = name.strip_prefix("epoch-").and_then(|s| {
-            s.strip_suffix(".car")
-                .or_else(|| s.strip_suffix(".car.zst"))
-        }) else {
-            continue;
-        };
-
-        let Ok(epoch) = epoch_str.parse::<u64>() else {
-            continue;
-        };
-
-        max_epoch = Some(max_epoch.map_or(epoch, |current: u64| current.max(epoch)));
-    }
-
-    Ok(max_epoch)
-}
-
-#[inline]
-fn peek_block_slot(block: &CarBlock) -> Result<u64> {
-    let mut decoder = minicbor::Decoder::new(block.block_bytes.as_ref());
-    decoder
-        .array()
-        .map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
-    let kind = decoder
-        .u64()
-        .map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
-    if kind != 2 {
-        return Err(anyhow!("unexpected block kind {kind}, expected Block"));
-    }
-    let slot = decoder
-        .u64()
-        .map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
-    Ok(slot)
-}
-
-#[inline]
-fn copy_dataframe_into<'a>(
-    block: &CarBlock,
-    cid: &Cid,
-    dst: &'a mut Vec<u8>,
-    inline_prefix: Option<&[u8]>,
-) -> Result<&'a [u8]> {
-    let prefix_len = inline_prefix.map_or(0, |p| p.len());
-    dst.clear();
-    dst.reserve(prefix_len + (64 << 10));
-
-    if let Some(prefix) = inline_prefix {
-        dst.extend_from_slice(prefix);
-    }
-
-    let mut rdr = block.dataframe_reader(cid);
-    rdr.read_to_end(dst)
-        .map_err(|e| anyhow!("read dataframe chain: {e}"))?;
-    Ok(&*dst)
-}
-
-#[inline]
-fn transaction_bytes<'a>(
-    block: &CarBlock,
-    tx_node: &TransactionNode<'_>,
-    buf: &'a mut Vec<u8>,
-) -> Result<&'a [u8]> {
-    match tx_node.data.next {
-        None => {
-            buf.clear();
-            buf.extend_from_slice(tx_node.data.data);
-            Ok(&*buf)
-        }
-        Some(df_cbor) => {
-            let df_cid = df_cbor.to_cid()?;
-            copy_dataframe_into(block, &df_cid, buf, None)
-        }
-    }
-}
-
-#[inline]
-fn metadata_bytes<'a>(
-    block: &CarBlock,
-    tx_node: &TransactionNode<'a>,
-    buf: &'a mut Vec<u8>,
-) -> Result<&'a [u8]> {
-    match tx_node.metadata.next {
-        None => Ok(tx_node.metadata.data),
-        Some(df_cbor) => {
-            let df_cid = df_cbor.to_cid()?;
-            copy_dataframe_into(block, &df_cid, buf, None)
-        }
-    }
-}
-
-fn extend_with_loaded_addresses(dest: &mut Vec<[u8; 32]>, addrs: &[Vec<u8>]) {
-    for addr in addrs {
-        if addr.len() == 32 {
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(addr);
-            dest.push(bytes);
-        }
-    }
-}
-
-fn decode_transaction_meta(bytes: &[u8], scratch: &mut Vec<u8>) -> Option<TransactionStatusMeta> {
-    if bytes.is_empty() {
-        return None;
-    }
-
-    if is_zstd(bytes) {
-        scratch.clear();
-        let mut decoder = zstd::Decoder::new(bytes).ok()?;
-        if decoder.read_to_end(scratch).is_err() {
-            return None;
-        }
-        TransactionStatusMeta::decode(scratch.as_slice()).ok()
-    } else {
-        TransactionStatusMeta::decode(bytes).ok()
-    }
-}
-
-#[inline]
-fn is_zstd(buf: &[u8]) -> bool {
-    buf.get(0..4)
-        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
-        .unwrap_or(false)
 }
