@@ -11,7 +11,6 @@ use cid::Cid;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use solana_pubkey::Pubkey;
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
 use std::io::{ErrorKind, IsTerminal, Read};
@@ -451,10 +450,13 @@ async fn process_epoch(
     let mut last_skipped_slot = 0u64;
 
     let mut buf_tx = Vec::with_capacity(128 * 1024);
-    let mut buf_meta = Vec::with_capacity(128 * 1024);
+    // buffer used only for dataframe reader for metadata
+    let mut buf_meta_df = Vec::with_capacity(64 * 1024);
+    // scratch buffer for zstd/prost decoding
+    let mut meta_scratch = Vec::with_capacity(64 * 1024);
     let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
-    let mut resolved_keys = Vec::<Pubkey>::with_capacity(512);
-    let mut tx_programs = AHashSet::<[u8; 32]>::with_capacity(64);
+    // raw 32-byte keys (static + loaded)
+    let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
 
     // Error counters (log once at end instead of spamming)
     let mut decode_errors = 0u64;
@@ -489,7 +491,13 @@ async fn process_epoch(
             }
         }
 
-        metrics.bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
+        // Compute block size once
+        let block_bytes = block
+            .entries
+            .iter()
+            .map(|entry| entry.len())
+            .sum::<usize>() as u64;
+        metrics.bytes_count += block_bytes;
 
         if let Some(map) = per_block_map.as_mut() {
             map.clear();
@@ -505,7 +513,7 @@ async fn process_epoch(
 
         if slot < min_slot {
             skipped_blocks += 1;
-            skipped_bytes += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
+            skipped_bytes += block_bytes;
             last_skipped_slot = slot;
             continue;
         }
@@ -577,53 +585,74 @@ async fn process_epoch(
 
                 let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
+                // First: tx-level count, +1 per static account key
+                for key in tx_ref.message.static_account_keys() {
+                    let program_key: [u8; 32] = *key;
+                    let entry = epoch_stats
+                        .entry(program_key)
+                        .or_insert_with(ProgramUsageStats::default);
+                    entry.tx_count += 1;
+
+                    if let Some(map) = per_block_map.as_mut() {
+                        map.entry(program_key)
+                            .or_insert_with(ProgramUsageStats::default)
+                            .tx_count += 1;
+                    }
+                }
+
+                // Build resolved_keys for instructions (static + loaded addresses)
                 resolved_keys.clear();
                 resolved_keys.reserve(
                     tx_ref.message.static_account_keys().len()
                         + if top_level_only { 0 } else { 16 },
                 );
                 for key in tx_ref.message.static_account_keys() {
-                    resolved_keys.push(Pubkey::new_from_array(*key));
+                    resolved_keys.push(*key);
                 }
 
                 // Load metadata and inner instructions only if needed
                 let inner_instruction_groups = if top_level_only {
                     None
                 } else {
-                    match metadata_bytes(&block, &tx_node, &mut buf_meta) {
-                        Ok(meta_bytes) => decode_transaction_meta(meta_bytes).and_then(|meta| {
-                            extend_with_loaded_addresses(
-                                &mut resolved_keys,
-                                &meta.loaded_writable_addresses,
-                            );
-                            extend_with_loaded_addresses(
-                                &mut resolved_keys,
-                                &meta.loaded_readonly_addresses,
-                            );
+                    match metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
+                        Ok(meta_bytes) => {
+                            decode_transaction_meta(meta_bytes, &mut meta_scratch).and_then(
+                                |meta| {
+                                    extend_with_loaded_addresses(
+                                        &mut resolved_keys,
+                                        &meta.loaded_writable_addresses,
+                                    );
+                                    extend_with_loaded_addresses(
+                                        &mut resolved_keys,
+                                        &meta.loaded_readonly_addresses,
+                                    );
 
-                            if !meta.inner_instructions_none && !meta.inner_instructions.is_empty()
-                            {
-                                Some(meta.inner_instructions)
-                            } else {
-                                None
-                            }
-                        }),
+                                    if !meta.inner_instructions_none
+                                        && !meta.inner_instructions.is_empty()
+                                    {
+                                        Some(meta.inner_instructions)
+                                    } else {
+                                        None
+                                    }
+                                },
+                            )
+                        }
                         Err(_) => None,
                     }
                 };
 
-                // First pass: count instructions and collect unique programs
+                // Top-level instructions: count uses
                 for ix in tx_ref.message.instructions_iter() {
                     let program_idx = ix.program_id_index as usize;
                     if program_idx >= resolved_keys.len() {
                         continue;
                     }
-                    let program_key = resolved_keys[program_idx].to_bytes();
+                    let program_key = resolved_keys[program_idx];
 
-                    epoch_stats
+                    let entry = epoch_stats
                         .entry(program_key)
-                        .or_insert_with(ProgramUsageStats::default)
-                        .instruction_count += 1;
+                        .or_insert_with(ProgramUsageStats::default);
+                    entry.instruction_count += 1;
 
                     if let Some(map) = per_block_map.as_mut() {
                         map.entry(program_key)
@@ -631,11 +660,10 @@ async fn process_epoch(
                             .instruction_count += 1;
                     }
 
-                    tx_programs.insert(program_key);
                     metrics.instructions_seen += 1;
                 }
 
-                // Process inner instructions if needed
+                // Inner instructions: count uses
                 if let Some(groups) = inner_instruction_groups.as_ref() {
                     for group in groups {
                         for inner_ix in group.instructions.iter() {
@@ -643,12 +671,12 @@ async fn process_epoch(
                             if program_idx >= resolved_keys.len() {
                                 continue;
                             }
-                            let program_key = resolved_keys[program_idx].to_bytes();
+                            let program_key = resolved_keys[program_idx];
 
-                            epoch_stats
+                            let entry = epoch_stats
                                 .entry(program_key)
-                                .or_insert_with(ProgramUsageStats::default)
-                                .inner_instruction_count += 1;
+                                .or_insert_with(ProgramUsageStats::default);
+                            entry.inner_instruction_count += 1;
 
                             if let Some(map) = per_block_map.as_mut() {
                                 map.entry(program_key)
@@ -656,26 +684,10 @@ async fn process_epoch(
                                     .inner_instruction_count += 1;
                             }
 
-                            tx_programs.insert(program_key);
                             metrics.inner_instructions_seen += 1;
                         }
                     }
                 }
-
-                // Second pass: increment tx_count once per unique program
-                for program_key in tx_programs.iter() {
-                    epoch_stats
-                        .entry(*program_key)
-                        .or_insert_with(ProgramUsageStats::default)
-                        .tx_count += 1;
-
-                    if let Some(map) = per_block_map.as_mut() {
-                        map.entry(*program_key)
-                            .or_insert_with(ProgramUsageStats::default)
-                            .tx_count += 1;
-                    }
-                }
-                tx_programs.clear();
 
                 unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
             }
@@ -772,7 +784,7 @@ async fn collect_program_stats(
     };
 
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
-    let mut processed_epochs = load_progress(&parts_dir).await?;
+    let mut processed_epochs: AHashSet<u64> = load_progress(&parts_dir).await?;
     let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
 
     let mut last_processed_slot = 0u64;
@@ -1338,33 +1350,30 @@ fn metadata_bytes<'a>(
     }
 }
 
-fn extend_with_loaded_addresses(dest: &mut Vec<Pubkey>, addrs: &[Vec<u8>]) {
+fn extend_with_loaded_addresses(dest: &mut Vec<[u8; 32]>, addrs: &[Vec<u8>]) {
     for addr in addrs {
         if addr.len() == 32 {
             let mut bytes = [0u8; 32];
             bytes.copy_from_slice(addr);
-            dest.push(Pubkey::new_from_array(bytes));
+            dest.push(bytes);
         }
     }
 }
 
-fn decode_transaction_meta(bytes: &[u8]) -> Option<TransactionStatusMeta> {
+fn decode_transaction_meta(bytes: &[u8], scratch: &mut Vec<u8>) -> Option<TransactionStatusMeta> {
     if bytes.is_empty() {
         return None;
     }
 
-    let raw = if is_zstd(bytes) {
-        match zstd::decode_all(bytes) {
-            Ok(data) => data,
-            Err(_) => return None,
+    if is_zstd(bytes) {
+        scratch.clear();
+        let mut decoder = zstd::Decoder::new(bytes).ok()?;
+        if decoder.read_to_end(scratch).is_err() {
+            return None;
         }
+        TransactionStatusMeta::decode(scratch.as_slice()).ok()
     } else {
-        bytes.to_vec()
-    };
-
-    match TransactionStatusMeta::decode(raw.as_slice()) {
-        Ok(meta) => Some(meta),
-        Err(_) => None,
+        TransactionStatusMeta::decode(bytes).ok()
     }
 }
 
