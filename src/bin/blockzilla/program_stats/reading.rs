@@ -1,7 +1,7 @@
 use super::{
     PROGRAM_USAGE_EXPORT_VERSION, PROGRESS_FILE_NAME, ProgramStatsProgress, ProgramUsageEpochPart,
-    ProgramUsageEpochPartV1, ProgramUsageExport, ProgramUsagePartsPreference, ProgramUsageRecord,
-    ProgramUsageStats, Result,
+    ProgramUsageEpochPartV0, ProgramUsageEpochPartV1, ProgramUsageExport, ProgramUsageExportV0,
+    ProgramUsagePartsPreference, ProgramUsageRecord, ProgramUsageStats, Result,
 };
 use ahash::{AHashMap, AHashSet};
 use anyhow::anyhow;
@@ -14,19 +14,57 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+fn convert_epoch_part_v1(legacy: ProgramUsageEpochPartV1) -> ProgramUsageEpochPart {
+    ProgramUsageEpochPart {
+        epoch: legacy.epoch,
+        last_slot: legacy.last_slot,
+        last_blocktime: None,
+        records: legacy.records,
+    }
+}
+
+fn convert_epoch_part_v0(legacy: ProgramUsageEpochPartV0) -> ProgramUsageEpochPart {
+    ProgramUsageEpochPart {
+        epoch: legacy.epoch,
+        last_slot: legacy.last_slot,
+        last_blocktime: None,
+        records: legacy.records,
+    }
+}
+
+fn decode_program_usage_export(bytes: &[u8]) -> Result<ProgramUsageExport> {
+    if let Ok(export) = wincode::deserialize::<ProgramUsageExport>(bytes) {
+        return Ok(export);
+    }
+
+    let legacy = wincode::deserialize::<ProgramUsageExportV0>(bytes)?;
+    Ok(ProgramUsageExport {
+        version: legacy.version,
+        start_epoch: legacy.start_epoch,
+        start_slot: legacy.start_slot,
+        top_level_only: legacy.top_level_only,
+        processed_epochs: legacy.processed_epochs,
+        aggregated: legacy.aggregated,
+        epochs: legacy
+            .epochs
+            .into_iter()
+            .map(convert_epoch_part_v0)
+            .collect(),
+    })
+}
+
 pub(super) fn decode_epoch_part(bytes: &[u8]) -> Result<ProgramUsageEpochPart> {
     fn decode_slice(bytes: &[u8]) -> Result<ProgramUsageEpochPart> {
         if let Ok(part) = wincode::deserialize::<ProgramUsageEpochPart>(bytes) {
             return Ok(part);
         }
 
-        let legacy = wincode::deserialize::<ProgramUsageEpochPartV1>(bytes)?;
-        Ok(ProgramUsageEpochPart {
-            epoch: legacy.epoch,
-            last_slot: legacy.last_slot,
-            last_blocktime: None,
-            records: legacy.records,
-        })
+        if let Ok(legacy) = wincode::deserialize::<ProgramUsageEpochPartV1>(bytes) {
+            return Ok(convert_epoch_part_v1(legacy));
+        }
+
+        let legacy = wincode::deserialize::<ProgramUsageEpochPartV0>(bytes)?;
+        Ok(convert_epoch_part_v0(legacy))
     }
 
     if is_zstd(bytes) {
@@ -84,7 +122,7 @@ pub(super) async fn load_program_usage_export(
 ) -> Result<ProgramUsageExport> {
     match fs::read(input_path).await {
         Ok(data) => {
-            let export: ProgramUsageExport = wincode::deserialize(&data)?;
+            let export = decode_program_usage_export(&data)?;
             if export.version != PROGRAM_USAGE_EXPORT_VERSION {
                 return Err(anyhow!(
                     "unsupported program usage export version {}",
