@@ -23,6 +23,17 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use wincode::Deserialize as _;
 
+fn emit_progress(pb: &ProgressBar, message: String, tick: bool) {
+    if pb.is_hidden() {
+        tracing::info!("{message}");
+    } else {
+        pb.set_message(message);
+        if tick {
+            pb.tick();
+        }
+    }
+}
+
 async fn process_epoch(
     epoch: u64,
     cache_dir: &str,
@@ -89,22 +100,19 @@ async fn process_epoch(
                 0
             };
 
-            if !pb.is_hidden() {
-                msg_buf.clear();
-                write!(
-                    &mut msg_buf,
-                    "E{:04} | {} blk | {:.0} blk/s | {:.1} MB/s | {} TPS | {} programs",
-                    epoch,
-                    metrics.blocks_scanned,
-                    blk_s,
-                    mb_s,
-                    tps,
-                    epoch_stats.len()
-                )
-                .unwrap();
-                pb.set_message(msg_buf.clone());
-                pb.tick();
-            }
+            msg_buf.clear();
+            write!(
+                &mut msg_buf,
+                "E{:04} | {} blk | {:.0} blk/s | {:.1} MB/s | {} TPS | {} programs",
+                epoch,
+                metrics.blocks_scanned,
+                blk_s,
+                mb_s,
+                tps,
+                epoch_stats.len()
+            )
+            .unwrap();
+            emit_progress(pb, msg_buf.clone(), true);
         }
 
         // Compute block size once
@@ -990,9 +998,7 @@ async fn collect_program_stats(
         start_epoch, start_slot, last_epoch
     )
     .unwrap();
-    if !pb.is_hidden() {
-        pb.set_message(msg_buf.clone());
-    }
+    emit_progress(&pb, msg_buf.clone(), false);
 
     let mut last_epoch_processed = processed_epochs.iter().copied().max();
 
@@ -1006,10 +1012,7 @@ async fn collect_program_stats(
     for epoch in start_epoch..=last_epoch {
         if processed_epochs.contains(&epoch) {
             let msg = format!("skipping epoch {epoch:04} (already cached)");
-            if !pb.is_hidden() {
-                pb.set_message(msg);
-                pb.tick();
-            }
+            emit_progress(&pb, msg, true);
             last_epoch_processed = Some(last_epoch_processed.map_or(epoch, |cur| cur.max(epoch)));
             continue;
         }
@@ -1117,10 +1120,7 @@ async fn collect_program_stats(
             )
             .unwrap();
 
-            if !pb.is_hidden() {
-                pb.set_message(msg_buf.clone());
-                pb.tick();
-            }
+            emit_progress(&pb, msg_buf.clone(), true);
         }
     }
 
@@ -1327,9 +1327,7 @@ async fn collect_program_stats_par(
         start_epoch, start_slot, last_epoch
     )
     .unwrap();
-    if !pb.is_hidden() {
-        pb.set_message(msg_buf.clone());
-    }
+    emit_progress(&pb, msg_buf.clone(), false);
 
     let mut last_epoch_processed = processed_epochs.iter().copied().max();
 
@@ -1343,10 +1341,7 @@ async fn collect_program_stats_par(
     for epoch in start_epoch..=last_epoch {
         if processed_epochs.contains(&epoch) {
             let msg = format!("skipping epoch {epoch:04} (already cached)");
-            if !pb.is_hidden() {
-                pb.set_message(msg);
-                pb.tick();
-            }
+            emit_progress(&pb, msg, true);
             last_epoch_processed = Some(last_epoch_processed.map_or(epoch, |cur| cur.max(epoch)));
             continue;
         }
@@ -1451,10 +1446,7 @@ async fn collect_program_stats_par(
             )
             .unwrap();
 
-            if !pb.is_hidden() {
-                pb.set_message(msg_buf.clone());
-                pb.tick();
-            }
+            emit_progress(&pb, msg_buf.clone(), true);
 
             if let Some((epoch, min_slot)) = pending.next() {
                 spawn_epoch(&mut join_set, epoch, min_slot);
