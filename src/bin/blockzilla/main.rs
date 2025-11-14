@@ -280,12 +280,6 @@ enum StatsCommand {
         output: PathBuf,
         #[arg(
             long,
-            value_name = "LIMIT",
-            help = "Limit number of programs written to output"
-        )]
-        limit: Option<usize>,
-        #[arg(
-            long,
             help = "Only count top-level program instructions (skip metadata and inner instructions)"
         )]
         top_level_only: bool,
@@ -551,7 +545,6 @@ async fn main() -> Result<()> {
                 start_slot,
                 cache_dir,
                 output,
-                limit,
                 top_level_only,
             } => {
                 program_stats::dump_program_stats(
@@ -559,7 +552,6 @@ async fn main() -> Result<()> {
                     start_slot,
                     &cache_dir,
                     &output,
-                    limit,
                     top_level_only,
                 )
                 .await?;

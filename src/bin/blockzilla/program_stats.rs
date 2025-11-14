@@ -519,7 +519,7 @@ async fn process_epoch(
                         continue;
                     }
                     let program_key = resolved_keys[program_idx].to_bytes();
-                    
+
                     epoch_stats
                         .entry(program_key)
                         .or_insert_with(ProgramUsageStats::default)
@@ -545,7 +545,7 @@ async fn process_epoch(
                                 continue;
                             }
                             let program_key = resolved_keys[program_idx].to_bytes();
-                            
+
                             epoch_stats
                                 .entry(program_key)
                                 .or_insert_with(ProgramUsageStats::default)
@@ -1012,7 +1012,6 @@ pub async fn dump_program_stats(
     start_slot: u64,
     cache_dir: &str,
     output_path: &Path,
-    limit: Option<usize>,
     top_level_only: bool,
 ) -> Result<()> {
     let collection = collect_program_stats(
@@ -1031,10 +1030,7 @@ pub async fn dump_program_stats(
         }
     }
 
-    let mut aggregated = collection.aggregated;
-    let limit = limit.unwrap_or(aggregated.len());
-    aggregated.truncate(limit);
-
+    let aggregated = collection.aggregated;
     let program_order = aggregated
         .iter()
         .enumerate()
