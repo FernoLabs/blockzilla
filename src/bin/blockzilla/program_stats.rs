@@ -15,8 +15,11 @@ use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
 use std::io::{ErrorKind, IsTerminal, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use wincode::Deserialize as _;
 use wincode::{SchemaRead, SchemaWrite};
 
@@ -773,6 +776,387 @@ async fn process_epoch(
     })
 }
 
+struct WorkerEpochResult {
+    pub stats: AHashMap<[u8; 32], ProgramUsageStats>,
+    pub metrics: EpochMetrics,
+    pub last_slot: u64,
+    pub last_blocktime: Option<i64>,
+    pub decode_errors: u64,
+}
+
+async fn process_epoch_par(
+    epoch: u64,
+    cache_dir: &str,
+    parts_dir: &Path,
+    top_level_only: bool,
+    min_slot: u64,
+    jobs: usize,
+) -> Result<EpochProcessSummary> {
+    let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
+        .await
+        .with_context(|| format!("failed to open epoch {epoch:04}"))?;
+    let mut car = CarBlockReader::new(reader);
+    car.read_header().await?;
+
+    let (tx, rx) = mpsc::channel::<CarBlock>(jobs * 2);
+    let rx = Arc::new(Mutex::new(rx));
+
+    let mut handles: Vec<JoinHandle<Result<WorkerEpochResult>>> = Vec::with_capacity(jobs);
+
+    for _ in 0..jobs {
+        let rx = Arc::clone(&rx);
+
+        let handle = tokio::spawn(async move {
+            let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> =
+                AHashMap::with_capacity(4096);
+
+            let mut metrics = EpochMetrics::default();
+            let mut last_slot = 0u64;
+            let mut last_blocktime: Option<i64> = None;
+            let mut decode_errors = 0u64;
+
+            let mut buf_tx = Vec::with_capacity(128 * 1024);
+            let mut buf_meta_df = Vec::with_capacity(64 * 1024);
+            let mut meta_scratch = Vec::with_capacity(64 * 1024);
+            let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
+            let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
+
+            loop {
+                let block = {
+                    let mut guard = rx.lock().await;
+                    match guard.recv().await {
+                        Some(b) => b,
+                        None => break,
+                    }
+                };
+
+                let block_bytes = block
+                    .entries
+                    .iter()
+                    .map(|entry| entry.len())
+                    .sum::<usize>() as u64;
+                metrics.bytes_count += block_bytes;
+
+                let slot = match peek_block_slot(&block) {
+                    Ok(slot) => slot,
+                    Err(_) => {
+                        decode_errors += 1;
+                        continue;
+                    }
+                };
+
+                if slot < min_slot {
+                    continue;
+                }
+
+                if slot > last_slot {
+                    last_slot = slot;
+                }
+
+                let block_node = match block.block() {
+                    Ok(node) => node,
+                    Err(_) => {
+                        decode_errors += 1;
+                        continue;
+                    }
+                };
+
+                if let Some(blocktime) = block_node.meta.blocktime {
+                    last_blocktime = Some(last_blocktime.map_or(blocktime, |cur| cur.max(blocktime)));
+                }
+
+                for entry_cid_res in block_node.entries.iter() {
+                    let entry_cid = match entry_cid_res {
+                        Ok(cid) => cid,
+                        Err(_) => {
+                            decode_errors += 1;
+                            continue;
+                        }
+                    };
+
+                    let entry = match block.decode(entry_cid.hash_bytes()) {
+                        Ok(Node::Entry(entry)) => entry,
+                        Ok(_) => continue,
+                        Err(_) => {
+                            decode_errors += 1;
+                            continue;
+                        }
+                    };
+
+                    for tx_cid_res in entry.transactions.iter() {
+                        let tx_cid = match tx_cid_res {
+                            Ok(cid) => cid,
+                            Err(_) => {
+                                decode_errors += 1;
+                                continue;
+                            }
+                        };
+
+                        let tx_node = match block.decode(tx_cid.hash_bytes()) {
+                            Ok(Node::Transaction(tx_node)) => tx_node,
+                            Ok(_) => continue,
+                            Err(_) => {
+                                decode_errors += 1;
+                                continue;
+                            }
+                        };
+
+                        let tx_bytes_slice =
+                            match transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                                Ok(bytes) => bytes,
+                                Err(_) => {
+                                    decode_errors += 1;
+                                    continue;
+                                }
+                            };
+
+                        metrics.txs_seen += 1;
+
+                        if let Err(_) = VersionedTransaction::deserialize_into(
+                            tx_bytes_slice,
+                            &mut reusable_tx,
+                        ) {
+                            decode_errors += 1;
+                            continue;
+                        }
+
+                        let tx_ref = unsafe { reusable_tx.assume_init_ref() };
+
+                        // tx_count: +1 per static account key
+                        for key in tx_ref.message.static_account_keys() {
+                            let program_key: [u8; 32] = *key;
+                            let entry = epoch_stats
+                                .entry(program_key)
+                                .or_insert_with(ProgramUsageStats::default);
+                            entry.tx_count += 1;
+                        }
+
+                        // Build resolved_keys
+                        resolved_keys.clear();
+                        resolved_keys.reserve(
+                            tx_ref.message.static_account_keys().len()
+                                + if top_level_only { 0 } else { 16 },
+                        );
+                        for key in tx_ref.message.static_account_keys() {
+                            resolved_keys.push(*key);
+                        }
+
+                        if top_level_only {
+                            // Top-level only
+                            for ix in tx_ref.message.instructions_iter() {
+                                let program_idx = ix.program_id_index as usize;
+                                if program_idx >= resolved_keys.len() {
+                                    continue;
+                                }
+                                let program_key = resolved_keys[program_idx];
+
+                                let entry = epoch_stats
+                                    .entry(program_key)
+                                    .or_insert_with(ProgramUsageStats::default);
+                                entry.instruction_count += 1;
+
+                                metrics.instructions_seen += 1;
+                            }
+                        } else {
+                            // Full mode with inner instructions
+                            let inner_instruction_groups =
+                                match metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
+                                    Ok(meta_bytes) => decode_transaction_meta(
+                                        meta_bytes,
+                                        &mut meta_scratch,
+                                    )
+                                    .and_then(|meta| {
+                                        extend_with_loaded_addresses(
+                                            &mut resolved_keys,
+                                            &meta.loaded_writable_addresses,
+                                        );
+                                        extend_with_loaded_addresses(
+                                            &mut resolved_keys,
+                                            &meta.loaded_readonly_addresses,
+                                        );
+
+                                        if !meta.inner_instructions_none
+                                            && !meta.inner_instructions.is_empty()
+                                        {
+                                            Some(meta.inner_instructions)
+                                        } else {
+                                            None
+                                        }
+                                    }),
+                                    Err(_) => None,
+                                };
+
+                            // Top-level
+                            for ix in tx_ref.message.instructions_iter() {
+                                let program_idx = ix.program_id_index as usize;
+                                if program_idx >= resolved_keys.len() {
+                                    continue;
+                                }
+                                let program_key = resolved_keys[program_idx];
+
+                                let entry = epoch_stats
+                                    .entry(program_key)
+                                    .or_insert_with(ProgramUsageStats::default);
+                                entry.instruction_count += 1;
+
+                                metrics.instructions_seen += 1;
+                            }
+
+                            // Inner
+                            if let Some(groups) = inner_instruction_groups.as_ref() {
+                                for group in groups {
+                                    for inner_ix in group.instructions.iter() {
+                                        let program_idx = inner_ix.program_id_index as usize;
+                                        if program_idx >= resolved_keys.len() {
+                                            continue;
+                                        }
+                                        let program_key = resolved_keys[program_idx];
+
+                                        let entry = epoch_stats
+                                            .entry(program_key)
+                                            .or_insert_with(
+                                                ProgramUsageStats::default,
+                                            );
+                                        entry.inner_instruction_count += 1;
+
+                                        metrics.inner_instructions_seen += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        unsafe {
+                            std::ptr::drop_in_place(reusable_tx.as_mut_ptr());
+                        }
+                    }
+                }
+
+                metrics.blocks_scanned += 1;
+            }
+
+            Ok(WorkerEpochResult {
+                stats: epoch_stats,
+                metrics,
+                last_slot,
+                last_blocktime,
+                decode_errors,
+            })
+        });
+
+        handles.push(handle);
+    }
+
+    let epoch_start = Instant::now();
+    let mut last_log = epoch_start;
+    let mut blocks_sent = 0u64;
+    let mut bytes_sent = 0u64;
+
+    while let Some(block) = car.next_block().await? {
+        bytes_sent += block
+            .entries
+            .iter()
+            .map(|entry| entry.len())
+            .sum::<usize>() as u64;
+        blocks_sent += 1;
+
+        if tx.send(block).await.is_err() {
+            break;
+        }
+
+        let now = Instant::now();
+        if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+            last_log = now;
+            let elapsed = now.duration_since(epoch_start);
+            let secs = elapsed.as_secs_f64().max(1e-6);
+            let blk_s = blocks_sent as f64 / secs;
+            let mb_s = (bytes_sent as f64 / (1024.0 * 1024.0)) / secs;
+
+            tracing::info!(
+                "epoch {:04} | sent {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
+                epoch,
+                blocks_sent,
+                blk_s,
+                mb_s
+            );
+        }
+    }
+
+    drop(tx);
+
+    let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> =
+        AHashMap::with_capacity(4096);
+    let mut metrics = EpochMetrics::default();
+    let mut epoch_last_slot = 0u64;
+    let mut epoch_last_blocktime: Option<i64> = None;
+    let mut decode_errors_total = 0u64;
+
+    for handle in handles {
+        let worker = handle
+            .await
+            .map_err(|e| anyhow!("worker join error: {e}"))??;
+
+        for (program, stats) in worker.stats.into_iter() {
+            epoch_stats
+                .entry(program)
+                .or_insert_with(ProgramUsageStats::default)
+                .accumulate(&stats);
+        }
+
+        metrics.blocks_scanned += worker.metrics.blocks_scanned;
+        metrics.txs_seen += worker.metrics.txs_seen;
+        metrics.instructions_seen += worker.metrics.instructions_seen;
+        metrics.inner_instructions_seen += worker.metrics.inner_instructions_seen;
+        metrics.bytes_count += worker.metrics.bytes_count;
+
+        if worker.last_slot > epoch_last_slot {
+            epoch_last_slot = worker.last_slot;
+        }
+
+        if let Some(bt) = worker.last_blocktime {
+            epoch_last_blocktime = Some(epoch_last_blocktime.map_or(bt, |cur| cur.max(bt)));
+        }
+
+        decode_errors_total += worker.decode_errors;
+    }
+
+    if decode_errors_total > 0 {
+        tracing::warn!("epoch {epoch:04} had {decode_errors_total} decode errors (parallel)");
+    }
+
+    fs::create_dir_all(parts_dir).await?;
+    let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
+    let tmp_path = part_path.with_extension("bin.tmp");
+
+    let mut records: Vec<ProgramUsageRecord> = epoch_stats
+        .into_iter()
+        .map(|(program, stats)| ProgramUsageRecord { program, stats })
+        .collect();
+    records.sort_unstable_by(|a, b| {
+        b.stats
+            .instruction_count
+            .cmp(&a.stats.instruction_count)
+    });
+
+    let epoch_dump = ProgramUsageEpochPart {
+        epoch,
+        last_slot: epoch_last_slot,
+        last_blocktime: epoch_last_blocktime,
+        records: records.clone(),
+    };
+    let encoded_epoch = wincode::serialize(&epoch_dump)?;
+    fs::write(&tmp_path, &encoded_epoch).await?;
+    fs::rename(&tmp_path, &part_path).await?;
+
+    Ok(EpochProcessSummary {
+        epoch,
+        last_slot: epoch_last_slot,
+        last_blocktime: epoch_last_blocktime,
+        records,
+        per_block: None,
+        metrics,
+    })
+}
+
 async fn collect_program_stats(
     start_epoch: u64,
     start_slot: u64,
@@ -1114,6 +1498,324 @@ async fn collect_program_stats(
     })
 }
 
+async fn collect_program_stats_par(
+    start_epoch: u64,
+    start_slot: u64,
+    cache_dir: &str,
+    output_path: &Path,
+    top_level_only: bool,
+    jobs: usize,
+) -> Result<ProgramStatsCollection> {
+    let cache_path = Path::new(cache_dir);
+    let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
+        return Err(anyhow!(
+            "no cached epochs found in {}",
+            cache_path.display()
+        ));
+    };
+
+    if start_epoch > last_epoch {
+        return Err(anyhow!(
+            "start epoch {start_epoch:04} is beyond last cached epoch {last_epoch:04}"
+        ));
+    }
+
+    let parts_dir = if top_level_only {
+        output_path.with_extension("parts.top_level")
+    } else {
+        output_path.with_extension("parts")
+    };
+
+    let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> =
+        AHashMap::with_capacity(16_384);
+    let mut processed_epochs: AHashSet<u64> = load_progress(&parts_dir).await?;
+    let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> =
+        AHashMap::with_capacity(256);
+
+    let mut last_processed_slot = 0u64;
+    let mut epoch_last_slots: AHashMap<u64, u64> = AHashMap::with_capacity(256);
+
+    // load cached parts
+    if let Ok(mut rd) = fs::read_dir(&parts_dir).await {
+        let mut part_entries: Vec<(u64, PathBuf)> = Vec::new();
+        while let Some(entry) = rd.next_entry().await? {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(epoch_str) = name
+                .strip_prefix("epoch-")
+                .and_then(|s| s.strip_suffix(".bin"))
+            else {
+                continue;
+            };
+            let Ok(epoch) = epoch_str.parse::<u64>() else {
+                continue;
+            };
+            part_entries.push((epoch, entry.path()));
+        }
+        part_entries.sort_unstable_by_key(|(epoch, _)| *epoch);
+
+        for (epoch, path) in part_entries {
+            if epoch < start_epoch || epoch > last_epoch {
+                continue;
+            }
+
+            let data = match fs::read(&path).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to read cached epoch stats {}: {}",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let part = match decode_epoch_part(&data) {
+                Ok(part) => part,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to decode cached epoch stats {}: {}",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            for record in part.records.iter() {
+                aggregated
+                    .entry(record.program)
+                    .or_insert_with(ProgramUsageStats::default)
+                    .accumulate(&record.stats);
+            }
+
+            processed_epochs.insert(part.epoch);
+            epoch_last_slots.insert(part.epoch, part.last_slot);
+            epoch_summaries.insert(part.epoch, part.clone());
+            if part.epoch == start_epoch {
+                last_processed_slot = part.last_slot;
+            }
+        }
+    }
+
+    persist_progress(&parts_dir, &processed_epochs).await?;
+
+    let draw_target = if std::io::stdout().is_terminal() {
+        ProgressDrawTarget::stderr_with_hz(8)
+    } else {
+        ProgressDrawTarget::hidden()
+    };
+    let pb = ProgressBar::with_draw_target(Some(0), draw_target);
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
+    pb.enable_steady_tick(Duration::from_millis(120));
+
+    let start = Instant::now();
+
+    let mut blocks_scanned = 0u64;
+    let mut txs_seen = 0u64;
+    let mut instructions_seen = 0u64;
+    let mut inner_instructions_seen = 0u64;
+    let mut bytes_count = 0u64;
+
+    let mut msg_buf = String::with_capacity(256);
+    write!(
+        &mut msg_buf,
+        "starting program stats (par) | start_epoch={:04} start_slot={} | scanning up to {:04}",
+        start_epoch, start_slot, last_epoch
+    )
+    .unwrap();
+    if !pb.is_hidden() {
+        pb.set_message(msg_buf.clone());
+    }
+
+    let mut last_epoch_processed = processed_epochs.iter().copied().max();
+
+    let start_epoch_min_slot = if processed_epochs.contains(&start_epoch) {
+        0
+    } else {
+        start_slot
+    };
+
+    let mut epochs_to_process: Vec<(u64, u64)> = Vec::new();
+    for epoch in start_epoch..=last_epoch {
+        if processed_epochs.contains(&epoch) {
+            let msg = format!("skipping epoch {epoch:04} (already cached)");
+            if !pb.is_hidden() {
+                pb.set_message(msg);
+                pb.tick();
+            }
+            last_epoch_processed = Some(last_epoch_processed.map_or(epoch, |cur| cur.max(epoch)));
+            continue;
+        }
+
+        let min_slot = if epoch == start_epoch {
+            start_epoch_min_slot
+        } else {
+            0
+        };
+        epochs_to_process.push((epoch, min_slot));
+    }
+
+    if !epochs_to_process.is_empty() {
+        for (epoch, min_slot) in epochs_to_process {
+            let summary = process_epoch_par(
+                epoch,
+                cache_dir,
+                &parts_dir,
+                top_level_only,
+                min_slot,
+                jobs,
+            )
+            .await?;
+
+            let EpochProcessSummary {
+                epoch: summary_epoch,
+                last_slot: summary_last_slot,
+                last_blocktime: summary_last_blocktime,
+                records: summary_records,
+                per_block: _,
+                metrics: summary_metrics,
+            } = summary;
+
+            bytes_count += summary_metrics.bytes_count;
+            blocks_scanned += summary_metrics.blocks_scanned;
+            txs_seen += summary_metrics.txs_seen;
+            instructions_seen += summary_metrics.instructions_seen;
+            inner_instructions_seen += summary_metrics.inner_instructions_seen;
+
+            for record in summary_records.iter() {
+                aggregated
+                    .entry(record.program)
+                    .or_insert_with(ProgramUsageStats::default)
+                    .accumulate(&record.stats);
+            }
+
+            processed_epochs.insert(summary_epoch);
+            epoch_last_slots.insert(summary_epoch, summary_last_slot);
+            epoch_summaries.insert(
+                summary_epoch,
+                ProgramUsageEpochPart {
+                    epoch: summary_epoch,
+                    last_slot: summary_last_slot,
+                    last_blocktime: summary_last_blocktime,
+                    records: summary_records,
+                },
+            );
+            persist_progress(&parts_dir, &processed_epochs).await?;
+            last_epoch_processed =
+                Some(last_epoch_processed.map_or(summary_epoch, |cur| cur.max(summary_epoch)));
+
+            msg_buf.clear();
+            let elapsed = start.elapsed();
+            let secs = elapsed.as_secs_f64().max(1e-6);
+            let blk_s = blocks_scanned as f64 / secs;
+            let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+            let tps = if elapsed.as_secs() > 0 {
+                txs_seen / elapsed.as_secs()
+            } else {
+                0
+            };
+
+            write!(
+                &mut msg_buf,
+                "[par] epoch {:04} done | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
+                summary_epoch,
+                summary_metrics.blocks_scanned,
+                blk_s,
+                mb_s,
+                tps,
+                summary_metrics.instructions_seen,
+                summary_metrics.inner_instructions_seen
+            )
+            .unwrap();
+
+            if !pb.is_hidden() {
+                pb.set_message(msg_buf.clone());
+                pb.tick();
+            }
+        }
+    }
+
+    let Some(last_epoch_processed) = last_epoch_processed else {
+        return Err(anyhow!(
+            "no epochs processed between {start_epoch:04} and {last_epoch:04}"
+        ));
+    };
+
+    if let Some(slot) = epoch_last_slots.get(&last_epoch_processed) {
+        last_processed_slot = *slot;
+    }
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let mut aggregated_records: Vec<ProgramUsageRecord> = aggregated
+        .into_iter()
+        .map(|(program, stats)| ProgramUsageRecord { program, stats })
+        .collect();
+    aggregated_records
+        .sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
+
+    let elapsed = start.elapsed();
+    let secs = elapsed.as_secs_f64().max(1e-6);
+    let blk_s = blocks_scanned as f64 / secs;
+    let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+    let tps = if elapsed.as_secs() > 0 {
+        txs_seen / elapsed.as_secs()
+    } else {
+        0
+    };
+
+    let range_label = if start_epoch == last_epoch_processed {
+        format!("epoch {start_epoch:04}")
+    } else {
+        format!("epochs {start_epoch:04}-{last_epoch_processed:04}")
+    };
+
+    let final_line = format!(
+        "[par] {range_label} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={} txs={}",
+        blocks_scanned,
+        blk_s,
+        mb_s,
+        tps,
+        instructions_seen,
+        inner_instructions_seen,
+        txs_seen
+    );
+
+    if pb.is_hidden() {
+        tracing::info!("{final_line}");
+    } else {
+        pb.finish_and_clear();
+        eprintln!("{final_line}");
+    }
+
+    let mut per_epoch: Vec<ProgramUsageEpochPart> = epoch_summaries.into_values().collect();
+    per_epoch.sort_unstable_by_key(|part| part.epoch);
+
+    let mut processed_epochs_list: Vec<u64> = processed_epochs.into_iter().collect();
+    processed_epochs_list.sort_unstable();
+
+    Ok(ProgramStatsCollection {
+        aggregated: aggregated_records,
+        per_block: None,
+        per_epoch,
+        processed_epochs: processed_epochs_list,
+    })
+}
+
 pub async fn dump_program_stats(
     start_epoch: u64,
     start_slot: u64,
@@ -1128,6 +1830,68 @@ pub async fn dump_program_stats(
         output_path,
         false,
         top_level_only,
+    )
+    .await?;
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let aggregated = collection.aggregated;
+    let program_order = aggregated
+        .iter()
+        .enumerate()
+        .map(|(idx, record)| (record.program, idx))
+        .collect::<AHashMap<_, _>>();
+
+    let mut per_epoch = collection.per_epoch;
+    for epoch in per_epoch.iter_mut() {
+        epoch
+            .records
+            .retain(|record| program_order.contains_key(&record.program));
+        epoch.records.sort_unstable_by_key(|record| {
+            program_order
+                .get(&record.program)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    let export = ProgramUsageExport {
+        version: PROGRAM_USAGE_EXPORT_VERSION,
+        start_epoch,
+        start_slot,
+        top_level_only,
+        processed_epochs: collection.processed_epochs,
+        aggregated,
+        epochs: per_epoch,
+    };
+
+    let encoded = wincode::serialize(&export)?;
+    let tmp_path = output_path.with_extension("tmp");
+    fs::write(&tmp_path, &encoded).await?;
+    fs::rename(&tmp_path, output_path).await?;
+
+    Ok(())
+}
+
+pub async fn dump_program_stats_par(
+    start_epoch: u64,
+    start_slot: u64,
+    cache_dir: &str,
+    output_path: &Path,
+    top_level_only: bool,
+    jobs: usize,
+) -> Result<()> {
+    let collection = collect_program_stats_par(
+        start_epoch,
+        start_slot,
+        cache_dir,
+        output_path,
+        top_level_only,
+        jobs,
     )
     .await?;
 
