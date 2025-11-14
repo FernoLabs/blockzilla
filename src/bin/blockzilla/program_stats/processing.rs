@@ -13,6 +13,7 @@ use blockzilla::{
     transaction_parser::VersionedTransaction,
 };
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use smallvec::SmallVec;
 use std::fmt::Write as FmtWrite;
 use std::io::{IsTerminal, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -50,6 +51,7 @@ async fn process_epoch(
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
 
+    // Per-epoch aggregated stats keyed by program id
     let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
     let mut epoch_last_slot = 0u64;
     let mut epoch_last_blocktime = None;
@@ -83,6 +85,9 @@ async fn process_epoch(
     // raw 32-byte keys (static + loaded)
     let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
     let mut msg_buf = String::with_capacity(256);
+
+    // per-tx unique program ids
+    let mut tx_programs: SmallVec<[[u8; 32]; 16]> = SmallVec::new();
 
     // Error counters (log once at end instead of spamming)
     let mut decode_errors = 0u64;
@@ -205,26 +210,14 @@ async fn process_epoch(
 
                 let message = &tx.message;
 
-                // tx_count: +1 per static account key
-                for key in message.static_account_keys() {
-                    let program_key: [u8; 32] = *key;
-                    let entry = epoch_stats
-                        .entry(program_key)
-                        .or_insert_with(ProgramUsageStats::default);
-                    entry.tx_count += 1;
-
-                    if let Some(map) = per_block_map.as_mut() {
-                        map.entry(program_key)
-                            .or_insert_with(ProgramUsageStats::default)
-                            .tx_count += 1;
-                    }
-                }
-
                 // Build resolved_keys: static only by default
                 let static_keys = message.static_account_keys();
                 resolved_keys.clear();
                 resolved_keys.reserve(static_keys.len() + if top_level_only { 0 } else { 16 });
                 resolved_keys.extend_from_slice(static_keys);
+
+                // Track per-tx unique program ids
+                tx_programs.clear();
 
                 if top_level_only {
                     // Top level only, no metadata, no inner instructions
@@ -244,6 +237,10 @@ async fn process_epoch(
                             map.entry(program_key)
                                 .or_insert_with(ProgramUsageStats::default)
                                 .instruction_count += 1;
+                        }
+
+                        if !tx_programs.iter().any(|k| *k == program_key) {
+                            tx_programs.push(program_key);
                         }
 
                         metrics.instructions_seen += 1;
@@ -295,6 +292,10 @@ async fn process_epoch(
                                 .instruction_count += 1;
                         }
 
+                        if !tx_programs.iter().any(|k| *k == program_key) {
+                            tx_programs.push(program_key);
+                        }
+
                         metrics.instructions_seen += 1;
                     }
 
@@ -319,8 +320,28 @@ async fn process_epoch(
                                         .inner_instruction_count += 1;
                                 }
 
+                                if !tx_programs.iter().any(|k| *k == program_key) {
+                                    tx_programs.push(program_key);
+                                }
+
                                 metrics.inner_instructions_seen += 1;
                             }
+                        }
+                    }
+                }
+
+                // Increment tx_count once per tx per program id used in that tx
+                if !tx_programs.is_empty() {
+                    for program_key in tx_programs.iter().copied() {
+                        let entry = epoch_stats
+                            .entry(program_key)
+                            .or_insert_with(ProgramUsageStats::default);
+                        entry.tx_count += 1;
+
+                        if let Some(map) = per_block_map.as_mut() {
+                            map.entry(program_key)
+                                .or_insert_with(ProgramUsageStats::default)
+                                .tx_count += 1;
                         }
                     }
                 }
@@ -528,6 +549,7 @@ async fn process_epoch_par(
                 AHashMap::with_capacity(4096);
             let mut stats_vec = Vec::with_capacity(4096);
             let mut block_count = 0u64;
+            let mut tx_programs: SmallVec<[[u8; 32]; 16]> = SmallVec::new();
 
             loop {
                 let block = {
@@ -661,20 +683,14 @@ async fn process_epoch_par(
                         };
                         let message = &tx.message;
 
-                        for key in message.static_account_keys() {
-                            let program_key: [u8; 32] = *key;
-                            let entry = block_stats
-                                .entry(program_key)
-                                .or_insert_with(ProgramUsageStats::default);
-                            entry.tx_count += 1;
-                        }
-
                         let static_keys = message.static_account_keys();
                         resolved_keys.clear();
                         resolved_keys.reserve(
                             static_keys.len() + if worker_top_level_only { 0 } else { 16 },
                         );
                         resolved_keys.extend_from_slice(static_keys);
+
+                        tx_programs.clear();
 
                         if worker_top_level_only {
                             for ix in message.instructions_iter() {
@@ -688,6 +704,10 @@ async fn process_epoch_par(
                                     .entry(program_key)
                                     .or_insert_with(ProgramUsageStats::default);
                                 entry.instruction_count += 1;
+
+                                if !tx_programs.iter().any(|k| *k == program_key) {
+                                    tx_programs.push(program_key);
+                                }
 
                                 block_metrics.instructions_seen += 1;
                             }
@@ -731,6 +751,10 @@ async fn process_epoch_par(
                                     .or_insert_with(ProgramUsageStats::default);
                                 entry.instruction_count += 1;
 
+                                if !tx_programs.iter().any(|k| *k == program_key) {
+                                    tx_programs.push(program_key);
+                                }
+
                                 block_metrics.instructions_seen += 1;
                             }
 
@@ -748,9 +772,23 @@ async fn process_epoch_par(
                                             .or_insert_with(ProgramUsageStats::default);
                                         entry.inner_instruction_count += 1;
 
+                                        if !tx_programs.iter().any(|k| *k == program_key) {
+                                            tx_programs.push(program_key);
+                                        }
+
                                         block_metrics.inner_instructions_seen += 1;
                                     }
                                 }
+                            }
+                        }
+
+                        // once per tx per program id
+                        if !tx_programs.is_empty() {
+                            for program_key in tx_programs.iter().copied() {
+                                let entry = block_stats
+                                    .entry(program_key)
+                                    .or_insert_with(ProgramUsageStats::default);
+                                entry.tx_count += 1;
                             }
                         }
                     }
