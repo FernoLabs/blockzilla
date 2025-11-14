@@ -623,8 +623,6 @@ async fn process_epoch(
                 metrics.inner_instructions_seen
             )
             .unwrap();
-
-            tracing::info!("{}", msg_buf);
         }
     }
 
