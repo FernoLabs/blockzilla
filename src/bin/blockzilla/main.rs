@@ -52,7 +52,12 @@ enum Commands {
         cache_dir: String,
         #[arg(short, long)]
         mode: FetchMode,
-        #[arg(short = 'j', long, default_value_t = 1)]
+        #[arg(
+            short = 'j',
+            long,
+            default_value_t = 1,
+            help = "Number of block-level workers (per-epoch concurrency is fixed)"
+        )]
         jobs: usize,
     },
 
@@ -230,7 +235,12 @@ enum OptimizeCommand {
         epoch: u64,
         #[arg(short, long, default_value = DEFAULT_OPTIMIZED_DIR)]
         input_dir: String,
-        #[arg(short = 'j', long, default_value_t = 1)]
+        #[arg(
+            short = 'j',
+            long,
+            default_value_t = 1,
+            help = "Number of block-level workers per epoch (epoch concurrency is fixed)"
+        )]
         jobs: usize,
     },
 
@@ -283,7 +293,12 @@ enum StatsCommand {
             help = "Only count top-level program instructions (skip metadata and inner instructions)"
         )]
         top_level_only: bool,
-        #[arg(short = 'j', long, default_value_t = 1)]
+        #[arg(
+            short = 'j',
+            long,
+            default_value_t = 1,
+            help = "Number of block-level workers per epoch (epoch concurrency is fixed)"
+        )]
         jobs: usize,
     },
     ProgramCsv {
