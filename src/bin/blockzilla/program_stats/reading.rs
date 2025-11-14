@@ -15,17 +15,28 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 pub(super) fn decode_epoch_part(bytes: &[u8]) -> Result<ProgramUsageEpochPart> {
-    if let Ok(part) = wincode::deserialize::<ProgramUsageEpochPart>(bytes) {
-        return Ok(part);
+    fn decode_slice(bytes: &[u8]) -> Result<ProgramUsageEpochPart> {
+        if let Ok(part) = wincode::deserialize::<ProgramUsageEpochPart>(bytes) {
+            return Ok(part);
+        }
+
+        let legacy = wincode::deserialize::<ProgramUsageEpochPartV1>(bytes)?;
+        Ok(ProgramUsageEpochPart {
+            epoch: legacy.epoch,
+            last_slot: legacy.last_slot,
+            last_blocktime: None,
+            records: legacy.records,
+        })
     }
 
-    let legacy = wincode::deserialize::<ProgramUsageEpochPartV1>(bytes)?;
-    Ok(ProgramUsageEpochPart {
-        epoch: legacy.epoch,
-        last_slot: legacy.last_slot,
-        last_blocktime: None,
-        records: legacy.records,
-    })
+    if is_zstd(bytes) {
+        let mut decoder = zstd::Decoder::new(bytes)?;
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)?;
+        return decode_slice(&decompressed);
+    }
+
+    decode_slice(bytes)
 }
 
 pub(super) async fn load_progress(parts_dir: &Path) -> Result<AHashSet<u64>> {
