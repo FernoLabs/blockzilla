@@ -305,6 +305,18 @@ enum StatsCommand {
             help = "Limit number of programs written to the CSV"
         )]
         limit: Option<usize>,
+        #[arg(
+            long,
+            conflicts_with = "include_inner",
+            help = "Read stats from <input>.parts.top_level instead of auto-detecting"
+        )]
+        top_level_only: bool,
+        #[arg(
+            long,
+            conflicts_with = "top_level_only",
+            help = "Read stats from <input>.parts and include inner instructions"
+        )]
+        include_inner: bool,
     },
 }
 
@@ -560,8 +572,18 @@ async fn main() -> Result<()> {
                 input,
                 output,
                 limit,
+                top_level_only,
+                include_inner,
             } => {
-                program_stats::dump_program_stats_csv(&input, &output, limit).await?;
+                let parts_preference = if top_level_only {
+                    program_stats::ProgramUsagePartsPreference::TopLevelOnly
+                } else if include_inner {
+                    program_stats::ProgramUsagePartsPreference::IncludeInner
+                } else {
+                    program_stats::ProgramUsagePartsPreference::Auto
+                };
+                program_stats::dump_program_stats_csv(&input, &output, limit, parts_preference)
+                    .await?;
             }
         },
     }
