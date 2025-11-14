@@ -283,6 +283,8 @@ enum StatsCommand {
             help = "Only count top-level program instructions (skip metadata and inner instructions)"
         )]
         top_level_only: bool,
+        #[arg(short = 'j', long, default_value_t = 1)]
+        jobs: usize,
     },
     ProgramCsv {
         #[arg(
@@ -558,15 +560,28 @@ async fn main() -> Result<()> {
                 cache_dir,
                 output,
                 top_level_only,
+                jobs,
             } => {
-                program_stats::dump_program_stats(
-                    start_epoch,
-                    start_slot,
-                    &cache_dir,
-                    &output,
-                    top_level_only,
-                )
-                .await?;
+                if jobs > 1 {
+                    program_stats::dump_program_stats_par(
+                        start_epoch,
+                        start_slot,
+                        &cache_dir,
+                        &output,
+                        top_level_only,
+                        jobs,
+                    )
+                    .await?;
+                } else {
+                    program_stats::dump_program_stats(
+                        start_epoch,
+                        start_slot,
+                        &cache_dir,
+                        &output,
+                        top_level_only,
+                    )
+                    .await?;
+                }
             }
             StatsCommand::ProgramCsv {
                 input,
