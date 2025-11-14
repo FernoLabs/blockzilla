@@ -1248,6 +1248,10 @@ async fn collect_program_stats_par(
     top_level_only: bool,
     jobs: usize,
 ) -> Result<ProgramStatsCollection> {
+    // Limit the number of concurrently processed epochs so that block-level worker count can
+    // be tuned independently of epoch-level parallelism.
+    const MAX_PAR_EPOCH_CONCURRENCY: usize = 4;
+
     let cache_path = Path::new(cache_dir);
     let Some(last_epoch) = reading::find_last_cached_epoch(cache_path).await? else {
         return Err(anyhow!(
@@ -1407,7 +1411,7 @@ async fn collect_program_stats_par(
 
     if !epochs_to_process.is_empty() {
         let total_epochs = epochs_to_process.len();
-        let max_inflight = std::cmp::min(total_epochs, std::cmp::max(2, jobs));
+        let max_inflight = std::cmp::min(total_epochs, MAX_PAR_EPOCH_CONCURRENCY);
         let mut pending = epochs_to_process.into_iter();
         let mut join_set: JoinSet<Result<EpochProcessSummary>> = JoinSet::new();
 
