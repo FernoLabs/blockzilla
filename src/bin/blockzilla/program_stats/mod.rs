@@ -71,9 +71,19 @@ mod program_usage_wincode {
         wincode::len::BincodeLen<{ PROGRAM_USAGE_RECORDS_PREALLOCATION_LIMIT }>,
     >;
 
+    pub type RecordVecShortU16 = wincode::containers::Vec<
+        wincode::containers::Elem<ProgramUsageRecord>,
+        wincode::len::short_vec::ShortU16Len,
+    >;
+
     pub type EpochVec = wincode::containers::Vec<
         wincode::containers::Elem<ProgramUsageEpochPart>,
         wincode::len::BincodeLen<{ PROGRAM_USAGE_EPOCHS_PREALLOCATION_LIMIT }>,
+    >;
+
+    pub type EpochVecShortU16 = wincode::containers::Vec<
+        wincode::containers::Elem<ProgramUsageEpochPartV0>,
+        wincode::len::short_vec::ShortU16Len,
     >;
 }
 
@@ -81,6 +91,14 @@ mod program_usage_wincode {
 struct ProgramUsageRecord {
     pub program: [u8; 32],
     pub stats: ProgramUsageStats,
+}
+
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
+struct ProgramUsageEpochPartV0 {
+    pub epoch: u64,
+    pub last_slot: u64,
+    #[wincode(with = "program_usage_wincode::RecordVecShortU16")]
+    pub records: Vec<ProgramUsageRecord>,
 }
 
 #[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
@@ -116,6 +134,19 @@ struct ProgramUsageExport {
     pub aggregated: Vec<ProgramUsageRecord>,
     #[wincode(with = "program_usage_wincode::EpochVec")]
     pub epochs: Vec<ProgramUsageEpochPart>,
+}
+
+#[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
+struct ProgramUsageExportV0 {
+    pub version: u32,
+    pub start_epoch: u64,
+    pub start_slot: u64,
+    pub top_level_only: bool,
+    pub processed_epochs: Vec<u64>,
+    #[wincode(with = "program_usage_wincode::RecordVecShortU16")]
+    pub aggregated: Vec<ProgramUsageRecord>,
+    #[wincode(with = "program_usage_wincode::EpochVecShortU16")]
+    pub epochs: Vec<ProgramUsageEpochPartV0>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
