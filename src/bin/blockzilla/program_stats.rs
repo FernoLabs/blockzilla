@@ -169,6 +169,170 @@ async fn persist_progress(parts_dir: &Path, processed: &AHashSet<u64>) -> Result
     Ok(())
 }
 
+async fn load_program_usage_export(input_path: &Path) -> Result<ProgramUsageExport> {
+    match fs::read(input_path).await {
+        Ok(data) => {
+            let export: ProgramUsageExport = wincode::deserialize(&data)?;
+            if export.version != PROGRAM_USAGE_EXPORT_VERSION {
+                return Err(anyhow!(
+                    "unsupported program usage export version {}",
+                    export.version
+                ));
+            }
+            Ok(export)
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            load_program_usage_export_from_parts(input_path).await
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn load_program_usage_export_from_parts(input_path: &Path) -> Result<ProgramUsageExport> {
+    async fn collect_part_entries(parts_dir: &Path) -> Result<Option<Vec<(u64, PathBuf)>>> {
+        let mut rd = match fs::read_dir(parts_dir).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut entries = Vec::new();
+        while let Some(entry) = rd.next_entry().await? {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(epoch_str) = name
+                .strip_prefix("epoch-")
+                .and_then(|s| s.strip_suffix(".bin"))
+            else {
+                continue;
+            };
+            let Ok(epoch) = epoch_str.parse::<u64>() else {
+                continue;
+            };
+
+            entries.push((epoch, entry.path()));
+        }
+
+        if entries.is_empty() {
+            return Ok(None);
+        }
+
+        entries.sort_unstable_by_key(|(epoch, _)| *epoch);
+        Ok(Some(entries))
+    }
+
+    let parts_path = input_path.with_extension("parts");
+    let parts_top_level_path = input_path.with_extension("parts.top_level");
+
+    let (parts_dir, top_level_only, part_entries) = match collect_part_entries(&parts_path).await? {
+        Some(entries) => (parts_path, false, entries),
+        None => match collect_part_entries(&parts_top_level_path).await? {
+            Some(entries) => (parts_top_level_path, true, entries),
+            None => {
+                return Err(anyhow!(
+                    "no program usage export found at {} or {}",
+                    parts_path.display(),
+                    parts_top_level_path.display()
+                ));
+            }
+        },
+    };
+
+    let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
+    let mut epochs = Vec::with_capacity(part_entries.len());
+
+    for (expected_epoch, path) in part_entries {
+        let data = match fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to read cached epoch stats {}: {}",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        let part = match decode_epoch_part(&data) {
+            Ok(part) => part,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to decode cached epoch stats {}: {}",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        for record in part.records.iter() {
+            aggregated
+                .entry(record.program)
+                .or_insert_with(ProgramUsageStats::default)
+                .accumulate(&record.stats);
+        }
+
+        if part.epoch != expected_epoch {
+            tracing::warn!(
+                "cached epoch stats {} has mismatched epoch {} (expected {})",
+                path.display(),
+                part.epoch,
+                expected_epoch
+            );
+        }
+
+        epochs.push(part);
+    }
+
+    if epochs.is_empty() {
+        return Err(anyhow!(
+            "no program usage export parts found in {}",
+            parts_dir.display()
+        ));
+    }
+
+    epochs.sort_unstable_by_key(|part| part.epoch);
+
+    let mut aggregated_records: Vec<ProgramUsageRecord> = aggregated
+        .into_iter()
+        .map(|(program, stats)| ProgramUsageRecord { program, stats })
+        .collect();
+    aggregated_records
+        .sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
+
+    let processed_epochs_set = load_progress(&parts_dir).await?;
+    let mut processed_epochs: Vec<u64> = processed_epochs_set.iter().copied().collect();
+    for part in epochs.iter() {
+        if !processed_epochs_set.contains(&part.epoch) {
+            processed_epochs.push(part.epoch);
+        }
+    }
+    processed_epochs.sort_unstable();
+    processed_epochs.dedup();
+
+    let start_epoch = epochs.first().map(|part| part.epoch).unwrap_or(0);
+
+    Ok(ProgramUsageExport {
+        version: PROGRAM_USAGE_EXPORT_VERSION,
+        start_epoch,
+        start_slot: 0,
+        top_level_only,
+        processed_epochs,
+        aggregated: aggregated_records,
+        epochs,
+    })
+}
+
 async fn process_epoch(
     epoch: u64,
     cache_dir: &str,
@@ -904,20 +1068,14 @@ pub async fn dump_program_stats_csv(
     output_path: &Path,
     limit: Option<usize>,
 ) -> Result<()> {
-    let data = fs::read(input_path).await.with_context(|| {
-        format!(
-            "failed to read program usage export {}",
-            input_path.display()
-        )
-    })?;
-
-    let export: ProgramUsageExport = wincode::deserialize(&data)?;
-    if export.version != PROGRAM_USAGE_EXPORT_VERSION {
-        return Err(anyhow!(
-            "unsupported program usage export version {}",
-            export.version
-        ));
-    }
+    let export = load_program_usage_export(input_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load program usage export {}",
+                input_path.display()
+            )
+        })?;
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
