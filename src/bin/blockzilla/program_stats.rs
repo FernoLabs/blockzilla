@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use wincode::Deserialize as _;
 use wincode::{SchemaRead, SchemaWrite};
@@ -82,6 +82,23 @@ impl ProgramUsageStats {
     }
 }
 
+const PROGRAM_USAGE_RECORDS_PREALLOCATION_LIMIT: usize = 512 << 20; // 512 MiB
+const PROGRAM_USAGE_EPOCHS_PREALLOCATION_LIMIT: usize = 64 << 20; // 64 MiB
+
+mod program_usage_wincode {
+    use super::*;
+
+    pub type RecordVec = wincode::containers::Vec<
+        wincode::containers::Elem<ProgramUsageRecord>,
+        wincode::len::BincodeLen<{ PROGRAM_USAGE_RECORDS_PREALLOCATION_LIMIT }>,
+    >;
+
+    pub type EpochVec = wincode::containers::Vec<
+        wincode::containers::Elem<ProgramUsageEpochPart>,
+        wincode::len::BincodeLen<{ PROGRAM_USAGE_EPOCHS_PREALLOCATION_LIMIT }>,
+    >;
+}
+
 #[derive(Debug, Clone, SchemaRead, SchemaWrite, Serialize, Deserialize)]
 struct ProgramUsageRecord {
     pub program: [u8; 32],
@@ -92,6 +109,7 @@ struct ProgramUsageRecord {
 struct ProgramUsageEpochPartV1 {
     pub epoch: u64,
     pub last_slot: u64,
+    #[wincode(with = "program_usage_wincode::RecordVec")]
     pub records: Vec<ProgramUsageRecord>,
 }
 
@@ -100,6 +118,7 @@ struct ProgramUsageEpochPart {
     pub epoch: u64,
     pub last_slot: u64,
     pub last_blocktime: Option<i64>,
+    #[wincode(with = "program_usage_wincode::RecordVec")]
     pub records: Vec<ProgramUsageRecord>,
 }
 
@@ -115,7 +134,9 @@ struct ProgramUsageExport {
     pub start_slot: u64,
     pub top_level_only: bool,
     pub processed_epochs: Vec<u64>,
+    #[wincode(with = "program_usage_wincode::RecordVec")]
     pub aggregated: Vec<ProgramUsageRecord>,
+    #[wincode(with = "program_usage_wincode::EpochVec")]
     pub epochs: Vec<ProgramUsageEpochPart>,
 }
 
@@ -830,11 +851,8 @@ async fn process_epoch_par(
                     }
                 };
 
-                let block_bytes = block
-                    .entries
-                    .iter()
-                    .map(|entry| entry.len())
-                    .sum::<usize>() as u64;
+                let block_bytes =
+                    block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
                 metrics.bytes_count += block_bytes;
 
                 let slot = match peek_block_slot(&block) {
@@ -862,7 +880,8 @@ async fn process_epoch_par(
                 };
 
                 if let Some(blocktime) = block_node.meta.blocktime {
-                    last_blocktime = Some(last_blocktime.map_or(blocktime, |cur| cur.max(blocktime)));
+                    last_blocktime =
+                        Some(last_blocktime.map_or(blocktime, |cur| cur.max(blocktime)));
                 }
 
                 for entry_cid_res in block_node.entries.iter() {
@@ -901,21 +920,20 @@ async fn process_epoch_par(
                             }
                         };
 
-                        let tx_bytes_slice =
-                            match transaction_bytes(&block, &tx_node, &mut buf_tx) {
-                                Ok(bytes) => bytes,
-                                Err(_) => {
-                                    decode_errors += 1;
-                                    continue;
-                                }
-                            };
+                        let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx)
+                        {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                decode_errors += 1;
+                                continue;
+                            }
+                        };
 
                         metrics.txs_seen += 1;
 
-                        if let Err(_) = VersionedTransaction::deserialize_into(
-                            tx_bytes_slice,
-                            &mut reusable_tx,
-                        ) {
+                        if let Err(_) =
+                            VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
+                        {
                             decode_errors += 1;
                             continue;
                         }
@@ -961,28 +979,27 @@ async fn process_epoch_par(
                             // Full mode with inner instructions
                             let inner_instruction_groups =
                                 match metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
-                                    Ok(meta_bytes) => decode_transaction_meta(
-                                        meta_bytes,
-                                        &mut meta_scratch,
-                                    )
-                                    .and_then(|meta| {
-                                        extend_with_loaded_addresses(
-                                            &mut resolved_keys,
-                                            &meta.loaded_writable_addresses,
-                                        );
-                                        extend_with_loaded_addresses(
-                                            &mut resolved_keys,
-                                            &meta.loaded_readonly_addresses,
-                                        );
+                                    Ok(meta_bytes) => {
+                                        decode_transaction_meta(meta_bytes, &mut meta_scratch)
+                                            .and_then(|meta| {
+                                                extend_with_loaded_addresses(
+                                                    &mut resolved_keys,
+                                                    &meta.loaded_writable_addresses,
+                                                );
+                                                extend_with_loaded_addresses(
+                                                    &mut resolved_keys,
+                                                    &meta.loaded_readonly_addresses,
+                                                );
 
-                                        if !meta.inner_instructions_none
-                                            && !meta.inner_instructions.is_empty()
-                                        {
-                                            Some(meta.inner_instructions)
-                                        } else {
-                                            None
-                                        }
-                                    }),
+                                                if !meta.inner_instructions_none
+                                                    && !meta.inner_instructions.is_empty()
+                                                {
+                                                    Some(meta.inner_instructions)
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                    }
                                     Err(_) => None,
                                 };
 
@@ -1014,9 +1031,7 @@ async fn process_epoch_par(
 
                                         let entry = epoch_stats
                                             .entry(program_key)
-                                            .or_insert_with(
-                                                ProgramUsageStats::default,
-                                            );
+                                            .or_insert_with(ProgramUsageStats::default);
                                         entry.inner_instruction_count += 1;
 
                                         metrics.inner_instructions_seen += 1;
@@ -1052,11 +1067,7 @@ async fn process_epoch_par(
     let mut bytes_sent = 0u64;
 
     while let Some(block) = car.next_block().await? {
-        bytes_sent += block
-            .entries
-            .iter()
-            .map(|entry| entry.len())
-            .sum::<usize>() as u64;
+        bytes_sent += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
         blocks_sent += 1;
 
         if tx.send(block).await.is_err() {
@@ -1083,8 +1094,7 @@ async fn process_epoch_par(
 
     drop(tx);
 
-    let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> =
-        AHashMap::with_capacity(4096);
+    let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
     let mut metrics = EpochMetrics::default();
     let mut epoch_last_slot = 0u64;
     let mut epoch_last_blocktime: Option<i64> = None;
@@ -1131,11 +1141,7 @@ async fn process_epoch_par(
         .into_iter()
         .map(|(program, stats)| ProgramUsageRecord { program, stats })
         .collect();
-    records.sort_unstable_by(|a, b| {
-        b.stats
-            .instruction_count
-            .cmp(&a.stats.instruction_count)
-    });
+    records.sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
 
     let epoch_dump = ProgramUsageEpochPart {
         epoch,
@@ -1526,11 +1532,9 @@ async fn collect_program_stats_par(
         output_path.with_extension("parts")
     };
 
-    let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> =
-        AHashMap::with_capacity(16_384);
+    let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
     let mut processed_epochs: AHashSet<u64> = load_progress(&parts_dir).await?;
-    let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> =
-        AHashMap::with_capacity(256);
+    let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
 
     let mut last_processed_slot = 0u64;
     let mut epoch_last_slots: AHashMap<u64, u64> = AHashMap::with_capacity(256);
@@ -1667,15 +1671,9 @@ async fn collect_program_stats_par(
 
     if !epochs_to_process.is_empty() {
         for (epoch, min_slot) in epochs_to_process {
-            let summary = process_epoch_par(
-                epoch,
-                cache_dir,
-                &parts_dir,
-                top_level_only,
-                min_slot,
-                jobs,
-            )
-            .await?;
+            let summary =
+                process_epoch_par(epoch, cache_dir, &parts_dir, top_level_only, min_slot, jobs)
+                    .await?;
 
             let EpochProcessSummary {
                 epoch: summary_epoch,
@@ -1786,13 +1784,7 @@ async fn collect_program_stats_par(
 
     let final_line = format!(
         "[par] {range_label} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={} txs={}",
-        blocks_scanned,
-        blk_s,
-        mb_s,
-        tps,
-        instructions_seen,
-        inner_instructions_seen,
-        txs_seen
+        blocks_scanned, blk_s, mb_s, tps, instructions_seen, inner_instructions_seen, txs_seen
     );
 
     if pb.is_hidden() {
