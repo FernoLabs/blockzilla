@@ -371,11 +371,13 @@ async fn process_epoch(
         epoch,
         last_slot: epoch_last_slot,
         last_blocktime: epoch_last_blocktime,
-        records: records.clone(),
+        records,
     };
     let encoded_epoch = wincode::serialize(&epoch_dump)?;
     fs::write(&tmp_path, &encoded_epoch).await?;
     fs::rename(&tmp_path, &part_path).await?;
+
+    let ProgramUsageEpochPart { records, .. } = epoch_dump;
 
     if let Some(per_block_stats) = per_block_stats.as_mut() {
         per_block_stats.blocks.sort_by(|a, b| a.slot.cmp(&b.slot));
@@ -483,11 +485,13 @@ async fn consume_epoch_results(
         epoch,
         last_slot: epoch_last_slot,
         last_blocktime: epoch_last_blocktime,
-        records: records.clone(),
+        records,
     };
     let encoded_epoch = wincode::serialize(&epoch_dump)?;
     fs::write(&tmp_path, &encoded_epoch).await?;
     fs::rename(&tmp_path, &part_path).await?;
+
+    let ProgramUsageEpochPart { records, .. } = epoch_dump;
 
     Ok(EpochProcessSummary {
         epoch,
