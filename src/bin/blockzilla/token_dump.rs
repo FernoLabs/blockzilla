@@ -36,16 +36,16 @@ use crate::LOG_INTERVAL_SECS;
 #[derive(Default, Clone)]
 struct TokenInstrStats {
     // Only for our mint (instruction accounts explicitly include the mint)
-    mint_init_acct: u64,        // InitializeAccount, InitializeAccount2, InitializeAccount3
-    mint_init_mint: u64,        // InitializeMint, InitializeMint2
+    mint_init_acct: u64, // InitializeAccount, InitializeAccount2, InitializeAccount3
+    mint_init_mint: u64, // InitializeMint, InitializeMint2
     mint_transfer_checked: u64, // TransferChecked
-    mint_mint_to: u64,          // MintTo
-    mint_burn: u64,             // Burn
-    mint_freeze: u64,           // FreezeAccount
-    mint_thaw: u64,             // ThawAccount
+    mint_mint_to: u64,   // MintTo
+    mint_burn: u64,      // Burn
+    mint_freeze: u64,    // FreezeAccount
+    mint_thaw: u64,      // ThawAccount
 
     // For tracked accounts but the mint is NOT present in account metas
-    tracked_only_transfer: u64,       // Transfer (no mint in accounts)
+    tracked_only_transfer: u64, // Transfer (no mint in accounts)
     tracked_only_approve: u64,
     tracked_only_revoke: u64,
     tracked_only_close: u64,
@@ -54,7 +54,9 @@ struct TokenInstrStats {
 }
 
 impl TokenInstrStats {
-    fn reset(&mut self) { *self = Self::default(); }
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
     fn any(&self) -> bool {
         self.mint_init_acct
             + self.mint_init_mint
@@ -68,7 +70,8 @@ impl TokenInstrStats {
             + self.tracked_only_revoke
             + self.tracked_only_close
             + self.tracked_only_set_authority
-            + self.tracked_only_sync_native > 0
+            + self.tracked_only_sync_native
+            > 0
     }
 }
 
@@ -89,12 +92,16 @@ fn count_token_ix_for_mint_or_tracked(
         resolved_keys.get(idx).copied()
     };
     let acc_matches_mint = |i: usize| -> bool {
-        acc_at(i).map(|p| p.to_bytes() == *mint_bytes).unwrap_or(false)
+        acc_at(i)
+            .map(|p| p.to_bytes() == *mint_bytes)
+            .unwrap_or(false)
     };
     let any_tracked_in_accounts = || -> bool {
         accounts.iter().copied().any(|b| {
             let idx = b as usize;
-            if idx >= resolved_keys.len() { return false; }
+            if idx >= resolved_keys.len() {
+                return false;
+            }
             tracked.contains(&resolved_keys[idx].to_bytes())
         })
     };
@@ -108,31 +115,45 @@ fn count_token_ix_for_mint_or_tracked(
     match instr {
         // [account, mint, ...]
         TI::InitializeAccount | TI::InitializeAccount2 { .. } | TI::InitializeAccount3 { .. } => {
-            if acc_matches_mint(1) { acc.mint_init_acct += 1; }
+            if acc_matches_mint(1) {
+                acc.mint_init_acct += 1;
+            }
         }
         // [mint, ...]
         TI::InitializeMint { .. } | TI::InitializeMint2 { .. } => {
-            if acc_matches_mint(0) { acc.mint_init_mint += 1; }
+            if acc_matches_mint(0) {
+                acc.mint_init_mint += 1;
+            }
         }
         // [src, mint, dst, owner, ...]
         TI::TransferChecked { .. } => {
-            if acc_matches_mint(1) { acc.mint_transfer_checked += 1; }
+            if acc_matches_mint(1) {
+                acc.mint_transfer_checked += 1;
+            }
         }
         // [mint, account, mint_authority, ...]
         TI::MintTo { .. } => {
-            if acc_matches_mint(0) { acc.mint_mint_to += 1; }
+            if acc_matches_mint(0) {
+                acc.mint_mint_to += 1;
+            }
         }
         // [account, mint, owner, ...]
         TI::Burn { .. } => {
-            if acc_matches_mint(1) { acc.mint_burn += 1; }
+            if acc_matches_mint(1) {
+                acc.mint_burn += 1;
+            }
         }
         // [account, mint, authority, ...]
         TI::FreezeAccount => {
-            if acc_matches_mint(1) { acc.mint_freeze += 1; }
+            if acc_matches_mint(1) {
+                acc.mint_freeze += 1;
+            }
         }
         // [account, mint, authority, ...]
         TI::ThawAccount => {
-            if acc_matches_mint(1) { acc.mint_thaw += 1; }
+            if acc_matches_mint(1) {
+                acc.mint_thaw += 1;
+            }
         }
 
         // Variants without explicit mint in accounts — count as tracked_only if any tracked account is referenced
@@ -180,30 +201,43 @@ fn extend_with_loaded_addresses(dest: &mut SmallVec<[Pubkey; 512]>, addrs: &[Vec
             bytes.copy_from_slice(addr);
             dest.push(Pubkey::new_from_array(bytes));
         } else {
-            tracing::warn!("loaded address has invalid length: expected 32 bytes, got {}", addr.len());
+            tracing::warn!(
+                "loaded address has invalid length: expected 32 bytes, got {}",
+                addr.len()
+            );
         }
     }
 }
 
 fn decode_transaction_meta(bytes: &[u8]) -> Option<TransactionStatusMeta> {
-    if bytes.is_empty() { return None; }
+    if bytes.is_empty() {
+        return None;
+    }
     let raw = if is_zstd(bytes) {
         match zstd::decode_all(bytes) {
             Ok(data) => data,
-            Err(e) => { tracing::warn!("failed to decompress metadata: {e}"); return None; }
+            Err(e) => {
+                tracing::warn!("failed to decompress metadata: {e}");
+                return None;
+            }
         }
     } else {
         bytes.to_vec()
     };
     match TransactionStatusMeta::decode(raw.as_slice()) {
         Ok(meta) => Some(meta),
-        Err(e) => { tracing::warn!("failed to decode TransactionStatusMeta protobuf: {e}"); None }
+        Err(e) => {
+            tracing::warn!("failed to decode TransactionStatusMeta protobuf: {e}");
+            None
+        }
     }
 }
 
 #[inline]
 fn is_zstd(buf: &[u8]) -> bool {
-    buf.get(0..4).map(|m| m == [0x28, 0xB5, 0x2F, 0xFD]).unwrap_or(false)
+    buf.get(0..4)
+        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
+        .unwrap_or(false)
 }
 
 /// Only SPL Token classic (no Token-2022), no ATA heuristic.
@@ -240,14 +274,23 @@ fn extract_new_tracked_accounts_and_count(
     }
 
     let mut handle_ix = |program_idx: usize, accounts: &[u8], data: &[u8]| {
-        if program_idx >= resolved_keys.len() { return; }
+        if program_idx >= resolved_keys.len() {
+            return;
+        }
         let program_key = resolved_keys[program_idx].to_bytes();
-        if &program_key != token_program_bytes { return; }
+        if &program_key != token_program_bytes {
+            return;
+        }
 
         if let Ok(instr) = TokenInstruction::unpack(data) {
             // Count by mint or tracked-only
             count_token_ix_for_mint_or_tracked(
-                &instr, accounts, &resolved_keys, mint_bytes, tracked, tok_ix,
+                &instr,
+                accounts,
+                &resolved_keys,
+                mint_bytes,
+                tracked,
+                tok_ix,
             );
 
             // Track new accounts for InitializeAccount* when the mint matches
@@ -255,14 +298,20 @@ fn extract_new_tracked_accounts_and_count(
                 TokenInstruction::InitializeAccount
                 | TokenInstruction::InitializeAccount2 { .. }
                 | TokenInstruction::InitializeAccount3 { .. } => {
-                    if accounts.len() < 2 { return; }
+                    if accounts.len() < 2 {
+                        return;
+                    }
                     let account_idx = accounts[0] as usize;
                     let mint_idx = accounts[1] as usize;
-                    if account_idx >= resolved_keys.len() || mint_idx >= resolved_keys.len() { return; }
+                    if account_idx >= resolved_keys.len() || mint_idx >= resolved_keys.len() {
+                        return;
+                    }
 
                     let candidate_key = resolved_keys[account_idx].to_bytes();
                     let mint_key = resolved_keys[mint_idx].to_bytes();
-                    if &mint_key != mint_bytes { return; }
+                    if &mint_key != mint_bytes {
+                        return;
+                    }
 
                     if tracked.insert(candidate_key) {
                         added.push(candidate_key);
@@ -339,11 +388,16 @@ pub async fn dump_token_transactions(
 
     let cache_path = Path::new(cache_dir);
     let Some(last_epoch) = find_last_cached_epoch(cache_path).await? else {
-        return Err(anyhow!("no cached epochs found in {}", cache_path.display()));
+        return Err(anyhow!(
+            "no cached epochs found in {}",
+            cache_path.display()
+        ));
     };
 
     if start_epoch > last_epoch {
-        return Err(anyhow!("start epoch {start_epoch:04} is beyond last cached epoch {last_epoch:04}"));
+        return Err(anyhow!(
+            "start epoch {start_epoch:04} is beyond last cached epoch {last_epoch:04}"
+        ));
     }
 
     let mut buf_tx = Vec::with_capacity(128 * 1024);
@@ -359,7 +413,7 @@ pub async fn dump_token_transactions(
 
     let mut processed_epochs: AHashSet<u64> = AHashSet::with_capacity(epoch_span);
     let mut blocks_scanned = 0u64; // processed blocks (excludes skipped)
-    let mut txs_kept = 0u64;       // cumulative kept
+    let mut txs_kept = 0u64; // cumulative kept
     let mut accounts_tracked_new_win = 0u64; // per-interval new tracked
     let mut bytes_count = 0u64; // processed bytes for final summary
     let mut _entry_count = 0u64;
@@ -378,31 +432,59 @@ pub async fn dump_token_transactions(
     if let Ok(mut rd) = fs::read_dir(&parts_dir).await {
         let mut part_entries: Vec<(u64, PathBuf)> = Vec::new();
         while let Some(entry) = rd.next_entry().await? {
-            let Ok(file_type) = entry.file_type().await else { continue; };
-            if !file_type.is_file() { continue; }
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
             let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue; };
-            let Some(epoch_str) = name.strip_prefix("epoch-").and_then(|s| s.strip_suffix(".bin")) else { continue; };
-            let Ok(epoch) = epoch_str.parse::<u64>() else { continue; };
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(epoch_str) = name
+                .strip_prefix("epoch-")
+                .and_then(|s| s.strip_suffix(".bin"))
+            else {
+                continue;
+            };
+            let Ok(epoch) = epoch_str.parse::<u64>() else {
+                continue;
+            };
             part_entries.push((epoch, entry.path()));
         }
         part_entries.sort_unstable_by_key(|(epoch, _)| *epoch);
 
         for (epoch, path) in part_entries {
-            if epoch < start_epoch || epoch > last_epoch { continue; }
+            if epoch < start_epoch || epoch > last_epoch {
+                continue;
+            }
 
             let data = match fs::read(&path).await {
                 Ok(bytes) => bytes,
-                Err(e) => { tracing::warn!("failed to read cached epoch dump {}: {}", path.display(), e); continue; }
+                Err(e) => {
+                    tracing::warn!("failed to read cached epoch dump {}: {}", path.display(), e);
+                    continue;
+                }
             };
 
             let part: TokenTransactionEpochDump = match wincode::deserialize(&data) {
                 Ok(part) => part,
-                Err(e) => { tracing::warn!("failed to decode cached epoch dump {}: {}", path.display(), e); continue; }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to decode cached epoch dump {}: {}",
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
             };
 
             if part.mint != mint_bytes {
-                return Err(anyhow!("cached epoch dump mint mismatch for {}", path.display()));
+                return Err(anyhow!(
+                    "cached epoch dump mint mismatch for {}",
+                    path.display()
+                ));
             }
 
             // UNION tracked accounts from cached part
@@ -434,10 +516,18 @@ pub async fn dump_token_transactions(
     let mut last_log_time = start;
 
     // skip-phase control
-    let mut min_slot = if processed_epochs.contains(&start_epoch) { 0 } else { start_slot };
+    let mut min_slot = if processed_epochs.contains(&start_epoch) {
+        0
+    } else {
+        start_slot
+    };
 
     // signed slot display support
-    let mut first_target_slot_opt: Option<u64> = if processed_epochs.contains(&start_epoch) { None } else { Some(start_slot) };
+    let mut first_target_slot_opt: Option<u64> = if processed_epochs.contains(&start_epoch) {
+        None
+    } else {
+        Some(start_slot)
+    };
     let mut last_seen_slot = 0u64;
 
     msg_buf.clear();
@@ -445,31 +535,38 @@ pub async fn dump_token_transactions(
         &mut msg_buf,
         "starting dump | mint={} | start_epoch={:04} start_slot={} | scanning up to {:04}",
         mint_str, start_epoch, start_slot, last_epoch
-    ).unwrap();
+    )
+    .unwrap();
     pb.set_message(msg_buf.clone());
 
     for epoch in start_epoch..=last_epoch {
         if processed_epochs.contains(&epoch) {
-            if pb.is_hidden() { tracing::info!("skipping epoch {epoch:04} (already cached)"); }
-            else { pb.println(format!("skipping epoch {epoch:04} (already cached)")); }
+            if pb.is_hidden() {
+                tracing::info!("skipping epoch {epoch:04} (already cached)");
+            } else {
+                pb.println(format!("skipping epoch {epoch:04} (already cached)"));
+            }
             last_epoch_processed = Some(epoch);
             continue;
         }
 
         // ========== reset interval counters when changing epoch ==========
-        let mut int_blocks: u64 = 0;           // includes skipped
-        let mut int_bytes: u64 = 0;            // includes skipped
+        let mut int_blocks: u64 = 0; // includes skipped
+        let mut int_bytes: u64 = 0; // includes skipped
         let mut int_txs_seen: u64 = 0;
-        let mut int_txs_kept: u64 = 0;         // only per-interval
+        let mut int_txs_kept: u64 = 0; // only per-interval
         let mut int_blocks_with_kept: u64 = 0;
         let mut tok_ix = TokenInstrStats::default();
-        accounts_tracked_new_win = 0;          // reset per-interval new tracked
+        accounts_tracked_new_win = 0; // reset per-interval new tracked
         last_log_time = Instant::now();
 
         let epoch_start_idx = collected.len();
 
-        if pb.is_hidden() { tracing::info!("opening epoch {epoch:04}"); }
-        else { pb.println(format!("opening epoch {epoch:04}")); }
+        if pb.is_hidden() {
+            tracing::info!("opening epoch {epoch:04}");
+        } else {
+            pb.println(format!("opening epoch {epoch:04}"));
+        }
 
         let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
             .await
@@ -488,7 +585,10 @@ pub async fn dump_token_transactions(
 
             let slot = match peek_block_slot(&block) {
                 Ok(slot) => slot,
-                Err(e) => { tracing::warn!("failed to decode block: {e}"); continue; }
+                Err(e) => {
+                    tracing::warn!("failed to decode block: {e}");
+                    continue;
+                }
             };
             last_seen_slot = slot;
 
@@ -504,7 +604,10 @@ pub async fn dump_token_transactions(
 
                 let block_node = match block.block() {
                     Ok(node) => node,
-                    Err(e) => { tracing::warn!("failed to decode block: {e}"); continue; }
+                    Err(e) => {
+                        tracing::warn!("failed to decode block: {e}");
+                        continue;
+                    }
                 };
 
                 let mut reusable_tx = MaybeUninit::<VersionedTransaction>::uninit();
@@ -512,38 +615,58 @@ pub async fn dump_token_transactions(
                 for entry_cid_res in block_node.entries.iter() {
                     let entry_cid = match entry_cid_res {
                         Ok(cid) => cid,
-                        Err(e) => { tracing::warn!("failed to decode entry cid: {e}"); continue; }
+                        Err(e) => {
+                            tracing::warn!("failed to decode entry cid: {e}");
+                            continue;
+                        }
                     };
 
                     let entry = match block.decode(entry_cid.hash_bytes()) {
                         Ok(Node::Entry(entry)) => entry,
                         Ok(_) => continue,
-                        Err(e) => { tracing::warn!("failed to decode entry: {e}"); continue; }
+                        Err(e) => {
+                            tracing::warn!("failed to decode entry: {e}");
+                            continue;
+                        }
                     };
 
                     for tx_cid_res in entry.transactions.iter() {
                         let tx_cid = match tx_cid_res {
                             Ok(cid) => cid,
-                            Err(e) => { tracing::warn!("failed to decode transaction cid: {e}"); continue; }
+                            Err(e) => {
+                                tracing::warn!("failed to decode transaction cid: {e}");
+                                continue;
+                            }
                         };
 
                         let tx_node = match block.decode(tx_cid.hash_bytes()) {
                             Ok(Node::Transaction(tx_node)) => tx_node,
                             Ok(_) => continue,
-                            Err(e) => { tracing::warn!("failed to decode transaction node: {e}"); continue; }
+                            Err(e) => {
+                                tracing::warn!("failed to decode transaction node: {e}");
+                                continue;
+                            }
                         };
 
                         // Read transaction bytes into buf_tx
-                        let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
+                        let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx)
+                        {
                             Ok(bytes) => bytes,
-                            Err(e) => { tracing::warn!("failed to read transaction bytes: {e}"); continue; }
+                            Err(e) => {
+                                tracing::warn!("failed to read transaction bytes: {e}");
+                                continue;
+                            }
                         };
 
                         seen_in_this_block += 1;
 
                         // Fast path: parse account keys only (cheap)
                         account_keys_buf.clear();
-                        if parse_account_keys_only(tx_bytes_slice, &mut account_keys_buf).ok().flatten().is_none() {
+                        if parse_account_keys_only(tx_bytes_slice, &mut account_keys_buf)
+                            .ok()
+                            .flatten()
+                            .is_none()
+                        {
                             continue;
                         }
 
@@ -562,15 +685,21 @@ pub async fn dump_token_transactions(
                         let mut involves_token = false;
                         for key in &account_keys_buf {
                             let key_bytes = key.to_bytes();
-                            if &key_bytes == &mint_bytes || tracked_account_keys.contains(&key_bytes) {
+                            if &key_bytes == &mint_bytes
+                                || tracked_account_keys.contains(&key_bytes)
+                            {
                                 involves_token = true;
                                 break;
                             }
                         }
-                        if !involves_token { continue; }
+                        if !involves_token {
+                            continue;
+                        }
 
                         // Full deserialize only for involved tx
-                        if let Err(e) = VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx) {
+                        if let Err(e) =
+                            VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
+                        {
                             tracing::warn!("failed to parse transaction: {e}");
                             continue;
                         }
@@ -597,7 +726,10 @@ pub async fn dump_token_transactions(
                         }
 
                         // Keep the tx bytes
-                        collected.push(TokenTransactionRecord { slot, tx_bytes: tx_bytes_slice.to_vec() });
+                        collected.push(TokenTransactionRecord {
+                            slot,
+                            tx_bytes: tx_bytes_slice.to_vec(),
+                        });
                         kept_in_this_block += 1;
                         txs_kept += 1; // cumulative kept
                     }
@@ -606,7 +738,9 @@ pub async fn dump_token_transactions(
                 // Aggregate interval counts
                 int_txs_seen += seen_in_this_block;
                 int_txs_kept += kept_in_this_block;
-                if kept_in_this_block > 0 { int_blocks_with_kept += 1; }
+                if kept_in_this_block > 0 {
+                    int_blocks_with_kept += 1;
+                }
 
                 last_processed_slot = slot;
             }
@@ -620,7 +754,7 @@ pub async fn dump_token_transactions(
             if time_due || chunk_due {
                 let blk_s = (int_blocks as f64) / dt.max(1e-6);
                 let mb_s = ((int_bytes as f64) / (1024.0 * 1024.0)) / dt.max(1e-6);
-                let tps   = (int_txs_seen as f64) / dt.max(1e-6);
+                let tps = (int_txs_seen as f64) / dt.max(1e-6);
 
                 let tracked_accounts_len = tracked_account_keys.len();
 
@@ -653,8 +787,12 @@ pub async fn dump_token_transactions(
                     accounts_tracked_new_win // per-interval new tracked
                 ).unwrap();
 
-                if pb.is_hidden() { tracing::info!("{}", msg_buf); }
-                else { pb.set_message(msg_buf.clone()); pb.tick(); }
+                if pb.is_hidden() {
+                    tracing::info!("{}", msg_buf);
+                } else {
+                    pb.set_message(msg_buf.clone());
+                    pb.tick();
+                }
 
                 // second line: mint-only and tracked-only instruction breakdown
                 if tok_ix.any() {
@@ -677,8 +815,11 @@ pub async fn dump_token_transactions(
                         tok_ix.tracked_only_sync_native
                     ).unwrap();
 
-                    if pb.is_hidden() { tracing::info!("{}", tok_line); }
-                    else { pb.println(tok_line); }
+                    if pb.is_hidden() {
+                        tracing::info!("{}", tok_line);
+                    } else {
+                        pb.println(tok_line);
+                    }
                 }
 
                 // reset interval
@@ -720,7 +861,9 @@ pub async fn dump_token_transactions(
     }
 
     let Some(last_epoch_processed) = last_epoch_processed else {
-        return Err(anyhow!("no epochs processed between {start_epoch:04} and {last_epoch:04}"));
+        return Err(anyhow!(
+            "no epochs processed between {start_epoch:04} and {last_epoch:04}"
+        ));
     };
 
     if let Some(parent) = output_path.parent() {
@@ -729,7 +872,10 @@ pub async fn dump_token_transactions(
         }
     }
 
-    let dump = TokenTransactionDump { mint: mint_bytes, transactions: collected };
+    let dump = TokenTransactionDump {
+        mint: mint_bytes,
+        transactions: collected,
+    };
     let total_transactions = dump.transactions.len() as u64;
 
     let encoded = wincode::serialize(&dump)?;
@@ -749,8 +895,12 @@ pub async fn dump_token_transactions(
         tracked_account_keys.len(),
     );
 
-    if pb.is_hidden() { tracing::info!("{final_line}"); }
-    else { pb.finish_and_clear(); eprintln!("{final_line}"); }
+    if pb.is_hidden() {
+        tracing::info!("{final_line}");
+    } else {
+        pb.finish_and_clear();
+        eprintln!("{final_line}");
+    }
 
     Ok(())
 }
@@ -766,17 +916,28 @@ async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
 
     let mut max_epoch = None;
     while let Some(entry) = rd.next_entry().await? {
-        let Ok(file_type) = entry.file_type().await else { continue; };
-        if !file_type.is_file() { continue; }
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
 
         let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue; };
+        let Some(name) = name.to_str() else {
+            continue;
+        };
 
         let Some(epoch_str) = name.strip_prefix("epoch-").and_then(|s| {
-            s.strip_suffix(".car").or_else(|| s.strip_suffix(".car.zst"))
-        }) else { continue; };
+            s.strip_suffix(".car")
+                .or_else(|| s.strip_suffix(".car.zst"))
+        }) else {
+            continue;
+        };
 
-        let Ok(epoch) = epoch_str.parse::<u64>() else { continue; };
+        let Ok(epoch) = epoch_str.parse::<u64>() else {
+            continue;
+        };
 
         max_epoch = Some(max_epoch.map_or(epoch, |current: u64| current.max(epoch)));
     }
@@ -787,10 +948,18 @@ async fn find_last_cached_epoch(cache_dir: &Path) -> Result<Option<u64>> {
 #[inline]
 fn peek_block_slot(block: &CarBlock) -> Result<u64> {
     let mut decoder = minicbor::Decoder::new(block.block_bytes.as_ref());
-    decoder.array().map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
-    let kind = decoder.u64().map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
-    if kind != 2 { return Err(anyhow!("unexpected block kind {kind}, expected Block")); }
-    let slot = decoder.u64().map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
+    decoder
+        .array()
+        .map_err(|e| anyhow!("failed to decode block header array: {e}"))?;
+    let kind = decoder
+        .u64()
+        .map_err(|e| anyhow!("failed to decode block kind: {e}"))?;
+    if kind != 2 {
+        return Err(anyhow!("unexpected block kind {kind}, expected Block"));
+    }
+    let slot = decoder
+        .u64()
+        .map_err(|e| anyhow!("failed to decode block slot: {e}"))?;
     Ok(slot)
 }
 
@@ -804,9 +973,12 @@ fn copy_dataframe_into<'a>(
     let prefix_len = inline_prefix.map_or(0, |p| p.len());
     dst.clear();
     dst.reserve(prefix_len + (64 << 10));
-    if let Some(prefix) = inline_prefix { dst.extend_from_slice(prefix); }
+    if let Some(prefix) = inline_prefix {
+        dst.extend_from_slice(prefix);
+    }
     let mut rdr = block.dataframe_reader(cid);
-    rdr.read_to_end(dst).map_err(|e| anyhow!("read dataframe chain: {e}"))?;
+    rdr.read_to_end(dst)
+        .map_err(|e| anyhow!("read dataframe chain: {e}"))?;
     Ok(&*dst)
 }
 
@@ -817,7 +989,11 @@ fn transaction_bytes<'a>(
     buf: &'a mut Vec<u8>,
 ) -> Result<&'a [u8]> {
     match tx_node.data.next {
-        None => { buf.clear(); buf.extend_from_slice(tx_node.data.data); Ok(&*buf) }
+        None => {
+            buf.clear();
+            buf.extend_from_slice(tx_node.data.data);
+            Ok(&*buf)
+        }
         Some(df_cbor) => {
             let df_cid = df_cbor.to_cid()?;
             copy_dataframe_into(block, &df_cid, buf, None)

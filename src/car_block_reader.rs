@@ -48,9 +48,9 @@ struct EntryMeta {
 
 pub struct CarBlockReader<R: AsyncRead + Unpin + Send> {
     reader: BufReader<R>,
-    buf: BytesMut,               // streaming accumulation buffer
+    buf: BytesMut, // streaming accumulation buffer
     entry_offsets: Vec<EntryMeta>,
-    scratch: Vec<u8>,            // reusable scratch for header and discards
+    scratch: Vec<u8>, // reusable scratch for header and discards
 }
 
 impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
@@ -115,7 +115,7 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 // Zero-copy: detach the entire prefix that belongs to this block
                 // entry_end is the end of the last entry in this block
                 let prefix = self.buf.split_to(entry_end); // no copy
-                let frozen: Bytes = prefix.freeze();       // no copy
+                let frozen: Bytes = prefix.freeze(); // no copy
 
                 // Build zero-copy views for the block body and entries
                 let block_bytes = frozen.slice(cbor_start..entry_end);
@@ -123,7 +123,7 @@ impl<R: AsyncRead + Unpin + Send> CarBlockReader<R> {
                 let mut entries = Vec::with_capacity(self.entry_offsets.len());
                 let mut entry_index = Vec::with_capacity(self.entry_offsets.len());
                 for (idx, m) in self.entry_offsets.drain(..).enumerate() {
-                    let cid     = frozen.slice(m.cid_start..m.cid_end);
+                    let cid = frozen.slice(m.cid_start..m.cid_end);
                     let payload = frozen.slice(m.payload_start..m.payload_end);
                     entries.push(payload);
                     entry_index.push((cid, idx));
