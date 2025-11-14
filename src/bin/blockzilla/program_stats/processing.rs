@@ -63,10 +63,6 @@ async fn process_epoch(
 
     let mut metrics = EpochMetrics::default();
 
-    let mut skipped_blocks = 0u64;
-    let mut skipped_bytes = 0u64;
-    let mut last_skipped_slot = 0u64;
-
     let mut buf_tx = Vec::with_capacity(128 * 1024);
     // buffer used only for dataframe reader for metadata
     let mut buf_meta_df = Vec::with_capacity(64 * 1024);
@@ -126,9 +122,6 @@ async fn process_epoch(
         };
 
         if slot < min_slot {
-            skipped_blocks += 1;
-            skipped_bytes += block_bytes;
-            last_skipped_slot = slot;
             continue;
         }
 
@@ -198,10 +191,11 @@ async fn process_epoch(
                     continue;
                 }
 
-                let tx_ref = unsafe { reusable_tx.assume_init_ref() };
+                let tx = unsafe { reusable_tx.assume_init_read() };
+                let message = &tx.message;
 
                 // tx_count: +1 per static account key
-                for key in tx_ref.message.static_account_keys() {
+                for key in message.static_account_keys() {
                     let program_key: [u8; 32] = *key;
                     let entry = epoch_stats
                         .entry(program_key)
@@ -217,17 +211,14 @@ async fn process_epoch(
 
                 // Build resolved_keys: static only by default
                 resolved_keys.clear();
-                resolved_keys.reserve(
-                    tx_ref.message.static_account_keys().len()
-                        + if top_level_only { 0 } else { 16 },
-                );
-                for key in tx_ref.message.static_account_keys() {
-                    resolved_keys.push(*key);
+                resolved_keys.extend_from_slice(message.static_account_keys());
+                if !top_level_only {
+                    resolved_keys.reserve(16);
                 }
 
                 if top_level_only {
                     // Top level only, no metadata, no inner instructions
-                    for ix in tx_ref.message.instructions_iter() {
+                    for ix in message.instructions_iter() {
                         let program_idx = ix.program_id_index as usize;
                         if program_idx >= resolved_keys.len() {
                             continue;
@@ -276,7 +267,7 @@ async fn process_epoch(
                         };
 
                     // Top-level
-                    for ix in tx_ref.message.instructions_iter() {
+                    for ix in message.instructions_iter() {
                         let program_idx = ix.program_id_index as usize;
                         if program_idx >= resolved_keys.len() {
                             continue;
@@ -323,13 +314,24 @@ async fn process_epoch(
                         }
                     }
                 }
-
-                unsafe { std::ptr::drop_in_place(reusable_tx.as_mut_ptr()) };
             }
         }
 
         epoch_last_slot = slot;
         metrics.blocks_scanned += 1;
+
+        if buf_tx.capacity() > 256 * 1024 {
+            buf_tx.shrink_to(128 * 1024);
+        }
+        if buf_meta_df.capacity() > 128 * 1024 {
+            buf_meta_df.shrink_to(64 * 1024);
+        }
+        if meta_scratch.capacity() > 128 * 1024 {
+            meta_scratch.shrink_to(64 * 1024);
+        }
+        if resolved_keys.capacity() > 1024 {
+            resolved_keys.shrink_to(512);
+        }
 
         if let (Some(map), Some(per_block_stats)) =
             (per_block_map.as_ref(), per_block_stats.as_mut())
@@ -406,11 +408,6 @@ async fn consume_epoch_results(
     parts_dir: PathBuf,
     mut rx: mpsc::Receiver<BlockProcessResult>,
 ) -> Result<EpochProcessSummary> {
-    let start = Instant::now();
-    let mut last_log = start;
-
-    tracing::info!("[epoch {epoch:04}] aggregator worker started");
-
     let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
     let mut metrics = EpochMetrics::default();
     let mut epoch_last_slot = 0u64;
@@ -443,33 +440,11 @@ async fn consume_epoch_results(
                 .or_insert_with(ProgramUsageStats::default)
                 .accumulate(&stats);
         }
-
-        let now = Instant::now();
-        if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS)
-            && metrics.blocks_scanned > 0
-        {
-            last_log = now;
-            let secs = now.duration_since(start).as_secs_f64().max(1e-6);
-            let blk_s = metrics.blocks_scanned as f64 / secs;
-            let mb_s = (metrics.bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-
-            tracing::info!(
-                "[epoch {epoch:04}] aggregator processed {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
-                metrics.blocks_scanned,
-                blk_s,
-                mb_s
-            );
-        }
     }
 
     if decode_errors_total > 0 {
         tracing::warn!("epoch {epoch:04} had {decode_errors_total} decode errors (parallel)");
     }
-
-    tracing::info!(
-        "[epoch {epoch:04}] aggregator worker finished with {} blocks",
-        metrics.blocks_scanned
-    );
 
     fs::create_dir_all(&parts_dir).await?;
     let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
@@ -511,8 +486,6 @@ async fn process_epoch_par(
     min_slot: u64,
     jobs: usize,
 ) -> Result<EpochProcessSummary> {
-    tracing::info!("[epoch {epoch:04}] starting parallel processing with {jobs} block workers");
-
     let (block_tx, block_rx) = mpsc::channel::<CarBlock>(jobs * 2);
     let block_rx = Arc::new(Mutex::new(block_rx));
     let (result_tx, result_rx) = mpsc::channel::<BlockProcessResult>(jobs * 2);
@@ -525,13 +498,11 @@ async fn process_epoch_par(
 
     let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(jobs);
 
-    for worker_idx in 0..jobs {
+    for _ in 0..jobs {
         let rx = Arc::clone(&block_rx);
         let result_tx = result_tx.clone();
-        let worker_epoch = epoch;
         let worker_top_level_only = top_level_only;
         let handle = tokio::spawn(async move {
-            tracing::info!("[epoch {worker_epoch:04}] processor worker #{worker_idx} started");
             let mut buf_tx = Vec::with_capacity(128 * 1024);
             let mut buf_meta_df = Vec::with_capacity(64 * 1024);
             let mut meta_scratch = Vec::with_capacity(64 * 1024);
@@ -539,7 +510,7 @@ async fn process_epoch_par(
             let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
             let mut block_stats: AHashMap<[u8; 32], ProgramUsageStats> =
                 AHashMap::with_capacity(4096);
-            let mut worker_totals = EpochMetrics::default();
+            let mut processed_blocks = 0usize;
 
             loop {
                 let block = {
@@ -671,9 +642,10 @@ async fn process_epoch_par(
                             continue;
                         }
 
-                        let tx_ref = unsafe { reusable_tx.assume_init_ref() };
+                        let tx = unsafe { reusable_tx.assume_init_read() };
+                        let message = &tx.message;
 
-                        for key in tx_ref.message.static_account_keys() {
+                        for key in message.static_account_keys() {
                             let program_key: [u8; 32] = *key;
                             let entry = block_stats
                                 .entry(program_key)
@@ -682,16 +654,13 @@ async fn process_epoch_par(
                         }
 
                         resolved_keys.clear();
-                        resolved_keys.reserve(
-                            tx_ref.message.static_account_keys().len()
-                                + if worker_top_level_only { 0 } else { 16 },
-                        );
-                        for key in tx_ref.message.static_account_keys() {
-                            resolved_keys.push(*key);
+                        resolved_keys.extend_from_slice(message.static_account_keys());
+                        if !worker_top_level_only {
+                            resolved_keys.reserve(16);
                         }
 
                         if worker_top_level_only {
-                            for ix in tx_ref.message.instructions_iter() {
+                            for ix in message.instructions_iter() {
                                 let program_idx = ix.program_id_index as usize;
                                 if program_idx >= resolved_keys.len() {
                                     continue;
@@ -733,7 +702,7 @@ async fn process_epoch_par(
                                     Err(_) => None,
                                 };
 
-                            for ix in tx_ref.message.instructions_iter() {
+                            for ix in message.instructions_iter() {
                                 let program_idx = ix.program_id_index as usize;
                                 if program_idx >= resolved_keys.len() {
                                     continue;
@@ -767,20 +736,10 @@ async fn process_epoch_par(
                                 }
                             }
                         }
-
-                        unsafe {
-                            std::ptr::drop_in_place(reusable_tx.as_mut_ptr());
-                        }
                     }
                 }
 
                 block_metrics.blocks_scanned += 1;
-                worker_totals.blocks_scanned += block_metrics.blocks_scanned;
-                worker_totals.txs_seen += block_metrics.txs_seen;
-                worker_totals.instructions_seen += block_metrics.instructions_seen;
-                worker_totals.inner_instructions_seen += block_metrics.inner_instructions_seen;
-                worker_totals.bytes_count += block_metrics.bytes_count;
-
                 let stats = block_stats
                     .iter()
                     .map(|(program, stats)| (*program, *stats))
@@ -796,12 +755,24 @@ async fn process_epoch_par(
                     })
                     .await
                     .map_err(|_| anyhow!("result channel closed"))?;
-            }
 
-            tracing::info!(
-                "[epoch {worker_epoch:04}] processor worker #{worker_idx} finished after {} blocks",
-                worker_totals.blocks_scanned
-            );
+                processed_blocks += 1;
+                if processed_blocks % 256 == 0 && block_stats.capacity() > 8192 {
+                    block_stats.shrink_to(4096);
+                }
+                if buf_tx.capacity() > 256 * 1024 {
+                    buf_tx.shrink_to(128 * 1024);
+                }
+                if buf_meta_df.capacity() > 128 * 1024 {
+                    buf_meta_df.shrink_to(64 * 1024);
+                }
+                if meta_scratch.capacity() > 128 * 1024 {
+                    meta_scratch.shrink_to(64 * 1024);
+                }
+                if resolved_keys.capacity() > 1024 {
+                    resolved_keys.shrink_to(512);
+                }
+            }
 
             Ok(())
         });
@@ -814,50 +785,19 @@ async fn process_epoch_par(
     let cache_dir_owned = cache_dir.to_string();
     let reader_sender = block_tx.clone();
     let reader_handle = tokio::spawn(async move {
-        tracing::info!("[epoch {epoch:04}] reader worker started");
         let reader = open_epoch::open_epoch(epoch, &cache_dir_owned, FetchMode::Offline)
             .await
             .with_context(|| format!("failed to open epoch {epoch:04}"))?;
         let mut car = CarBlockReader::new(reader);
         car.read_header().await?;
 
-        let start = Instant::now();
-        let mut last_log = start;
-        let mut blocks_sent = 0u64;
-        let mut bytes_sent = 0u64;
-
         while let Some(block) = car.next_block().await? {
-            bytes_sent += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
-            blocks_sent += 1;
-
             if reader_sender.send(block).await.is_err() {
-                tracing::warn!(
-                    "[epoch {epoch:04}] reader worker encountered closed channel, stopping early"
-                );
                 break;
-            }
-
-            let now = Instant::now();
-            if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
-                last_log = now;
-                let secs = now.duration_since(start).as_secs_f64().max(1e-6);
-                let blk_s = blocks_sent as f64 / secs;
-                let mb_s = (bytes_sent as f64 / (1024.0 * 1024.0)) / secs;
-                tracing::info!(
-                    "[epoch {epoch:04}] reader sent {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
-                    blocks_sent,
-                    blk_s,
-                    mb_s
-                );
             }
         }
 
         drop(reader_sender);
-
-        tracing::info!(
-            "[epoch {epoch:04}] reader worker finished after {} blocks",
-            blocks_sent
-        );
 
         Ok::<_, anyhow::Error>(())
     });
@@ -911,7 +851,6 @@ async fn collect_program_stats(
     let mut processed_epochs: AHashSet<u64> = reading::load_progress(&parts_dir).await?;
     let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
 
-    let mut last_processed_slot = 0u64;
     let mut epoch_last_slots: AHashMap<u64, u64> = AHashMap::with_capacity(256);
 
     if let Ok(mut rd) = fs::read_dir(&parts_dir).await {
@@ -1003,9 +942,6 @@ async fn collect_program_stats(
             processed_epochs.insert(part.epoch);
             epoch_last_slots.insert(part.epoch, part.last_slot);
             epoch_summaries.insert(part.epoch, part.clone());
-            if part.epoch == start_epoch {
-                last_processed_slot = part.last_slot;
-            }
         }
     }
 
@@ -1185,10 +1121,6 @@ async fn collect_program_stats(
         ));
     };
 
-    if let Some(slot) = epoch_last_slots.get(&last_epoch_processed) {
-        last_processed_slot = *slot;
-    }
-
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).await?;
@@ -1280,7 +1212,6 @@ async fn collect_program_stats_par(
     let mut processed_epochs: AHashSet<u64> = reading::load_progress(&parts_dir).await?;
     let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
 
-    let mut last_processed_slot = 0u64;
     let mut epoch_last_slots: AHashMap<u64, u64> = AHashMap::with_capacity(256);
 
     // load cached parts
@@ -1349,9 +1280,6 @@ async fn collect_program_stats_par(
             processed_epochs.insert(part.epoch);
             epoch_last_slots.insert(part.epoch, part.last_slot);
             epoch_summaries.insert(part.epoch, part.clone());
-            if part.epoch == start_epoch {
-                last_processed_slot = part.last_slot;
-            }
         }
     }
 
@@ -1415,6 +1343,8 @@ async fn collect_program_stats_par(
 
     if !epochs_to_process.is_empty() {
         let total_epochs = epochs_to_process.len();
+        let mut completed_in_run = 0usize;
+        let mut epochs_since_progress_persist = 0usize;
         let max_inflight = std::cmp::min(total_epochs, MAX_PAR_EPOCH_CONCURRENCY);
         let mut pending = epochs_to_process.into_iter();
         let mut join_set: JoinSet<Result<EpochProcessSummary>> = JoinSet::new();
@@ -1477,7 +1407,8 @@ async fn collect_program_stats_par(
                     records: summary_records,
                 },
             );
-            reading::persist_progress(&parts_dir, &processed_epochs).await?;
+            completed_in_run += 1;
+            epochs_since_progress_persist += 1;
             last_epoch_processed =
                 Some(last_epoch_processed.map_or(summary_epoch, |cur| cur.max(summary_epoch)));
 
@@ -1486,27 +1417,15 @@ async fn collect_program_stats_par(
             let secs = elapsed.as_secs_f64().max(1e-6);
             let blk_s = blocks_scanned as f64 / secs;
             let mb_s = (bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-            let tps = if elapsed.as_secs() > 0 {
-                txs_seen / elapsed.as_secs()
-            } else {
-                0
-            };
 
             let active = join_set.len();
             let queued = pending.len();
+            let remaining = active + queued;
 
             write!(
                 &mut msg_buf,
-                "[par] epoch {:04} done | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={} | active={} queued={}",
-                summary_epoch,
-                summary_metrics.blocks_scanned,
-                blk_s,
-                mb_s,
-                tps,
-                summary_metrics.instructions_seen,
-                summary_metrics.inner_instructions_seen,
-                active,
-                queued
+                "E{:04}\u{2713} ({}/{}) | {} active | {} remaining | {:.1} blk/s | {:.1} MB/s",
+                summary_epoch, completed_in_run, total_epochs, active, remaining, blk_s, mb_s
             )
             .unwrap();
 
@@ -1518,6 +1437,11 @@ async fn collect_program_stats_par(
             if let Some((epoch, min_slot)) = pending.next() {
                 spawn_epoch(&mut join_set, epoch, min_slot);
             }
+
+            if epochs_since_progress_persist >= 10 || (pending.len() == 0 && join_set.is_empty()) {
+                reading::persist_progress(&parts_dir, &processed_epochs).await?;
+                epochs_since_progress_persist = 0;
+            }
         }
     }
 
@@ -1526,10 +1450,6 @@ async fn collect_program_stats_par(
             "no epochs processed between {start_epoch:04} and {last_epoch:04}"
         ));
     };
-
-    if let Some(slot) = epoch_last_slots.get(&last_epoch_processed) {
-        last_processed_slot = *slot;
-    }
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
