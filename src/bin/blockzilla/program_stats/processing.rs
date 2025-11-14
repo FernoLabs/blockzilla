@@ -949,6 +949,18 @@ async fn collect_program_stats(
                         path.display(),
                         e
                     );
+                    if processed_epochs.remove(&epoch) {
+                        tracing::warn!(
+                            "removing epoch {epoch:04} from cached progress due to unreadable file"
+                        );
+                    }
+                    if let Err(remove_err) = fs::remove_file(&path).await {
+                        tracing::warn!(
+                            "failed to delete unreadable cache file {}: {}",
+                            path.display(),
+                            remove_err
+                        );
+                    }
                     continue;
                 }
             };
@@ -961,6 +973,18 @@ async fn collect_program_stats(
                         path.display(),
                         e
                     );
+                    if processed_epochs.remove(&epoch) {
+                        tracing::warn!(
+                            "removing epoch {epoch:04} from cached progress due to decode failure"
+                        );
+                    }
+                    if let Err(remove_err) = fs::remove_file(&path).await {
+                        tracing::warn!(
+                            "failed to delete corrupt cache file {}: {}",
+                            path.display(),
+                            remove_err
+                        );
+                    }
                     continue;
                 }
             };
