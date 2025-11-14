@@ -1,5 +1,5 @@
 use ahash::{AHashMap, AHashSet};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
     confirmed_block::TransactionStatusMeta,
@@ -492,11 +492,7 @@ async fn process_epoch(
         }
 
         // Compute block size once
-        let block_bytes = block
-            .entries
-            .iter()
-            .map(|entry| entry.len())
-            .sum::<usize>() as u64;
+        let block_bytes = block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
         metrics.bytes_count += block_bytes;
 
         if let Some(map) = per_block_map.as_mut() {
@@ -585,7 +581,7 @@ async fn process_epoch(
 
                 let tx_ref = unsafe { reusable_tx.assume_init_ref() };
 
-                // First: tx-level count, +1 per static account key
+                // tx_count: +1 per static account key
                 for key in tx_ref.message.static_account_keys() {
                     let program_key: [u8; 32] = *key;
                     let entry = epoch_stats
@@ -600,7 +596,7 @@ async fn process_epoch(
                     }
                 }
 
-                // Build resolved_keys for instructions (static + loaded addresses)
+                // Build resolved_keys: static only by default
                 resolved_keys.clear();
                 resolved_keys.reserve(
                     tx_ref.message.static_account_keys().len()
@@ -610,81 +606,102 @@ async fn process_epoch(
                     resolved_keys.push(*key);
                 }
 
-                // Load metadata and inner instructions only if needed
-                let inner_instruction_groups = if top_level_only {
-                    None
-                } else {
-                    match metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
-                        Ok(meta_bytes) => {
-                            decode_transaction_meta(meta_bytes, &mut meta_scratch).and_then(
-                                |meta| {
-                                    extend_with_loaded_addresses(
-                                        &mut resolved_keys,
-                                        &meta.loaded_writable_addresses,
-                                    );
-                                    extend_with_loaded_addresses(
-                                        &mut resolved_keys,
-                                        &meta.loaded_readonly_addresses,
-                                    );
-
-                                    if !meta.inner_instructions_none
-                                        && !meta.inner_instructions.is_empty()
-                                    {
-                                        Some(meta.inner_instructions)
-                                    } else {
-                                        None
-                                    }
-                                },
-                            )
+                if top_level_only {
+                    // Top level only, no metadata, no inner instructions
+                    for ix in tx_ref.message.instructions_iter() {
+                        let program_idx = ix.program_id_index as usize;
+                        if program_idx >= resolved_keys.len() {
+                            continue;
                         }
-                        Err(_) => None,
+                        let program_key = resolved_keys[program_idx];
+
+                        let entry = epoch_stats
+                            .entry(program_key)
+                            .or_insert_with(ProgramUsageStats::default);
+                        entry.instruction_count += 1;
+
+                        if let Some(map) = per_block_map.as_mut() {
+                            map.entry(program_key)
+                                .or_insert_with(ProgramUsageStats::default)
+                                .instruction_count += 1;
+                        }
+
+                        metrics.instructions_seen += 1;
                     }
-                };
+                } else {
+                    // Full mode: load metadata, extend loaded addresses, count inner
+                    let inner_instruction_groups =
+                        match metadata_bytes(&block, &tx_node, &mut buf_meta_df) {
+                            Ok(meta_bytes) => {
+                                decode_transaction_meta(meta_bytes, &mut meta_scratch).and_then(
+                                    |meta| {
+                                        extend_with_loaded_addresses(
+                                            &mut resolved_keys,
+                                            &meta.loaded_writable_addresses,
+                                        );
+                                        extend_with_loaded_addresses(
+                                            &mut resolved_keys,
+                                            &meta.loaded_readonly_addresses,
+                                        );
 
-                // Top-level instructions: count uses
-                for ix in tx_ref.message.instructions_iter() {
-                    let program_idx = ix.program_id_index as usize;
-                    if program_idx >= resolved_keys.len() {
-                        continue;
-                    }
-                    let program_key = resolved_keys[program_idx];
-
-                    let entry = epoch_stats
-                        .entry(program_key)
-                        .or_insert_with(ProgramUsageStats::default);
-                    entry.instruction_count += 1;
-
-                    if let Some(map) = per_block_map.as_mut() {
-                        map.entry(program_key)
-                            .or_insert_with(ProgramUsageStats::default)
-                            .instruction_count += 1;
-                    }
-
-                    metrics.instructions_seen += 1;
-                }
-
-                // Inner instructions: count uses
-                if let Some(groups) = inner_instruction_groups.as_ref() {
-                    for group in groups {
-                        for inner_ix in group.instructions.iter() {
-                            let program_idx = inner_ix.program_id_index as usize;
-                            if program_idx >= resolved_keys.len() {
-                                continue;
+                                        if !meta.inner_instructions_none
+                                            && !meta.inner_instructions.is_empty()
+                                        {
+                                            Some(meta.inner_instructions)
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                )
                             }
-                            let program_key = resolved_keys[program_idx];
+                            Err(_) => None,
+                        };
 
-                            let entry = epoch_stats
-                                .entry(program_key)
-                                .or_insert_with(ProgramUsageStats::default);
-                            entry.inner_instruction_count += 1;
+                    // Top-level
+                    for ix in tx_ref.message.instructions_iter() {
+                        let program_idx = ix.program_id_index as usize;
+                        if program_idx >= resolved_keys.len() {
+                            continue;
+                        }
+                        let program_key = resolved_keys[program_idx];
 
-                            if let Some(map) = per_block_map.as_mut() {
-                                map.entry(program_key)
-                                    .or_insert_with(ProgramUsageStats::default)
-                                    .inner_instruction_count += 1;
+                        let entry = epoch_stats
+                            .entry(program_key)
+                            .or_insert_with(ProgramUsageStats::default);
+                        entry.instruction_count += 1;
+
+                        if let Some(map) = per_block_map.as_mut() {
+                            map.entry(program_key)
+                                .or_insert_with(ProgramUsageStats::default)
+                                .instruction_count += 1;
+                        }
+
+                        metrics.instructions_seen += 1;
+                    }
+
+                    // Inner
+                    if let Some(groups) = inner_instruction_groups.as_ref() {
+                        for group in groups {
+                            for inner_ix in group.instructions.iter() {
+                                let program_idx = inner_ix.program_id_index as usize;
+                                if program_idx >= resolved_keys.len() {
+                                    continue;
+                                }
+                                let program_key = resolved_keys[program_idx];
+
+                                let entry = epoch_stats
+                                    .entry(program_key)
+                                    .or_insert_with(ProgramUsageStats::default);
+                                entry.inner_instruction_count += 1;
+
+                                if let Some(map) = per_block_map.as_mut() {
+                                    map.entry(program_key)
+                                        .or_insert_with(ProgramUsageStats::default)
+                                        .inner_instruction_count += 1;
+                                }
+
+                                metrics.inner_instructions_seen += 1;
                             }
-
-                            metrics.inner_instructions_seen += 1;
                         }
                     }
                 }
@@ -696,13 +713,16 @@ async fn process_epoch(
         epoch_last_slot = slot;
         metrics.blocks_scanned += 1;
 
-        if let (Some(map), Some(per_block_stats)) = (per_block_map.as_ref(), per_block_stats.as_mut())
+        if let (Some(map), Some(per_block_stats)) =
+            (per_block_map.as_ref(), per_block_stats.as_mut())
         {
             let start = per_block_stats.records.len();
-            per_block_stats.records.extend(
-                map.iter()
-                    .map(|(program, stats)| ProgramUsageRecord { program: *program, stats: *stats }),
-            );
+            per_block_stats
+                .records
+                .extend(map.iter().map(|(program, stats)| ProgramUsageRecord {
+                    program: *program,
+                    stats: *stats,
+                }));
             let end = per_block_stats.records.len();
 
             per_block_stats.blocks.push(BlockProgramUsage {
@@ -740,9 +760,7 @@ async fn process_epoch(
     fs::rename(&tmp_path, &part_path).await?;
 
     if let Some(per_block_stats) = per_block_stats.as_mut() {
-        per_block_stats
-            .blocks
-            .sort_by(|a, b| a.slot.cmp(&b.slot));
+        per_block_stats.blocks.sort_by(|a, b| a.slot.cmp(&b.slot));
     }
 
     Ok(EpochProcessSummary {
@@ -968,12 +986,12 @@ async fn collect_program_stats(
             {
                 let offset = global_stats.records.len();
                 global_stats.records.extend(epoch_stats.records.into_iter());
-                global_stats.blocks.extend(
-                    epoch_stats.blocks.into_iter().map(|mut blk| {
+                global_stats
+                    .blocks
+                    .extend(epoch_stats.blocks.into_iter().map(|mut blk| {
                         blk.start += offset;
                         blk
-                    }),
-                );
+                    }));
             }
 
             processed_epochs.insert(summary_epoch);
@@ -1023,10 +1041,12 @@ async fn collect_program_stats(
     }
 
     if let Some(global_stats) = per_block_global.as_mut() {
-        global_stats.blocks.sort_by(|a, b| match a.epoch.cmp(&b.epoch) {
-            std::cmp::Ordering::Equal => a.slot.cmp(&b.slot),
-            other => other,
-        });
+        global_stats
+            .blocks
+            .sort_by(|a, b| match a.epoch.cmp(&b.epoch) {
+                std::cmp::Ordering::Equal => a.slot.cmp(&b.slot),
+                other => other,
+            });
     }
 
     let Some(last_epoch_processed) = last_epoch_processed else {
@@ -1070,13 +1090,7 @@ async fn collect_program_stats(
 
     let final_line = format!(
         "{range_label} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={} txs={}",
-        blocks_scanned,
-        blk_s,
-        mb_s,
-        tps,
-        instructions_seen,
-        inner_instructions_seen,
-        txs_seen
+        blocks_scanned, blk_s, mb_s, tps, instructions_seen, inner_instructions_seen, txs_seen
     );
 
     if pb.is_hidden() {
