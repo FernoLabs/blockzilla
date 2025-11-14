@@ -27,10 +27,11 @@ fn emit_progress(pb: &ProgressBar, message: String, tick: bool) {
     if pb.is_hidden() {
         tracing::info!("{message}");
     } else {
-        pb.set_message(message);
+        pb.set_message(message.clone());
         if tick {
             pb.tick();
         }
+        tracing::info!("{message}");
     }
 }
 
