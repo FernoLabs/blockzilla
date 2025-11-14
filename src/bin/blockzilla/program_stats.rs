@@ -11,7 +11,6 @@ use cid::Cid;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
@@ -372,9 +371,11 @@ async fn process_epoch(
     let mut buf_tx = Vec::with_capacity(128 * 1024);
     let mut buf_meta = Vec::with_capacity(128 * 1024);
     let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
-    let mut resolved_keys = SmallVec::<[Pubkey; 512]>::new();
-    let mut tx_programs = SmallVec::<[[u8; 32]; 64]>::new();
-    let mut msg_buf = String::with_capacity(256);
+    let mut resolved_keys = Vec::<Pubkey>::with_capacity(512);
+    let mut tx_programs = AHashSet::<[u8; 32]>::with_capacity(64);
+
+    // Error counters (log once at end instead of spamming)
+    let mut decode_errors = 0u64;
 
     while let Some(block) = car.next_block().await? {
         metrics.bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
@@ -387,8 +388,8 @@ async fn process_epoch(
 
         let slot = match peek_block_slot(&block) {
             Ok(slot) => slot,
-            Err(e) => {
-                tracing::warn!("failed to peek block slot: {e}");
+            Err(_) => {
+                decode_errors += 1;
                 continue;
             }
         };
@@ -411,8 +412,8 @@ async fn process_epoch(
 
         let block_node = match block.block() {
             Ok(node) => node,
-            Err(e) => {
-                tracing::warn!("failed to decode block: {e}");
+            Err(_) => {
+                decode_errors += 1;
                 continue;
             }
         };
@@ -424,8 +425,8 @@ async fn process_epoch(
         for entry_cid_res in block_node.entries.iter() {
             let entry_cid = match entry_cid_res {
                 Ok(cid) => cid,
-                Err(e) => {
-                    tracing::warn!("failed to decode entry cid: {e}");
+                Err(_) => {
+                    decode_errors += 1;
                     continue;
                 }
             };
@@ -433,8 +434,8 @@ async fn process_epoch(
             let entry = match block.decode(entry_cid.hash_bytes()) {
                 Ok(Node::Entry(entry)) => entry,
                 Ok(_) => continue,
-                Err(e) => {
-                    tracing::warn!("failed to decode entry: {e}");
+                Err(_) => {
+                    decode_errors += 1;
                     continue;
                 }
             };
@@ -442,8 +443,8 @@ async fn process_epoch(
             for tx_cid_res in entry.transactions.iter() {
                 let tx_cid = match tx_cid_res {
                     Ok(cid) => cid,
-                    Err(e) => {
-                        tracing::warn!("failed to decode transaction cid: {e}");
+                    Err(_) => {
+                        decode_errors += 1;
                         continue;
                     }
                 };
@@ -451,26 +452,26 @@ async fn process_epoch(
                 let tx_node = match block.decode(tx_cid.hash_bytes()) {
                     Ok(Node::Transaction(tx_node)) => tx_node,
                     Ok(_) => continue,
-                    Err(e) => {
-                        tracing::warn!("failed to decode transaction node: {e}");
+                    Err(_) => {
+                        decode_errors += 1;
                         continue;
                     }
                 };
 
                 let tx_bytes_slice = match transaction_bytes(&block, &tx_node, &mut buf_tx) {
                     Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::warn!("failed to read transaction bytes: {e}");
+                    Err(_) => {
+                        decode_errors += 1;
                         continue;
                     }
                 };
 
                 metrics.txs_seen += 1;
 
-                if let Err(e) =
+                if let Err(_) =
                     VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
                 {
-                    tracing::warn!("failed to parse transaction: {e}");
+                    decode_errors += 1;
                     continue;
                 }
 
@@ -485,11 +486,12 @@ async fn process_epoch(
                     resolved_keys.push(Pubkey::new_from_array(*key));
                 }
 
-                let mut inner_instruction_groups = None;
-
-                if !top_level_only {
-                    if let Ok(meta_bytes) = metadata_bytes(&block, &tx_node, &mut buf_meta) {
-                        if let Some(meta) = decode_transaction_meta(meta_bytes) {
+                // Load metadata and inner instructions only if needed
+                let inner_instruction_groups = if top_level_only {
+                    None
+                } else {
+                    match metadata_bytes(&block, &tx_node, &mut buf_meta) {
+                        Ok(meta_bytes) => decode_transaction_meta(meta_bytes).and_then(|meta| {
                             extend_with_loaded_addresses(
                                 &mut resolved_keys,
                                 &meta.loaded_writable_addresses,
@@ -501,23 +503,27 @@ async fn process_epoch(
 
                             if !meta.inner_instructions_none && !meta.inner_instructions.is_empty()
                             {
-                                inner_instruction_groups = Some(meta.inner_instructions);
+                                Some(meta.inner_instructions)
+                            } else {
+                                None
                             }
-                        }
+                        }),
+                        Err(_) => None,
                     }
-                }
+                };
 
+                // First pass: count instructions and collect unique programs
                 for ix in tx_ref.message.instructions_iter() {
                     let program_idx = ix.program_id_index as usize;
                     if program_idx >= resolved_keys.len() {
                         continue;
                     }
                     let program_key = resolved_keys[program_idx].to_bytes();
-                    let entry = epoch_stats
+                    
+                    epoch_stats
                         .entry(program_key)
-                        .or_insert_with(ProgramUsageStats::default);
-                    entry.tx_count += 1;
-                    entry.instruction_count += 1;
+                        .or_insert_with(ProgramUsageStats::default)
+                        .instruction_count += 1;
 
                     if let Some(block_stats) = block_stats.as_mut() {
                         block_stats
@@ -526,12 +532,11 @@ async fn process_epoch(
                             .instruction_count += 1;
                     }
 
-                    if !tx_programs.iter().any(|existing| existing == &program_key) {
-                        tx_programs.push(program_key);
-                    }
+                    tx_programs.insert(program_key);
                     metrics.instructions_seen += 1;
                 }
 
+                // Process inner instructions if needed
                 if let Some(groups) = inner_instruction_groups.as_ref() {
                     for group in groups {
                         for inner_ix in group.instructions.iter() {
@@ -540,10 +545,11 @@ async fn process_epoch(
                                 continue;
                             }
                             let program_key = resolved_keys[program_idx].to_bytes();
-                            let entry = epoch_stats
+                            
+                            epoch_stats
                                 .entry(program_key)
-                                .or_insert_with(ProgramUsageStats::default);
-                            entry.inner_instruction_count += 1;
+                                .or_insert_with(ProgramUsageStats::default)
+                                .inner_instruction_count += 1;
 
                             if let Some(block_stats) = block_stats.as_mut() {
                                 block_stats
@@ -552,15 +558,19 @@ async fn process_epoch(
                                     .inner_instruction_count += 1;
                             }
 
-                            if !tx_programs.iter().any(|existing| existing == &program_key) {
-                                tx_programs.push(program_key);
-                            }
+                            tx_programs.insert(program_key);
                             metrics.inner_instructions_seen += 1;
                         }
                     }
                 }
 
+                // Second pass: increment tx_count once per unique program
                 for program_key in tx_programs.iter() {
+                    epoch_stats
+                        .entry(*program_key)
+                        .or_insert_with(ProgramUsageStats::default)
+                        .tx_count += 1;
+
                     if let Some(block_stats) = block_stats.as_mut() {
                         block_stats
                             .entry(*program_key)
@@ -609,9 +619,7 @@ async fn process_epoch(
                 0
             };
 
-            msg_buf.clear();
-            write!(
-                &mut msg_buf,
+            tracing::info!(
                 "epoch {:04} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
                 epoch,
                 epoch_last_slot,
@@ -621,9 +629,12 @@ async fn process_epoch(
                 tps,
                 metrics.instructions_seen,
                 metrics.inner_instructions_seen
-            )
-            .unwrap();
+            );
         }
+    }
+
+    if decode_errors > 0 {
+        tracing::warn!("epoch {epoch:04} had {decode_errors} decode errors");
     }
 
     fs::create_dir_all(parts_dir).await?;
@@ -1249,17 +1260,12 @@ fn metadata_bytes<'a>(
     }
 }
 
-fn extend_with_loaded_addresses(dest: &mut SmallVec<[Pubkey; 512]>, addrs: &[Vec<u8>]) {
+fn extend_with_loaded_addresses(dest: &mut Vec<Pubkey>, addrs: &[Vec<u8>]) {
     for addr in addrs {
         if addr.len() == 32 {
             let mut bytes = [0u8; 32];
             bytes.copy_from_slice(addr);
             dest.push(Pubkey::new_from_array(bytes));
-        } else {
-            tracing::warn!(
-                "loaded address has invalid length: expected 32 bytes, got {}",
-                addr.len()
-            );
         }
     }
 }
@@ -1272,10 +1278,7 @@ fn decode_transaction_meta(bytes: &[u8]) -> Option<TransactionStatusMeta> {
     let raw = if is_zstd(bytes) {
         match zstd::decode_all(bytes) {
             Ok(data) => data,
-            Err(e) => {
-                tracing::warn!("failed to decompress metadata: {e}");
-                return None;
-            }
+            Err(_) => return None,
         }
     } else {
         bytes.to_vec()
@@ -1283,10 +1286,7 @@ fn decode_transaction_meta(bytes: &[u8]) -> Option<TransactionStatusMeta> {
 
     match TransactionStatusMeta::decode(raw.as_slice()) {
         Ok(meta) => Some(meta),
-        Err(e) => {
-            tracing::warn!("failed to decode TransactionStatusMeta protobuf: {e}");
-            None
-        }
+        Err(_) => None,
     }
 }
 
