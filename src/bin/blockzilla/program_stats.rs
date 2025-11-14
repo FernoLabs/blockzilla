@@ -1183,16 +1183,32 @@ pub async fn dump_program_stats_csv(
     }
 
     let mut aggregated = export.aggregated;
-    let limit = limit.unwrap_or(aggregated.len());
-    aggregated.truncate(limit);
+    let limit = limit.unwrap_or(usize::MAX);
+    if limit != usize::MAX {
+        aggregated.truncate(limit);
+    }
 
-    let program_keys = aggregated
+    let mut program_keys = Vec::with_capacity(aggregated.len());
+    let mut seen_programs = AHashSet::with_capacity(aggregated.len());
+    for record in aggregated.iter() {
+        if seen_programs.insert(record.program) {
+            program_keys.push(record.program);
+        }
+    }
+
+    if limit != usize::MAX {
+        for epoch in export.epochs.iter() {
+            for record in epoch.records.iter().take(limit) {
+                if seen_programs.insert(record.program) {
+                    program_keys.push(record.program);
+                }
+            }
+        }
+    }
+
+    let program_labels = program_keys
         .iter()
-        .map(|record| record.program)
-        .collect::<Vec<_>>();
-    let program_labels = aggregated
-        .iter()
-        .map(|record| bs58::encode(record.program).into_string())
+        .map(|program| bs58::encode(program).into_string())
         .collect::<Vec<_>>();
 
     let mut csv_bytes = Vec::with_capacity(export.epochs.len() * (program_keys.len() + 3) * 8);
