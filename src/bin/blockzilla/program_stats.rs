@@ -1,5 +1,5 @@
 use ahash::{AHashMap, AHashSet};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use blockzilla::{
     car_block_reader::{CarBlock, CarBlockReader},
     confirmed_block::TransactionStatusMeta,
@@ -23,21 +23,26 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::LOG_INTERVAL_SECS;
 
-const BLOCK_LOG_CHUNK: u64 = 500;
-
 #[derive(Clone)]
 #[allow(dead_code)]
 struct BlockProgramUsage {
     pub epoch: u64,
     pub slot: u64,
     pub block_time: Option<i64>,
+    // inclusive range into a pooled records vec
+    pub start: usize,
+    pub len: usize,
+}
+
+struct PerBlockStats {
+    pub blocks: Vec<BlockProgramUsage>,
     pub records: Vec<ProgramUsageRecord>,
 }
 
 struct ProgramStatsCollection {
     pub aggregated: Vec<ProgramUsageRecord>,
     #[allow(dead_code)]
-    pub per_block: Option<Vec<BlockProgramUsage>>,
+    pub per_block: Option<PerBlockStats>,
     pub per_epoch: Vec<ProgramUsageEpochPart>,
     pub processed_epochs: Vec<u64>,
 }
@@ -56,7 +61,7 @@ struct EpochProcessSummary {
     pub last_slot: u64,
     pub last_blocktime: Option<i64>,
     pub records: Vec<ProgramUsageRecord>,
-    pub per_block: Option<Vec<BlockProgramUsage>>,
+    pub per_block: Option<PerBlockStats>,
     pub metrics: EpochMetrics,
 }
 
@@ -408,9 +413,8 @@ async fn process_epoch(
     collect_per_block: bool,
     top_level_only: bool,
     min_slot: u64,
+    pb: &ProgressBar,
 ) -> Result<EpochProcessSummary> {
-    tracing::info!("opening epoch {epoch:04}");
-
     let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
         .await
         .with_context(|| format!("failed to open epoch {epoch:04}"))?;
@@ -421,21 +425,30 @@ async fn process_epoch(
     let mut epoch_last_slot = 0u64;
     let mut epoch_last_blocktime = None;
 
-    let mut per_block_records = if collect_per_block {
-        Some(Vec::new())
+    let mut per_block_stats = if collect_per_block {
+        Some(PerBlockStats {
+            blocks: Vec::new(),
+            records: Vec::new(),
+        })
+    } else {
+        None
+    };
+
+    // Reused per-block map
+    let mut per_block_map = if collect_per_block {
+        Some(AHashMap::<[u8; 32], ProgramUsageStats>::with_capacity(128))
     } else {
         None
     };
 
     let epoch_start = Instant::now();
-    let mut last_log = epoch_start - Duration::from_secs(LOG_INTERVAL_SECS);
+    let mut last_log = epoch_start;
 
     let mut metrics = EpochMetrics::default();
 
     let mut skipped_blocks = 0u64;
     let mut skipped_bytes = 0u64;
     let mut last_skipped_slot = 0u64;
-    let mut printed_skipped_summary = false;
 
     let mut buf_tx = Vec::with_capacity(128 * 1024);
     let mut buf_meta = Vec::with_capacity(128 * 1024);
@@ -447,13 +460,40 @@ async fn process_epoch(
     let mut decode_errors = 0u64;
 
     while let Some(block) = car.next_block().await? {
+        let now = Instant::now();
+        if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+            last_log = now;
+            let elapsed = now.duration_since(epoch_start);
+            let secs = elapsed.as_secs_f64().max(1e-6);
+            let blk_s = metrics.blocks_scanned as f64 / secs;
+            let mb_s = (metrics.bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+            let tps = if elapsed.as_secs() > 0 {
+                metrics.txs_seen / elapsed.as_secs()
+            } else {
+                0
+            };
+
+            let msg = format!(
+                "epoch {:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | {} programs",
+                epoch,
+                metrics.blocks_scanned,
+                blk_s,
+                mb_s,
+                tps,
+                epoch_stats.len()
+            );
+
+            if !pb.is_hidden() {
+                pb.set_message(msg);
+                pb.tick();
+            }
+        }
+
         metrics.bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
 
-        let mut block_stats = if collect_per_block {
-            Some(AHashMap::<[u8; 32], ProgramUsageStats>::with_capacity(128))
-        } else {
-            None
-        };
+        if let Some(map) = per_block_map.as_mut() {
+            map.clear();
+        }
 
         let slot = match peek_block_slot(&block) {
             Ok(slot) => slot,
@@ -468,15 +508,6 @@ async fn process_epoch(
             skipped_bytes += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
             last_skipped_slot = slot;
             continue;
-        }
-
-        if !printed_skipped_summary && skipped_blocks > 0 {
-            printed_skipped_summary = true;
-            tracing::info!(
-                "reached start_slot={min_slot} | skipped {} blocks ({:.2} MB), last skipped slot {last_skipped_slot}",
-                skipped_blocks,
-                skipped_bytes as f64 / (1024.0 * 1024.0)
-            );
         }
 
         let block_node = match block.block() {
@@ -594,9 +625,8 @@ async fn process_epoch(
                         .or_insert_with(ProgramUsageStats::default)
                         .instruction_count += 1;
 
-                    if let Some(block_stats) = block_stats.as_mut() {
-                        block_stats
-                            .entry(program_key)
+                    if let Some(map) = per_block_map.as_mut() {
+                        map.entry(program_key)
                             .or_insert_with(ProgramUsageStats::default)
                             .instruction_count += 1;
                     }
@@ -620,9 +650,8 @@ async fn process_epoch(
                                 .or_insert_with(ProgramUsageStats::default)
                                 .inner_instruction_count += 1;
 
-                            if let Some(block_stats) = block_stats.as_mut() {
-                                block_stats
-                                    .entry(program_key)
+                            if let Some(map) = per_block_map.as_mut() {
+                                map.entry(program_key)
                                     .or_insert_with(ProgramUsageStats::default)
                                     .inner_instruction_count += 1;
                             }
@@ -640,9 +669,8 @@ async fn process_epoch(
                         .or_insert_with(ProgramUsageStats::default)
                         .tx_count += 1;
 
-                    if let Some(block_stats) = block_stats.as_mut() {
-                        block_stats
-                            .entry(*program_key)
+                    if let Some(map) = per_block_map.as_mut() {
+                        map.entry(*program_key)
                             .or_insert_with(ProgramUsageStats::default)
                             .tx_count += 1;
                     }
@@ -656,49 +684,22 @@ async fn process_epoch(
         epoch_last_slot = slot;
         metrics.blocks_scanned += 1;
 
-        if let (Some(block_stats), Some(per_block_records)) =
-            (block_stats, per_block_records.as_mut())
+        if let (Some(map), Some(per_block_stats)) = (per_block_map.as_ref(), per_block_stats.as_mut())
         {
-            let mut records: Vec<ProgramUsageRecord> = block_stats
-                .into_iter()
-                .map(|(program, stats)| ProgramUsageRecord { program, stats })
-                .collect();
-            records
-                .sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
-            per_block_records.push(BlockProgramUsage {
+            let start = per_block_stats.records.len();
+            per_block_stats.records.extend(
+                map.iter()
+                    .map(|(program, stats)| ProgramUsageRecord { program: *program, stats: *stats }),
+            );
+            let end = per_block_stats.records.len();
+
+            per_block_stats.blocks.push(BlockProgramUsage {
                 epoch,
                 slot,
                 block_time: block_node.meta.blocktime,
-                records,
+                start,
+                len: end - start,
             });
-        }
-
-        let now = Instant::now();
-        let time_due = now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS);
-        let chunk_due = metrics.blocks_scanned % BLOCK_LOG_CHUNK == 0;
-        if time_due || chunk_due {
-            last_log = now;
-            let elapsed = now.duration_since(epoch_start);
-            let secs = elapsed.as_secs_f64().max(1e-6);
-            let blk_s = metrics.blocks_scanned as f64 / secs;
-            let mb_s = (metrics.bytes_count as f64 / (1024.0 * 1024.0)) / secs;
-            let tps = if elapsed.as_secs() > 0 {
-                metrics.txs_seen / elapsed.as_secs()
-            } else {
-                0
-            };
-
-            tracing::info!(
-                "epoch {:04} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
-                epoch,
-                epoch_last_slot,
-                metrics.blocks_scanned,
-                blk_s,
-                mb_s,
-                tps,
-                metrics.instructions_seen,
-                metrics.inner_instructions_seen
-            );
         }
     }
 
@@ -726,8 +727,10 @@ async fn process_epoch(
     fs::write(&tmp_path, &encoded_epoch).await?;
     fs::rename(&tmp_path, &part_path).await?;
 
-    if let Some(per_block_records) = per_block_records.as_mut() {
-        per_block_records.sort_by(|a, b| a.slot.cmp(&b.slot));
+    if let Some(per_block_stats) = per_block_stats.as_mut() {
+        per_block_stats
+            .blocks
+            .sort_by(|a, b| a.slot.cmp(&b.slot));
     }
 
     Ok(EpochProcessSummary {
@@ -735,7 +738,7 @@ async fn process_epoch(
         last_slot: epoch_last_slot,
         last_blocktime: epoch_last_blocktime,
         records,
-        per_block: per_block_records,
+        per_block: per_block_stats,
         metrics,
     })
 }
@@ -771,12 +774,6 @@ async fn collect_program_stats(
     let mut aggregated: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(16_384);
     let mut processed_epochs = load_progress(&parts_dir).await?;
     let mut epoch_summaries: AHashMap<u64, ProgramUsageEpochPart> = AHashMap::with_capacity(256);
-
-    let mut per_block_records = if collect_per_block {
-        Some(Vec::new())
-    } else {
-        None
-    };
 
     let mut last_processed_slot = 0u64;
     let mut epoch_last_slots: AHashMap<u64, u64> = AHashMap::with_capacity(256);
@@ -878,7 +875,9 @@ async fn collect_program_stats(
         start_epoch, start_slot, last_epoch
     )
     .unwrap();
-    pb.set_message(msg_buf.clone());
+    if !pb.is_hidden() {
+        pb.set_message(msg_buf.clone());
+    }
 
     let mut last_epoch_processed = processed_epochs.iter().copied().max();
 
@@ -891,10 +890,10 @@ async fn collect_program_stats(
     let mut epochs_to_process: Vec<(u64, u64)> = Vec::new();
     for epoch in start_epoch..=last_epoch {
         if processed_epochs.contains(&epoch) {
-            if pb.is_hidden() {
-                tracing::info!("skipping epoch {epoch:04} (already cached)");
-            } else {
-                pb.println(format!("skipping epoch {epoch:04} (already cached)"));
+            let msg = format!("skipping epoch {epoch:04} (already cached)");
+            if !pb.is_hidden() {
+                pb.set_message(msg);
+                pb.tick();
             }
             last_epoch_processed = Some(last_epoch_processed.map_or(epoch, |cur| cur.max(epoch)));
             continue;
@@ -908,6 +907,15 @@ async fn collect_program_stats(
         epochs_to_process.push((epoch, min_slot));
     }
 
+    let mut per_block_global = if collect_per_block {
+        Some(PerBlockStats {
+            blocks: Vec::new(),
+            records: Vec::new(),
+        })
+    } else {
+        None
+    };
+
     if !epochs_to_process.is_empty() {
         for (epoch, min_slot) in epochs_to_process {
             let summary = process_epoch(
@@ -917,6 +925,7 @@ async fn collect_program_stats(
                 collect_per_block,
                 top_level_only,
                 min_slot,
+                &pb,
             )
             .await?;
 
@@ -942,10 +951,17 @@ async fn collect_program_stats(
                     .accumulate(&record.stats);
             }
 
-            if let (Some(blocks), Some(per_block_records)) =
-                (summary_per_block, per_block_records.as_mut())
+            if let (Some(epoch_stats), Some(global_stats)) =
+                (summary_per_block, per_block_global.as_mut())
             {
-                per_block_records.extend(blocks);
+                let offset = global_stats.records.len();
+                global_stats.records.extend(epoch_stats.records.into_iter());
+                global_stats.blocks.extend(
+                    epoch_stats.blocks.into_iter().map(|mut blk| {
+                        blk.start += offset;
+                        blk
+                    }),
+                );
             }
 
             processed_epochs.insert(summary_epoch);
@@ -976,29 +992,26 @@ async fn collect_program_stats(
 
             write!(
                 &mut msg_buf,
-                "epoch {:04} done | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
+                "epoch {:04} done | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={}",
                 summary_epoch,
-                summary_last_slot,
-                blocks_scanned,
+                summary_metrics.blocks_scanned,
                 blk_s,
                 mb_s,
                 tps,
-                instructions_seen,
-                inner_instructions_seen
+                summary_metrics.instructions_seen,
+                summary_metrics.inner_instructions_seen
             )
             .unwrap();
 
-            if pb.is_hidden() {
-                tracing::info!("{}", msg_buf);
-            } else {
+            if !pb.is_hidden() {
                 pb.set_message(msg_buf.clone());
                 pb.tick();
             }
         }
     }
 
-    if let Some(per_block_records) = per_block_records.as_mut() {
-        per_block_records.sort_by(|a, b| match a.epoch.cmp(&b.epoch) {
+    if let Some(global_stats) = per_block_global.as_mut() {
+        global_stats.blocks.sort_by(|a, b| match a.epoch.cmp(&b.epoch) {
             std::cmp::Ordering::Equal => a.slot.cmp(&b.slot),
             other => other,
         });
@@ -1044,8 +1057,7 @@ async fn collect_program_stats(
     };
 
     let final_line = format!(
-        "{range_label} | slot={} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={} txs={}",
-        last_processed_slot,
+        "{range_label} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} TPS | instr={} inner={} txs={}",
         blocks_scanned,
         blk_s,
         mb_s,
@@ -1070,7 +1082,7 @@ async fn collect_program_stats(
 
     Ok(ProgramStatsCollection {
         aggregated: aggregated_records,
-        per_block: per_block_records,
+        per_block: per_block_global,
         per_epoch,
         processed_epochs: processed_epochs_list,
     })
