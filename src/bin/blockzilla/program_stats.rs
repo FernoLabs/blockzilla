@@ -797,12 +797,106 @@ async fn process_epoch(
     })
 }
 
-struct WorkerEpochResult {
-    pub stats: AHashMap<[u8; 32], ProgramUsageStats>,
+struct BlockProcessResult {
+    pub slot: Option<u64>,
+    pub block_time: Option<i64>,
+    pub stats: Vec<([u8; 32], ProgramUsageStats)>,
     pub metrics: EpochMetrics,
-    pub last_slot: u64,
-    pub last_blocktime: Option<i64>,
     pub decode_errors: u64,
+}
+
+async fn consume_epoch_results(
+    epoch: u64,
+    parts_dir: PathBuf,
+    mut rx: mpsc::Receiver<BlockProcessResult>,
+) -> Result<EpochProcessSummary> {
+    let start = Instant::now();
+    let mut last_log = start;
+
+    let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
+    let mut metrics = EpochMetrics::default();
+    let mut epoch_last_slot = 0u64;
+    let mut epoch_last_blocktime: Option<i64> = None;
+    let mut decode_errors_total = 0u64;
+
+    while let Some(block) = rx.recv().await {
+        metrics.blocks_scanned += block.metrics.blocks_scanned;
+        metrics.txs_seen += block.metrics.txs_seen;
+        metrics.instructions_seen += block.metrics.instructions_seen;
+        metrics.inner_instructions_seen += block.metrics.inner_instructions_seen;
+        metrics.bytes_count += block.metrics.bytes_count;
+
+        decode_errors_total += block.decode_errors;
+
+        if let Some(slot) = block.slot {
+            if slot > epoch_last_slot {
+                epoch_last_slot = slot;
+            }
+        }
+
+        if let Some(block_time) = block.block_time {
+            epoch_last_blocktime =
+                Some(epoch_last_blocktime.map_or(block_time, |cur| cur.max(block_time)));
+        }
+
+        for (program, stats) in block.stats.into_iter() {
+            epoch_stats
+                .entry(program)
+                .or_insert_with(ProgramUsageStats::default)
+                .accumulate(&stats);
+        }
+
+        let now = Instant::now();
+        if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS)
+            && metrics.blocks_scanned > 0
+        {
+            last_log = now;
+            let secs = now.duration_since(start).as_secs_f64().max(1e-6);
+            let blk_s = metrics.blocks_scanned as f64 / secs;
+            let mb_s = (metrics.bytes_count as f64 / (1024.0 * 1024.0)) / secs;
+
+            tracing::info!(
+                "epoch {:04} | processed {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s",
+                epoch,
+                metrics.blocks_scanned,
+                blk_s,
+                mb_s
+            );
+        }
+    }
+
+    if decode_errors_total > 0 {
+        tracing::warn!("epoch {epoch:04} had {decode_errors_total} decode errors (parallel)");
+    }
+
+    fs::create_dir_all(&parts_dir).await?;
+    let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
+    let tmp_path = part_path.with_extension("bin.tmp");
+
+    let mut records: Vec<ProgramUsageRecord> = epoch_stats
+        .into_iter()
+        .map(|(program, stats)| ProgramUsageRecord { program, stats })
+        .collect();
+    records.sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
+
+    let epoch_dump = ProgramUsageEpochPart {
+        epoch,
+        last_slot: epoch_last_slot,
+        last_blocktime: epoch_last_blocktime,
+        records: records.clone(),
+    };
+    let encoded_epoch = wincode::serialize(&epoch_dump)?;
+    fs::write(&tmp_path, &encoded_epoch).await?;
+    fs::rename(&tmp_path, &part_path).await?;
+
+    Ok(EpochProcessSummary {
+        epoch,
+        last_slot: epoch_last_slot,
+        last_blocktime: epoch_last_blocktime,
+        records,
+        per_block: None,
+        metrics,
+    })
 }
 
 async fn process_epoch_par(
@@ -819,28 +913,30 @@ async fn process_epoch_par(
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
 
-    let (tx, rx) = mpsc::channel::<CarBlock>(jobs * 2);
-    let rx = Arc::new(Mutex::new(rx));
+    let (block_tx, block_rx) = mpsc::channel::<CarBlock>(jobs * 2);
+    let block_rx = Arc::new(Mutex::new(block_rx));
+    let (result_tx, result_rx) = mpsc::channel::<BlockProcessResult>(jobs * 2);
 
-    let mut handles: Vec<JoinHandle<Result<WorkerEpochResult>>> = Vec::with_capacity(jobs);
+    let consumer_handle = tokio::spawn(consume_epoch_results(
+        epoch,
+        parts_dir.to_path_buf(),
+        result_rx,
+    ));
+
+    let mut handles: Vec<JoinHandle<Result<()>>> = Vec::with_capacity(jobs);
 
     for _ in 0..jobs {
-        let rx = Arc::clone(&rx);
+        let rx = Arc::clone(&block_rx);
+        let result_tx = result_tx.clone();
 
         let handle = tokio::spawn(async move {
-            let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> =
-                AHashMap::with_capacity(4096);
-
-            let mut metrics = EpochMetrics::default();
-            let mut last_slot = 0u64;
-            let mut last_blocktime: Option<i64> = None;
-            let mut decode_errors = 0u64;
-
             let mut buf_tx = Vec::with_capacity(128 * 1024);
             let mut buf_meta_df = Vec::with_capacity(64 * 1024);
             let mut meta_scratch = Vec::with_capacity(64 * 1024);
             let mut reusable_tx = std::mem::MaybeUninit::<VersionedTransaction>::uninit();
             let mut resolved_keys = Vec::<[u8; 32]>::with_capacity(512);
+            let mut block_stats: AHashMap<[u8; 32], ProgramUsageStats> =
+                AHashMap::with_capacity(4096);
 
             loop {
                 let block = {
@@ -851,44 +947,78 @@ async fn process_epoch_par(
                     }
                 };
 
+                block_stats.clear();
+
                 let block_bytes =
                     block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
-                metrics.bytes_count += block_bytes;
+                let mut block_metrics = EpochMetrics {
+                    bytes_count: block_bytes,
+                    ..EpochMetrics::default()
+                };
+                let mut block_decode_errors = 0u64;
+                let mut block_time: Option<i64> = None;
 
                 let slot = match peek_block_slot(&block) {
                     Ok(slot) => slot,
                     Err(_) => {
-                        decode_errors += 1;
+                        block_decode_errors += 1;
+                        result_tx
+                            .send(BlockProcessResult {
+                                slot: None,
+                                block_time: None,
+                                stats: Vec::new(),
+                                metrics: block_metrics,
+                                decode_errors: block_decode_errors,
+                            })
+                            .await
+                            .map_err(|_| anyhow!("result channel closed"))?;
                         continue;
                     }
                 };
 
                 if slot < min_slot {
+                    result_tx
+                        .send(BlockProcessResult {
+                            slot: None,
+                            block_time: None,
+                            stats: Vec::new(),
+                            metrics: block_metrics,
+                            decode_errors: block_decode_errors,
+                        })
+                        .await
+                        .map_err(|_| anyhow!("result channel closed"))?;
                     continue;
                 }
 
-                if slot > last_slot {
-                    last_slot = slot;
-                }
+                let block_slot = Some(slot);
 
                 let block_node = match block.block() {
                     Ok(node) => node,
                     Err(_) => {
-                        decode_errors += 1;
+                        block_decode_errors += 1;
+                        result_tx
+                            .send(BlockProcessResult {
+                                slot: block_slot,
+                                block_time: None,
+                                stats: Vec::new(),
+                                metrics: block_metrics,
+                                decode_errors: block_decode_errors,
+                            })
+                            .await
+                            .map_err(|_| anyhow!("result channel closed"))?;
                         continue;
                     }
                 };
 
-                if let Some(blocktime) = block_node.meta.blocktime {
-                    last_blocktime =
-                        Some(last_blocktime.map_or(blocktime, |cur| cur.max(blocktime)));
+                if let Some(bt) = block_node.meta.blocktime {
+                    block_time = Some(bt);
                 }
 
                 for entry_cid_res in block_node.entries.iter() {
                     let entry_cid = match entry_cid_res {
                         Ok(cid) => cid,
                         Err(_) => {
-                            decode_errors += 1;
+                            block_decode_errors += 1;
                             continue;
                         }
                     };
@@ -897,7 +1027,7 @@ async fn process_epoch_par(
                         Ok(Node::Entry(entry)) => entry,
                         Ok(_) => continue,
                         Err(_) => {
-                            decode_errors += 1;
+                            block_decode_errors += 1;
                             continue;
                         }
                     };
@@ -906,7 +1036,7 @@ async fn process_epoch_par(
                         let tx_cid = match tx_cid_res {
                             Ok(cid) => cid,
                             Err(_) => {
-                                decode_errors += 1;
+                                block_decode_errors += 1;
                                 continue;
                             }
                         };
@@ -915,7 +1045,7 @@ async fn process_epoch_par(
                             Ok(Node::Transaction(tx_node)) => tx_node,
                             Ok(_) => continue,
                             Err(_) => {
-                                decode_errors += 1;
+                                block_decode_errors += 1;
                                 continue;
                             }
                         };
@@ -924,17 +1054,17 @@ async fn process_epoch_par(
                         {
                             Ok(bytes) => bytes,
                             Err(_) => {
-                                decode_errors += 1;
+                                block_decode_errors += 1;
                                 continue;
                             }
                         };
 
-                        metrics.txs_seen += 1;
+                        block_metrics.txs_seen += 1;
 
                         if let Err(_) =
                             VersionedTransaction::deserialize_into(tx_bytes_slice, &mut reusable_tx)
                         {
-                            decode_errors += 1;
+                            block_decode_errors += 1;
                             continue;
                         }
 
@@ -943,7 +1073,7 @@ async fn process_epoch_par(
                         // tx_count: +1 per static account key
                         for key in tx_ref.message.static_account_keys() {
                             let program_key: [u8; 32] = *key;
-                            let entry = epoch_stats
+                            let entry = block_stats
                                 .entry(program_key)
                                 .or_insert_with(ProgramUsageStats::default);
                             entry.tx_count += 1;
@@ -968,12 +1098,12 @@ async fn process_epoch_par(
                                 }
                                 let program_key = resolved_keys[program_idx];
 
-                                let entry = epoch_stats
+                                let entry = block_stats
                                     .entry(program_key)
                                     .or_insert_with(ProgramUsageStats::default);
                                 entry.instruction_count += 1;
 
-                                metrics.instructions_seen += 1;
+                                block_metrics.instructions_seen += 1;
                             }
                         } else {
                             // Full mode with inner instructions
@@ -1011,12 +1141,12 @@ async fn process_epoch_par(
                                 }
                                 let program_key = resolved_keys[program_idx];
 
-                                let entry = epoch_stats
+                                let entry = block_stats
                                     .entry(program_key)
                                     .or_insert_with(ProgramUsageStats::default);
                                 entry.instruction_count += 1;
 
-                                metrics.instructions_seen += 1;
+                                block_metrics.instructions_seen += 1;
                             }
 
                             // Inner
@@ -1029,12 +1159,12 @@ async fn process_epoch_par(
                                         }
                                         let program_key = resolved_keys[program_idx];
 
-                                        let entry = epoch_stats
+                                        let entry = block_stats
                                             .entry(program_key)
                                             .or_insert_with(ProgramUsageStats::default);
                                         entry.inner_instruction_count += 1;
 
-                                        metrics.inner_instructions_seen += 1;
+                                        block_metrics.inner_instructions_seen += 1;
                                     }
                                 }
                             }
@@ -1046,20 +1176,32 @@ async fn process_epoch_par(
                     }
                 }
 
-                metrics.blocks_scanned += 1;
+                block_metrics.blocks_scanned += 1;
+
+                let stats = block_stats
+                    .iter()
+                    .map(|(program, stats)| (*program, *stats))
+                    .collect::<Vec<_>>();
+
+                result_tx
+                    .send(BlockProcessResult {
+                        slot: block_slot,
+                        block_time,
+                        stats,
+                        metrics: block_metrics,
+                        decode_errors: block_decode_errors,
+                    })
+                    .await
+                    .map_err(|_| anyhow!("result channel closed"))?;
             }
 
-            Ok(WorkerEpochResult {
-                stats: epoch_stats,
-                metrics,
-                last_slot,
-                last_blocktime,
-                decode_errors,
-            })
+            Ok(())
         });
 
         handles.push(handle);
     }
+
+    drop(result_tx);
 
     let epoch_start = Instant::now();
     let mut last_log = epoch_start;
@@ -1070,7 +1212,7 @@ async fn process_epoch_par(
         bytes_sent += block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
         blocks_sent += 1;
 
-        if tx.send(block).await.is_err() {
+        if block_tx.send(block).await.is_err() {
             break;
         }
 
@@ -1092,75 +1234,17 @@ async fn process_epoch_par(
         }
     }
 
-    drop(tx);
-
-    let mut epoch_stats: AHashMap<[u8; 32], ProgramUsageStats> = AHashMap::with_capacity(4096);
-    let mut metrics = EpochMetrics::default();
-    let mut epoch_last_slot = 0u64;
-    let mut epoch_last_blocktime: Option<i64> = None;
-    let mut decode_errors_total = 0u64;
+    drop(block_tx);
 
     for handle in handles {
-        let worker = handle
+        handle
             .await
             .map_err(|e| anyhow!("worker join error: {e}"))??;
-
-        for (program, stats) in worker.stats.into_iter() {
-            epoch_stats
-                .entry(program)
-                .or_insert_with(ProgramUsageStats::default)
-                .accumulate(&stats);
-        }
-
-        metrics.blocks_scanned += worker.metrics.blocks_scanned;
-        metrics.txs_seen += worker.metrics.txs_seen;
-        metrics.instructions_seen += worker.metrics.instructions_seen;
-        metrics.inner_instructions_seen += worker.metrics.inner_instructions_seen;
-        metrics.bytes_count += worker.metrics.bytes_count;
-
-        if worker.last_slot > epoch_last_slot {
-            epoch_last_slot = worker.last_slot;
-        }
-
-        if let Some(bt) = worker.last_blocktime {
-            epoch_last_blocktime = Some(epoch_last_blocktime.map_or(bt, |cur| cur.max(bt)));
-        }
-
-        decode_errors_total += worker.decode_errors;
     }
 
-    if decode_errors_total > 0 {
-        tracing::warn!("epoch {epoch:04} had {decode_errors_total} decode errors (parallel)");
-    }
-
-    fs::create_dir_all(parts_dir).await?;
-    let part_path = parts_dir.join(format!("epoch-{epoch:04}.bin"));
-    let tmp_path = part_path.with_extension("bin.tmp");
-
-    let mut records: Vec<ProgramUsageRecord> = epoch_stats
-        .into_iter()
-        .map(|(program, stats)| ProgramUsageRecord { program, stats })
-        .collect();
-    records.sort_unstable_by(|a, b| b.stats.instruction_count.cmp(&a.stats.instruction_count));
-
-    let epoch_dump = ProgramUsageEpochPart {
-        epoch,
-        last_slot: epoch_last_slot,
-        last_blocktime: epoch_last_blocktime,
-        records: records.clone(),
-    };
-    let encoded_epoch = wincode::serialize(&epoch_dump)?;
-    fs::write(&tmp_path, &encoded_epoch).await?;
-    fs::rename(&tmp_path, &part_path).await?;
-
-    Ok(EpochProcessSummary {
-        epoch,
-        last_slot: epoch_last_slot,
-        last_blocktime: epoch_last_blocktime,
-        records,
-        per_block: None,
-        metrics,
-    })
+    consumer_handle
+        .await
+        .map_err(|e| anyhow!("consumer join error: {e}"))?
 }
 
 async fn collect_program_stats(
