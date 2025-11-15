@@ -515,7 +515,6 @@ async fn consume_epoch_results(
         metrics,
     })
 }
-
 async fn process_epoch_par(
     epoch: u64,
     cache_dir: &str,
@@ -850,16 +849,55 @@ async fn process_epoch_par(
 
     let cache_dir_owned = cache_dir.to_string();
     let reader_sender = block_tx.clone();
+
     let reader_handle = tokio::spawn(async move {
+        // Open epoch
         let reader = open_epoch::open_epoch(epoch, &cache_dir_owned, FetchMode::Offline)
             .await
             .with_context(|| format!("failed to open epoch {epoch:04}"))?;
+
         let mut car = CarBlockReader::new(reader);
         car.read_header().await?;
 
+        // --- Progress tracking for this epoch ---
+        let epoch_start = Instant::now();
+        let mut last_log = epoch_start;
+        let mut blocks_read = 0u64;
+        let mut bytes_read = 0u64;
+
         while let Some(block) = car.next_block().await? {
+            // track block size
+            let block_bytes = block
+                .entries
+                .iter()
+                .map(|entry| entry.len())
+                .sum::<usize>() as u64;
+
+            bytes_read += block_bytes;
+            blocks_read += 1;
+
+            // send block to workers
             if reader_sender.send(block).await.is_err() {
                 break;
+            }
+
+            // periodic log
+            let now = Instant::now();
+            if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
+                let elapsed = now.duration_since(epoch_start);
+                let secs = elapsed.as_secs_f64().max(1e-6);
+
+                let blk_s = blocks_read as f64 / secs;
+                let mb_s = (bytes_read as f64 / (1024.0 * 1024.0)) / secs;
+
+                tracing::info!(
+                    "E{epoch:04} (par reader) | {} blk | {:.0} blk/s | {:.1} MB/s",
+                    blocks_read,
+                    blk_s,
+                    mb_s,
+                );
+
+                last_log = now;
             }
         }
 
