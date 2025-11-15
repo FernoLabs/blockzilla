@@ -20,7 +20,24 @@ use wincode::Deserialize;
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
 
-pub async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> Result<()> {
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BlockStats {
+    pub blocks: u64,
+    pub txs: u64,
+    pub bytes: u64,
+    pub entries: u64,
+}
+
+impl std::ops::AddAssign for BlockStats {
+    fn add_assign(&mut self, other: Self) {
+        self.blocks += other.blocks;
+        self.txs += other.txs;
+        self.bytes += other.bytes;
+        self.entries += other.entries;
+    }
+}
+
+pub async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> Result<BlockStats> {
     let reader = open_epoch::open_epoch(epoch, cache_dir, mode).await?;
     let mut car = CarBlockReader::new(reader);
     car.read_header().await?;
@@ -32,13 +49,13 @@ pub async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> Result<
     let mut reusable_tx = MaybeUninit::uninit();
     let mut out = Vec::new();
 
-    let mut blocks_count = 0;
-    let mut tx_count = 0;
-    let mut bytes_count = 0;
-    let mut entry_count = 0;
+    let mut blocks_count = 0u64;
+    let mut tx_count = 0u64;
+    let mut bytes_count = 0u64;
+    let mut entry_count = 0u64;
 
     while let Some(block) = car.next_block().await? {
-        entry_count += block.entries.len();
+        entry_count += block.entries.len() as u64;
 
         for entry_cid in block.block()?.entries.iter() {
             let entry_cid = entry_cid?;
@@ -73,35 +90,85 @@ pub async fn read_block(epoch: u64, cache_dir: &str, mode: FetchMode) -> Result<
         }
 
         blocks_count += 1;
-        bytes_count += block.entries.iter().map(|entry| entry.len()).sum::<usize>();
+        bytes_count += block
+            .entries
+            .iter()
+            .map(|entry| entry.len() as u64)
+            .sum::<u64>();
         drop(block);
 
         let now = Instant::now();
         if now.duration_since(last_log) > Duration::from_secs(LOG_INTERVAL_SECS) {
             last_log = now;
             let elapsed = now.duration_since(start);
-            pb.set_message(format!(
-                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} avg blk size | {} TPS | {} avg entry",
-                blocks_count,
-                blocks_count as f64 / elapsed.as_secs_f64(),
-                bytes_count as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64(),
-                bytes_count / blocks_count,
-                tx_count / elapsed.as_secs(),
+            let elapsed_secs = elapsed.as_secs_f64();
+            let blocks_per_sec = if elapsed_secs > 0.0 {
+                blocks_count as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            let mb_per_sec = if elapsed_secs > 0.0 {
+                bytes_count as f64 / (1024.0 * 1024.0) / elapsed_secs
+            } else {
+                0.0
+            };
+            let avg_block_size = if blocks_count > 0 {
+                bytes_count / blocks_count
+            } else {
+                0
+            };
+            let avg_entry = if blocks_count > 0 {
                 entry_count / blocks_count
+            } else {
+                0
+            };
+            let tps = match elapsed.as_secs() {
+                0 => 0,
+                secs => tx_count / secs,
+            };
+            pb.set_message(format!(
+                "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {avg_block_size} avg blk size | {tps} TPS | {avg_entry} avg entry",
+                blocks_count,
+                blocks_per_sec,
+                mb_per_sec,
             ));
         }
     }
 
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let blocks_per_sec = if elapsed_secs > 0.0 {
+        blocks_count as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+    let mb_per_sec = if elapsed_secs > 0.0 {
+        bytes_count as f64 / (1024.0 * 1024.0) / elapsed_secs
+    } else {
+        0.0
+    };
+    let avg_block_size = if blocks_count > 0 {
+        bytes_count / blocks_count
+    } else {
+        0
+    };
+    let tps = match elapsed.as_secs() {
+        0 => 0,
+        secs => tx_count / secs,
+    };
     tracing::info!(
-        "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} avg blk size | {} TPS",
+        "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {avg_block_size} avg blk size | {tps} TPS",
         blocks_count,
-        blocks_count as f64 / start.elapsed().as_secs_f64(),
-        bytes_count as f64 / (1024.0 * 1024.0) / start.elapsed().as_secs_f64(),
-        bytes_count / blocks_count,
-        tx_count / start.elapsed().as_secs()
+        blocks_per_sec,
+        mb_per_sec,
     );
 
-    Ok(())
+    Ok(BlockStats {
+        blocks: blocks_count,
+        txs: tx_count,
+        bytes: bytes_count,
+        entries: entry_count,
+    })
 }
 
 pub async fn read_block_par(
@@ -109,7 +176,7 @@ pub async fn read_block_par(
     cache_dir: &str,
     mode: FetchMode,
     jobs: usize,
-) -> Result<()> {
+) -> Result<BlockStats> {
     use indicatif::ProgressBar;
     use std::time::{Duration, Instant};
 
@@ -229,11 +296,23 @@ pub async fn read_block_par(
             let by = bytes_count.load(Ordering::Relaxed);
             let e = entry_count.load(Ordering::Relaxed);
 
+            let elapsed_secs = elapsed.as_secs_f64();
+            let blocks_per_sec = if elapsed_secs > 0.0 {
+                b as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            let mb_per_sec = if elapsed_secs > 0.0 {
+                by as f64 / (1024.0 * 1024.0) / elapsed_secs
+            } else {
+                0.0
+            };
+
             pb.set_message(format!(
                 "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} avg blk size | {} TPS | {} avg entry",
                 b,
-                b as f64 / elapsed.as_secs_f64(),
-                by as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64(),
+                blocks_per_sec,
+                mb_per_sec,
                 if b > 0 { by / b } else { 0 },
                 if elapsed.as_secs() > 0 { t / elapsed.as_secs() } else { 0 },
                 if b > 0 { e / b } else { 0 },
@@ -248,11 +327,22 @@ pub async fn read_block_par(
     let b = blocks_count.load(Ordering::Relaxed);
     let t = tx_count.load(Ordering::Relaxed);
     let by = bytes_count.load(Ordering::Relaxed);
+    let elapsed_secs = elapsed.as_secs_f64();
+    let blocks_per_sec = if elapsed_secs > 0.0 {
+        b as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+    let mb_per_sec = if elapsed_secs > 0.0 {
+        by as f64 / (1024.0 * 1024.0) / elapsed_secs
+    } else {
+        0.0
+    };
     tracing::info!(
         "epoch {epoch:04} | {:>7} blk | {:>6.1} blk/s | {:>5.2} MB/s | {} avg blk size | {} TPS",
         b,
-        b as f64 / elapsed.as_secs_f64(),
-        by as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64(),
+        blocks_per_sec,
+        mb_per_sec,
         if b > 0 { by / b } else { 0 },
         if elapsed.as_secs() > 0 {
             t / elapsed.as_secs()
@@ -261,5 +351,10 @@ pub async fn read_block_par(
         },
     );
 
-    Ok(())
+    Ok(BlockStats {
+        blocks: b,
+        txs: t,
+        bytes: by,
+        entries: entry_count.load(Ordering::Relaxed),
+    })
 }
