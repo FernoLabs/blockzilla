@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use crate::{
-    block_reader::{read_block, read_block_par},
+    block_reader::{BlockStats, read_block, read_block_par},
     build_registry::{build_registry_auto, build_registry_single, merge_registries},
     optimized_block_reader::{
         analyze_compressed_blocks, dump_logs, read_compressed_blocks, read_compressed_blocks_par,
@@ -46,8 +46,12 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Block {
-        #[arg(short, long)]
-        epoch: u64,
+        #[arg(short, long, conflicts_with_all = ["start_epoch", "stop_epoch"])]
+        epoch: Option<u64>,
+        #[arg(long = "start-epoch", conflicts_with = "epoch")]
+        start_epoch: Option<u64>,
+        #[arg(long = "stop-epoch", conflicts_with = "epoch")]
+        stop_epoch: Option<u64>,
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
         cache_dir: String,
         #[arg(short, long)]
@@ -351,15 +355,48 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Block {
             epoch,
+            start_epoch,
+            stop_epoch,
             cache_dir,
             mode,
             jobs,
         } => {
-            if jobs == 1 {
-                read_block(epoch, &cache_dir, mode).await?
-            } else {
-                read_block_par(epoch, &cache_dir, mode, jobs).await?
+            let (start_epoch, stop_epoch) = match (epoch, start_epoch, stop_epoch) {
+                (Some(epoch), None, None) => (epoch, epoch),
+                (None, Some(start), Some(stop)) => (start, stop),
+                (None, Some(start), None) => (start, start),
+                (None, None, Some(_)) => {
+                    return Err(anyhow!(
+                        "--stop-epoch requires --start-epoch unless --epoch is provided"
+                    ));
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "--epoch or --start-epoch must be provided for the block command"
+                    ));
+                }
+            };
+
+            if stop_epoch < start_epoch {
+                return Err(anyhow!(
+                    "--stop-epoch must be greater than or equal to the start epoch"
+                ));
             }
+
+            let mut total = BlockStats::default();
+            for epoch in start_epoch..=stop_epoch {
+                let stats = if jobs == 1 {
+                    read_block(epoch, &cache_dir, mode).await?
+                } else {
+                    read_block_par(epoch, &cache_dir, mode, jobs).await?
+                };
+                total += stats;
+            }
+
+            info!(
+                "epochs {start_epoch:04}-{stop_epoch:04} | {:>7} blk | {:>7} tx",
+                total.blocks, total.txs,
+            );
         }
 
         Commands::Registry(cmd) => match cmd {
