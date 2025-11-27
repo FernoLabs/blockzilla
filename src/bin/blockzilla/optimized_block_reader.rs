@@ -21,10 +21,11 @@ use crate::optimizer::OptimizedFormat;
 use blockzilla::{
     carblock_to_compact::{CompactBlock, CompactMetadataPayload},
     compact_log::{self, DecodeConfig},
-    optimized_cbor::decode_owned_compact_block,
+    optimized_cbor::{CompactBlockRef, decode_owned_compact_block},
     transaction_parser::Signature,
 };
 use bs58;
+use wincode::Deserialize;
 
 pub const LOG_INTERVAL_SECS: u64 = 2;
 
@@ -79,38 +80,6 @@ struct OptimizedStream {
     rdr: BufReader<File>,
     format: OptimizedFormat,
     scratch: Vec<u8>,
-    reusable_block: MaybeUninit<CompactBlock>,
-    block_initialized: bool,
-}
-
-struct CompactBlockGuard<'a> {
-    ptr: *mut CompactBlock,
-    initialized: &'a mut bool,
-}
-
-impl<'a> Deref for CompactBlockGuard<'a> {
-    type Target = CompactBlock;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: `ptr` is initialized whenever the guard is constructed and
-        // remains valid for the guard's lifetime. The guard guarantees unique
-        // access until it drops, at which point the block is dropped and the
-        // initialized flag is reset.
-        unsafe { &*self.ptr }
-    }
-}
-
-impl<'a> Drop for CompactBlockGuard<'a> {
-    fn drop(&mut self) {
-        if *self.initialized {
-            // SAFETY: the block was initialized before the guard was created,
-            // and no other references exist while the guard is alive.
-            unsafe {
-                std::ptr::drop_in_place(self.ptr);
-            }
-            *self.initialized = false;
-        }
-    }
 }
 
 async fn read_varint_async<R>(reader: &mut R) -> Result<Option<(usize, usize)>>
@@ -160,12 +129,10 @@ impl OptimizedStream {
             rdr: BufReader::with_capacity(32 * 1024 * 1024, f),
             format,
             scratch: Vec::with_capacity(256 << 10),
-            reusable_block: MaybeUninit::uninit(),
-            block_initialized: false,
         })
     }
 
-    async fn next_block(&mut self) -> Result<Option<(CompactBlockGuard<'_>, usize, usize)>> {
+    async fn next_block(&mut self) -> Result<Option<(CompactBlock, usize, usize)>> {
         match self.format {
             OptimizedFormat::Wincode => {
                 let mut len_bytes = [0u8; 4];
@@ -178,22 +145,10 @@ impl OptimizedStream {
 
                 self.scratch.resize(len, 0);
                 self.rdr.read_exact(&mut self.scratch).await?;
-                // Drop any previously held block before reusing the buffer.
-                if self.block_initialized {
-                    unsafe {
-                        std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
-                    }
-                    self.block_initialized = false;
-                }
 
-                wincode::deserialize_into(&self.scratch, &mut self.reusable_block)
+                let block: CompactBlock = wincode::deserialize(&self.scratch)
                     .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))?;
-                self.block_initialized = true;
-                let guard = CompactBlockGuard {
-                    ptr: self.reusable_block.as_mut_ptr(),
-                    initialized: &mut self.block_initialized,
-                };
-                Ok(Some((guard, len, len + 4)))
+                Ok(Some((block, len, len + 4)))
             }
             OptimizedFormat::Postcard => {
                 let (len, header_len) = match read_varint_async(&mut self.rdr).await? {
@@ -203,25 +158,11 @@ impl OptimizedStream {
 
                 self.scratch.resize(len, 0);
                 self.rdr.read_exact(&mut self.scratch).await?;
-                if self.block_initialized {
-                    unsafe {
-                        std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
-                    }
-                    self.block_initialized = false;
-                }
 
                 let block =
                     blockzilla::optimized_postcard::decode_owned_compact_block(&self.scratch)
                         .map_err(|e| anyhow!("deserialize CompactBlock postcard: {e}"))?;
-                unsafe {
-                    self.reusable_block.as_mut_ptr().write(block);
-                }
-                self.block_initialized = true;
-                let guard = CompactBlockGuard {
-                    ptr: self.reusable_block.as_mut_ptr(),
-                    initialized: &mut self.block_initialized,
-                };
-                Ok(Some((guard, len, len + header_len)))
+                Ok(Some((block, len, len + header_len)))
             }
             OptimizedFormat::Cbor => {
                 let (len, header_len) = match read_varint_async(&mut self.rdr).await? {
@@ -231,36 +172,12 @@ impl OptimizedStream {
 
                 self.scratch.resize(len, 0);
                 self.rdr.read_exact(&mut self.scratch).await?;
-                if self.block_initialized {
-                    unsafe {
-                        std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
-                    }
-                    self.block_initialized = false;
-                }
 
                 let block = decode_owned_compact_block(&self.scratch)
                     .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))?;
-                unsafe {
-                    self.reusable_block.as_mut_ptr().write(block);
-                }
-                self.block_initialized = true;
-                let guard = CompactBlockGuard {
-                    ptr: self.reusable_block.as_mut_ptr(),
-                    initialized: &mut self.block_initialized,
-                };
-                Ok(Some((guard, len, len + header_len)))
-            }
-        }
-    }
-}
 
-impl Drop for OptimizedStream {
-    fn drop(&mut self) {
-        if self.block_initialized {
-            unsafe {
-                std::ptr::drop_in_place(self.reusable_block.as_mut_ptr());
+                Ok(Some((block, len, len + header_len)))
             }
-            self.block_initialized = false;
         }
     }
 }
@@ -437,26 +354,26 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                 };
                 let Some(frame) = frame_opt else { break };
 
+                // FIXME: geniric type decoder is killing us here we are not using Cbor to max perf
                 let decoded = match format {
-                    OptimizedFormat::Wincode => {
-                        wincode::deserialize_into(&frame, &mut reusable_block)
-                            .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))
-                            .map(|()| unsafe { reusable_block.assume_init_ref() })
-                    }
-                    OptimizedFormat::Postcard => {
-                        blockzilla::optimized_postcard::decode_owned_compact_block(&frame)
-                            .map_err(|e| anyhow!("deserialize CompactBlock postcard: {e}"))
-                            .map(|block| unsafe {
-                                reusable_block.as_mut_ptr().write(block);
-                                reusable_block.assume_init_ref()
-                            })
-                    }
-                    OptimizedFormat::Cbor => decode_owned_compact_block(&frame)
-                        .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))
+                    OptimizedFormat::Wincode => wincode::deserialize(&frame)
+                        .map_err(|e| anyhow!("deserialize CompactBlock: {e}"))
+                        .map(|()| unsafe { reusable_block.assume_init_ref() }),
+                    OptimizedFormat::Postcard => postcard::from_bytes(&frame)
+                        .map_err(|e| anyhow!("deserialize CompactBlock postcard: {e}"))
                         .map(|block| unsafe {
                             reusable_block.as_mut_ptr().write(block);
                             reusable_block.assume_init_ref()
                         }),
+                    OptimizedFormat::Cbor => {
+                        let mut d = minicbor::Decoder::new(&frame);
+                        d.decode()
+                            .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))
+                            .map(|block:CompactBlockRef| unsafe {
+                                reusable_block.as_mut_ptr().write(block.to_owned().unwrap());
+                                reusable_block.assume_init_ref()
+                            })
+                    }
                 };
 
                 match decoded {
