@@ -142,15 +142,26 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStat
         let mut buf = cell.borrow_mut();
         buf.clear();
 
-        let mut decoder =
-            ZstdDecoder::new(Cursor::new(bytes)).context("zstd stream open failed")?;
-        decoder
-            .read_to_end(&mut buf)
-            .context("zstd decode failed")?;
+        if is_zstd(bytes) {
+            let mut decoder =
+                ZstdDecoder::new(Cursor::new(bytes)).context("zstd stream open failed")?;
+            decoder
+                .read_to_end(&mut buf)
+                .context("zstd decode failed")?;
+        } else {
+            buf.extend_from_slice(bytes);
+        }
 
         confirmed_block::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
             .context("prost decode failed")
     })
+}
+
+#[inline]
+fn is_zstd(buf: &[u8]) -> bool {
+    buf.get(0..4)
+        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
+        .unwrap_or(false)
 }
 
 #[inline]
