@@ -1,7 +1,5 @@
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use bincode::serde::Compat;
-use prost::Message;
 use solana_reward_info::RewardType;
 use solana_sdk::transaction::{TransactionVersion, VersionedTransaction};
 use solana_transaction_error::TransactionError;
@@ -12,16 +10,15 @@ use solana_transaction_status_client_types::{
     UiTransactionStatusMeta, UiTransactionTokenBalance, option_serializer::OptionSerializer,
 };
 use std::cell::RefCell;
-use std::io::{Cursor, Read};
-use zstd::stream::read::Decoder as ZstdDecoder;
 
 use crate::confirmed_block;
+use crate::meta_decode::decode_transaction_status_meta_bytes;
 use crate::node::CborCid;
 use crate::{block_stream::CarBlock, node::Node};
 
 thread_local! {
     static TL_META_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));
-    static TL_BINCODE_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(16 * 1024));
+    static TL_WINCODE_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(16 * 1024));
     static TL_BASE64_BUF: RefCell<String> = RefCell::new(String::with_capacity(24 * 1024));
 }
 
@@ -56,11 +53,8 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
                             .merge_dataframe(&tx.data)
                             .context("merge_dataframe(tx) failed")?;
 
-                        let (bincode::serde::Compat(vt), _len): (
-                            bincode::serde::Compat<VersionedTransaction>,
-                            usize,
-                        ) = bincode::decode_from_slice(&tx_bytes, bincode::config::legacy())
-                            .map_err(|err| anyhow!("cant decode {err}"))?;
+                        let vt: VersionedTransaction =
+                            wincode::deserialize(&tx_bytes).map_err(|err| anyhow!("cant decode {err}"))?;
 
                         let meta = decode_meta(&meta_bytes);
 
@@ -91,9 +85,7 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
         {
             Some(Node::DataFrame(df)) => {
                 let bytes = self.merge_dataframe(df)?;
-                let res: Vec<Compat<Reward>> =
-                    bincode::decode_from_slice(&bytes, bincode::config::legacy())?.0;
-                res.into_iter().map(|a| a.0).collect()
+                wincode::deserialize(&bytes)?
             }
             _ => Vec::new(),
         };
@@ -113,17 +105,17 @@ impl TryInto<EncodedConfirmedBlock> for CarBlock {
 
 #[inline]
 fn encode_transaction_base64(vt: &VersionedTransaction) -> Result<String> {
-    TL_BINCODE_BUF.with(|bincode_cell| {
+    TL_WINCODE_BUF.with(|wincode_cell| {
         TL_BASE64_BUF.with(|base64_cell| {
-            let mut bincode_buf = bincode_cell.borrow_mut();
+            let mut wincode_buf = wincode_cell.borrow_mut();
             let mut base64_buf = base64_cell.borrow_mut();
 
-            bincode_buf.clear();
-            bincode::encode_into_slice(Compat(vt), &mut *bincode_buf, bincode::config::legacy())
+            wincode_buf.clear();
+            wincode::serialize_into(&mut *wincode_buf, vt)
                 .context("re-serialize VersionedTransaction")?;
 
             base64_buf.clear();
-            BASE64.encode_string(&*bincode_buf, &mut base64_buf);
+            BASE64.encode_string(&*wincode_buf, &mut base64_buf);
 
             Ok(base64_buf.clone())
         })
@@ -141,27 +133,10 @@ fn decode_protobuf_meta(bytes: &[u8]) -> Result<confirmed_block::TransactionStat
     TL_META_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear();
+        buf.extend_from_slice(bytes);
 
-        if is_zstd(bytes) {
-            let mut decoder =
-                ZstdDecoder::new(Cursor::new(bytes)).context("zstd stream open failed")?;
-            decoder
-                .read_to_end(&mut buf)
-                .context("zstd decode failed")?;
-        } else {
-            buf.extend_from_slice(bytes);
-        }
-
-        confirmed_block::TransactionStatusMeta::decode(&mut Cursor::new(&*buf))
-            .context("prost decode failed")
+        decode_transaction_status_meta_bytes(&buf)
     })
-}
-
-#[inline]
-fn is_zstd(buf: &[u8]) -> bool {
-    buf.get(0..4)
-        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
-        .unwrap_or(false)
 }
 
 #[inline]
@@ -204,13 +179,7 @@ fn decode_transaction_error(
 ) -> Result<Option<TransactionError>> {
     meta.err
         .as_ref()
-        .map(|e| {
-            bincode::decode_from_slice::<bincode::serde::Compat<TransactionError>, _>(
-                &e.err,
-                bincode::config::legacy(),
-            )
-            .map(|(v, _)| v.0)
-        })
+        .map(|e| wincode::deserialize(&e.err))
         .transpose()
         .context("failed to deserialize TransactionError")
 }
