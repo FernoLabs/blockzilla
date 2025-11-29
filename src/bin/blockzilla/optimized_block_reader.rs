@@ -369,7 +369,7 @@ pub async fn read_compressed_blocks_par(epoch: u64, input_dir: &str, jobs: usize
                         let mut d = minicbor::Decoder::new(&frame);
                         d.decode()
                             .map_err(|e| anyhow!("deserialize CompactBlock cbor: {e}"))
-                            .map(|block:CompactBlockRef| unsafe {
+                            .map(|block: CompactBlockRef| unsafe {
                                 reusable_block.as_mut_ptr().write(block.to_owned().unwrap());
                                 reusable_block.assume_init_ref()
                             })
