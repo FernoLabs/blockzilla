@@ -11,6 +11,7 @@ use wincode::Deserialize as WincodeDeserialize;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
+use crate::meta_decode::decode_transaction_status_meta_bytes;
 use crate::partial_meta::extract_metadata_pubkeys;
 use crate::transaction_parser::Signature;
 use crate::{
@@ -769,7 +770,7 @@ fn process_metadata<P: PubkeyIdProvider>(
     resolver: &mut P,
 ) -> Option<CompactMetadataPayload> {
     match metadata_mode {
-        MetadataMode::Compact => match confirmed_block::TransactionStatusMeta::decode(raw_slice) {
+        MetadataMode::Compact => match decode_transaction_status_meta_bytes(raw_slice) {
             Ok(parsed) => Some(CompactMetadataPayload::Compact(meta_to_compact(
                 parsed, resolver,
             ))),
