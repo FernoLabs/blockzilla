@@ -1,18 +1,11 @@
 use anyhow::{Context, Result};
-use prost::Message;
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use tracing::warn;
 
 use crate::confirmed_block::TransactionStatusMeta;
-
-#[inline]
-fn is_zstd(buf: &[u8]) -> bool {
-    buf.get(0..4)
-        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
-        .unwrap_or(false)
-}
+use crate::meta_decode::decode_transaction_status_meta_bytes;
 
 #[inline]
 fn push_pk_bytes32(b: &[u8], out: &mut SmallVec<[Pubkey; 256]>) {
@@ -40,28 +33,11 @@ pub fn extract_metadata_pubkeys(
     meta_zstd_or_raw: &[u8],
     out: &mut SmallVec<[Pubkey; 256]>,
 ) -> Result<()> {
-    if meta_zstd_or_raw.is_empty() {
-        warn!("empty metadata buffer (no meta bytes provided)");
-        return Ok(());
-    }
-
-    let raw = if is_zstd(meta_zstd_or_raw) {
-        match zstd::decode_all(meta_zstd_or_raw) {
-            Ok(data) => data,
-            Err(e) => {
-                warn!("zstd decompression failed: {}", e);
-                return Err(e).context("zstd decompress meta");
-            }
-        }
-    } else {
-        meta_zstd_or_raw.to_vec()
-    };
-
-    let pb: TransactionStatusMeta = match TransactionStatusMeta::decode(raw.as_slice()) {
+    let pb: TransactionStatusMeta = match decode_transaction_status_meta_bytes(meta_zstd_or_raw) {
         Ok(v) => v,
         Err(e) => {
             warn!("failed to decode TransactionStatusMeta protobuf: {}", e);
-            return Err(e).context("prost decode meta");
+            return Err(e).context("decode meta");
         }
     };
 

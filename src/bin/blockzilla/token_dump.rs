@@ -3,7 +3,6 @@ use anyhow::{Context, Result, anyhow};
 use cid::Cid;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use minicbor;
-use prost::Message;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
@@ -210,34 +209,13 @@ fn extend_with_loaded_addresses(dest: &mut SmallVec<[Pubkey; 512]>, addrs: &[Vec
 }
 
 fn decode_transaction_meta(bytes: &[u8]) -> Option<TransactionStatusMeta> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let raw = if is_zstd(bytes) {
-        match zstd::decode_all(bytes) {
-            Ok(data) => data,
-            Err(e) => {
-                tracing::warn!("failed to decompress metadata: {e}");
-                return None;
-            }
-        }
-    } else {
-        bytes.to_vec()
-    };
-    match TransactionStatusMeta::decode(raw.as_slice()) {
+    match blockzilla::meta_decode::decode_transaction_status_meta_bytes(bytes) {
         Ok(meta) => Some(meta),
         Err(e) => {
             tracing::warn!("failed to decode TransactionStatusMeta protobuf: {e}");
             None
         }
     }
-}
-
-#[inline]
-fn is_zstd(buf: &[u8]) -> bool {
-    buf.get(0..4)
-        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
-        .unwrap_or(false)
 }
 
 /// Only SPL Token classic (no Token-2022), no ATA heuristic.

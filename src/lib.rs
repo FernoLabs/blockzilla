@@ -2,6 +2,7 @@ pub mod car_block_reader;
 pub mod carblock_to_compact;
 pub mod cbor_utils;
 pub mod compact_log;
+pub mod meta_decode;
 pub mod node;
 pub mod open_epoch;
 pub mod optimized_cbor;

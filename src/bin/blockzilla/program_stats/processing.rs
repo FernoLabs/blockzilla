@@ -867,11 +867,7 @@ async fn process_epoch_par(
 
         while let Some(block) = car.next_block().await? {
             // track block size
-            let block_bytes = block
-                .entries
-                .iter()
-                .map(|entry| entry.len())
-                .sum::<usize>() as u64;
+            let block_bytes = block.entries.iter().map(|entry| entry.len()).sum::<usize>() as u64;
 
             bytes_read += block_bytes;
             blocks_read += 1;
