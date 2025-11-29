@@ -6,10 +6,10 @@ use super::{
 use ahash::{AHashMap, AHashSet};
 use anyhow::anyhow;
 use blockzilla::{
-    car_block_reader::CarBlock, confirmed_block::TransactionStatusMeta, node::TransactionNode,
+    car_block_reader::CarBlock, confirmed_block::TransactionStatusMeta, meta_decode,
+    node::TransactionNode,
 };
 use cid::Cid;
-use prost::Message;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -67,7 +67,7 @@ pub(super) fn decode_epoch_part(bytes: &[u8]) -> Result<ProgramUsageEpochPart> {
         Ok(convert_epoch_part_v0(legacy))
     }
 
-    if is_zstd(bytes) {
+    if meta_decode::is_zstd(bytes) {
         let mut decoder = zstd::Decoder::new(bytes)?;
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed)?;
@@ -437,25 +437,5 @@ pub(super) fn decode_transaction_meta(
     bytes: &[u8],
     scratch: &mut Vec<u8>,
 ) -> Option<TransactionStatusMeta> {
-    if bytes.is_empty() {
-        return None;
-    }
-
-    if is_zstd(bytes) {
-        scratch.clear();
-        let mut decoder = zstd::Decoder::new(bytes).ok()?;
-        if decoder.read_to_end(scratch).is_err() {
-            return None;
-        }
-        TransactionStatusMeta::decode(scratch.as_slice()).ok()
-    } else {
-        TransactionStatusMeta::decode(bytes).ok()
-    }
-}
-
-#[inline]
-pub(super) fn is_zstd(buf: &[u8]) -> bool {
-    buf.get(0..4)
-        .map(|m| m == [0x28, 0xB5, 0x2F, 0xFD])
-        .unwrap_or(false)
+    meta_decode::decode_transaction_status_meta_bytes(bytes).ok()
 }
