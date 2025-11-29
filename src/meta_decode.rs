@@ -9,6 +9,7 @@ use solana_transaction_status_client_types::{
     Reward as LegacyReward,
 };
 use std::io::Cursor;
+use wincode::deserialize as wincode_deserialize;
 
 use crate::confirmed_block::{self, TransactionStatusMeta};
 
@@ -88,6 +89,15 @@ fn decode_proto_with_prefix(bytes: &[u8]) -> Result<TransactionStatusMeta> {
     }
 }
 
+fn decode_proto_or_legacy(bytes: &[u8]) -> Result<TransactionStatusMeta> {
+    match decode_proto_with_prefix(bytes) {
+        Ok(meta) => Ok(meta),
+        Err(proto_err) => decode_legacy(bytes).map_err(|legacy_err| {
+            proto_err.context(format!("legacy bincode decode also failed: {legacy_err}"))
+        }),
+    }
+}
+
 fn decode_legacy(meta_bytes: &[u8]) -> Result<TransactionStatusMeta> {
     let legacy: LegacyTransactionStatusMeta = bincode_options()
         .deserialize(meta_bytes)
@@ -109,12 +119,18 @@ pub fn decode_transaction_status_meta_bytes(
         meta_zstd_or_raw.to_vec()
     };
 
-    match decode_proto_with_prefix(&raw) {
-        Ok(meta) => Ok(meta),
-        Err(proto_err) => decode_legacy(&raw).map_err(|legacy_err| {
-            proto_err.context(format!("legacy bincode decode also failed: {legacy_err}"))
-        }),
+    if let Ok(wrapped) = wincode_deserialize::<Option<Vec<u8>>>(&raw) {
+        return match wrapped {
+            Some(inner) if inner.is_empty() => {
+                bail!("metadata Option wrapper contained empty payload")
+            }
+            Some(inner) => decode_proto_or_legacy(&inner)
+                .context("decode wincode Option-wrapped TransactionStatusMeta"),
+            None => bail!("metadata missing (wincode Option::None wrapper)"),
+        };
     }
+
+    decode_proto_or_legacy(&raw)
 }
 
 fn convert_legacy_meta(meta: LegacyTransactionStatusMeta) -> Result<TransactionStatusMeta> {
