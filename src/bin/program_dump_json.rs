@@ -1,31 +1,10 @@
-use anyhow::{Context, Result};
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use clap::Parser;
-use serde::Serialize;
-use std::path::PathBuf;
-use tokio::{fs, io::AsyncWriteExt};
-use wincode::SchemaRead;
-
-#[derive(Debug, Clone, SchemaRead)]
-struct ProgramTransactionRecord {
-    slot: u64,
-    #[wincode(with = "wincode::containers::Vec<[u8; 32], wincode::len::short_vec::ShortU16Len>")]
-    matched_programs: Vec<[u8; 32]>,
-    #[wincode(with = "wincode::containers::Vec<u8, wincode::len::BincodeLen<{ 64 << 20 }>>")]
-    tx_bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, SchemaRead)]
-struct ProgramTransactionDump {
-    #[wincode(with = "wincode::containers::Vec<[u8; 32], wincode::len::short_vec::ShortU16Len>")]
-    programs: Vec<[u8; 32]>,
-    start_slot: u64,
-    end_slot: u64,
-    #[wincode(
-        with = "wincode::containers::Vec<ProgramTransactionRecord, wincode::len::BincodeLen<{ 1 << 28 }>>"
-    )]
-    transactions: Vec<ProgramTransactionRecord>,
-}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -46,68 +25,211 @@ struct Args {
     compact: bool,
 }
 
-#[derive(Serialize)]
-struct JsonTransactionRecord {
-    slot: u64,
-    matched_programs: Vec<String>,
-    tx_base64: String,
-}
+const PROGRAM_ID_LEN: usize = 32;
+const TX_BYTES_MAX: usize = 64 << 20; // 64 MiB, matches wincode len constraint
 
-#[derive(Serialize)]
-struct JsonDump {
-    programs: Vec<String>,
-    start_slot: u64,
-    end_slot: u64,
-    transactions: Vec<JsonTransactionRecord>,
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
-    let data = fs::read(&args.input)
-        .await
-        .with_context(|| format!("failed to read {}", args.input.display()))?;
-    let dump: ProgramTransactionDump = wincode::deserialize(&data)?;
+    let input = File::open(&args.input)
+        .with_context(|| format!("failed to open {}", args.input.display()))?;
+    let mut reader = BufReader::with_capacity(256 * 1024, input);
 
-    let json_dump = JsonDump {
-        programs: dump.programs.iter().map(to_base58).collect(),
-        start_slot: dump.start_slot,
-        end_slot: dump.end_slot,
-        transactions: dump
-            .transactions
-            .into_iter()
-            .map(|tx| JsonTransactionRecord {
-                slot: tx.slot,
-                matched_programs: tx.matched_programs.iter().map(to_base58).collect(),
-                tx_base64: base64::engine::general_purpose::STANDARD.encode(tx.tx_bytes),
-            })
-            .collect(),
-    };
+    let programs = read_programs(&mut reader)?;
+    let start_slot = read_u64_le(&mut reader)?;
+    let end_slot = read_u64_le(&mut reader)?;
+    let tx_count = usize::try_from(read_u64_le(&mut reader)?)
+        .context("transaction count does not fit in usize")?;
 
-    let json = if args.compact {
-        serde_json::to_string(&json_dump)?
-    } else {
-        serde_json::to_string_pretty(&json_dump)?
-    };
-
-    if let Some(path) = args.output {
+    let output: Box<dyn Write> = if let Some(path) = args.output.as_ref() {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).await?;
+                std::fs::create_dir_all(parent)?;
             }
         }
-        let mut file = fs::File::create(&path)
-            .await
-            .with_context(|| format!("failed to create {}", path.display()))?;
-        file.write_all(json.as_bytes()).await?;
+        let file =
+            File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+        Box::new(BufWriter::new(file))
     } else {
-        println!("{}", json);
+        Box::new(io::BufWriter::new(io::stdout().lock()))
+    };
+
+    if args.compact {
+        write_compact_json(
+            output,
+            programs,
+            start_slot,
+            end_slot,
+            tx_count,
+            &mut reader,
+        )?;
+    } else {
+        write_pretty_json(
+            output,
+            programs,
+            start_slot,
+            end_slot,
+            tx_count,
+            &mut reader,
+        )?;
     }
 
     Ok(())
 }
 
-fn to_base58(bytes: &[u8; 32]) -> String {
-    bs58::encode(bytes).into_string()
+fn write_compact_json(
+    mut writer: Box<dyn Write>,
+    programs: Vec<[u8; PROGRAM_ID_LEN]>,
+    start_slot: u64,
+    end_slot: u64,
+    tx_count: usize,
+    reader: &mut BufReader<File>,
+) -> Result<()> {
+    write!(writer, "{{\"programs\":[")?;
+    for (i, program) in programs.iter().enumerate() {
+        if i > 0 {
+            writer.write_all(b",")?;
+        }
+        write!(writer, "\"{}\"", bs58::encode(program).into_string())?;
+    }
+
+    write!(
+        writer,
+        "],\"start_slot\":{},\"end_slot\":{},\"transactions\":[",
+        start_slot, end_slot
+    )?;
+
+    for idx in 0..tx_count {
+        if idx > 0 {
+            writer.write_all(b",")?;
+        }
+        write_transaction_object(&mut writer, reader)?;
+    }
+
+    writer.write_all(b"]}")?;
+    writer.flush()?;
+
+    Ok(())
+}
+
+fn write_pretty_json(
+    mut writer: Box<dyn Write>,
+    programs: Vec<[u8; PROGRAM_ID_LEN]>,
+    start_slot: u64,
+    end_slot: u64,
+    tx_count: usize,
+    reader: &mut BufReader<File>,
+) -> Result<()> {
+    writeln!(writer, "{{")?;
+    writeln!(writer, "  \"programs\": [")?;
+    for (i, program) in programs.iter().enumerate() {
+        let suffix = if i + 1 == programs.len() { "" } else { "," };
+        writeln!(
+            writer,
+            "    \"{}\"{}",
+            bs58::encode(program).into_string(),
+            suffix
+        )?;
+    }
+    writeln!(writer, "  ],")?;
+    writeln!(writer, "  \"start_slot\": {},", start_slot)?;
+    writeln!(writer, "  \"end_slot\": {},", end_slot)?;
+    writeln!(writer, "  \"transactions\": [")?;
+
+    for idx in 0..tx_count {
+        if idx > 0 {
+            write!(writer, ",\n")?;
+        }
+        write!(writer, "    ")?;
+        write_transaction_object(&mut writer, reader)?;
+    }
+
+    writeln!(writer)?;
+
+    writeln!(writer, "  ]")?;
+    writeln!(writer, "}}")?;
+    writer.flush()?;
+
+    Ok(())
+}
+
+fn write_transaction_object(writer: &mut dyn Write, reader: &mut BufReader<File>) -> Result<()> {
+    let slot = read_u64_le(reader)?;
+    let matched_programs = read_matched_programs(reader)?;
+    let tx_bytes = read_transaction_bytes(reader)?;
+
+    write!(writer, "{{\"slot\":{},\"matched_programs\":[", slot)?;
+    for (i, program) in matched_programs.iter().enumerate() {
+        if i > 0 {
+            writer.write_all(b",")?;
+        }
+        write!(writer, "\"{}\"", bs58::encode(program).into_string())?;
+    }
+    write!(
+        writer,
+        "],\"tx_base64\":\"{}\"}}",
+        base64::engine::general_purpose::STANDARD.encode(tx_bytes)
+    )?;
+
+    Ok(())
+}
+
+fn read_programs(reader: &mut BufReader<File>) -> Result<Vec<[u8; PROGRAM_ID_LEN]>> {
+    let len = read_short_vec_len(reader)?;
+    let mut programs = Vec::with_capacity(len);
+    for _ in 0..len {
+        let mut buf = [0u8; PROGRAM_ID_LEN];
+        reader.read_exact(&mut buf)?;
+        programs.push(buf);
+    }
+    Ok(programs)
+}
+
+fn read_matched_programs(reader: &mut BufReader<File>) -> Result<Vec<[u8; PROGRAM_ID_LEN]>> {
+    let len = read_short_vec_len(reader)?;
+    let mut matched = Vec::with_capacity(len);
+    for _ in 0..len {
+        let mut buf = [0u8; PROGRAM_ID_LEN];
+        reader.read_exact(&mut buf)?;
+        matched.push(buf);
+    }
+    Ok(matched)
+}
+
+fn read_short_vec_len(reader: &mut BufReader<File>) -> Result<usize> {
+    let mut len = [0u8; 1];
+    reader.read_exact(&mut len)?;
+    if len[0] & 0x80 == 0 {
+        return Ok(len[0] as usize);
+    }
+
+    let mut second = [0u8; 1];
+    reader.read_exact(&mut second)?;
+    let mut value = ((len[0] & 0x7f) as u16) | (((second[0] & 0x7f) as u16) << 7);
+    if second[0] & 0x80 == 0 {
+        return Ok(value as usize);
+    }
+
+    let mut third = [0u8; 1];
+    reader.read_exact(&mut third)?;
+    value |= (third[0] as u16) << 14;
+    Ok(value as usize)
+}
+
+fn read_transaction_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>> {
+    let len = read_u64_le(reader)? as usize;
+    if len > TX_BYTES_MAX {
+        return Err(anyhow!(
+            "transaction length {len} exceeds limit {TX_BYTES_MAX}"
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+fn read_u64_le(reader: &mut BufReader<File>) -> Result<u64> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
 }
