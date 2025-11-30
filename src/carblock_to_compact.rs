@@ -1,7 +1,6 @@
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Result, anyhow};
 use cid::Cid;
-use prost::Message;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use std::convert::TryFrom;
