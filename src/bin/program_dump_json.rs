@@ -103,7 +103,7 @@ fn write_compact_json(
         if idx > 0 {
             writer.write_all(b",")?;
         }
-        write_transaction_object(&mut writer, reader)?;
+        write_transaction_object(&mut writer, reader, idx)?;
     }
 
     writer.write_all(b"]}")?;
@@ -141,7 +141,7 @@ fn write_pretty_json(
             write!(writer, ",\n")?;
         }
         write!(writer, "    ")?;
-        write_transaction_object(&mut writer, reader)?;
+        write_transaction_object(&mut writer, reader, idx)?;
     }
 
     writeln!(writer)?;
@@ -153,10 +153,25 @@ fn write_pretty_json(
     Ok(())
 }
 
-fn write_transaction_object(writer: &mut dyn Write, reader: &mut BufReader<File>) -> Result<()> {
-    let slot = read_u64_le(reader)?;
-    let matched_programs = read_matched_programs(reader)?;
-    let tx_bytes = read_transaction_bytes(reader)?;
+fn write_transaction_object(
+    writer: &mut dyn Write,
+    reader: &mut BufReader<File>,
+    tx_index: usize,
+) -> Result<()> {
+    let slot = read_u64_le(reader)
+        .with_context(|| format!("failed to read slot for transaction {}", tx_index + 1))?;
+    let matched_programs = read_matched_programs(reader).with_context(|| {
+        format!(
+            "failed to read matched programs for transaction {}",
+            tx_index + 1
+        )
+    })?;
+    let tx_bytes = read_transaction_bytes(reader).with_context(|| {
+        format!(
+            "failed to read transaction bytes for slot {slot} (index {})",
+            tx_index + 1
+        )
+    })?;
 
     write!(writer, "{{\"slot\":{},\"matched_programs\":[", slot)?;
     for (i, program) in matched_programs.iter().enumerate() {

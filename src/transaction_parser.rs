@@ -6,7 +6,7 @@ use solana_pubkey::Pubkey;
 use std::mem::MaybeUninit;
 use std::ptr::copy_nonoverlapping;
 use wincode::ReadResult;
-use wincode::containers::{self, Elem, Pod};
+use wincode::containers::{self, Pod};
 use wincode::io::Reader;
 use wincode::len::ShortU16Len;
 use wincode::{SchemaRead, SchemaWrite};
