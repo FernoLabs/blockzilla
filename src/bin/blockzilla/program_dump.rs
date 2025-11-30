@@ -6,13 +6,17 @@ use minicbor;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
-use std::io::{IsTerminal, Read};
+use std::fs::File;
+use std::io::{BufWriter, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::fs;
+use tokio::io::{AsyncWriteExt, copy};
+use tracing::{error, info};
 use wincode::Deserialize as _;
+use wincode::len::SeqLen;
 use wincode::SchemaRead;
 use wincode::SchemaWrite;
 
@@ -104,10 +108,30 @@ pub async fn dump_program_transactions(
     pb.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
     pb.enable_steady_tick(Duration::from_millis(120));
 
+    let program_list: Vec<String> = programs
+        .iter()
+        .map(|p| Pubkey::new_from_array(*p).to_string())
+        .collect();
+
+    info!(
+        "starting program dump | epochs {start_epoch:04}-{last_epoch:04} | slots {start_slot}-{end_slot} | {} programs",
+        program_list.len()
+    );
+    info!("programs: {}", program_list.join(", "));
+
     let mut buf_tx = Vec::with_capacity(128 * 1024);
     let mut buf_meta = Vec::with_capacity(64 * 1024);
     let mut reusable_tx: MaybeUninit<VersionedTransaction> = MaybeUninit::uninit();
-    let mut collected: Vec<ProgramTransactionRecord> = Vec::new();
+    let mut tx_count: usize = 0;
+    let spool_path = base_output_dir.join(format!(
+        "{}.spool", 
+        output_file_name
+            .to_str()
+            .unwrap_or("program_transactions")
+    ));
+    let spool_file = File::create(&spool_path)
+        .with_context(|| format!("failed to create spool file {}", spool_path.display()))?;
+    let mut spool_writer = BufWriter::new(spool_file);
 
     let mut last_slot = 0u64;
     let start_time = Instant::now();
@@ -119,13 +143,26 @@ pub async fn dump_program_transactions(
             break;
         }
 
+        info!("scanning epoch {:04}", epoch);
+
         let reader = open_epoch::open_epoch(epoch, cache_dir, FetchMode::Offline)
             .await
             .with_context(|| format!("failed to open cached epoch {epoch:04}"))?;
         let mut car = CarBlockReader::new(reader);
         car.read_header().await?;
 
-        while let Some(block) = car.next_block().await? {
+        loop {
+            let next_block = match car.next_block().await {
+                Ok(block) => block,
+                Err(e) => {
+                    error!("failed to read block for epoch {epoch:04}: {e}");
+                    break;
+                }
+            };
+
+            let Some(block) = next_block else {
+                break;
+            };
             let slot = peek_block_slot(&block)?;
             if slot < start_slot {
                 continue;
@@ -179,11 +216,17 @@ pub async fn dump_program_transactions(
                         continue;
                     }
 
-                    collected.push(ProgramTransactionRecord {
+                    let record = ProgramTransactionRecord {
                         slot,
                         matched_programs: matched,
                         tx_bytes: tx_bytes_slice.to_vec(),
-                    });
+                    };
+                    let record_bytes =
+                        wincode::serialize(&record).context("serialize program transaction")?;
+                    spool_writer
+                        .write_all(&record_bytes)
+                        .context("write transaction to spool")?;
+                    tx_count += 1;
                 }
             }
 
@@ -193,7 +236,7 @@ pub async fn dump_program_transactions(
             if now.duration_since(last_log) >= Duration::from_secs(LOG_INTERVAL_SECS) {
                 let elapsed = now.duration_since(start_time).as_secs_f64();
                 let tps = if elapsed > 0.0 {
-                    (collected.len() as f64) / elapsed
+                    (tx_count as f64) / elapsed
                 } else {
                     0.0
                 };
@@ -201,14 +244,15 @@ pub async fn dump_program_transactions(
                     "epoch {:04} | slot {} | kept {} tx | {:.1} tx/s",
                     epoch,
                     last_slot,
-                    collected.len(),
+                    tx_count,
                     tps
                 );
                 if pb.is_hidden() {
                     tracing::info!("{}", msg);
                 } else {
-                    pb.set_message(msg);
+                    pb.set_message(msg.clone());
                     pb.tick();
+                    tracing::info!("{}", msg);
                 }
                 last_log = now;
             }
@@ -224,20 +268,31 @@ pub async fn dump_program_transactions(
         );
     }
 
-    let dump = ProgramTransactionDump {
-        programs: programs.clone(),
-        start_slot,
-        end_slot,
-        transactions: collected,
-    };
+    spool_writer
+        .flush()
+        .with_context(|| format!("failed to flush spool file {}", spool_path.display()))?;
 
-    let data = wincode::serialize(&dump)?;
-    fs::write(&output_path, data).await?;
+    let mut header = wincode::serialize(&programs)?;
+    header.extend_from_slice(&wincode::serialize(&start_slot)?);
+    header.extend_from_slice(&wincode::serialize(&end_slot)?);
+
+    let mut tx_len_prefix = Vec::new();
+    wincode::len::BincodeLen::<{ 1 << 28 }>::write(&mut tx_len_prefix, tx_count)?;
+
+    let mut output_file = fs::File::create(&output_path).await?;
+    output_file.write_all(&header).await?;
+    output_file.write_all(&tx_len_prefix).await?;
+
+    let mut spool_reader = fs::File::open(&spool_path).await?;
+    copy(&mut spool_reader, &mut output_file).await?;
+    output_file.flush().await?;
+
+    fs::remove_file(&spool_path).await.ok();
 
     pb.finish_and_clear();
     tracing::info!(
         "📝 wrote {} transactions to {}",
-        dump.transactions.len(),
+        tx_count,
         output_path.display()
     );
 
