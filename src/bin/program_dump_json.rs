@@ -27,6 +27,7 @@ struct Args {
 
 const PROGRAM_ID_LEN: usize = 32;
 const TX_BYTES_MAX: usize = 64 << 20; // 64 MiB, matches wincode len constraint
+const TX_COUNT_MAX: usize = 1 << 28; // matches wincode len constraint
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -38,8 +39,7 @@ fn main() -> Result<()> {
     let programs = read_programs(&mut reader)?;
     let start_slot = read_u64_le(&mut reader)?;
     let end_slot = read_u64_le(&mut reader)?;
-    let tx_count = usize::try_from(read_u64_le(&mut reader)?)
-        .context("transaction count does not fit in usize")?;
+    let tx_count = read_bincode_len(&mut reader, TX_COUNT_MAX, "transaction count")?;
 
     let output: Box<dyn Write> = if let Some(path) = args.output.as_ref() {
         if let Some(parent) = path.parent() {
@@ -217,12 +217,7 @@ fn read_short_vec_len(reader: &mut BufReader<File>) -> Result<usize> {
 }
 
 fn read_transaction_bytes(reader: &mut BufReader<File>) -> Result<Vec<u8>> {
-    let len = read_u64_le(reader)? as usize;
-    if len > TX_BYTES_MAX {
-        return Err(anyhow!(
-            "transaction length {len} exceeds limit {TX_BYTES_MAX}"
-        ));
-    }
+    let len = read_bincode_len(reader, TX_BYTES_MAX, "transaction length")?;
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(buf)
@@ -232,4 +227,14 @@ fn read_u64_le(reader: &mut BufReader<File>) -> Result<u64> {
     let mut buf = [0u8; 8];
     reader.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
+}
+
+fn read_bincode_len(reader: &mut BufReader<File>, max: usize, label: &str) -> Result<usize> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    let len = u32::from_le_bytes(buf) as usize;
+    if len > max {
+        return Err(anyhow!("{label} {len} exceeds limit {max}"));
+    }
+    Ok(len)
 }
