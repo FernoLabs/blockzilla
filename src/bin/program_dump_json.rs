@@ -245,9 +245,11 @@ fn read_u64_le(reader: &mut BufReader<File>) -> Result<u64> {
 }
 
 fn read_bincode_len(reader: &mut BufReader<File>, max: usize, label: &str) -> Result<usize> {
-    let mut buf = [0u8; 4];
+    let mut buf = [0u8; 8];
     reader.read_exact(&mut buf)?;
-    let len = u32::from_le_bytes(buf) as usize;
+    let len = u64::from_le_bytes(buf)
+        .try_into()
+        .map_err(|_| anyhow!("{label} exceeds usize"))?;
     if len > max {
         return Err(anyhow!("{label} {len} exceeds limit {max}"));
     }
