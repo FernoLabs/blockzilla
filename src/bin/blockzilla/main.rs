@@ -3,6 +3,7 @@ mod build_registry;
 mod file_downloader;
 mod optimized_block_reader;
 mod optimizer;
+mod program_dump;
 mod program_stats;
 mod token_dump;
 
@@ -73,6 +74,9 @@ enum Commands {
 
     #[command(subcommand)]
     Token(TokenCommand),
+
+    #[command(subcommand)]
+    ProgramDump(ProgramDumpCommand),
 
     #[command(subcommand)]
     Stats(StatsCommand),
@@ -277,6 +281,38 @@ enum TokenCommand {
         #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
         cache_dir: String,
         #[arg(short, long, default_value = "token_transaction_dump.bin")]
+        output: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProgramDumpCommand {
+    Dump {
+        #[arg(value_name = "START_EPOCH", help = "Starting epoch to scan, inclusive")]
+        start_epoch: u64,
+        #[arg(
+            long,
+            value_name = "START_SLOT",
+            help = "First slot to include (inclusive)"
+        )]
+        start_slot: u64,
+        #[arg(
+            long,
+            value_name = "END_SLOT",
+            help = "Last slot to include (inclusive)"
+        )]
+        end_slot: u64,
+        #[arg(
+            long,
+            value_name = "PROGRAM",
+            num_args = 1..,
+            value_delimiter = ',',
+            help = "One or more program IDs to match (comma-separated supported)",
+        )]
+        programs: Vec<String>,
+        #[arg(short, long, default_value = DEFAULT_CACHE_DIR)]
+        cache_dir: String,
+        #[arg(short, long, default_value = "program_transaction_dump.bin")]
         output: PathBuf,
     },
 }
@@ -599,6 +635,27 @@ async fn main() -> Result<()> {
                     start_slot,
                     &cache_dir,
                     &mint,
+                    &output,
+                )
+                .await?;
+            }
+        },
+
+        Commands::ProgramDump(cmd) => match cmd {
+            ProgramDumpCommand::Dump {
+                start_epoch,
+                start_slot,
+                end_slot,
+                programs,
+                cache_dir,
+                output,
+            } => {
+                program_dump::dump_program_transactions(
+                    start_epoch,
+                    start_slot,
+                    end_slot,
+                    &cache_dir,
+                    &programs,
                     &output,
                 )
                 .await?;
