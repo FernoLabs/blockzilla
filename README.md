@@ -14,9 +14,9 @@ It is a playground for experiments, benchmarks, and ideas that are still evolvin
 
 ### Optimize a single epoch
 
-Run the end-to-end pipeline for one epoch. The command downloads the CAR file if
-it is missing, builds the registry artifacts, writes the optimized archive, and
-then removes the CAR again when it was fetched during this run.
+Run the end-to-end pipeline for one epoch. The command builds the registry
+artifacts, writes the optimized archive, and cleans up the CAR file if it was
+generated during the run.
 
 ```bash
 cargo run --release --bin blockzilla optimize epoch 839
@@ -65,10 +65,7 @@ The older, more manual steps are still available if you want to drive each stage
 individually:
 
 ```bash
-# download epoch car file from old-faithful archive or IPFS
-curl -fSL https://files.old-faithful.net/0/epoch-0.car -o cache/epoch-0.car # /!\ epoch 0 is 4Gb
-
-# convert the cached CAR without running the downloader/cleanup workflow
+# convert an existing cached CAR without running the downloader/cleanup workflow
 cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized
 # store raw transaction metadata instead of compact encoding
 cargo run --release --bin blockzilla optimize car --epoch 0 --cache-dir cache --results-dir optimized --raw-metadata
