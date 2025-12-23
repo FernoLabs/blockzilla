@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bincode::Options;
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -217,7 +217,9 @@ fn convert_inner_instruction(ix: &LegacyInnerInstruction) -> confirmed_block::In
     }
 }
 
-fn convert_inner_instructions(list: &LegacyInnerInstructions) -> confirmed_block::InnerInstructions {
+fn convert_inner_instructions(
+    list: &LegacyInnerInstructions,
+) -> confirmed_block::InnerInstructions {
     confirmed_block::InnerInstructions {
         index: list.index as u32,
         instructions: list
@@ -249,10 +251,7 @@ fn convert_reward(r: LegacyReward) -> confirmed_block::Reward {
         lamports: r.lamports,
         post_balance: r.post_balance,
         reward_type: r.reward_type.map(|rt| rt as i32).unwrap_or_default(),
-        commission: r
-            .commission
-            .map(|c| c.to_string())
-            .unwrap_or_default(),
+        commission: r.commission.map(|c| c.to_string()).unwrap_or_default(),
     }
 }
 
