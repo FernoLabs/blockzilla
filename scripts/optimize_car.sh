@@ -2,18 +2,17 @@
 set -euo pipefail
 
 # Usage:
-#   ./optimize_car.sh <start> <end> [dest_dir] [base_url] [--verify] [--min-free-pct=N]
+#   ./optimize_car.sh <start> <end> [dest_dir] [--verify] [--min-free-pct=N]
 # Example:
-#   ./optimize_car.sh 0 874 /volume1/blockzilla https://files.old-faithful.net --verify --min-free-pct=10
+#   ./optimize_car.sh 0 874 /volume1/blockzilla --verify --min-free-pct=10
 
 # -------- positional args --------
 START="${1:-}"
 END="${2:-}"
 DEST_DIR="${3:-./epochs}"
-BASE_URL="${4:-https://files.old-faithful.net}"
 
 if [[ -z "${START}" || -z "${END}" ]]; then
-  echo "Usage: $0 <start> <end> [dest_dir] [base_url] [--verify] [--min-free-pct=N]" >&2
+  echo "Usage: $0 <start> <end> [dest_dir] [--verify] [--min-free-pct=N]" >&2
   exit 1
 fi
 
@@ -23,9 +22,9 @@ MIN_FREE_PCT=10
 ZSTD_LVL=3          # zstd -3 recommended
 ZSTD_THREADS=0      # 0 = all cores for this single file
 
-# parse optional flags starting from arg #5
-if (( $# >= 4 )); then
-  shift 4
+# parse optional flags starting from arg #4
+if (( $# >= 3 )); then
+  shift 3
 else
   shift $#
 fi
@@ -49,7 +48,7 @@ for arg in "${@:-}"; do
 done
 
 # -------- requirements --------
-for cmd in aria2c zstd df awk; do
+for cmd in zstd df awk; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Error: $cmd not found in PATH" >&2
     exit 1
@@ -86,11 +85,10 @@ compress_one() {
   echo "$(timestamp) compress: done  $(basename "$zst")  free=$(free_pct)%"
 }
 
-download_and_compress_epoch() {
+compress_epoch() {
   local i="$1"
   local car="${DEST_DIR}/epoch-${i}.car"
   local zst="${DEST_DIR}/epoch-${i}.car.zst"
-  local url="${BASE_URL}/${i}/epoch-${i}.car"
 
   # Already compressed
   if [[ -f "$zst" ]]; then
@@ -98,40 +96,25 @@ download_and_compress_epoch() {
     return 0
   fi
 
-  # If raw exists, compress it
-  if [[ -f "$car" ]]; then
-    if ! require_free_space "${MIN_FREE_PCT}"; then
-      echo "$(timestamp) epoch-${i}: low space before compression - abort." >&2
-      exit 2
-    fi
-    compress_one "$car"
-    return 0
+  if [[ ! -f "$car" ]]; then
+    echo "$(timestamp) epoch-${i}: missing ${car} - cannot compress." >&2
+    exit 2
   fi
 
-  # Ensure free space before download
   if ! require_free_space "${MIN_FREE_PCT}"; then
-    echo "$(timestamp) epoch-${i}: free space < ${MIN_FREE_PCT}% - abort before download." >&2
+    echo "$(timestamp) epoch-${i}: low space before compression - abort." >&2
     exit 3
   fi
 
-  echo "$(timestamp) epoch-${i}: download ${url}"
-  aria2c -d "${DEST_DIR}" -c "${url}" -x 16 -s 16 --file-allocation=none
-
-  if [[ ! -f "$car" ]]; then
-    echo "$(timestamp) epoch-${i}: download failed - ${car} missing." >&2
-    exit 4
-  fi
-
-  # Compress the single downloaded file
   compress_one "$car"
 }
 
-echo "$(timestamp) config: dest=${DEST_DIR} base_url=${BASE_URL} keep_free>=${MIN_FREE_PCT}% zstd=-${ZSTD_LVL} T=${ZSTD_THREADS} verify=${VERIFY}"
+echo "$(timestamp) config: dest=${DEST_DIR} keep_free>=${MIN_FREE_PCT}% zstd=-${ZSTD_LVL} T=${ZSTD_THREADS} verify=${VERIFY}"
 echo "$(timestamp) fs: $(df -P "${DEST_DIR}" | awk 'NR==2{print $1" on "$6", free "100-$5"%"}')"
 
 # Process only the requested range
 for i in $(seq "${START}" "${END}"); do
-  download_and_compress_epoch "$i"
+  compress_epoch "$i"
 done
 
 echo "$(timestamp) all done."

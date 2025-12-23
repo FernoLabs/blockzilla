@@ -2,10 +2,7 @@ use std::path::PathBuf;
 
 use ahash::AHashMap;
 use anyhow::Result;
-use car_reader::{
-    car_block_reader::CarBlockReader,
-    open_epoch::{self, FetchMode},
-};
+use car_reader::car_block_reader::CarBlockReader;
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use optimized_archive::{
@@ -22,17 +19,9 @@ use tokio::{
 #[derive(Parser, Debug)]
 #[command(about = "Convert CAR streams into the optimized archive format")]
 struct Args {
-    /// Path to the source CAR file. If omitted, use --epoch to download.
+    /// Path to the source CAR file.
     #[arg(long, value_name = "CAR_PATH")]
-    input: Option<PathBuf>,
-
-    /// Epoch to download from the Old Faithful dataset when no --input path is given.
-    #[arg(long, value_name = "EPOCH")]
-    epoch: Option<u64>,
-
-    /// Directory to store or read cached epoch downloads.
-    #[arg(long, default_value = "cache")] 
-    cache_dir: PathBuf,
+    input: PathBuf,
 
     /// Output file for the optimized archive.
     #[arg(long, default_value = "blocks.cbor")]
@@ -81,13 +70,8 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(path) = args.input {
-        Box::new(File::open(&path).await?)
-    } else if let Some(epoch) = args.epoch {
-        open_epoch::open_epoch(epoch, &args.cache_dir, FetchMode::Offline).await?
-    } else {
-        anyhow::bail!("either --input or --epoch must be provided");
-    };
+    let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> =
+        Box::new(File::open(&args.input).await?);
 
     let mut car_reader = CarBlockReader::new(reader);
     car_reader.read_header().await?;
@@ -106,12 +90,8 @@ async fn main() -> Result<()> {
     let metadata_mode: MetadataMode = args.metadata.into();
 
     while let Some(block) = car_reader.next_block().await? {
-        let compact: CompactBlock = carblock_to_compactblock_inplace(
-            &block,
-            &mut scratch,
-            &mut provider,
-            metadata_mode,
-        )?;
+        let compact: CompactBlock =
+            carblock_to_compactblock_inplace(&block, &mut scratch, &mut provider, metadata_mode)?;
 
         optimized_cbor::encode_compact_block_to_vec(&compact, &mut encoded)?;
         write_varint(encoded.len(), &mut output).await?;
