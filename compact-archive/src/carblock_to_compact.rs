@@ -10,12 +10,12 @@ use wincode::Deserialize as WincodeDeserialize;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
+use crate::confirmed_block;
 use crate::meta_decode::decode_transaction_status_meta_bytes;
 use crate::partial_meta::extract_metadata_pubkeys;
 use crate::transaction_parser::Signature;
-use crate::{
+use car_reader::{
     car_block_reader::CarBlock,
-    confirmed_block,
     node::{Node, TransactionNode},
 };
 use smallvec::SmallVec;
