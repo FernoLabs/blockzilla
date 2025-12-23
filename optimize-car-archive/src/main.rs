@@ -2,11 +2,12 @@ use anyhow::{Context, Result};
 use async_compression::tokio::bufread::ZstdDecoder;
 use car_reader::car_block_reader::CarBlockReader;
 use clap::{Parser, ValueEnum};
-use compact_archive::archive::CompactArchive;
-use compact_archive::carblock_to_compact::{
-    CompactBlock, MetadataMode, PubkeyIdProvider, carblock_to_compactblock_inplace,
-};
+use compact_archive::{archive::CompactArchive, format::CompactBlock};
+use convert::{MetadataMode, PubkeyIdProvider, carblock_to_compactblock_inplace};
 use std::path::PathBuf;
+
+mod compact_log;
+mod convert;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Convert CAR files into compact archives")]

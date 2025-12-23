@@ -10,5 +10,12 @@ async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 car-reader = { path = "../car-reader" }
 clap = { version = "4.5", features = ["derive"] }
 compact-archive = { path = "../compact-archive" }
-tokio = { version = "1", features = ["full"] }
+cid = "0.11"
+serde = { version = "1", features = ["derive"] }
+smallvec = "1.15"
+solana-pubkey = "3.0.0"
 tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+wincode = { version = "0.2.1", features = ["derive", "solana-short-vec"] }
+zstd = "0.13"
+base64 = "0.22"

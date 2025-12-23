@@ -1,5 +1,6 @@
 use ahash::AHashMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use compact_archive::format::CompactLogStream;
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
@@ -78,12 +79,6 @@ pub enum LogEvent {
     Unparsed {
         str_idx: u16,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-pub struct CompactLogStream {
-    pub bytes: Vec<u8>,
-    pub strings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

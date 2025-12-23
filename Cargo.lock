@@ -11,7 +11,6 @@ dependencies = [
  "cfg-if",
  "getrandom",
  "once_cell",
- "serde",
  "version_check",
  "zerocopy",
 ]
@@ -223,11 +222,23 @@ name = "car-reader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
+ "bincode",
  "bytes",
  "cid",
+ "compact-archive",
  "minicbor",
+ "prost",
+ "prost-build",
+ "serde",
+ "smallvec",
+ "solana-pubkey",
+ "solana-transaction-error",
+ "solana-transaction-status-client-types",
  "tokio",
  "tracing",
+ "wincode",
+ "zstd",
 ]
 
 [[package]]
@@ -332,33 +343,9 @@ dependencies = [
 name = "compact-archive"
 version = "0.1.0"
 dependencies = [
- "ahash",
- "anyhow",
- "base64",
- "bincode",
- "bytes",
- "car-reader",
- "cid",
  "postcard",
- "prost",
- "prost-build",
- "prost-types",
  "serde",
- "serde_json",
- "smallvec",
- "solana-account-decoder-client-types",
- "solana-instruction",
- "solana-message",
- "solana-pubkey",
- "solana-reward-info",
- "solana-signature",
- "solana-transaction-context",
- "solana-transaction-error",
- "solana-transaction-status-client-types",
- "tokio",
- "tracing",
  "wincode",
- "zstd",
 ]
 
 [[package]]
@@ -848,11 +835,18 @@ dependencies = [
  "ahash",
  "anyhow",
  "async-compression",
+ "base64",
  "car-reader",
+ "cid",
  "clap",
  "compact-archive",
+ "serde",
+ "smallvec",
+ "solana-pubkey",
  "tokio",
  "tracing",
+ "wincode",
+ "zstd",
 ]
 
 [[package]]
@@ -1350,8 +1344,6 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df4e8fcba01d7efa647ed20a081c234475df5e11a93acb4393cc2c9a7b99bab"
 dependencies = [
- "bincode",
- "serde",
  "solana-define-syscall",
  "solana-instruction-error",
  "solana-pubkey",
@@ -1406,7 +1398,6 @@ version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85666605c9fd727f865ed381665db0a8fc29f984a030ecc1e40f43bfb2541623"
 dependencies = [
- "bincode",
  "lazy_static",
  "serde",
  "serde_derive",

@@ -1,15 +1,15 @@
 use anyhow::Result;
-use serde::Deserialize;
-use serde::Serialize;
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::mem::MaybeUninit;
 use std::ptr::copy_nonoverlapping;
 use wincode::ReadResult;
-use wincode::containers::{self, Pod};
+use wincode::containers;
 use wincode::io::Reader;
 use wincode::len::ShortU16Len;
 use wincode::{SchemaRead, SchemaWrite};
+
+pub use compact_archive::format::{CompiledInstruction, MessageHeader, Signature};
 
 #[inline(always)]
 fn read_short_u16_len(buf: &[u8], pos: &mut usize) -> anyhow::Result<usize> {
@@ -115,86 +115,12 @@ pub fn parse_account_keys_only(
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
 pub struct VersionedTransaction {
-    #[wincode(with = "containers::Vec<Pod<Signature>, ShortU16Len>")]
+    #[wincode(with = "containers::Vec<Signature, ShortU16Len>")]
     pub signatures: Vec<Signature>,
     pub message: VersionedMessage,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, wincode::SchemaRead, wincode::SchemaWrite)]
-#[repr(transparent)]
-pub struct Signature(pub [u8; 64]);
-
-impl serde::Serialize for Signature {
-    #[inline]
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_bytes(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Signature {
-    #[inline]
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct SigVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for SigVisitor {
-            type Value = Signature;
-
-            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-                write!(f, "a 64-byte signature")
-            }
-
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if v.len() != 64 {
-                    return Err(E::invalid_length(v.len(), &self));
-                }
-                let mut arr = [0u8; 64];
-                arr.copy_from_slice(v);
-                Ok(Signature(arr))
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut arr = [0u8; 64];
-                for i in 0..64 {
-                    arr[i] = seq
-                        .next_element()?
-                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
-                }
-                Ok(Signature(arr))
-            }
-        }
-
-        deserializer.deserialize_bytes(SigVisitor)
-    }
-}
 
 pub const PUBKEY_BYTES: usize = 32;
-
-#[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-pub struct CompiledInstruction {
-    pub program_id_index: u8,
-    #[wincode(with = "containers::Vec<u8, ShortU16Len>")]
-    pub accounts: Vec<u8>,
-    #[wincode(with = "containers::Vec<u8, ShortU16Len>")]
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, SchemaWrite, Serialize, Deserialize)]
-pub struct MessageHeader {
-    pub num_required_signatures: u8,
-    pub num_readonly_signed_accounts: u8,
-    pub num_readonly_unsigned_accounts: u8,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub struct MessageAddressTableLookup {

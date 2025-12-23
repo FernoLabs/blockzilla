@@ -1,4 +1,4 @@
-use crate::carblock_to_compact::CompactBlock;
+use crate::format::CompactBlock;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
