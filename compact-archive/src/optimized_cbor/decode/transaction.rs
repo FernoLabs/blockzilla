@@ -1,7 +1,7 @@
 use crate::carblock_to_compact::{
     CompactAddressTableLookup, CompactMetadataPayload, CompactVersionedTx,
 };
-use crate::cbor_utils::CborArrayView;
+use car_reader::cbor_utils::CborArrayView;
 use crate::transaction_parser::{CompiledInstruction, MessageHeader, Signature};
 use minicbor::Decoder;
 use minicbor::decode::Error as DecodeError;

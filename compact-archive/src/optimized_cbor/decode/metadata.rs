@@ -2,7 +2,7 @@ use crate::carblock_to_compact::{
     CompactInnerInstruction, CompactInnerInstructions, CompactMetadata, CompactReturnData,
     CompactTokenBalanceMeta,
 };
-use crate::cbor_utils::CborArrayView;
+use car_reader::cbor_utils::CborArrayView;
 use minicbor::Decoder;
 use minicbor::decode::Error as DecodeError;
 

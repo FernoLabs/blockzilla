@@ -1,7 +1,9 @@
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Result, anyhow};
+use car_reader::{car_block_reader::CarBlock, node::{Node, TransactionNode}};
 use cid::Cid;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use std::convert::TryFrom;
 use std::str::FromStr;
@@ -13,12 +15,7 @@ use crate::compact_log::{CompactLogStream, EncodeConfig, encode_logs};
 use crate::meta_decode::decode_transaction_status_meta_bytes;
 use crate::partial_meta::extract_metadata_pubkeys;
 use crate::transaction_parser::Signature;
-use crate::{
-    car_block_reader::CarBlock,
-    confirmed_block,
-    node::{Node, TransactionNode},
-};
-use smallvec::SmallVec;
+use crate::confirmed_block;
 
 pub trait PubkeyIdProvider {
     fn resolve(&mut self, key: &[u8; 32]) -> Option<u32>;
