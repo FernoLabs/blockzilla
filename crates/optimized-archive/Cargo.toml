@@ -1,0 +1,43 @@
+[package]
+name = "optimized-archive"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+ahash = { workspace = true }
+base64 = { workspace = true }
+bincode = { workspace = true }
+bs58 = { workspace = true }
+bytes = { workspace = true }
+car-reader = { path = "../car-reader" }
+clap = { workspace = true }
+memmap2 = { workspace = true }
+minicbor = { workspace = true }
+once_cell = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smallvec = { workspace = true }
+solana-account-decoder-client-types = { workspace = true }
+solana-instruction = { workspace = true }
+solana-message = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-reward-info = { workspace = true }
+solana-signature = { workspace = true }
+solana-transaction-context = { workspace = true }
+solana-transaction-error = { workspace = true }
+solana-transaction-status-client-types = { workspace = true }
+spl-token = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+which = { workspace = true }
+wincode = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }

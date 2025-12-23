@@ -1,0 +1,10 @@
+[package]
+name = "extract-archive"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+optimized-archive = { path = "../../crates/optimized-archive" }
+serde_json = { workspace = true }
