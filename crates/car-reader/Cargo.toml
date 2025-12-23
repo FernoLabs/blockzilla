@@ -5,17 +5,23 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
+ahash = { workspace = true }
 async-compression = { workspace = true }
 bytes = { workspace = true }
 cid = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
+optimized-archive = { path = "../optimized-archive" }
 once_cell = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+solana-pubkey = { workspace = true }
+wincode = { workspace = true }
 
 # cbor parsing utilities
 minicbor = { workspace = true }

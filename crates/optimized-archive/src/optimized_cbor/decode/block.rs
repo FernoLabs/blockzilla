@@ -1,4 +1,4 @@
-use crate::carblock_to_compact::{CompactBlock, CompactReward, CompactRewardType};
+use crate::compact_block::{CompactBlock, CompactReward, CompactRewardType};
 use car_reader::cbor_utils::CborArrayView;
 use minicbor::Decoder;
 use minicbor::decode::Error as DecodeError;

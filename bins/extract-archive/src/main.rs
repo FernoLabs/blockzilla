@@ -54,7 +54,7 @@ fn read_varint<R: Read>(rdr: &mut R) -> io::Result<Option<usize>> {
     loop {
         let mut byte = [0u8; 1];
         match rdr.read_exact(&mut byte) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 if seen == 0 {
                     return Ok(None);
@@ -72,7 +72,10 @@ fn read_varint<R: Read>(rdr: &mut R) -> io::Result<Option<usize>> {
         }
         shift += 7;
         if shift >= usize::BITS as usize {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "varint overflow"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
         }
     }
 }

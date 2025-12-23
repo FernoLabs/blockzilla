@@ -1,5 +1,5 @@
-use car_reader::cbor_utils::CborArrayView;
 use crate::compact_log::CompactLogStream;
+use car_reader::cbor_utils::CborArrayView;
 use minicbor::Decoder;
 use minicbor::decode::Error as DecodeError;
 

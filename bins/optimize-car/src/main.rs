@@ -2,15 +2,13 @@ use std::path::PathBuf;
 
 use ahash::AHashMap;
 use anyhow::Result;
-use car_reader::car_block_reader::CarBlockReader;
+use car_reader::{
+    car_block_reader::CarBlockReader,
+    compact_transform::{MetadataMode, PubkeyIdProvider, carblock_to_compactblock_inplace},
+};
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
-use optimized_archive::{
-    carblock_to_compact::{
-        CompactBlock, MetadataMode, PubkeyIdProvider, carblock_to_compactblock_inplace,
-    },
-    optimized_cbor,
-};
+use optimized_archive::{compact_block::CompactBlock, optimized_cbor};
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},

@@ -1,4 +1,4 @@
-use crate::carblock_to_compact::{
+use crate::compact_block::{
     CompactInnerInstruction, CompactInnerInstructions, CompactMetadata, CompactReturnData,
     CompactTokenBalanceMeta,
 };

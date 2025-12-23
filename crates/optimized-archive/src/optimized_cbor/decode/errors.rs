@@ -1,4 +1,4 @@
-use crate::carblock_to_compact::{CompactInstructionError, CompactTxError};
+use crate::compact_block::{CompactInstructionError, CompactTxError};
 use minicbor::Decoder;
 use minicbor::decode::Error as DecodeError;
 

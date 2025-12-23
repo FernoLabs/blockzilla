@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 
-use crate::carblock_to_compact::{
+use crate::compact_block::{
     CompactAddressTableLookup, CompactBlock, CompactInnerInstruction, CompactInnerInstructions,
     CompactInstructionError, CompactMetadata, CompactMetadataPayload, CompactReturnData,
     CompactReward, CompactTokenBalanceMeta, CompactTxError, CompactVersionedTx,
