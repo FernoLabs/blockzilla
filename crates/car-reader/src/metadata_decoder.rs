@@ -1,12 +1,9 @@
 use core::fmt;
-use std::io::Read;
-
 use prost::Message;
 
 use crate::confirmed_block::TransactionStatusMeta;
 use crate::stored_transaction_status_meta::StoredTransactionStatusMeta;
 
-// Epochs earlier than this were bincode-encoded in Old Faithful.
 pub const BINCODE_EPOCH_CUTOFF: u64 = 157;
 
 #[derive(Debug)]
@@ -30,15 +27,73 @@ impl fmt::Display for MetadataDecodeError {
 
 impl std::error::Error for MetadataDecodeError {}
 
+#[inline]
+fn looks_like_zstd_frame(data: &[u8]) -> bool {
+    // zstd frame magic number: 28 B5 2F FD
+    data.len() >= 4 && data[0..4] == [0x28, 0xB5, 0x2F, 0xFD]
+}
+
+/// Reusable zstd context + reusable output buffer.
+/// Keep one per worker thread. Do not share across threads.
+pub struct ZstdReusableDecoder {
+    dctx: zstd::zstd_safe::DCtx<'static>,
+    out: Vec<u8>,
+}
+
+impl ZstdReusableDecoder {
+    /// `out_capacity` should be your typical decompressed metadata size.
+    #[inline]
+    pub fn new(out_capacity: usize) -> Self {
+        Self {
+            dctx: zstd::zstd_safe::DCtx::create(),
+            out: Vec::with_capacity(out_capacity),
+        }
+    }
+
+    #[inline]
+    pub fn output(&self) -> &[u8] {
+        &self.out
+    }
+
+    /// If `input` is zstd, decompress into the internal buffer and return Ok(true).
+    /// If it is not zstd, return Ok(false) and leave output empty.
+    pub fn decompress_if_zstd(&mut self, input: &[u8]) -> Result<bool, std::io::Error> {
+        use std::io::{BufReader, Cursor, Read};
+
+        self.out.clear();
+
+        if !looks_like_zstd_frame(input) {
+            return Ok(false);
+        }
+
+        // Optional: reserve exact size if present in the frame header.
+        if let Ok(Some(sz)) = zstd::zstd_safe::get_frame_content_size(input) {
+            let sz = sz as usize;
+            if sz > self.out.capacity() {
+                self.out.reserve(sz - self.out.capacity());
+            }
+        }
+
+        let reader = BufReader::new(Cursor::new(input));
+        let mut dec =
+            zstd::stream::read::Decoder::with_context(reader, &mut self.dctx);
+
+        dec.read_to_end(&mut self.out)?;
+        Ok(true)
+    }
+}
+
 /// Decode TransactionStatusMeta from a "frame" (possibly zstd-compressed; possibly empty).
 ///
-/// Behavior matches the snippet you pasted:
+/// Behavior:
 /// - empty => default meta
-/// - try zstd first; if not zstd, fall back to raw decode
+/// - if zstd magic, decompress using reusable decoder
+/// - else treat bytes as raw
 pub fn decode_transaction_status_meta_from_frame(
     slot: u64,
     reassembled_metadata: &[u8],
     out: &mut TransactionStatusMeta,
+    zstd: &mut ZstdReusableDecoder,
 ) -> Result<(), MetadataDecodeError> {
     out.clear();
 
@@ -46,10 +101,13 @@ pub fn decode_transaction_status_meta_from_frame(
         return Ok(());
     }
 
-    // Try zstd. If it fails, treat the bytes as raw.
-    match decompress_zstd(reassembled_metadata) {
-        Ok(decompressed) => decode_transaction_status_meta(slot, &decompressed, out),
-        Err(decomp_err) => decode_transaction_status_meta(slot, reassembled_metadata, out),
+    if zstd
+        .decompress_if_zstd(reassembled_metadata)
+        .map_err(MetadataDecodeError::ZstdDecompress)?
+    {
+        decode_transaction_status_meta(slot, zstd.output(), out)
+    } else {
+        decode_transaction_status_meta(slot, reassembled_metadata, out)
     }
 }
 
@@ -74,18 +132,7 @@ pub fn decode_transaction_status_meta(
     Ok(())
 }
 
-// todo fixme
-pub type SharedError = Box<dyn std::error::Error + Send + Sync + 'static>;
-
-pub fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, SharedError> {
-    let mut decoder = zstd::Decoder::new(data)?;
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
-    Ok(decompressed)
-}
-
 #[inline(always)]
-/// Converts a slot back into the epoch that contains it.
 pub const fn slot_to_epoch(slot: u64) -> u64 {
     slot / 432000
 }

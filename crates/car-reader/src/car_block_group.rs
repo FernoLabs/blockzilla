@@ -6,7 +6,7 @@ use solana_transaction::versioned::VersionedTransaction;
 use wincode::Deserialize;
 
 use crate::{
-    confirmed_block::TransactionStatusMeta, error::GroupError, metadata_decoder::decode_transaction_status_meta_from_frame, node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node}, versioned_transaction::VersionedTransactionSchema
+    confirmed_block::TransactionStatusMeta, error::GroupError, metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame}, node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node}, versioned_transaction::VersionedTransactionSchema
 };
 
 
@@ -67,6 +67,7 @@ impl CarBlockGroup {
             tx_iter: None,
             reusable_tx: MaybeUninit::uninit(),
             reusable_meta: TransactionStatusMeta::default(),
+            zstd: ZstdReusableDecoder::new(4096),
             has_tx: false,
         })
     }
@@ -80,6 +81,7 @@ pub struct TxIter<'a> {
 
     reusable_tx: MaybeUninit<VersionedTransaction>,
     reusable_meta: TransactionStatusMeta,
+    zstd: ZstdReusableDecoder,
     has_tx: bool,
 }
 
@@ -156,7 +158,7 @@ impl<'a> TxIter<'a> {
                 self.has_tx = false;
             }
 
-            decode_transaction_status_meta_from_frame(tx.slot, tx.metadata.data, &mut self.reusable_meta)
+            decode_transaction_status_meta_from_frame(tx.slot, tx.metadata.data, &mut self.reusable_meta, &mut self.zstd)
                 .map_err(|_e| GroupError::TxMetaDecode)?;
             VersionedTransactionSchema::deserialize_into(tx.data.data, &mut self.reusable_tx)
                 .map_err(|_e| GroupError::TxDecode)?;
