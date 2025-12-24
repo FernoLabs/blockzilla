@@ -1,0 +1,21 @@
+[package]
+name = "optimize-car-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "optimize-car-archive"
+path = "src/main.rs"
+
+[dependencies]
+car-reader = { path = "../car-reader" }
+compact-archive = { path = "../compact-archive" }
+#anyhow.workspace = true
+#clap.workspace = true
+#tracing.workspace = true
+#tracing-subscriber.workspace = true
+#zstd.workspace = true
+
+[dev-dependencies]
