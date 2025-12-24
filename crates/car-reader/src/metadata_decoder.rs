@@ -75,8 +75,7 @@ impl ZstdReusableDecoder {
         }
 
         let reader = BufReader::new(Cursor::new(input));
-        let mut dec =
-            zstd::stream::read::Decoder::with_context(reader, &mut self.dctx);
+        let mut dec = zstd::stream::read::Decoder::with_context(reader, &mut self.dctx);
 
         dec.read_to_end(&mut self.out)?;
         Ok(true)

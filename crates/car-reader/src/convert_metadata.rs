@@ -1,5 +1,5 @@
 use crate::{
-    confirmed_block::{self,TransactionStatusMeta},
+    confirmed_block::{self, TransactionStatusMeta},
     stored_transaction_status_meta as stored,
     stored_transaction_status_meta::StoredTransactionStatusMeta,
 };
@@ -90,7 +90,9 @@ fn return_data_to_proto(rd: &stored::TransactionReturnData) -> confirmed_block::
 }
 
 #[inline]
-fn inner_instructions_to_proto(ii: &stored::InnerInstructions) -> confirmed_block::InnerInstructions {
+fn inner_instructions_to_proto(
+    ii: &stored::InnerInstructions,
+) -> confirmed_block::InnerInstructions {
     confirmed_block::InnerInstructions {
         index: ii.index as u32,
         instructions: ii
@@ -112,7 +114,9 @@ fn inner_instruction_to_proto(i: &stored::InnerInstruction) -> confirmed_block::
 }
 
 #[inline]
-fn token_balance_to_proto(tb: &stored::StoredTransactionTokenBalance) -> confirmed_block::TokenBalance {
+fn token_balance_to_proto(
+    tb: &stored::StoredTransactionTokenBalance,
+) -> confirmed_block::TokenBalance {
     confirmed_block::TokenBalance {
         account_index: tb.account_index as u32,
         mint: tb.mint.clone(),

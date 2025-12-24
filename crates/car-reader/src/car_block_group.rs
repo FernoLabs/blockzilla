@@ -6,9 +6,12 @@ use solana_transaction::versioned::VersionedTransaction;
 use wincode::Deserialize;
 
 use crate::{
-    confirmed_block::TransactionStatusMeta, error::GroupError, metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame}, node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node}, versioned_transaction::VersionedTransactionSchema
+    confirmed_block::TransactionStatusMeta,
+    error::GroupError,
+    metadata_decoder::{decode_transaction_status_meta_from_frame, ZstdReusableDecoder},
+    node::{decode_node, CborArrayIter, CborCidRef, Node, NodeDecodeError},
+    versioned_transaction::VersionedTransactionSchema,
 };
-
 
 pub struct CarBlockGroup {
     pub block_payload: Bytes,
@@ -158,8 +161,13 @@ impl<'a> TxIter<'a> {
                 self.has_tx = false;
             }
 
-            decode_transaction_status_meta_from_frame(tx.slot, tx.metadata.data, &mut self.reusable_meta, &mut self.zstd)
-                .map_err(|_e| GroupError::TxMetaDecode)?;
+            decode_transaction_status_meta_from_frame(
+                tx.slot,
+                tx.metadata.data,
+                &mut self.reusable_meta,
+                &mut self.zstd,
+            )
+            .map_err(|_e| GroupError::TxMetaDecode)?;
             VersionedTransactionSchema::deserialize_into(tx.data.data, &mut self.reusable_tx)
                 .map_err(|_e| GroupError::TxDecode)?;
 

@@ -3,15 +3,15 @@
 //! This crate provides zero-copy parsing and reading of CAR files.
 //! Designed to be reusable, auditable, and verifiable against other implementations.
 
-mod cid;
-mod node;
-mod versioned_transaction;
-mod metadata_decoder;
-mod convert_metadata;
-mod stored_transaction_status_meta;
 pub mod car_block_group;
+mod cid;
+mod convert_metadata;
 pub mod error;
+mod metadata_decoder;
+mod node;
 pub mod reader;
+mod stored_transaction_status_meta;
+mod versioned_transaction;
 
 pub use reader::CarBlockReader;
 

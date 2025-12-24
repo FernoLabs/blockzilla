@@ -2,7 +2,9 @@ use clap::{Parser, Subcommand};
 use tracing::{info, Level};
 
 use car_reader::{
-    CarBlockReader, car_block_group::CarBlockGroup, error::{CarReadError as CarError, CarReadResult as Result}
+    car_block_group::CarBlockGroup,
+    error::{CarReadError as CarError, CarReadResult as Result},
+    CarBlockReader,
 };
 
 use pprof::ProfilerGuard;
@@ -198,7 +200,7 @@ fn profile_car(
     let mut bytes_i: u64 = 0;
 
     while car.read_until_block_into(&mut group)? {
-        let tx_count = group.transactions().unwrap().count();
+        let _tx_count = group.transactions().unwrap().count();
         blocks += 1;
         blocks_i += 1;
 

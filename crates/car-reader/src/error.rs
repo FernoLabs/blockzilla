@@ -28,7 +28,6 @@ impl From<io::Error> for CarReadError {
     }
 }
 
-
 #[derive(Debug)]
 pub enum GroupError {
     /// Error while decoding a CBOR node
@@ -43,7 +42,7 @@ pub enum GroupError {
     /// Error while decoding a Solana transaction with wincode
     TxDecode,
     IteratorStateBug,
-    TxMetaDecode
+    TxMetaDecode,
 }
 
 impl core::fmt::Display for GroupError {

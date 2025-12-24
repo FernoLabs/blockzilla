@@ -69,7 +69,7 @@ where
         let n = d.array().ok().flatten().unwrap_or(0);
         (0..n).map(move |_| d.decode_with(&mut ()))
     }
-        #[inline]
+    #[inline]
     pub fn decode_at(&self, idx: usize) -> core::result::Result<T, minicbor::decode::Error> {
         let mut d = minicbor::Decoder::new(self.slice);
         let n = d.array().ok().flatten().unwrap_or(0) as usize;
@@ -81,9 +81,7 @@ where
         }
         d.decode_with(&mut ())
     }
-
 }
-
 
 #[derive(Debug, Decode)]
 #[cbor(array)]
