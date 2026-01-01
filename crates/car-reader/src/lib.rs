@@ -7,11 +7,11 @@ pub mod car_block_group;
 mod cid;
 mod convert_metadata;
 pub mod error;
-mod metadata_decoder;
-mod node;
+pub mod metadata_decoder;
+pub mod node;
 pub mod reader;
-mod stored_transaction_status_meta;
-mod versioned_transaction;
+pub mod stored_transaction_status_meta;
+pub mod versioned_transaction;
 
 pub use reader::CarBlockReader;
 

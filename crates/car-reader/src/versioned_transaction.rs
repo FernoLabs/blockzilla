@@ -101,7 +101,7 @@ impl<'de> SchemaRead<'de> for VersionedMsg {
 
 #[derive(SchemaRead)]
 #[wincode(from = "versioned::VersionedTransaction")]
-pub(super) struct VersionedTransactionSchema {
+pub struct VersionedTransactionSchema {
     signatures: containers::Vec<Pod<Signature>, ShortU16Len>,
     message: VersionedMsg,
 }

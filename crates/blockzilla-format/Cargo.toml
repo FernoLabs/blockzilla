@@ -1,0 +1,25 @@
+[package]
+name = "blockzilla-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+ahash = "0.8"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc","use-std"] }
+base64 = "0.22.1"
+wincode = "0.2.5"
+
+# Optional: only needed for building compact from Solana tx
+solana-pubkey = "4.0.0"
+car-reader = { path = "../car-reader", optional = true }
+solana-transaction = { version = "*", features = ["serde"], optional = true }
+solana-message = { version = "*", optional = true }
+tracing = "0.1.44"
+
+[features]
+default = []
+solana = ["dep:solana-transaction", "dep:solana-message", "dep:car-reader"]

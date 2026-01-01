@@ -124,6 +124,7 @@ pub fn decode_transaction_status_meta(
             .map_err(|err| MetadataDecodeError::Bincode(err.to_string()))?
             .into();
     } else {
+        out.clear();
         out.merge(metadata_bytes)
             .map_err(MetadataDecodeError::ProstDecode)?;
     }

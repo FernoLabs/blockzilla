@@ -13,6 +13,8 @@ use crate::{
     versioned_transaction::VersionedTransactionSchema,
 };
 
+const DEFAULT_CAPACITY: usize = 8192;
+
 pub struct CarBlockGroup {
     pub block_payload: Bytes,
     pub payloads: Vec<Bytes>,
@@ -29,8 +31,8 @@ impl CarBlockGroup {
     pub fn new() -> Self {
         Self {
             block_payload: Bytes::new(),
-            payloads: Vec::with_capacity(8192),
-            cid_map: AHashMap::with_capacity(8192),
+            payloads: Vec::with_capacity(DEFAULT_CAPACITY),
+            cid_map: AHashMap::with_capacity(DEFAULT_CAPACITY),
         }
     }
 
@@ -48,7 +50,7 @@ impl CarBlockGroup {
     }
 
     #[inline]
-    fn decode_by_hash<'a>(&'a self, cid_hash_bytes: &[u8]) -> Result<Node<'a>, GroupError> {
+    pub fn decode_by_hash<'a>(&'a self, cid_hash_bytes: &[u8]) -> Result<Node<'a>, GroupError> {
         let payload = self.get(cid_hash_bytes).ok_or(GroupError::MissingCid)?;
         decode_node(payload.as_ref()).map_err(GroupError::Node)
     }
@@ -69,7 +71,7 @@ impl CarBlockGroup {
             entry_iter,
             tx_iter: None,
             reusable_tx: MaybeUninit::uninit(),
-            reusable_meta: TransactionStatusMeta::default(),
+            reusable_meta: None,
             zstd: ZstdReusableDecoder::new(4096),
             has_tx: false,
         })
@@ -83,7 +85,7 @@ pub struct TxIter<'a> {
     tx_iter: Option<CborArrayIter<'a, CborCidRef<'a>>>,
 
     reusable_tx: MaybeUninit<VersionedTransaction>,
-    reusable_meta: TransactionStatusMeta,
+    reusable_meta: Option<TransactionStatusMeta>,
     zstd: ZstdReusableDecoder,
     has_tx: bool,
 }
@@ -91,54 +93,58 @@ pub struct TxIter<'a> {
 impl<'a> Drop for TxIter<'a> {
     fn drop(&mut self) {
         if self.has_tx {
-            unsafe { core::ptr::drop_in_place(self.reusable_tx.as_mut_ptr()) };
-            self.has_tx = false;
+            unsafe { self.reusable_tx.assume_init_drop() };
         }
     }
 }
 
 impl<'a> TxIter<'a> {
     #[inline]
+    fn decode_error(e: impl Into<NodeDecodeError>) -> GroupError {
+        GroupError::Node(e.into())
+    }
+
+    #[inline]
     fn load_next_entry(&mut self) -> Result<bool, GroupError> {
-        loop {
-            let entry_cid = match self.entry_iter.next_item() {
-                None => return Ok(false),
-                Some(r) => r.map_err(|e| GroupError::Node(NodeDecodeError::from(e)))?,
-            };
+        while let Some(entry_cid) = self.entry_iter.next_item() {
+            let entry_cid = entry_cid.map_err(Self::decode_error)?;
 
-            let node = self.group.decode_by_hash(entry_cid.hash_bytes())?;
-            let Node::Entry(entry) = node else {
-                continue;
-            };
-
-            self.tx_iter = Some(
-                entry
-                    .transactions
-                    .iter_stateful()
-                    .map_err(|e| GroupError::Node(NodeDecodeError::from(e)))?,
-            );
-
-            return Ok(true);
+            if let Node::Entry(entry) = self.group.decode_by_hash(entry_cid.hash_bytes())? {
+                self.tx_iter = Some(
+                    entry
+                        .transactions
+                        .iter_stateful()
+                        .map_err(Self::decode_error)?,
+                );
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 
     #[inline]
     fn decode_next_tx_in_place(&mut self) -> Result<bool, GroupError> {
         loop {
-            if self.tx_iter.is_none() && !self.load_next_entry()? {
-                return Ok(false);
-            }
+            // Get or load tx_iter
+            let tx_iter = match &mut self.tx_iter {
+                Some(iter) => iter,
+                None => {
+                    if !self.load_next_entry()? {
+                        return Ok(false);
+                    }
+                    self.tx_iter.as_mut().unwrap()
+                }
+            };
 
-            let tx_cid = match self.tx_iter.as_mut().unwrap().next_item() {
+            let tx_cid = match tx_iter.next_item() {
                 None => {
                     self.tx_iter = None;
                     continue;
                 }
-                Some(r) => r.map_err(|e| GroupError::Node(NodeDecodeError::from(e)))?,
+                Some(r) => r.map_err(Self::decode_error)?,
             };
 
-            let node = self.group.decode_by_hash(tx_cid.hash_bytes())?;
-            let Node::Transaction(tx) = node else {
+            let Node::Transaction(tx) = self.group.decode_by_hash(tx_cid.hash_bytes())? else {
                 continue;
             };
 
@@ -156,38 +162,65 @@ impl<'a> TxIter<'a> {
                 );
             }
 
+            // Drop previous transaction if exists
             if self.has_tx {
-                unsafe { core::ptr::drop_in_place(self.reusable_tx.as_mut_ptr()) };
+                unsafe { self.reusable_tx.assume_init_drop() };
                 self.has_tx = false;
             }
 
-            decode_transaction_status_meta_from_frame(
-                tx.slot,
-                tx.metadata.data,
-                &mut self.reusable_meta,
-                &mut self.zstd,
-            )
-            .map_err(|_e| GroupError::TxMetaDecode)?;
-            VersionedTransactionSchema::deserialize_into(tx.data.data, &mut self.reusable_tx)
-                .map_err(|_e| GroupError::TxDecode)?;
+            // Decode metadata if present
 
+            let has_metadata = !tx.metadata.data.is_empty();
+            if has_metadata {
+                let meta = self
+                    .reusable_meta
+                    .get_or_insert_with(TransactionStatusMeta::default);
+
+                decode_transaction_status_meta_from_frame(
+                    tx.slot,
+                    tx.metadata.data,
+                    meta,
+                    &mut self.zstd,
+                )
+                .map_err(|_| GroupError::TxMetaDecode)?;
+            } else {
+                self.reusable_meta = None;
+            }
+
+            VersionedTransactionSchema::deserialize_into(tx.data.data, &mut self.reusable_tx)
+                .map_err(|_| GroupError::TxDecode)?;
             self.has_tx = true;
+
             return Ok(true);
+        }
+    }
+
+    /// Returns a reference to the metadata of the current transaction.
+    /// Returns None if no transaction is loaded or if the transaction has no metadata.
+    /// This reference is valid until next() is called again.
+    #[inline]
+    pub fn current_metadata(&self) -> Option<&TransactionStatusMeta> {
+        if self.has_tx {
+            self.reusable_meta.as_ref()
+        } else {
+            None
         }
     }
 }
 
 impl<'a> Iterator for TxIter<'a> {
     // Reference is valid until next() is called again (reused buffer).
-    type Item = Result<&'a VersionedTransaction, GroupError>;
+    type Item = Result<(&'a VersionedTransaction, Option<&'a TransactionStatusMeta>), GroupError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.decode_next_tx_in_place() {
             Ok(false) => None,
             Ok(true) => {
                 let tx = unsafe { self.reusable_tx.assume_init_ref() };
-                let ptr: *const VersionedTransaction = tx;
-                Some(Ok(unsafe { &*ptr }))
+                let tx_ptr: *const VersionedTransaction = tx;
+                let meta_ptr: Option<*const TransactionStatusMeta> =
+                    self.reusable_meta.as_ref().map(|m| m as *const _);
+                Some(Ok(unsafe { (&*tx_ptr, meta_ptr.map(|p| &*p)) }))
             }
             Err(e) => Some(Err(e)),
         }
