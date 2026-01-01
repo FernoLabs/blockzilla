@@ -262,11 +262,11 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
         }
 
         // standalone: custom program error: 0x....
-        if let Some(hex) = line.strip_prefix("custom program error: 0x") {
-            if let Ok(code) = u32::from_str_radix(hex.trim(), 16) {
-                events.push(LogEvent::CustomProgramError { code });
-                continue;
-            }
+        if let Some(hex) = line.strip_prefix("custom program error: 0x")
+            && let Ok(code) = u32::from_str_radix(hex.trim(), 16)
+        {
+            events.push(LogEvent::CustomProgramError { code });
+            continue;
         }
 
         // Program failed to complete: ...
@@ -345,32 +345,31 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
         }
 
         // Program <id> log: <msg>
-        if let Some(rest) = line.strip_prefix("Program ") {
-            if let Some(pos) = rest.find(" log: ") {
-                let pk_txt = rest[..pos].trim();
-                let text = rest[pos + " log: ".len()..].trim();
+        if let Some(rest) = line.strip_prefix("Program ")
+            && let Some(pos) = rest.find(" log: ")
+        {
+            let pk_txt = rest[..pos].trim();
+            let text = rest[pos + " log: ".len()..].trim();
 
-                let program = lookup_pid_or_panic(registry, pk_txt, line_no, line);
+            let program = lookup_pid_or_panic(registry, pk_txt, line_no, line);
 
-                // If a program emitted the runtime custom error string in its own log channel,
-                // record it as a program-attributed custom error.
-                if let Some(code) = parse_custom_program_error_reason(text) {
-                    events.push(LogEvent::FailureCustomProgramError { program, code });
-                    continue;
-                }
-
-                // Optional: Program <pk> log: Error: <msg>
-                if let Some(msg) = parse_program_log_error_payload(text) {
-                    // Attribute as generic program log error (still useful)
-                    events.push(LogEvent::ProgramLogError { msg: st.push(msg) });
-                    continue;
-                }
-
-                let log =
-                    program_logs::parse_program_log_for_program(pk_txt, text, registry, &mut st);
-                events.push(LogEvent::ProgramIdLog { program, log });
+            // If a program emitted the runtime custom error string in its own log channel,
+            // record it as a program-attributed custom error.
+            if let Some(code) = parse_custom_program_error_reason(text) {
+                events.push(LogEvent::FailureCustomProgramError { program, code });
                 continue;
             }
+
+            // Optional: Program <pk> log: Error: <msg>
+            if let Some(msg) = parse_program_log_error_payload(text) {
+                // Attribute as generic program log error (still useful)
+                events.push(LogEvent::ProgramLogError { msg: st.push(msg) });
+                continue;
+            }
+
+            let log = program_logs::parse_program_log_for_program(pk_txt, text, registry, &mut st);
+            events.push(LogEvent::ProgramIdLog { program, log });
+            continue;
         }
 
         // Program ...
@@ -416,11 +415,11 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
 
             // Program consumption: N units remaining
             if let Some(rem) = rest.strip_prefix("consumption: ") {
-                if let Some(pos) = rem.find(" units remaining") {
-                    if let Some(units) = parse_u32_commas(&rem[..pos]) {
-                        events.push(LogEvent::Consumption { units });
-                        continue;
-                    }
+                if let Some(pos) = rem.find(" units remaining")
+                    && let Some(units) = parse_u32_commas(&rem[..pos])
+                {
+                    events.push(LogEvent::Consumption { units });
+                    continue;
                 }
                 events.push(LogEvent::Unparsed {
                     text: st.push(line),
@@ -452,14 +451,13 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
                 let is_cb = program == cb_pid;
 
                 // invoke [N]
-                if let Some(depth_str) = after_pk.strip_prefix("invoke [") {
-                    if let Some(d) = depth_str.strip_suffix(']') {
-                        if let Ok(depth_u32) = d.trim().parse::<u32>() {
-                            let depth = depth_u32.min(255) as u8;
-                            events.push(LogEvent::Invoke { program, depth });
-                            continue;
-                        }
-                    }
+                if let Some(depth_str) = after_pk.strip_prefix("invoke [")
+                    && let Some(d) = depth_str.strip_suffix(']')
+                    && let Ok(depth_u32) = d.trim().parse::<u32>()
+                {
+                    let depth = depth_u32.min(255) as u8;
+                    events.push(LogEvent::Invoke { program, depth });
+                    continue;
                 }
 
                 // success
@@ -506,11 +504,11 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
                 // ComputeBudget special: request units
                 if is_cb {
                     let norm = after_pk.replace(':', "").to_lowercase();
-                    if let Some(tail) = norm.strip_prefix("request units ") {
-                        if let Some(units) = parse_u32_commas(tail) {
-                            events.push(LogEvent::CbRequestUnits { units });
-                            continue;
-                        }
+                    if let Some(tail) = norm.strip_prefix("request units ")
+                        && let Some(units) = parse_u32_commas(tail)
+                    {
+                        events.push(LogEvent::CbRequestUnits { units });
+                        continue;
                     }
                 }
 

@@ -28,7 +28,7 @@ impl<R: Read> PostcardFramedReader<R> {
         match self.r.read_exact(&mut lenb) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e).context("read frame len").map_err(Into::into),
+            Err(e) => return Err(e).context("read frame len"),
         }
 
         let len = u32::from_le_bytes(lenb) as usize;
@@ -40,7 +40,7 @@ impl<R: Read> PostcardFramedReader<R> {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Ok(None);
             }
-            Err(e) => return Err(e).context("read frame payload").map_err(Into::into),
+            Err(e) => return Err(e).context("read frame payload"),
         }
 
         let v = postcard::from_bytes::<T>(&self.buf).context("postcard decode")?;

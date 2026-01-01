@@ -406,20 +406,20 @@ impl Token2022Log {
 
         // "account needs resize, +{:?} bytes"
         // In practice the {:?} for usize prints a plain integer.
-        if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes") {
-            if let Ok(bytes) = x.parse::<usize>() {
-                return Some(Self::AccountNeedsResizePlusBytesDebug { bytes });
-            }
+        if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes")
+            && let Ok(bytes) = x.parse::<usize>()
+        {
+            return Some(Self::AccountNeedsResizePlusBytesDebug { bytes });
         }
 
         // NOTE: you had a second enum variant for another site, but the log string is the same.
         // If you later want to distinguish these, you need an additional discriminator in the log line.
-        if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes") {
-            if let Ok(bytes) = x.parse::<usize>() {
-                // If you want to prefer the other variant instead, swap which one you return here.
-                // For now we keep Debug as the canonical one, and Debug2 remains for future use.
-                let _ = bytes;
-            }
+        if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes")
+            && let Ok(bytes) = x.parse::<usize>()
+        {
+            // If you want to prefer the other variant instead, swap which one you return here.
+            // For now we keep Debug as the canonical one, and Debug2 remains for future use.
+            let _ = bytes;
         }
 
         // "Error harvesting from {}: {}"

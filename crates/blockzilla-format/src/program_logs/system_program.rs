@@ -180,27 +180,27 @@ impl SystemProgramLog {
         }
 
         // Create: address X does not match derived address Y
-        if let Some(rest) = text.strip_prefix("Create: address ") {
-            if let Some(mid) = rest.find(" does not match derived address ") {
-                let provided_txt = rest[..mid].trim();
-                let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
-                return Some(Self::CreateAddressMismatch {
-                    provided_addr: parse_pubkey_id(registry, provided_txt)?,
-                    derived_addr: parse_pubkey_id(registry, derived_txt)?,
-                });
-            }
+        if let Some(rest) = text.strip_prefix("Create: address ")
+            && let Some(mid) = rest.find(" does not match derived address ")
+        {
+            let provided_txt = rest[..mid].trim();
+            let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
+            return Some(Self::CreateAddressMismatch {
+                provided_addr: parse_pubkey_id(registry, provided_txt)?,
+                derived_addr: parse_pubkey_id(registry, derived_txt)?,
+            });
         }
 
         // Transfer: 'from' address X does not match derived address Y
-        if let Some(rest) = text.strip_prefix("Transfer: 'from' address ") {
-            if let Some(mid) = rest.find(" does not match derived address ") {
-                let provided_txt = rest[..mid].trim();
-                let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
-                return Some(Self::TransferFromAddressMismatch {
-                    provided_addr: parse_pubkey_id(registry, provided_txt)?,
-                    derived_addr: parse_pubkey_id(registry, derived_txt)?,
-                });
-            }
+        if let Some(rest) = text.strip_prefix("Transfer: 'from' address ")
+            && let Some(mid) = rest.find(" does not match derived address ")
+        {
+            let provided_txt = rest[..mid].trim();
+            let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
+            return Some(Self::TransferFromAddressMismatch {
+                provided_addr: parse_pubkey_id(registry, provided_txt)?,
+                derived_addr: parse_pubkey_id(registry, derived_txt)?,
+            });
         }
 
         // Create Account: account {:?} already in use  (prints Address via Debug)
@@ -228,13 +228,13 @@ impl SystemProgramLog {
         }
 
         // Allocate: requested <space>, max allowed <max>
-        if let Some(rest) = text.strip_prefix("Allocate: requested ") {
-            if let Some(pos) = rest.find(", max allowed ") {
-                return Some(Self::AllocateRequestedTooLarge {
-                    requested: parse_u64_commas(&rest[..pos])?,
-                    max_allowed: parse_u64_commas(&rest[pos + ", max allowed ".len()..])?,
-                });
-            }
+        if let Some(rest) = text.strip_prefix("Allocate: requested ")
+            && let Some(pos) = rest.find(", max allowed ")
+        {
+            return Some(Self::AllocateRequestedTooLarge {
+                requested: parse_u64_commas(&rest[..pos])?,
+                max_allowed: parse_u64_commas(&rest[pos + ", max allowed ".len()..])?,
+            });
         }
 
         // Transfer: `from` must not carry data
@@ -243,12 +243,12 @@ impl SystemProgramLog {
         }
 
         // Transfer: `from` account <pubkey> must sign
-        if let Some(rest) = text.strip_prefix("Transfer: `from` account ") {
-            if let Some(pk_txt) = rest.strip_suffix(" must sign") {
-                return Some(Self::TransferFromMustSign {
-                    from: parse_pubkey_id(registry, pk_txt.trim())?,
-                });
-            }
+        if let Some(rest) = text.strip_prefix("Transfer: `from` account ")
+            && let Some(pk_txt) = rest.strip_suffix(" must sign")
+        {
+            return Some(Self::TransferFromMustSign {
+                from: parse_pubkey_id(registry, pk_txt.trim())?,
+            });
         }
 
         // Transfer: insufficient lamports <have>, need <need>

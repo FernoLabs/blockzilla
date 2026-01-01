@@ -450,7 +450,7 @@ fn registry_process_block(
             }
 
             if !tx.metadata.data.is_empty() {
-                let meta = tx_scratch.decode_meta(tx.slot, &tx.metadata.data)?;
+                let meta = tx_scratch.decode_meta(tx.slot, tx.metadata.data)?;
 
                 for pk in &meta.loaded_writable_addresses {
                     counter.add32(pk.as_slice().try_into().unwrap());
@@ -469,16 +469,16 @@ fn registry_process_block(
                         counter.add32(pk.as_array());
                     }
                     // owner optional
-                    if !tb.owner.is_empty() {
-                        if let Ok(pk) = Pubkey::from_str(&tb.owner) {
-                            counter.add32(pk.as_array());
-                        }
+                    if !tb.owner.is_empty()
+                        && let Ok(pk) = Pubkey::from_str(&tb.owner)
+                    {
+                        counter.add32(pk.as_array());
                     }
                     // program_id optional
-                    if !tb.program_id.is_empty() {
-                        if let Ok(pk) = Pubkey::from_str(&tb.program_id) {
-                            counter.add32(pk.as_array());
-                        }
+                    if !tb.program_id.is_empty()
+                        && let Ok(pk) = Pubkey::from_str(&tb.program_id)
+                    {
+                        counter.add32(pk.as_array());
                     }
                 }
             }
@@ -721,7 +721,7 @@ fn compact_process_block<W: std::io::Write>(
             let tx_bytes = tx.data.data;
 
             // Fail fast on bad tx decode
-            let vtx = scratch.decode_tx(tx_bytes).map_err(|e| {
+            let vtx = scratch.decode_tx(tx_bytes).inspect_err(|e| {
                 error!(
                     "FAIL decode_tx: block_slot={} tx_slot={} tx_index_in_block={} tx_len={} tx_prefix={} cid_digest_prefix={}",
                     block_slot,
@@ -731,7 +731,6 @@ fn compact_process_block<W: std::io::Write>(
                     hex_prefix(tx_bytes, 32),
                     hex_prefix(tx_cid.hash_bytes(), 16),
                 );
-                e
             })?;
 
             // Fail fast on compact tx conversion
@@ -756,7 +755,7 @@ fn compact_process_block<W: std::io::Write>(
                 None
             } else {
                 // Decode meta (fail fast)
-                let meta = scratch.decode_meta(tx.slot, &tx.metadata.data).map_err(|e| {
+                let meta = scratch.decode_meta(tx.slot, tx.metadata.data).inspect_err(|e| {
                     error!(
                         "FAIL decode_meta: block_slot={} tx_slot={} tx_index_in_block={} meta_len={} cid_digest_prefix={}",
                         block_slot,
@@ -765,7 +764,6 @@ fn compact_process_block<W: std::io::Write>(
                         tx.metadata.data.len(),
                         hex_prefix(tx_cid.hash_bytes(), 16),
                     );
-                    e
                 })?;
 
                 // Convert to CompactMetaV1 (this already encodes compact logs into CompactMetaV1.logs)
@@ -938,7 +936,7 @@ where
     reader.skip_header().context("skip CAR header")?;
 
     let mut group = CarBlockGroup::new();
-    while let Ok(_) = reader.read_until_block_into(&mut group) {
+    while reader.read_until_block_into(&mut group).is_ok() {
         f(&group)?;
         group.clear();
     }

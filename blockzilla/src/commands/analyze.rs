@@ -153,10 +153,10 @@ pub fn analyze_epoch_file(
         .read::<CompactBlockRecord>()
         .context("decode CompactBlockRecord")?
     {
-        if let Some(max) = limit_blocks {
-            if rep.blocks >= max {
-                break;
-            }
+        if let Some(max) = limit_blocks
+            && rep.blocks >= max
+        {
+            break;
         }
 
         rep.blocks += 1;
@@ -315,26 +315,23 @@ pub fn print_epoch_report(rep: &EpochReport) {
     println!();
 
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  header",
         rep.bytes_header,
-        pct_payload(rep.bytes_header),
-        "header"
+        pct_payload(rep.bytes_header)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  tx",
         rep.bytes_tx,
-        pct_payload(rep.bytes_tx),
-        "tx"
+        pct_payload(rep.bytes_tx)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  meta",
         rep.bytes_meta,
-        pct_payload(rep.bytes_meta),
-        "meta"
+        pct_payload(rep.bytes_meta)
     );
     println!(
-        "{:>14} {:>8}    {}",
-        rep.bytes_frame_prefix, "", "frame_prefix_u32"
+        "{:>14} {:>8}    frame_prefix_u32",
+        rep.bytes_frame_prefix, ""
     );
 
     // tx composition / compactness
@@ -357,67 +354,57 @@ pub fn print_epoch_report(rep: &EpochReport) {
     };
 
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  signatures",
         rep.sigs_bytes,
-        pct_tx(rep.sigs_bytes),
-        "signatures"
+        pct_tx(rep.sigs_bytes)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  msg.header",
         rep.msg_header_bytes,
-        pct_tx(rep.msg_header_bytes),
-        "msg.header"
+        pct_tx(rep.msg_header_bytes)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  msg.recent_blockhash",
         rep.msg_recent_blockhash_bytes,
-        pct_tx(rep.msg_recent_blockhash_bytes),
-        "msg.recent_blockhash"
+        pct_tx(rep.msg_recent_blockhash_bytes)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  msg.account_keys",
         rep.msg_account_keys_bytes,
-        pct_tx(rep.msg_account_keys_bytes),
-        "msg.account_keys"
+        pct_tx(rep.msg_account_keys_bytes)
     );
 
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  ix.container(total)",
         rep.ix_container_bytes,
-        pct_tx(rep.ix_container_bytes),
-        "ix.container(total)"
+        pct_tx(rep.ix_container_bytes)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  ix.accounts",
         rep.ix_accounts_bytes,
-        pct_tx(rep.ix_accounts_bytes),
-        "ix.accounts"
+        pct_tx(rep.ix_accounts_bytes)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  ix.data(serialized)",
         rep.ix_data_bytes,
-        pct_tx(rep.ix_data_bytes),
-        "ix.data(serialized)"
+        pct_tx(rep.ix_data_bytes)
     );
     println!(
-        "{:>14} {:>8.2}%  {}",
+        "{:>14} {:>8.2}%  ix.overhead(approx)",
         rep.ix_overhead_bytes_approx(),
-        pct_tx(rep.ix_overhead_bytes_approx()),
-        "ix.overhead(approx)"
+        pct_tx(rep.ix_overhead_bytes_approx())
     );
 
     if rep.atl_container_bytes > 0 || rep.atl_payload_bytes > 0 {
         println!(
-            "{:>14} {:>8.2}%  {}",
+            "{:>14} {:>8.2}%  atl.container",
             rep.atl_container_bytes,
-            pct_tx(rep.atl_container_bytes),
-            "atl.container"
+            pct_tx(rep.atl_container_bytes)
         );
         println!(
-            "{:>14} {:>8.2}%  {}",
+            "{:>14} {:>8.2}%  atl.payload",
             rep.atl_payload_bytes,
-            pct_tx(rep.atl_payload_bytes),
-            "atl.payload"
+            pct_tx(rep.atl_payload_bytes)
         );
     }
 

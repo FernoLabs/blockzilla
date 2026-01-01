@@ -48,10 +48,10 @@ pub fn dump_log_strings(
         .read::<CompactBlockRecord>()
         .context("postcard decode CompactBlockRecord")?
     {
-        if let Some(max) = limit_blocks {
-            if blocks >= max {
-                break;
-            }
+        if let Some(max) = limit_blocks
+            && blocks >= max
+        {
+            break;
         }
         if max_lines != 0 && lines_out >= max_lines {
             break;
@@ -80,7 +80,7 @@ pub fn dump_log_strings(
 
         blocks += 1;
 
-        if progress_every > 0 && blocks % progress_every == 0 {
+        if progress_every > 0 && blocks.is_multiple_of(progress_every) {
             let elapsed = start.elapsed().as_secs().max(1);
             let blk_s = blocks as f64 / elapsed as f64;
             let line_s = lines_out as f64 / elapsed as f64;

@@ -133,10 +133,10 @@ pub fn parse_program_log_for_program(
 #[inline]
 pub fn try_parse_program_log(program: &str, payload: &str) -> Option<ProgramLog> {
     // SPL Token program (static-only for now)
-    if token::STR_ID == program {
-        if let Some(t) = token::TokenLog::parse(payload) {
-            return Some(ProgramLog::Token(t));
-        }
+    if token::STR_ID == program
+        && let Some(t) = token::TokenLog::parse(payload)
+    {
+        return Some(ProgramLog::Token(t));
     }
 
     None
@@ -151,52 +151,52 @@ pub fn try_parse_program_log_with_table(
     registry: &Registry,
     st: &mut StringTable,
 ) -> Option<ProgramLog> {
-    if token_2022::STR_ID == program {
-        if let Some(t) = token_2022::Token2022Log::parse(payload, registry, st) {
-            return Some(ProgramLog::Token2022(t));
-        }
+    if token_2022::STR_ID == program
+        && let Some(t) = token_2022::Token2022Log::parse(payload, registry, st)
+    {
+        return Some(ProgramLog::Token2022(t));
     }
 
-    if address_lookup_table::STR_ID == program {
-        if let Some(x) = address_lookup_table::AddressLookupTableLog::parse(payload, st) {
-            return Some(ProgramLog::AddressLookupTable(x));
-        }
+    if address_lookup_table::STR_ID == program
+        && let Some(x) = address_lookup_table::AddressLookupTableLog::parse(payload, st)
+    {
+        return Some(ProgramLog::AddressLookupTable(x));
     }
 
-    if loader_v3::STR_ID == program {
-        if let Some(x) = loader_v3::LoaderV3Log::parse(payload, st) {
-            return Some(ProgramLog::LoaderV3(x));
-        }
+    if loader_v3::STR_ID == program
+        && let Some(x) = loader_v3::LoaderV3Log::parse(payload, st)
+    {
+        return Some(ProgramLog::LoaderV3(x));
     }
 
-    if loader_v4::STR_ID == program {
-        if let Some(x) = loader_v4::LoaderV4Log::parse(payload, st) {
-            return Some(ProgramLog::LoaderV4(x));
-        }
+    if loader_v4::STR_ID == program
+        && let Some(x) = loader_v4::LoaderV4Log::parse(payload, st)
+    {
+        return Some(ProgramLog::LoaderV4(x));
     }
 
-    if memo::STR_ID == program {
-        if let Some(x) = memo::MemoLog::parse(payload, st) {
-            return Some(ProgramLog::Memo(x));
-        }
+    if memo::STR_ID == program
+        && let Some(x) = memo::MemoLog::parse(payload, st)
+    {
+        return Some(ProgramLog::Memo(x));
     }
 
-    if record::STR_ID == program {
-        if let Some(x) = record::RecordLog::parse(payload, st) {
-            return Some(ProgramLog::Record(x));
-        }
+    if record::STR_ID == program
+        && let Some(x) = record::RecordLog::parse(payload, st)
+    {
+        return Some(ProgramLog::Record(x));
     }
 
-    if transfer_hook::STR_ID == program {
-        if let Some(x) = transfer_hook::TransferHookLog::parse(payload, st) {
-            return Some(ProgramLog::TransferHook(x));
-        }
+    if transfer_hook::STR_ID == program
+        && let Some(x) = transfer_hook::TransferHookLog::parse(payload, st)
+    {
+        return Some(ProgramLog::TransferHook(x));
     }
 
-    if account_compression::STR_ID == program {
-        if let Some(x) = account_compression::AccountCompressionLog::parse(payload, st) {
-            return Some(ProgramLog::AccountCompression(x));
-        }
+    if account_compression::STR_ID == program
+        && let Some(x) = account_compression::AccountCompressionLog::parse(payload, st)
+    {
+        return Some(ProgramLog::AccountCompression(x));
     }
 
     None
