@@ -2,11 +2,18 @@
 name = "car-reader"
 edition = "2021"
 
+[[bin]]
+name = "reader"
+path = "src/bin/reader.rs"
+required-features = ["reader"]
+
+[features]
+default = []
+reader = ["dep:clap", "dep:tracing", "dep:tracing-subscriber"]
+
 [dependencies]
-tokio = { version = "1", features = ["io-util"] }
 bytes = "1"
 cid = "0.11"
-tracing = "0.1"
 ahash = "0.8.12"
 minicbor = { version = "2.1.3", features = ["full"] }
 wincode = { version = "0.2.5", features = ["derive", "solana-short-vec"] }
@@ -18,10 +25,11 @@ solana-hash = "4.0.1"
 solana-signature = "3.1.0"
 solana-transaction = "3.0.2"
 solana-message = "3.0.1"
-solana-transaction-status = "3.1.5"
-solana-transaction-context = "3.1.5"
 solana-transaction-error = "3.0.0"
-
+# reader dependencies
+clap = { version = "4", features = ["derive"] , optional = true}
+tracing = { version = "0.1" , optional = true}
+tracing-subscriber = { version = "0.3" , optional = true}
 
 [build-dependencies]
 prost-build = "0.14.1"

@@ -43,6 +43,7 @@ pub enum GroupError {
     TxDecode,
     IteratorStateBug,
     TxMetaDecode,
+    Io,
 }
 
 impl core::fmt::Display for GroupError {
@@ -54,6 +55,7 @@ impl core::fmt::Display for GroupError {
             GroupError::TxDecode => write!(f, "transaction decode error"),
             GroupError::IteratorStateBug => write!(f, "iterator state bug"),
             GroupError::TxMetaDecode => write!(f, "transaction metadata decode error"),
+            GroupError::Io => write!(f, "io error"),
         }
     }
 }

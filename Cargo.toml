@@ -2,14 +2,15 @@
 resolver = "2"
 members = [
     "crates/car-reader",
-    #"crates/compact-archive",
-    #"crates/optimize-car-archive",
+    "crates/blockzilla-format",
+    "crates/optimize-car-archive",
     "blockzilla",
 ]
+exclude = ["solana-prog/"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 repository = "https://github.com/ferno-ag/blockzilla"
 
@@ -22,3 +23,7 @@ strip = false
 debug = false
 incremental = false
 overflow-checks = false
+
+[profile.release-debug]
+inherits = "release"
+debug = true
