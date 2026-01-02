@@ -1,10 +1,4 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::error;
-
-use rustc_hash::FxHashMap;
-
-use crate::registry::Registry;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactTransaction {
@@ -35,8 +29,8 @@ pub struct CompactInstruction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactLegacyMessage {
     pub header: CompactMessageHeader,
-    pub account_keys: Vec<u32>, // registry indices
-    pub recent_blockhash: i32,  // blockhash registry id
+    pub account_keys: Vec<u32>,                   // registry indices
+    pub recent_blockhash: CompactRecentBlockhash, // blockhash registry id
     pub instructions: Vec<CompactInstruction>,
 }
 
@@ -50,7 +44,7 @@ pub struct CompactAddressTableLookup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CompactRecentBlockhash {
     /// Normal case: index into epoch blockhash registry.
-    Id(u32),
+    Id(i32),
     /// Durable nonce case: store the nonce value inline.
     Nonce([u8; 32]),
 }
@@ -64,147 +58,3 @@ pub struct CompactV0Message {
     pub address_table_lookups: Vec<CompactAddressTableLookup>,
 }
 
-#[cfg(feature = "solana")]
-pub fn to_compact_transaction(
-    vtx: &solana_transaction::versioned::VersionedTransaction,
-    registry: &Registry,
-    bh_index: &FxHashMap<[u8; 32], i32>,
-) -> Result<CompactTransaction> {
-    use solana_message::VersionedMessage;
-
-    let signatures = vtx.signatures.clone();
-
-    let message = match &vtx.message {
-        VersionedMessage::Legacy(m) => {
-            let header = CompactMessageHeader {
-                num_required_signatures: m.header.num_required_signatures,
-                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
-                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
-            };
-
-            let account_keys = m
-                .account_keys
-                .iter()
-                .map(|k| {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(k.as_ref());
-                    registry
-                        .lookup(&arr)
-                        .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))
-                })
-                .collect::<Result<Vec<u32>>>()?;
-
-            let recent_blockhash: [u8; 32] = m
-                .recent_blockhash
-                .as_ref()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
-
-            let recent_blockhash = match bh_index.get(&recent_blockhash).copied() {
-                Some(id) => id,
-                None => {
-                    use solana_pubkey::Pubkey;
-
-                    error!(
-                        "recent_blockhash missing from blockhash registry: {}",
-                        Pubkey::new_from_array(recent_blockhash)
-                    );
-                    return Err(anyhow::anyhow!(
-                        "recent_blockhash missing from blockhash registry"
-                    ));
-                }
-            };
-
-            let instructions = m
-                .instructions
-                .iter()
-                .map(|ix| CompactInstruction {
-                    program_id_index: ix.program_id_index,
-                    accounts: ix.accounts.clone(),
-                    data: ix.data.clone(),
-                })
-                .collect();
-
-            CompactMessage::Legacy(CompactLegacyMessage {
-                header,
-                account_keys,
-                recent_blockhash,
-                instructions,
-            })
-        }
-
-        VersionedMessage::V0(m) => {
-            let header = CompactMessageHeader {
-                num_required_signatures: m.header.num_required_signatures,
-                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
-                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
-            };
-
-            let account_keys = m
-                .account_keys
-                .iter()
-                .map(|k| {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(k.as_ref());
-                    registry
-                        .lookup(&arr)
-                        .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))
-                })
-                .collect::<Result<Vec<u32>>>()?;
-
-            let recent_blockhash: [u8; 32] = m
-                .recent_blockhash
-                .as_ref()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
-
-            let recent_blockhash = bh_index
-                .get(&recent_blockhash)
-                .copied()
-                .map(|id| CompactRecentBlockhash::Id(id as u32))
-                .ok_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash))
-                .map_err(|_| anyhow::anyhow!("recent_blockhash missing from blockhash registry or invalid nonce"))?;
-
-            let instructions = m
-                .instructions
-                .iter()
-                .map(|ix| CompactInstruction {
-                    program_id_index: ix.program_id_index,
-                    accounts: ix.accounts.clone(),
-                    data: ix.data.clone(),
-                })
-                .collect();
-
-            let address_table_lookups = m
-                .address_table_lookups
-                .iter()
-                .map(|l| {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(l.account_key.as_ref());
-                    let table_idx = registry
-                        .lookup(&arr)
-                        .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
-
-                    Ok(CompactAddressTableLookup {
-                        account_key: table_idx,
-                        writable_indexes: l.writable_indexes.clone(),
-                        readonly_indexes: l.readonly_indexes.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            CompactMessage::V0(CompactV0Message {
-                header,
-                account_keys,
-                recent_blockhash,
-                instructions,
-                address_table_lookups,
-            })
-        }
-    };
-
-    Ok(CompactTransaction {
-        signatures,
-        message,
-    })
-}

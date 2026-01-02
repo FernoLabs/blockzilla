@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use rustc_hash::FxHashMap;
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom},
-    path::{Path},
+    path::Path,
 };
 use tracing::{error, info, warn};
 use wincode::Deserialize;
@@ -13,17 +14,19 @@ use solana_transaction::versioned::VersionedTransaction;
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
-    metadata_decoder::{decode_transaction_status_meta_from_frame, ZstdReusableDecoder},
-    node::{decode_node, Node},
+    metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
+    node::{Node, decode_node},
     versioned_transaction::VersionedTransactionSchema,
 };
 
 use blockzilla_format::{
-    compact_meta_from_proto, load_registry, to_compact_transaction, BlockhashRegistry,
-    CompactBlockHeader, CompactBlockRecord, CompactTxWithMeta, PostcardFramedWriter, Registry,
+    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactBlockRecord,
+    CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader,
+    CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message,
+    PostcardFramedWriter, Registry, compact_meta_from_proto, load_registry,
 };
 
-use crate::{epoch_paths, hex_prefix, stream_car_blocks, Cli, ProgressTracker, BUFFER_SIZE};
+use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths, hex_prefix, stream_car_blocks};
 
 pub const PREV_TAIL_LEN: usize = 200;
 
@@ -109,14 +112,6 @@ fn load_prev_epoch_tail(path: &Path) -> Result<Vec<[u8; 32]>> {
     Ok(out)
 }
 
-/// Extract tx recent blockhash bytes from a VersionedTransaction.
-fn tx_recent_blockhash_bytes(vtx: &VersionedTransaction) -> [u8; 32] {
-    match &vtx.message {
-        VersionedMessage::Legacy(m) => m.recent_blockhash.to_bytes(),
-        VersionedMessage::V0(m) => m.recent_blockhash.to_bytes(),
-    }
-}
-
 pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     // epoch_paths: (car, dir, registry, blockhash_registry, compact)
     let (car_path, epoch_dir, registry_path, bh_registry_path, compact_path) =
@@ -195,8 +190,14 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let mut block_count: u32 = 0;
 
     stream_car_blocks(&car_path, |group| {
-        let (blocks_delta, txs_delta, slot) =
-            compact_process_block(group, &registry, &bh, &mut writer, &mut scratch, block_count)?;
+        let (blocks_delta, txs_delta, slot) = compact_process_block(
+            group,
+            &registry,
+            &bh,
+            &mut writer,
+            &mut scratch,
+            block_count,
+        )?;
 
         block_count = block_count.wrapping_add(1);
 
@@ -278,10 +279,138 @@ impl Drop for CompactTxDecodeScratch {
     }
 }
 
-/// Returns:
-/// - blocks_delta
-/// - txs_delta
-/// - slot
+pub fn to_compact_transaction(
+    vtx: &solana_transaction::versioned::VersionedTransaction,
+    registry: &Registry,
+    bh_index: &FxHashMap<[u8; 32], i32>,
+) -> Result<CompactTransaction> {
+    use solana_message::VersionedMessage;
+
+    let signatures = vtx.signatures.clone();
+
+    let message = match &vtx.message {
+        VersionedMessage::Legacy(m) => {
+            let header = CompactMessageHeader {
+                num_required_signatures: m.header.num_required_signatures,
+                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
+            };
+
+            let account_keys = m
+                .account_keys
+                .iter()
+                .map(|k| {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(k.as_ref());
+                    registry
+                        .lookup(&arr)
+                        .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))
+                })
+                .collect::<Result<Vec<u32>>>()?;
+
+            let recent_blockhash: [u8; 32] = m
+                .recent_blockhash
+                .as_ref()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+
+            let recent_blockhash = bh_index
+                .get(&recent_blockhash)
+                .copied()
+                .map(|id| CompactRecentBlockhash::Id(id))
+                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
+
+            let instructions = m
+                .instructions
+                .iter()
+                .map(|ix| CompactInstruction {
+                    program_id_index: ix.program_id_index,
+                    accounts: ix.accounts.clone(),
+                    data: ix.data.clone(),
+                })
+                .collect();
+
+            CompactMessage::Legacy(CompactLegacyMessage {
+                header,
+                account_keys,
+                recent_blockhash,
+                instructions,
+            })
+        }
+
+        VersionedMessage::V0(m) => {
+            let header = CompactMessageHeader {
+                num_required_signatures: m.header.num_required_signatures,
+                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
+            };
+
+            let account_keys = m
+                .account_keys
+                .iter()
+                .map(|k| {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(k.as_ref());
+                    registry
+                        .lookup(&arr)
+                        .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))
+                })
+                .collect::<Result<Vec<u32>>>()?;
+
+            let recent_blockhash: [u8; 32] = m
+                .recent_blockhash
+                .as_ref()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+
+            let recent_blockhash = bh_index
+                .get(&recent_blockhash)
+                .copied()
+                .map(|id| CompactRecentBlockhash::Id(id))
+                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
+
+            let instructions = m
+                .instructions
+                .iter()
+                .map(|ix| CompactInstruction {
+                    program_id_index: ix.program_id_index,
+                    accounts: ix.accounts.clone(),
+                    data: ix.data.clone(),
+                })
+                .collect();
+
+            let address_table_lookups = m
+                .address_table_lookups
+                .iter()
+                .map(|l| {
+                    let table_idx = registry
+                        .lookup(l.account_key.as_array())
+                        .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
+
+                    Ok(CompactAddressTableLookup {
+                        account_key: table_idx,
+                        writable_indexes: l.writable_indexes.clone(),
+                        readonly_indexes: l.readonly_indexes.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            CompactMessage::V0(CompactV0Message {
+                header,
+                account_keys,
+                recent_blockhash,
+                instructions,
+                address_table_lookups,
+            })
+        }
+    };
+
+    Ok(CompactTransaction {
+        signatures,
+        message,
+    })
+}
+
 fn compact_process_block<W: std::io::Write>(
     group: &CarBlockGroup,
     registry: &Registry,
@@ -300,7 +429,6 @@ fn compact_process_block<W: std::io::Write>(
 
     let block_slot = block.slot;
 
-    // CompactBlockHeader: keep your implicit id convention.
     let this_blockhash_id = block_i;
     let previous_blockhash_id = block_i.saturating_sub(1);
 
@@ -313,6 +441,7 @@ fn compact_process_block<W: std::io::Write>(
         block_height: block.meta.block_height,
     };
 
+    // todo reuse same vector
     let mut txs_out: Vec<CompactTxWithMeta> = Vec::with_capacity(4096);
 
     let mut entry_iter = block
@@ -354,7 +483,6 @@ fn compact_process_block<W: std::io::Write>(
                 );
             })?;
 
-            // Uses BlockhashRegistry inside, so it checks current epoch hashes and prev tail.
             let compact_tx = to_compact_transaction(vtx, registry, &bh.index).map_err(|conv_err| {
                 error!(
                     "FAIL to_compact_transaction: block_slot={} tx_slot={} tx_index_in_block={} kind={} sigs={} tx_len={} tx_prefix={} cid_digest_prefix={}",
@@ -370,17 +498,6 @@ fn compact_process_block<W: std::io::Write>(
                 error!("to_compact_transaction error: {:?}", conv_err);
                 GroupError::TxDecode
             })?;
-
-            // Optional extra visibility: warn when recent blockhash is missing in both current + tail.
-            let recent_bh = tx_recent_blockhash_bytes(vtx);
-            if bh.lookup(&recent_bh).is_none() {
-                warn!(
-                    "recent_blockhash missing from blockhash registry (current + prev tail): block_slot={} tx_slot={} tx_index_in_block={}",
-                    block_slot,
-                    tx.slot,
-                    tx_index_in_block
-                );
-            }
 
             let metadata_opt = if tx.metadata.data.is_empty() {
                 None
@@ -417,7 +534,10 @@ fn compact_process_block<W: std::io::Write>(
         }
     }
 
-    let rec = CompactBlockRecord { header, txs: txs_out };
+    let rec = CompactBlockRecord {
+        header,
+        txs: txs_out,
+    };
     writer.write(&rec).map_err(|_| GroupError::Io)?;
 
     Ok((1, txs, Some(block_slot)))
