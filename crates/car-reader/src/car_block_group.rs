@@ -8,7 +8,8 @@ use crate::{
     confirmed_block::TransactionStatusMeta,
     error::GroupError,
     metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
-    node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node}, versioned_transaction::VersionedTransaction,
+    node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node},
+    versioned_transaction::VersionedTransaction,
 };
 
 const DEFAULT_CAPACITY: usize = 8192;
@@ -83,7 +84,7 @@ pub struct TxIter<'a> {
     entry_iter: CborArrayIter<'a, CborCidRef<'a>>,
     tx_iter: Option<CborArrayIter<'a, CborCidRef<'a>>>,
 
-    reusable_tx: MaybeUninit<VersionedTransaction>,
+    reusable_tx: MaybeUninit<VersionedTransaction<'a>>,
     reusable_meta: Option<TransactionStatusMeta>,
     zstd: ZstdReusableDecoder,
     has_tx: bool,
@@ -205,23 +206,19 @@ impl<'a> TxIter<'a> {
             None
         }
     }
-}
 
-impl<'a> Iterator for TxIter<'a> {
-    // Reference is valid until next() is called again (reused buffer).
-    type Item = Result<(&'a VersionedTransaction, Option<&'a TransactionStatusMeta>), GroupError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.decode_next_tx_in_place() {
-            Ok(false) => None,
-            Ok(true) => {
+    #[inline]
+    pub fn next_tx(
+        &mut self,
+    ) -> Result<Option<(&VersionedTransaction<'a>, Option<&TransactionStatusMeta>)>, GroupError>
+    {
+        match self.decode_next_tx_in_place()? {
+            false => Ok(None),
+            true => {
                 let tx = unsafe { self.reusable_tx.assume_init_ref() };
-                let tx_ptr: *const VersionedTransaction = tx;
-                let meta_ptr: Option<*const TransactionStatusMeta> =
-                    self.reusable_meta.as_ref().map(|m| m as *const _);
-                Some(Ok(unsafe { (&*tx_ptr, meta_ptr.map(|p| &*p)) }))
+                let meta = self.reusable_meta.as_ref();
+                Ok(Some((tx, meta)))
             }
-            Err(e) => Some(Err(e)),
         }
     }
 }

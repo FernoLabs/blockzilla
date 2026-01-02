@@ -74,14 +74,14 @@ impl Stats {
 
         // optional tx decode
         if decode_tx {
-            let it = group.transactions().map_err(|e| {
+            let mut it = group.transactions().map_err(|e| {
                 CarError::InvalidData(format!("transaction iteration failed: {e:?}"))
             })?;
 
-            for r in it {
-                let (_tx, maybe_meta) = r.map_err(|e| {
-                    CarError::InvalidData(format!("transaction decode failed: {e:?}"))
-                })?;
+            while let Some((tx, maybe_meta)) = it
+                .next_tx()
+                .map_err(|e| CarError::InvalidData(format!("transaction decode failed: {e:?}")))?
+            {
                 self.txs += 1;
                 if maybe_meta.is_some() {
                     self.txs_with_meta += 1;

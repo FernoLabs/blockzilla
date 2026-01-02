@@ -29,18 +29,18 @@ pub struct CompiledInstruction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, SchemaRead)]
-pub struct LegacyMessage {
+pub struct LegacyMessage<'a> {
     pub header: MessageHeader,
-    #[wincode(with = "containers::Vec<[u8; 32], ShortU16Len>")]
-    pub account_keys: Vec<[u8; 32]>,
-    pub recent_blockhash: [u8; 32],
+    #[wincode(with = "containers::Vec<&'a [u8; 32], ShortU16Len>")]
+    pub account_keys: Vec<&'a [u8; 32]>,
+    pub recent_blockhash: &'a [u8; 32],
     #[wincode(with = "containers::Vec<CompiledInstruction, ShortU16Len>")]
     pub instructions: Vec<CompiledInstruction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, SchemaRead)]
-pub struct MessageAddressTableLookup {
-    pub account_key: [u8; 32],
+pub struct MessageAddressTableLookup<'a> {
+    pub account_key: &'a [u8; 32],
     #[wincode(with = "containers::Vec<u8, ShortU16Len>")]
     pub writable_indexes: Vec<u8>,
     #[wincode(with = "containers::Vec<u8, ShortU16Len>")]
@@ -48,32 +48,32 @@ pub struct MessageAddressTableLookup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, SchemaRead)]
-pub struct V0Message {
+pub struct V0Message<'a> {
     pub header: MessageHeader,
-    #[wincode(with = "containers::Vec<[u8; 32], ShortU16Len>")]
-    pub account_keys: Vec<[u8; 32]>,
-    pub recent_blockhash: [u8; 32],
+    #[wincode(with = "containers::Vec<&'a [u8; 32], ShortU16Len>")]
+    pub account_keys: Vec<&'a [u8; 32]>,
+    pub recent_blockhash: &'a [u8; 32],
     #[wincode(with = "containers::Vec<CompiledInstruction, ShortU16Len>")]
     pub instructions: Vec<CompiledInstruction>,
-    #[wincode(with = "containers::Vec<MessageAddressTableLookup, ShortU16Len>")]
-    pub address_table_lookups: Vec<MessageAddressTableLookup>,
+    #[wincode(with = "containers::Vec<MessageAddressTableLookup<'a>, ShortU16Len>")]
+    pub address_table_lookups: Vec<MessageAddressTableLookup<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum VersionedMessage {
-    Legacy(LegacyMessage),
-    V0(V0Message),
+pub enum VersionedMessage<'a> {
+    Legacy(LegacyMessage<'a>),
+    V0(V0Message<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SchemaRead)]
-pub struct VersionedTransaction {
-    #[wincode(with = "containers::Vec<[u8; 64], ShortU16Len>")]
-    pub signatures: Vec<[u8; 64]>,
-    pub message: VersionedMessage,
+pub struct VersionedTransaction<'a> {
+    #[wincode(with = "containers::Vec<&'a [u8; 64], ShortU16Len>")]
+    pub signatures: Vec<&'a [u8; 64]>,
+    pub message: VersionedMessage<'a>,
 }
 
-impl<'de> SchemaRead<'de> for VersionedMessage {
-    type Dst = VersionedMessage;
+impl<'de> SchemaRead<'de> for VersionedMessage<'de> {
+    type Dst = VersionedMessage<'de>;
 
     #[inline(always)]
     fn read(reader: &mut impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
@@ -100,8 +100,9 @@ impl<'de> SchemaRead<'de> for VersionedMessage {
             num_readonly_unsigned_accounts,
         };
 
-        let account_keys = containers::Vec::<[u8; 32], ShortU16Len>::get(reader)?;
-        let recent_blockhash = <[u8; 32]>::get(reader)?;
+        // Zero-copy pubkeys + blockhash
+        let account_keys = containers::Vec::<&'de [u8; 32], ShortU16Len>::get(reader)?;
+        let recent_blockhash = <&'de [u8; 32]>::get(reader)?;
         let instructions = containers::Vec::<CompiledInstruction, ShortU16Len>::get(reader)?;
 
         dst.write(VersionedMessage::Legacy(LegacyMessage {

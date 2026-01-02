@@ -26,16 +26,6 @@ pub(crate) fn file_nonempty(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn hex_prefix(data: &[u8], n: usize) -> String {
-    let n = n.min(data.len());
-    let mut s = String::with_capacity(n * 2);
-    for b in &data[..n] {
-        use core::fmt::Write;
-        let _ = write!(s, "{:02x}", b);
-    }
-    s
-}
-
 // ----- CLI -----
 
 #[derive(Parser)]

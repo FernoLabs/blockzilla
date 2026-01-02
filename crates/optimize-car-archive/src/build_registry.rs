@@ -1,25 +1,21 @@
 use anyhow::{Context, Result};
 use car_reader::versioned_transaction::VersionedMessage;
-use car_reader::versioned_transaction::VersionedTransaction;
 use rustc_hash::FxBuildHasher;
 use solana_pubkey::Pubkey;
 use std::{str::FromStr, time::Instant};
-use tracing::error;
 use tracing::info;
-use wincode::Deserialize;
 
 use rustc_hash::FxHashMap;
 
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
-    metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
     node::{Node, decode_node},
 };
 
 use blockzilla_format::write_registry;
 
-use crate::{Cli, ProgressTracker, epoch_paths, hex_prefix, stream_car_blocks};
+use crate::{Cli, ProgressTracker, epoch_paths, stream_car_blocks};
 
 pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let (car_path, epoch_dir, registry_path, _, _) = epoch_paths(cli, epoch);
@@ -83,153 +79,72 @@ impl PubkeyCounter {
         *self.counts.entry(*k32).or_insert(0) += 1;
     }
 }
-
 fn registry_process_block(
     group: &CarBlockGroup,
     counter: &mut PubkeyCounter,
 ) -> Result<(u64, u64, Option<u64>), GroupError> {
-    let mut tx_scratch = RegistryTxDecodeScratch::new();
-    let mut txs = 0u64;
-
+    // Keep this if you need the slot for progress reporting.
     let block = match decode_node(group.block_payload.as_ref()).map_err(GroupError::Node)? {
         Node::Block(b) => b,
         _ => return Err(GroupError::WrongRootKind),
     };
-
     let block_slot = block.slot;
 
-    let mut entry_iter = block
-        .entries
-        .iter_stateful()
-        .map_err(|e| GroupError::Node(car_reader::node::NodeDecodeError::from(e)))?;
+    let mut it = group.transactions().unwrap();
 
-    while let Some(entry_cid) = entry_iter.next_item() {
-        let entry_cid = entry_cid.map_err(|e| GroupError::Node(e.into()))?;
-        let Node::Entry(entry) = group.decode_by_hash(entry_cid.hash_bytes())? else {
-            continue;
-        };
+    let mut txs = 0u64;
 
-        let mut tx_iter = entry
-            .transactions
-            .iter_stateful()
-            .map_err(|e| GroupError::Node(e.into()))?;
+    while let Some(r) = it.next_tx().unwrap() {
+        let (vtx, maybe_meta) = r;
+        txs += 1;
 
-        while let Some(tx_cid) = tx_iter.next_item() {
-            let tx_cid = tx_cid.map_err(|e| GroupError::Node(e.into()))?;
-            let Node::Transaction(tx) = group.decode_by_hash(tx_cid.hash_bytes())? else {
-                continue;
-            };
-
-            txs += 1;
-
-            let vtx = tx_scratch.decode_tx(tx.data.data)?;
-
-            match &vtx.message {
-                VersionedMessage::Legacy(m) => {
-                    for k in &m.account_keys {
-                        counter.add32(k);
-                    }
-                }
-                VersionedMessage::V0(m) => {
-                    for k in &m.account_keys {
-                        counter.add32(k);
-                    }
-                    for l in &m.address_table_lookups {
-                        counter.add32(&l.account_key);
-                    }
+        match &vtx.message {
+            VersionedMessage::Legacy(m) => {
+                for k in &m.account_keys {
+                    counter.add32(k);
                 }
             }
-
-            if !tx.metadata.data.is_empty() {
-                let meta = tx_scratch.decode_meta(tx.slot, tx.metadata.data)?;
-
-                for pk in &meta.loaded_writable_addresses {
-                    counter.add32(pk.as_slice().try_into().unwrap());
+            VersionedMessage::V0(m) => {
+                for k in &m.account_keys {
+                    counter.add32(k);
                 }
-                for pk in &meta.loaded_readonly_addresses {
-                    counter.add32(pk.as_slice().try_into().unwrap());
+                for l in &m.address_table_lookups {
+                    counter.add32(l.account_key);
                 }
+            }
+        }
 
-                for tb in meta
-                    .pre_token_balances
-                    .iter()
-                    .chain(meta.post_token_balances.iter())
-                {
-                    if let Ok(pk) = Pubkey::from_str(&tb.mint) {
+        if let Some(meta) = maybe_meta {
+            // loaded addresses
+            for pk in &meta.loaded_writable_addresses {
+                let key = pk.as_slice().try_into().unwrap();
+                counter.add32(key);
+            }
+            for pk in &meta.loaded_readonly_addresses {
+                let key = pk.as_slice().try_into().unwrap();
+                counter.add32(key);
+            }
+
+            // token balances (string fields)
+            for tb in meta
+                .pre_token_balances
+                .iter()
+                .chain(meta.post_token_balances.iter())
+            {
+                if let Ok(pk) = Pubkey::from_str(&tb.mint) {
+                    counter.add32(pk.as_array());
+                }
+                if !tb.owner.is_empty()
+                    && let Ok(pk) = Pubkey::from_str(&tb.owner) {
                         counter.add32(pk.as_array());
                     }
-                    if !tb.owner.is_empty()
-                        && let Ok(pk) = Pubkey::from_str(&tb.owner)
-                    {
+                if !tb.program_id.is_empty()
+                    && let Ok(pk) = Pubkey::from_str(&tb.program_id) {
                         counter.add32(pk.as_array());
                     }
-                    if !tb.program_id.is_empty()
-                        && let Ok(pk) = Pubkey::from_str(&tb.program_id)
-                    {
-                        counter.add32(pk.as_array());
-                    }
-                }
             }
         }
     }
 
     Ok((1, txs, Some(block_slot)))
-}
-
-struct RegistryTxDecodeScratch {
-    reusable_tx: std::mem::MaybeUninit<VersionedTransaction>,
-    has_tx: bool,
-    meta_out: car_reader::confirmed_block::TransactionStatusMeta,
-    zstd: ZstdReusableDecoder,
-}
-
-impl RegistryTxDecodeScratch {
-    fn new() -> Self {
-        Self {
-            reusable_tx: std::mem::MaybeUninit::uninit(),
-            has_tx: false,
-            meta_out: car_reader::confirmed_block::TransactionStatusMeta::default(),
-            zstd: ZstdReusableDecoder::new(256 * 1024),
-        }
-    }
-
-    #[inline(always)]
-    fn decode_tx(&mut self, bytes: &[u8]) -> Result<&VersionedTransaction, GroupError> {
-        if self.has_tx {
-            unsafe { self.reusable_tx.assume_init_drop() };
-            self.has_tx = false;
-        }
-
-        if let Err(e) = VersionedTransaction::deserialize_into(bytes, &mut self.reusable_tx) {
-            error!(
-                "TX_DECODE (registry) failed: len={} prefix={}",
-                bytes.len(),
-                hex_prefix(bytes, 32)
-            );
-            error!("TX_DECODE (registry) error: {:?}", e);
-            return Err(GroupError::TxDecode);
-        }
-
-        self.has_tx = true;
-        Ok(unsafe { self.reusable_tx.assume_init_ref() })
-    }
-
-    #[inline(always)]
-    fn decode_meta(
-        &mut self,
-        slot: u64,
-        frame: &[u8],
-    ) -> Result<&car_reader::confirmed_block::TransactionStatusMeta, GroupError> {
-        decode_transaction_status_meta_from_frame(slot, frame, &mut self.meta_out, &mut self.zstd)
-            .map_err(|_| GroupError::TxMetaDecode)?;
-        Ok(&self.meta_out)
-    }
-}
-
-impl Drop for RegistryTxDecodeScratch {
-    fn drop(&mut self) {
-        if self.has_tx {
-            unsafe { self.reusable_tx.assume_init_drop() };
-        }
-    }
 }
