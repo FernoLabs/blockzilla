@@ -1,5 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use tracing::error;
+
+use ahash::AHashMap;
 
 use crate::registry::Registry;
 
@@ -33,7 +36,7 @@ pub struct CompactInstruction {
 pub struct CompactLegacyMessage {
     pub header: CompactMessageHeader,
     pub account_keys: Vec<u32>, // registry indices
-    pub recent_blockhash: [u8; 32],
+    pub recent_blockhash: i32,  // blockhash registry id
     pub instructions: Vec<CompactInstruction>,
 }
 
@@ -48,7 +51,7 @@ pub struct CompactAddressTableLookup {
 pub struct CompactV0Message {
     pub header: CompactMessageHeader,
     pub account_keys: Vec<u32>, // registry indices of static keys
-    pub recent_blockhash: [u8; 32],
+    pub recent_blockhash: i32,  // blockhash registry id
     pub instructions: Vec<CompactInstruction>,
     pub address_table_lookups: Vec<CompactAddressTableLookup>,
 }
@@ -57,6 +60,7 @@ pub struct CompactV0Message {
 pub fn to_compact_transaction(
     vtx: &solana_transaction::versioned::VersionedTransaction,
     registry: &Registry,
+    bh_index: &AHashMap<[u8; 32], i32>,
 ) -> Result<CompactTransaction> {
     use solana_message::VersionedMessage;
 
@@ -87,6 +91,21 @@ pub fn to_compact_transaction(
                 .as_ref()
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+
+            let recent_blockhash = match bh_index.get(&recent_blockhash).copied() {
+                Some(id) => id,
+                None => {
+                    use solana_pubkey::Pubkey;
+
+                    error!(
+                        "recent_blockhash missing from blockhash registry: {}",
+                        Pubkey::new_from_array(recent_blockhash)
+                    );
+                    return Err(anyhow::anyhow!(
+                        "recent_blockhash missing from blockhash registry"
+                    ));
+                }
+            };
 
             let instructions = m
                 .instructions
@@ -130,6 +149,10 @@ pub fn to_compact_transaction(
                 .as_ref()
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+
+            let recent_blockhash = bh_index.get(&recent_blockhash).copied().ok_or_else(|| {
+                anyhow::anyhow!("recent_blockhash missing from blockhash registry")
+            })?;
 
             let instructions = m
                 .instructions
