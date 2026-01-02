@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use car_reader::versioned_transaction::VersionedMessage;
+use car_reader::versioned_transaction::VersionedTransaction;
 use rustc_hash::FxBuildHasher;
 use solana_pubkey::Pubkey;
 use std::{str::FromStr, time::Instant};
@@ -8,15 +10,11 @@ use wincode::Deserialize;
 
 use rustc_hash::FxHashMap;
 
-use solana_message::VersionedMessage;
-use solana_transaction::versioned::VersionedTransaction;
-
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
     metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
     node::{Node, decode_node},
-    versioned_transaction::VersionedTransactionSchema,
 };
 
 use blockzilla_format::write_registry;
@@ -129,15 +127,15 @@ fn registry_process_block(
             match &vtx.message {
                 VersionedMessage::Legacy(m) => {
                     for k in &m.account_keys {
-                        counter.add32(k.as_array());
+                        counter.add32(k);
                     }
                 }
                 VersionedMessage::V0(m) => {
                     for k in &m.account_keys {
-                        counter.add32(k.as_array());
+                        counter.add32(k);
                     }
                     for l in &m.address_table_lookups {
-                        counter.add32(l.account_key.as_array());
+                        counter.add32(&l.account_key);
                     }
                 }
             }
@@ -202,7 +200,7 @@ impl RegistryTxDecodeScratch {
             self.has_tx = false;
         }
 
-        if let Err(e) = VersionedTransactionSchema::deserialize_into(bytes, &mut self.reusable_tx) {
+        if let Err(e) = VersionedTransaction::deserialize_into(bytes, &mut self.reusable_tx) {
             error!(
                 "TX_DECODE (registry) failed: len={} prefix={}",
                 bytes.len(),
