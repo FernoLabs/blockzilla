@@ -1,11 +1,10 @@
 use std::str::FromStr;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 
+use crate::program_logs::{self, system_program, ProgramLog};
 use crate::Registry;
-use crate::program_logs::{self, ProgramLog, system_program};
 
 pub type StrId = u32;
 pub type ProgramId = u32;
@@ -41,90 +40,50 @@ pub enum LogEvent {
     ProgramLog(ProgramLog),
 
     /// `Program log: Error: <msg>`
-    ProgramLogError {
-        msg: StrId,
-    },
+    ProgramLogError { msg: StrId },
 
     /// `Program <id> log: <msg>`
-    ProgramIdLog {
-        program: ProgramId,
-        log: ProgramLog,
-    },
+    ProgramIdLog { program: ProgramId, log: ProgramLog },
 
-    Invoke {
-        program: ProgramId,
-        depth: u8,
-    },
-    Consumed {
-        program: ProgramId,
-        used: u32,
-        limit: u32,
-    },
-    Success {
-        program: ProgramId,
-    },
+    Invoke { program: ProgramId, depth: u8 },
+    Consumed { program: ProgramId, used: u32, limit: u32 },
+    Success { program: ProgramId },
 
     /// `Program <pk> failed: <reason>`
-    Failure {
-        program: ProgramId,
-        reason: StrId,
-    },
+    Failure { program: ProgramId, reason: StrId },
 
     /// `Program <pk> failed: custom program error: 0xNN`
-    FailureCustomProgramError {
-        program: ProgramId,
-        code: u32,
-    },
+    FailureCustomProgramError { program: ProgramId, code: u32 },
 
     /// `Program <pk> failed: invalid account data for instruction`
-    FailureInvalidAccountData {
-        program: ProgramId,
-    },
+    FailureInvalidAccountData { program: ProgramId },
 
     /// `Program <pk> failed: invalid program argument`
-    FailureInvalidProgramArgument {
-        program: ProgramId,
-    },
+    FailureInvalidProgramArgument { program: ProgramId },
 
-    FailedToComplete {
-        reason: StrId,
-    },
+    FailedToComplete { reason: StrId },
 
     /// Standalone: `custom program error: 0xNN`
-    CustomProgramError {
-        code: u32,
-    },
+    CustomProgramError { code: u32 },
 
-    Return {
-        program: ProgramId,
-        data: Vec<u8>,
-    },
+    /// `Program return: <pk> <b64>`
+    /// We keep the base64 payload as a string in the string table (no decoding).
+    Return { program: ProgramId, data_b64: StrId },
 
-    Data {
-        data: Vec<u8>,
-    },
+    /// `Program data: <b64>`
+    /// We keep the base64 payload as a string in the string table (no decoding).
+    Data { data_b64: StrId },
 
-    Consumption {
-        units: u32,
-    },
+    Consumption { units: u32 },
+    CbRequestUnits { units: u32 },
 
-    CbRequestUnits {
-        units: u32,
-    },
-
-    ProgramNotDeployed {
-        program: Option<ProgramId>,
-    },
+    ProgramNotDeployed { program: Option<ProgramId> },
 
     /// Runtime says this program is unknown. Keep as string (may not exist in registry).
-    UnknownProgram {
-        program: StrId,
-    },
+    UnknownProgram { program: StrId },
 
     /// Runtime says this account is unknown. Keep as string (will often not exist in registry).
-    UnknownAccount {
-        account: StrId,
-    },
+    UnknownAccount { account: StrId },
 
     /// Hardcoded runtime verifiers (remove stringly Syscall)
     VerifyEd25519,
@@ -133,13 +92,8 @@ pub enum LogEvent {
     /// Runtime context teardown
     CloseContextState,
 
-    Plain {
-        text: StrId,
-    },
-
-    Unparsed {
-        text: StrId,
-    },
+    Plain { text: StrId },
+    Unparsed { text: StrId },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -333,7 +287,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
                 continue;
             }
 
-            // NEW: Program log: Error: <msg>
+            // Program log: Error: <msg>
             if let Some(msg) = parse_program_log_error_payload(text) {
                 events.push(LogEvent::ProgramLogError { msg: st.push(msg) });
                 continue;
@@ -362,7 +316,6 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
 
             // Optional: Program <pk> log: Error: <msg>
             if let Some(msg) = parse_program_log_error_payload(text) {
-                // Attribute as generic program log error (still useful)
                 events.push(LogEvent::ProgramLogError { msg: st.push(msg) });
                 continue;
             }
@@ -376,36 +329,23 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
         if let Some(rest) = line.strip_prefix("Program ") {
             // Program data: <b64>
             if let Some(b64) = rest.strip_prefix("data: ") {
-                match B64.decode(b64.trim()) {
-                    Ok(data) => {
-                        events.push(LogEvent::Data { data });
-                        continue;
-                    }
-                    Err(_) => {
-                        events.push(LogEvent::Unparsed {
-                            text: st.push(line),
-                        });
-                        continue;
-                    }
-                }
+                // No validation, keep raw base64 string in string table
+                events.push(LogEvent::Data {
+                    data_b64: st.push(b64.trim()),
+                });
+                continue;
             }
 
             // Program return: <pk> <b64>
             if let Some(tail) = rest.strip_prefix("return: ") {
                 if let Some((pk_txt, b64_txt)) = tail.trim().split_once(' ') {
                     let program = lookup_pid_or_panic(registry, pk_txt.trim(), line_no, line);
-                    match B64.decode(b64_txt.trim()) {
-                        Ok(data) => {
-                            events.push(LogEvent::Return { program, data });
-                            continue;
-                        }
-                        Err(_) => {
-                            events.push(LogEvent::Unparsed {
-                                text: st.push(line),
-                            });
-                            continue;
-                        }
-                    }
+                    // No validation, keep raw base64 string in string table
+                    events.push(LogEvent::Return {
+                        program,
+                        data_b64: st.push(b64_txt.trim()),
+                    });
+                    continue;
                 }
                 events.push(LogEvent::Unparsed {
                     text: st.push(line),
@@ -466,7 +406,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
                     continue;
                 }
 
-                // failed: <reason> (with classification)
+                // failed: <reason>
                 if let Some(reason) = after_pk.strip_prefix("failed: ") {
                     match classify_failed_reason(reason) {
                         FailedReasonClass::Custom(code) => {
@@ -602,12 +542,18 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
             LogEvent::CustomProgramError { code } => {
                 out.push(format!("custom program error: 0x{:x}", code))
             }
-            LogEvent::Return { program, data } => out.push(format!(
+
+            LogEvent::Return { program, data_b64 } => out.push(format!(
                 "Program return: {} {}",
                 pid_to_pubkey(registry, *program),
-                B64.encode(data)
+                st.resolve(*data_b64),
             )),
-            LogEvent::Data { data } => out.push(format!("Program data: {}", B64.encode(data))),
+
+            LogEvent::Data { data_b64 } => out.push(format!(
+                "Program data: {}",
+                st.resolve(*data_b64),
+            )),
+
             LogEvent::Consumption { units } => {
                 out.push(format!("Program consumption: {} units remaining", units))
             }

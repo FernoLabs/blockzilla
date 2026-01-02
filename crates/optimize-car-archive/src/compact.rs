@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::{Path},
 };
 use tracing::{error, info, warn};
 use wincode::Deserialize;

@@ -1,6 +1,4 @@
 use anyhow::{Context, Result};
-use ahash::AHashMap;
-use solana_message::Hash;
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -44,21 +42,6 @@ impl BlockhashRegistryWriter {
     }
 }
 
-/// Inserts hash into registry if missing, returning its id.
-#[inline(always)]
-fn get_or_insert_hash(
-    map: &mut AHashMap<[u8; 32], u32>,
-    w: &mut BlockhashRegistryWriter,
-    h: [u8; 32],
-) -> Result<u32> {
-    if let Some(&id) = map.get(&h) {
-        return Ok(id);
-    }
-    let id = w.push_raw(&h)?;
-    map.insert(h, id);
-    Ok(id)
-}
-
 fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
     let (car_path, epoch_dir, _registry_path, bh_path, _compact_path) = epoch_paths(cli, epoch);
 
@@ -76,9 +59,6 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
     // Atomic write: tmp then rename
     let tmp_path = bh_path.with_extension("bin.tmp");
     let mut w = BlockhashRegistryWriter::create(&tmp_path)?;
-
-    // hash -> id (dedup within this epoch file)
-    let mut ids: AHashMap<[u8; 32], u32> = AHashMap::with_capacity(4_000_000);
 
     let mut progress = ProgressTracker::new("Blockhash Registry");
 
@@ -117,7 +97,7 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
         }
 
         if let Some(bh) = last_entry_hash {
-            let id = get_or_insert_hash(&mut ids, &mut w, bh).map_err(|_| GroupError::Io)?;
+            w.push_raw(&bh).map_err(|_| GroupError::Io)?;
         } else {
             warn!("no entry hash found for slot={}", slot);
         }
