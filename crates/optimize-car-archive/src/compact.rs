@@ -20,7 +20,10 @@ use car_reader::{
 };
 
 use blockzilla_format::{
-    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactBlockRecord, CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader, CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message, PostcardFramedWriter, Registry, Signature, compact_meta_from_proto, load_registry
+    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactBlockRecord,
+    CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader,
+    CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message,
+    PostcardFramedWriter, Registry, Signature, compact_meta_from_proto, load_registry,
 };
 
 use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths, hex_prefix, stream_car_blocks};
@@ -407,11 +410,13 @@ pub fn to_compact_transaction(
                     .lookup(lookup.account_key.as_array())
                     .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
 
-                builder.address_table_lookups_buf.push(CompactAddressTableLookup {
-                    account_key: table_idx,
-                    writable_indexes: lookup.writable_indexes.clone(),
-                    readonly_indexes: lookup.readonly_indexes.clone(),
-                });
+                builder
+                    .address_table_lookups_buf
+                    .push(CompactAddressTableLookup {
+                        account_key: table_idx,
+                        writable_indexes: lookup.writable_indexes.clone(),
+                        readonly_indexes: lookup.readonly_indexes.clone(),
+                    });
             }
 
             CompactMessage::V0(CompactV0Message {
@@ -425,7 +430,11 @@ pub fn to_compact_transaction(
     };
 
     Ok(CompactTransaction {
-        signatures: vtx.signatures.iter().map(|s| Signature(*s.as_array())).collect(),
+        signatures: vtx
+            .signatures
+            .iter()
+            .map(|s| Signature(*s.as_array()))
+            .collect(),
         message,
     })
 }

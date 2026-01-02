@@ -27,9 +27,21 @@ pub enum ProgramLog {
     Record(record::RecordLog),
     TransferHook(transfer_hook::TransferHookLog),
     AccountCompression(account_compression::AccountCompressionLog),
-    AnchorInstruction { name: StrId },
-    AnchorErrorOccurred { code: StrId, number: u32, msg: StrId },
-    AnchorErrorThrown { file: StrId, line: u32, code: StrId, number: u32, msg: StrId },
+    AnchorInstruction {
+        name: StrId,
+    },
+    AnchorErrorOccurred {
+        code: StrId,
+        number: u32,
+        msg: StrId,
+    },
+    AnchorErrorThrown {
+        file: StrId,
+        line: u32,
+        code: StrId,
+        number: u32,
+        msg: StrId,
+    },
     Unknown(StrId),
 }
 
@@ -118,35 +130,67 @@ pub fn try_parse_program_log_with_table(
     registry: &Registry,
     st: &mut StringTable,
 ) -> Option<ProgramLog> {
-    try_parse!(program, token::STR_ID, 
-        token::TokenLog::parse(payload).map(ProgramLog::Token));
-    
-    try_parse!(program, token_2022::STR_ID,
-        token_2022::Token2022Log::parse(payload, registry, st).map(ProgramLog::Token2022));
-    
-    try_parse!(program, associated_token_account::STR_ID,
-        associated_token_account::TokenErrorLog::parse(payload).map(ProgramLog::Ata));
-    
-    try_parse!(program, address_lookup_table::STR_ID,
-        address_lookup_table::AddressLookupTableLog::parse(payload, st).map(ProgramLog::AddressLookupTable));
-    
-    try_parse!(program, loader_v3::STR_ID,
-        loader_v3::LoaderV3Log::parse(payload, st).map(ProgramLog::LoaderV3));
-    
-    try_parse!(program, loader_v4::STR_ID,
-        loader_v4::LoaderV4Log::parse(payload, st).map(ProgramLog::LoaderV4));
-    
-    try_parse!(program, memo::STR_ID,
-        memo::MemoLog::parse(payload, st).map(ProgramLog::Memo));
-    
-    try_parse!(program, record::STR_ID,
-        record::RecordLog::parse(payload, st).map(ProgramLog::Record));
-    
-    try_parse!(program, transfer_hook::STR_ID,
-        transfer_hook::TransferHookLog::parse(payload, st).map(ProgramLog::TransferHook));
-    
-    try_parse!(program, account_compression::STR_ID,
-        account_compression::AccountCompressionLog::parse(payload, st).map(ProgramLog::AccountCompression));
+    try_parse!(
+        program,
+        token::STR_ID,
+        token::TokenLog::parse(payload).map(ProgramLog::Token)
+    );
+
+    try_parse!(
+        program,
+        token_2022::STR_ID,
+        token_2022::Token2022Log::parse(payload, registry, st).map(ProgramLog::Token2022)
+    );
+
+    try_parse!(
+        program,
+        associated_token_account::STR_ID,
+        associated_token_account::TokenErrorLog::parse(payload).map(ProgramLog::Ata)
+    );
+
+    try_parse!(
+        program,
+        address_lookup_table::STR_ID,
+        address_lookup_table::AddressLookupTableLog::parse(payload, st)
+            .map(ProgramLog::AddressLookupTable)
+    );
+
+    try_parse!(
+        program,
+        loader_v3::STR_ID,
+        loader_v3::LoaderV3Log::parse(payload, st).map(ProgramLog::LoaderV3)
+    );
+
+    try_parse!(
+        program,
+        loader_v4::STR_ID,
+        loader_v4::LoaderV4Log::parse(payload, st).map(ProgramLog::LoaderV4)
+    );
+
+    try_parse!(
+        program,
+        memo::STR_ID,
+        memo::MemoLog::parse(payload, st).map(ProgramLog::Memo)
+    );
+
+    try_parse!(
+        program,
+        record::STR_ID,
+        record::RecordLog::parse(payload, st).map(ProgramLog::Record)
+    );
+
+    try_parse!(
+        program,
+        transfer_hook::STR_ID,
+        transfer_hook::TransferHookLog::parse(payload, st).map(ProgramLog::TransferHook)
+    );
+
+    try_parse!(
+        program,
+        account_compression::STR_ID,
+        account_compression::AccountCompressionLog::parse(payload, st)
+            .map(ProgramLog::AccountCompression)
+    );
 
     None
 }
@@ -169,11 +213,23 @@ pub fn render_program_log(log: &ProgramLog, registry: &Registry, st: &StringTabl
         }
         ProgramLog::AnchorErrorOccurred { code, number, msg } => format!(
             "AnchorError occurred. Error Code: {}. Error Number: {}. Error Message: {}.",
-            st.resolve(*code), number, st.resolve(*msg)
+            st.resolve(*code),
+            number,
+            st.resolve(*msg)
         ),
-        ProgramLog::AnchorErrorThrown { file, line, code, number, msg } => format!(
+        ProgramLog::AnchorErrorThrown {
+            file,
+            line,
+            code,
+            number,
+            msg,
+        } => format!(
             "AnchorError thrown in {}:{}. Error Code: {}. Error Number: {}. Error Message: {}.",
-            st.resolve(*file), line, st.resolve(*code), number, st.resolve(*msg)
+            st.resolve(*file),
+            line,
+            st.resolve(*code),
+            number,
+            st.resolve(*msg)
         ),
         ProgramLog::Unknown(id) => st.resolve(*id).to_string(),
     }
@@ -185,7 +241,9 @@ fn parse_anchor_instruction(text: &str, st: &mut StringTable) -> Option<ProgramL
     if name.is_empty() {
         return None;
     }
-    Some(ProgramLog::AnchorInstruction { name: st.push(name) })
+    Some(ProgramLog::AnchorInstruction {
+        name: st.push(name),
+    })
 }
 
 fn parse_anchor_error(text: &str, st: &mut StringTable) -> Option<ProgramLog> {
@@ -195,17 +253,22 @@ fn parse_anchor_error(text: &str, st: &mut StringTable) -> Option<ProgramLog> {
         let colon = loc.rfind(':')?;
         let file = st.push(loc[..colon].trim());
         let line = loc[colon + 1..].trim().parse().ok()?;
-        
+
         return parse_error_fields(tail, st).map(|(code, number, msg)| {
-            ProgramLog::AnchorErrorThrown { file, line, code, number, msg }
+            ProgramLog::AnchorErrorThrown {
+                file,
+                line,
+                code,
+                number,
+                msg,
+            }
         });
     }
 
     // Try "occurred" variant without file location
     if let Some(rest) = text.strip_prefix("AnchorError occurred. Error Code: ") {
-        return parse_error_fields(rest, st).map(|(code, number, msg)| {
-            ProgramLog::AnchorErrorOccurred { code, number, msg }
-        });
+        return parse_error_fields(rest, st)
+            .map(|(code, number, msg)| ProgramLog::AnchorErrorOccurred { code, number, msg });
     }
 
     None
@@ -214,10 +277,10 @@ fn parse_anchor_error(text: &str, st: &mut StringTable) -> Option<ProgramLog> {
 fn parse_error_fields(text: &str, st: &mut StringTable) -> Option<(StrId, u32, StrId)> {
     let (code_str, tail) = text.split_once(". Error Number: ")?;
     let (num_str, msg_str) = tail.split_once(". Error Message: ")?;
-    
+
     let code = st.push(code_str.trim());
     let number = num_str.trim().parse().ok()?;
     let msg = st.push(msg_str.strip_suffix('.').unwrap_or(msg_str).trim());
-    
+
     Some((code, number, msg))
 }
