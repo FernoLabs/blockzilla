@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
-ahash = "0.8"
+rustc-hash = "2.1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc","use-std"] }
 wincode = "0.2.5"

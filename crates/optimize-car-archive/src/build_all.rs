@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path, time::Instant};
 use tracing::{error, info, warn};
 
-use crate::{epoch_paths, file_nonempty, Cli};
+use crate::{Cli, epoch_paths, file_nonempty};
 
 pub(crate) fn run(cli: &Cli) -> Result<()> {
     info!(

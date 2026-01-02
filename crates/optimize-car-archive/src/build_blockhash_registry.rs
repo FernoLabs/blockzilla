@@ -79,15 +79,6 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
 
         out.extend_from_slice(entry.hash);
 
-        let n = out.len() / 32;
-        if n > MAX_BLOCKHASHES_PER_EPOCH {
-            return Err(GroupError::Other(format!(
-                "too many blockhashes for epoch: {} > {}",
-                n, MAX_BLOCKHASHES_PER_EPOCH
-            ))
-            .into());
-        }
-
         progress.update_slot(slot);
         progress.update(1, 0);
         Ok(())

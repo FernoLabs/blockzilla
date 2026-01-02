@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
+use rustc_hash::FxBuildHasher;
 use solana_pubkey::Pubkey;
 use std::{str::FromStr, time::Instant};
-use tracing::info;
 use tracing::error;
+use tracing::info;
 use wincode::Deserialize;
 
-use ahash::AHashMap;
+use rustc_hash::FxHashMap;
 
 use solana_message::VersionedMessage;
 use solana_transaction::versioned::VersionedTransaction;
@@ -20,7 +21,7 @@ use car_reader::{
 
 use blockzilla_format::write_registry;
 
-use crate::{epoch_paths, stream_car_blocks, Cli, ProgressTracker, hex_prefix};
+use crate::{Cli, ProgressTracker, epoch_paths, hex_prefix, stream_car_blocks};
 
 pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let (car_path, epoch_dir, registry_path, _, _) = epoch_paths(cli, epoch);
@@ -70,14 +71,13 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
 }
 
 struct PubkeyCounter {
-    counts: AHashMap<[u8; 32], u32>,
+    counts: FxHashMap<[u8; 32], u32>,
 }
 
 impl PubkeyCounter {
     fn new(cap: usize) -> Self {
-        Self {
-            counts: AHashMap::with_capacity(cap),
-        }
+        let counts = FxHashMap::with_capacity_and_hasher(cap, FxBuildHasher::default());
+        Self { counts }
     }
 
     #[inline(always)]

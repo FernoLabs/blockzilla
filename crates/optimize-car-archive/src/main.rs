@@ -2,13 +2,15 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{
     fs::File,
-    io::BufReader,
+    io::{BufReader, BufWriter},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tracing::{Level, info};
 
-use car_reader::{car_block_group::CarBlockGroup, CarBlockReader};
+use car_reader::{CarBlockReader, car_block_group::CarBlockGroup};
+
+use crate::progress_reader::ProgressReader;
 
 pub const BUFFER_SIZE: usize = 256 << 20;
 pub const PROGRESS_REPORT_INTERVAL_SECS: u64 = 3;
@@ -16,9 +18,10 @@ pub const SLOTS_PER_EPOCH: u64 = 432_000;
 
 mod build;
 mod build_all;
-mod build_registry;
 mod build_blockhash_registry;
+mod build_registry;
 mod compact;
+mod progress_reader;
 
 // ----- NEW: tiny debug helpers -----
 
@@ -80,12 +83,18 @@ pub(crate) enum Cmd {
     },
 
     /// Pass 1 only: build registry.bin from CAR
-    BuildRegistry { epoch: u64 },
+    BuildRegistry {
+        epoch: u64,
+    },
 
-    BuildBlockhashRegistry { epoch: u64 },
+    BuildBlockhashRegistry {
+        epoch: u64,
+    },
 
     /// Pass 2 only: build compact.bin from CAR + registry.bin
-    Compact { epoch: u64 },
+    Compact {
+        epoch: u64,
+    },
 
     /// Process all epochs found in the cache directory
     BuildAll,
@@ -99,7 +108,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Build { epoch, .. } => build::run(&cli, epoch),
         Cmd::BuildRegistry { epoch } => build_registry::run(&cli, epoch),
-                Cmd::BuildBlockhashRegistry { epoch } => build_blockhash_registry::run(&cli, epoch),
+        Cmd::BuildBlockhashRegistry { epoch } => build_blockhash_registry::run(&cli, epoch),
 
         Cmd::Compact { epoch } => compact::run(&cli, epoch),
         Cmd::BuildAll => build_all::run(&cli),
@@ -114,7 +123,6 @@ pub(crate) fn epoch_paths(cli: &Cli, epoch: u64) -> (PathBuf, PathBuf, PathBuf, 
     let compact_path = epoch_dir.join("compact.bin");
     (car_path, epoch_dir, registry_path, bh_path, compact_path)
 }
-
 
 // ----- progress -----
 
@@ -290,7 +298,47 @@ impl ProgressTracker {
     }
 }
 
-// ----- CAR streaming -----
+pub fn derived_uncompressed_path(car_path: &Path) -> Option<PathBuf> {
+    let name = car_path.file_name()?.to_string_lossy();
+
+    if name.ends_with(".car.zst") {
+        let base = name.strip_suffix(".zst").unwrap();
+        return Some(car_path.with_file_name(base));
+    }
+
+    None
+}
+
+fn ensure_plain_car_path(car_path: &Path) -> Result<PathBuf> {
+    if let Some(plain) = derived_uncompressed_path(car_path) {
+        if plain.exists() {
+            return Ok(plain);
+        }
+
+        info!(
+            "Decompressing CAR: {} -> {}",
+            car_path.display(),
+            plain.display()
+        );
+
+        let src = File::open(car_path).with_context(|| format!("open {}", car_path.display()))?;
+        let total = src.metadata()?.len();
+        let src = BufReader::with_capacity(BUFFER_SIZE, src);
+
+        let src = ProgressReader::new(src, 1024 * 1024 * 1024).with_total_size(total);
+        let dst = File::create(&plain).with_context(|| format!("create {}", plain.display()))?;
+        let dst = BufWriter::with_capacity(BUFFER_SIZE, dst);
+
+        zstd::stream::copy_decode(src, dst).with_context(|| {
+            format!("zstd decode {} -> {}", car_path.display(), plain.display())
+        })?;
+
+        info!("Decompression complete: {}", plain.display());
+        return Ok(plain);
+    }
+
+    Ok(car_path.to_path_buf())
+}
 
 pub(crate) fn stream_car_blocks<F>(car_path: &Path, mut f: F) -> Result<()>
 where

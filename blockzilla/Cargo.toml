@@ -19,7 +19,6 @@ blockzilla-format = { path = "../crates/blockzilla-format" }
 mimalloc = "0.1.48"
 pprof = { version = "0.15", features = ["flamegraph", "prost-codec","protobuf"] }
 prost = "0.12"
-ahash = "0.8.12"
 zstd = "0.13.3"
 serde = "1.0.228"
 anyhow = "1.0.100"

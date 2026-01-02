@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use ahash::AHashMap;
+use rustc_hash::FxHashMap;
 
 use crate::registry::Registry;
 
@@ -48,10 +48,18 @@ pub struct CompactAddressTableLookup {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CompactRecentBlockhash {
+    /// Normal case: index into epoch blockhash registry.
+    Id(u32),
+    /// Durable nonce case: store the nonce value inline.
+    Nonce([u8; 32]),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactV0Message {
     pub header: CompactMessageHeader,
     pub account_keys: Vec<u32>, // registry indices of static keys
-    pub recent_blockhash: i32,  // blockhash registry id
+    pub recent_blockhash: CompactRecentBlockhash,
     pub instructions: Vec<CompactInstruction>,
     pub address_table_lookups: Vec<CompactAddressTableLookup>,
 }
@@ -60,7 +68,7 @@ pub struct CompactV0Message {
 pub fn to_compact_transaction(
     vtx: &solana_transaction::versioned::VersionedTransaction,
     registry: &Registry,
-    bh_index: &AHashMap<[u8; 32], i32>,
+    bh_index: &FxHashMap<[u8; 32], i32>,
 ) -> Result<CompactTransaction> {
     use solana_message::VersionedMessage;
 
@@ -150,9 +158,12 @@ pub fn to_compact_transaction(
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
 
-            let recent_blockhash = bh_index.get(&recent_blockhash).copied().ok_or_else(|| {
-                anyhow::anyhow!("recent_blockhash missing from blockhash registry")
-            })?;
+            let recent_blockhash = bh_index
+                .get(&recent_blockhash)
+                .copied()
+                .map(|id| CompactRecentBlockhash::Id(id as u32))
+                .ok_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash))
+                .map_err(|_| anyhow::anyhow!("recent_blockhash missing from blockhash registry or invalid nonce"))?;
 
             let instructions = m
                 .instructions

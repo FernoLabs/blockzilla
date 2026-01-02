@@ -1,5 +1,5 @@
-use ahash::AHashMap;
 use anyhow::{Context, Result};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use solana_pubkey::{Pubkey, pubkey};
 use std::{
     fs::File,
@@ -10,7 +10,7 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct Registry {
     pub keys: Vec<[u8; 32]>,
-    index: AHashMap<[u8; 32], u32>,
+    index: FxHashMap<[u8; 32], u32>,
 }
 
 impl Registry {
@@ -26,7 +26,8 @@ impl Registry {
             }
         }
 
-        let mut index = AHashMap::with_capacity(keys.len());
+        let mut index = FxHashMap::with_capacity_and_hasher(keys.len(), FxBuildHasher::default());
+
         for (i, k) in keys.iter().enumerate() {
             index.insert(*k, i as u32);
         }

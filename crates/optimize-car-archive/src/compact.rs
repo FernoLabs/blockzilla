@@ -25,7 +25,7 @@ use blockzilla_format::{
 
 use crate::{epoch_paths, hex_prefix, stream_car_blocks, Cli, ProgressTracker, BUFFER_SIZE};
 
-pub const PREV_TAIL_LEN: usize = 150;
+pub const PREV_TAIL_LEN: usize = 200;
 
 fn tx_kind(vtx: &VersionedTransaction) -> &'static str {
     match &vtx.message {

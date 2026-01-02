@@ -1,15 +1,15 @@
 use std::mem::MaybeUninit;
 
-use ahash::AHashMap;
 use bytes::Bytes;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use solana_transaction::versioned::VersionedTransaction;
 use wincode::Deserialize;
 
 use crate::{
     confirmed_block::TransactionStatusMeta,
     error::GroupError,
-    metadata_decoder::{decode_transaction_status_meta_from_frame, ZstdReusableDecoder},
-    node::{decode_node, CborArrayIter, CborCidRef, Node, NodeDecodeError},
+    metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
+    node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node},
     versioned_transaction::VersionedTransactionSchema,
 };
 
@@ -18,7 +18,7 @@ const DEFAULT_CAPACITY: usize = 8192;
 pub struct CarBlockGroup {
     pub block_payload: Bytes,
     pub payloads: Vec<Bytes>,
-    pub cid_map: AHashMap<Bytes, usize>,
+    pub cid_map: FxHashMap<Bytes, usize>,
 }
 
 impl Default for CarBlockGroup {
@@ -29,10 +29,14 @@ impl Default for CarBlockGroup {
 
 impl CarBlockGroup {
     pub fn new() -> Self {
+        let cid_map = FxHashMap::with_capacity_and_hasher(
+            DEFAULT_CAPACITY,
+            FxBuildHasher::default(),
+        );
         Self {
             block_payload: Bytes::new(),
             payloads: Vec::with_capacity(DEFAULT_CAPACITY),
-            cid_map: AHashMap::with_capacity(DEFAULT_CAPACITY),
+            cid_map,
         }
     }
 
