@@ -7,16 +7,14 @@ use std::{
 };
 use tracing::{error, info, warn};
 use wincode::Deserialize;
-
-use solana_message::VersionedMessage;
-use solana_transaction::versioned::VersionedTransaction;
+use car_reader::versioned_transaction::VersionedTransaction;
+use car_reader::versioned_transaction::VersionedMessage;
 
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
     metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
     node::{Node, decode_node},
-    versioned_transaction::VersionedTransactionSchema,
 };
 
 use blockzilla_format::{
@@ -275,7 +273,7 @@ impl CompactTxDecodeScratch {
             self.has_tx = false;
         }
 
-        if let Err(e) = VersionedTransactionSchema::deserialize_into(bytes, &mut self.reusable_tx) {
+        if let Err(e) = VersionedTransaction::deserialize_into(bytes, &mut self.reusable_tx) {
             error!(
                 "TX_DECODE (compact) failed: len={} prefix={}",
                 bytes.len(),
@@ -310,12 +308,11 @@ impl Drop for CompactTxDecodeScratch {
 }
 
 pub fn to_compact_transaction(
-    vtx: &solana_transaction::versioned::VersionedTransaction,
+    vtx: &car_reader::versioned_transaction::VersionedTransaction,
     registry: &Registry,
     bh_index: &FxHashMap<[u8; 32], i32>,
     builder: &mut CompactTxBuilder,
 ) -> Result<CompactTransaction> {
-    use solana_message::VersionedMessage;
 
     builder.clear();
 
@@ -407,15 +404,15 @@ pub fn to_compact_transaction(
             // Build address table lookups in pre-allocated buffer
             for lookup in &m.address_table_lookups {
                 let table_idx = registry
-                    .lookup(lookup.account_key.as_array())
+                    .lookup(&lookup.account_key)
                     .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
 
                 builder
                     .address_table_lookups_buf
                     .push(CompactAddressTableLookup {
                         account_key: table_idx,
-                        writable_indexes: lookup.writable_indexes.clone(),
-                        readonly_indexes: lookup.readonly_indexes.clone(),
+                        writable_indexes: lookup.writable_indexes.to_vec(),
+                        readonly_indexes: lookup.readonly_indexes.to_vec(),
                     });
             }
 
@@ -433,7 +430,7 @@ pub fn to_compact_transaction(
         signatures: vtx
             .signatures
             .iter()
-            .map(|s| Signature(*s.as_array()))
+            .map(|s| Signature(*s))
             .collect(),
         message,
     })

@@ -2,15 +2,13 @@ use std::mem::MaybeUninit;
 
 use bytes::Bytes;
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use solana_transaction::versioned::VersionedTransaction;
 use wincode::Deserialize;
 
 use crate::{
     confirmed_block::TransactionStatusMeta,
     error::GroupError,
     metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
-    node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node},
-    versioned_transaction::VersionedTransactionSchema,
+    node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node}, versioned_transaction::VersionedTransaction,
 };
 
 const DEFAULT_CAPACITY: usize = 8192;
@@ -188,7 +186,7 @@ impl<'a> TxIter<'a> {
                 self.reusable_meta = None;
             }
 
-            VersionedTransactionSchema::deserialize_into(tx.data.data, &mut self.reusable_tx)
+            VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
                 .map_err(|_| GroupError::TxDecode)?;
             self.has_tx = true;
 
