@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
-use wincode::{SchemaRead, SchemaWrite};
 use std::str::FromStr;
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{CompactLogStream, Registry};
 

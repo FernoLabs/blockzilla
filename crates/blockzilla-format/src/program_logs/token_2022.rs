@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
-use wincode::{SchemaRead, SchemaWrite};
 use std::str::FromStr;
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{Registry, StrId, StringTable};
 
