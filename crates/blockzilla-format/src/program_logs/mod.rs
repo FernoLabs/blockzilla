@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{Registry, StrId, StringTable};
 
@@ -14,7 +15,7 @@ pub mod token;
 pub mod token_2022;
 pub mod transfer_hook;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum ProgramLog {
     /// SPL Token program logs
     Token(token::TokenLog),
@@ -58,9 +59,6 @@ pub enum ProgramLog {
         number: u32,
         msg: StrId,
     },
-
-    /// System program logs
-    // System(system::SystemLog),
 
     /// Fallback for unsupported programs or unparsed payloads
     /// Stored verbatim via string table

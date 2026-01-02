@@ -68,16 +68,6 @@ pub(crate) fn run(cli: &Cli) -> Result<()> {
 fn process_single_epoch(cli: &Cli, epoch: u64) -> Result<()> {
     let (_, _, registry_path, bh_path, compact_path) = epoch_paths(cli, epoch);
 
-    if !(cli.resume && file_nonempty(&registry_path)) {
-        crate::build_registry::run(cli, epoch)
-            .with_context(|| format!("Failed to build registry for epoch {}", epoch))?;
-    } else {
-        info!(
-            "Resume: registry exists, skipping: {}",
-            registry_path.display()
-        );
-    }
-
     if !(cli.resume && file_nonempty(&bh_path)) {
         crate::build_blockhash_registry::run(cli, epoch)
             .with_context(|| format!("Failed to build blockhash registry for epoch {}", epoch))?;
@@ -85,6 +75,16 @@ fn process_single_epoch(cli: &Cli, epoch: u64) -> Result<()> {
         info!(
             "Resume: blockhash registry exists, skipping: {}",
             bh_path.display()
+        );
+    }
+
+    if !(cli.resume && file_nonempty(&registry_path)) {
+        crate::build_registry::run(cli, epoch)
+            .with_context(|| format!("Failed to build registry for epoch {}", epoch))?;
+    } else {
+        info!(
+            "Resume: registry exists, skipping: {}",
+            registry_path.display()
         );
     }
 

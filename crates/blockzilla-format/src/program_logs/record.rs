@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
 /// TODO: confirm record program id
 pub const STR_ID: &str = "Record111111111111111111111111111111111111";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum RecordLog {
     /// processor.rs:171 "reallocating +{:?} bytes"
     ReallocatingPlusBytesDebug {

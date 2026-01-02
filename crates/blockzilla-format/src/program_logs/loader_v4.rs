@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
 /// TODO: confirm loader-v4 id
 pub const STR_ID: &str = "LoaderV411111111111111111111111111111111111";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum LoaderV4Log {
     /// processor.rs:150 "Insufficient lamports, {} are required."
     InsufficientLamportsRequired {

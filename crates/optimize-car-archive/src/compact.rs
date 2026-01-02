@@ -20,10 +20,7 @@ use car_reader::{
 };
 
 use blockzilla_format::{
-    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactBlockRecord,
-    CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader,
-    CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message,
-    PostcardFramedWriter, Registry, compact_meta_from_proto, load_registry,
+    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactBlockRecord, CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader, CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message, PostcardFramedWriter, Registry, Signature, compact_meta_from_proto, load_registry
 };
 
 use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths, hex_prefix, stream_car_blocks};
@@ -221,11 +218,36 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     Ok(())
 }
 
+/// Reusable buffer pool for building compact transactions
+/// This avoids allocating new vectors for every transaction
+pub struct CompactTxBuilder {
+    account_keys_buf: Vec<u32>,
+    instructions_buf: Vec<CompactInstruction>,
+    address_table_lookups_buf: Vec<CompactAddressTableLookup>,
+}
+
+impl CompactTxBuilder {
+    fn new() -> Self {
+        Self {
+            account_keys_buf: Vec::with_capacity(64),
+            instructions_buf: Vec::with_capacity(8),
+            address_table_lookups_buf: Vec::with_capacity(4),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.account_keys_buf.clear();
+        self.instructions_buf.clear();
+        self.address_table_lookups_buf.clear();
+    }
+}
+
 struct CompactTxDecodeScratch {
     reusable_tx: std::mem::MaybeUninit<VersionedTransaction>,
     has_tx: bool,
     meta_out: car_reader::confirmed_block::TransactionStatusMeta,
     zstd: ZstdReusableDecoder,
+    txs_out_buf: Vec<CompactTxWithMeta>,
 }
 
 impl CompactTxDecodeScratch {
@@ -235,7 +257,12 @@ impl CompactTxDecodeScratch {
             has_tx: false,
             meta_out: car_reader::confirmed_block::TransactionStatusMeta::default(),
             zstd: ZstdReusableDecoder::new(256 * 1024),
+            txs_out_buf: Vec::with_capacity(4096),
         }
+    }
+
+    fn clear_tx_buffer(&mut self) {
+        self.txs_out_buf.clear();
     }
 
     #[inline(always)]
@@ -283,10 +310,11 @@ pub fn to_compact_transaction(
     vtx: &solana_transaction::versioned::VersionedTransaction,
     registry: &Registry,
     bh_index: &FxHashMap<[u8; 32], i32>,
+    builder: &mut CompactTxBuilder,
 ) -> Result<CompactTransaction> {
     use solana_message::VersionedMessage;
 
-    let signatures = vtx.signatures.clone();
+    builder.clear();
 
     let message = match &vtx.message {
         VersionedMessage::Legacy(m) => {
@@ -296,17 +324,15 @@ pub fn to_compact_transaction(
                 num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
             };
 
-            let account_keys = m
-                .account_keys
-                .iter()
-                .map(|k| {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(k.as_ref());
-                    registry
-                        .lookup(&arr)
-                        .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))
-                })
-                .collect::<Result<Vec<u32>>>()?;
+            // Build account_keys in pre-allocated buffer
+            for key in &m.account_keys {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(key.as_ref());
+                let idx = registry
+                    .lookup(&arr)
+                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
+                builder.account_keys_buf.push(idx);
+            }
 
             let recent_blockhash: [u8; 32] = m
                 .recent_blockhash
@@ -320,21 +346,20 @@ pub fn to_compact_transaction(
                 .map(CompactRecentBlockhash::Id)
                 .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
 
-            let instructions = m
-                .instructions
-                .iter()
-                .map(|ix| CompactInstruction {
+            // Build instructions in pre-allocated buffer
+            for ix in &m.instructions {
+                builder.instructions_buf.push(CompactInstruction {
                     program_id_index: ix.program_id_index,
                     accounts: ix.accounts.clone(),
                     data: ix.data.clone(),
-                })
-                .collect();
+                });
+            }
 
             CompactMessage::Legacy(CompactLegacyMessage {
                 header,
-                account_keys,
+                account_keys: std::mem::take(&mut builder.account_keys_buf),
                 recent_blockhash,
-                instructions,
+                instructions: std::mem::take(&mut builder.instructions_buf),
             })
         }
 
@@ -345,17 +370,15 @@ pub fn to_compact_transaction(
                 num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
             };
 
-            let account_keys = m
-                .account_keys
-                .iter()
-                .map(|k| {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(k.as_ref());
-                    registry
-                        .lookup(&arr)
-                        .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))
-                })
-                .collect::<Result<Vec<u32>>>()?;
+            // Build account_keys in pre-allocated buffer
+            for key in &m.account_keys {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(key.as_ref());
+                let idx = registry
+                    .lookup(&arr)
+                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
+                builder.account_keys_buf.push(idx);
+            }
 
             let recent_blockhash: [u8; 32] = m
                 .recent_blockhash
@@ -369,44 +392,40 @@ pub fn to_compact_transaction(
                 .map(CompactRecentBlockhash::Id)
                 .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
 
-            let instructions = m
-                .instructions
-                .iter()
-                .map(|ix| CompactInstruction {
+            // Build instructions in pre-allocated buffer
+            for ix in &m.instructions {
+                builder.instructions_buf.push(CompactInstruction {
                     program_id_index: ix.program_id_index,
                     accounts: ix.accounts.clone(),
                     data: ix.data.clone(),
-                })
-                .collect();
+                });
+            }
 
-            let address_table_lookups = m
-                .address_table_lookups
-                .iter()
-                .map(|l| {
-                    let table_idx = registry
-                        .lookup(l.account_key.as_array())
-                        .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
+            // Build address table lookups in pre-allocated buffer
+            for lookup in &m.address_table_lookups {
+                let table_idx = registry
+                    .lookup(lookup.account_key.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
 
-                    Ok(CompactAddressTableLookup {
-                        account_key: table_idx,
-                        writable_indexes: l.writable_indexes.clone(),
-                        readonly_indexes: l.readonly_indexes.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
+                builder.address_table_lookups_buf.push(CompactAddressTableLookup {
+                    account_key: table_idx,
+                    writable_indexes: lookup.writable_indexes.clone(),
+                    readonly_indexes: lookup.readonly_indexes.clone(),
+                });
+            }
 
             CompactMessage::V0(CompactV0Message {
                 header,
-                account_keys,
+                account_keys: std::mem::take(&mut builder.account_keys_buf),
                 recent_blockhash,
-                instructions,
-                address_table_lookups,
+                instructions: std::mem::take(&mut builder.instructions_buf),
+                address_table_lookups: std::mem::take(&mut builder.address_table_lookups_buf),
             })
         }
     };
 
     Ok(CompactTransaction {
-        signatures,
+        signatures: vtx.signatures.iter().map(|s| Signature(*s.as_array())).collect(),
         message,
     })
 }
@@ -441,8 +460,11 @@ fn compact_process_block<W: std::io::Write>(
         block_height: block.meta.block_height,
     };
 
-    // todo reuse same vector
-    let mut txs_out: Vec<CompactTxWithMeta> = Vec::with_capacity(4096);
+    // Reuse pre-allocated buffer instead of creating new Vec
+    scratch.clear_tx_buffer();
+
+    // Create tx_builder outside the loop to reuse it
+    let mut tx_builder = CompactTxBuilder::new();
 
     let mut entry_iter = block
         .entries
@@ -483,14 +505,18 @@ fn compact_process_block<W: std::io::Write>(
                 );
             })?;
 
-            let compact_tx = to_compact_transaction(vtx, registry, &bh.index).map_err(|conv_err| {
+            // Need to extract info before borrowing tx_builder
+            let vtx_kind = tx_kind(vtx);
+            let vtx_sigs_len = vtx.signatures.len();
+
+            let compact_tx = to_compact_transaction(vtx, registry, &bh.index, &mut tx_builder).map_err(|conv_err| {
                 error!(
                     "FAIL to_compact_transaction: block_slot={} tx_slot={} tx_index_in_block={} kind={} sigs={} tx_len={} tx_prefix={} cid_digest_prefix={}",
                     block_slot,
                     tx.slot,
                     tx_index_in_block,
-                    tx_kind(vtx),
-                    vtx.signatures.len(),
+                    vtx_kind,
+                    vtx_sigs_len,
                     tx_bytes.len(),
                     hex_prefix(tx_bytes, 32),
                     hex_prefix(tx_cid.hash_bytes(), 16),
@@ -527,7 +553,7 @@ fn compact_process_block<W: std::io::Write>(
                 Some(compact_meta)
             };
 
-            txs_out.push(CompactTxWithMeta {
+            scratch.txs_out_buf.push(CompactTxWithMeta {
                 tx: compact_tx,
                 metadata: metadata_opt,
             });
@@ -536,7 +562,7 @@ fn compact_process_block<W: std::io::Write>(
 
     let rec = CompactBlockRecord {
         header,
-        txs: txs_out,
+        txs: std::mem::take(&mut scratch.txs_out_buf),
     };
     writer.write(&rec).map_err(|_| GroupError::Io)?;
 
