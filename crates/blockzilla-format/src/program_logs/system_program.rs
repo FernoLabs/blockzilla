@@ -174,9 +174,7 @@ impl SystemProgramLog {
             if let Some(ix) = SystemInstructionLog::parse(name) {
                 return Some(Self::Instruction(ix));
             }
-            return Some(Self::Unparsed {
-                text: st.push(text),
-            });
+            return None;
         }
 
         // Create: address X does not match derived address Y

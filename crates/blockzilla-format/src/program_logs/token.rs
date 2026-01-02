@@ -99,7 +99,7 @@ impl TokenErrorLog {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenLog {
     Error(TokenErrorLog),
-
+    PleaseUpgrade,
     InstructionInitializeMint,
     InstructionInitializeAccount,
     InstructionInitializeAccount2,
@@ -127,6 +127,10 @@ impl TokenLog {
     pub fn parse(text: &str) -> Option<Self> {
         if let Some(e) = TokenErrorLog::parse(text) {
             return Some(Self::Error(e));
+        }
+
+        if text == "Please upgrade to SPL Token 2022 for immutable owner support" {
+            return Some(Self::PleaseUpgrade);
         }
 
         let name = text.strip_prefix("Instruction: ")?.trim();
@@ -177,6 +181,7 @@ impl TokenLog {
             Self::InstructionFreezeAccount => "Instruction: FreezeAccount",
             Self::InstructionThawAccount => "Instruction: ThawAccount",
             Self::InstructionSyncNative => "Instruction: SyncNative",
+            Self::PleaseUpgrade => "Please upgrade to SPL Token 2022 for immutable owner support",
         }
     }
 }
