@@ -2,15 +2,13 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{
     fs::File,
-    io::{BufReader, BufWriter},
+    io::BufReader,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tracing::{Level, info};
 
 use car_reader::{CarBlockReader, car_block_group::CarBlockGroup};
-
-use crate::progress_reader::ProgressReader;
 
 pub const BUFFER_SIZE: usize = 256 << 20;
 pub const PROGRESS_REPORT_INTERVAL_SECS: u64 = 3;
@@ -21,9 +19,6 @@ mod build_all;
 mod build_blockhash_registry;
 mod build_registry;
 mod compact;
-mod progress_reader;
-
-// ----- NEW: tiny debug helpers -----
 
 pub(crate) fn file_nonempty(path: &Path) -> bool {
     std::fs::metadata(path)
@@ -307,37 +302,6 @@ pub fn derived_uncompressed_path(car_path: &Path) -> Option<PathBuf> {
     }
 
     None
-}
-
-fn ensure_plain_car_path(car_path: &Path) -> Result<PathBuf> {
-    if let Some(plain) = derived_uncompressed_path(car_path) {
-        if plain.exists() {
-            return Ok(plain);
-        }
-
-        info!(
-            "Decompressing CAR: {} -> {}",
-            car_path.display(),
-            plain.display()
-        );
-
-        let src = File::open(car_path).with_context(|| format!("open {}", car_path.display()))?;
-        let total = src.metadata()?.len();
-        let src = BufReader::with_capacity(BUFFER_SIZE, src);
-
-        let src = ProgressReader::new(src, 1024 * 1024 * 1024).with_total_size(total);
-        let dst = File::create(&plain).with_context(|| format!("create {}", plain.display()))?;
-        let dst = BufWriter::with_capacity(BUFFER_SIZE, dst);
-
-        zstd::stream::copy_decode(src, dst).with_context(|| {
-            format!("zstd decode {} -> {}", car_path.display(), plain.display())
-        })?;
-
-        info!("Decompression complete: {}", plain.display());
-        return Ok(plain);
-    }
-
-    Ok(car_path.to_path_buf())
 }
 
 pub(crate) fn stream_car_blocks<F>(car_path: &Path, mut f: F) -> Result<()>

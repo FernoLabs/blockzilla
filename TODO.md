@@ -1,5 +1,4 @@
 simplify error handling
-tryout fxhashmap instead of Ahash
 review encoding to compact it is doing a bunch of allocation and clone
 
 //first pass uncompress if needed
@@ -12,3 +11,4 @@ or at least store multiple Strid for Program data log and returned data as they 
 that will give us a better dedup and compression capability
 - future optimisation may be intruction data pubk detection and replace with id.
 
+Optimise registry builder by decoding up to log including zstd, so zstd stream decode up to log.
