@@ -3,44 +3,16 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use car_reader::{
     error::GroupError,
-    node::{decode_node, Node},
+    node::{CborCidRef, Node, decode_node},
 };
 
-use crate::{epoch_paths, stream_car_blocks, Cli, ProgressTracker, BUFFER_SIZE};
+use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths, stream_car_blocks};
 
-/// Plain writer: writes raw 32-byte hashes back-to-back.
-/// ID is implicit: position in file (0-based).
-struct BlockhashRegistryWriter {
-    w: BufWriter<File>,
-    n: u32,
-}
-
-impl BlockhashRegistryWriter {
-    fn create(path: &std::path::Path) -> Result<Self> {
-        let f = File::create(path).with_context(|| format!("create {}", path.display()))?;
-        Ok(Self {
-            w: BufWriter::with_capacity(BUFFER_SIZE, f),
-            n: 0,
-        })
-    }
-
-    #[inline(always)]
-    fn push_raw(&mut self, h: &[u8; 32]) -> Result<u32> {
-        self.w.write_all(h).with_context(|| "write blockhash")?;
-        let id = self.n;
-        self.n += 1;
-        Ok(id)
-    }
-
-    fn finish(mut self) -> Result<u32> {
-        self.w.flush().context("flush blockhash registry")?;
-        Ok(self.n)
-    }
-}
+const MAX_BLOCKHASHES_PER_EPOCH: usize = 432_000;
 
 fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
     let (car_path, epoch_dir, _registry_path, bh_path, _compact_path) = epoch_paths(cli, epoch);
@@ -56,9 +28,8 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
     info!("  car: {}", car_path.display());
     info!("  out: {}", bh_path.display());
 
-    // Atomic write: tmp then rename
-    let tmp_path = bh_path.with_extension("bin.tmp");
-    let mut w = BlockhashRegistryWriter::create(&tmp_path)?;
+    // Final file image in memory: N * 32 bytes.
+    let mut out: Vec<u8> = Vec::with_capacity(MAX_BLOCKHASHES_PER_EPOCH * 32);
 
     let mut progress = ProgressTracker::new("Blockhash Registry");
 
@@ -70,36 +41,51 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
 
         let slot = block.slot;
 
-        // Match firehose/RPC semantics:
-        // "blockhash" is the hash of the last Entry in the slot.
-        let mut last_entry_hash: Option<[u8; 32]> = None;
+        // Decode last entry CID from the entries array.
+        let mut decoder = minicbor::Decoder::new(block.entries.slice);
 
-        let mut entry_iter = block
-            .entries
-            .iter_stateful()
-            .map_err(|e| GroupError::Node(car_reader::node::NodeDecodeError::from(e)))?;
+        let len_opt = decoder
+            .array()
+            .map_err(|e| GroupError::Other(format!("decode entries array header: {e}")))?;
+        let Some(len_u64) = len_opt else {
+            return Err(GroupError::Other(format!(
+                "indefinite-length entries array not supported here"
+            ))
+            .into());
+        };
 
-        while let Some(entry_cid) = entry_iter.next_item() {
-            let entry_cid = entry_cid.map_err(|e| GroupError::Node(e.into()))?;
-            let Node::Entry(entry) = group.decode_by_hash(entry_cid.hash_bytes())? else {
-                continue;
-            };
-
-            let h = entry.hash;
-            if h.len() != 32 {
-                warn!("entry.hash len != 32: slot={} len={}", slot, h.len());
-                continue;
-            }
-
-            let mut bh = [0u8; 32];
-            bh.copy_from_slice(h);
-            last_entry_hash = Some(bh);
+        let len = len_u64 as usize;
+        if len == 0 {
+            return Err(GroupError::Other(format!("entries array is empty")).into());
         }
 
-        if let Some(bh) = last_entry_hash {
-            w.push_raw(&bh).map_err(|_| GroupError::Io)?;
-        } else {
-            warn!("no entry hash found for slot={}", slot);
+        for _ in 0..(len - 1) {
+            decoder
+                .skip()
+                .map_err(|e| GroupError::Other(format!("skip entry cid: {e}")))?;
+        }
+
+        let last_entry_cid: CborCidRef = decoder
+            .decode()
+            .map_err(|e| GroupError::Other(format!("decode last entry cid: {e}")))?;
+
+        let Node::Entry(entry) = group.decode_by_hash(last_entry_cid.hash_bytes())? else {
+            return Err(GroupError::Other(format!("expected entry node")).into());
+        };
+
+        if entry.hash.len() != 32 {
+            return Err(GroupError::Other(format!("entry.hash len != 32")).into());
+        }
+
+        out.extend_from_slice(entry.hash);
+
+        let n = out.len() / 32;
+        if n > MAX_BLOCKHASHES_PER_EPOCH {
+            return Err(GroupError::Other(format!(
+                "too many blockhashes for epoch: {} > {}",
+                n, MAX_BLOCKHASHES_PER_EPOCH
+            ))
+            .into());
         }
 
         progress.update_slot(slot);
@@ -107,9 +93,14 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
         Ok(())
     })?;
 
-    let n = w.finish()?;
-    std::fs::rename(&tmp_path, &bh_path)
-        .with_context(|| format!("rename {} -> {}", tmp_path.display(), bh_path.display()))?;
+    let n = out.len() / 32;
+
+    // Direct write (no tmp + rename)
+    let f = File::create(&bh_path).with_context(|| format!("create {}", bh_path.display()))?;
+    let mut w = BufWriter::with_capacity(BUFFER_SIZE, f);
+    w.write_all(&out)
+        .with_context(|| "write blockhash registry")?;
+    w.flush().context("flush blockhash registry")?;
 
     progress.final_report();
     info!("Blockhash registry written: {} hashes", n);
@@ -143,6 +134,5 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
         }
     }
 
-    // Always build current epoch registry.
     build_blockhash_registry_for_epoch(cli, epoch)
 }

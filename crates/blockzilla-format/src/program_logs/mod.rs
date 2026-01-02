@@ -4,6 +4,7 @@ use crate::{Registry, StrId, StringTable};
 
 pub mod account_compression;
 pub mod address_lookup_table;
+pub mod associated_token_account;
 pub mod loader_v3;
 pub mod loader_v4;
 pub mod memo;
@@ -12,7 +13,6 @@ pub mod system_program;
 pub mod token;
 pub mod token_2022;
 pub mod transfer_hook;
-// pub mod system;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProgramLog {
@@ -21,6 +21,8 @@ pub enum ProgramLog {
 
     /// SPL Token-2022 program logs
     Token2022(token_2022::Token2022Log),
+
+    Ata(associated_token_account::TokenErrorLog),
 
     /// Address Lookup Table
     AddressLookupTable(address_lookup_table::AddressLookupTableLog),
@@ -45,7 +47,9 @@ pub enum ProgramLog {
 
     /// Anchor programs commonly log: `Instruction: <Name>`
     /// Store only the instruction name in the string table.
-    AnchorInstruction { name: StrId },
+    AnchorInstruction {
+        name: StrId,
+    },
 
     AnchorErrorThrown {
         file: StrId,
@@ -65,29 +69,67 @@ pub enum ProgramLog {
 
 /// `Program log: <msg>`
 ///
-/// No program id available -> no dispatch.
-/// We intentionally do **not** guess.
-/// Exact payload is stored.
+/// No program id available -> best-effort parse across known log formats.
+/// This can misclassify if two programs share identical text patterns,
+/// but it's useful for logs that omit program id.
 #[inline]
 pub fn parse_program_log_no_id(
     payload: &str,
     registry: &Registry,
     st: &mut StringTable,
 ) -> ProgramLog {
-    // zero-alloc parsers first
+    // -----------------------------
+    // 1) zero-alloc / no StringTable
+    // -----------------------------
     if let Some(t) = token::TokenLog::parse(payload) {
         return ProgramLog::Token(t);
     }
 
-    // generic anchor instruction (program-agnostic)
+    if let Some(t) = associated_token_account::TokenErrorLog::parse(payload) {
+        return ProgramLog::Ata(t);
+    }
+
+    // Program-agnostic Anchor patterns (cheap)
     if let Some(ev) = parse_anchor_instruction(payload, st) {
         return ev;
     }
 
-    // parsers requiring a string table
+    // -----------------------------
+    // 2) parsers that may push to StringTable (and/or need registry)
+    // -----------------------------
     if let Some(t) = token_2022::Token2022Log::parse(payload, registry, st) {
         return ProgramLog::Token2022(t);
     }
+
+    if let Some(x) = address_lookup_table::AddressLookupTableLog::parse(payload, st) {
+        return ProgramLog::AddressLookupTable(x);
+    }
+
+    if let Some(x) = loader_v3::LoaderV3Log::parse(payload, st) {
+        return ProgramLog::LoaderV3(x);
+    }
+
+    if let Some(x) = loader_v4::LoaderV4Log::parse(payload, st) {
+        return ProgramLog::LoaderV4(x);
+    }
+
+    if let Some(x) = memo::MemoLog::parse(payload, st) {
+        return ProgramLog::Memo(x);
+    }
+
+    if let Some(x) = record::RecordLog::parse(payload, st) {
+        return ProgramLog::Record(x);
+    }
+
+    if let Some(x) = transfer_hook::TransferHookLog::parse(payload, st) {
+        return ProgramLog::TransferHook(x);
+    }
+
+    if let Some(x) = account_compression::AccountCompressionLog::parse(payload, st) {
+        return ProgramLog::AccountCompression(x);
+    }
+
+    // Program-agnostic Anchor error (may push multiple strings)
     if let Some(ev) = parse_anchor_error(payload, st) {
         return ev;
     }
@@ -105,12 +147,6 @@ pub fn parse_program_log_for_program(
     registry: &Registry,
     st: &mut StringTable,
 ) -> ProgramLog {
-    // fast path: zero allocation
-    if let Some(log) = try_parse_program_log(program, payload) {
-        return log;
-    }
-
-    // slow path: may allocate into string table for dynamic args
     if let Some(log) = try_parse_program_log_with_table(program, payload, registry, st) {
         return log;
     }
@@ -128,20 +164,6 @@ pub fn parse_program_log_for_program(
     ProgramLog::Unknown(st.push(payload))
 }
 
-/// Program-aware parser (fast path).
-/// This function contains **zero string allocation**.
-#[inline]
-pub fn try_parse_program_log(program: &str, payload: &str) -> Option<ProgramLog> {
-    // SPL Token program (static-only for now)
-    if token::STR_ID == program
-        && let Some(t) = token::TokenLog::parse(payload)
-    {
-        return Some(ProgramLog::Token(t));
-    }
-
-    None
-}
-
 /// Program-aware parser (slow path).
 /// May push args into the string table.
 #[inline]
@@ -151,10 +173,22 @@ pub fn try_parse_program_log_with_table(
     registry: &Registry,
     st: &mut StringTable,
 ) -> Option<ProgramLog> {
+    if token::STR_ID == program
+        && let Some(t) = token::TokenLog::parse(payload)
+    {
+        return Some(ProgramLog::Token(t));
+    }
+
     if token_2022::STR_ID == program
         && let Some(t) = token_2022::Token2022Log::parse(payload, registry, st)
     {
         return Some(ProgramLog::Token2022(t));
+    }
+
+    if associated_token_account::STR_ID == program
+        && let Some(t) = associated_token_account::TokenErrorLog::parse(payload)
+    {
+        return Some(ProgramLog::Ata(t));
     }
 
     if address_lookup_table::STR_ID == program
@@ -208,6 +242,7 @@ pub fn render_program_log(log: &ProgramLog, registry: &Registry, st: &StringTabl
     match log {
         ProgramLog::Token(t) => t.as_str().to_string(),
         ProgramLog::Token2022(t) => t.as_str(st, registry),
+        ProgramLog::Ata(t) => t.as_str().to_string(),
         ProgramLog::AddressLookupTable(x) => x.as_str(st),
         ProgramLog::LoaderV3(x) => x.as_str(st),
         ProgramLog::LoaderV4(x) => x.as_str(st),

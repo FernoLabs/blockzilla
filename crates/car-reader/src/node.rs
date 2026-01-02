@@ -33,7 +33,7 @@ impl From<CborError> for NodeDecodeError {
 /// Borrowed view over an encoded CBOR array, allowing cheap `len()` + iterator decoding.
 #[derive(Debug, Clone)]
 pub struct CborArrayView<'b, T> {
-    pub(crate) slice: &'b [u8],
+    pub slice: &'b [u8],
     pub(crate) _t: PhantomData<T>,
 }
 
@@ -69,6 +69,7 @@ where
         let n = d.array().ok().flatten().unwrap_or(0);
         (0..n).map(move |_| d.decode_with(&mut ()))
     }
+
     #[inline]
     pub fn decode_at(&self, idx: usize) -> core::result::Result<T, minicbor::decode::Error> {
         let mut d = minicbor::Decoder::new(self.slice);
@@ -77,6 +78,7 @@ where
             return Err(minicbor::decode::Error::message("index out of bounds"));
         }
         for _ in 0..idx {
+            
             d.skip()?;
         }
         d.decode_with(&mut ())
