@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
@@ -6,7 +7,7 @@ use crate::{StrId, StringTable};
 /// TODO: confirm id in your environment (Agave/Solana)
 pub const STR_ID: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum LoaderV3Log {
     /// processor.rs:111 "Write overflow: {} < {}"
     WriteOverflow {

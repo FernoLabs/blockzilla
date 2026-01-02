@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::Registry;
 use crate::program_logs::{self, ProgramLog, system_program};
@@ -11,7 +12,13 @@ pub type ProgramId = u32;
 
 const CB_PK: &str = "ComputeBudget111111111111111111111111111111";
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct CompactLogStream {
+    pub events: Vec<LogEvent>,
+    pub strings: StringTable,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct StringTable {
     pub strings: Vec<String>,
 }
@@ -30,7 +37,7 @@ impl StringTable {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum LogEvent {
     /// System program structured logs (system_program.rs)
     System(system_program::SystemProgramLog),
@@ -141,12 +148,6 @@ pub enum LogEvent {
     Unparsed {
         text: StrId,
     },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompactLogStream {
-    pub events: Vec<LogEvent>,
-    pub strings: StringTable,
 }
 
 #[inline]

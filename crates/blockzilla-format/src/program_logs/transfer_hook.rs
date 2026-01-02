@@ -1,15 +1,16 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::StringTable;
 
 pub const STR_ID: &str = "TransferHook1111111111111111111111111111111";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum TransferHookLog {
     Error(TransferHookErrorLog),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum TransferHookErrorLog {
     IncorrectAccount,
     MintHasNoMintAuthority,

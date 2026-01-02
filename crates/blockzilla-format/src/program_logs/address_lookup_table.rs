@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
 /// TODO: confirm program id
 pub const STR_ID: &str = "AddressLookupTab1e1111111111111111111111111";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum AddressLookupTableLog {
     /// entrypoint.rs:18 msg!(error.to_str::<AddressLookupTableError>())
     Error(AddressLookupTableErrorLog),
@@ -37,7 +38,7 @@ pub enum AddressLookupTableLog {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum AddressLookupTableErrorLog {
     /// "Length of the seed is too long for address generation"
     PubkeyErrorMaxSeedLengthExceeded,

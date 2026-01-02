@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
+use wincode::{SchemaRead, SchemaWrite};
 use std::str::FromStr;
 
 use crate::{Registry, StrId, StringTable};
@@ -11,7 +12,7 @@ pub const STR_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 /// This is not “program id” specific here, it is simply the registry index + 1.
 pub type PubkeyId = u32;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum Token2022Log {
     /// entrypoint.rs:17 msg!(error.to_str::<TokenError>())
     Error(Token2022ErrorLog),
@@ -39,7 +40,7 @@ pub enum Token2022Log {
     ErrorHarvestingFrom4 { account_key: PubkeyId, error: StrId },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum Token2022ErrorLog {
     NotRentExempt,
     InsufficientFunds,

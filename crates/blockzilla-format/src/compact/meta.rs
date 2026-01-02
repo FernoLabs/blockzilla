@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
+use wincode::{SchemaRead, SchemaWrite};
 use std::str::FromStr;
 
 use crate::{CompactLogStream, Registry};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactMetaV1 {
     pub err: Option<Vec<u8>>,
 
@@ -30,13 +31,13 @@ pub struct CompactMetaV1 {
     pub cost_units: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactInnerInstructions {
     pub index: u32,
     pub instructions: Vec<CompactInnerInstruction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactInnerInstruction {
     pub program_id_index: u32, // message index
     pub accounts: Vec<u8>,
@@ -44,13 +45,13 @@ pub struct CompactInnerInstruction {
     pub stack_height: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactReturnData {
     pub program_id_index: u32, // registry index
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactTokenBalance {
     pub account_index: u32,
 
@@ -63,7 +64,7 @@ pub struct CompactTokenBalance {
     pub decimals: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactReward {
     pub pubkey_index: u32,
     pub lamports: i64,

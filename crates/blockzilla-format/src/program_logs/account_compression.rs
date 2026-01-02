@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
 /// TODO: confirm account-compression program id
 pub const STR_ID: &str = "AccountCompression11111111111111111111111111111";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum AccountCompressionLog {
     /// canopy.rs: "Canopy byte length {} is not a multiple of {}"
     CanopyLengthMismatch {

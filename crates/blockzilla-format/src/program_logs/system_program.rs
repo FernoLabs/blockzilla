@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
+use wincode::{SchemaRead, SchemaWrite};
 use std::str::FromStr;
 
 use crate::Registry;
@@ -11,7 +12,7 @@ pub const STR_ID: &str = "11111111111111111111111111111111";
 /// Registry-backed pubkey id (1-based, like your log.rs pid_to_pubkey convention).
 pub type PubkeyId = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum SystemProgramLog {
     /// `Instruction: <name>`
     Instruction(SystemInstructionLog),
@@ -71,7 +72,7 @@ pub enum SystemProgramLog {
     Unparsed { text: StrId },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum SystemInstructionLog {
     RevokePendingActivation,
 }
