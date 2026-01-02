@@ -29,10 +29,7 @@ impl Default for CarBlockGroup {
 
 impl CarBlockGroup {
     pub fn new() -> Self {
-        let cid_map = FxHashMap::with_capacity_and_hasher(
-            DEFAULT_CAPACITY,
-            FxBuildHasher::default(),
-        );
+        let cid_map = FxHashMap::with_capacity_and_hasher(DEFAULT_CAPACITY, FxBuildHasher);
         Self {
             block_payload: Bytes::new(),
             payloads: Vec::with_capacity(DEFAULT_CAPACITY),

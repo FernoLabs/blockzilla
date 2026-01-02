@@ -48,15 +48,15 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
             .array()
             .map_err(|e| GroupError::Other(format!("decode entries array header: {e}")))?;
         let Some(len_u64) = len_opt else {
-            return Err(GroupError::Other(format!(
-                "indefinite-length entries array not supported here"
-            ))
+            return Err(GroupError::Other(
+                "indefinite-length entries array not supported here".to_string(),
+            )
             .into());
         };
 
         let len = len_u64 as usize;
         if len == 0 {
-            return Err(GroupError::Other(format!("entries array is empty")).into());
+            return Err(GroupError::Other("entries array is empty".to_string()).into());
         }
 
         for _ in 0..(len - 1) {
@@ -70,11 +70,11 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
             .map_err(|e| GroupError::Other(format!("decode last entry cid: {e}")))?;
 
         let Node::Entry(entry) = group.decode_by_hash(last_entry_cid.hash_bytes())? else {
-            return Err(GroupError::Other(format!("expected entry node")).into());
+            return Err(GroupError::Other("expected entry node".to_string()).into());
         };
 
         if entry.hash.len() != 32 {
-            return Err(GroupError::Other(format!("entry.hash len != 32")).into());
+            return Err(GroupError::Other("entry.hash len != 32".to_string()).into());
         }
 
         out.extend_from_slice(entry.hash);

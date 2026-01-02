@@ -26,7 +26,7 @@ impl Registry {
             }
         }
 
-        let mut index = FxHashMap::with_capacity_and_hasher(keys.len(), FxBuildHasher::default());
+        let mut index = FxHashMap::with_capacity_and_hasher(keys.len(), FxBuildHasher);
 
         for (i, k) in keys.iter().enumerate() {
             index.insert(*k, i as u32);
@@ -47,6 +47,11 @@ impl Registry {
     #[inline]
     pub fn len(&self) -> usize {
         self.keys.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 }
 

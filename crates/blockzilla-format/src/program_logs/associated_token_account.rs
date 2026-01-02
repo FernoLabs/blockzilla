@@ -24,36 +24,74 @@ impl TokenErrorLog {
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "Error: Associated address does not match seed derivation" => Some(Self::InvalidSeeds),
-            "Error: Associated token account owner does not match address derivation" => Some(Self::InvalidOwner),
-            "Error: Owner associated address does not match seed derivation" => Some(Self::InvalidOwnerSeeds),
-            "Error: Nested associated address does not match seed derivation" => Some(Self::InvalidNestedSeeds),
-            "Error: Destination associated address does not match seed derivation" => Some(Self::InvalidDestinationSeeds),
-            "Wallet of the owner associated token account must sign"=>Some(Self::MissingRequiredSignature),
+            "Error: Associated token account owner does not match address derivation" => {
+                Some(Self::InvalidOwner)
+            }
+            "Error: Owner associated address does not match seed derivation" => {
+                Some(Self::InvalidOwnerSeeds)
+            }
+            "Error: Nested associated address does not match seed derivation" => {
+                Some(Self::InvalidNestedSeeds)
+            }
+            "Error: Destination associated address does not match seed derivation" => {
+                Some(Self::InvalidDestinationSeeds)
+            }
+            "Wallet of the owner associated token account must sign" => {
+                Some(Self::MissingRequiredSignature)
+            }
             "Owner mint not owned by provided token program" => Some(Self::IllegalMintOwner),
-            "Owner associated token account not owned by provided token program, recreate the owner associated token account first"=>Some(Self::IllegalAtaProgramOwner),
-            "Owner associated token account not owned by provided wallet" => Some(Self::IllegalAtaOwner),
-            "Nested associated token account not owned by provided token program" => Some(Self::IllegalNestedProgramOwner),
-            "Nested associated token account not owned by provided associated token account" => Some(Self::IllegalNestedOwner),
-            "Nested mint account not owned by provided token program" => Some(Self::IllegalNestedMintOwner),
-            _=>None
+            "Owner associated token account not owned by provided token program, recreate the owner associated token account first" => {
+                Some(Self::IllegalAtaProgramOwner)
+            }
+            "Owner associated token account not owned by provided wallet" => {
+                Some(Self::IllegalAtaOwner)
+            }
+            "Nested associated token account not owned by provided token program" => {
+                Some(Self::IllegalNestedProgramOwner)
+            }
+            "Nested associated token account not owned by provided associated token account" => {
+                Some(Self::IllegalNestedOwner)
+            }
+            "Nested mint account not owned by provided token program" => {
+                Some(Self::IllegalNestedMintOwner)
+            }
+            _ => None,
         }
     }
 
     #[inline]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::InvalidOwnerSeeds => "Error: Owner associated address does not match seed derivation",
+            Self::InvalidOwnerSeeds => {
+                "Error: Owner associated address does not match seed derivation"
+            }
             Self::InvalidSeeds => "Error: Associated address does not match seed derivation",
-            Self::InvalidNestedSeeds => "Error: Nested associated address does not match seed derivation",
-            Self::InvalidOwner => "Error: Associated token account owner does not match address derivation",
-            Self::InvalidDestinationSeeds => "Error: Destination associated address does not match seed derivation",
-            Self::MissingRequiredSignature => "Wallet of the owner associated token account must sign",
+            Self::InvalidNestedSeeds => {
+                "Error: Nested associated address does not match seed derivation"
+            }
+            Self::InvalidOwner => {
+                "Error: Associated token account owner does not match address derivation"
+            }
+            Self::InvalidDestinationSeeds => {
+                "Error: Destination associated address does not match seed derivation"
+            }
+            Self::MissingRequiredSignature => {
+                "Wallet of the owner associated token account must sign"
+            }
             Self::IllegalMintOwner => "Owner mint not owned by provided token program",
-            Self::IllegalAtaProgramOwner => "Owner associated token account not owned by provided token program, recreate the owner associated token account first",
-            Self::IllegalNestedProgramOwner => "Nested associated token account not owned by provided token program",
-            Self::IllegalNestedOwner => "Nested associated token account not owned by provided associated token account",
+            Self::IllegalAtaProgramOwner => {
+                "Owner associated token account not owned by provided token program, recreate the owner associated token account first"
+            }
+            Self::IllegalNestedProgramOwner => {
+                "Nested associated token account not owned by provided token program"
+            }
+            Self::IllegalNestedOwner => {
+                "Nested associated token account not owned by provided associated token account"
+            }
             Self::IllegalAtaOwner => "Owner associated token account not owned by provided wallet",
-            Self::IllegalNestedMintOwner => "Nested mint account not owned by provided token program",
+            Self::IllegalNestedMintOwner => {
+                "Nested mint account not owned by provided token program"
+            }
         }
     }
 }

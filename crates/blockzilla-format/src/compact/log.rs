@@ -3,8 +3,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 
-use crate::program_logs::{self, system_program, ProgramLog};
 use crate::Registry;
+use crate::program_logs::{self, ProgramLog, system_program};
 
 pub type StrId = u32;
 pub type ProgramId = u32;
@@ -40,50 +40,93 @@ pub enum LogEvent {
     ProgramLog(ProgramLog),
 
     /// `Program log: Error: <msg>`
-    ProgramLogError { msg: StrId },
+    ProgramLogError {
+        msg: StrId,
+    },
 
     /// `Program <id> log: <msg>`
-    ProgramIdLog { program: ProgramId, log: ProgramLog },
+    ProgramIdLog {
+        program: ProgramId,
+        log: ProgramLog,
+    },
 
-    Invoke { program: ProgramId, depth: u8 },
-    Consumed { program: ProgramId, used: u32, limit: u32 },
-    Success { program: ProgramId },
+    Invoke {
+        program: ProgramId,
+        depth: u8,
+    },
+    Consumed {
+        program: ProgramId,
+        used: u32,
+        limit: u32,
+    },
+    Success {
+        program: ProgramId,
+    },
 
     /// `Program <pk> failed: <reason>`
-    Failure { program: ProgramId, reason: StrId },
+    Failure {
+        program: ProgramId,
+        reason: StrId,
+    },
 
     /// `Program <pk> failed: custom program error: 0xNN`
-    FailureCustomProgramError { program: ProgramId, code: u32 },
+    FailureCustomProgramError {
+        program: ProgramId,
+        code: u32,
+    },
 
     /// `Program <pk> failed: invalid account data for instruction`
-    FailureInvalidAccountData { program: ProgramId },
+    FailureInvalidAccountData {
+        program: ProgramId,
+    },
 
     /// `Program <pk> failed: invalid program argument`
-    FailureInvalidProgramArgument { program: ProgramId },
+    FailureInvalidProgramArgument {
+        program: ProgramId,
+    },
 
-    FailedToComplete { reason: StrId },
+    FailedToComplete {
+        reason: StrId,
+    },
 
     /// Standalone: `custom program error: 0xNN`
-    CustomProgramError { code: u32 },
+    CustomProgramError {
+        code: u32,
+    },
 
     /// `Program return: <pk> <b64>`
     /// We keep the base64 payload as a string in the string table (no decoding).
-    Return { program: ProgramId, data_b64: StrId },
+    Return {
+        program: ProgramId,
+        data_b64: StrId,
+    },
 
     /// `Program data: <b64>`
     /// We keep the base64 payload as a string in the string table (no decoding).
-    Data { data_b64: StrId },
+    Data {
+        data_b64: StrId,
+    },
 
-    Consumption { units: u32 },
-    CbRequestUnits { units: u32 },
+    Consumption {
+        units: u32,
+    },
+    CbRequestUnits {
+        units: u32,
+    },
 
-    ProgramNotDeployed { program: Option<ProgramId> },
+    ProgramNotDeployed {
+        program: Option<ProgramId>,
+    },
 
     /// Runtime says this program is unknown. Keep as string (may not exist in registry).
-    UnknownProgram { program: StrId },
+    UnknownProgram {
+        program: StrId,
+    },
 
     /// Runtime says this account is unknown. Keep as string (will often not exist in registry).
-    UnknownAccount { account: StrId },
+    UnknownAccount {
+        account: StrId,
+    },
 
     /// Hardcoded runtime verifiers (remove stringly Syscall)
     VerifyEd25519,
@@ -92,8 +135,12 @@ pub enum LogEvent {
     /// Runtime context teardown
     CloseContextState,
 
-    Plain { text: StrId },
-    Unparsed { text: StrId },
+    Plain {
+        text: StrId,
+    },
+    Unparsed {
+        text: StrId,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -549,10 +596,9 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
                 st.resolve(*data_b64),
             )),
 
-            LogEvent::Data { data_b64 } => out.push(format!(
-                "Program data: {}",
-                st.resolve(*data_b64),
-            )),
+            LogEvent::Data { data_b64 } => {
+                out.push(format!("Program data: {}", st.resolve(*data_b64),))
+            }
 
             LogEvent::Consumption { units } => {
                 out.push(format!("Program consumption: {} units remaining", units))

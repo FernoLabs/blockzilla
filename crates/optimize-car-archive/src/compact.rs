@@ -317,7 +317,7 @@ pub fn to_compact_transaction(
             let recent_blockhash = bh_index
                 .get(&recent_blockhash)
                 .copied()
-                .map(|id| CompactRecentBlockhash::Id(id))
+                .map(CompactRecentBlockhash::Id)
                 .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
 
             let instructions = m
@@ -366,7 +366,7 @@ pub fn to_compact_transaction(
             let recent_blockhash = bh_index
                 .get(&recent_blockhash)
                 .copied()
-                .map(|id| CompactRecentBlockhash::Id(id))
+                .map(CompactRecentBlockhash::Id)
                 .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
 
             let instructions = m

@@ -1,10 +1,10 @@
 use clap::Parser;
-use tracing::{info, Level};
+use tracing::{Level, info};
 
 use car_reader::{
+    CarBlockReader,
     car_block_group::CarBlockGroup,
     error::{CarReadError as CarError, CarReadResult as Result},
-    CarBlockReader,
 };
 
 use std::fs::File;

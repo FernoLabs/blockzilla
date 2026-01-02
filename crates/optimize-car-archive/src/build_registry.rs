@@ -76,7 +76,7 @@ struct PubkeyCounter {
 
 impl PubkeyCounter {
     fn new(cap: usize) -> Self {
-        let counts = FxHashMap::with_capacity_and_hasher(cap, FxBuildHasher::default());
+        let counts = FxHashMap::with_capacity_and_hasher(cap, FxBuildHasher);
         Self { counts }
     }
 

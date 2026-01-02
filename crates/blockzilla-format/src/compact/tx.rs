@@ -57,4 +57,3 @@ pub struct CompactV0Message {
     pub instructions: Vec<CompactInstruction>,
     pub address_table_lookups: Vec<CompactAddressTableLookup>,
 }
-

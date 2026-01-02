@@ -7,11 +7,11 @@ pub const PREV_TAIL_LEN: usize = 200;
 ///
 /// Index convention (signed):
 ///   >= 0  → current epoch (index in `hashes`)
-///   <  0  → previous epoch tail
-///           -1 = last (newest)
-///           -2 = second last
-///           ...
-///           -150 = 150th last
+/// > <  0  → previous epoch tail
+/// > -1 = last (newest)
+/// > -2 = second last
+/// > ...
+/// > -150 = 150th last
 #[derive(Debug, Clone)]
 pub struct BlockhashRegistry {
     /// All blockhashes for the current epoch (in seen order).
@@ -29,10 +29,8 @@ impl BlockhashRegistry {
             prev_tail.drain(0..prev_tail.len() - PREV_TAIL_LEN);
         }
 
-        let mut index = FxHashMap::with_capacity_and_hasher(
-            hashes.len() + prev_tail.len(),
-            FxBuildHasher::default(),
-        );
+        let mut index =
+            FxHashMap::with_capacity_and_hasher(hashes.len() + prev_tail.len(), FxBuildHasher);
 
         // 1) Insert previous-epoch tail with NEGATIVE ids.
         //

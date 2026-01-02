@@ -1,16 +1,16 @@
 use {
     solana_address::Address,
     solana_hash::Hash,
-    solana_message::{self, legacy, v0, MESSAGE_VERSION_PREFIX},
+    solana_message::{self, MESSAGE_VERSION_PREFIX, legacy, v0},
     solana_signature::Signature,
     solana_transaction::versioned,
     std::mem::MaybeUninit,
     wincode::{
+        ReadResult, SchemaRead, SchemaWrite,
         containers::{self, Pod},
         error::invalid_tag_encoding,
         io::Reader,
         len::ShortU16Len,
-        ReadResult, SchemaRead, SchemaWrite,
     },
 };
 

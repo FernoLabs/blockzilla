@@ -1,4 +1,4 @@
-use wincode::{containers, len::ShortU16Len, SchemaRead};
+use wincode::{SchemaRead, containers, len::ShortU16Len};
 
 use crate::{confirmed_block, convert_metadata};
 

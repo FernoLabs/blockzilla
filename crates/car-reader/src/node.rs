@@ -78,7 +78,6 @@ where
             return Err(minicbor::decode::Error::message("index out of bounds"));
         }
         for _ in 0..idx {
-            
             d.skip()?;
         }
         d.decode_with(&mut ())
