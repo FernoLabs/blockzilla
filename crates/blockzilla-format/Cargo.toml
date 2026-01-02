@@ -13,6 +13,5 @@ postcard = { version = "1", features = ["alloc","use-std"] }
 wincode = { version = "0.2.5", features = ["derive"] }
 solana-pubkey = "4.0.0"
 car-reader = { path = "../car-reader"}
-tracing = "0.1.44"
 serde-big-array = "0.5.1"
 

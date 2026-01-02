@@ -11,14 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
-async-compression = { version = "0.4", features = ["tokio", "zstd"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 blockzilla-format = { path = "../crates/blockzilla-format" }
-mimalloc = "0.1.48"
-pprof = { version = "0.15", features = ["flamegraph", "prost-codec","protobuf"] }
-prost = "0.12"
+prost = "0.14"
 zstd = "0.13.3"
 serde = "1.0.228"
 anyhow = "1.0.100"
