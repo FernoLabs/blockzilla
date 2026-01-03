@@ -1,4 +1,3 @@
-use cid::Cid;
 use core::marker::PhantomData;
 use minicbor::data::Type;
 use minicbor::decode::Error as CborError;
