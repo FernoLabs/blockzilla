@@ -32,7 +32,7 @@ pub(crate) fn file_nonempty(path: &Path) -> bool {
 #[command(version)]
 pub(crate) struct Cli {
     /// Cache directory containing CAR files
-    #[arg(long, default_value = "cache", global = true)]
+    #[arg(long, default_value = "epochs", global = true)]
     pub(crate) cache_dir: PathBuf,
 
     /// Output directory for blockzilla archives
