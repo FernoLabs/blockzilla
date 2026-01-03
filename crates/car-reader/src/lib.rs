@@ -4,6 +4,7 @@
 //! Designed to be reusable, auditable, and verifiable against other implementations.
 
 pub mod car_block_group;
+pub mod car_stream;
 mod cid;
 mod convert_metadata;
 pub mod error;

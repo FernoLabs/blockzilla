@@ -2,13 +2,12 @@ use clap::Parser;
 use tracing::{Level, info};
 
 use car_reader::{
-    CarBlockReader,
     car_block_group::CarBlockGroup,
+    car_stream::CarStream,
     error::{CarReadError as CarError, CarReadResult as Result},
 };
 
-use std::fs::File;
-use std::io::BufReader;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
@@ -78,7 +77,7 @@ impl Stats {
                 CarError::InvalidData(format!("transaction iteration failed: {e:?}"))
             })?;
 
-            while let Some((tx, maybe_meta)) = it
+            while let Some((_tx, maybe_meta)) = it
                 .next_tx()
                 .map_err(|e| CarError::InvalidData(format!("transaction decode failed: {e:?}")))?
             {
@@ -126,17 +125,6 @@ fn main() -> Result<()> {
         args.input, args.decode_tx
     );
 
-    let file = File::open(&args.input).map_err(|e| CarError::Io(e.to_string()))?;
-    let file = BufReader::with_capacity(128 << 20, file);
-
-    let zstd = zstd::Decoder::with_buffer(file)
-        .map_err(|e| CarError::InvalidData(format!("zstd decoder init failed: {e}")))?;
-
-    let mut car = CarBlockReader::with_capacity(zstd, 128 << 20);
-    car.skip_header()?;
-
-    let mut group = CarBlockGroup::new();
-
     let stats_every = Duration::from_secs(args.stats_every.max(1));
     let start = Instant::now();
     let end = if args.seconds == 0 {
@@ -148,7 +136,8 @@ fn main() -> Result<()> {
     let mut stats = Stats::default();
     let mut last_print = Instant::now();
 
-    while car.read_until_block_into(&mut group)? {
+    let mut stream = CarStream::open_zstd(Path::new(&args.input))?;
+    while let Some(group) = stream.next_group()? {
         stats.add_group(&group, args.decode_tx)?;
 
         let now = Instant::now();

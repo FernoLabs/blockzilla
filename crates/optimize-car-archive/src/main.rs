@@ -1,14 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::{
-    fs::File,
-    io::BufReader,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tracing::{Level, info};
-
-use car_reader::{CarBlockReader, car_block_group::CarBlockGroup};
 
 pub const BUFFER_SIZE: usize = 256 << 20;
 pub const PROGRESS_REPORT_INTERVAL_SECS: u64 = 3;
@@ -292,23 +288,4 @@ pub fn derived_uncompressed_path(car_path: &Path) -> Option<PathBuf> {
     }
 
     None
-}
-
-pub(crate) fn stream_car_blocks<F>(car_path: &Path, mut f: F) -> Result<()>
-where
-    F: FnMut(&CarBlockGroup) -> Result<()>,
-{
-    let file = File::open(car_path).with_context(|| format!("open {}", car_path.display()))?;
-    let file = BufReader::with_capacity(BUFFER_SIZE, file);
-
-    let zstd = zstd::Decoder::with_buffer(file).context("init zstd decoder")?;
-    let mut reader = CarBlockReader::with_capacity(zstd, BUFFER_SIZE);
-    reader.skip_header().context("skip CAR header")?;
-
-    let mut group = CarBlockGroup::new();
-    while reader.read_until_block_into(&mut group).is_ok() {
-        f(&group)?;
-        group.clear();
-    }
-    Ok(())
 }
