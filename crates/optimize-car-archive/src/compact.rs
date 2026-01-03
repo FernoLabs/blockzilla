@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use car_reader::car_stream::CarStream;
 use car_reader::versioned_transaction::VersionedMessage;
 use car_reader::versioned_transaction::VersionedTransaction;
 use rustc_hash::FxHashMap;
@@ -22,7 +23,7 @@ use blockzilla_format::{
     PostcardFramedWriter, Registry, Signature, compact_meta_from_proto, load_registry,
 };
 
-use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths, stream_car_blocks};
+use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths};
 
 pub const PREV_TAIL_LEN: usize = 200;
 
@@ -184,7 +185,8 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     // block_i is the id, previous is block_i-1 (0 for first).
     let mut block_count: u32 = 0;
 
-    stream_car_blocks(&car_path, |group| {
+    let mut stream = CarStream::open_zstd(Path::new(&car_path))?;
+    while let Some(group) = stream.next_group()? {
         let (blocks_delta, txs_delta, slot) =
             compact_process_block(group, &registry, &bh, &mut writer, block_count)?;
         block_count = block_count.wrapping_add(1);
@@ -192,8 +194,7 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
         if let Some(s) = slot {
             progress.update_slot(s);
         }
-        Ok(())
-    })?;
+    }
 
     writer.flush()?;
     std::fs::rename(&tmp_path, &compact_path).with_context(|| {

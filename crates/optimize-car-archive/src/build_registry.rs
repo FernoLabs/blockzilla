@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use car_reader::versioned_transaction::VersionedMessage;
+use car_reader::{car_stream::CarStream, versioned_transaction::VersionedMessage};
 use rustc_hash::FxBuildHasher;
 use solana_pubkey::Pubkey;
-use std::{str::FromStr, time::Instant};
+use std::{path::Path, str::FromStr, time::Instant};
 use tracing::info;
 
 use rustc_hash::FxHashMap;
@@ -15,7 +15,7 @@ use car_reader::{
 
 use blockzilla_format::write_registry;
 
-use crate::{Cli, ProgressTracker, epoch_paths, stream_car_blocks};
+use crate::{Cli, ProgressTracker, epoch_paths};
 
 pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let (car_path, epoch_dir, registry_path, _, _) = epoch_paths(cli, epoch);
@@ -33,14 +33,14 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let mut counter = PubkeyCounter::new(16_000_000);
     let mut progress = ProgressTracker::new("Phase 1/2");
 
-    stream_car_blocks(&car_path, |group| {
+    let mut stream = CarStream::open_zstd(Path::new(&car_path))?;
+    while let Some(group) = stream.next_group()? {
         let (blocks_delta, txs_delta, slot) = registry_process_block(group, &mut counter)?;
         if let Some(s) = slot {
             progress.update_slot(s);
         }
         progress.update(blocks_delta, txs_delta);
-        Ok(())
-    })?;
+    }
 
     progress.final_report();
     info!("Unique pubkeys: {}", counter.counts.len());
@@ -135,13 +135,15 @@ fn registry_process_block(
                     counter.add32(pk.as_array());
                 }
                 if !tb.owner.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.owner) {
-                        counter.add32(pk.as_array());
-                    }
+                    && let Ok(pk) = Pubkey::from_str(&tb.owner)
+                {
+                    counter.add32(pk.as_array());
+                }
                 if !tb.program_id.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.program_id) {
-                        counter.add32(pk.as_array());
-                    }
+                    && let Ok(pk) = Pubkey::from_str(&tb.program_id)
+                {
+                    counter.add32(pk.as_array());
+                }
             }
         }
     }
