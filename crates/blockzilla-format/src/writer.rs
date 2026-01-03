@@ -28,3 +28,13 @@ impl<W: Write> PostcardFramedWriter<W> {
         self.w
     }
 }
+
+impl<W: std::io::Write> PostcardFramedWriter<W> {
+    #[inline]
+    pub fn write_bytes(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+        let len = payload.len() as u32;
+        self.w.write_all(&len.to_le_bytes())?;
+        self.w.write_all(payload)?;
+        Ok(())
+    }
+}

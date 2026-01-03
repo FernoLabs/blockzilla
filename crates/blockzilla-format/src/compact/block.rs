@@ -4,9 +4,10 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::CompactMetaV1;
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct CompactBlockRecord {
+pub struct CompactBlockRecord<'a> {
     pub header: CompactBlockHeader,
-    pub txs: Vec<CompactTxWithMeta>,
+    #[serde(borrow)]
+    pub txs: Vec<CompactTxWithMeta<'a>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -20,7 +21,8 @@ pub struct CompactBlockHeader {
 }
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct CompactTxWithMeta {
-    pub tx: crate::compact::CompactTransaction,
+pub struct CompactTxWithMeta<'a> {
+    #[serde(borrow)]
+    pub tx: crate::compact::CompactTransaction<'a>,
     pub metadata: Option<CompactMetaV1>,
 }

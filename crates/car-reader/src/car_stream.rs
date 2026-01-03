@@ -31,8 +31,6 @@ impl CarStream<zstd::Decoder<'static, BufReader<File>>> {
         })
     }
 
-    /// Loads the next block group into the internal reusable buffer.
-    /// The returned reference is valid until the next call.
     #[inline(always)]
     pub fn next_group(&mut self) -> Result<Option<&CarBlockGroup>> {
         if self.car.read_until_block_into(&mut self.group).is_ok() {
@@ -40,11 +38,5 @@ impl CarStream<zstd::Decoder<'static, BufReader<File>>> {
         } else {
             Ok(None)
         }
-    }
-
-    /// If you want to reuse the group outside the struct sometimes.
-    #[inline(always)]
-    pub fn group_mut(&mut self) -> &mut CarBlockGroup {
-        &mut self.group
     }
 }
