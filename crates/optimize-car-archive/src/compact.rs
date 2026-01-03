@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use car_reader::car_stream::CarStream;
-use car_reader::versioned_transaction::VersionedMessage;
-use car_reader::versioned_transaction::VersionedTransaction;
+use car_reader::versioned_transaction::{VersionedMessage, VersionedTransaction};
 use rustc_hash::FxHashMap;
 use std::{
     fs::File,
@@ -13,17 +12,14 @@ use tracing::{error, info, warn};
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
-    node::{Node, decode_node},
+    node::{decode_node, Node},
 };
 
 use blockzilla_format::{
-    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactBlockRecord,
-    CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader,
-    CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message,
-    PostcardFramedWriter, Registry, Signature, compact_meta_from_proto, load_registry,
+    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader, CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message, PostcardFramedWriter, Registry, Signature, compact_meta_from_proto, load_registry
 };
 
-use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths};
+use crate::{epoch_paths, Cli, ProgressTracker, BUFFER_SIZE};
 
 pub const PREV_TAIL_LEN: usize = 200;
 
@@ -146,7 +142,6 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     info!("Blockhash registry loaded: {} hashes", hashes.len());
 
     // Load previous epoch tail if possible.
-    // We derive the prev path from epoch_paths(epoch - 1) so it matches your folder layout.
     let prev_tail = if epoch == 0 {
         Vec::new()
     } else {
@@ -181,14 +176,25 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
 
     let mut progress = ProgressTracker::new("Phase 2/2");
 
-    // Blockhash ids are implicit for CompactBlockHeader:
-    // block_i is the id, previous is block_i-1 (0 for first).
     let mut block_count: u32 = 0;
+
+    // Reusable per-block buffers
+    let mut tx_payload: Vec<u8> = Vec::with_capacity(8 << 20);
+    let mut block_payload: Vec<u8> = Vec::with_capacity(8 << 20);
+    let mut varint_buf: [u8; varint_max::<usize>()] = [0u8; varint_max::<usize>()];
 
     let mut stream = CarStream::open_zstd(Path::new(&car_path))?;
     while let Some(group) = stream.next_group()? {
-        let (blocks_delta, txs_delta, slot) =
-            compact_process_block(group, &registry, &bh, &mut writer, block_count)?;
+        let (blocks_delta, txs_delta, slot) = compact_process_block_manual(
+            group,
+            &registry,
+            &bh.index,
+            &mut writer,
+            block_count,
+            &mut tx_payload,
+            &mut block_payload,
+            &mut varint_buf,
+        )?;
         block_count = block_count.wrapping_add(1);
         progress.update(blocks_delta, txs_delta);
         if let Some(s) = slot {
@@ -209,145 +215,15 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     Ok(())
 }
 
-pub fn to_compact_transaction(
-    vtx: &car_reader::versioned_transaction::VersionedTransaction,
-    registry: &Registry,
-    bh_index: &FxHashMap<[u8; 32], i32>,
-) -> Result<CompactTransaction> {
-    // Signatures
-    let mut signatures = Vec::with_capacity(vtx.signatures.len());
-    for s in &vtx.signatures {
-        signatures.push(Signature(**s));
-    }
-
-    // Message
-    let message = match &vtx.message {
-        VersionedMessage::Legacy(m) => {
-            let header = CompactMessageHeader {
-                num_required_signatures: m.header.num_required_signatures,
-                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
-                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
-            };
-
-            // Account keys
-            let mut account_keys = Vec::with_capacity(m.account_keys.len());
-            for key in &m.account_keys {
-                // If `key` is already `[u8;32]`, this is zero-copy.
-                // If it’s a Pubkey-like type, prefer `key.to_bytes()` or `*key.as_array()` as appropriate.
-                let idx = registry
-                    .lookup(key)
-                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
-                account_keys.push(idx);
-            }
-
-            // Recent blockhash
-            let recent_blockhash: [u8; 32] = m
-                .recent_blockhash
-                .as_ref()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
-
-            let recent_blockhash = bh_index
-                .get(&recent_blockhash)
-                .copied()
-                .map(CompactRecentBlockhash::Id)
-                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
-
-            // Instructions
-            let mut instructions = Vec::with_capacity(m.instructions.len());
-            for ix in &m.instructions {
-                instructions.push(CompactInstruction {
-                    program_id_index: ix.program_id_index,
-                    accounts: ix.accounts.clone(),
-                    data: ix.data.clone(),
-                });
-            }
-
-            CompactMessage::Legacy(CompactLegacyMessage {
-                header,
-                account_keys,
-                recent_blockhash,
-                instructions,
-            })
-        }
-
-        VersionedMessage::V0(m) => {
-            let header = CompactMessageHeader {
-                num_required_signatures: m.header.num_required_signatures,
-                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
-                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
-            };
-
-            // Account keys
-            let mut account_keys = Vec::with_capacity(m.account_keys.len());
-            for key in &m.account_keys {
-                let idx = registry
-                    .lookup(key)
-                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
-                account_keys.push(idx);
-            }
-
-            // Recent blockhash
-            let recent_blockhash: [u8; 32] = m
-                .recent_blockhash
-                .as_ref()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
-
-            let recent_blockhash = bh_index
-                .get(&recent_blockhash)
-                .copied()
-                .map(CompactRecentBlockhash::Id)
-                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
-
-            // Instructions
-            let mut instructions = Vec::with_capacity(m.instructions.len());
-            for ix in &m.instructions {
-                instructions.push(CompactInstruction {
-                    program_id_index: ix.program_id_index,
-                    accounts: ix.accounts.clone(),
-                    data: ix.data.clone(),
-                });
-            }
-
-            // Address table lookups
-            let mut address_table_lookups = Vec::with_capacity(m.address_table_lookups.len());
-            for lookup in &m.address_table_lookups {
-                // If lookup.account_key is `[u8;32]`, registry.lookup can use it directly.
-                // If it’s Pubkey, use lookup.account_key.to_bytes() / as_array depending on type.
-                let table_idx = registry
-                    .lookup(lookup.account_key)
-                    .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
-
-                address_table_lookups.push(CompactAddressTableLookup {
-                    account_key: table_idx,
-                    writable_indexes: lookup.writable_indexes.to_vec(),
-                    readonly_indexes: lookup.readonly_indexes.to_vec(),
-                });
-            }
-
-            CompactMessage::V0(CompactV0Message {
-                header,
-                account_keys,
-                recent_blockhash,
-                instructions,
-                address_table_lookups,
-            })
-        }
-    };
-
-    Ok(CompactTransaction {
-        signatures,
-        message,
-    })
-}
-
-fn compact_process_block<W: std::io::Write>(
+fn compact_process_block_manual<W: std::io::Write>(
     group: &CarBlockGroup,
     registry: &Registry,
-    bh: &BlockhashRegistry,
+    bh_index: &FxHashMap<[u8; 32], i32>,
     writer: &mut PostcardFramedWriter<W>,
     block_i: u32,
+    tx_payload: &mut Vec<u8>,
+    block_payload: &mut Vec<u8>,
+    varint_tmp: &mut [u8; varint_max::<usize>()],
 ) -> Result<(u64, u64, Option<u64>), GroupError> {
     let block = match decode_node(group.block_payload.as_ref()).map_err(GroupError::Node)? {
         Node::Block(b) => b,
@@ -364,17 +240,18 @@ fn compact_process_block<W: std::io::Write>(
         block_height: block.meta.block_height,
     };
 
-    let mut txs = 0u64;
+    tx_payload.clear();
+
+    let mut txs: u64 = 0;
     let mut tx_index_in_block: u32 = 0;
 
-    let mut out_txs: Vec<CompactTxWithMeta> = Vec::with_capacity(4096);
     let mut it = group.transactions()?;
 
     while let Some((vtx, maybe_meta)) = it.next_tx()? {
         txs += 1;
         tx_index_in_block += 1;
 
-        let compact_tx = to_compact_transaction(vtx, registry, &bh.index).map_err(|e| {
+        let compact_tx = to_compact_transaction(vtx, registry, bh_index).map_err(|e| {
             error!(
                 "FAIL to_compact_transaction: block_slot={} tx_index_in_block={} kind={} sigs={}",
                 block_slot,
@@ -400,18 +277,182 @@ fn compact_process_block<W: std::io::Write>(
             None
         };
 
-        out_txs.push(CompactTxWithMeta {
+        let elem = CompactTxWithMeta {
             tx: compact_tx,
             metadata: metadata_opt,
-        });
+        };
+
+        // Serialize element now while borrows are valid.
+        postcard::to_io(&elem, &mut *tx_payload).map_err(|_| GroupError::Io)?;
     }
 
-    writer
-        .write(&CompactBlockRecord {
-            header,
-            txs: out_txs,
-        })
-        .map_err(|_| GroupError::Io)?;
+    // Build one payload for the block frame:
+    // postcard(header) + varint(tx_count) + concatenated tx elements
+    block_payload.clear();
+    postcard::to_io(&header, &mut *block_payload).map_err(|_| GroupError::Io)?;
+
+    let tx_count = txs as usize;
+    let len_bytes = varint_usize(tx_count, varint_tmp);
+    block_payload.extend_from_slice(len_bytes);
+    block_payload.extend_from_slice(&mut *tx_payload);
+
+    // IMPORTANT: you need a `write_bytes` method on PostcardFramedWriter.
+    // Since your current PostcardFramedWriter doesn't expose `w`, implement this
+    // in blockzilla_format (recommended) or add a method there.
+    //
+    // Example method:
+    //   pub fn write_bytes(&mut self, payload: &[u8]) -> Result<()> { ... }
+    //
+    // Call:
+    writer.write_bytes(block_payload).map_err(|_| GroupError::Io)?;
 
     Ok((1, txs, Some(block_slot)))
+}
+
+//
+// Postcard varint helpers (your snippet)
+//
+
+/// Returns the maximum number of bytes required to encode T.
+pub const fn varint_max<T: Sized>() -> usize {
+    const BITS_PER_BYTE: usize = 8;
+    const BITS_PER_VARINT_BYTE: usize = 7;
+
+    let bits = core::mem::size_of::<T>() * BITS_PER_BYTE;
+    let roundup_bits = bits + (BITS_PER_VARINT_BYTE - 1);
+    roundup_bits / BITS_PER_VARINT_BYTE
+}
+
+#[inline]
+pub fn varint_usize(n: usize, out: &mut [u8; varint_max::<usize>()]) -> &mut [u8] {
+    let mut value = n;
+    for i in 0..varint_max::<usize>() {
+        out[i] = value.to_le_bytes()[0];
+        if value < 128 {
+            return &mut out[..=i];
+        }
+
+        out[i] |= 0x80;
+        value >>= 7;
+    }
+    debug_assert_eq!(value, 0);
+    &mut out[..]
+}
+
+pub fn to_compact_transaction<'a>(
+    vtx: &'a car_reader::versioned_transaction::VersionedTransaction,
+    registry: &Registry,
+    bh_index: &FxHashMap<[u8; 32], i32>,
+) -> Result<CompactTransaction<'a>> {
+    // Signatures (still owning)
+    let mut signatures = Vec::with_capacity(vtx.signatures.len());
+    for s in &vtx.signatures {
+        signatures.push(Signature(**s));
+    }
+
+    let message = match &vtx.message {
+        VersionedMessage::Legacy(m) => {
+            let header = CompactMessageHeader {
+                num_required_signatures: m.header.num_required_signatures,
+                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
+            };
+
+            let mut account_keys = Vec::with_capacity(m.account_keys.len());
+            for key in &m.account_keys {
+                let idx = registry
+                    .lookup(key)
+                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
+                account_keys.push(idx);
+            }
+
+            let recent_blockhash: [u8; 32] = m
+                .recent_blockhash
+                .as_ref()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+
+            let recent_blockhash = bh_index
+                .get(&recent_blockhash)
+                .copied()
+                .map(CompactRecentBlockhash::Id)
+                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
+
+            let mut instructions = Vec::with_capacity(m.instructions.len());
+            for ix in &m.instructions {
+                instructions.push(CompactInstruction {
+                    program_id_index: ix.program_id_index,
+                    accounts: ix.accounts.as_ref(),
+                    data: ix.data.as_ref(),
+                });
+            }
+
+            CompactMessage::Legacy(CompactLegacyMessage {
+                header,
+                account_keys,
+                recent_blockhash,
+                instructions,
+            })
+        }
+
+        VersionedMessage::V0(m) => {
+            let header = CompactMessageHeader {
+                num_required_signatures: m.header.num_required_signatures,
+                num_readonly_signed_accounts: m.header.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
+            };
+
+            let mut account_keys = Vec::with_capacity(m.account_keys.len());
+            for key in &m.account_keys {
+                let idx = registry
+                    .lookup(key)
+                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
+                account_keys.push(idx);
+            }
+
+            let recent_blockhash: [u8; 32] = m
+                .recent_blockhash
+                .as_ref()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+
+            let recent_blockhash = bh_index
+                .get(&recent_blockhash)
+                .copied()
+                .map(CompactRecentBlockhash::Id)
+                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
+
+            let mut instructions = Vec::with_capacity(m.instructions.len());
+            for ix in &m.instructions {
+                instructions.push(CompactInstruction {
+                    program_id_index: ix.program_id_index,
+                    accounts: ix.accounts.as_ref(),
+                    data: ix.data.as_ref(),
+                });
+            }
+
+            let mut address_table_lookups = Vec::with_capacity(m.address_table_lookups.len());
+            for lookup in &m.address_table_lookups {
+                let table_idx = registry
+                    .lookup(lookup.account_key)
+                    .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
+
+                address_table_lookups.push(CompactAddressTableLookup {
+                    account_key: table_idx,
+                    writable_indexes: lookup.writable_indexes.as_ref(),
+                    readonly_indexes: lookup.readonly_indexes.as_ref(),
+                });
+            }
+
+            CompactMessage::V0(CompactV0Message {
+                header,
+                account_keys,
+                recent_blockhash,
+                instructions,
+                address_table_lookups,
+            })
+        }
+    };
+
+    Ok(CompactTransaction { signatures, message })
 }

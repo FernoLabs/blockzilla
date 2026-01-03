@@ -6,15 +6,16 @@ use wincode::{SchemaRead, SchemaWrite};
 pub struct Signature(#[serde(with = "BigArray")] pub [u8; 64]);
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct CompactTransaction {
+pub struct CompactTransaction<'a> {
     pub signatures: Vec<Signature>,
-    pub message: CompactMessage,
+    #[serde(borrow)]
+    pub message: CompactMessage<'a>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub enum CompactMessage {
-    Legacy(CompactLegacyMessage),
-    V0(CompactV0Message),
+pub enum CompactMessage<'a> {
+    Legacy(#[serde(borrow)] CompactLegacyMessage<'a>),
+    V0(#[serde(borrow)] CompactV0Message<'a>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -25,25 +26,30 @@ pub struct CompactMessageHeader {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct CompactInstruction {
+pub struct CompactInstruction<'a> {
     pub program_id_index: u8,
-    pub accounts: Vec<u8>,
-    pub data: Vec<u8>,
+    #[serde(borrow)]
+    pub accounts: &'a [u8],
+    #[serde(borrow)]
+    pub data: &'a [u8],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct CompactLegacyMessage {
+pub struct CompactLegacyMessage<'a> {
     pub header: CompactMessageHeader,
     pub account_keys: Vec<u32>,                   // registry indices
     pub recent_blockhash: CompactRecentBlockhash, // blockhash registry id
-    pub instructions: Vec<CompactInstruction>,
+    #[serde(borrow)]
+    pub instructions: Vec<CompactInstruction<'a>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct CompactAddressTableLookup {
+pub struct CompactAddressTableLookup<'a> {
     pub account_key: u32, // registry index of the table address
-    pub writable_indexes: Vec<u8>,
-    pub readonly_indexes: Vec<u8>,
+    #[serde(borrow)]
+    pub writable_indexes: &'a [u8],
+    #[serde(borrow)]
+    pub readonly_indexes: &'a [u8],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -55,10 +61,12 @@ pub enum CompactRecentBlockhash {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct CompactV0Message {
+pub struct CompactV0Message<'a> {
     pub header: CompactMessageHeader,
     pub account_keys: Vec<u32>, // registry indices of static keys
     pub recent_blockhash: CompactRecentBlockhash,
-    pub instructions: Vec<CompactInstruction>,
-    pub address_table_lookups: Vec<CompactAddressTableLookup>,
+    #[serde(borrow)]
+    pub instructions: Vec<CompactInstruction<'a>>,
+    #[serde(borrow)]
+    pub address_table_lookups: Vec<CompactAddressTableLookup<'a>>,
 }
