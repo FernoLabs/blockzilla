@@ -251,11 +251,6 @@ pub struct CborCidRef<'a> {
 
 impl<'a> CborCidRef<'a> {
     #[inline]
-    pub fn to_cid(&self) -> core::result::Result<Cid, cid::Error> {
-        Cid::read_bytes(&self.bytes[1..])
-    }
-
-    #[inline]
     pub fn hash_bytes(&self) -> &'a [u8] {
         &self.bytes[1..]
     }

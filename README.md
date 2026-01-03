@@ -20,7 +20,7 @@ cargo run --release --bin optimize-car-archive build-all
 cargo run --release --bin optimize-car-archive build 800
 ```
 
-## run analyze
+## Run analyze
 
 ```
 cargo run --release --bin blockzilla analyze --input blockzilla-v1/epoch-800/compact.bin
