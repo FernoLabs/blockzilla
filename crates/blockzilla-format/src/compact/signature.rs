@@ -1,6 +1,6 @@
 use serde::{
-    de::{Error as DeError, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
+    de::{Error as DeError, Visitor},
 };
 use std::fmt;
 use wincode::{SchemaRead, SchemaWrite};

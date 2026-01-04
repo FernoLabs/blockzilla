@@ -12,14 +12,17 @@ use tracing::{error, info, warn};
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
-    node::{decode_node, Node},
+    node::{Node, decode_node},
 };
 
 use blockzilla_format::{
-    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactInstruction, CompactLegacyMessage, CompactMessage, CompactMessageHeader, CompactRecentBlockhash, CompactTransaction, CompactTxWithMeta, CompactV0Message, PostcardFramedWriter, Registry, Signature, compact_meta_from_proto, load_registry
+    BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactInstruction,
+    CompactLegacyMessage, CompactMessage, CompactMessageHeader, CompactRecentBlockhash,
+    CompactTransaction, CompactTxWithMeta, CompactV0Message, PostcardFramedWriter, Registry,
+    Signature, compact_meta_from_proto, load_registry,
 };
 
-use crate::{epoch_paths, Cli, ProgressTracker, BUFFER_SIZE};
+use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths};
 
 pub const PREV_TAIL_LEN: usize = 200;
 
@@ -282,36 +285,24 @@ fn compact_process_block_manual<W: std::io::Write>(
             metadata: metadata_opt,
         };
 
-        // Serialize element now while borrows are valid.
         postcard::to_io(&elem, &mut *tx_payload).map_err(|_| GroupError::Io)?;
     }
 
-    // Build one payload for the block frame:
-    // postcard(header) + varint(tx_count) + concatenated tx elements
     block_payload.clear();
     postcard::to_io(&header, &mut *block_payload).map_err(|_| GroupError::Io)?;
 
     let tx_count = txs as usize;
     let len_bytes = varint_usize(tx_count, varint_tmp);
     block_payload.extend_from_slice(len_bytes);
-    block_payload.extend_from_slice(&mut *tx_payload);
+    block_payload.extend_from_slice(&*tx_payload);
 
-    // IMPORTANT: you need a `write_bytes` method on PostcardFramedWriter.
-    // Since your current PostcardFramedWriter doesn't expose `w`, implement this
-    // in blockzilla_format (recommended) or add a method there.
-    //
-    // Example method:
-    //   pub fn write_bytes(&mut self, payload: &[u8]) -> Result<()> { ... }
-    //
-    // Call:
-    writer.write_bytes(block_payload).map_err(|_| GroupError::Io)?;
+    writer
+        .write_bytes(block_payload)
+        .map_err(|_| GroupError::Io)?;
 
     Ok((1, txs, Some(block_slot)))
 }
 
-//
-// Postcard varint helpers (your snippet)
-//
 
 /// Returns the maximum number of bytes required to encode T.
 pub const fn varint_max<T: Sized>() -> usize {
@@ -344,10 +335,9 @@ pub fn to_compact_transaction<'a>(
     registry: &Registry,
     bh_index: &FxHashMap<[u8; 32], i32>,
 ) -> Result<CompactTransaction<'a>> {
-    // Signatures (still owning)
     let mut signatures = Vec::with_capacity(vtx.signatures.len());
     for s in &vtx.signatures {
-        signatures.push(Signature(*s));
+        signatures.push(Signature(s));
     }
 
     let message = match &vtx.message {
@@ -454,5 +444,8 @@ pub fn to_compact_transaction<'a>(
         }
     };
 
-    Ok(CompactTransaction { signatures, message })
+    Ok(CompactTransaction {
+        signatures,
+        message,
+    })
 }
