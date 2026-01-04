@@ -3,8 +3,8 @@ use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::Registry;
 use crate::log::{StrId, StringTable};
+use crate::{KeyIndex, KeyStore};
 
 /// System Program id
 pub const STR_ID: &str = "11111111111111111111111111111111";
@@ -101,20 +101,19 @@ fn parse_u64_commas(s: &str) -> Option<u64> {
 
 /// Parse a pubkey string and convert to registry-backed PubkeyId (1-based).
 #[inline]
-fn parse_pubkey_id(registry: &Registry, pk_txt: &str) -> Option<PubkeyId> {
+fn parse_pubkey_id(index: &KeyIndex, pk_txt: &str) -> Option<PubkeyId> {
     let pk = Pubkey::from_str(pk_txt.trim()).ok()?;
-    let ix0 = registry.lookup(&pk.to_bytes())?;
-    Some(ix0)
+    Some(index.lookup_unchecked(&pk.to_bytes()))
 }
 
 #[inline]
-fn pubkey_id_to_pubkey(registry: &Registry, id: PubkeyId) -> Pubkey {
+fn pubkey_id_to_pubkey(store: &KeyStore, id: PubkeyId) -> Pubkey {
     assert!(id != 0, "SystemProgramLog: PubkeyId=0 is reserved/invalid");
-    let bytes = registry.get(id).unwrap_or_else(|| {
+    let bytes = store.get(id).unwrap_or_else(|| {
         panic!(
             "SystemProgramLog: PubkeyId out of bounds: id={} len={}",
             id,
-            registry.len()
+            store.len()
         )
     });
     Pubkey::new_from_array(*bytes)
@@ -138,7 +137,7 @@ fn parse_between<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<&'a st
 ///
 /// We accept both and return the registry-backed PubkeyId.
 #[inline]
-fn parse_debug_address_to_pubkey_id(registry: &Registry, addr_txt: &str) -> Option<PubkeyId> {
+fn parse_debug_address_to_pubkey_id(index: &KeyIndex, addr_txt: &str) -> Option<PubkeyId> {
     let s = addr_txt.trim();
 
     // Case A: "Address { address: <PK> }" (or possibly more spaces)
@@ -155,17 +154,17 @@ fn parse_debug_address_to_pubkey_id(registry: &Registry, addr_txt: &str) -> Opti
             .find(|c: char| c.is_whitespace() || c == '}')
             .unwrap_or(inner.len());
         let pk_txt = inner[..end].trim().trim_end_matches('}');
-        return parse_pubkey_id(registry, pk_txt);
+        return parse_pubkey_id(index, pk_txt);
     }
 
     // Case B: plain pubkey
-    parse_pubkey_id(registry, s)
+    parse_pubkey_id(index, s)
 }
 
 impl SystemProgramLog {
     /// `text` is the payload after "Program log: " or after "Program <id> log: "
     #[inline]
-    pub fn parse(text: &str, registry: &Registry, st: &mut StringTable) -> Option<Self> {
+    pub fn parse(text: &str, index: &KeyIndex, st: &mut StringTable) -> Option<Self> {
         let text = text.trim();
 
         // Instruction: <name>
@@ -184,8 +183,8 @@ impl SystemProgramLog {
             let provided_txt = rest[..mid].trim();
             let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
             return Some(Self::CreateAddressMismatch {
-                provided_addr: parse_pubkey_id(registry, provided_txt)?,
-                derived_addr: parse_pubkey_id(registry, derived_txt)?,
+                provided_addr: parse_pubkey_id(index, provided_txt)?,
+                derived_addr: parse_pubkey_id(index, derived_txt)?,
             });
         }
 
@@ -196,32 +195,32 @@ impl SystemProgramLog {
             let provided_txt = rest[..mid].trim();
             let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
             return Some(Self::TransferFromAddressMismatch {
-                provided_addr: parse_pubkey_id(registry, provided_txt)?,
-                derived_addr: parse_pubkey_id(registry, derived_txt)?,
+                provided_addr: parse_pubkey_id(index, provided_txt)?,
+                derived_addr: parse_pubkey_id(index, derived_txt)?,
             });
         }
 
         // Create Account: account {:?} already in use  (prints Address via Debug)
         if let Some(addr_txt) = parse_between(text, "Create Account: account ", " already in use") {
-            let addr = parse_debug_address_to_pubkey_id(registry, addr_txt)?;
+            let addr = parse_debug_address_to_pubkey_id(index, addr_txt)?;
             return Some(Self::CreateAccountAlreadyInUse { addr });
         }
 
         // Allocate: account {:?} already in use
         if let Some(addr_txt) = parse_between(text, "Allocate: account ", " already in use") {
-            let addr = parse_debug_address_to_pubkey_id(registry, addr_txt)?;
+            let addr = parse_debug_address_to_pubkey_id(index, addr_txt)?;
             return Some(Self::AllocateAlreadyInUse { addr });
         }
 
         // Allocate: 'to' account {:?} must sign
         if let Some(addr_txt) = parse_between(text, "Allocate: 'to' account ", " must sign") {
-            let addr = parse_debug_address_to_pubkey_id(registry, addr_txt)?;
+            let addr = parse_debug_address_to_pubkey_id(index, addr_txt)?;
             return Some(Self::AllocateToMustSign { addr });
         }
 
         // Assign: account {:?} must sign
         if let Some(addr_txt) = parse_between(text, "Assign: account ", " must sign") {
-            let addr = parse_debug_address_to_pubkey_id(registry, addr_txt)?;
+            let addr = parse_debug_address_to_pubkey_id(index, addr_txt)?;
             return Some(Self::AssignAccountMustSign { addr });
         }
 
@@ -245,7 +244,7 @@ impl SystemProgramLog {
             && let Some(pk_txt) = rest.strip_suffix(" must sign")
         {
             return Some(Self::TransferFromMustSign {
-                from: parse_pubkey_id(registry, pk_txt.trim())?,
+                from: parse_pubkey_id(index, pk_txt.trim())?,
             });
         }
 
@@ -281,7 +280,7 @@ impl SystemProgramLog {
     }
 
     #[inline]
-    pub fn render(&self, st: &StringTable, registry: &Registry) -> String {
+    pub fn render(&self, st: &StringTable, store: &KeyStore) -> String {
         match self {
             Self::Instruction(ix) => ix.as_str().to_string(),
 
@@ -290,8 +289,8 @@ impl SystemProgramLog {
                 derived_addr,
             } => format!(
                 "Create: address {} does not match derived address {}",
-                pubkey_id_to_pubkey(registry, *provided_addr),
-                pubkey_id_to_pubkey(registry, *derived_addr),
+                pubkey_id_to_pubkey(store, *provided_addr),
+                pubkey_id_to_pubkey(store, *derived_addr),
             ),
 
             Self::TransferFromAddressMismatch {
@@ -299,32 +298,32 @@ impl SystemProgramLog {
                 derived_addr,
             } => format!(
                 "Transfer: 'from' address {} does not match derived address {}",
-                pubkey_id_to_pubkey(registry, *provided_addr),
-                pubkey_id_to_pubkey(registry, *derived_addr),
+                pubkey_id_to_pubkey(store, *provided_addr),
+                pubkey_id_to_pubkey(store, *derived_addr),
             ),
 
             Self::CreateAccountAlreadyInUse { addr }
             | Self::CreateAccountAccountAlreadyInUse { addr } => format!(
                 "Create Account: account {:?} already in use",
                 // Keep `{:?}`-ish feel, but minimal: just the pubkey.
-                pubkey_id_to_pubkey(registry, *addr),
+                pubkey_id_to_pubkey(store, *addr),
             ),
 
             Self::AllocateAlreadyInUse { addr } | Self::AllocateAccountAlreadyInUse { addr } => {
                 format!(
                     "Allocate: account {:?} already in use",
-                    pubkey_id_to_pubkey(registry, *addr),
+                    pubkey_id_to_pubkey(store, *addr),
                 )
             }
 
             Self::AllocateToMustSign { addr } => format!(
                 "Allocate: 'to' account {:?} must sign",
-                pubkey_id_to_pubkey(registry, *addr),
+                pubkey_id_to_pubkey(store, *addr),
             ),
 
             Self::AssignAccountMustSign { addr } => format!(
                 "Assign: account {:?} must sign",
-                pubkey_id_to_pubkey(registry, *addr),
+                pubkey_id_to_pubkey(store, *addr),
             ),
 
             Self::AllocateRequestedTooLarge {
@@ -341,7 +340,7 @@ impl SystemProgramLog {
 
             Self::TransferFromMustSign { from } => format!(
                 "Transfer: `from` account {} must sign",
-                pubkey_id_to_pubkey(registry, *from),
+                pubkey_id_to_pubkey(store, *from),
             ),
 
             Self::TransferInsufficient { have, need } => {
