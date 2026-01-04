@@ -139,7 +139,7 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     info!("  out:      {}", compact_path.display());
 
     let registry = load_registry(&registry_path)?;
-    info!("Registry loaded: {} keys", registry.keys.len());
+    info!("Registry loaded: {} keys", registry.len());
 
     let hashes = load_blockhash_registry_plain(&bh_registry_path)?;
     info!("Blockhash registry loaded: {} hashes", hashes.len());
@@ -351,7 +351,7 @@ pub fn to_compact_transaction<'a>(
             let mut account_keys = Vec::with_capacity(m.account_keys.len());
             for key in &m.account_keys {
                 let idx = registry
-                    .lookup(key)
+                    .lookup(*key)
                     .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
                 account_keys.push(idx);
             }
@@ -395,7 +395,7 @@ pub fn to_compact_transaction<'a>(
             let mut account_keys = Vec::with_capacity(m.account_keys.len());
             for key in &m.account_keys {
                 let idx = registry
-                    .lookup(key)
+                    .lookup(*key)
                     .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
                 account_keys.push(idx);
             }

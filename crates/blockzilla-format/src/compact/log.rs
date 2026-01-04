@@ -259,7 +259,6 @@ fn decode_base64_array(text: &str, dt: &mut DataTable, scratch: &mut Vec<u8>) ->
 }
 
 #[inline]
-#[inline]
 fn lookup_pid_or_panic(
     registry: &Registry,
     pk_txt: &str,
@@ -284,8 +283,7 @@ fn lookup_pid_or_panic(
 #[inline]
 fn pid_to_pubkey(registry: &Registry, pid: ProgramId) -> Pubkey {
     assert!(pid != 0, "log.rs: ProgramId=0 is reserved/invalid");
-    let ix = (pid - 1) as usize;
-    let bytes = registry.keys.get(ix).unwrap_or_else(|| {
+    let bytes = registry.get(pid).unwrap_or_else(|| {
         panic!(
             "log.rs: ProgramId out of bounds: pid={} len={}",
             pid,
