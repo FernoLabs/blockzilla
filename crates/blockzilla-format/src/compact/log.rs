@@ -437,9 +437,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             if let Some(tail) = rest.strip_prefix("return: ") {
                 if let Some((pk_txt, b64_txt)) = tail.trim().split_once(' ') {
                     let program = lookup_pid_or_panic(index, pk_txt.trim(), line_no, line);
-                    if let Some(data) =
-                        decode_base64_array(b64_txt, &mut dt, &mut decode_buf)
-                    {
+                    if let Some(data) = decode_base64_array(b64_txt, &mut dt, &mut decode_buf) {
                         events.push(LogEvent::Return { program, data });
                         continue;
                     }
@@ -652,12 +650,10 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 DataTable::render_array(dt.resolve(*data)),
             )),
 
-            LogEvent::Data { data } => {
-                out.push(format!(
-                    "Program data: {}",
-                    DataTable::render_array(dt.resolve(*data))
-                ))
-            }
+            LogEvent::Data { data } => out.push(format!(
+                "Program data: {}",
+                DataTable::render_array(dt.resolve(*data))
+            )),
 
             LogEvent::Consumption { units } => {
                 out.push(format!("Program consumption: {} units remaining", units))

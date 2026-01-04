@@ -351,7 +351,7 @@ pub fn to_compact_transaction<'a>(
 
             let mut account_keys = Vec::with_capacity(m.account_keys.len());
             for key in &m.account_keys {
-                let idx = index.lookup_unchecked(*key);
+                let idx = index.lookup_unchecked(key);
                 account_keys.push(idx);
             }
 
@@ -393,7 +393,7 @@ pub fn to_compact_transaction<'a>(
 
             let mut account_keys = Vec::with_capacity(m.account_keys.len());
             for key in &m.account_keys {
-                let idx = index.lookup_unchecked(*key);
+                let idx = index.lookup_unchecked(key);
                 account_keys.push(idx);
             }
 
