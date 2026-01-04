@@ -60,20 +60,20 @@ pub struct KeyIndex {
 }
 
 impl KeyIndex {
-    pub fn build(keys_in_file_order: &[[u8; 32]]) -> Self {
+    pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
         // Store (file_index + 1) to reserve 0
         let values: Vec<u32> = (0..keys_in_file_order.len())
             .map(|i| (i as u32) + 1)
             .collect();
 
-        let index = NoKeyBoomHashMap::new(1.7, keys_in_file_order, values);
+        let index = NoKeyBoomHashMap::new(keys_in_file_order, values);
         Self { index }
     }
 
     /// Returns 1-based id. Undefined behavior (wrong id) if key is not in the set.
     #[inline(always)]
     pub fn lookup_unchecked(&self, k: &[u8; 32]) -> u32 {
-        *self.index.get(k)
+        self.index.get(k).copied().unwrap()
     }
 }
 
