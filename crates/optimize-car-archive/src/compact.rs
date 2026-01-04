@@ -347,7 +347,7 @@ pub fn to_compact_transaction<'a>(
     // Signatures (still owning)
     let mut signatures = Vec::with_capacity(vtx.signatures.len());
     for s in &vtx.signatures {
-        signatures.push(Signature(**s));
+        signatures.push(Signature(*s));
     }
 
     let message = match &vtx.message {
