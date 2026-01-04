@@ -4,7 +4,7 @@ use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{CompactLogStream, Registry};
+use crate::{CompactLogStream, KeyIndex};
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactMetaV1 {
@@ -75,12 +75,12 @@ pub struct CompactReward {
 
 pub fn compact_meta_from_proto(
     meta: &car_reader::confirmed_block::TransactionStatusMeta,
-    registry: &Registry,
+    index: &KeyIndex,
 ) -> Result<CompactMetaV1> {
     let err = meta.err.as_ref().map(|e| e.err.clone());
 
-    let loaded_writable_indices = map_loaded_addrs(&meta.loaded_writable_addresses, registry)?;
-    let loaded_readonly_indices = map_loaded_addrs(&meta.loaded_readonly_addresses, registry)?;
+    let loaded_writable_indices = map_loaded_addrs(&meta.loaded_writable_addresses, index)?;
+    let loaded_readonly_indices = map_loaded_addrs(&meta.loaded_readonly_addresses, index)?;
 
     let inner_instructions = if meta.inner_instructions_none {
         None
@@ -108,25 +108,25 @@ pub fn compact_meta_from_proto(
     let logs = if meta.log_messages_none {
         None
     } else {
-        Some(crate::log::parse_logs(&meta.log_messages, registry))
+        Some(crate::log::parse_logs(&meta.log_messages, index))
     };
 
     let pre_token_balances = meta
         .pre_token_balances
         .iter()
-        .map(|tb| compact_token_balance(tb, registry))
+        .map(|tb| compact_token_balance(tb, index))
         .collect::<Result<Vec<_>>>()?;
 
     let post_token_balances = meta
         .post_token_balances
         .iter()
-        .map(|tb| compact_token_balance(tb, registry))
+        .map(|tb| compact_token_balance(tb, index))
         .collect::<Result<Vec<_>>>()?;
 
     let rewards = meta
         .rewards
         .iter()
-        .map(|rw| compact_reward(rw, registry))
+        .map(|rw| compact_reward(rw, index))
         .collect::<Result<Vec<_>>>()?;
 
     let return_data = if meta.return_data_none {
@@ -141,9 +141,7 @@ pub fn compact_meta_from_proto(
                 );
                 let mut a = [0u8; 32];
                 a.copy_from_slice(&rd.program_id);
-                let ix = registry
-                    .lookup(&a)
-                    .context("return_data program_id not in registry")?;
+                let ix = index.lookup_unchecked(&a);
                 Ok(CompactReturnData {
                     program_id_index: ix,
                     data: rd.data.clone(),
@@ -177,7 +175,7 @@ pub fn compact_meta_from_proto(
     })
 }
 
-fn map_loaded_addrs(addrs: &Vec<Vec<u8>>, registry: &Registry) -> Result<Vec<u32>> {
+fn map_loaded_addrs(addrs: &Vec<Vec<u8>>, index: &KeyIndex) -> Result<Vec<u32>> {
     let mut out = Vec::with_capacity(addrs.len());
     for pk in addrs {
         if pk.len() != 32 {
@@ -185,36 +183,36 @@ fn map_loaded_addrs(addrs: &Vec<Vec<u8>>, registry: &Registry) -> Result<Vec<u32
         }
         let mut a = [0u8; 32];
         a.copy_from_slice(pk);
-        out.push(registry.lookup(&a).context("loaded addr not in registry")?);
+        out.push(index.lookup_unchecked(&a));
     }
     Ok(out)
 }
 
 #[inline]
-fn lookup_pubkey_index_optional(registry: &Registry, s: &str) -> u32 {
+fn lookup_pubkey_index_optional(index: &KeyIndex, s: &str) -> u32 {
     if s.is_empty() {
         return 0;
     }
 
     match Pubkey::from_str(s) {
-        Ok(pk) => registry.lookup(&pk.to_bytes()).unwrap_or(0),
+        Ok(pk) => index.lookup_unchecked(&pk.to_bytes()),
         Err(_) => 0,
     }
 }
 
 fn compact_token_balance(
     tb: &car_reader::confirmed_block::TokenBalance,
-    registry: &Registry,
+    index: &KeyIndex,
 ) -> Result<CompactTokenBalance> {
     let mint = Pubkey::from_str(&tb.mint)
         .context("token mint parse")?
         .to_bytes();
 
-    let mint_index = registry.lookup(&mint).context("mint not in registry")?;
+    let mint_index = index.lookup_unchecked(&mint);
 
     // OPTIONAL owner + program_id
-    let owner_index = lookup_pubkey_index_optional(registry, &tb.owner);
-    let program_id_index = lookup_pubkey_index_optional(registry, &tb.program_id);
+    let owner_index = lookup_pubkey_index_optional(index, &tb.owner);
+    let program_id_index = lookup_pubkey_index_optional(index, &tb.program_id);
 
     let (amount, decimals) = match &tb.ui_token_amount {
         None => (0u64, 0u8),
@@ -239,14 +237,12 @@ fn compact_token_balance(
 
 fn compact_reward(
     rw: &car_reader::confirmed_block::Reward,
-    registry: &Registry,
+    index: &KeyIndex,
 ) -> Result<CompactReward> {
     let pk = Pubkey::from_str(&rw.pubkey)
         .context("reward pubkey parse")?
         .to_bytes();
-    let pubkey_index = registry
-        .lookup(&pk)
-        .context("reward pubkey not in registry")?;
+    let pubkey_index = index.lookup_unchecked(&pk);
 
     let commission = rw.commission.parse::<u8>().ok();
 
