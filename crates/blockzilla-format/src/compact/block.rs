@@ -1,16 +1,15 @@
 use serde::{Deserialize, Serialize};
-use wincode::{SchemaRead, SchemaWrite};
 
 use crate::CompactMetaV1;
 
-#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CompactBlockRecord<'a> {
     pub header: CompactBlockHeader,
     #[serde(borrow)]
     pub txs: Vec<CompactTxWithMeta<'a>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactBlockHeader {
     pub slot: u64,
     pub parent_slot: u64,
@@ -20,7 +19,7 @@ pub struct CompactBlockHeader {
     pub block_height: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CompactTxWithMeta<'a> {
     #[serde(borrow)]
     pub tx: crate::compact::CompactTransaction<'a>,

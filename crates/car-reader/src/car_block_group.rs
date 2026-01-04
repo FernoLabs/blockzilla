@@ -38,7 +38,7 @@ impl CarBlockGroup {
 
     #[inline]
     pub fn clear(&mut self) {
-        self.block_payload = Bytes::new();
+        self.block_payload.clear();
         self.payloads.clear();
         self.cid_map.clear();
     }
@@ -71,9 +71,10 @@ impl CarBlockGroup {
             entry_iter,
             tx_iter: None,
             reusable_tx: MaybeUninit::uninit(),
-            reusable_meta: None,
-            zstd: ZstdReusableDecoder::new(4096),
+            reusable_meta: TransactionStatusMeta::default(),
+            zstd: ZstdReusableDecoder::new(16384),
             has_tx: false,
+            has_meta: false,
         })
     }
 }
@@ -85,9 +86,10 @@ pub struct TxIter<'a> {
     tx_iter: Option<CborArrayIter<'a, CborCidRef<'a>>>,
 
     reusable_tx: MaybeUninit<VersionedTransaction<'a>>,
-    reusable_meta: Option<TransactionStatusMeta>,
+    reusable_meta: TransactionStatusMeta,
     zstd: ZstdReusableDecoder,
     has_tx: bool,
+    has_meta: bool,
 }
 
 impl<'a> Drop for TxIter<'a> {
@@ -172,24 +174,19 @@ impl<'a> TxIter<'a> {
 
             let has_metadata = !tx.metadata.data.is_empty();
             if has_metadata {
-                let meta = self
-                    .reusable_meta
-                    .get_or_insert_with(TransactionStatusMeta::default);
-
                 decode_transaction_status_meta_from_frame(
                     tx.slot,
                     tx.metadata.data,
-                    meta,
+                    &mut self.reusable_meta,
                     &mut self.zstd,
                 )
                 .map_err(|_| GroupError::TxMetaDecode)?;
-            } else {
-                self.reusable_meta = None;
             }
 
             VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
                 .map_err(|_| GroupError::TxDecode)?;
             self.has_tx = true;
+            self.has_meta = has_metadata;
 
             return Ok(true);
         }
@@ -199,12 +196,8 @@ impl<'a> TxIter<'a> {
     /// Returns None if no transaction is loaded or if the transaction has no metadata.
     /// This reference is valid until next() is called again.
     #[inline]
-    pub fn current_metadata(&self) -> Option<&TransactionStatusMeta> {
-        if self.has_tx {
-            self.reusable_meta.as_ref()
-        } else {
-            None
-        }
+    pub fn current_metadata(&self) -> &TransactionStatusMeta {
+        &self.reusable_meta
     }
 
     #[inline]
@@ -216,8 +209,11 @@ impl<'a> TxIter<'a> {
             false => Ok(None),
             true => {
                 let tx = unsafe { self.reusable_tx.assume_init_ref() };
-                let meta = self.reusable_meta.as_ref();
-                Ok(Some((tx, meta)))
+                if self.has_meta {
+                    Ok(Some((tx, Some(&self.reusable_meta))))
+                } else {
+                    Ok(Some((tx, None)))
+                }
             }
         }
     }

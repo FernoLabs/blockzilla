@@ -259,23 +259,6 @@ fn decode_base64_array(text: &str, dt: &mut DataTable, scratch: &mut Vec<u8>) ->
 }
 
 #[inline]
-fn lookup_pid_or_panic(
-    index: &KeyIndex,
-    pk_txt: &str,
-    line_no: usize,
-    full_line: &str,
-) -> ProgramId {
-    let pk = Pubkey::from_str(pk_txt).unwrap_or_else(|e| {
-        panic!(
-            "log.rs: invalid pubkey token: pk='{}' line_no={} err={} line='{}'",
-            pk_txt, line_no, e, full_line
-        )
-    });
-
-    index.lookup_unchecked(&pk.to_bytes())
-}
-
-#[inline]
 fn pid_to_pubkey(store: &KeyStore, pid: ProgramId) -> Pubkey {
     assert!(pid != 0, "log.rs: ProgramId=0 is reserved/invalid");
     let bytes = store.get(pid).unwrap_or_else(|| {
@@ -295,9 +278,11 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
     let mut decode_buf = Vec::new();
 
     // CB id must exist in registry (else bug)
-    let cb_pid = lookup_pid_or_panic(index, CB_PK, 0, "ComputeBudget constant");
+    let cb_pid = index
+        .lookup_str(CB_PK)
+        .expect("CB id not found in registry");
 
-    for (line_no, line) in lines.iter().enumerate() {
+    for line in lines {
         let line = line.trim_end();
         if line.is_empty() {
             continue;
@@ -399,7 +384,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             let pk_txt = rest[..pos].trim();
             let text = rest[pos + " log: ".len()..].trim();
 
-            let program = lookup_pid_or_panic(index, pk_txt, line_no, line);
+            let program = index.lookup_str(pk_txt).expect("malformed Program");
 
             // If a program emitted the runtime custom error string in its own log channel,
             // record it as a program-attributed custom error.
@@ -436,7 +421,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             // Program return: <pk> <b64>
             if let Some(tail) = rest.strip_prefix("return: ") {
                 if let Some((pk_txt, b64_txt)) = tail.trim().split_once(' ') {
-                    let program = lookup_pid_or_panic(index, pk_txt.trim(), line_no, line);
+                    let program = index.lookup_str(pk_txt.trim()).expect("Invaild Pubkey");
                     if let Some(data) = decode_base64_array(b64_txt, &mut dt, &mut decode_buf) {
                         events.push(LogEvent::Return { program, data });
                         continue;
@@ -474,7 +459,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
 
             // Program <pk> is not deployed
             if let Some(pk_txt) = rest.strip_suffix(" is not deployed") {
-                let program = lookup_pid_or_panic(index, pk_txt.trim(), line_no, line);
+                let program = index.lookup_str(pk_txt.trim()).expect("Invaild Pubkey");
                 events.push(LogEvent::ProgramNotDeployed {
                     program: Some(program),
                 });
@@ -486,7 +471,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 let pk_txt = rest[..space_pos].trim();
                 let after_pk = rest[space_pos + 1..].trim();
 
-                let program = lookup_pid_or_panic(index, pk_txt, line_no, line);
+                let program = index.lookup_str(pk_txt).expect("Invaild Pubkey");
                 let is_cb = program == cb_pid;
 
                 // invoke [N]

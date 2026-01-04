@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
-use std::str::FromStr;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{KeyIndex, KeyStore, StrId, StringTable};
@@ -425,7 +424,7 @@ impl Token2022Log {
 
         // "Error harvesting from {}: {}"
         if let Some((a, b)) = parse_two_braced(payload, "Error harvesting from ", ": ") {
-            let account_key = lookup_pubkey_id_or_none(index, a)?;
+            let account_key = index.lookup_str(a)?;
             return Some(Self::ErrorHarvestingFrom {
                 account_key,
                 error: st.push(b),
@@ -457,12 +456,6 @@ impl Token2022Log {
             ),
         }
     }
-}
-
-#[inline]
-fn lookup_pubkey_id_or_none(index: &KeyIndex, pk_txt: &str) -> Option<PubkeyId> {
-    let pk = Pubkey::from_str(pk_txt.trim()).ok()?;
-    Some(index.lookup_unchecked(&pk.to_bytes()))
 }
 
 #[inline]

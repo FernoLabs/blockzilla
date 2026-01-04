@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use rustc_hash::{FxBuildHasher, FxHashMap};
+use solana_pubkey::Pubkey;
+use std::hash::{Hash, Hasher};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
+    str::FromStr,
 };
 
 /// Owns keys in file order. Ids are 1-based (0 reserved).
@@ -59,28 +62,70 @@ impl KeyStore {
 #[derive(Debug, Clone)]
 pub struct KeyIndex {
     index: FxHashMap<[u8; 32], u32>, // fingerprint -> id
+    index_hot: FxHashMap<[u8; 32], u32>,
+    cache: FxHashMap<u64, u32>, // string to pubk cache for most use pubk
+}
+
+#[inline]
+fn fxhash(bytes: &[u8]) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl KeyIndex {
     /// Build index over keys in file order.
     pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
-        let mut index =
-            FxHashMap::with_capacity_and_hasher(keys_in_file_order.len(), FxBuildHasher);
+        let cache_capacity = 10000;
 
-        for (i, k) in keys_in_file_order.into_iter().enumerate() {
+        let mut index = FxHashMap::with_capacity_and_hasher(
+            keys_in_file_order.len() - cache_capacity,
+            FxBuildHasher,
+        );
+        let mut index_hot = FxHashMap::with_capacity_and_hasher(cache_capacity, FxBuildHasher);
+
+        let mut cache = FxHashMap::with_capacity_and_hasher(cache_capacity, FxBuildHasher);
+
+        for (i, k) in keys_in_file_order.iter().enumerate().take(cache_capacity) {
+            let id = i as u32 + 1;
+            let pubk_str = Pubkey::new_from_array(*k).to_string();
+            cache.insert(fxhash(pubk_str.as_bytes()), id);
+            index_hot.insert(*k, id);
+        }
+
+        for (i, k) in keys_in_file_order
+            .into_iter()
+            .enumerate()
+            .skip(cache_capacity)
+        {
             let id = i as u32 + 1;
             index.insert(k, id);
         }
 
         index.shrink_to_fit();
 
-        Self { index }
+        Self {
+            index,
+            index_hot,
+            cache,
+        }
     }
 
-    /// Fast path: assumes key exists and no collisions.
+    pub fn lookup_str(&self, k: &str) -> Option<u32> {
+        match self.cache.get(&fxhash(k.as_bytes())) {
+            Some(id) => Some(*id),
+            None => Pubkey::from_str(k)
+                .ok()
+                .and_then(|k| self.index.get(k.as_array()).copied()),
+        }
+    }
+
     #[inline(always)]
     pub fn lookup_unchecked(&self, k: &[u8; 32]) -> u32 {
-        *self.index.get(k).expect("missing key")
+        match self.index_hot.get(k) {
+            Some(id) => *id,
+            None => *self.index.get(k).expect("missing key"),
+        }
     }
 }
 

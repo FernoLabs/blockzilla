@@ -58,26 +58,22 @@ impl ZstdReusableDecoder {
     /// If `input` is zstd, decompress into the internal buffer and return Ok(true).
     /// If it is not zstd, return Ok(false) and leave output empty.
     pub fn decompress_if_zstd(&mut self, input: &[u8]) -> Result<bool, std::io::Error> {
-        use std::io::{BufReader, Cursor, Read};
-
         self.out.clear();
+        let size_hint = 10 * input.len();
+        if size_hint > self.out.len() {
+            self.out.resize(size_hint, 0);
+        }
 
         if !looks_like_zstd_frame(input) {
             return Ok(false);
         }
 
-        // Optional: reserve exact size if present in the frame header.
-        if let Ok(Some(sz)) = zstd::zstd_safe::get_frame_content_size(input) {
-            let sz = sz as usize;
-            if sz > self.out.capacity() {
-                self.out.reserve(sz - self.out.capacity());
-            }
-        }
-
-        let reader = BufReader::new(Cursor::new(input));
-        let mut dec = zstd::stream::read::Decoder::with_context(reader, &mut self.dctx);
-
-        dec.read_to_end(&mut self.out)?;
+        let read = self
+            .dctx
+            .decompress(&mut self.out, input)
+            .inspect_err(|err| println!("{}", err))
+            .expect("error zstd decoding");
+        self.out.truncate(read);
         Ok(true)
     }
 }
@@ -124,7 +120,6 @@ pub fn decode_transaction_status_meta(
             .map_err(|err| MetadataDecodeError::Bincode(err.to_string()))?
             .into();
     } else {
-        out.clear();
         out.merge(metadata_bytes)
             .map_err(MetadataDecodeError::ProstDecode)?;
     }
