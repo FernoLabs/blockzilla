@@ -104,14 +104,13 @@ fn parse_u64_commas(s: &str) -> Option<u64> {
 fn parse_pubkey_id(registry: &Registry, pk_txt: &str) -> Option<PubkeyId> {
     let pk = Pubkey::from_str(pk_txt.trim()).ok()?;
     let ix0 = registry.lookup(&pk.to_bytes())?;
-    Some(ix0 + 1)
+    Some(ix0)
 }
 
 #[inline]
 fn pubkey_id_to_pubkey(registry: &Registry, id: PubkeyId) -> Pubkey {
     assert!(id != 0, "SystemProgramLog: PubkeyId=0 is reserved/invalid");
-    let ix = (id - 1) as usize;
-    let bytes = registry.keys.get(ix).unwrap_or_else(|| {
+    let bytes = registry.get(id).unwrap_or_else(|| {
         panic!(
             "SystemProgramLog: PubkeyId out of bounds: id={} len={}",
             id,

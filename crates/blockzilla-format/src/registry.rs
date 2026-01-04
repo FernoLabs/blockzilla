@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use boomphf::hashmap::{BoomHashMap};
 use solana_pubkey::{Pubkey, pubkey};
 use std::{
     fs::File,
@@ -9,8 +9,7 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub struct Registry {
-    pub keys: Vec<[u8; 32]>,
-    index: FxHashMap<[u8; 32], u32>,
+    index: BoomHashMap<[u8; 32], u32>,
 }
 
 impl Registry {
@@ -18,44 +17,45 @@ impl Registry {
         const BUILTIN_PROGRAM_KEYS: &[Pubkey] =
             &[pubkey!("ComputeBudget111111111111111111111111111111")];
 
-        // Prepend missing builtins
         for b in BUILTIN_PROGRAM_KEYS {
             let b = b.to_bytes();
-            if !keys.contains(&b) {
+            if !keys.iter().any(|k| k == &b) {
                 keys.insert(0, b);
             }
         }
 
-        let mut index = FxHashMap::with_capacity_and_hasher(keys.len(), FxBuildHasher);
+        // Values are (file_index + 1) so 0 is reserved
+        let values: Vec<u32> = (0..keys.len()).map(|i| (i as u32) + 1).collect();
 
-        for (i, k) in keys.iter().enumerate() {
-            index.insert(*k, i as u32);
-        }
+        // Build "no-key" boom hash map: uses keys to build MPHF, stores only values
+        let index = BoomHashMap::new(keys, values);
 
-        Self { keys, index }
+        Self {index }
     }
 
+    /// 1-based id -> key (file order)
     pub fn get(&self, ix: u32) -> Option<&[u8; 32]> {
-        self.keys.get((ix - 1) as usize)
+        self.index.get_key(ix.checked_sub(1)? as usize)
     }
 
+    /// key -> 1-based file-order id (None if missing)
     #[inline(always)]
     pub fn lookup(&self, k: &[u8; 32]) -> Option<u32> {
-        self.index.get(k).map(|&ix| ix + 1)
+        self.index.get(k).copied()
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.index.len()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.index.is_empty()
     }
 }
 
-/// Write registry.bin (raw sorted 32-byte pubkeys, no header)
+/// Write registry.bin (raw 32-byte pubkeys, no header)
 pub fn write_registry(path: &Path, keys: &[[u8; 32]]) -> Result<()> {
     let f = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
     let mut w = BufWriter::with_capacity(64 << 20, f);
