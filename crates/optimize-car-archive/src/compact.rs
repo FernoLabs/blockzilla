@@ -139,8 +139,9 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     info!("  out:      {}", compact_path.display());
 
     let store = KeyStore::load(&registry_path)?;
-    let index = KeyIndex::build(&store.keys);
-    info!("Registry loaded: {} keys", store.len());
+    let len = store.len();
+    let index = KeyIndex::build(store.keys);
+    info!("Registry loaded: {} keys", len);
 
     let hashes = load_blockhash_registry_plain(&bh_registry_path)?;
     info!("Blockhash registry loaded: {} hashes", hashes.len());
@@ -303,7 +304,6 @@ fn compact_process_block_manual<W: std::io::Write>(
 
     Ok((1, txs, Some(block_slot)))
 }
-
 
 /// Returns the maximum number of bytes required to encode T.
 pub const fn varint_max<T: Sized>() -> usize {
