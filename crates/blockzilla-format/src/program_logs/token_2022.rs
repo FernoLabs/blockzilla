@@ -462,9 +462,8 @@ impl Token2022Log {
 #[inline]
 fn lookup_pubkey_id_or_none(registry: &Registry, pk_txt: &str) -> Option<PubkeyId> {
     let pk = Pubkey::from_str(pk_txt.trim()).ok()?;
-    // Registry lookup returns a 0-based index; we store ids as 1-based (same convention as your log.rs).
     let ix0 = registry.lookup(&pk.to_bytes())?;
-    Some(ix0 + 1)
+    Some(ix0)
 }
 
 #[inline]
@@ -473,8 +472,7 @@ fn pubkey_id_to_string(registry: &Registry, id: PubkeyId) -> String {
     if id == 0 {
         return "<invalid-pubkey-id-0>".to_string();
     }
-    let ix = (id - 1) as usize;
-    let bytes = match registry.keys.get(ix) {
+    let bytes = match registry.get(id) {
         Some(b) => b,
         None => return format!("<pubkey-id-oob:{}>", id),
     };

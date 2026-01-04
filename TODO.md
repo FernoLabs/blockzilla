@@ -1,13 +1,13 @@
 # TODO
 
+- String dedup in string table acrose epoch ?
+  - try inside block first
+  - accross epoch is harder as table is huge and may not fit in memory
+  - maybe add a postprocessing on epoch or a new type foreignId or gloabalId
+
 - Simplify error handling  
   - Single error type per crate  
   - Add context only at I/O and top-level boundaries  
-
-- Handle base64 logs  
-  - Build a `BytesTable` for base64-decoded log data  
-  - Store multiple `StrId` entries for program data logs and return data (multiple base64 blobs per tx)  
-  - Future: detect pubkeys inside instruction/return data and replace them with ids  
 
 - Split archive data  
   - Separate data required for replay from runtime-only data  
@@ -20,3 +20,9 @@
 
 - wincode optimisation
   - can we use slice with shortu16 len decode ?
+
+## Backlog
+
+- explore perfec hash function for registry (may reduce memory usage drastcly while keeping perf)
+- try reucing size of hashtable for registry by only storing half pubk (maybe faster compact / read)
+- detect pubkeys inside instruction and log and replace them with ids  
