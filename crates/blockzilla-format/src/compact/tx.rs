@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 use wincode::{SchemaRead, SchemaWrite};
 
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
-pub struct Signature(#[serde(with = "BigArray")] pub [u8; 64]);
+use crate::Signature;
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactTransaction<'a> {
-    pub signatures: Vec<Signature>,
+    #[serde(borrow)]
+    pub signatures: Vec<Signature<'a>>,
     #[serde(borrow)]
     pub message: CompactMessage<'a>,
 }
@@ -37,8 +36,8 @@ pub struct CompactInstruction<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactLegacyMessage<'a> {
     pub header: CompactMessageHeader,
-    pub account_keys: Vec<u32>,                   // registry indices
-    pub recent_blockhash: CompactRecentBlockhash, // blockhash registry id
+    pub account_keys: Vec<u32>,
+    pub recent_blockhash: CompactRecentBlockhash,
     #[serde(borrow)]
     pub instructions: Vec<CompactInstruction<'a>>,
 }
