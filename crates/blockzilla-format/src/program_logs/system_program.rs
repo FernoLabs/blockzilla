@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
-use std::str::FromStr;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::log::{StrId, StringTable};
@@ -12,6 +11,21 @@ pub const STR_ID: &str = "11111111111111111111111111111111";
 /// Registry-backed pubkey id (1-based, like your log.rs pid_to_pubkey convention).
 pub type PubkeyId = u32;
 
+/// Either a registry-backed pubkey id (when we can resolve it),
+/// or a raw string id (when the pubkey was not in the registry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub enum PubkeyOrString {
+    Pubkey(PubkeyId),
+    Text(StrId),
+}
+
+impl PubkeyOrString {
+    #[inline]
+    pub fn from_pubkey_id(id: PubkeyId) -> Self {
+        Self::Pubkey(id)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum SystemProgramLog {
     /// `Instruction: <name>`
@@ -20,7 +34,7 @@ pub enum SystemProgramLog {
     /// `Create: address <provided> does not match derived address <derived>`
     CreateAddressMismatch {
         provided_addr: PubkeyId,
-        derived_addr: PubkeyId,
+        derived_addr: PubkeyOrString,
     },
 
     /// `Create Account: account <addr> already in use`
@@ -44,10 +58,10 @@ pub enum SystemProgramLog {
     /// `Create Account: account <addr> already in use` (explicit alias)
     CreateAccountAccountAlreadyInUse { addr: PubkeyId },
 
-    /// `Transfer: \`from\` must not carry data`
+    /// `Transfer: `from` must not carry data`
     TransferFromMustNotCarryData,
 
-    /// `Transfer: \`from\` account <pubkey> must sign`
+    /// `Transfer: `from` account <pubkey> must sign`
     TransferFromMustSign { from: PubkeyId },
 
     /// `Transfer: insufficient lamports <have>, need <need>`
@@ -56,7 +70,7 @@ pub enum SystemProgramLog {
     /// `Transfer: 'from' address <provided> does not match derived address <derived>`
     TransferFromAddressMismatch {
         provided_addr: PubkeyId,
-        derived_addr: PubkeyId,
+        derived_addr: PubkeyOrString,
     },
 
     /// `Advance nonce account: recent blockhash list is empty`
@@ -67,9 +81,6 @@ pub enum SystemProgramLog {
 
     /// `Authorize nonce account: <free text>`
     AuthorizeNonceAccount { msg: StrId },
-
-    /// Anything else we decided to keep as plain text for now.
-    Unparsed { text: StrId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -99,13 +110,6 @@ fn parse_u64_commas(s: &str) -> Option<u64> {
     s.trim().replace(',', "").parse().ok()
 }
 
-/// Parse a pubkey string and convert to registry-backed PubkeyId (1-based).
-#[inline]
-fn parse_pubkey_id(index: &KeyIndex, pk_txt: &str) -> Option<PubkeyId> {
-    let pk = Pubkey::from_str(pk_txt.trim()).ok()?;
-    Some(index.lookup_unchecked(&pk.to_bytes()))
-}
-
 #[inline]
 fn pubkey_id_to_pubkey(store: &KeyStore, id: PubkeyId) -> Pubkey {
     assert!(id != 0, "SystemProgramLog: PubkeyId=0 is reserved/invalid");
@@ -120,6 +124,14 @@ fn pubkey_id_to_pubkey(store: &KeyStore, id: PubkeyId) -> Pubkey {
 }
 
 #[inline]
+fn pubkey_or_string_to_string(v: PubkeyOrString, st: &StringTable, store: &KeyStore) -> String {
+    match v {
+        PubkeyOrString::Pubkey(id) => pubkey_id_to_pubkey(store, id).to_string(),
+        PubkeyOrString::Text(sid) => st.resolve(sid).to_string(),
+    }
+}
+
+#[inline]
 fn parse_between<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
     let b = line.as_bytes();
     if !b.starts_with(prefix.as_bytes()) || !b.ends_with(suffix.as_bytes()) {
@@ -129,36 +141,38 @@ fn parse_between<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<&'a st
 }
 
 /// Parse the `{:?}`-formatted `Address` that system program prints in logs.
-///
-/// In Solana, `to_address` is an `Address` wrapper around a `Pubkey`, and logs print it via `{:?}`.
-/// Depending on version, this often looks like either:
-/// - `Address { address: <PUBKEY> }`
-/// - `<PUBKEY>`
-///
-/// We accept both and return the registry-backed PubkeyId.
 #[inline]
 fn parse_debug_address_to_pubkey_id(index: &KeyIndex, addr_txt: &str) -> Option<PubkeyId> {
     let s = addr_txt.trim();
 
-    // Case A: "Address { address: <PK> }" (or possibly more spaces)
+    // Case A: "Address { address: <PK> }"
     if let Some(inner) = s.strip_prefix("Address {") {
-        // Find "address:" then take the token that follows
         let inner = inner.trim();
         let inner = inner
             .strip_prefix("address:")
             .or_else(|| inner.strip_prefix("address :"))?;
         let inner = inner.trim();
 
-        // token ends at whitespace or '}'
         let end = inner
             .find(|c: char| c.is_whitespace() || c == '}')
             .unwrap_or(inner.len());
         let pk_txt = inner[..end].trim().trim_end_matches('}');
-        return parse_pubkey_id(index, pk_txt);
+        return index.lookup_str(pk_txt);
     }
 
     // Case B: plain pubkey
-    parse_pubkey_id(index, s)
+    index.lookup_str(s)
+}
+
+/// Try to resolve a pubkey text into the registry. If missing, store the raw text in StringTable.
+#[inline]
+fn parse_pubkey_or_string(index: &KeyIndex, st: &mut StringTable, s: &str) -> PubkeyOrString {
+    let s = s.trim();
+    if let Some(id) = index.lookup_str(s) {
+        PubkeyOrString::Pubkey(id)
+    } else {
+        PubkeyOrString::Text(st.push(s))
+    }
 }
 
 impl SystemProgramLog {
@@ -183,8 +197,8 @@ impl SystemProgramLog {
             let provided_txt = rest[..mid].trim();
             let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
             return Some(Self::CreateAddressMismatch {
-                provided_addr: parse_pubkey_id(index, provided_txt)?,
-                derived_addr: parse_pubkey_id(index, derived_txt)?,
+                provided_addr: index.lookup_str(provided_txt)?,
+                derived_addr: parse_pubkey_or_string(index, st, derived_txt),
             });
         }
 
@@ -195,12 +209,12 @@ impl SystemProgramLog {
             let provided_txt = rest[..mid].trim();
             let derived_txt = rest[mid + " does not match derived address ".len()..].trim();
             return Some(Self::TransferFromAddressMismatch {
-                provided_addr: parse_pubkey_id(index, provided_txt)?,
-                derived_addr: parse_pubkey_id(index, derived_txt)?,
+                provided_addr: index.lookup_str(provided_txt)?,
+                derived_addr: parse_pubkey_or_string(index, st, derived_txt),
             });
         }
 
-        // Create Account: account {:?} already in use  (prints Address via Debug)
+        // Create Account: account {:?} already in use
         if let Some(addr_txt) = parse_between(text, "Create Account: account ", " already in use") {
             let addr = parse_debug_address_to_pubkey_id(index, addr_txt)?;
             return Some(Self::CreateAccountAlreadyInUse { addr });
@@ -244,20 +258,17 @@ impl SystemProgramLog {
             && let Some(pk_txt) = rest.strip_suffix(" must sign")
         {
             return Some(Self::TransferFromMustSign {
-                from: parse_pubkey_id(index, pk_txt.trim())?,
+                from: index.lookup_str(pk_txt.trim())?,
             });
         }
 
         // Transfer: insufficient lamports <have>, need <need>
-        if let Some(rest) = text.strip_prefix("Transfer: insufficient lamports ") {
-            if let Some(pos) = rest.find(", need ") {
-                return Some(Self::TransferInsufficient {
-                    have: parse_u64_commas(&rest[..pos])?,
-                    need: parse_u64_commas(&rest[pos + ", need ".len()..])?,
-                });
-            }
-            return Some(Self::Unparsed {
-                text: st.push(text),
+        if let Some(rest) = text.strip_prefix("Transfer: insufficient lamports ")
+            && let Some(pos) = rest.find(", need ")
+        {
+            return Some(Self::TransferInsufficient {
+                have: parse_u64_commas(&rest[..pos])?,
+                need: parse_u64_commas(&rest[pos + ", need ".len()..])?,
             });
         }
 
@@ -290,7 +301,7 @@ impl SystemProgramLog {
             } => format!(
                 "Create: address {} does not match derived address {}",
                 pubkey_id_to_pubkey(store, *provided_addr),
-                pubkey_id_to_pubkey(store, *derived_addr),
+                pubkey_or_string_to_string(*derived_addr, st, store),
             ),
 
             Self::TransferFromAddressMismatch {
@@ -299,13 +310,12 @@ impl SystemProgramLog {
             } => format!(
                 "Transfer: 'from' address {} does not match derived address {}",
                 pubkey_id_to_pubkey(store, *provided_addr),
-                pubkey_id_to_pubkey(store, *derived_addr),
+                pubkey_or_string_to_string(*derived_addr, st, store),
             ),
 
             Self::CreateAccountAlreadyInUse { addr }
             | Self::CreateAccountAccountAlreadyInUse { addr } => format!(
                 "Create Account: account {:?} already in use",
-                // Keep `{:?}`-ish feel, but minimal: just the pubkey.
                 pubkey_id_to_pubkey(store, *addr),
             ),
 
@@ -358,8 +368,6 @@ impl SystemProgramLog {
             Self::AuthorizeNonceAccount { msg } => {
                 format!("Authorize nonce account: {}", st.resolve(*msg))
             }
-
-            Self::Unparsed { text } => st.resolve(*text).to_string(),
         }
     }
 }

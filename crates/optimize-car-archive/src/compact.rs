@@ -336,10 +336,7 @@ pub fn to_compact_transaction<'a>(
     index: &KeyIndex,
     bh_index: &FxHashMap<[u8; 32], i32>,
 ) -> Result<CompactTransaction<'a>> {
-    let mut signatures = Vec::with_capacity(vtx.signatures.len());
-    for s in &vtx.signatures {
-        signatures.push(Signature(s));
-    }
+    let signatures = vtx.signatures.iter().map(|s| Signature(s)).collect();
 
     let message = match &vtx.message {
         VersionedMessage::Legacy(m) => {
@@ -349,32 +346,29 @@ pub fn to_compact_transaction<'a>(
                 num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
             };
 
-            let mut account_keys = Vec::with_capacity(m.account_keys.len());
-            for key in &m.account_keys {
-                let idx = index.lookup_unchecked(key);
-                account_keys.push(idx);
-            }
-
-            let recent_blockhash: [u8; 32] = m
-                .recent_blockhash
-                .as_ref()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+            let account_keys = m
+                .account_keys
+                .iter()
+                .map(|a| index.lookup_unchecked(a))
+                .collect();
 
             let recent_blockhash = bh_index
-                .get(&recent_blockhash)
+                .get(m.recent_blockhash)
                 .copied()
                 .map(CompactRecentBlockhash::Id)
-                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
+                .unwrap_or_else(|| {
+                    CompactRecentBlockhash::Nonce(blockzilla_format::Nonce(m.recent_blockhash))
+                });
 
-            let mut instructions = Vec::with_capacity(m.instructions.len());
-            for ix in &m.instructions {
-                instructions.push(CompactInstruction {
+            let instructions = m
+                .instructions
+                .iter()
+                .map(|ix| CompactInstruction {
                     program_id_index: ix.program_id_index,
                     accounts: ix.accounts.as_ref(),
                     data: ix.data.as_ref(),
-                });
-            }
+                })
+                .collect();
 
             CompactMessage::Legacy(CompactLegacyMessage {
                 header,
@@ -391,43 +385,39 @@ pub fn to_compact_transaction<'a>(
                 num_readonly_unsigned_accounts: m.header.num_readonly_unsigned_accounts,
             };
 
-            let mut account_keys = Vec::with_capacity(m.account_keys.len());
-            for key in &m.account_keys {
-                let idx = index.lookup_unchecked(key);
-                account_keys.push(idx);
-            }
-
-            let recent_blockhash: [u8; 32] = m
-                .recent_blockhash
-                .as_ref()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("blockhash len != 32"))?;
+            let account_keys = m
+                .account_keys
+                .iter()
+                .map(|a| index.lookup_unchecked(a))
+                .collect();
 
             let recent_blockhash = bh_index
-                .get(&recent_blockhash)
+                .get(m.recent_blockhash)
                 .copied()
                 .map(CompactRecentBlockhash::Id)
-                .unwrap_or_else(|| CompactRecentBlockhash::Nonce(recent_blockhash));
+                .unwrap_or_else(|| {
+                    CompactRecentBlockhash::Nonce(blockzilla_format::Nonce(m.recent_blockhash))
+                });
 
-            let mut instructions = Vec::with_capacity(m.instructions.len());
-            for ix in &m.instructions {
-                instructions.push(CompactInstruction {
+            let instructions = m
+                .instructions
+                .iter()
+                .map(|ix| CompactInstruction {
                     program_id_index: ix.program_id_index,
                     accounts: ix.accounts.as_ref(),
                     data: ix.data.as_ref(),
-                });
-            }
+                })
+                .collect();
 
-            let mut address_table_lookups = Vec::with_capacity(m.address_table_lookups.len());
-            for lookup in &m.address_table_lookups {
-                let table_idx = index.lookup_unchecked(lookup.account_key);
-
-                address_table_lookups.push(CompactAddressTableLookup {
-                    account_key: table_idx,
+            let address_table_lookups = m
+                .address_table_lookups
+                .iter()
+                .map(|lookup| CompactAddressTableLookup {
+                    account_key: index.lookup_unchecked(lookup.account_key),
                     writable_indexes: lookup.writable_indexes.as_ref(),
                     readonly_indexes: lookup.readonly_indexes.as_ref(),
-                });
-            }
+                })
+                .collect();
 
             CompactMessage::V0(CompactV0Message {
                 header,
