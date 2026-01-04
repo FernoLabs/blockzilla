@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use data_encoding::BASE64;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
@@ -9,6 +10,7 @@ use crate::program_logs::{self, ProgramLog, system_program};
 
 pub type StrId = u32;
 pub type ProgramId = u32;
+pub type DataId = u32;
 
 const CB_PK: &str = "ComputeBudget111111111111111111111111111111";
 
@@ -16,6 +18,7 @@ const CB_PK: &str = "ComputeBudget111111111111111111111111111111";
 pub struct CompactLogStream {
     pub events: Vec<LogEvent>,
     pub strings: StringTable,
+    pub data: DataTable,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -34,6 +37,33 @@ impl StringTable {
     #[inline]
     pub fn resolve(&self, id: StrId) -> &str {
         &self.strings[id as usize]
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct DataTable {
+    pub arrays: Vec<Vec<Vec<u8>>>,
+}
+
+impl DataTable {
+    #[inline]
+    pub fn push(&mut self, data: Vec<Vec<u8>>) -> DataId {
+        let id = self.arrays.len() as DataId;
+        self.arrays.push(data);
+        id
+    }
+
+    #[inline]
+    pub fn resolve(&self, id: DataId) -> &[Vec<u8>] {
+        &self.arrays[id as usize]
+    }
+
+    #[inline]
+    pub fn render_array(data: &[Vec<u8>]) -> String {
+        data.iter()
+            .map(|chunk| BASE64.encode(chunk))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -102,16 +132,16 @@ pub enum LogEvent {
     },
 
     /// `Program return: <pk> <b64>`
-    /// We keep the base64 payload as a string in the string table (no decoding).
+    /// We keep the base64 payload decoded into byte arrays.
     Return {
         program: ProgramId,
-        data_b64: StrId,
+        data: DataId,
     },
 
     /// `Program data: <b64>`
-    /// We keep the base64 payload as a string in the string table (no decoding).
+    /// We keep the base64 payload decoded into byte arrays.
     Data {
-        data_b64: StrId,
+        data: DataId,
     },
 
     Consumption {
@@ -209,6 +239,27 @@ fn classify_failed_reason(reason: &str) -> FailedReasonClass<'_> {
 }
 
 #[inline]
+fn decode_base64_array(text: &str, dt: &mut DataTable, scratch: &mut Vec<u8>) -> Option<DataId> {
+    let mut decoded = Vec::new();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some(dt.push(decoded));
+    }
+
+    for token in trimmed.split_whitespace() {
+        scratch.clear();
+        let capacity = BASE64.decode_len(token.len()).ok()?;
+        scratch.resize(capacity, 0);
+        let used = BASE64.decode_mut(token.as_bytes(), scratch).ok()?;
+        scratch.truncate(used);
+        decoded.push(scratch.to_vec());
+    }
+
+    Some(dt.push(decoded))
+}
+
+#[inline]
+#[inline]
 fn lookup_pid_or_panic(
     registry: &Registry,
     pk_txt: &str,
@@ -246,7 +297,9 @@ fn pid_to_pubkey(registry: &Registry, pid: ProgramId) -> Pubkey {
 
 pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
     let mut st = StringTable::default();
+    let mut dt = DataTable::default();
     let mut events = Vec::with_capacity(lines.len());
+    let mut decode_buf = Vec::new();
 
     // CB id must exist in registry (else bug)
     let cb_pid = lookup_pid_or_panic(registry, CB_PK, 0, "ComputeBudget constant");
@@ -377,9 +430,12 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
         if let Some(rest) = line.strip_prefix("Program ") {
             // Program data: <b64>
             if let Some(b64) = rest.strip_prefix("data: ") {
-                // No validation, keep raw base64 string in string table
-                events.push(LogEvent::Data {
-                    data_b64: st.push(b64.trim()),
+                if let Some(data) = decode_base64_array(b64, &mut dt, &mut decode_buf) {
+                    events.push(LogEvent::Data { data });
+                    continue;
+                }
+                events.push(LogEvent::Unparsed {
+                    text: st.push(line),
                 });
                 continue;
             }
@@ -388,10 +444,14 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
             if let Some(tail) = rest.strip_prefix("return: ") {
                 if let Some((pk_txt, b64_txt)) = tail.trim().split_once(' ') {
                     let program = lookup_pid_or_panic(registry, pk_txt.trim(), line_no, line);
-                    // No validation, keep raw base64 string in string table
-                    events.push(LogEvent::Return {
-                        program,
-                        data_b64: st.push(b64_txt.trim()),
+                    if let Some(data) =
+                        decode_base64_array(b64_txt, &mut dt, &mut decode_buf)
+                    {
+                        events.push(LogEvent::Return { program, data });
+                        continue;
+                    }
+                    events.push(LogEvent::Unparsed {
+                        text: st.push(line),
                     });
                     continue;
                 }
@@ -516,12 +576,14 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
     CompactLogStream {
         events,
         strings: st,
+        data: dt,
     }
 }
 
 pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
     let mut out = Vec::with_capacity(cls.events.len());
     let st = &cls.strings;
+    let dt = &cls.data;
 
     for ev in cls.events.iter() {
         match ev {
@@ -591,14 +653,17 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
                 out.push(format!("custom program error: 0x{:x}", code))
             }
 
-            LogEvent::Return { program, data_b64 } => out.push(format!(
+            LogEvent::Return { program, data } => out.push(format!(
                 "Program return: {} {}",
                 pid_to_pubkey(registry, *program),
-                st.resolve(*data_b64),
+                DataTable::render_array(dt.resolve(*data)),
             )),
 
-            LogEvent::Data { data_b64 } => {
-                out.push(format!("Program data: {}", st.resolve(*data_b64),))
+            LogEvent::Data { data } => {
+                out.push(format!(
+                    "Program data: {}",
+                    DataTable::render_array(dt.resolve(*data))
+                ))
             }
 
             LogEvent::Consumption { units } => {

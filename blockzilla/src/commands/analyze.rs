@@ -57,11 +57,13 @@ pub struct EpochReport {
     // meta breakdown (extra details)
     pub bytes_meta_logs: u64,            // serialized size of meta.logs
     pub bytes_meta_logs_strings: u64,    // serialized size of logs.strings
+    pub bytes_meta_logs_data: u64,       // serialized size of logs.data
     pub bytes_meta_logs_events: u64,     // serialized size of logs.events Vec container
     pub bytes_meta_logs_events_sum: u64, // sum(serialized size of each event)
 
     pub meta_logs_some: u64,
     pub meta_log_lines: u64,
+    pub meta_log_data_arrays: u64,
     pub meta_log_events: u64,
 
     // name -> stats
@@ -223,9 +225,13 @@ pub fn analyze_epoch_file(
 
             // Assumes CompactLogStream has these fields:
             // logs.strings.strings: Vec<String>
+            // logs.data.arrays: Vec<Vec<Vec<u8>>>
             // logs.events: Vec<LogEvent>
             rep.bytes_meta_logs_strings += sz(&logs.strings)?;
             rep.meta_log_lines += logs.strings.strings.len() as u64;
+
+            rep.bytes_meta_logs_data += sz(&logs.data)?;
+            rep.meta_log_data_arrays += logs.data.arrays.len() as u64;
 
             rep.bytes_meta_logs_events += sz(&logs.events)?;
             rep.meta_log_events += logs.events.len() as u64;
@@ -414,11 +420,13 @@ pub fn print_epoch_report(rep: &EpochReport) {
     if rep.metas_some > 0 {
         println!("meta_logs_some={}", rep.meta_logs_some);
         println!("meta_log_lines={}", rep.meta_log_lines);
+        println!("meta_log_data_arrays={}", rep.meta_log_data_arrays);
         println!("meta_log_events={}", rep.meta_log_events);
         println!(
-            "meta_logs_bytes_total={} (strings={} events_container={} events_sum={})",
+            "meta_logs_bytes_total={} (strings={} data={} events_container={} events_sum={})",
             rep.bytes_meta_logs,
             rep.bytes_meta_logs_strings,
+            rep.bytes_meta_logs_data,
             rep.bytes_meta_logs_events,
             rep.bytes_meta_logs_events_sum
         );
