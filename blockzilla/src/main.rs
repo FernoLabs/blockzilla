@@ -54,6 +54,10 @@ enum Commands {
         /// If > 0, stop after writing N lines
         #[arg(long, default_value_t = 0)]
         max_lines: u64,
+
+        /// Also dump decoded data table entries as base64 strings
+        #[arg(long, default_value_t = false)]
+        include_data: bool,
     },
 }
 
@@ -72,12 +76,14 @@ fn main() -> Result<()> {
             out,
             limit_blocks,
             max_lines,
+            include_data,
         } => dump_log_strings(
             &input,
             out.as_deref(),
             limit_blocks,
             cli.progress_every,
             max_lines,
+            include_data,
         ),
     }
 }

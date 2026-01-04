@@ -14,4 +14,4 @@ wincode = { version = "0.2.5", features = ["derive"] }
 solana-pubkey = "4.0.0"
 car-reader = { path = "../car-reader"}
 serde-big-array = "0.5.1"
-
+data-encoding = "2.9.0"
