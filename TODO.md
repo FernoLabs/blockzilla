@@ -14,6 +14,9 @@
   - Runtime-only includes logs, inner instructions, return data  
 
 - Try new encodings  
-  - Review compact encoding to remove unnecessary allocations and clones  
+  - Review compact encoding to remove unnecessary allocations and clones
   - Evaluate `wincode` for low-allocation streaming encoding  
   - Evaluate `rkyv` for zero-copy / archive-friendly layouts  
+
+- wincode optimisation
+  - can we use slice with shortu16 len decode ?
