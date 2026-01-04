@@ -7,7 +7,7 @@ use std::{
 };
 use tracing::info;
 
-use blockzilla_format::{PostcardFramedReader, compact::CompactBlockRecord};
+use blockzilla_format::{PostcardFramedReader, compact::CompactBlockRecord, log::DataTable};
 
 fn fmt_dur(secs: u64) -> String {
     let h = secs / 3600;
@@ -26,6 +26,7 @@ pub fn dump_log_strings(
     limit_blocks: Option<u64>,
     progress_every: u64,
     max_lines: u64,
+    include_data: bool,
 ) -> Result<()> {
     info!("dump-log-strings input={} (framed)", path.display());
 
@@ -75,6 +76,17 @@ pub fn dump_log_strings(
                 }
                 writeln!(out, "{s}")?;
                 lines_out += 1;
+            }
+
+            if include_data {
+                for data in logs.data.arrays.iter() {
+                    if max_lines != 0 && lines_out >= max_lines {
+                        break;
+                    }
+                    let rendered = DataTable::render_array(data);
+                    writeln!(out, "{rendered}")?;
+                    lines_out += 1;
+                }
             }
         }
 
