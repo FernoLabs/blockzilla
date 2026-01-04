@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use boomphf::hashmap::NoKeyBoomHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
@@ -23,27 +23,30 @@ impl KeyStore {
         self.keys.is_empty()
     }
 
+    /// 1-based id -> key
     #[inline]
     pub fn get(&self, id: u32) -> Option<&[u8; 32]> {
         self.keys.get(id.checked_sub(1)? as usize)
     }
 
+    /// Sequential load, no extra buffers.
     pub fn load(path: &Path) -> Result<Self> {
         let f = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
-        let mut r = BufReader::with_capacity(64 << 20, f);
+        let len_bytes = f.metadata().context("stat registry")?.len() as usize;
 
-        let mut buf = Vec::new();
-        r.read_to_end(&mut buf).context("read registry")?;
         anyhow::ensure!(
-            buf.len() % 32 == 0,
+            len_bytes % 32 == 0,
             "invalid registry size {} (not multiple of 32)",
-            buf.len()
+            len_bytes
         );
 
-        let mut keys = Vec::with_capacity(buf.len() / 32);
-        for c in buf.chunks_exact(32) {
+        let n = len_bytes / 32;
+        let mut r = BufReader::with_capacity(64 << 20, f);
+
+        let mut keys = Vec::with_capacity(n);
+        for _ in 0..n {
             let mut a = [0u8; 32];
-            a.copy_from_slice(c);
+            r.read_exact(&mut a).context("read pubkey")?;
             keys.push(a);
         }
 
@@ -51,29 +54,33 @@ impl KeyStore {
     }
 }
 
-/// Key -> id index that does NOT store keys.
-/// Assumes lookups are always hits.
+/// Key -> id index using 128-bit prefix fingerprint.
 /// Ids are 1-based (0 reserved).
 #[derive(Debug, Clone)]
 pub struct KeyIndex {
-    index: NoKeyBoomHashMap<[u8; 32], u32>,
+    index: FxHashMap<[u8; 32], u32>, // fingerprint -> id
 }
 
 impl KeyIndex {
+    /// Build index over keys in file order.
     pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
-        // Store (file_index + 1) to reserve 0
-        let values: Vec<u32> = (0..keys_in_file_order.len())
-            .map(|i| (i as u32) + 1)
-            .collect();
+        let mut index =
+            FxHashMap::with_capacity_and_hasher(keys_in_file_order.len(), FxBuildHasher);
 
-        let index = NoKeyBoomHashMap::new(keys_in_file_order, values);
+        for (i, k) in keys_in_file_order.into_iter().enumerate() {
+            let id = i as u32 + 1;
+            index.insert(k, id);
+        }
+
+        index.shrink_to_fit();
+
         Self { index }
     }
 
-    /// Returns 1-based id. Undefined behavior (wrong id) if key is not in the set.
+    /// Fast path: assumes key exists and no collisions.
     #[inline(always)]
     pub fn lookup_unchecked(&self, k: &[u8; 32]) -> u32 {
-        self.index.get(k).copied().unwrap()
+        *self.index.get(k).expect("missing key")
     }
 }
 
