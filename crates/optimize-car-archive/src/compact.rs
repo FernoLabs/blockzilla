@@ -18,8 +18,8 @@ use car_reader::{
 use blockzilla_format::{
     BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactInstruction,
     CompactLegacyMessage, CompactMessage, CompactMessageHeader, CompactRecentBlockhash,
-    CompactTransaction, CompactTxWithMeta, CompactV0Message, PostcardFramedWriter, Registry,
-    Signature, compact_meta_from_proto, load_registry,
+    CompactTransaction, CompactTxWithMeta, CompactV0Message, KeyIndex, KeyStore,
+    PostcardFramedWriter, Signature, compact_meta_from_proto,
 };
 
 use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths};
@@ -138,8 +138,9 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     info!("  bh-reg:   {}", bh_registry_path.display());
     info!("  out:      {}", compact_path.display());
 
-    let registry = load_registry(&registry_path)?;
-    info!("Registry loaded: {} keys", registry.len());
+    let store = KeyStore::load(&registry_path)?;
+    let index = KeyIndex::build(&store.keys);
+    info!("Registry loaded: {} keys", store.len());
 
     let hashes = load_blockhash_registry_plain(&bh_registry_path)?;
     info!("Blockhash registry loaded: {} hashes", hashes.len());
@@ -190,7 +191,7 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     while let Some(group) = stream.next_group()? {
         let (blocks_delta, txs_delta, slot) = compact_process_block_manual(
             group,
-            &registry,
+            &index,
             &bh.index,
             &mut writer,
             block_count,
@@ -220,7 +221,7 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
 
 fn compact_process_block_manual<W: std::io::Write>(
     group: &CarBlockGroup,
-    registry: &Registry,
+    index: &KeyIndex,
     bh_index: &FxHashMap<[u8; 32], i32>,
     writer: &mut PostcardFramedWriter<W>,
     block_i: u32,
@@ -254,7 +255,7 @@ fn compact_process_block_manual<W: std::io::Write>(
         txs += 1;
         tx_index_in_block += 1;
 
-        let compact_tx = to_compact_transaction(vtx, registry, bh_index).map_err(|e| {
+        let compact_tx = to_compact_transaction(vtx, index, bh_index).map_err(|e| {
             error!(
                 "FAIL to_compact_transaction: block_slot={} tx_index_in_block={} kind={} sigs={}",
                 block_slot,
@@ -267,7 +268,7 @@ fn compact_process_block_manual<W: std::io::Write>(
         })?;
 
         let metadata_opt = if let Some(meta) = maybe_meta {
-            let compact_meta = compact_meta_from_proto(meta, registry).map_err(|e| {
+            let compact_meta = compact_meta_from_proto(meta, index).map_err(|e| {
                 error!(
                     "FAIL compact_meta_from_proto: block_slot={} tx_index_in_block={}",
                     block_slot, tx_index_in_block
@@ -332,7 +333,7 @@ pub fn varint_usize(n: usize, out: &mut [u8; varint_max::<usize>()]) -> &mut [u8
 
 pub fn to_compact_transaction<'a>(
     vtx: &'a car_reader::versioned_transaction::VersionedTransaction,
-    registry: &Registry,
+    index: &KeyIndex,
     bh_index: &FxHashMap<[u8; 32], i32>,
 ) -> Result<CompactTransaction<'a>> {
     let mut signatures = Vec::with_capacity(vtx.signatures.len());
@@ -350,9 +351,7 @@ pub fn to_compact_transaction<'a>(
 
             let mut account_keys = Vec::with_capacity(m.account_keys.len());
             for key in &m.account_keys {
-                let idx = registry
-                    .lookup(*key)
-                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
+                let idx = index.lookup_unchecked(*key);
                 account_keys.push(idx);
             }
 
@@ -394,9 +393,7 @@ pub fn to_compact_transaction<'a>(
 
             let mut account_keys = Vec::with_capacity(m.account_keys.len());
             for key in &m.account_keys {
-                let idx = registry
-                    .lookup(*key)
-                    .ok_or_else(|| anyhow::anyhow!("pubkey missing from registry"))?;
+                let idx = index.lookup_unchecked(*key);
                 account_keys.push(idx);
             }
 
@@ -423,9 +420,7 @@ pub fn to_compact_transaction<'a>(
 
             let mut address_table_lookups = Vec::with_capacity(m.address_table_lookups.len());
             for lookup in &m.address_table_lookups {
-                let table_idx = registry
-                    .lookup(lookup.account_key)
-                    .ok_or_else(|| anyhow::anyhow!("lookup table key missing from registry"))?;
+                let table_idx = index.lookup_unchecked(lookup.account_key);
 
                 address_table_lookups.push(CompactAddressTableLookup {
                     account_key: table_idx,

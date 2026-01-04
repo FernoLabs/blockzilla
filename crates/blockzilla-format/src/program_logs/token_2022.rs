@@ -3,7 +3,7 @@ use solana_pubkey::Pubkey;
 use std::str::FromStr;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{Registry, StrId, StringTable};
+use crate::{KeyIndex, KeyStore, StrId, StringTable};
 
 /// SPL Token-2022 program id
 pub const STR_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -400,7 +400,7 @@ impl Token2022ErrorLog {
 
 impl Token2022Log {
     #[inline]
-    pub fn parse(payload: &str, registry: &Registry, st: &mut StringTable) -> Option<Self> {
+    pub fn parse(payload: &str, index: &KeyIndex, st: &mut StringTable) -> Option<Self> {
         if let Some(e) = Token2022ErrorLog::parse(payload) {
             return Some(Self::Error(e));
         }
@@ -425,7 +425,7 @@ impl Token2022Log {
 
         // "Error harvesting from {}: {}"
         if let Some((a, b)) = parse_two_braced(payload, "Error harvesting from ", ": ") {
-            let account_key = lookup_pubkey_id_or_none(registry, a)?;
+            let account_key = lookup_pubkey_id_or_none(index, a)?;
             return Some(Self::ErrorHarvestingFrom {
                 account_key,
                 error: st.push(b),
@@ -436,7 +436,7 @@ impl Token2022Log {
     }
 
     #[inline]
-    pub fn as_str(&self, st: &StringTable, registry: &Registry) -> String {
+    pub fn as_str(&self, st: &StringTable, store: &KeyStore) -> String {
         match self {
             Self::Error(e) => e.as_str().to_string(),
 
@@ -452,7 +452,7 @@ impl Token2022Log {
             | Self::ErrorHarvestingFrom3 { account_key, error }
             | Self::ErrorHarvestingFrom4 { account_key, error } => format!(
                 "Error harvesting from {}: {}",
-                pubkey_id_to_string(registry, *account_key),
+                pubkey_id_to_string(store, *account_key),
                 st.resolve(*error),
             ),
         }
@@ -460,19 +460,18 @@ impl Token2022Log {
 }
 
 #[inline]
-fn lookup_pubkey_id_or_none(registry: &Registry, pk_txt: &str) -> Option<PubkeyId> {
+fn lookup_pubkey_id_or_none(index: &KeyIndex, pk_txt: &str) -> Option<PubkeyId> {
     let pk = Pubkey::from_str(pk_txt.trim()).ok()?;
-    let ix0 = registry.lookup(&pk.to_bytes())?;
-    Some(ix0)
+    Some(index.lookup_unchecked(&pk.to_bytes()))
 }
 
 #[inline]
-fn pubkey_id_to_string(registry: &Registry, id: PubkeyId) -> String {
+fn pubkey_id_to_string(store: &KeyStore, id: PubkeyId) -> String {
     // Id=0 reserved/invalid.
     if id == 0 {
         return "<invalid-pubkey-id-0>".to_string();
     }
-    let bytes = match registry.get(id) {
+    let bytes = match store.get(id) {
         Some(b) => b,
         None => return format!("<pubkey-id-oob:{}>", id),
     };
