@@ -35,7 +35,7 @@ impl KeyStore {
         let len_bytes = f.metadata().context("stat registry")?.len() as usize;
 
         anyhow::ensure!(
-            len_bytes % 32 == 0,
+            len_bytes.is_multiple_of(32),
             "invalid registry size {} (not multiple of 32)",
             len_bytes
         );
