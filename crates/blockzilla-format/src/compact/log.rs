@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::Registry;
 use crate::program_logs::{self, ProgramLog, system_program};
+use crate::{KeyIndex, KeyStore};
 
 pub type StrId = u32;
 pub type ProgramId = u32;
@@ -260,7 +260,7 @@ fn decode_base64_array(text: &str, dt: &mut DataTable, scratch: &mut Vec<u8>) ->
 
 #[inline]
 fn lookup_pid_or_panic(
-    registry: &Registry,
+    index: &KeyIndex,
     pk_txt: &str,
     line_no: usize,
     full_line: &str,
@@ -272,35 +272,30 @@ fn lookup_pid_or_panic(
         )
     });
 
-    registry.lookup(&pk.to_bytes()).unwrap_or_else(|| {
-        panic!(
-            "log.rs: pubkey not in registry (BUG): pk='{}' line_no={} line='{}'",
-            pk_txt, line_no, full_line
-        )
-    })
+    index.lookup_unchecked(&pk.to_bytes())
 }
 
 #[inline]
-fn pid_to_pubkey(registry: &Registry, pid: ProgramId) -> Pubkey {
+fn pid_to_pubkey(store: &KeyStore, pid: ProgramId) -> Pubkey {
     assert!(pid != 0, "log.rs: ProgramId=0 is reserved/invalid");
-    let bytes = registry.get(pid).unwrap_or_else(|| {
+    let bytes = store.get(pid).unwrap_or_else(|| {
         panic!(
             "log.rs: ProgramId out of bounds: pid={} len={}",
             pid,
-            registry.len()
+            store.len()
         )
     });
     Pubkey::new_from_array(*bytes)
 }
 
-pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
+pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
     let mut st = StringTable::default();
     let mut dt = DataTable::default();
     let mut events = Vec::with_capacity(lines.len());
     let mut decode_buf = Vec::new();
 
     // CB id must exist in registry (else bug)
-    let cb_pid = lookup_pid_or_panic(registry, CB_PK, 0, "ComputeBudget constant");
+    let cb_pid = lookup_pid_or_panic(index, CB_PK, 0, "ComputeBudget constant");
 
     for (line_no, line) in lines.iter().enumerate() {
         let line = line.trim_end();
@@ -309,7 +304,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
         }
 
         // 1) First, let the SystemProgramLog try to parse any "system program-ish" lines.
-        if let Some(sys) = system_program::SystemProgramLog::parse(line, registry, &mut st) {
+        if let Some(sys) = system_program::SystemProgramLog::parse(line, index, &mut st) {
             events.push(LogEvent::System(sys));
             continue;
         }
@@ -392,7 +387,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
                 continue;
             }
 
-            let log = program_logs::parse_program_log_no_id(text, registry, &mut st);
+            let log = program_logs::parse_program_log_no_id(text, index, &mut st);
             events.push(LogEvent::ProgramLog(log));
             continue;
         }
@@ -404,7 +399,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
             let pk_txt = rest[..pos].trim();
             let text = rest[pos + " log: ".len()..].trim();
 
-            let program = lookup_pid_or_panic(registry, pk_txt, line_no, line);
+            let program = lookup_pid_or_panic(index, pk_txt, line_no, line);
 
             // If a program emitted the runtime custom error string in its own log channel,
             // record it as a program-attributed custom error.
@@ -419,7 +414,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
                 continue;
             }
 
-            let log = program_logs::parse_program_log_for_program(pk_txt, text, registry, &mut st);
+            let log = program_logs::parse_program_log_for_program(pk_txt, text, index, &mut st);
             events.push(LogEvent::ProgramIdLog { program, log });
             continue;
         }
@@ -441,7 +436,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
             // Program return: <pk> <b64>
             if let Some(tail) = rest.strip_prefix("return: ") {
                 if let Some((pk_txt, b64_txt)) = tail.trim().split_once(' ') {
-                    let program = lookup_pid_or_panic(registry, pk_txt.trim(), line_no, line);
+                    let program = lookup_pid_or_panic(index, pk_txt.trim(), line_no, line);
                     if let Some(data) =
                         decode_base64_array(b64_txt, &mut dt, &mut decode_buf)
                     {
@@ -481,7 +476,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
 
             // Program <pk> is not deployed
             if let Some(pk_txt) = rest.strip_suffix(" is not deployed") {
-                let program = lookup_pid_or_panic(registry, pk_txt.trim(), line_no, line);
+                let program = lookup_pid_or_panic(index, pk_txt.trim(), line_no, line);
                 events.push(LogEvent::ProgramNotDeployed {
                     program: Some(program),
                 });
@@ -493,7 +488,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
                 let pk_txt = rest[..space_pos].trim();
                 let after_pk = rest[space_pos + 1..].trim();
 
-                let program = lookup_pid_or_panic(registry, pk_txt, line_no, line);
+                let program = lookup_pid_or_panic(index, pk_txt, line_no, line);
                 let is_cb = program == cb_pid;
 
                 // invoke [N]
@@ -578,7 +573,7 @@ pub fn parse_logs(lines: &[String], registry: &Registry) -> CompactLogStream {
     }
 }
 
-pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
+pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
     let mut out = Vec::with_capacity(cls.events.len());
     let st = &cls.strings;
     let dt = &cls.data;
@@ -587,7 +582,7 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
         match ev {
             LogEvent::Invoke { program, depth, .. } => out.push(format!(
                 "Program {} invoke [{}]",
-                pid_to_pubkey(registry, *program),
+                pid_to_pubkey(store, *program),
                 depth
             )),
             LogEvent::Consumed {
@@ -596,32 +591,32 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
                 limit,
             } => out.push(format!(
                 "Program {} consumed {} of {} compute units",
-                pid_to_pubkey(registry, *program),
+                pid_to_pubkey(store, *program),
                 used,
                 limit
             )),
             LogEvent::Success { program } => out.push(format!(
                 "Program {} success",
-                pid_to_pubkey(registry, *program)
+                pid_to_pubkey(store, *program)
             )),
 
             LogEvent::Failure { program, reason } => out.push(format!(
                 "Program {} failed: {}",
-                pid_to_pubkey(registry, *program),
+                pid_to_pubkey(store, *program),
                 st.resolve(*reason)
             )),
             LogEvent::FailureCustomProgramError { program, code } => out.push(format!(
                 "Program {} failed: custom program error: 0x{:x}",
-                pid_to_pubkey(registry, *program),
+                pid_to_pubkey(store, *program),
                 code
             )),
             LogEvent::FailureInvalidAccountData { program } => out.push(format!(
                 "Program {} failed: invalid account data for instruction",
-                pid_to_pubkey(registry, *program)
+                pid_to_pubkey(store, *program)
             )),
             LogEvent::FailureInvalidProgramArgument { program } => out.push(format!(
                 "Program {} failed: invalid program argument",
-                pid_to_pubkey(registry, *program)
+                pid_to_pubkey(store, *program)
             )),
 
             LogEvent::FailedToComplete { reason } => out.push(format!(
@@ -629,20 +624,20 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
                 st.resolve(*reason)
             )),
 
-            LogEvent::System(sys) => out.push(sys.render(st, registry)),
+            LogEvent::System(sys) => out.push(sys.render(st, store)),
 
             LogEvent::ProgramLog(log) => {
-                let payload = program_logs::render_program_log(log, registry, st);
+                let payload = program_logs::render_program_log(log, store, st);
                 out.push(format!("Program log: {}", payload));
             }
             LogEvent::ProgramLogError { msg } => {
                 out.push(format!("Program log: Error: {}", st.resolve(*msg)));
             }
             LogEvent::ProgramIdLog { program, log } => {
-                let payload = program_logs::render_program_log(log, registry, st);
+                let payload = program_logs::render_program_log(log, store, st);
                 out.push(format!(
                     "Program {} log: {}",
-                    pid_to_pubkey(registry, *program),
+                    pid_to_pubkey(store, *program),
                     payload
                 ));
             }
@@ -653,7 +648,7 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
 
             LogEvent::Return { program, data } => out.push(format!(
                 "Program return: {} {}",
-                pid_to_pubkey(registry, *program),
+                pid_to_pubkey(store, *program),
                 DataTable::render_array(dt.resolve(*data)),
             )),
 
@@ -674,7 +669,7 @@ pub fn render_logs(cls: &CompactLogStream, registry: &Registry) -> Vec<String> {
                 if let Some(pid) = program {
                     out.push(format!(
                         "Program {} is not deployed",
-                        pid_to_pubkey(registry, *pid)
+                        pid_to_pubkey(store, *pid)
                     ));
                 } else {
                     out.push("Program is not deployed".to_string());

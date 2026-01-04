@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use car_reader::{car_stream::CarStream, versioned_transaction::VersionedMessage};
 use rustc_hash::FxBuildHasher;
-use solana_pubkey::Pubkey;
+use solana_pubkey::{Pubkey, pubkey};
 use std::{path::Path, str::FromStr, time::Instant};
 use tracing::info;
 
@@ -51,7 +51,17 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let mut items: Vec<([u8; 32], u32)> = counter.counts.into_iter().collect();
     items.sort_unstable_by(|(ka, ca), (kb, cb)| cb.cmp(ca).then_with(|| ka.cmp(kb)));
 
-    let keys: Vec<[u8; 32]> = items.into_iter().map(|(k, _)| k).collect();
+    let mut keys: Vec<[u8; 32]> = items.into_iter().map(|(k, _)| k).collect();
+
+    const BUILTIN_PROGRAM_KEYS: &[Pubkey] =
+        &[pubkey!("ComputeBudget111111111111111111111111111111")];
+
+    for b in BUILTIN_PROGRAM_KEYS {
+        let b = b.to_bytes();
+        if !keys.iter().any(|k| k == &b) {
+            keys.insert(0, b);
+        }
+    }
 
     info!(
         "Sorting completed in {:.2}s",
