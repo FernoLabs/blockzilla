@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{Registry, StrId, StringTable};
+use crate::{KeyIndex, KeyStore, StrId, StringTable};
 
 pub mod account_compression;
 pub mod address_lookup_table;
@@ -48,7 +48,7 @@ pub enum ProgramLog {
 #[inline]
 pub fn parse_program_log_no_id(
     payload: &str,
-    registry: &Registry,
+    index: &KeyIndex,
     st: &mut StringTable,
 ) -> ProgramLog {
     // Fast path: zero-alloc parsers
@@ -63,7 +63,7 @@ pub fn parse_program_log_no_id(
     }
 
     // Slow path: parsers using StringTable
-    if let Some(t) = token_2022::Token2022Log::parse(payload, registry, st) {
+    if let Some(t) = token_2022::Token2022Log::parse(payload, index, st) {
         return ProgramLog::Token2022(t);
     }
     if let Some(x) = address_lookup_table::AddressLookupTableLog::parse(payload, st) {
@@ -98,10 +98,10 @@ pub fn parse_program_log_no_id(
 pub fn parse_program_log_for_program(
     program: &str,
     payload: &str,
-    registry: &Registry,
+    index: &KeyIndex,
     st: &mut StringTable,
 ) -> ProgramLog {
-    if let Some(log) = try_parse_program_log_with_table(program, payload, registry, st) {
+    if let Some(log) = try_parse_program_log_with_table(program, payload, index, st) {
         return log;
     }
     if let Some(ev) = parse_anchor_instruction(payload, st) {
@@ -127,7 +127,7 @@ macro_rules! try_parse {
 pub fn try_parse_program_log_with_table(
     program: &str,
     payload: &str,
-    registry: &Registry,
+    index: &KeyIndex,
     st: &mut StringTable,
 ) -> Option<ProgramLog> {
     try_parse!(
@@ -139,7 +139,7 @@ pub fn try_parse_program_log_with_table(
     try_parse!(
         program,
         token_2022::STR_ID,
-        token_2022::Token2022Log::parse(payload, registry, st).map(ProgramLog::Token2022)
+        token_2022::Token2022Log::parse(payload, index, st).map(ProgramLog::Token2022)
     );
 
     try_parse!(
@@ -196,10 +196,10 @@ pub fn try_parse_program_log_with_table(
 }
 
 #[inline]
-pub fn render_program_log(log: &ProgramLog, registry: &Registry, st: &StringTable) -> String {
+pub fn render_program_log(log: &ProgramLog, store: &KeyStore, st: &StringTable) -> String {
     match log {
         ProgramLog::Token(t) => t.as_str().to_string(),
-        ProgramLog::Token2022(t) => t.as_str(st, registry),
+        ProgramLog::Token2022(t) => t.as_str(st, store),
         ProgramLog::Ata(t) => t.as_str().to_string(),
         ProgramLog::AddressLookupTable(x) => x.as_str(st),
         ProgramLog::LoaderV3(x) => x.as_str(st),
