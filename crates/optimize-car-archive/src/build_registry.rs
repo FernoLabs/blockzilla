@@ -94,7 +94,7 @@ fn registry_process_block(
     counter: &mut PubkeyCounter,
 ) -> Result<(u64, u64, Option<u64>), GroupError> {
     // Keep this if you need the slot for progress reporting.
-    let block = match decode_node(group.block_payload.as_ref()).map_err(GroupError::Node)? {
+    let block = match decode_node(group.block_payload()).map_err(GroupError::Node)? {
         Node::Block(b) => b,
         _ => return Err(GroupError::WrongRootKind),
     };

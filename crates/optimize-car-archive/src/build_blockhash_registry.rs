@@ -1,9 +1,5 @@
 use anyhow::{Context, Result};
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-    path::Path,
-};
+use std::{fs::File, io::Write, path::Path};
 use tracing::info;
 
 use car_reader::{
@@ -12,7 +8,7 @@ use car_reader::{
     node::{CborCidRef, Node, decode_node},
 };
 
-use crate::{BUFFER_SIZE, Cli, ProgressTracker, epoch_paths};
+use crate::{Cli, ProgressTracker, epoch_paths};
 
 const MAX_BLOCKHASHES_PER_EPOCH: usize = 432_000;
 
@@ -37,7 +33,7 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
 
     let mut stream = CarStream::open_zstd(Path::new(&car_path))?;
     while let Some(group) = stream.next_group()? {
-        let block = match decode_node(group.block_payload.as_ref()).map_err(GroupError::Node)? {
+        let block = match decode_node(group.block_payload()).map_err(GroupError::Node)? {
             Node::Block(bk) => bk,
             _ => return Err(GroupError::WrongRootKind.into()),
         };

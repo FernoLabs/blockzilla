@@ -79,7 +79,8 @@ impl KeyIndex {
         let total = keys_in_file_order.len();
         let hot_cap = total.min(10_000);
 
-        let mut index = FxHashMap::with_capacity_and_hasher(total.saturating_sub(hot_cap), FxBuildHasher);
+        let mut index =
+            FxHashMap::with_capacity_and_hasher(total.saturating_sub(hot_cap), FxBuildHasher);
         let mut index_hot = FxHashMap::with_capacity_and_hasher(hot_cap, FxBuildHasher);
         let mut cache = FxHashMap::with_capacity_and_hasher(hot_cap, FxBuildHasher);
 
@@ -99,7 +100,11 @@ impl KeyIndex {
 
         index.shrink_to_fit();
 
-        Self { index, index_hot, cache }
+        Self {
+            index,
+            index_hot,
+            cache,
+        }
     }
 
     pub fn lookup_str(&self, k: &str) -> Option<u32> {

@@ -1,6 +1,5 @@
 use wincode::{SchemaRead, SchemaWrite};
 
-
 #[derive(SchemaRead, SchemaWrite)]
 #[wincode(tag_encoding = "u32")]
 pub enum StoredTransactionError {

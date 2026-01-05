@@ -37,8 +37,6 @@ struct Stats {
     bytes: u64,
     txs: u64,
     txs_with_meta: u64,
-    // cache the CID length once (same within file for your format)
-    cid_len: Option<u64>,
 }
 
 impl Stats {
@@ -49,29 +47,21 @@ impl Stats {
         self.bytes = 0;
         self.txs = 0;
         self.txs_with_meta = 0;
-        // keep cid_len cached across intervals
     }
 
     #[inline]
     fn add_group(&mut self, group: &CarBlockGroup, decode_tx: bool) -> Result<()> {
         self.blocks += 1;
 
-        // entries + bytes
-        let n_entries = group.payloads.len() as u64;
+        let (entries_count, bytes_size) = group.get_len();
+        // Count entries from the cid_map
+        let n_entries = entries_count as u64;
         self.entries += n_entries;
 
-        if self.cid_len.is_none() {
-            // Avoid walking the whole map. If you really need it, this is O(1) average,
-            // but still touches the hash map. You can also just hardcode if fixed.
-            self.cid_len = group.cid_map.keys().next().map(|cid| cid.len() as u64);
-        }
-        let cid_len = self.cid_len.unwrap_or(0);
+        // Total bytes from the backing buffer
+        self.bytes += bytes_size as u64;
 
-        // payload bytes: still a sum, but it's just iterating a Vec<Bytes>
-        let payload_bytes: u64 = group.payloads.iter().map(|p| p.len() as u64).sum();
-        self.bytes += payload_bytes + cid_len * n_entries;
-
-        // optional tx decode
+        // Optional tx decode
         if decode_tx {
             let mut it = group.transactions().map_err(|e| {
                 CarError::InvalidData(format!("transaction iteration failed: {e:?}"))
@@ -116,15 +106,7 @@ impl Stats {
     }
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
-    let args = Args::parse();
-
-    info!(
-        "Reading CAR archive: {} (decode_tx={})",
-        args.input, args.decode_tx
-    );
-
+fn run_stream<R: std::io::Read>(stream: &mut CarStream<R>, args: &Args) -> Result<()> {
     let stats_every = Duration::from_secs(args.stats_every.max(1));
     let start = Instant::now();
     let end = if args.seconds == 0 {
@@ -136,9 +118,8 @@ fn main() -> Result<()> {
     let mut stats = Stats::default();
     let mut last_print = Instant::now();
 
-    let mut stream = CarStream::open_zstd(Path::new(&args.input))?;
     while let Some(group) = stream.next_group()? {
-        stats.add_group(&group, args.decode_tx)?;
+        stats.add_group(group, args.decode_tx)?;
 
         let now = Instant::now();
         if now.duration_since(last_print) >= stats_every {
@@ -152,13 +133,32 @@ fn main() -> Result<()> {
             break;
         }
     }
-
-    // Print final partial interval (optional, but useful)
+    // Print final partial interval
     let now = Instant::now();
     let dt = now.duration_since(last_print).as_secs_f64();
     if dt > 0.0 && (stats.blocks > 0 || stats.entries > 0) {
         stats.print_interval(dt.max(1e-9), args.decode_tx);
     }
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+    let args = Args::parse();
+
+    info!(
+        "Reading CAR archive: {} (decode_tx={})",
+        args.input, args.decode_tx
+    );
+
+    let path = Path::new(&args.input);
+    if path.extension().unwrap() == "zst" {
+        let mut stream = CarStream::open_zstd(path)?;
+        run_stream(&mut stream, &args)?;
+    } else {
+        let mut stream = CarStream::open(path)?;
+        run_stream(&mut stream, &args)?;
+    };
 
     Ok(())
 }

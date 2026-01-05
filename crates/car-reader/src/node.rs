@@ -313,3 +313,12 @@ where
         CborArrayIter::new(self.slice)
     }
 }
+
+/// Returns true if `payload` looks like a CBOR array whose 1st element (kind) is small uint 2.
+#[inline]
+pub fn is_block_node(payload: &[u8]) -> bool {
+    payload.len() >= 2
+        && payload[0] >= 0x80
+        && payload[0] < 0xA0 // CBOR array (major type 4)
+        && payload[1] == 0x02
+}

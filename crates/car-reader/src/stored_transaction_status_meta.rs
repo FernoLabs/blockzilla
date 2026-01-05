@@ -2,7 +2,7 @@ use std::mem::MaybeUninit;
 use wincode::ReadResult;
 use wincode::error::invalid_tag_encoding;
 use wincode::io::Reader;
-use wincode::{SchemaRead, containers, len::BincodeLen, len::ShortU16Len};
+use wincode::{SchemaRead, containers, len::BincodeLen};
 
 use crate::stored_transaction_error::StoredTransactionError;
 use crate::{confirmed_block, convert_metadata};
@@ -90,7 +90,9 @@ impl From<StoredTransactionStatusMeta> for confirmed_block::TransactionStatusMet
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Default)]
 pub enum OptionEof<T> {
+    #[default]
     None,
     Some(T),
 }
@@ -187,11 +189,6 @@ impl<T> OptionEof<T> {
     }
 }
 
-impl<T> Default for OptionEof<T> {
-    fn default() -> Self {
-        OptionEof::None
-    }
-}
 
 impl<T> From<Option<T>> for OptionEof<T> {
     fn from(opt: Option<T>) -> Self {
@@ -220,12 +217,11 @@ where
                     dst.write(OptionEof::None);
                     return Ok(());
                 }
-                if let wincode::io::ReadError::Io(ioe) = read_err {
-                    if ioe.kind() == std::io::ErrorKind::UnexpectedEof {
+                if let wincode::io::ReadError::Io(ioe) = read_err
+                    && ioe.kind() == std::io::ErrorKind::UnexpectedEof {
                         dst.write(OptionEof::None);
                         return Ok(());
                     }
-                }
             }
             println!("{:#?}", e);
             return Err(e);
