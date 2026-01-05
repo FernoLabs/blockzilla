@@ -213,29 +213,38 @@ where
     fn read(reader: &mut impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
         let mut discriminant = MaybeUninit::<u8>::uninit();
 
-        match u8::read(reader, &mut discriminant) {
-            Err(e) => {
-                // Treat EOF as "field absent" => None.
+        if let Err(e) = u8::read(reader, &mut discriminant) {
+            // Only accept true EOF as "absent field"
+            if let wincode::ReadError::Io(read_err) = &e {
+                if let wincode::io::ReadError::ReadSizeLimit(_) = read_err {
+                    dst.write(OptionEof::None);
+                    return Ok(());
+                }
+                if let wincode::io::ReadError::Io(ioe) = read_err {
+                    if ioe.kind() == std::io::ErrorKind::UnexpectedEof {
+                        dst.write(OptionEof::None);
+                        return Ok(());
+                    }
+                }
+            }
+            println!("{:#?}", e);
+            return Err(e);
+        }
+
+        let disc = unsafe { discriminant.assume_init() };
+        match disc {
+            0 => {
                 dst.write(OptionEof::None);
                 Ok(())
             }
-            Ok(()) => {
-                let disc = unsafe { discriminant.assume_init() };
-                match disc {
-                    0 => {
-                        dst.write(OptionEof::None);
-                        Ok(())
-                    }
-                    1 => {
-                        let mut value = MaybeUninit::<T::Dst>::uninit();
-                        T::read(reader, &mut value)?;
-                        let value = unsafe { value.assume_init() };
-                        dst.write(OptionEof::Some(value));
-                        Ok(())
-                    }
-                    other => Err(invalid_tag_encoding(other as usize)),
-                }
+            1 => {
+                let mut value = MaybeUninit::<T::Dst>::uninit();
+                T::read(reader, &mut value)?;
+                let value = unsafe { value.assume_init() };
+                dst.write(OptionEof::Some(value));
+                Ok(())
             }
+            other => Err(invalid_tag_encoding(other as usize)),
         }
     }
 }
