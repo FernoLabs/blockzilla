@@ -31,7 +31,7 @@ impl Default for CarBlockGroup {
 impl CarBlockGroup {
     pub fn new() -> Self {
         Self {
-            buffer: Vec::with_capacity(3 * 1024 * 1024),
+            buffer: Vec::with_capacity(5 * 1024 * 1024),
             cid_map: FxHashMap::with_capacity_and_hasher(8096, FxBuildHasher),
             block_range: (0, 0),
         }
@@ -144,7 +144,7 @@ impl CarBlockGroup {
     pub fn read_entry_payload_into<R: Read>(
         &mut self,
         reader: &mut R,
-        cid_bytes: &[u8],
+        cid_bytes: &[u8;36],
         entry_len: usize,
     ) -> CarReadResult<bool> {
         let payload_len = entry_len
