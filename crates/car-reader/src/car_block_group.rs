@@ -31,8 +31,8 @@ impl Default for CarBlockGroup {
 impl CarBlockGroup {
     pub fn new() -> Self {
         Self {
-            buffer: Vec::new(),
-            cid_map: FxHashMap::with_hasher(FxBuildHasher),
+            buffer: Vec::with_capacity(3 * 1024 * 1024),
+            cid_map: FxHashMap::with_capacity_and_hasher(8096, FxBuildHasher),
             block_range: (0, 0),
         }
     }
@@ -47,12 +47,6 @@ impl CarBlockGroup {
         self.buffer.clear();
         self.cid_map.clear();
         self.block_range = (0, 0);
-    }
-
-    #[inline]
-    pub fn reserve(&mut self, extra_entries: usize, extra_payload_bytes: usize) {
-        self.buffer.reserve(extra_payload_bytes);
-        self.cid_map.reserve(extra_entries);
     }
 
     #[inline]
