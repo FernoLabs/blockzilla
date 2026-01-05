@@ -21,6 +21,8 @@
 - wincode optimisation
   - can we use slice with shortu16 len decode ?
 
+Optimize transaction error storage (u32 + u32 + potentail tuple)
+
 ## Backlog
 
 - explore perfec hash function for registry (may reduce memory usage drastcly while keeping perf)

@@ -9,27 +9,27 @@ pub fn stored_meta_to_proto(m: StoredTransactionStatusMeta) -> TransactionStatus
     // status -> err
     let err = match &m.status {
         stored::TransactionResult::Ok => None,
-        stored::TransactionResult::Err(e) => Some(confirmed_block::TransactionError {
-            err: e.error_bytes.clone(),
+        stored::TransactionResult::Err(err) => Some(confirmed_block::TransactionError {
+            err: wincode::serialize(err).unwrap(),
         }),
     };
 
     // inner_instructions Option<Vec<..>> -> Vec + none flag
     let (inner_instructions, inner_instructions_none) = match &m.inner_instructions {
-        None => (Vec::new(), true),
-        Some(v) => (v.iter().map(inner_instructions_to_proto).collect(), false),
+        stored::OptionEof::None => (Vec::new(), true),
+        stored::OptionEof::Some(v) => (v.iter().map(inner_instructions_to_proto).collect(), false),
     };
 
     // log_messages Option<Vec<String>> -> Vec + none flag
     let (log_messages, log_messages_none) = match &m.log_messages {
-        None => (Vec::new(), true),
-        Some(v) => (v.clone(), false),
+        stored::OptionEof::None => (Vec::new(), true),
+        stored::OptionEof::Some(v) => (v.clone(), false),
     };
 
     // return_data Option<..> -> Option + none flag
     let (return_data, return_data_none) = match &m.return_data {
-        None => (None, true),
-        Some(rd) => (Some(return_data_to_proto(rd)), false),
+        stored::OptionEof::None => (None, true),
+        stored::OptionEof::Some(rd) => (Some(return_data_to_proto(rd)), false),
     };
 
     // Token balances: stored uses Option, proto uses Vec without *_none flags
@@ -76,8 +76,8 @@ pub fn stored_meta_to_proto(m: StoredTransactionStatusMeta) -> TransactionStatus
         return_data,
         return_data_none,
 
-        compute_units_consumed: m.compute_units_consumed,
-        cost_units: m.cost_units,
+        compute_units_consumed: None,
+        cost_units: None,
     }
 }
 
