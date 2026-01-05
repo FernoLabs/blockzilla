@@ -1,23 +1,29 @@
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHasher};
+use std::hash::Hasher;
+use std::io::Read;
 use std::mem::MaybeUninit;
 
-use bytes::Bytes;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use crate::confirmed_block::TransactionStatusMeta;
+use crate::error::{CarReadError, CarReadResult, GroupError};
+use crate::metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame};
+use crate::node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node, is_block_node};
+use crate::versioned_transaction::VersionedTransaction;
+
 use wincode::Deserialize;
 
-use crate::{
-    confirmed_block::TransactionStatusMeta,
-    error::GroupError,
-    metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame},
-    node::{CborArrayIter, CborCidRef, Node, NodeDecodeError, decode_node},
-    versioned_transaction::VersionedTransaction,
-};
-
-const DEFAULT_CAPACITY: usize = 8192;
+// ============================================================
+// CarBlockGroup
+// ============================================================
 
 pub struct CarBlockGroup {
-    pub block_payload: Bytes,
-    pub payloads: Vec<Bytes>,
-    pub cid_map: FxHashMap<Bytes, usize>,
+    /// Concatenated payload bytes for the current group.
+    backing: Vec<u8>,
+
+    /// FxHash(CID bytes) -> (payload_start, payload_end) offsets in `backing`.
+    cid_map: FxHashMap<u64, (u32, u32)>,
+
+    /// (payload_start, payload_end) for the block node payload, inside `backing`.
+    block_range: (u32, u32),
 }
 
 impl Default for CarBlockGroup {
@@ -28,35 +34,68 @@ impl Default for CarBlockGroup {
 
 impl CarBlockGroup {
     pub fn new() -> Self {
-        let cid_map = FxHashMap::with_capacity_and_hasher(DEFAULT_CAPACITY, FxBuildHasher);
         Self {
-            block_payload: Bytes::new(),
-            payloads: Vec::with_capacity(DEFAULT_CAPACITY),
-            cid_map,
+            backing: Vec::new(),
+            cid_map: FxHashMap::with_hasher(FxBuildHasher),
+            block_range: (0, 0),
         }
     }
 
     #[inline]
-    pub fn clear(&mut self) {
-        self.block_payload.clear();
-        self.payloads.clear();
-        self.cid_map.clear();
+    pub fn get_len(&self) -> (usize, usize) {
+        (self.cid_map.len(), self.backing.len())
     }
 
     #[inline]
-    pub fn get(&self, cid_key: &[u8]) -> Option<&Bytes> {
-        let idx = *self.cid_map.get(cid_key)?;
-        self.payloads.get(idx)
+    pub fn clear(&mut self) {
+        self.backing.clear();
+        self.cid_map.clear();
+        self.block_range = (0, 0);
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, extra_entries: usize, extra_payload_bytes: usize) {
+        self.backing.reserve(extra_payload_bytes);
+        self.cid_map.reserve(extra_entries);
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.backing.is_empty()
+    }
+
+    #[inline]
+    fn hash_cid(cid_bytes: &[u8]) -> u64 {
+        let mut h = FxHasher::default();
+        h.write(cid_bytes);
+        h.finish()
+    }
+
+    /// Lookup payload by CID bytes (hash computed internally).
+    #[inline]
+    pub fn get_entry(&self, cid_bytes: &[u8]) -> Option<&[u8]> {
+        let key = Self::hash_cid(cid_bytes);
+        let (s, e) = *self.cid_map.get(&key)?;
+        Some(&self.backing[s as usize..e as usize])
+    }
+
+    /// Returns the current block payload slice.
+    #[inline]
+    pub fn block_payload(&self) -> &[u8] {
+        let (s, e) = self.block_range;
+        &self.backing[s as usize..e as usize]
     }
 
     #[inline]
     pub fn decode_by_hash<'a>(&'a self, cid_hash_bytes: &[u8]) -> Result<Node<'a>, GroupError> {
-        let payload = self.get(cid_hash_bytes).ok_or(GroupError::MissingCid)?;
-        decode_node(payload.as_ref()).map_err(GroupError::Node)
+        let payload = self
+            .get_entry(cid_hash_bytes)
+            .ok_or(GroupError::MissingCid)?;
+        decode_node(payload).map_err(GroupError::Node)
     }
 
     pub fn transactions<'a>(&'a self) -> Result<TxIter<'a>, GroupError> {
-        let block = match decode_node(self.block_payload.as_ref()).map_err(GroupError::Node)? {
+        let block = match decode_node(self.block_payload()).map_err(GroupError::Node)? {
             Node::Block(b) => b,
             _ => return Err(GroupError::WrongRootKind),
         };
@@ -72,12 +111,63 @@ impl CarBlockGroup {
             tx_iter: None,
             reusable_tx: MaybeUninit::uninit(),
             reusable_meta: TransactionStatusMeta::default(),
-            zstd: ZstdReusableDecoder::new(16384),
+            zstd: ZstdReusableDecoder::new(16 * 1024),
             has_tx: false,
             has_meta: false,
         })
     }
+
+    /// Reads the payload bytes of one CAR entry into `backing`, hashes CID bytes,
+    /// inserts cid_map entry, and if payload is a block node sets `block_range`.
+    ///
+    /// `entry_len` is the total section size (CID bytes + payload bytes).
+    ///
+    /// Returns:
+    /// - Ok(true)  => this entry was the block node (group complete)
+    /// - Ok(false) => continue reading
+    #[inline]
+    pub fn read_entry_payload_into<R: Read>(
+        &mut self,
+        reader: &mut R,
+        cid_bytes: &[u8],
+        entry_len: usize,
+    ) -> CarReadResult<bool> {
+        let payload_len = entry_len
+            .checked_sub(cid_bytes.len())
+            .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
+
+        let start = self.backing.len();
+        let end = start + payload_len;
+
+        if end > u32::MAX as usize {
+            return Err(CarReadError::InvalidData(
+                "group payload buffer exceeds u32::MAX".to_string(),
+            ));
+        }
+
+        // Grow and read payload bytes.
+        self.backing.resize(end, 0);
+        reader
+            .read_exact(&mut self.backing[start..end])
+            .map_err(|e| CarReadError::Io(e.to_string()))?;
+
+        // Hash CID and store mapping.
+        let key = Self::hash_cid(cid_bytes);
+        self.cid_map.insert(key, (start as u32, end as u32));
+
+        // If this payload is the block node, record it.
+        if is_block_node(&self.backing[start..end]) {
+            self.block_range = (start as u32, end as u32);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 }
+
+// ============================================================
+// TxIter
+// ============================================================
 
 pub struct TxIter<'a> {
     group: &'a CarBlockGroup,
@@ -171,7 +261,6 @@ impl<'a> TxIter<'a> {
             }
 
             // Decode metadata if present
-
             let has_metadata = !tx.metadata.data.is_empty();
             if has_metadata {
                 decode_transaction_status_meta_from_frame(
@@ -180,12 +269,13 @@ impl<'a> TxIter<'a> {
                     &mut self.reusable_meta,
                     &mut self.zstd,
                 )
-                .inspect_err(|err| println!("{}",err))
+                .inspect_err(|err| println!("{err}"))
                 .map_err(|_| GroupError::TxMetaDecode)?;
             }
 
             VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
                 .map_err(|_| GroupError::TxDecode)?;
+
             self.has_tx = true;
             self.has_meta = has_metadata;
 
@@ -194,8 +284,7 @@ impl<'a> TxIter<'a> {
     }
 
     /// Returns a reference to the metadata of the current transaction.
-    /// Returns None if no transaction is loaded or if the transaction has no metadata.
-    /// This reference is valid until next() is called again.
+    /// Valid until next_tx() is called again.
     #[inline]
     pub fn current_metadata(&self) -> &TransactionStatusMeta {
         &self.reusable_meta
@@ -206,16 +295,11 @@ impl<'a> TxIter<'a> {
         &mut self,
     ) -> Result<Option<(&VersionedTransaction<'a>, Option<&TransactionStatusMeta>)>, GroupError>
     {
-        match self.decode_next_tx_in_place()? {
-            false => Ok(None),
-            true => {
-                let tx = unsafe { self.reusable_tx.assume_init_ref() };
-                if self.has_meta {
-                    Ok(Some((tx, Some(&self.reusable_meta))))
-                } else {
-                    Ok(Some((tx, None)))
-                }
-            }
+        if !self.decode_next_tx_in_place()? {
+            return Ok(None);
         }
+
+        let tx = unsafe { self.reusable_tx.assume_init_ref() };
+        Ok(Some((tx, self.has_meta.then_some(&self.reusable_meta))))
     }
 }

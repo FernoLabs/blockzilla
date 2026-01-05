@@ -230,7 +230,7 @@ fn compact_process_block_manual<W: std::io::Write>(
     block_payload: &mut Vec<u8>,
     varint_tmp: &mut [u8; varint_max::<usize>()],
 ) -> Result<(u64, u64, Option<u64>), GroupError> {
-    let block = match decode_node(group.block_payload.as_ref()).map_err(GroupError::Node)? {
+    let block = match decode_node(group.block_payload()).map_err(GroupError::Node)? {
         Node::Block(b) => b,
         _ => return Err(GroupError::WrongRootKind),
     };

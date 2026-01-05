@@ -15,7 +15,6 @@ default = []
 reader = ["dep:clap", "dep:tracing", "dep:tracing-subscriber"]
 
 [dependencies]
-bytes = "1"
 rustc-hash = "2.1"
 minicbor = { version = "2.1.3", features = ["full"] }
 wincode = { version = "0.2.5", features = ["derive", "solana-short-vec"] }
