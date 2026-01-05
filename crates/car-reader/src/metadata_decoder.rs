@@ -116,9 +116,9 @@ pub fn decode_transaction_status_meta(
     let epoch = slot_to_epoch(slot);
 
     if epoch < BINCODE_EPOCH_CUTOFF {
-        *out = wincode::deserialize::<StoredTransactionStatusMeta>(metadata_bytes)
-            .map_err(|err| MetadataDecodeError::Bincode(err.to_string()))?
-            .into();
+        //*out = wincode::deserialize::<StoredTransactionStatusMeta>(metadata_bytes)
+        //    .map_err(|err| MetadataDecodeError::Bincode(err.to_string()))?
+        //    .into();
     } else {
         out.merge(metadata_bytes)
             .map_err(MetadataDecodeError::ProstDecode)?;
