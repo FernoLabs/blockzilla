@@ -227,70 +227,71 @@ impl<'a> TxIter<'a> {
 
     #[inline]
     fn decode_next_tx_in_place(&mut self) -> Result<bool, GroupError> {
-        // Get or load tx_iter
-        let tx_iter = match &mut self.tx_iter {
-            Some(iter) => iter,
-            None => {
-                if !self.load_next_entry()? {
-                    return Ok(false);
+        loop {
+            // Get or load tx_iter
+            let tx_iter = match &mut self.tx_iter {
+                Some(iter) => iter,
+                None => {
+                    if !self.load_next_entry()? {
+                        return Ok(false);
+                    }
+                    self.tx_iter.as_mut().unwrap()
                 }
-                self.tx_iter.as_mut().unwrap()
+            };
+
+            let tx_cid = match tx_iter.next_item() {
+                None => {
+                    self.tx_iter = None;
+                    continue;
+                }
+                Some(r) => r.map_err(Self::decode_error)?,
+            };
+
+            let Node::Transaction(tx) = self.group.decode_by_hash(tx_cid.hash_bytes())? else {
+                continue;
+            };
+
+            if tx.data.next.is_some() {
+                panic!(
+                    "unexpected tx dataframe continuation (tx.data.next != None) at slot={} index={:?}",
+                    tx.slot, tx.index
+                );
             }
-        };
 
-        let tx_cid = match tx_iter.next_item() {
-            None => {
-                self.tx_iter = None;
-                return Ok(false);
+            if tx.metadata.next.is_some() {
+                panic!(
+                    "unexpected tx dataframe continuation (tx.metadata.next != None) at slot={} index={:?}",
+                    tx.slot, tx.index
+                );
             }
-            Some(r) => r.map_err(Self::decode_error)?,
-        };
 
-        let Node::Transaction(tx) = self.group.decode_by_hash(tx_cid.hash_bytes())? else {
-            panic!("Can't decode transaction");
-        };
+            // Drop previous transaction if exists
+            if self.has_tx {
+                unsafe { self.reusable_tx.assume_init_drop() };
+                self.has_tx = false;
+            }
 
-        if tx.data.next.is_some() {
-            panic!(
-                "unexpected tx dataframe continuation (tx.data.next != None) at slot={} index={:?}",
-                tx.slot, tx.index
-            );
+            // Decode metadata if present
+            let has_metadata = !tx.metadata.data.is_empty();
+            if has_metadata {
+                decode_transaction_status_meta_from_frame(
+                    tx.slot,
+                    tx.metadata.data,
+                    &mut self.reusable_meta,
+                    &mut self.zstd,
+                )
+                .inspect_err(|err| println!("{err}"))
+                .map_err(|_| GroupError::TxMetaDecode)?;
+            }
+
+            VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
+                .map_err(|_| GroupError::TxDecode)?;
+
+            self.has_tx = true;
+            self.has_meta = has_metadata;
+
+            return Ok(true);
         }
-
-        if tx.metadata.next.is_some() {
-            panic!(
-                "unexpected tx dataframe continuation (tx.metadata.next != None) at slot={} index={:?}",
-                tx.slot, tx.index
-            );
-        }
-
-        // Decode metadata if present
-        self.has_meta = false;
-        let has_metadata = !tx.metadata.data.is_empty();
-        if has_metadata {
-            decode_transaction_status_meta_from_frame(
-                tx.slot,
-                tx.metadata.data,
-                &mut self.reusable_meta,
-                &mut self.zstd,
-            )
-            .inspect_err(|err| println!("{err}"))
-            .map_err(|_| GroupError::TxMetaDecode)?;
-            self.has_meta = true;
-        }
-
-        // Drop previous transaction if exists
-        if self.has_tx {
-            unsafe { self.reusable_tx.assume_init_drop() };
-            self.has_tx = false;
-        }
-
-        VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
-            .map_err(|_| GroupError::TxDecode)?;
-
-        self.has_tx = true;
-
-        Ok(true)
     }
 
     /// Returns a reference to the metadata of the current transaction.
