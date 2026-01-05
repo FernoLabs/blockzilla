@@ -12,6 +12,7 @@ pub mod metadata_decoder;
 pub mod node;
 pub mod reader;
 pub mod stored_transaction_status_meta;
+pub mod stored_transaction_error;
 pub mod versioned_transaction;
 
 pub use reader::CarBlockReader;
