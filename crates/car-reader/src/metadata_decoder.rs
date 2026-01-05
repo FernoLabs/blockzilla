@@ -1,5 +1,6 @@
 use core::fmt;
 use prost::Message;
+use zstd::zstd_safe;
 
 use crate::confirmed_block::TransactionStatusMeta;
 use crate::stored_transaction_status_meta::StoredTransactionStatusMeta;
@@ -37,33 +38,29 @@ fn looks_like_zstd_frame(data: &[u8]) -> bool {
 /// Keep one per worker thread. Do not share across threads.
 pub struct ZstdReusableDecoder {
     dctx: zstd::zstd_safe::DCtx<'static>,
-    out: Vec<u8>,
+    len: usize,
+    out: [u8; 32 * 1024], // 10KB max log + inner instruction usually ~= log len
 }
 
 impl ZstdReusableDecoder {
     /// `out_capacity` should be your typical decompressed metadata size.
     #[inline]
-    pub fn new(out_capacity: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             dctx: zstd::zstd_safe::DCtx::create(),
-            out: Vec::with_capacity(out_capacity),
+            out: [0; _],
+            len: 0,
         }
     }
 
     #[inline]
     pub fn output(&self) -> &[u8] {
-        &self.out
+        &self.out[..self.len]
     }
 
     /// If `input` is zstd, decompress into the internal buffer and return Ok(true).
     /// If it is not zstd, return Ok(false) and leave output empty.
     pub fn decompress_if_zstd(&mut self, input: &[u8]) -> Result<bool, std::io::Error> {
-        self.out.clear();
-        let size_hint = 10 * input.len();
-        if size_hint > self.out.len() {
-            self.out.resize(size_hint, 0);
-        }
-
         if !looks_like_zstd_frame(input) {
             return Ok(false);
         }
@@ -71,9 +68,12 @@ impl ZstdReusableDecoder {
         let read = self
             .dctx
             .decompress(&mut self.out, input)
-            .inspect_err(|err| println!("{}", err))
+            .inspect_err(|code| {
+                let name = zstd_safe::get_error_name(*code);
+                eprintln!("zstd decode failed: {name} (raw={code})");
+            })
             .expect("error zstd decoding");
-        self.out.truncate(read);
+        self.len = read;
         Ok(true)
     }
 }

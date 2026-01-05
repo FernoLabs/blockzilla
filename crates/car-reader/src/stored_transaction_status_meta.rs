@@ -23,12 +23,6 @@ pub struct CompiledInstruction {
 }
 
 #[derive(SchemaRead, Clone)]
-pub struct InnerInstruction {
-    pub instruction: CompiledInstruction,
-    //pub stack_height: Option<u32>,
-}
-
-#[derive(SchemaRead, Clone)]
 pub struct InnerInstructions {
     pub index: u8,
     #[wincode(with = "containers::Vec<_, BincodeLen>")]
