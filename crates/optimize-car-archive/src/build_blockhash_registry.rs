@@ -89,11 +89,11 @@ fn build_blockhash_registry_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
     let n = out.len() / 32;
 
     // Direct write (no tmp + rename)
-    let f = File::create(&bh_path).with_context(|| format!("create {}", bh_path.display()))?;
-    let mut w = BufWriter::with_capacity(BUFFER_SIZE, f);
-    w.write_all(&out)
+    let mut f = File::create(&bh_path).with_context(|| format!("create {}", bh_path.display()))?;
+    //let mut w = BufWriter::with_capacity(BUFFER_SIZE, f);
+    f.write_all(&out)
         .with_context(|| "write blockhash registry")?;
-    w.flush().context("flush blockhash registry")?;
+    f.flush().context("flush blockhash registry")?;
 
     progress.final_report();
     info!("Blockhash registry written: {} hashes", n);

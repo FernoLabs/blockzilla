@@ -76,48 +76,44 @@ fn fxhash(bytes: &[u8]) -> u64 {
 impl KeyIndex {
     /// Build index over keys in file order.
     pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
-        let cache_capacity = 10000;
+        let total = keys_in_file_order.len();
+        let hot_cap = total.min(10_000);
 
-        let mut index = FxHashMap::with_capacity_and_hasher(
-            keys_in_file_order.len() - cache_capacity,
-            FxBuildHasher,
-        );
-        let mut index_hot = FxHashMap::with_capacity_and_hasher(cache_capacity, FxBuildHasher);
+        let mut index = FxHashMap::with_capacity_and_hasher(total.saturating_sub(hot_cap), FxBuildHasher);
+        let mut index_hot = FxHashMap::with_capacity_and_hasher(hot_cap, FxBuildHasher);
+        let mut cache = FxHashMap::with_capacity_and_hasher(hot_cap, FxBuildHasher);
 
-        let mut cache = FxHashMap::with_capacity_and_hasher(cache_capacity, FxBuildHasher);
-
-        for (i, k) in keys_in_file_order.iter().enumerate().take(cache_capacity) {
+        // fill hot (first hot_cap keys)
+        for (i, k) in keys_in_file_order.iter().enumerate().take(hot_cap) {
             let id = i as u32 + 1;
             let pubk_str = Pubkey::new_from_array(*k).to_string();
             cache.insert(fxhash(pubk_str.as_bytes()), id);
             index_hot.insert(*k, id);
         }
 
-        for (i, k) in keys_in_file_order
-            .into_iter()
-            .enumerate()
-            .skip(cache_capacity)
-        {
+        // fill cold (rest)
+        for (i, k) in keys_in_file_order.into_iter().enumerate().skip(hot_cap) {
             let id = i as u32 + 1;
             index.insert(k, id);
         }
 
         index.shrink_to_fit();
 
-        Self {
-            index,
-            index_hot,
-            cache,
-        }
+        Self { index, index_hot, cache }
     }
 
     pub fn lookup_str(&self, k: &str) -> Option<u32> {
-        match self.cache.get(&fxhash(k.as_bytes())) {
-            Some(id) => Some(*id),
-            None => Pubkey::from_str(k)
-                .ok()
-                .and_then(|k| self.index.get(k.as_array()).copied()),
+        if let Some(id) = self.cache.get(&fxhash(k.as_bytes())) {
+            return Some(*id);
         }
+
+        let pk = Pubkey::from_str(k).ok()?;
+        let a = pk.as_array();
+
+        self.index_hot
+            .get(a)
+            .copied()
+            .or_else(|| self.index.get(a).copied())
     }
 
     #[inline(always)]
