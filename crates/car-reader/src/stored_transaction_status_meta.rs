@@ -2,7 +2,7 @@ use std::mem::MaybeUninit;
 use wincode::ReadResult;
 use wincode::error::invalid_tag_encoding;
 use wincode::io::Reader;
-use wincode::{SchemaRead, containers, len::BincodeLen};
+use wincode::{SchemaRead, containers, len::BincodeLen, len::ShortU16Len};
 
 use crate::stored_transaction_error::StoredTransactionError;
 use crate::{confirmed_block, convert_metadata};
@@ -16,20 +16,23 @@ pub struct TransactionReturnData {
 #[derive(SchemaRead, Clone)]
 pub struct CompiledInstruction {
     pub program_id_index: u8,
+    #[wincode(with = "containers::Vec<_, ShortU16Len>")]
     pub accounts: Vec<u8>,
+    #[wincode(with = "containers::Vec<_, ShortU16Len>")]
     pub data: Vec<u8>,
 }
 
 #[derive(SchemaRead, Clone)]
 pub struct InnerInstruction {
     pub instruction: CompiledInstruction,
-    pub stack_height: Option<u32>,
+    //pub stack_height: Option<u32>,
 }
 
 #[derive(SchemaRead, Clone)]
 pub struct InnerInstructions {
     pub index: u8,
-    pub instructions: Vec<InnerInstruction>,
+    #[wincode(with = "containers::Vec<_, BincodeLen>")]
+    pub instructions: Vec<CompiledInstruction>,
 }
 
 #[derive(SchemaRead, Clone)]

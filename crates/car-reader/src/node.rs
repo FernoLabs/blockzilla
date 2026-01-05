@@ -160,7 +160,8 @@ pub struct BlockNode<'a> {
     #[n(1)]
     pub slot: u64,
     #[n(2)]
-    pub shredding: Vec<Shredding>,
+    #[cbor(borrow = "'a + 'bytes")]
+    pub shredding: CborArrayView<'a, Shredding>,
     #[n(3)]
     #[cbor(borrow = "'a + 'bytes")]
     pub entries: CborArrayView<'a, CborCidRef<'a>>,
@@ -181,7 +182,7 @@ pub struct SubsetNode<'a> {
     pub last: u64,
     #[n(3)]
     #[cbor(borrow = "'a + 'bytes")]
-    pub blocks: Vec<CborCidRef<'a>>,
+    pub blocks: CborArrayView<'a, CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode)]
@@ -193,7 +194,7 @@ pub struct EpochNode<'a> {
     pub epoch: u64,
     #[n(2)]
     #[cbor(borrow = "'a + 'bytes")]
-    pub subsets: Vec<CborCidRef<'a>>,
+    pub subsets: CborArrayView<'a, CborCidRef<'a>>,
 }
 
 #[derive(Debug, Decode)]
