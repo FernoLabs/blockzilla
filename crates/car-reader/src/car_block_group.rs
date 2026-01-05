@@ -11,10 +11,6 @@ use crate::versioned_transaction::VersionedTransaction;
 
 use wincode::Deserialize;
 
-// ============================================================
-// CarBlockGroup
-// ============================================================
-
 pub struct CarBlockGroup {
     /// Concatenated payload bytes for the current group.
     backing: Vec<u8>,
@@ -164,10 +160,6 @@ impl CarBlockGroup {
         }
     }
 }
-
-// ============================================================
-// TxIter
-// ============================================================
 
 pub struct TxIter<'a> {
     group: &'a CarBlockGroup,
