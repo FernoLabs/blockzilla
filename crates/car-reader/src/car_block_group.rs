@@ -13,12 +13,12 @@ use wincode::Deserialize;
 
 pub struct CarBlockGroup {
     /// Concatenated payload bytes for the current group.
-    backing: Vec<u8>,
+    buffer: Vec<u8>,
 
-    /// FxHash(CID bytes) -> (payload_start, payload_end) offsets in `backing`.
+    /// FxHash(CID bytes) -> (payload_start, payload_end) offsets in `buffer`.
     cid_map: FxHashMap<u64, (u32, u32)>,
 
-    /// (payload_start, payload_end) for the block node payload, inside `backing`.
+    /// (payload_start, payload_end) for the block node payload, inside `buffer`.
     block_range: (u32, u32),
 }
 
@@ -31,7 +31,7 @@ impl Default for CarBlockGroup {
 impl CarBlockGroup {
     pub fn new() -> Self {
         Self {
-            backing: Vec::new(),
+            buffer: Vec::new(),
             cid_map: FxHashMap::with_hasher(FxBuildHasher),
             block_range: (0, 0),
         }
@@ -39,25 +39,25 @@ impl CarBlockGroup {
 
     #[inline]
     pub fn get_len(&self) -> (usize, usize) {
-        (self.cid_map.len(), self.backing.len())
+        (self.cid_map.len(), self.buffer.len())
     }
 
     #[inline]
     pub fn clear(&mut self) {
-        self.backing.clear();
+        self.buffer.clear();
         self.cid_map.clear();
         self.block_range = (0, 0);
     }
 
     #[inline]
     pub fn reserve(&mut self, extra_entries: usize, extra_payload_bytes: usize) {
-        self.backing.reserve(extra_payload_bytes);
+        self.buffer.reserve(extra_payload_bytes);
         self.cid_map.reserve(extra_entries);
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.backing.is_empty()
+        self.buffer.is_empty()
     }
 
     #[inline]
@@ -72,14 +72,14 @@ impl CarBlockGroup {
     pub fn get_entry(&self, cid_bytes: &[u8]) -> Option<&[u8]> {
         let key = Self::hash_cid(cid_bytes);
         let (s, e) = *self.cid_map.get(&key)?;
-        Some(&self.backing[s as usize..e as usize])
+        Some(&self.buffer[s as usize..e as usize])
     }
 
     /// Returns the current block payload slice.
     #[inline]
     pub fn block_payload(&self) -> &[u8] {
         let (s, e) = self.block_range;
-        &self.backing[s as usize..e as usize]
+        &self.buffer[s as usize..e as usize]
     }
 
     #[inline]
@@ -113,7 +113,7 @@ impl CarBlockGroup {
         })
     }
 
-    /// Reads the payload bytes of one CAR entry into `backing`, hashes CID bytes,
+    /// Reads the payload bytes of one CAR entry into `buffer`, hashes CID bytes,
     /// inserts cid_map entry, and if payload is a block node sets `block_range`.
     ///
     /// `entry_len` is the total section size (CID bytes + payload bytes).
@@ -132,7 +132,7 @@ impl CarBlockGroup {
             .checked_sub(cid_bytes.len())
             .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
 
-        let start = self.backing.len();
+        let start = self.buffer.len();
         let end = start + payload_len;
 
         if end > u32::MAX as usize {
@@ -142,9 +142,9 @@ impl CarBlockGroup {
         }
 
         // Grow and read payload bytes.
-        self.backing.resize(end, 0);
+        self.buffer.resize(end, 0);
         reader
-            .read_exact(&mut self.backing[start..end])
+            .read_exact(&mut self.buffer[start..end])
             .map_err(|e| CarReadError::Io(e.to_string()))?;
 
         // Hash CID and store mapping.
@@ -152,7 +152,7 @@ impl CarBlockGroup {
         self.cid_map.insert(key, (start as u32, end as u32));
 
         // If this payload is the block node, record it.
-        if is_block_node(&self.backing[start..end]) {
+        if is_block_node(&self.buffer[start..end]) {
             self.block_range = (start as u32, end as u32);
             Ok(true)
         } else {
