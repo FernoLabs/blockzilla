@@ -62,18 +62,43 @@ impl CarBlockGroup {
     }
 
     /// Lookup payload by CID bytes (hash computed internally).
-    #[inline]
+    #[inline(always)]
     pub fn get_entry(&self, cid_bytes: &[u8]) -> Option<&[u8]> {
         let key = Self::hash_cid(cid_bytes);
         let (s, e) = *self.cid_map.get(&key)?;
-        Some(&self.buffer[s as usize..e as usize])
+
+        let s = s as usize;
+        let e = e as usize;
+
+        // These are invariants enforced by read_entry_payload_into.
+        debug_assert!(s <= e);
+        debug_assert!(e <= self.buffer.len());
+
+        // SAFETY: this is sound as long as self.buffer is in sync with cid_map
+        unsafe {
+            // Equivalent to &self.buffer[s..e] but without bounds checks.
+            Some(std::slice::from_raw_parts(
+                self.buffer.as_ptr().add(s),
+                e - s,
+            ))
+        }
     }
 
     /// Returns the current block payload slice.
-    #[inline]
+    #[inline(always)]
     pub fn block_payload(&self) -> &[u8] {
         let (s, e) = self.block_range;
-        &self.buffer[s as usize..e as usize]
+        let s = s as usize;
+        let e = e as usize;
+
+        debug_assert!(s <= e);
+        debug_assert!(e <= self.buffer.len());
+
+        // SAFETY: this is sound as long as self.buffer is in sync with cid_map
+        unsafe {
+            // Equivalent to &self.buffer[s..e] but without bounds checks.
+            std::slice::from_raw_parts(self.buffer.as_ptr().add(s), e - s)
+        }
     }
 
     #[inline]
@@ -202,71 +227,70 @@ impl<'a> TxIter<'a> {
 
     #[inline]
     fn decode_next_tx_in_place(&mut self) -> Result<bool, GroupError> {
-        loop {
-            // Get or load tx_iter
-            let tx_iter = match &mut self.tx_iter {
-                Some(iter) => iter,
-                None => {
-                    if !self.load_next_entry()? {
-                        return Ok(false);
-                    }
-                    self.tx_iter.as_mut().unwrap()
+        // Get or load tx_iter
+        let tx_iter = match &mut self.tx_iter {
+            Some(iter) => iter,
+            None => {
+                if !self.load_next_entry()? {
+                    return Ok(false);
                 }
-            };
-
-            let tx_cid = match tx_iter.next_item() {
-                None => {
-                    self.tx_iter = None;
-                    continue;
-                }
-                Some(r) => r.map_err(Self::decode_error)?,
-            };
-
-            let Node::Transaction(tx) = self.group.decode_by_hash(tx_cid.hash_bytes())? else {
-                continue;
-            };
-
-            if tx.data.next.is_some() {
-                panic!(
-                    "unexpected tx dataframe continuation (tx.data.next != None) at slot={} index={:?}",
-                    tx.slot, tx.index
-                );
+                self.tx_iter.as_mut().unwrap()
             }
+        };
 
-            if tx.metadata.next.is_some() {
-                panic!(
-                    "unexpected tx dataframe continuation (tx.metadata.next != None) at slot={} index={:?}",
-                    tx.slot, tx.index
-                );
+        let tx_cid = match tx_iter.next_item() {
+            None => {
+                self.tx_iter = None;
+                return Ok(false);
             }
+            Some(r) => r.map_err(Self::decode_error)?,
+        };
 
-            // Drop previous transaction if exists
-            if self.has_tx {
-                unsafe { self.reusable_tx.assume_init_drop() };
-                self.has_tx = false;
-            }
+        let Node::Transaction(tx) = self.group.decode_by_hash(tx_cid.hash_bytes())? else {
+            panic!("Can't decode transaction");
+        };
 
-            // Decode metadata if present
-            let has_metadata = !tx.metadata.data.is_empty();
-            if has_metadata {
-                decode_transaction_status_meta_from_frame(
-                    tx.slot,
-                    tx.metadata.data,
-                    &mut self.reusable_meta,
-                    &mut self.zstd,
-                )
-                .inspect_err(|err| println!("{err}"))
-                .map_err(|_| GroupError::TxMetaDecode)?;
-            }
-
-            VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
-                .map_err(|_| GroupError::TxDecode)?;
-
-            self.has_tx = true;
-            self.has_meta = has_metadata;
-
-            return Ok(true);
+        if tx.data.next.is_some() {
+            panic!(
+                "unexpected tx dataframe continuation (tx.data.next != None) at slot={} index={:?}",
+                tx.slot, tx.index
+            );
         }
+
+        if tx.metadata.next.is_some() {
+            panic!(
+                "unexpected tx dataframe continuation (tx.metadata.next != None) at slot={} index={:?}",
+                tx.slot, tx.index
+            );
+        }
+
+        // Decode metadata if present
+        self.has_meta = false;
+        let has_metadata = !tx.metadata.data.is_empty();
+        if has_metadata {
+            decode_transaction_status_meta_from_frame(
+                tx.slot,
+                tx.metadata.data,
+                &mut self.reusable_meta,
+                &mut self.zstd,
+            )
+            .inspect_err(|err| println!("{err}"))
+            .map_err(|_| GroupError::TxMetaDecode)?;
+            self.has_meta = true;
+        }
+
+        // Drop previous transaction if exists
+        if self.has_tx {
+            unsafe { self.reusable_tx.assume_init_drop() };
+            self.has_tx = false;
+        }
+
+        VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
+            .map_err(|_| GroupError::TxDecode)?;
+
+        self.has_tx = true;
+
+        Ok(true)
     }
 
     /// Returns a reference to the metadata of the current transaction.

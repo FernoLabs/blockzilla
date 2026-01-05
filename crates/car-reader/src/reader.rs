@@ -9,14 +9,12 @@ const MAX_UVARINT_LEN_64: usize = 10;
 
 pub struct CarBlockReader<R: Read> {
     reader: io::BufReader<R>,
-    cid_buf: Vec<u8>,
 }
 
 impl<R: Read> CarBlockReader<R> {
     pub fn with_capacity(inner: R, io_buf_bytes: usize) -> Self {
         Self {
             reader: io::BufReader::with_capacity(io_buf_bytes, inner),
-            cid_buf: Vec::with_capacity(64),
         }
     }
 
@@ -53,10 +51,14 @@ impl<R: Read> CarBlockReader<R> {
                 continue;
             }
 
-            self.cid_buf.clear();
-            read_cid_bytes(&mut self.reader, &mut self.cid_buf)?;
+            let mut cid_buf = [0; 36];
+            self.reader.read_exact(&mut cid_buf)?;
+            if cid_buf[0] != 0x01 || cid_buf[1] != 0x71 || cid_buf[2] != 0x12 || cid_buf[3] != 0x20
+            {
+                panic!("Not known cid {:02x?}", cid_buf);
+            }
 
-            let done = out.read_entry_payload_into(&mut self.reader, &self.cid_buf, entry_len)?;
+            let done = out.read_entry_payload_into(&mut self.reader, &cid_buf, entry_len)?;
             if done {
                 return Ok(true);
             }
@@ -87,83 +89,6 @@ fn read_uvarint64<R: BufRead>(r: &mut R) -> CarReadResult<u64> {
         for &byte in buf {
             consumed += 1;
             i += 1;
-
-            if byte < 0x80 {
-                if i == MAX_UVARINT_LEN_64 && byte > 1 {
-                    return Err(CarReadError::VarintOverflow("uvarint overflow".to_string()));
-                }
-                x |= (byte as u64) << shift;
-                r.consume(consumed);
-                return Ok(x);
-            }
-
-            x |= ((byte & 0x7f) as u64) << shift;
-            shift += 7;
-
-            if shift > 63 {
-                return Err(CarReadError::VarintOverflow("uvarint too long".to_string()));
-            }
-
-            if i >= MAX_UVARINT_LEN_64 {
-                break;
-            }
-        }
-
-        r.consume(consumed);
-    }
-}
-
-fn read_cid_bytes<R: BufRead>(r: &mut R, out: &mut Vec<u8>) -> CarReadResult<()> {
-    // First varint: either version=1 (CIDv1) or multihash code (CIDv0).
-    let first = read_uvarint64_append(r, out)?;
-
-    if first == 1 {
-        // CIDv1: version(1) + codec + multihash(code + size + digest)
-        let _codec = read_uvarint64_append(r, out)?;
-
-        let _mh_code = read_uvarint64_append(r, out)?;
-        let mh_size = read_uvarint64_append(r, out)? as usize;
-
-        read_exact_append(r, out, mh_size)?;
-    } else {
-        // CIDv0: multihash(code + size + digest), where `first` was mh_code
-        let mh_size = read_uvarint64_append(r, out)? as usize;
-        read_exact_append(r, out, mh_size)?;
-    }
-
-    Ok(())
-}
-#[inline]
-fn read_exact_append<R: Read>(r: &mut R, out: &mut Vec<u8>, n: usize) -> CarReadResult<()> {
-    let start = out.len();
-    out.resize(start + n, 0);
-    r.read_exact(&mut out[start..])
-        .map_err(|e| CarReadError::Io(e.to_string()))?;
-    Ok(())
-}
-fn read_uvarint64_append<R: BufRead>(r: &mut R, out: &mut Vec<u8>) -> CarReadResult<u64> {
-    let mut x: u64 = 0;
-    let mut shift: u32 = 0;
-    let mut i: usize = 0;
-
-    loop {
-        if i >= MAX_UVARINT_LEN_64 {
-            return Err(CarReadError::VarintOverflow("uvarint overflow".to_string()));
-        }
-
-        let buf = r.fill_buf().map_err(|e| CarReadError::Io(e.to_string()))?;
-        if buf.is_empty() {
-            return Err(CarReadError::UnexpectedEof(
-                "EOF while reading uvarint".to_string(),
-            ));
-        }
-
-        let mut consumed = 0usize;
-
-        for &byte in buf {
-            consumed += 1;
-            i += 1;
-            out.push(byte);
 
             if byte < 0x80 {
                 if i == MAX_UVARINT_LEN_64 && byte > 1 {
