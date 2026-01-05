@@ -180,6 +180,7 @@ impl<'a> TxIter<'a> {
                     &mut self.reusable_meta,
                     &mut self.zstd,
                 )
+                .inspect_err(|err| println!("{}",err))
                 .map_err(|_| GroupError::TxMetaDecode)?;
             }
 
