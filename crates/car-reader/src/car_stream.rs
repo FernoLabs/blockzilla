@@ -13,7 +13,7 @@ pub struct CarStream<R: std::io::Read> {
     group: CarBlockGroup,
 }
 
-impl<R:std::io::Read> CarStream<R> {
+impl<R: std::io::Read> CarStream<R> {
     #[inline(always)]
     pub fn next_group(&mut self) -> Result<Option<&CarBlockGroup>> {
         if self.car.read_until_block_into(&mut self.group).is_ok() {
@@ -44,7 +44,6 @@ impl CarStream<zstd::Decoder<'static, BufReader<File>>> {
         let file =
             File::open(path).map_err(|e| CarError::Io(format!("open {}: {e}", path.display())))?;
         let file = BufReader::with_capacity(CAR_BUF, file);
-
         let zstd = zstd::Decoder::with_buffer(file)
             .map_err(|e| CarError::InvalidData(format!("zstd decoder init failed: {e}")))?;
 

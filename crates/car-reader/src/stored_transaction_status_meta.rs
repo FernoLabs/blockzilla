@@ -89,8 +89,7 @@ impl From<StoredTransactionStatusMeta> for confirmed_block::TransactionStatusMet
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OptionEof<T> {
     #[default]
     None,
@@ -189,7 +188,6 @@ impl<T> OptionEof<T> {
     }
 }
 
-
 impl<T> From<Option<T>> for OptionEof<T> {
     fn from(opt: Option<T>) -> Self {
         Self::from_option(opt)
@@ -218,10 +216,11 @@ where
                     return Ok(());
                 }
                 if let wincode::io::ReadError::Io(ioe) = read_err
-                    && ioe.kind() == std::io::ErrorKind::UnexpectedEof {
-                        dst.write(OptionEof::None);
-                        return Ok(());
-                    }
+                    && ioe.kind() == std::io::ErrorKind::UnexpectedEof
+                {
+                    dst.write(OptionEof::None);
+                    return Ok(());
+                }
             }
             println!("{:#?}", e);
             return Err(e);
