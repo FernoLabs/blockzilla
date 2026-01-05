@@ -22,8 +22,6 @@ pub(crate) fn file_nonempty(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// ----- CLI -----
-
 #[derive(Parser)]
 #[command(name = "blockzilla-optimizer")]
 #[command(
@@ -104,8 +102,6 @@ pub(crate) fn epoch_paths(cli: &Cli, epoch: u64) -> (PathBuf, PathBuf, PathBuf, 
     let compact_path = epoch_dir.join("compact.bin");
     (car_path, epoch_dir, registry_path, bh_path, compact_path)
 }
-
-// ----- progress -----
 
 pub(crate) fn format_duration(seconds: f64) -> String {
     let total_secs = seconds as u64;
