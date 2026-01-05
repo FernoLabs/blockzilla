@@ -126,7 +126,7 @@ impl CarBlockGroup {
             tx_iter: None,
             reusable_tx: MaybeUninit::uninit(),
             reusable_meta: TransactionStatusMeta::default(),
-            zstd: ZstdReusableDecoder::new(16 * 1024),
+            zstd: ZstdReusableDecoder::new(),// 10KB max log + inner instruction usually ~= log len
             has_tx: false,
             has_meta: false,
         })
