@@ -16,10 +16,10 @@ pub struct CarStream<R: std::io::Read> {
 impl<R: std::io::Read> CarStream<R> {
     #[inline(always)]
     pub fn next_group(&mut self) -> Result<Option<&CarBlockGroup>> {
-        if self.car.read_until_block_into(&mut self.group).is_ok() {
-            Ok(Some(&self.group))
-        } else {
-            Ok(None)
+        match self.car.read_until_block_into(&mut self.group) {
+            Ok(true) => Ok(Some(&self.group)),
+            Ok(false) => Ok(None),
+            Err(err) => Err(err),
         }
     }
 }

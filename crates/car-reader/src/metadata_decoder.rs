@@ -39,7 +39,8 @@ fn looks_like_zstd_frame(data: &[u8]) -> bool {
 pub struct ZstdReusableDecoder {
     dctx: zstd::zstd_safe::DCtx<'static>,
     len: usize,
-    out: [u8; 32 * 1024], // 10KB max log + inner instruction usually ~= log len
+    // 10KB max log + inner instruction usually ~= log len (32k was weirdly not enouth)
+    out: [u8; 1024 * 1024],
 }
 
 impl ZstdReusableDecoder {
@@ -70,7 +71,11 @@ impl ZstdReusableDecoder {
             .decompress(&mut self.out, input)
             .inspect_err(|code| {
                 let name = zstd_safe::get_error_name(*code);
-                eprintln!("zstd decode failed: {name} (raw={code})");
+                eprintln!(
+                    "zstd decode failed: {name} (raw={code}) input {} buffer {}",
+                    input.len(),
+                    self.out.len()
+                );
             })
             .expect("error zstd decoding");
         self.len = read;

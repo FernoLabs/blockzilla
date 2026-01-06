@@ -1,12 +1,18 @@
-use std::{error::Error as StdError, fmt, io};
+use std::{
+    error::Error as StdError,
+    fmt::{self},
+    io,
+};
 
 #[derive(Debug, Clone)]
 pub enum CarReadError {
     Io(String),
+    Eof,
     UnexpectedEof(String),
     InvalidData(String),
     VarintOverflow(String),
     Cid(String),
+    InvalidEntryLen(String),
 }
 pub type CarReadResult<T> = std::result::Result<T, CarReadError>;
 
@@ -14,10 +20,12 @@ impl fmt::Display for CarReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CarReadError::Io(s) => write!(f, "io error: {s}"),
+            CarReadError::Eof => write!(f, "eof"),
             CarReadError::UnexpectedEof(s) => write!(f, "unexpected eof: {s}"),
             CarReadError::InvalidData(s) => write!(f, "invalid data: {s}"),
             CarReadError::VarintOverflow(s) => write!(f, "varint overflow: {s}"),
             CarReadError::Cid(s) => write!(f, "cid error: {s}"),
+            CarReadError::InvalidEntryLen(s) => write!(f, "InvalidEntryLen : {s}"),
         }
     }
 }
@@ -43,6 +51,7 @@ pub enum GroupError {
     TxDecode,
     IteratorStateBug,
     TxMetaDecode,
+    DataFrameHasNext,
     Io,
     Other(String),
 }
@@ -56,6 +65,7 @@ impl core::fmt::Display for GroupError {
             GroupError::TxDecode => write!(f, "transaction decode error"),
             GroupError::IteratorStateBug => write!(f, "iterator state bug"),
             GroupError::TxMetaDecode => write!(f, "transaction metadata decode error"),
+            GroupError::DataFrameHasNext => write!(f, "DataFrameHasNext"),
             GroupError::Io => write!(f, "io error"),
             GroupError::Other(e) => write!(f, "{e}"),
         }

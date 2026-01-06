@@ -57,13 +57,12 @@ impl KeyStore {
     }
 }
 
-/// Key -> id index using 128-bit prefix fingerprint.
-/// Ids are 1-based (0 reserved).
 #[derive(Debug, Clone)]
 pub struct KeyIndex {
-    index: FxHashMap<[u8; 32], u32>, // fingerprint -> id
+    index: FxHashMap<[u8; 32], u32>,
     index_hot: FxHashMap<[u8; 32], u32>,
-    cache: FxHashMap<u64, u32>, // string to pubk cache for most use pubk
+    /// string to pubk cache for most use pubk
+    cache: FxHashMap<u64, u32>,
 }
 
 #[inline]

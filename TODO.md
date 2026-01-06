@@ -25,6 +25,8 @@ Optimize transaction error storage (u32 + u32 + potentail tuple)
 
 ## Backlog
 
+- explore https://crates.io/crates/gxhash
 - explore perfec hash function for registry (may reduce memory usage drastcly while keeping perf)
+  - https://crates.io/crates/ph
 - try reucing size of hashtable for registry by only storing half pubk (maybe faster compact / read)
 - detect pubkeys inside instruction and log and replace them with ids  

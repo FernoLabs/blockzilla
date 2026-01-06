@@ -13,7 +13,7 @@ use wincode::Deserialize;
 
 pub struct CarBlockGroup {
     /// Concatenated payload bytes for the current group.
-    buffer: Vec<u8>,
+    pub buffer: Vec<u8>,
 
     /// FxHash(CID bytes) -> (payload_start, payload_end) offsets in `buffer`.
     cid_map: FxHashMap<u64, (u32, u32)>,
@@ -126,7 +126,7 @@ impl CarBlockGroup {
             tx_iter: None,
             reusable_tx: MaybeUninit::uninit(),
             reusable_meta: TransactionStatusMeta::default(),
-            zstd: ZstdReusableDecoder::new(),// 10KB max log + inner instruction usually ~= log len
+            zstd: ZstdReusableDecoder::new(),
             has_tx: false,
             has_meta: false,
         })
@@ -144,7 +144,7 @@ impl CarBlockGroup {
     pub fn read_entry_payload_into<R: Read>(
         &mut self,
         reader: &mut R,
-        cid_bytes: &[u8;36],
+        cid_bytes: &[u8; 36],
         entry_len: usize,
     ) -> CarReadResult<bool> {
         let payload_len = entry_len
@@ -252,17 +252,11 @@ impl<'a> TxIter<'a> {
             };
 
             if tx.data.next.is_some() {
-                panic!(
-                    "unexpected tx dataframe continuation (tx.data.next != None) at slot={} index={:?}",
-                    tx.slot, tx.index
-                );
+                return Err(GroupError::DataFrameHasNext);
             }
 
             if tx.metadata.next.is_some() {
-                panic!(
-                    "unexpected tx dataframe continuation (tx.metadata.next != None) at slot={} index={:?}",
-                    tx.slot, tx.index
-                );
+                return Err(GroupError::DataFrameHasNext);
             }
 
             // Drop previous transaction if exists

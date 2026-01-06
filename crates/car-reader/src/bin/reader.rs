@@ -7,11 +7,11 @@ use car_reader::{
     error::{CarReadError as CarError, CarReadResult as Result},
 };
 
-use std::path::Path;
 use std::time::{Duration, Instant};
+use std::{fs, io::Write, path::Path};
 
 #[derive(Parser, Debug)]
-#[command(name = "carread", about = "Stream and read a CAR (.car.zst) archive")]
+#[command(name = "carread", about = "Stream and read a CAR (.car[.zst]) archive")]
 struct Args {
     /// Input CAR file path (.car.zst)
     #[arg(value_name = "FILE")]
@@ -22,7 +22,7 @@ struct Args {
     stats_every: u64,
 
     /// Run for N seconds (0 = until EOF)
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 0)]
     seconds: u64,
 
     /// Decode transactions and compute TPS
@@ -107,6 +107,8 @@ impl Stats {
 }
 
 fn run_stream<R: std::io::Read>(stream: &mut CarStream<R>, args: &Args) -> Result<()> {
+    let mut current_biggest = Vec::new();
+    let mut block_count = 0;
     let stats_every = Duration::from_secs(args.stats_every.max(1));
     let start = Instant::now();
     let end = if args.seconds == 0 {
@@ -119,6 +121,10 @@ fn run_stream<R: std::io::Read>(stream: &mut CarStream<R>, args: &Args) -> Resul
     let mut last_print = Instant::now();
 
     while let Some(group) = stream.next_group()? {
+        block_count += 1;
+        if group.buffer.len() > current_biggest.len() {
+            current_biggest = group.buffer.clone();
+        }
         stats.add_group(group, args.decode_tx)?;
 
         let now = Instant::now();
@@ -139,6 +145,12 @@ fn run_stream<R: std::io::Read>(stream: &mut CarStream<R>, args: &Args) -> Resul
     if dt > 0.0 && (stats.blocks > 0 || stats.entries > 0) {
         stats.print_interval(dt.max(1e-9), args.decode_tx);
     }
+    println!(
+        "Biggest out off {block_count} len {}",
+        current_biggest.len()
+    );
+    let mut f = fs::File::create("res.txt")?;
+    f.write_all(&format!("{:?}", current_biggest).as_bytes())?;
     Ok(())
 }
 
