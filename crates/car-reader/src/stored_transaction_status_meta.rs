@@ -50,8 +50,9 @@ pub struct StoredTransactionTokenBalance {
     pub account_index: u8,
     pub mint: String,
     pub ui_token_amount: StoredTokenAmount,
-    pub owner: OptionEof<String>,
-    pub program_id: OptionEof<String>,
+    // can't have Option EOF here as it will interpret next StoredTransactionTokenBalance
+    //pub owner: OptionEof<String>,
+    //pub program_id: OptionEof<String>,
 }
 
 #[derive(SchemaRead)]
@@ -71,8 +72,11 @@ pub struct StoredTransactionStatusMeta {
     pub post_balances: Vec<u64>,
     #[wincode(with = "OptionEof<containers::Vec<_, BincodeLen>>")]
     pub inner_instructions: OptionEof<Vec<InnerInstructions>>,
+    #[wincode(with = "OptionEof<containers::Vec<String, BincodeLen>>")]
     pub log_messages: OptionEof<Vec<String>>,
+    #[wincode(with = "OptionEof<containers::Vec<_, BincodeLen>>")]
     pub pre_token_balances: OptionEof<Vec<StoredTransactionTokenBalance>>,
+    #[wincode(with = "OptionEof<containers::Vec<_, BincodeLen>>")]
     pub post_token_balances: OptionEof<Vec<StoredTransactionTokenBalance>>,
     pub rewards: OptionEof<Vec<StoredExtendedReward>>,
     pub return_data: OptionEof<TransactionReturnData>,

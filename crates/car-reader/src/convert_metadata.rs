@@ -124,9 +124,9 @@ fn token_balance_to_proto(
         mint: tb.mint.clone(),
         ui_token_amount: Some(ui_token_amount_to_proto(&tb.ui_token_amount)),
         //TODO: fixme as this should be an option
-        owner: tb.owner.clone().unwrap_or_default(),
+        owner: String::default(),
         //TODO: fixme as this should be an option
-        program_id: tb.program_id.clone().unwrap_or_default(),
+        program_id: String::default(),
     }
 }
 
