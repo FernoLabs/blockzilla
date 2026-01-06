@@ -123,8 +123,10 @@ fn token_balance_to_proto(
         account_index: tb.account_index as u32,
         mint: tb.mint.clone(),
         ui_token_amount: Some(ui_token_amount_to_proto(&tb.ui_token_amount)),
-        owner: tb.owner.clone(),
-        program_id: tb.program_id.clone(),
+        //TODO: fixme as this should be an option
+        owner: tb.owner.clone().unwrap_or_default(),
+        //TODO: fixme as this should be an option
+        program_id: tb.program_id.clone().unwrap_or_default(),
     }
 }
 

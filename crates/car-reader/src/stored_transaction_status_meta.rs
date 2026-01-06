@@ -50,8 +50,8 @@ pub struct StoredTransactionTokenBalance {
     pub account_index: u8,
     pub mint: String,
     pub ui_token_amount: StoredTokenAmount,
-    pub owner: String,
-    pub program_id: String,
+    pub owner: OptionEof<String>,
+    pub program_id: OptionEof<String>,
 }
 
 #[derive(SchemaRead)]
