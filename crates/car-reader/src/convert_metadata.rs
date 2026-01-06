@@ -104,7 +104,9 @@ fn inner_instructions_to_proto(
 }
 
 #[inline]
-fn inner_instruction_to_proto(i: &stored::CompiledInstruction) -> confirmed_block::InnerInstruction {
+fn inner_instruction_to_proto(
+    i: &stored::CompiledInstruction,
+) -> confirmed_block::InnerInstruction {
     confirmed_block::InnerInstruction {
         program_id_index: i.program_id_index as u32,
         accounts: i.accounts.clone(),

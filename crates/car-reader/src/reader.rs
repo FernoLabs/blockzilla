@@ -37,25 +37,27 @@ impl<R: Read> CarBlockReader<R> {
         loop {
             let entry_len = match read_uvarint64(&mut self.reader) {
                 Ok(v) => v as usize,
-                Err(CarReadError::UnexpectedEof(_)) => {
-                    return if out.is_empty() {
-                        Ok(false)
-                    } else {
-                        Err(CarReadError::UnexpectedEof("EOF mid group".to_string()))
-                    };
+                Err(CarReadError::Eof) => {
+                    return Ok(false);
                 }
                 Err(e) => return Err(e),
             };
 
             if entry_len == 0 {
-                continue;
+                return Err(CarReadError::InvalidEntryLen("entry len 0".to_string()));
+            }
+
+            if entry_len <= 36 {
+                return Err(CarReadError::InvalidEntryLen(format!(
+                    "entry smaller than cid ({entry_len})"
+                )));
             }
 
             let mut cid_buf = [0; 36];
             self.reader.read_exact(&mut cid_buf)?;
             if cid_buf[0] != 0x01 || cid_buf[1] != 0x71 || cid_buf[2] != 0x12 || cid_buf[3] != 0x20
             {
-                panic!("Not known cid {:02x?}", cid_buf);
+                return Err(CarReadError::Cid(format!("Not known cid {cid_buf:02x?}")));
             }
 
             let done = out.read_entry_payload_into(&mut self.reader, &cid_buf, entry_len)?;
@@ -79,9 +81,12 @@ fn read_uvarint64<R: BufRead>(r: &mut R) -> CarReadResult<u64> {
 
         let buf = r.fill_buf().map_err(|e| CarReadError::Io(e.to_string()))?;
         if buf.is_empty() {
-            return Err(CarReadError::UnexpectedEof(
-                "EOF while reading uvarint".to_string(),
-            ));
+            if x != 0 {
+                return Err(CarReadError::UnexpectedEof(
+                    "EOF while reading uvarint".to_string(),
+                ));
+            }
+            return Err(CarReadError::Eof);
         }
 
         let mut consumed = 0usize;
@@ -103,11 +108,13 @@ fn read_uvarint64<R: BufRead>(r: &mut R) -> CarReadResult<u64> {
             shift += 7;
 
             if shift > 63 {
+                r.consume(consumed);
                 return Err(CarReadError::VarintOverflow("uvarint too long".to_string()));
             }
 
             if i >= MAX_UVARINT_LEN_64 {
-                break;
+                r.consume(consumed);
+                return Err(CarReadError::VarintOverflow("uvarint overflow".to_string()));
             }
         }
 
