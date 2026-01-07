@@ -25,11 +25,3 @@ cargo run --release --bin optimize-car-archive build 800
 ```
 cargo run --release --bin blockzilla analyze --input blockzilla-v1/epoch-800/compact.bin
 ```
-
-##
-
-https://files.old-faithful.net/800/epoch-800.car
-
-cargo build --release --bin reader --features reader
-aria2c -q -x16 -s16 -k64M -o /dev/null https://files.old-faithful.net/800/epoch-800.car | target/release/reader
-
