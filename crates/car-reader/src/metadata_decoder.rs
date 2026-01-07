@@ -5,7 +5,7 @@ use zstd::zstd_safe;
 use crate::confirmed_block::TransactionStatusMeta;
 use crate::stored_transaction_status_meta::StoredTransactionStatusMeta;
 
-pub const BINCODE_EPOCH_CUTOFF: u64 = 148;
+pub const BINCODE_EPOCH_CUTOFF: u64 = 156;
 
 #[derive(Debug)]
 pub enum MetadataDecodeError {
@@ -123,7 +123,8 @@ pub fn decode_transaction_status_meta(
 ) -> Result<(), MetadataDecodeError> {
     let epoch = slot_to_epoch(slot);
 
-    if epoch < BINCODE_EPOCH_CUTOFF {
+    // epoch 148 is a special case it is protobuf encoded
+    if epoch < BINCODE_EPOCH_CUTOFF && epoch != 148 {
         *out = wincode::deserialize::<StoredTransactionStatusMeta>(metadata_bytes)
             .inspect_err(|_err| println!("invalid metadata : {:?}", metadata_bytes))
             .map_err(|err| MetadataDecodeError::Bincode(err.to_string()))?
