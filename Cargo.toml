@@ -4,7 +4,7 @@ members = [
     "crates/car-reader",
     "crates/blockzilla-format",
     "crates/optimize-car-archive",
-    "blockzilla",
+    "blockzilla", "crates/sget",
 ]
 exclude = ["solana-prog/"]
 

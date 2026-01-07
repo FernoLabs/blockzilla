@@ -7,7 +7,7 @@ tar cz --no-xattrs --exclude target --exclude .git --exclude epochs --exclude bl
 ## Under VPN without local DNS
 
 ```
-tar cz --no-xattrs --exclude target --exclude .git --exclude epochs --exclude blockzilla-v1 . | ssh ach@192.168.1.45 -p 22 'mkdir -p ~/dev/blockzilla && tar xz -C ~/dev/blockzilla-v1'
+tar cz --no-xattrs --exclude target --exclude .git --exclude epochs --exclude blockzilla-v1 --exclude solana-prog . | ssh ach@192.168.1.45 -p 22 'mkdir -p ~/dev/blockzilla && tar xz -C ~/dev/blockzilla-v1'
 ```
 
 ## Benchmark

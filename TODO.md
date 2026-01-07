@@ -23,6 +23,8 @@
 
 Optimize transaction error storage (u32 + u32 + potentail tuple)
 
+make reqwest in reader optionel
+
 ## Backlog
 
 - explore https://crates.io/crates/gxhash

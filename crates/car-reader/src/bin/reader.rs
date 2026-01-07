@@ -7,15 +7,17 @@ use car_reader::{
     error::{CarReadError as CarError, CarReadResult as Result},
 };
 
+use std::io::{self, BufReader};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(name = "carread", about = "Stream and read a CAR (.car[.zst]) archive")]
 struct Args {
-    /// Input CAR file path (.car.zst)
-    #[arg(value_name = "FILE")]
-    input: String,
+    /// Input CAR file path, URL (http(s)://...), or '-' for stdin.
+    /// If omitted, reads from stdin.
+    #[arg(value_name = "FILE_OR_URL", default_value = None)]
+    input: Option<String>,
 
     /// Print stats every N seconds
     #[arg(long, default_value_t = 2)]
@@ -28,6 +30,10 @@ struct Args {
     /// Decode transactions and compute TPS
     #[arg(long)]
     decode_tx: bool,
+
+    /// Buffer size for stdin/HTTP reader (bytes)
+    #[arg(long, default_value_t = 32 << 20)]
+    buf_size: usize,
 }
 
 #[derive(Default)]
@@ -54,14 +60,9 @@ impl Stats {
         self.blocks += 1;
 
         let (entries_count, bytes_size) = group.get_len();
-        // Count entries from the cid_map
-        let n_entries = entries_count as u64;
-        self.entries += n_entries;
-
-        // Total bytes from the backing buffer
+        self.entries += entries_count as u64;
         self.bytes += bytes_size as u64;
 
-        // Optional tx decode
         if decode_tx {
             let mut it = group.transactions().map_err(|e| {
                 CarError::InvalidData(format!("transaction iteration failed: {e:?}"))
@@ -133,32 +134,98 @@ fn run_stream<R: std::io::Read>(stream: &mut CarStream<R>, args: &Args) -> Resul
             break;
         }
     }
-    // Print final partial interval
+
     let now = Instant::now();
     let dt = now.duration_since(last_print).as_secs_f64();
     if dt > 0.0 && (stats.blocks > 0 || stats.entries > 0) {
         stats.print_interval(dt.max(1e-9), args.decode_tx);
     }
+
     Ok(())
+}
+
+fn looks_like_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+fn has_zst_suffix(s: &str) -> bool {
+    s.ends_with(".zst")
+}
+
+fn run_stdin(args: &Args) -> Result<()> {
+    let stdin = io::stdin();
+    let reader = BufReader::with_capacity(args.buf_size, stdin.lock());
+    let mut stream = CarStream::from_reader(reader)?;
+    run_stream(&mut stream, args)
 }
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
     let args = Args::parse();
 
-    info!(
-        "Reading CAR archive: {} (decode_tx={})",
-        args.input, args.decode_tx
-    );
+    match args.input.as_deref() {
+        None => {
+            info!("Reading CAR archive: stdin (decode_tx={})", args.decode_tx);
+            return run_stdin(&args);
+        }
+        Some("-") => {
+            info!("Reading CAR archive: stdin (decode_tx={})", args.decode_tx);
+            return run_stdin(&args);
+        }
+        Some(input) => {
+            info!(
+                "Reading CAR archive: {} (decode_tx={})",
+                input, args.decode_tx
+            );
 
-    let path = Path::new(&args.input);
-    if path.extension().unwrap() == "zst" {
-        let mut stream = CarStream::open_zstd(path)?;
-        run_stream(&mut stream, &args)?;
-    } else {
-        let mut stream = CarStream::open(path)?;
-        run_stream(&mut stream, &args)?;
-    };
+            if looks_like_url(input) {
+                if has_zst_suffix(input) {
+                    return Err(CarError::InvalidData(
+                        "input looks like a URL ending with .zst, but URL zstd is not supported (download locally or add url+zstd support)".to_string(),
+                    ));
+                }
+
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(None)
+                    .no_gzip()
+                    .no_brotli()
+                    .no_deflate()
+                    // optional A/B test for Cloudflare:
+                    // .http1_only()
+                    .build()
+                    .map_err(|e| CarError::Io(format!("build http client: {e}")))?;
+
+                let resp = client
+                    .get(input)
+                    .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                    .send()
+                    .map_err(|e| CarError::Io(format!("GET {input}: {e}")))?
+                    .error_for_status()
+                    .map_err(|e| CarError::Io(format!("GET {input} (http error): {e}")))?;
+
+                let reader = BufReader::with_capacity(args.buf_size, resp);
+                let mut stream = CarStream::from_reader(reader)?;
+                return run_stream(&mut stream, &args);
+            }
+
+            // Local path
+            let path = Path::new(input);
+
+            let is_zst = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("zst"))
+                .unwrap_or(false);
+
+            if is_zst {
+                let mut stream = CarStream::open_zstd(path)?;
+                run_stream(&mut stream, &args)?;
+            } else {
+                let mut stream = CarStream::open(path)?;
+                run_stream(&mut stream, &args)?;
+            }
+        }
+    }
 
     Ok(())
 }
