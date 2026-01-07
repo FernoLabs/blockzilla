@@ -1,4 +1,4 @@
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use gxhash::{HashMap as GxHashMap, HashMapExt};
 
 /// Hard requirement: we always keep exactly the last 150 blockhashes from previous epoch (if any).
 pub const PREV_TAIL_LEN: usize = 200;
@@ -19,7 +19,7 @@ pub struct BlockhashRegistry {
     /// Last PREV_TAIL_LEN of previous epoch, oldest → newest, len <= PREV_TAIL_LEN.
     pub prev_tail: Vec<[u8; 32]>,
     /// Map blockhash bytes → signed id (>=0 current, <0 previous tail).
-    pub index: FxHashMap<[u8; 32], i32>,
+    pub index: GxHashMap<[u8; 32], i32>,
 }
 
 impl BlockhashRegistry {
@@ -30,7 +30,7 @@ impl BlockhashRegistry {
         }
 
         let mut index =
-            FxHashMap::with_capacity_and_hasher(hashes.len() + prev_tail.len(), FxBuildHasher);
+            GxHashMap::with_capacity(hashes.len() + prev_tail.len());
 
         // 1) Insert previous-epoch tail with NEGATIVE ids.
         //
