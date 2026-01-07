@@ -1,5 +1,8 @@
 # TODO
 
+- reader benchmark
+- compact benchmark
+
 - String dedup in string table acrose epoch ?
   - try inside block first
   - accross epoch is harder as table is huge and may not fit in memory
@@ -20,6 +23,9 @@
 
 - wincode optimisation
   - can we use slice with shortu16 len decode ?
+
+- proper parser ?
+  - current parser is hand rolled and suboptimal
 
 Optimize transaction error storage (u32 + u32 + potentail tuple)
 
