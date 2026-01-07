@@ -179,6 +179,7 @@ fn main() -> Result<()> {
             );
 
             if looks_like_url(input) {
+                info!("Using network mode");
                 if has_zst_suffix(input) {
                     return Err(CarError::InvalidData(
                         "input looks like a URL ending with .zst, but URL zstd is not supported (download locally or add url+zstd support)".to_string(),
@@ -218,9 +219,11 @@ fn main() -> Result<()> {
                 .unwrap_or(false);
 
             if is_zst {
+                info!("Using zstd  mode");
                 let mut stream = CarStream::open_zstd(path)?;
                 run_stream(&mut stream, &args)?;
             } else {
+                info!("Using file mode");
                 let mut stream = CarStream::open(path)?;
                 run_stream(&mut stream, &args)?;
             }
