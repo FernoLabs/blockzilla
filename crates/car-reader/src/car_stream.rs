@@ -14,6 +14,16 @@ pub struct CarStream<R: std::io::Read> {
 }
 
 impl<R: std::io::Read> CarStream<R> {
+    pub fn from_reader(reader: R) -> Result<Self> {
+        let mut car = CarBlockReader::with_capacity(reader, CAR_BUF);
+        car.skip_header()?;
+
+        Ok(Self {
+            car,
+            group: CarBlockGroup::new(),
+        })
+    }
+
     #[inline(always)]
     pub fn next_group(&mut self) -> Result<Option<&CarBlockGroup>> {
         match self.car.read_until_block_into(&mut self.group) {
@@ -29,13 +39,8 @@ impl CarStream<BufReader<File>> {
         let file =
             File::open(path).map_err(|e| CarError::Io(format!("open {}: {e}", path.display())))?;
         let file = BufReader::with_capacity(CAR_BUF, file);
-        let mut car = CarBlockReader::with_capacity(file, CAR_BUF);
-        car.skip_header()?;
 
-        Ok(Self {
-            car,
-            group: CarBlockGroup::new(),
-        })
+        Self::from_reader(file)
     }
 }
 
@@ -47,12 +52,6 @@ impl CarStream<zstd::Decoder<'static, BufReader<File>>> {
         let zstd = zstd::Decoder::with_buffer(file)
             .map_err(|e| CarError::InvalidData(format!("zstd decoder init failed: {e}")))?;
 
-        let mut car = CarBlockReader::with_capacity(zstd, CAR_BUF);
-        car.skip_header()?;
-
-        Ok(Self {
-            car,
-            group: CarBlockGroup::new(),
-        })
+        Self::from_reader(zstd)
     }
 }

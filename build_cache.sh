@@ -70,19 +70,62 @@ require_free_space() {
   return 0
 }
 
+# ---- aria "unfinished download" detection / resume ----
+# aria2 creates sidecar files while downloading:
+#   - <file>.aria2
+#   - <file>.aria2__temp (sometimes)
+aria_unfinished_for() {
+  local car="$1"
+  [[ -f "${car}.aria2" || -f "${car}.aria2__temp" ]]
+}
+
+resume_with_aria() {
+  local url="$1"
+  local dest_dir="$2"
+  echo "$(timestamp) aria: resume ${url}"
+  aria2c -d "${dest_dir}" -c "${url}" -x 16 -s 16 --file-allocation=none
+}
+
+ensure_aria_complete() {
+  local car="$1"
+  local url="$2"
+  local dest_dir="$3"
+
+  if aria_unfinished_for "$car"; then
+    resume_with_aria "$url" "$dest_dir"
+  fi
+
+  if aria_unfinished_for "$car"; then
+    echo "$(timestamp) aria: still unfinished after aria2 run for $(basename "$car")" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 compress_one() {
   local car="$1"
   local zst="${car}.zst"
+
   if [[ -f "$zst" ]]; then
     echo "$(timestamp) compress: exists $(basename "$zst") - skip"
     return 0
   fi
+
+  # Safety: if aria is still writing, do not compress
+  if aria_unfinished_for "$car"; then
+    echo "$(timestamp) compress: refuse $(basename "$car") - aria2 sidecar present (download active/unfinished)" >&2
+    return 1
+  fi
+
   echo "$(timestamp) compress: start $(basename "$car") (zstd -${ZSTD_LVL}, T=${ZSTD_THREADS})"
   zstd -T"${ZSTD_THREADS}" -"${ZSTD_LVL}" --rm "$car"
+
   if [[ "${VERIFY}" == "yes" ]]; then
     echo "$(timestamp) verify: $(basename "$zst")"
     zstd -t "$zst"
   fi
+
   echo "$(timestamp) compress: done  $(basename "$zst")  free=$(free_pct)%"
 }
 
@@ -98,7 +141,13 @@ download_and_compress_epoch() {
     return 0
   fi
 
-  # If raw exists, compress it
+  # If an unfinished aria download exists, resume it first
+  if aria_unfinished_for "$car"; then
+    echo "$(timestamp) epoch-${i}: unfinished aria download detected - resuming"
+    ensure_aria_complete "$car" "$url" "$DEST_DIR" || exit 5
+  fi
+
+  # If raw exists (either previously present or resumed), compress it
   if [[ -f "$car" ]]; then
     if ! require_free_space "${MIN_FREE_PCT}"; then
       echo "$(timestamp) epoch-${i}: low space before compression - abort." >&2
@@ -116,6 +165,9 @@ download_and_compress_epoch() {
 
   echo "$(timestamp) epoch-${i}: download ${url}"
   aria2c -d "${DEST_DIR}" -c "${url}" -x 16 -s 16 --file-allocation=none
+
+  # After aria2 returns, ensure no unfinished markers remain (defensive)
+  ensure_aria_complete "$car" "$url" "$DEST_DIR" || exit 6
 
   if [[ ! -f "$car" ]]; then
     echo "$(timestamp) epoch-${i}: download failed - ${car} missing." >&2
