@@ -4,7 +4,7 @@
 
 This repo contains the tooling used to build and maintain (blockzilla)[http://blockzilla.dev]the (ferno)[https://ferno.ag] Solana archive node.
 
-## Downlaod and setup file
+## Downlaod and setup cache of epochs
 
 ```
 # download and compress epoch 0 to 900
