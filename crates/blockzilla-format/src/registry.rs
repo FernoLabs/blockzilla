@@ -1,13 +1,91 @@
 use anyhow::{Context, Result};
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use gxhash::GxHasher;
+use ph::fmph;
 use solana_pubkey::Pubkey;
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
-    str::FromStr,
 };
+
+#[inline]
+fn gxhash64<T: Hash + ?Sized>(v: &T) -> u64 {
+    let mut h = GxHasher::default();
+    v.hash(&mut h);
+    h.finish()
+}
+
+pub struct KeyIndex {
+    /// Minimal perfect hash over all pubkeys
+    mphf: fmph::GOFunction,
+
+    /// mphf_index -> 1-based id
+    values: Vec<u32>,
+
+    /// Small hot cache for base58 string lookups
+    cache: HotCache,
+}
+
+impl KeyIndex {
+    /// Build index over keys in file order.
+    ///
+    /// All lookups are assumed to be members of the registry.
+    pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
+        let n = keys_in_file_order.len();
+        let hot_cap = n.min(10_000);
+
+        // MPHF build
+        let mphf: fmph::GOFunction = keys_in_file_order.as_slice().into();
+
+        let mut values = vec![0u32; n];
+
+        // size cache at ~50% load
+        let mut cache = HotCache::new(hot_cap * 2);
+
+        for (i, k) in keys_in_file_order.iter().enumerate() {
+            let id = i as u32 + 1;
+
+            let idx = mphf.get_or_panic(k) as usize;
+            debug_assert!(idx < n);
+            values[idx] = id;
+
+            // populate hot string cache
+            if i < hot_cap {
+                let s = Pubkey::new_from_array(*k).to_string();
+                cache.insert(gxhash64(s.as_bytes()), id);
+            }
+        }
+
+        Self {
+            mphf,
+            values,
+            cache,
+        }
+    }
+
+    /// Fast path: key MUST exist.
+    #[inline(always)]
+    pub fn lookup_unchecked(&self, k: &[u8; 32]) -> u32 {
+        let idx = self.mphf.get_or_panic(k) as usize;
+        let id = self.values[idx];
+        debug_assert!(id != 0);
+        id
+    }
+
+    /// Lookup from base58 string.
+    ///
+    /// Safe as long as all inputs belong to the registry.
+    pub fn lookup_str(&self, k: &str) -> Option<u32> {
+        if let Some(id) = self.cache.get(gxhash64(k.as_bytes())) {
+            return Some(id);
+        }
+
+        let pk = Pubkey::from_str(k).ok()?;
+        Some(self.lookup_unchecked(pk.as_array()))
+    }
+}
 
 /// Owns keys in file order. Ids are 1-based (0 reserved).
 #[derive(Debug, Clone)]
@@ -57,78 +135,6 @@ impl KeyStore {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct KeyIndex {
-    index: FxHashMap<[u8; 32], u32>,
-    index_hot: FxHashMap<[u8; 32], u32>,
-    /// string to pubk cache for most use pubk
-    cache: FxHashMap<u64, u32>,
-}
-
-#[inline]
-fn fxhash(bytes: &[u8]) -> u64 {
-    let mut hasher = rustc_hash::FxHasher::default();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
-impl KeyIndex {
-    /// Build index over keys in file order.
-    pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
-        let total = keys_in_file_order.len();
-        let hot_cap = total.min(10_000);
-
-        let mut index =
-            FxHashMap::with_capacity_and_hasher(total.saturating_sub(hot_cap), FxBuildHasher);
-        let mut index_hot = FxHashMap::with_capacity_and_hasher(hot_cap, FxBuildHasher);
-        let mut cache = FxHashMap::with_capacity_and_hasher(hot_cap, FxBuildHasher);
-
-        // fill hot (first hot_cap keys)
-        for (i, k) in keys_in_file_order.iter().enumerate().take(hot_cap) {
-            let id = i as u32 + 1;
-            let pubk_str = Pubkey::new_from_array(*k).to_string();
-            cache.insert(fxhash(pubk_str.as_bytes()), id);
-            index_hot.insert(*k, id);
-        }
-
-        // fill cold (rest)
-        for (i, k) in keys_in_file_order.into_iter().enumerate().skip(hot_cap) {
-            let id = i as u32 + 1;
-            index.insert(k, id);
-        }
-
-        index.shrink_to_fit();
-
-        Self {
-            index,
-            index_hot,
-            cache,
-        }
-    }
-
-    pub fn lookup_str(&self, k: &str) -> Option<u32> {
-        if let Some(id) = self.cache.get(&fxhash(k.as_bytes())) {
-            return Some(*id);
-        }
-
-        let pk = Pubkey::from_str(k).ok()?;
-        let a = pk.as_array();
-
-        self.index_hot
-            .get(a)
-            .copied()
-            .or_else(|| self.index.get(a).copied())
-    }
-
-    #[inline(always)]
-    pub fn lookup_unchecked(&self, k: &[u8; 32]) -> u32 {
-        match self.index_hot.get(k) {
-            Some(id) => *id,
-            None => *self.index.get(k).expect("missing key"),
-        }
-    }
-}
-
 /// Write registry.bin (raw 32-byte pubkeys, no header)
 pub fn write_registry(path: &Path, keys: &[[u8; 32]]) -> Result<()> {
     let f = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
@@ -140,4 +146,50 @@ pub fn write_registry(path: &Path, keys: &[[u8; 32]]) -> Result<()> {
 
     w.flush().context("flush registry")?;
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct HotCache {
+    keys: Vec<u64>,
+    values: Vec<u32>,
+    mask: usize,
+}
+
+impl HotCache {
+    fn new(capacity: usize) -> Self {
+        let cap = capacity.next_power_of_two().max(8);
+        Self {
+            keys: vec![0; cap],
+            values: vec![0; cap],
+            mask: cap - 1,
+        }
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, k: u64, v: u32) {
+        let mut i = k as usize & self.mask;
+        loop {
+            if self.keys[i] == 0 {
+                self.keys[i] = k;
+                self.values[i] = v;
+                return;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, k: u64) -> Option<u32> {
+        let mut i = k as usize & self.mask;
+        loop {
+            let kk = self.keys[i];
+            if kk == 0 {
+                return None;
+            }
+            if kk == k {
+                return Some(self.values[i]);
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
 }

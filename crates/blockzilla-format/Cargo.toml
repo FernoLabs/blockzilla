@@ -7,7 +7,6 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
-rustc-hash = "2.1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc","use-std"] }
 wincode = { version = "0.2.5", features = ["derive"] }
@@ -15,3 +14,5 @@ solana-pubkey = "4.0.0"
 car-reader = { path = "../car-reader"}
 data-encoding = "2.9.0"
 heapless = { version = "0.9.2", features = ["serde"] }
+gxhash = "3.5.0"
+ph = "0.10.0"

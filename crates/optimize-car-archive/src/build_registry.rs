@@ -1,21 +1,19 @@
 use anyhow::{Context, Result};
 use car_reader::{car_stream::CarStream, versioned_transaction::VersionedMessage};
-use rustc_hash::FxBuildHasher;
-use solana_pubkey::{Pubkey, pubkey};
+use gxhash::{GxBuildHasher, HashMap as GxHashMap};
+use solana_pubkey::{pubkey, Pubkey};
 use std::{path::Path, str::FromStr, time::Instant};
 use tracing::info;
-
-use rustc_hash::FxHashMap;
 
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
-    node::{Node, decode_node},
+    node::{decode_node, Node},
 };
 
 use blockzilla_format::write_registry;
 
-use crate::{Cli, ProgressTracker, epoch_paths};
+use crate::{epoch_paths, Cli, ProgressTracker};
 
 pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let (car_path, epoch_dir, registry_path, _, _) = epoch_paths(cli, epoch);
@@ -30,7 +28,7 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     info!("  car:      {}", car_path.display());
     info!("  out:      {}", registry_path.display());
 
-    let mut counter = PubkeyCounter::new(16_000_000);
+    let mut counter = PubkeyCounter::new(50_000_000);
     let mut progress = ProgressTracker::new("Phase 1/2");
 
     let mut stream = CarStream::open_zstd(Path::new(&car_path))?;
@@ -75,12 +73,12 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
 }
 
 struct PubkeyCounter {
-    counts: FxHashMap<[u8; 32], u32>,
+    counts: GxHashMap<[u8; 32], u32>,
 }
 
 impl PubkeyCounter {
     fn new(cap: usize) -> Self {
-        let counts = FxHashMap::with_capacity_and_hasher(cap, FxBuildHasher);
+        let counts = GxHashMap::with_capacity_and_hasher(cap, GxBuildHasher::default());
         Self { counts }
     }
 
@@ -89,11 +87,11 @@ impl PubkeyCounter {
         *self.counts.entry(*k32).or_insert(0) += 1;
     }
 }
+
 fn registry_process_block(
     group: &CarBlockGroup,
     counter: &mut PubkeyCounter,
 ) -> Result<(u64, u64, Option<u64>), GroupError> {
-    // Keep this if you need the slot for progress reporting.
     let block = match decode_node(group.block_payload()).map_err(GroupError::Node)? {
         Node::Block(b) => b,
         _ => return Err(GroupError::WrongRootKind),
@@ -101,7 +99,6 @@ fn registry_process_block(
     let block_slot = block.slot;
 
     let mut it = group.transactions().unwrap();
-
     let mut txs = 0u64;
 
     while let Some(r) = it.next_tx().unwrap() {
@@ -125,17 +122,15 @@ fn registry_process_block(
         }
 
         if let Some(meta) = maybe_meta {
-            // loaded addresses
             for pk in &meta.loaded_writable_addresses {
-                let key = pk.as_slice().try_into().unwrap();
+                let key: &[u8; 32] = pk.as_slice().try_into().unwrap();
                 counter.add32(key);
             }
             for pk in &meta.loaded_readonly_addresses {
-                let key = pk.as_slice().try_into().unwrap();
+                let key: &[u8; 32] = pk.as_slice().try_into().unwrap();
                 counter.add32(key);
             }
 
-            // token balances (string fields)
             for tb in meta
                 .pre_token_balances
                 .iter()
@@ -144,14 +139,10 @@ fn registry_process_block(
                 if let Ok(pk) = Pubkey::from_str(&tb.mint) {
                     counter.add32(pk.as_array());
                 }
-                if !tb.owner.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.owner)
-                {
+                if !tb.owner.is_empty() && let Ok(pk) = Pubkey::from_str(&tb.owner) {
                     counter.add32(pk.as_array());
                 }
-                if !tb.program_id.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.program_id)
-                {
+                if !tb.program_id.is_empty() && let Ok(pk) = Pubkey::from_str(&tb.program_id) {
                     counter.add32(pk.as_array());
                 }
             }

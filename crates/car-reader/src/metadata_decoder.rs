@@ -43,9 +43,13 @@ pub struct ZstdReusableDecoder {
     out: [u8; 1024 * 1024],
 }
 
+impl Default for ZstdReusableDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ZstdReusableDecoder {
-    /// `out_capacity` should be your typical decompressed metadata size.
-    #[inline]
     pub fn new() -> Self {
         Self {
             dctx: zstd::zstd_safe::DCtx::create(),
@@ -53,7 +57,6 @@ impl ZstdReusableDecoder {
             len: 0,
         }
     }
-
     #[inline]
     pub fn output(&self) -> &[u8] {
         &self.out[..self.len]

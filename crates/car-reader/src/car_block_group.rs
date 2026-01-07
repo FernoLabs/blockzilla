@@ -1,7 +1,9 @@
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHasher};
 use std::hash::Hasher;
 use std::io::Read;
 use std::mem::MaybeUninit;
+use gxhash::GxHasher;
+use gxhash::HashMapExt;
+use gxhash::HashMap;
 
 use crate::confirmed_block::TransactionStatusMeta;
 use crate::error::{CarReadError, CarReadResult, GroupError};
@@ -16,7 +18,7 @@ pub struct CarBlockGroup {
     pub buffer: Vec<u8>,
 
     /// FxHash(CID bytes) -> (payload_start, payload_end) offsets in `buffer`.
-    cid_map: FxHashMap<u64, (u32, u32)>,
+    cid_map: HashMap<u64, (u32, u32)>,
 
     /// (payload_start, payload_end) for the block node payload, inside `buffer`.
     block_range: (u32, u32),
@@ -32,7 +34,7 @@ impl CarBlockGroup {
     pub fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(5 * 1024 * 1024),
-            cid_map: FxHashMap::with_capacity_and_hasher(8096, FxBuildHasher),
+            cid_map: HashMap::with_capacity(8096),
             block_range: (0, 0),
         }
     }
@@ -56,7 +58,7 @@ impl CarBlockGroup {
 
     #[inline]
     fn hash_cid(cid_bytes: &[u8]) -> u64 {
-        let mut h = FxHasher::default();
+        let mut h = GxHasher::default();
         h.write(cid_bytes);
         h.finish()
     }
