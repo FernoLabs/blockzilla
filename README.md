@@ -2,7 +2,7 @@
 
 ⚠️🚧 EXPERIMENTAL / R&D CODE – NOT PRODUCTION READY 🚧⚠️
 
-This repo contains the tooling used to build and maintain (blockzilla)[http://blockzilla.dev]the (ferno)[https://ferno.ag] Solana archive node.
+This repo contains the tooling used to build and maintain [blockzilla](http://blockzilla.dev) the [ferno](https://ferno.ag) Solana archive node.
 
 ## Downlaod and setup cache of epochs
 
