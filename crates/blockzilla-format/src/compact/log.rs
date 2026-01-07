@@ -86,6 +86,7 @@ pub enum LogEvent {
         program: ProgramId,
         log: ProgramLog,
     },
+    ProgramAccountNotWritable,
 
     Invoke {
         program: ProgramId,
@@ -356,6 +357,11 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             continue;
         }
 
+        if line == "Program account not writeable" {
+            events.push(LogEvent::ProgramAccountNotWritable);
+            continue;
+        }
+
         // Program log: <msg>
         if let Some(text) = line.strip_prefix("Program log: ") {
             let text = text.trim();
@@ -471,7 +477,9 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 let pk_txt = rest[..space_pos].trim();
                 let after_pk = rest[space_pos + 1..].trim();
 
-                let program = index.lookup_str(pk_txt).expect("Invaild Pubkey");
+                let program = index
+                    .lookup_str(pk_txt)
+                    .expect(&format!("Invaild Pubkey {pk_txt} ({line})"));
                 let is_cb = program == cb_pid;
 
                 // invoke [N]
@@ -624,7 +632,9 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                     payload
                 ));
             }
-
+            LogEvent::ProgramAccountNotWritable => {
+                out.push(format!("Program account not writeable"))
+            }
             LogEvent::CustomProgramError { code } => {
                 out.push(format!("custom program error: 0x{:x}", code))
             }
