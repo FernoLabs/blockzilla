@@ -479,7 +479,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
 
                 let program = index
                     .lookup_str(pk_txt)
-                    .expect(&format!("Invaild Pubkey {pk_txt} ({line})"));
+                    .unwrap_or_else(|| panic!("Invaild Pubkey {pk_txt} ({line})"));
                 let is_cb = program == cb_pid;
 
                 // invoke [N]
@@ -633,7 +633,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 ));
             }
             LogEvent::ProgramAccountNotWritable => {
-                out.push(format!("Program account not writeable"))
+                out.push("Program account not writeable".to_string())
             }
             LogEvent::CustomProgramError { code } => {
                 out.push(format!("custom program error: 0x{:x}", code))
