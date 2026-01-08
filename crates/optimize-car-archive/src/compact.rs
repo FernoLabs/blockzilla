@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use car_reader::car_stream::CarStream;
 use car_reader::versioned_transaction::{VersionedMessage, VersionedTransaction};
-use gxhash::{HashMap as GxHashMap};
+use gxhash::HashMap as GxHashMap;
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom},
@@ -223,7 +223,7 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
 fn compact_process_block_manual<W: std::io::Write>(
     group: &CarBlockGroup,
     index: &KeyIndex,
-    bh_index: & GxHashMap<[u8; 32], i32>,
+    bh_index: &GxHashMap<[u8; 32], i32>,
     writer: &mut PostcardFramedWriter<W>,
     block_i: u32,
     tx_payload: &mut Vec<u8>,
@@ -334,7 +334,7 @@ pub fn varint_usize(n: usize, out: &mut [u8; varint_max::<usize>()]) -> &mut [u8
 pub fn to_compact_transaction<'a>(
     vtx: &'a car_reader::versioned_transaction::VersionedTransaction,
     index: &KeyIndex,
-    bh_index: & GxHashMap<[u8; 32], i32>,
+    bh_index: &GxHashMap<[u8; 32], i32>,
 ) -> Result<CompactTransaction<'a>> {
     let signatures = vtx.signatures.iter().map(|s| Signature(s)).collect();
 

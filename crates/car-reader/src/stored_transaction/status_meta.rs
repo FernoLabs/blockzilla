@@ -4,7 +4,7 @@ use wincode::error::invalid_tag_encoding;
 use wincode::io::Reader;
 use wincode::{SchemaRead, containers, len::BincodeLen, len::ShortU16Len};
 
-use crate::stored_transaction_error::StoredTransactionError;
+use crate::stored_transaction::StoredTransactionError;
 use crate::{confirmed_block, convert_metadata};
 
 #[derive(SchemaRead, Clone)]
