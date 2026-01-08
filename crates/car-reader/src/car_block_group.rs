@@ -1,9 +1,9 @@
+use gxhash::GxHasher;
+use gxhash::HashMap;
+use gxhash::HashMapExt;
 use std::hash::Hasher;
 use std::io::Read;
 use std::mem::MaybeUninit;
-use gxhash::GxHasher;
-use gxhash::HashMapExt;
-use gxhash::HashMap;
 
 use crate::confirmed_block::TransactionStatusMeta;
 use crate::error::{CarReadError, CarReadResult, GroupError};
@@ -267,6 +267,9 @@ impl<'a> TxIter<'a> {
                 self.has_tx = false;
             }
 
+            VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
+                .map_err(|_| GroupError::TxDecode)?;
+
             // Decode metadata if present
             let has_metadata = !tx.metadata.data.is_empty();
             if has_metadata {
@@ -276,12 +279,13 @@ impl<'a> TxIter<'a> {
                     &mut self.reusable_meta,
                     &mut self.zstd,
                 )
-                .inspect_err(|err| println!("{err}"))
+                .inspect_err(|err| {
+                    println!("tx {:?} failed : {err}", unsafe {
+                        &*self.reusable_tx.as_ptr()
+                    })
+                })
                 .map_err(|_| GroupError::TxMetaDecode)?;
             }
-
-            VersionedTransaction::deserialize_into(tx.data.data, &mut self.reusable_tx)
-                .map_err(|_| GroupError::TxDecode)?;
 
             self.has_tx = true;
             self.has_meta = has_metadata;

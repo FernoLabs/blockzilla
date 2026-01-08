@@ -1,7 +1,8 @@
 use crate::{
     confirmed_block::{self, TransactionStatusMeta},
-    stored_transaction_status_meta as stored,
-    stored_transaction_status_meta::StoredTransactionStatusMeta,
+    stored_transaction as stored,
+    stored_transaction::StoredTokenAmount,
+    stored_transaction::StoredTransactionStatusMeta,
 };
 
 #[inline]
@@ -69,7 +70,6 @@ pub fn stored_meta_to_proto(m: StoredTransactionStatusMeta) -> TransactionStatus
 
         rewards,
 
-        // You do not store these, so default empty.
         loaded_writable_addresses: Vec::new(),
         loaded_readonly_addresses: Vec::new(),
 
@@ -131,7 +131,7 @@ fn token_balance_to_proto(
 }
 
 #[inline]
-fn ui_token_amount_to_proto(a: &stored::StoredTokenAmount) -> confirmed_block::UiTokenAmount {
+fn ui_token_amount_to_proto(a: &StoredTokenAmount) -> confirmed_block::UiTokenAmount {
     // You have: ui_amount (f64), decimals (u8), amount (String)
     // Prost expects: ui_amount_string also. Best effort:
     // - keep the raw integer string in `amount`

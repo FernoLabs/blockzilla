@@ -1,19 +1,19 @@
 use anyhow::{Context, Result};
 use car_reader::{car_stream::CarStream, versioned_transaction::VersionedMessage};
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
-use solana_pubkey::{pubkey, Pubkey};
+use solana_pubkey::{Pubkey, pubkey};
 use std::{path::Path, str::FromStr, time::Instant};
 use tracing::info;
 
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
-    node::{decode_node, Node},
+    node::{Node, decode_node},
 };
 
 use blockzilla_format::write_registry;
 
-use crate::{epoch_paths, Cli, ProgressTracker};
+use crate::{Cli, ProgressTracker, epoch_paths};
 
 pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
     let (car_path, epoch_dir, registry_path, _, _) = epoch_paths(cli, epoch);
@@ -139,10 +139,14 @@ fn registry_process_block(
                 if let Ok(pk) = Pubkey::from_str(&tb.mint) {
                     counter.add32(pk.as_array());
                 }
-                if !tb.owner.is_empty() && let Ok(pk) = Pubkey::from_str(&tb.owner) {
+                if !tb.owner.is_empty()
+                    && let Ok(pk) = Pubkey::from_str(&tb.owner)
+                {
                     counter.add32(pk.as_array());
                 }
-                if !tb.program_id.is_empty() && let Ok(pk) = Pubkey::from_str(&tb.program_id) {
+                if !tb.program_id.is_empty()
+                    && let Ok(pk) = Pubkey::from_str(&tb.program_id)
+                {
                     counter.add32(pk.as_array());
                 }
             }

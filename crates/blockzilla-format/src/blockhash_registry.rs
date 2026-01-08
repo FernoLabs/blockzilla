@@ -29,8 +29,7 @@ impl BlockhashRegistry {
             prev_tail.drain(0..prev_tail.len() - PREV_TAIL_LEN);
         }
 
-        let mut index =
-            GxHashMap::with_capacity(hashes.len() + prev_tail.len());
+        let mut index = GxHashMap::with_capacity(hashes.len() + prev_tail.len());
 
         // 1) Insert previous-epoch tail with NEGATIVE ids.
         //
