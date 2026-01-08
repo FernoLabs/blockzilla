@@ -226,7 +226,7 @@ mod tests {
 
         let mut out = TransactionStatusMeta::default();
 
-        let res = decode_transaction_status_meta(0, metadata, &mut out)
+        let res = decode_transaction_status_meta(slot, metadata, &mut out)
             .inspect_err(|err| println!("{err}"));
         assert!(res.is_ok())
     }
