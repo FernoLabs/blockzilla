@@ -3,6 +3,8 @@
 - reader benchmark
 - compact benchmark
 
+- merge blockhash and registry builder
+
 - String dedup in string table acrose epoch ?
   - try inside block first
   - accross epoch is harder as table is huge and may not fit in memory

@@ -12,7 +12,6 @@ pub const SLOTS_PER_EPOCH: u64 = 432_000;
 
 mod build;
 mod build_all;
-mod build_blockhash_registry;
 mod build_registry;
 mod compact;
 
@@ -66,10 +65,6 @@ pub(crate) enum Cmd {
         epoch: u64,
     },
 
-    BuildBlockhashRegistry {
-        epoch: u64,
-    },
-
     /// Pass 2 only: build compact.bin from CAR + registry.bin
     Compact {
         epoch: u64,
@@ -87,8 +82,6 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Build { epoch, .. } => build::run(&cli, epoch),
         Cmd::BuildRegistry { epoch } => build_registry::run(&cli, epoch),
-        Cmd::BuildBlockhashRegistry { epoch } => build_blockhash_registry::run(&cli, epoch),
-
         Cmd::Compact { epoch } => compact::run(&cli, epoch),
         Cmd::BuildAll => build_all::run(&cli),
     }

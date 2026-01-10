@@ -1,4 +1,4 @@
-use crate::car_block_group::CarBlockGroup;
+use crate::car_block_group::{CarBlockGroup, CarBlockGroupUnchecked};
 use crate::error::CarReadError;
 use crate::error::CarReadResult;
 use std::io;
@@ -27,6 +27,8 @@ impl<R: Read> CarBlockReader<R> {
         Ok(())
     }
 
+    /// Safe group: follows block->entry->tx links.
+    ///
     /// Reads CAR sections until it finds a "block" node (kind == 2) in the entry payload.
     /// Fills `out` (reusing its internal allocations) and returns:
     /// - Ok(true)  => group produced
@@ -43,22 +45,39 @@ impl<R: Read> CarBlockReader<R> {
                 Err(e) => return Err(e),
             };
 
-            if entry_len == 0 {
-                return Err(CarReadError::InvalidEntryLen("entry len 0".to_string()));
-            }
+            let mut cid_buf = [0; 36];
+            self.reader.read_exact(&mut cid_buf)?;
 
-            if entry_len <= 36 {
-                return Err(CarReadError::InvalidEntryLen(format!(
-                    "entry smaller than cid ({entry_len})"
-                )));
+            let done = out.read_entry_payload_into(&mut self.reader, &cid_buf, entry_len)?;
+            if done {
+                return Ok(true);
             }
+        }
+    }
+
+    /// Unchecked group: assumes transactions are already in canonical file order.
+    ///
+    /// Reads CAR sections until it finds a "block" node (kind == 2) in the entry payload.
+    /// Fills `out` (reusing its internal allocations) and returns:
+    /// - Ok(true)  => group produced
+    /// - Ok(false) => clean EOF (no more groups)
+    pub fn read_until_block_into_unchecked(
+        &mut self,
+        out: &mut CarBlockGroupUnchecked,
+    ) -> CarReadResult<bool> {
+        out.clear();
+
+        loop {
+            let entry_len = match read_uvarint64(&mut self.reader) {
+                Ok(v) => v as usize,
+                Err(CarReadError::Eof) => {
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+            };
 
             let mut cid_buf = [0; 36];
             self.reader.read_exact(&mut cid_buf)?;
-            if cid_buf[0] != 0x01 || cid_buf[1] != 0x71 || cid_buf[2] != 0x12 || cid_buf[3] != 0x20
-            {
-                return Err(CarReadError::Cid(format!("Not known cid {cid_buf:02x?}")));
-            }
 
             let done = out.read_entry_payload_into(&mut self.reader, &cid_buf, entry_len)?;
             if done {
@@ -69,7 +88,7 @@ impl<R: Read> CarBlockReader<R> {
 }
 
 /// Reads a uvarint64 without recording bytes.
-fn read_uvarint64<R: BufRead>(r: &mut R) -> CarReadResult<u64> {
+pub fn read_uvarint64<R: BufRead>(r: &mut R) -> CarReadResult<u64> {
     let mut x: u64 = 0;
     let mut shift: u32 = 0;
     let mut i: usize = 0;
