@@ -1,46 +1,105 @@
 use anyhow::{Context, Result};
-use car_reader::{car_stream::CarStream, versioned_transaction::VersionedMessage};
-use gxhash::{GxBuildHasher, HashMap as GxHashMap};
-use solana_pubkey::{Pubkey, pubkey};
-use std::{path::Path, str::FromStr, time::Instant};
-use tracing::info;
-
+use blockzilla_format::write_registry;
 use car_reader::{
     car_block_group::CarBlockGroup,
+    car_stream::CarStream,
     error::GroupError,
-    node::{Node, decode_node},
+    node::{decode_node, Node},
+    versioned_transaction::VersionedMessage,
 };
+use gxhash::{GxBuildHasher, HashMap as GxHashMap};
+use solana_pubkey::{pubkey, Pubkey};
+use std::{fs::File, io::Write, path::Path, str::FromStr, time::Instant};
+use tracing::info;
 
-use blockzilla_format::write_registry;
+use crate::{epoch_paths, Cli, ProgressTracker};
 
-use crate::{Cli, ProgressTracker, epoch_paths};
+const MAX_BLOCKHASHES_PER_EPOCH: usize = 432_000;
 
 pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
-    let (car_path, epoch_dir, registry_path, _, _) = epoch_paths(cli, epoch);
+    // If prev epoch blockhash registry is missing, we MUST build it (transactions may reference it).
+    if epoch > 0 {
+        let (prev_car_path, _prev_dir, _prev_reg, prev_bh_path, _prev_compact) =
+            epoch_paths(cli, epoch - 1);
+
+        if !prev_bh_path.exists() {
+            info!(
+                "Prev epoch blockhash registry missing, building it now: epoch={} out={}",
+                epoch - 1,
+                prev_bh_path.display()
+            );
+
+            if !prev_car_path.exists() {
+                anyhow::bail!(
+                    "Prev epoch CAR not found, cannot build prev blockhash registry: epoch={} car={}",
+                    epoch - 1,
+                    prev_car_path.display()
+                );
+            }
+
+            build_registry_and_blockhash_for_epoch(cli, epoch - 1).with_context(|| {
+                format!(
+                    "build registry + blockhash registry for epoch {}",
+                    epoch - 1
+                )
+            })?;
+        }
+    }
+
+    build_registry_and_blockhash_for_epoch(cli, epoch)
+}
+
+fn build_registry_and_blockhash_for_epoch(cli: &Cli, epoch: u64) -> Result<()> {
+    let (car_path, epoch_dir, registry_path, bh_path, _compact_path) = epoch_paths(cli, epoch);
 
     if !car_path.exists() {
         anyhow::bail!("Input not found: {}", car_path.display());
     }
+
     std::fs::create_dir_all(&epoch_dir)
         .with_context(|| format!("Failed to create {}", epoch_dir.display()))?;
 
-    info!("Building registry (counting phase) epoch={}", epoch);
+    info!("Building registry + blockhash registry epoch={}", epoch);
     info!("  car:      {}", car_path.display());
-    info!("  out:      {}", registry_path.display());
+    info!("  registry: {}", registry_path.display());
+    info!("  bh:       {}", bh_path.display());
+
+    // Blockhash file image in memory: N * 32 bytes.
+    let mut blockhash_out: Vec<u8> = Vec::with_capacity(MAX_BLOCKHASHES_PER_EPOCH * 32);
 
     let mut counter = PubkeyCounter::new(50_000_000);
-    let mut progress = ProgressTracker::new("Phase 1/2");
+
+    // One progress tracker for the pass. If you prefer two, split it.
+    let mut progress = ProgressTracker::new("Registry + Blockhash");
 
     let mut stream = CarStream::open_zstd(Path::new(&car_path))?;
     while let Some(group) = stream.next_group()? {
-        let (blocks_delta, txs_delta, slot) = registry_process_block(group, &mut counter)?;
+        let (blocks_delta, txs_delta, slot, blockhash32) =
+            process_group_for_registry_and_blockhash(group, &mut counter)?;
+
         if let Some(s) = slot {
             progress.update_slot(s);
         }
         progress.update(blocks_delta, txs_delta);
+
+        if let Some(bh) = blockhash32 {
+            blockhash_out.extend_from_slice(&bh);
+        }
     }
 
     progress.final_report();
+
+    // Write blockhash registry first (fast)
+    {
+        let n = blockhash_out.len() / 32;
+        let mut f =
+            File::create(&bh_path).with_context(|| format!("create {}", bh_path.display()))?;
+        f.write_all(&blockhash_out)
+            .with_context(|| "write blockhash registry")?;
+        f.flush().context("flush blockhash registry")?;
+        info!("Blockhash registry written: {} hashes", n);
+    }
+
     info!("Unique pubkeys: {}", counter.counts.len());
 
     info!("Sorting registry by usage frequency...");
@@ -88,20 +147,29 @@ impl PubkeyCounter {
     }
 }
 
-fn registry_process_block(
-    group: &CarBlockGroup,
+/// One group pass:
+/// - decode block (slot for progress)
+/// - get blockhash from the reader (single-copy last-entry hash tracked by CarBlockGroup)
+/// - iterate txs via group.transactions() and count pubkeys
+fn process_group_for_registry_and_blockhash(
+    group: &mut CarBlockGroup,
     counter: &mut PubkeyCounter,
-) -> Result<(u64, u64, Option<u64>), GroupError> {
+) -> Result<(u64, u64, Option<u64>, Option<[u8; 32]>), GroupError> {
     let block = match decode_node(group.block_payload()).map_err(GroupError::Node)? {
         Node::Block(b) => b,
         _ => return Err(GroupError::WrongRootKind),
     };
     let block_slot = block.slot;
 
-    let mut it = group.transactions().unwrap();
+    // Blockhash is computed from the last Entry seen in the group.
+    // NOTE: group.blockhash_checked() contains a debug-only sanity check.
+    // If you validate this assumption, you can switch to a cheaper method later.
+    let bh = group.blockhash_checked()?;
+
+    let mut it = group.transactions()?;
     let mut txs = 0u64;
 
-    while let Some(r) = it.next_tx().unwrap() {
+    while let Some(r) = it.next_tx()? {
         let (vtx, maybe_meta) = r;
         txs += 1;
 
@@ -139,19 +207,19 @@ fn registry_process_block(
                 if let Ok(pk) = Pubkey::from_str(&tb.mint) {
                     counter.add32(pk.as_array());
                 }
-                if !tb.owner.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.owner)
-                {
-                    counter.add32(pk.as_array());
+                if !tb.owner.is_empty() {
+                    if let Ok(pk) = Pubkey::from_str(&tb.owner) {
+                        counter.add32(pk.as_array());
+                    }
                 }
-                if !tb.program_id.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.program_id)
-                {
-                    counter.add32(pk.as_array());
+                if !tb.program_id.is_empty() {
+                    if let Ok(pk) = Pubkey::from_str(&tb.program_id) {
+                        counter.add32(pk.as_array());
+                    }
                 }
             }
         }
     }
 
-    Ok((1, txs, Some(block_slot)))
+    Ok((1, txs, Some(block_slot), Some(bh)))
 }

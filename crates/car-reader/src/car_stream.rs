@@ -25,12 +25,18 @@ impl<R: std::io::Read> CarStream<R> {
     }
 
     #[inline(always)]
-    pub fn next_group(&mut self) -> Result<Option<&CarBlockGroup>> {
+    pub fn next_group(&mut self) -> Result<Option<&mut CarBlockGroup>> {
         match self.car.read_until_block_into(&mut self.group) {
-            Ok(true) => Ok(Some(&self.group)),
+            Ok(true) => Ok(Some(&mut self.group)),
             Ok(false) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    // TODO with this design lioks wrong refactor may be needed
+    #[inline(always)]
+    pub fn next_group_into(&mut self, group: &mut CarBlockGroup) -> Result<bool> {
+        self.car.read_until_block_into(group)
     }
 }
 
@@ -50,7 +56,7 @@ impl CarStream<zstd::Decoder<'static, BufReader<File>>> {
             File::open(path).map_err(|e| CarError::Io(format!("open {}: {e}", path.display())))?;
         let file = BufReader::with_capacity(CAR_BUF, file);
         let zstd = zstd::Decoder::with_buffer(file)
-            .map_err(|e| CarError::InvalidData(format!("zstd decoder init failed: {e}")))?;
+            .map_err(|e| CarError::InvalidData(format!("zstd decoder init failed ({e})")))?;
 
         Self::from_reader(zstd)
     }

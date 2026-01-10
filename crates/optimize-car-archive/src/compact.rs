@@ -221,7 +221,7 @@ pub(crate) fn run(cli: &Cli, epoch: u64) -> Result<()> {
 }
 
 fn compact_process_block_manual<W: std::io::Write>(
-    group: &CarBlockGroup,
+    group: &mut CarBlockGroup,
     index: &KeyIndex,
     bh_index: &GxHashMap<[u8; 32], i32>,
     writer: &mut PostcardFramedWriter<W>,

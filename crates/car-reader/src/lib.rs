@@ -12,6 +12,7 @@ pub mod node;
 pub mod reader;
 pub mod stored_transaction;
 pub mod versioned_transaction;
+pub mod car_stream_par;
 
 pub use reader::CarBlockReader;
 

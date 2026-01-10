@@ -40,7 +40,7 @@ pub struct ZstdReusableDecoder {
     dctx: zstd::zstd_safe::DCtx<'static>,
     len: usize,
     // 10KB max log + inner instruction usually ~= log len (32k was weirdly not enouth)
-    out: [u8; 1024 * 1024],
+    out: [u8; 64 * 1024],
 }
 
 impl Default for ZstdReusableDecoder {
@@ -108,15 +108,15 @@ pub fn decode_transaction_status_meta_from_frame(
         .decompress_if_zstd(reassembled_metadata)
         .map_err(MetadataDecodeError::ZstdDecompress)?
     {
-        decode_transaction_status_meta(slot, zstd.output(), out)
+        decode_transaction_status_meta_into(slot, zstd.output(), out)
     } else {
-        decode_transaction_status_meta(slot, reassembled_metadata, out)
+        decode_transaction_status_meta_into(slot, reassembled_metadata, out)
     }
 }
 
 /// Decode TransactionStatusMeta from raw bytes (either bincode StoredTransactionStatusMeta
 /// for early epochs, or protobuf for later epochs).
-pub fn decode_transaction_status_meta(
+pub fn decode_transaction_status_meta_into(
     slot: u64,
     metadata_bytes: &[u8],
     out: &mut TransactionStatusMeta,
@@ -147,6 +147,16 @@ pub fn decode_transaction_status_meta(
 
     Ok(())
 }
+
+pub fn decode_transaction_status_meta(
+    slot: u64,
+    metadata_bytes: &[u8],
+) -> Result<TransactionStatusMeta, MetadataDecodeError> {
+    let mut meta = TransactionStatusMeta::default();
+    decode_transaction_status_meta_into(slot,metadata_bytes,&mut meta)?;
+    Ok(meta)
+}
+
 
 #[inline(always)]
 fn decode_bincode(
@@ -226,7 +236,7 @@ mod tests {
 
         let mut out = TransactionStatusMeta::default();
 
-        let res = decode_transaction_status_meta(slot, metadata, &mut out)
+        let res = decode_transaction_status_meta_into(slot, metadata, &mut out)
             .inspect_err(|err| println!("{err}"));
         assert!(res.is_ok())
     }
@@ -264,7 +274,7 @@ mod tests {
 
         let mut out = TransactionStatusMeta::default();
 
-        let res = decode_transaction_status_meta(slot, metadata, &mut out)
+        let res = decode_transaction_status_meta_into(slot, metadata, &mut out)
             .inspect_err(|err| println!("{err}"));
         assert!(res.is_ok())
     }
@@ -285,7 +295,7 @@ mod tests {
 
         let mut out = TransactionStatusMeta::default();
 
-        let res = decode_transaction_status_meta(slot, metadata, &mut out)
+        let res = decode_transaction_status_meta_into(slot, metadata, &mut out)
             .inspect_err(|err| println!("{err}"));
         assert!(res.is_ok())
     }
@@ -330,7 +340,7 @@ mod tests {
 
         let mut out = TransactionStatusMeta::default();
 
-        let res = decode_transaction_status_meta(slot, metadata, &mut out)
+        let res = decode_transaction_status_meta_into(slot, metadata, &mut out)
             .inspect_err(|err| println!("{err}"));
         assert!(res.is_ok())
     }
@@ -443,7 +453,7 @@ mod tests {
 
         let mut out = TransactionStatusMeta::default();
 
-        let res = decode_transaction_status_meta(slot, metadata, &mut out)
+        let res = decode_transaction_status_meta_into(slot, metadata, &mut out)
             .inspect_err(|err| println!("{err}"));
         assert!(res.is_ok())
     }

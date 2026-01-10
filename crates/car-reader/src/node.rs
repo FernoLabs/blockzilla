@@ -323,3 +323,19 @@ pub fn is_block_node(payload: &[u8]) -> bool {
         && payload[0] < 0xA0 // CBOR array (major type 4)
         && payload[1] == 0x02
 }
+
+#[inline]
+pub fn is_entry_node(payload: &[u8]) -> bool {
+    payload.len() >= 2
+        && payload[0] >= 0x80
+        && payload[0] < 0xA0
+        && payload[1] == 0x01
+}
+
+#[inline]
+pub fn is_transaction_node(payload: &[u8]) -> bool {
+    payload.len() >= 2
+        && payload[0] >= 0x80
+        && payload[0] < 0xA0
+        && payload[1] == 0x00
+}

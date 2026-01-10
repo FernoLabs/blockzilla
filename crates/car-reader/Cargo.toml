@@ -10,6 +10,12 @@ name = "reader"
 path = "src/bin/reader.rs"
 required-features = ["reader"]
 
+[[bin]]
+name = "build-test-file"
+path = "src/bin/test_builder.rs"
+required-features = ["reader"]
+
+
 [features]
 default = []
 reader = ["dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:reqwest"]
@@ -29,6 +35,7 @@ reqwest = { version = "0.13.1", default-features = false, features = [
     "blocking",
     "rustls",
 ], optional = true }
+crossbeam-channel = "0.5.15"
 
 
 [build-dependencies]
