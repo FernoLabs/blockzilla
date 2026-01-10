@@ -1,9 +1,9 @@
 use clap::Parser;
-use tracing::{info, Level};
+use tracing::{Level, info};
 
 use car_reader::{
-    car_block_group::{CarBlockGroupSafe, CarBlockGroupUnchecked},
     CarBlockReader,
+    car_block_group::{CarBlockGroup, TxIter},
     error::{CarReadError as CarError, CarReadResult as Result},
 };
 
@@ -43,10 +43,6 @@ struct Args {
     /// Number of worker threads (1 = single-threaded)
     #[arg(short = 'j', long, default_value_t = 1)]
     jobs: usize,
-
-    /// Use unchecked reader (assumes tx file order is already canonical)
-    #[arg(long = "unsafe-reader")]
-    unsafe_reader: bool,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -139,28 +135,34 @@ fn has_zst_suffix(s: &str) -> bool {
 /// -------- pools (duplicated types, minimal) --------
 
 pub struct CarBlockGroupPoolSafe {
-    inner: Mutex<Vec<CarBlockGroupSafe>>,
+    inner: Mutex<Vec<CarBlockGroup>>,
     cv: Condvar,
 }
 impl CarBlockGroupPoolSafe {
     pub fn with_capacity(pool_size: usize) -> Self {
         let mut v = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            v.push(CarBlockGroupSafe::new());
+            v.push(CarBlockGroup::new());
         }
-        Self { inner: Mutex::new(v), cv: Condvar::new() }
+        Self {
+            inner: Mutex::new(v),
+            cv: Condvar::new(),
+        }
     }
     pub fn checkout(self: &Arc<Self>) -> PooledGroupSafe {
         let mut guard = self.inner.lock().unwrap();
         loop {
             if let Some(mut g) = guard.pop() {
                 g.clear();
-                return PooledGroupSafe { pool: Arc::clone(self), group: Some(g) };
+                return PooledGroupSafe {
+                    pool: Arc::clone(self),
+                    group: Some(g),
+                };
             }
             guard = self.cv.wait(guard).unwrap();
         }
     }
-    fn put_back(&self, mut g: CarBlockGroupSafe) {
+    fn put_back(&self, mut g: CarBlockGroup) {
         g.clear();
         let mut guard = self.inner.lock().unwrap();
         guard.push(g);
@@ -169,56 +171,15 @@ impl CarBlockGroupPoolSafe {
 }
 pub struct PooledGroupSafe {
     pool: Arc<CarBlockGroupPoolSafe>,
-    group: Option<CarBlockGroupSafe>,
+    group: Option<CarBlockGroup>,
 }
 impl PooledGroupSafe {
-    #[inline] pub fn as_mut(&mut self) -> &mut CarBlockGroupSafe { self.group.as_mut().unwrap() }
+    #[inline]
+    pub fn as_mut(&mut self) -> &mut CarBlockGroup {
+        self.group.as_mut().unwrap()
+    }
 }
 impl Drop for PooledGroupSafe {
-    fn drop(&mut self) {
-        if let Some(g) = self.group.take() {
-            self.pool.put_back(g);
-        }
-    }
-}
-
-pub struct CarBlockGroupPoolUnchecked {
-    inner: Mutex<Vec<CarBlockGroupUnchecked>>,
-    cv: Condvar,
-}
-impl CarBlockGroupPoolUnchecked {
-    pub fn with_capacity(pool_size: usize) -> Self {
-        let mut v = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            v.push(CarBlockGroupUnchecked::new());
-        }
-        Self { inner: Mutex::new(v), cv: Condvar::new() }
-    }
-    pub fn checkout(self: &Arc<Self>) -> PooledGroupUnchecked {
-        let mut guard = self.inner.lock().unwrap();
-        loop {
-            if let Some(mut g) = guard.pop() {
-                g.clear();
-                return PooledGroupUnchecked { pool: Arc::clone(self), group: Some(g) };
-            }
-            guard = self.cv.wait(guard).unwrap();
-        }
-    }
-    fn put_back(&self, mut g: CarBlockGroupUnchecked) {
-        g.clear();
-        let mut guard = self.inner.lock().unwrap();
-        guard.push(g);
-        self.cv.notify_one();
-    }
-}
-pub struct PooledGroupUnchecked {
-    pool: Arc<CarBlockGroupPoolUnchecked>,
-    group: Option<CarBlockGroupUnchecked>,
-}
-impl PooledGroupUnchecked {
-    #[inline] pub fn as_mut(&mut self) -> &mut CarBlockGroupUnchecked { self.group.as_mut().unwrap() }
-}
-impl Drop for PooledGroupUnchecked {
     fn drop(&mut self) {
         if let Some(g) = self.group.take() {
             self.pool.put_back(g);
@@ -246,13 +207,8 @@ impl<R: Read> CarGroupReader<R> {
     }
 
     #[inline(always)]
-    fn next_group_into_safe(&mut self, group: &mut CarBlockGroupSafe) -> Result<bool> {
+    fn next_group_into_safe(&mut self, group: &mut CarBlockGroup) -> Result<bool> {
         self.car.read_until_block_into(group)
-    }
-
-    #[inline(always)]
-    fn next_group_into_unchecked(&mut self, group: &mut CarBlockGroupUnchecked) -> Result<bool> {
-        self.car.read_until_block_into_unchecked(group)
     }
 }
 
@@ -261,16 +217,22 @@ impl<R: Read> CarGroupReader<R> {
 fn run_stream_single_thread_safe<R: Read>(mut car: CarGroupReader<R>, args: &Args) -> Result<()> {
     let stats_every = Duration::from_secs(args.stats_every.max(1));
     let start = Instant::now();
-    let end = if args.seconds == 0 { None } else { Some(start + Duration::from_secs(args.seconds)) };
+    let end = if args.seconds == 0 {
+        None
+    } else {
+        Some(start + Duration::from_secs(args.seconds))
+    };
 
     let mut stats = Stats::default();
     let mut last_print = Instant::now();
 
-    let mut group = CarBlockGroupSafe::new();
+    let mut group = CarBlockGroup::new();
 
     loop {
         let ok = car.next_group_into_safe(&mut group)?;
-        if !ok { break; }
+        if !ok {
+            break;
+        }
 
         stats.blocks += 1;
         let (entries_count, bytes_size) = group.get_len();
@@ -278,9 +240,7 @@ fn run_stream_single_thread_safe<R: Read>(mut car: CarGroupReader<R>, args: &Arg
         stats.bytes += bytes_size as u64;
 
         if args.decode_tx {
-            let mut it = group
-                .transactions()
-                .map_err(|e| CarError::TxDecode(format!("transaction iteration failed: {e:?}")))?;
+            let mut it = group.transactions();
 
             while let Some((_tx, maybe_meta)) = it
                 .next_tx()
@@ -301,7 +261,9 @@ fn run_stream_single_thread_safe<R: Read>(mut car: CarGroupReader<R>, args: &Arg
             last_print = now;
         }
 
-        if end.map_or(false, |dl| now >= dl) { break; }
+        if end.map_or(false, |dl| now >= dl) {
+            break;
+        }
     }
 
     let now = Instant::now();
@@ -313,64 +275,10 @@ fn run_stream_single_thread_safe<R: Read>(mut car: CarGroupReader<R>, args: &Arg
     Ok(())
 }
 
-fn run_stream_single_thread_unchecked<R: Read>(mut car: CarGroupReader<R>, args: &Args) -> Result<()> {
-    let stats_every = Duration::from_secs(args.stats_every.max(1));
-    let start = Instant::now();
-    let end = if args.seconds == 0 { None } else { Some(start + Duration::from_secs(args.seconds)) };
-
-    let mut stats = Stats::default();
-    let mut last_print = Instant::now();
-
-    let mut group = CarBlockGroupUnchecked::new();
-
-    loop {
-        let ok = car.next_group_into_unchecked(&mut group)?;
-        if !ok { break; }
-
-        stats.blocks += 1;
-        let (entries_count, bytes_size) = group.get_len();
-        stats.entries += entries_count as u64;
-        stats.bytes += bytes_size as u64;
-
-        if args.decode_tx {
-            let mut it = group
-                .transactions()
-                .map_err(|e| CarError::TxDecode(format!("transaction iteration failed: {e:?}")))?;
-
-            while let Some((_tx, maybe_meta)) = it
-                .next_tx()
-                .map_err(|e| CarError::TxDecode(format!("transaction decode failed: {e:?}")))?
-            {
-                stats.txs += 1;
-                if maybe_meta.is_some() {
-                    stats.txs_with_meta += 1;
-                }
-            }
-        }
-
-        let now = Instant::now();
-        if now.duration_since(last_print) >= stats_every {
-            let dt = now.duration_since(last_print).as_secs_f64().max(1e-9);
-            stats.print_interval(dt, args.decode_tx);
-            stats.reset();
-            last_print = now;
-        }
-
-        if end.map_or(false, |dl| now >= dl) { break; }
-    }
-
-    let now = Instant::now();
-    let dt = now.duration_since(last_print).as_secs_f64();
-    if dt > 0.0 && (stats.blocks > 0 || stats.entries > 0) {
-        stats.print_interval(dt.max(1e-9), args.decode_tx);
-    }
-
-    Ok(())
-}
-
-/// -------- parallel (duplicated, small) --------
-
-fn run_stream_parallel_safe<R: Read + Send + 'static>(mut car: CarGroupReader<R>, args: &Args) -> Result<()> {
+fn run_stream_parallel_safe<R: Read + Send + 'static>(
+    mut car: CarGroupReader<R>,
+    args: &Args,
+) -> Result<()> {
     let workers = args.jobs.max(1);
 
     let channel_bound = workers * 8;
@@ -432,15 +340,11 @@ fn run_stream_parallel_safe<R: Read + Send + 'static>(mut car: CarGroupReader<R>
                 window.bytes += bytes_size as u64;
 
                 if decode_tx {
-                    let mut it = pg
-                        .as_mut()
-                        .transactions()
-                        .map_err(|e| CarError::TxDecode(format!("transaction iteration failed: {e:?}")))?;
+                    let mut it = pg.as_mut().transactions();
 
-                    while let Some((_tx, maybe_meta)) = it
-                        .next_tx()
-                        .map_err(|e| CarError::TxDecode(format!("transaction decode failed: {e:?}")))?
-                    {
+                    while let Some((_tx, maybe_meta)) = it.next_tx().map_err(|e| {
+                        CarError::TxDecode(format!("transaction decode failed: {e:?}"))
+                    })? {
                         window.txs += 1;
                         if maybe_meta.is_some() {
                             window.txs_with_meta += 1;
@@ -485,7 +389,11 @@ fn run_stream_parallel_safe<R: Read + Send + 'static>(mut car: CarGroupReader<R>
     drop(rtx);
 
     let start = Instant::now();
-    let end = if args.seconds == 0 { None } else { Some(start + Duration::from_secs(args.seconds)) };
+    let end = if args.seconds == 0 {
+        None
+    } else {
+        Some(start + Duration::from_secs(args.seconds))
+    };
 
     loop {
         let now = Instant::now();
@@ -517,153 +425,6 @@ fn run_stream_parallel_safe<R: Read + Send + 'static>(mut car: CarGroupReader<R>
     Ok(())
 }
 
-fn run_stream_parallel_unchecked<R: Read + Send + 'static>(mut car: CarGroupReader<R>, args: &Args) -> Result<()> {
-    let workers = args.jobs.max(1);
-
-    let channel_bound = workers * 8;
-    let pool_size = channel_bound + workers + 2;
-
-    let pool = Arc::new(CarBlockGroupPoolUnchecked::with_capacity(pool_size));
-    let (tx, rx) = chan::bounded::<PooledGroupUnchecked>(channel_bound);
-
-    let (rtx, rrx) = chan::unbounded::<WorkerReport>();
-
-    let decode_tx = args.decode_tx;
-    let logger = thread::spawn(move || {
-        while let Ok(rep) = rrx.recv() {
-            let dt = rep.dt.max(1e-9);
-
-            let mib_s = (rep.stats.bytes as f64 / (1024.0 * 1024.0)) / dt;
-            let blocks_s = (rep.stats.blocks as f64) / dt;
-            let entries_s = (rep.stats.entries as f64) / dt;
-
-            if decode_tx {
-                let tps = (rep.stats.txs as f64) / dt;
-                let meta_pct = if rep.stats.txs > 0 {
-                    (rep.stats.txs_with_meta as f64 / rep.stats.txs as f64) * 100.0
-                } else {
-                    0.0
-                };
-                info!(
-                    "[w{:02}] {:.1} MiB/s | {:.0} blocks/s | {:.0} tx/s ({:.1}% meta) | {:.0} entries/s",
-                    rep.worker_id, mib_s, blocks_s, tps, meta_pct, entries_s
-                );
-            } else {
-                info!(
-                    "[w{:02}] {:.1} MiB/s | {:.0} blocks/s | {:.0} entries/s",
-                    rep.worker_id, mib_s, blocks_s, entries_s
-                );
-            }
-        }
-    });
-
-    let stats_every = Duration::from_secs(args.stats_every.max(1));
-
-    let mut handles = Vec::with_capacity(workers);
-    for worker_id in 0..workers {
-        let rx = rx.clone();
-        let rtx = rtx.clone();
-        let decode_tx = args.decode_tx;
-        let stats_every = stats_every;
-
-        handles.push(thread::spawn(move || -> Result<Stats> {
-            let mut total = Stats::default();
-            let mut window = Stats::default();
-            let mut last_report = Instant::now();
-
-            for mut pg in rx.iter() {
-                window.blocks += 1;
-
-                let (entries_count, bytes_size) = pg.as_mut().get_len();
-                window.entries += entries_count as u64;
-                window.bytes += bytes_size as u64;
-
-                if decode_tx {
-                    let mut it = pg
-                        .as_mut()
-                        .transactions()
-                        .map_err(|e| CarError::TxDecode(format!("transaction iteration failed: {e:?}")))?;
-
-                    while let Some((_tx, maybe_meta)) = it
-                        .next_tx()
-                        .map_err(|e| CarError::TxDecode(format!("transaction decode failed: {e:?}")))?
-                    {
-                        window.txs += 1;
-                        if maybe_meta.is_some() {
-                            window.txs_with_meta += 1;
-                        }
-                    }
-                }
-
-                let now = Instant::now();
-                if now.duration_since(last_report) >= stats_every {
-                    let dt = now.duration_since(last_report).as_secs_f64().max(1e-9);
-
-                    let report_stats = window.clone();
-                    total.merge_from(&report_stats);
-                    window.reset();
-                    last_report = now;
-
-                    let _ = rtx.try_send(WorkerReport {
-                        worker_id,
-                        dt,
-                        stats: report_stats,
-                    });
-                }
-            }
-
-            let now = Instant::now();
-            let dt = now.duration_since(last_report).as_secs_f64();
-            if dt > 0.0 && (window.blocks > 0 || window.entries > 0) {
-                let report_stats = window.clone();
-                total.merge_from(&report_stats);
-
-                let _ = rtx.try_send(WorkerReport {
-                    worker_id,
-                    dt: dt.max(1e-9),
-                    stats: report_stats,
-                });
-            }
-
-            Ok(total)
-        }));
-    }
-    drop(rx);
-    drop(rtx);
-
-    let start = Instant::now();
-    let end = if args.seconds == 0 { None } else { Some(start + Duration::from_secs(args.seconds)) };
-
-    loop {
-        let now = Instant::now();
-        if end.map_or(false, |dl| now >= dl) {
-            break;
-        }
-
-        let mut pg = pool.checkout();
-        let ok = car.next_group_into_unchecked(pg.as_mut())?;
-        if !ok {
-            break;
-        }
-
-        if tx.send(pg).is_err() {
-            break;
-        }
-    }
-    drop(tx);
-
-    let mut total = Stats::default();
-    for h in handles {
-        let s = h.join().unwrap()?;
-        total.merge_from(&s);
-    }
-
-    let _ = logger.join();
-
-    total.print_final(start.elapsed().as_secs_f64(), args.decode_tx);
-    Ok(())
-}
-
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
     let args = Args::parse();
@@ -671,8 +432,8 @@ fn main() -> Result<()> {
     match args.input.as_deref() {
         None | Some("-") => {
             info!(
-                "Reading CAR archive: stdin (decode_tx={}, jobs={}, unsafe_reader={})",
-                args.decode_tx, args.jobs, args.unsafe_reader
+                "Reading CAR archive: stdin (decode_tx={}, jobs={})",
+                args.decode_tx, args.jobs
             );
             let stdin = io::stdin();
             let reader = BufReader::with_capacity(args.buf_size, stdin.lock());
@@ -685,17 +446,13 @@ fn main() -> Result<()> {
             }
 
             let car = CarGroupReader::new(reader, args.buf_size)?;
-            if args.unsafe_reader {
-                run_stream_single_thread_unchecked(car, &args)
-            } else {
-                run_stream_single_thread_safe(car, &args)
-            }
+            run_stream_single_thread_safe(car, &args)
         }
 
         Some(input) => {
             info!(
-                "Reading CAR archive: {} (decode_tx={}, jobs={}, unsafe_reader={})",
-                input, args.decode_tx, args.jobs, args.unsafe_reader
+                "Reading CAR archive: {} (decode_tx={}, jobs={})",
+                input, args.decode_tx, args.jobs
             );
 
             if looks_like_url(input) {
@@ -726,17 +483,9 @@ fn main() -> Result<()> {
                 let car = CarGroupReader::new(reader, args.buf_size)?;
 
                 if args.jobs <= 1 {
-                    if args.unsafe_reader {
-                        run_stream_single_thread_unchecked(car, &args)
-                    } else {
-                        run_stream_single_thread_safe(car, &args)
-                    }
+                    run_stream_single_thread_safe(car, &args)
                 } else {
-                    if args.unsafe_reader {
-                        run_stream_parallel_unchecked(car, &args)
-                    } else {
-                        run_stream_parallel_safe(car, &args)
-                    }
+                    run_stream_parallel_safe(car, &args)
                 }
             } else {
                 let path = Path::new(input);
@@ -751,23 +500,16 @@ fn main() -> Result<()> {
                     let file = File::open(path)
                         .map_err(|e| CarError::Io(format!("open {}: {e}", path.display())))?;
                     let file = BufReader::with_capacity(args.buf_size, file);
-                    let zstd = zstd::Decoder::with_buffer(file)
-                        .map_err(|e| CarError::TxDecode(format!("zstd decoder init failed: {e}")))?;
+                    let zstd = zstd::Decoder::with_buffer(file).map_err(|e| {
+                        CarError::TxDecode(format!("zstd decoder init failed: {e}"))
+                    })?;
 
                     let car = CarGroupReader::new(zstd, args.buf_size)?;
 
                     if args.jobs <= 1 {
-                        if args.unsafe_reader {
-                            run_stream_single_thread_unchecked(car, &args)
-                        } else {
-                            run_stream_single_thread_safe(car, &args)
-                        }
+                        run_stream_single_thread_safe(car, &args)
                     } else {
-                        if args.unsafe_reader {
-                            run_stream_parallel_unchecked(car, &args)
-                        } else {
-                            run_stream_parallel_safe(car, &args)
-                        }
+                        run_stream_parallel_safe(car, &args)
                     }
                 } else {
                     info!("Using file mode");
@@ -778,17 +520,9 @@ fn main() -> Result<()> {
                     let car = CarGroupReader::new(reader, args.buf_size)?;
 
                     if args.jobs <= 1 {
-                        if args.unsafe_reader {
-                            run_stream_single_thread_unchecked(car, &args)
-                        } else {
-                            run_stream_single_thread_safe(car, &args)
-                        }
+                        run_stream_single_thread_safe(car, &args)
                     } else {
-                        if args.unsafe_reader {
-                            run_stream_parallel_unchecked(car, &args)
-                        } else {
-                            run_stream_parallel_safe(car, &args)
-                        }
+                        run_stream_parallel_safe(car, &args)
                     }
                 }
             }

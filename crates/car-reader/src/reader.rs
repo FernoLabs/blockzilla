@@ -1,4 +1,4 @@
-use crate::car_block_group::{CarBlockGroup, CarBlockGroupUnchecked};
+use crate::car_block_group::CarBlockGroup;
 use crate::error::CarReadError;
 use crate::error::CarReadResult;
 use std::io;
@@ -34,37 +34,6 @@ impl<R: Read> CarBlockReader<R> {
     /// - Ok(true)  => group produced
     /// - Ok(false) => clean EOF (no more groups)
     pub fn read_until_block_into(&mut self, out: &mut CarBlockGroup) -> CarReadResult<bool> {
-        out.clear();
-
-        loop {
-            let entry_len = match read_uvarint64(&mut self.reader) {
-                Ok(v) => v as usize,
-                Err(CarReadError::Eof) => {
-                    return Ok(false);
-                }
-                Err(e) => return Err(e),
-            };
-
-            let mut cid_buf = [0; 36];
-            self.reader.read_exact(&mut cid_buf)?;
-
-            let done = out.read_entry_payload_into(&mut self.reader, &cid_buf, entry_len)?;
-            if done {
-                return Ok(true);
-            }
-        }
-    }
-
-    /// Unchecked group: assumes transactions are already in canonical file order.
-    ///
-    /// Reads CAR sections until it finds a "block" node (kind == 2) in the entry payload.
-    /// Fills `out` (reusing its internal allocations) and returns:
-    /// - Ok(true)  => group produced
-    /// - Ok(false) => clean EOF (no more groups)
-    pub fn read_until_block_into_unchecked(
-        &mut self,
-        out: &mut CarBlockGroupUnchecked,
-    ) -> CarReadResult<bool> {
         out.clear();
 
         loop {
