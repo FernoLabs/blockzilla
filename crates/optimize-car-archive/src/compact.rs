@@ -12,7 +12,6 @@ use tracing::{error, info, warn};
 use car_reader::{
     car_block_group::CarBlockGroup,
     error::GroupError,
-    node::{Node, decode_node},
 };
 
 use blockzilla_format::{
@@ -230,19 +229,15 @@ fn compact_process_block_manual<W: std::io::Write>(
     block_payload: &mut Vec<u8>,
     varint_tmp: &mut [u8; varint_max::<usize>()],
 ) -> Result<(u64, u64, Option<u64>), GroupError> {
-    let block = match decode_node(group.block_payload()).map_err(GroupError::Node)? {
-        Node::Block(b) => b,
-        _ => return Err(GroupError::WrongRootKind),
-    };
-    let block_slot = block.slot;
+    let block_slot = group.slot.unwrap();
 
     let header = CompactBlockHeader {
-        slot: block.slot,
-        parent_slot: block.meta.parent_slot.unwrap_or(0),
+        slot: block_slot,
+        parent_slot: group.parent_slot.unwrap_or(0),
         blockhash: block_i,
         previous_blockhash: block_i.saturating_sub(1),
-        block_time: block.meta.blocktime,
-        block_height: block.meta.block_height,
+        block_time: group.block_time,
+        block_height: group.block_height,
     };
 
     tx_payload.clear();
@@ -250,7 +245,7 @@ fn compact_process_block_manual<W: std::io::Write>(
     let mut txs: u64 = 0;
     let mut tx_index_in_block: u32 = 0;
 
-    let mut it = group.transactions()?;
+    let mut it = group.transactions();
 
     while let Some((vtx, maybe_meta)) = it.next_tx()? {
         txs += 1;

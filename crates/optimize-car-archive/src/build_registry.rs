@@ -4,15 +4,14 @@ use car_reader::{
     car_block_group::CarBlockGroup,
     car_stream::CarStream,
     error::GroupError,
-    node::{decode_node, Node},
     versioned_transaction::VersionedMessage,
 };
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
-use solana_pubkey::{pubkey, Pubkey};
+use solana_pubkey::{Pubkey, pubkey};
 use std::{fs::File, io::Write, path::Path, str::FromStr, time::Instant};
 use tracing::info;
 
-use crate::{epoch_paths, Cli, ProgressTracker};
+use crate::{Cli, ProgressTracker, epoch_paths};
 
 const MAX_BLOCKHASHES_PER_EPOCH: usize = 432_000;
 
@@ -155,18 +154,10 @@ fn process_group_for_registry_and_blockhash(
     group: &mut CarBlockGroup,
     counter: &mut PubkeyCounter,
 ) -> Result<(u64, u64, Option<u64>, Option<[u8; 32]>), GroupError> {
-    let block = match decode_node(group.block_payload()).map_err(GroupError::Node)? {
-        Node::Block(b) => b,
-        _ => return Err(GroupError::WrongRootKind),
-    };
-    let block_slot = block.slot;
+    let block_slot = group.slot.unwrap();
+    let bh = group.blockhash;
 
-    // Blockhash is computed from the last Entry seen in the group.
-    // NOTE: group.blockhash_checked() contains a debug-only sanity check.
-    // If you validate this assumption, you can switch to a cheaper method later.
-    let bh = group.blockhash_checked()?;
-
-    let mut it = group.transactions()?;
+    let mut it = group.transactions();
     let mut txs = 0u64;
 
     while let Some(r) = it.next_tx()? {
@@ -207,16 +198,14 @@ fn process_group_for_registry_and_blockhash(
                 if let Ok(pk) = Pubkey::from_str(&tb.mint) {
                     counter.add32(pk.as_array());
                 }
-                if !tb.owner.is_empty() {
-                    if let Ok(pk) = Pubkey::from_str(&tb.owner) {
+                if !tb.owner.is_empty()
+                    && let Ok(pk) = Pubkey::from_str(&tb.owner) {
                         counter.add32(pk.as_array());
                     }
-                }
-                if !tb.program_id.is_empty() {
-                    if let Ok(pk) = Pubkey::from_str(&tb.program_id) {
+                if !tb.program_id.is_empty()
+                    && let Ok(pk) = Pubkey::from_str(&tb.program_id) {
                         counter.add32(pk.as_array());
                     }
-                }
             }
         }
     }
