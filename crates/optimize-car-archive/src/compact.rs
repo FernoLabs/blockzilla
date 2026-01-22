@@ -9,10 +9,7 @@ use std::{
 };
 use tracing::{error, info, warn};
 
-use car_reader::{
-    car_block_group::CarBlockGroup,
-    error::GroupError,
-};
+use car_reader::{car_block_group::CarBlockGroup, error::GroupError};
 
 use blockzilla_format::{
     BlockhashRegistry, CompactAddressTableLookup, CompactBlockHeader, CompactInstruction,

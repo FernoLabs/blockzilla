@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use blockzilla_format::write_registry;
 use car_reader::{
-    car_block_group::CarBlockGroup,
-    car_stream::CarStream,
-    error::GroupError,
+    car_block_group::CarBlockGroup, car_stream::CarStream, error::GroupError,
     versioned_transaction::VersionedMessage,
 };
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
@@ -199,13 +197,15 @@ fn process_group_for_registry_and_blockhash(
                     counter.add32(pk.as_array());
                 }
                 if !tb.owner.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.owner) {
-                        counter.add32(pk.as_array());
-                    }
+                    && let Ok(pk) = Pubkey::from_str(&tb.owner)
+                {
+                    counter.add32(pk.as_array());
+                }
                 if !tb.program_id.is_empty()
-                    && let Ok(pk) = Pubkey::from_str(&tb.program_id) {
-                        counter.add32(pk.as_array());
-                    }
+                    && let Ok(pk) = Pubkey::from_str(&tb.program_id)
+                {
+                    counter.add32(pk.as_array());
+                }
             }
         }
     }

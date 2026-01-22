@@ -4,8 +4,8 @@ use wincode::Deserialize;
 
 use crate::confirmed_block::TransactionStatusMeta;
 use crate::error::{CarReadError, CarReadResult, GroupError};
-use crate::metadata_decoder::{decode_transaction_status_meta_from_frame, ZstdReusableDecoder};
-use crate::node::{decode_node, is_block_node, is_transaction_node, Node};
+use crate::metadata_decoder::{ZstdReusableDecoder, decode_transaction_status_meta_from_frame};
+use crate::node::{Node, decode_block_metadata, decode_entry_hash, decode_node, peek_node_type};
 use crate::versioned_transaction::VersionedTransaction;
 
 /// Simple, fast CarBlockGroup that stores:
@@ -83,15 +83,12 @@ impl CarBlockGroup {
     pub fn read_entry_payload_into<R: Read>(
         &mut self,
         reader: &mut R,
-        cid_bytes: &[u8; 36],
-        entry_len: usize,
+        payload_len: usize,
     ) -> CarReadResult<bool> {
-        let payload_len = entry_len
-            .checked_sub(cid_bytes.len())
-            .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
-
         if payload_len == 0 {
-            return Ok(false);
+            return Err(CarReadError::UnexpectedEof(format!(
+                "Empty payload len ({payload_len})"
+            )));
         }
 
         self.scratch.clear();
@@ -102,13 +99,20 @@ impl CarBlockGroup {
             return Err(CarReadError::Io(e.to_string()));
         }
 
+        let node_type = peek_node_type(&self.scratch)
+            .map_err(|err| CarReadError::InvalidData(format!("Can't read node type ({err})")))?;
+
+        //println!("{node_type} {payload_len}");
+
         // Transaction: store in file order
-        if is_transaction_node(&self.scratch) {
+        if node_type == 0 {
             let start = self.tx_buf.len();
             let end = start + payload_len;
 
             if end > u32::MAX as usize {
-                return Err(CarReadError::InvalidData("tx buffer exceeds u32::MAX".to_string()));
+                return Err(CarReadError::InvalidData(
+                    "tx buffer exceeds u32::MAX".to_string(),
+                ));
             }
 
             self.tx_buf.extend_from_slice(&self.scratch);
@@ -117,27 +121,24 @@ impl CarBlockGroup {
         }
 
         // Entry: extract hash for blockhash
-        if self.scratch.len() >= 2 && self.scratch[0] == 0x84 {
-            // Basic CBOR array[4] check for Entry
-            if let Ok(Node::Entry(entry)) = decode_node(&self.scratch)
-                && entry.hash.len() == 32 {
-                    self.blockhash.copy_from_slice(entry.hash);
-                    self.has_blockhash = true;
-                }
+        if node_type == 1 {
+            let hash = decode_entry_hash(&self.scratch)
+                .map_err(|e| CarReadError::InvalidData(e.to_string()))?;
+
+            self.blockhash.copy_from_slice(hash);
+            self.has_blockhash = true;
             return Ok(false);
         }
 
         // Block: extract metadata and signal completion
-        if is_block_node(&self.scratch) {
-            let node = decode_node(&self.scratch)
+        if node_type == 2 {
+            let (slot, meta) = decode_block_metadata(&self.scratch)
                 .map_err(|e| CarReadError::InvalidData(e.to_string()))?;
 
-            if let Node::Block(block) = node {
-                self.slot = Some(block.slot);
-                self.parent_slot = block.meta.parent_slot;
-                self.block_time = block.meta.blocktime;
-                self.block_height = block.meta.block_height;
-            }
+            self.slot = Some(slot);
+            self.parent_slot = meta.parent_slot;
+            self.block_time = meta.blocktime;
+            self.block_height = meta.block_height;
 
             return Ok(true);
         }
