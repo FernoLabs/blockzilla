@@ -87,6 +87,9 @@ pub enum LogEvent {
         log: ProgramLog,
     },
     ProgramAccountNotWritable,
+    ProgramIdMismatch,
+    ProgramNotUpgradeable,
+    ProgramAndProgramDataAccountMismatch,
 
     Invoke {
         program: ProgramId,
@@ -362,6 +365,20 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             continue;
         }
 
+        if line == "Program not upgradeable" {
+            events.push(LogEvent::ProgramNotUpgradeable);
+            continue;
+        }
+
+        if line == "Program id mismatch" {
+            events.push(LogEvent::ProgramIdMismatch);
+            continue;
+        }
+
+        if line == "Program and ProgramData account mismatch" {
+            events.push(LogEvent::ProgramAndProgramDataAccountMismatch);
+        }
+
         // Program log: <msg>
         if let Some(text) = line.strip_prefix("Program log: ") {
             let text = text.trim();
@@ -590,7 +607,6 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 "Program {} success",
                 pid_to_pubkey(store, *program)
             )),
-
             LogEvent::Failure { program, reason } => out.push(format!(
                 "Program {} failed: {}",
                 pid_to_pubkey(store, *program),
@@ -609,14 +625,11 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 "Program {} failed: invalid program argument",
                 pid_to_pubkey(store, *program)
             )),
-
             LogEvent::FailedToComplete { reason } => out.push(format!(
                 "Program failed to complete: {}",
                 st.resolve(*reason)
             )),
-
             LogEvent::System(sys) => out.push(sys.render(st, store)),
-
             LogEvent::ProgramLog(log) => {
                 let payload = program_logs::render_program_log(log, store, st);
                 out.push(format!("Program log: {}", payload));
@@ -635,21 +648,22 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
             LogEvent::ProgramAccountNotWritable => {
                 out.push("Program account not writeable".to_string())
             }
+            LogEvent::ProgramNotUpgradeable => out.push("Program not upgradeable".to_string()),
+            LogEvent::ProgramAndProgramDataAccountMismatch => {
+                out.push("Program and ProgramData account mismatch".to_string())
+            }
             LogEvent::CustomProgramError { code } => {
                 out.push(format!("custom program error: 0x{:x}", code))
             }
-
             LogEvent::Return { program, data } => out.push(format!(
                 "Program return: {} {}",
                 pid_to_pubkey(store, *program),
                 DataTable::render_array(dt.resolve(*data)),
             )),
-
             LogEvent::Data { data } => out.push(format!(
                 "Program data: {}",
                 DataTable::render_array(dt.resolve(*data))
             )),
-
             LogEvent::Consumption { units } => {
                 out.push(format!("Program consumption: {} units remaining", units))
             }
@@ -666,7 +680,6 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                     out.push("Program is not deployed".to_string());
                 }
             }
-
             LogEvent::UnknownProgram { program } => {
                 out.push(format!("Unknown program {}", st.resolve(*program)))
             }
@@ -674,15 +687,13 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 "Instruction references an unknown account {}",
                 st.resolve(*account)
             )),
-
             LogEvent::VerifyEd25519 => out.push("VerifyEd25519".to_string()),
             LogEvent::VerifySecp256k1 => out.push("VerifySecp256k1".to_string()),
-
             LogEvent::CloseContextState => out.push("CloseContextState".to_string()),
-
             LogEvent::Plain { text } | LogEvent::Unparsed { text } => {
                 out.push(st.resolve(*text).to_string())
             }
+            LogEvent::ProgramIdMismatch => out.push("Program id mismatch".to_string()),
         }
     }
 

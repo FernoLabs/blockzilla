@@ -98,7 +98,7 @@ pub struct DataFrame<'a> {
     #[cbor(decode_with = "minicbor::bytes::decode")]
     pub data: &'a [u8],
     #[n(5)]
-    pub next: Option<CborCidRef<'a>>,
+    pub next: Option<CborArrayView<'a, CborCidRef<'a>>>,
 }
 
 #[derive(Debug, Decode, Clone)]
@@ -326,16 +326,82 @@ pub fn is_block_node(payload: &[u8]) -> bool {
 
 #[inline]
 pub fn is_entry_node(payload: &[u8]) -> bool {
-    payload.len() >= 2
-        && payload[0] >= 0x80
-        && payload[0] < 0xA0
-        && payload[1] == 0x01
+    payload.len() >= 2 && payload[0] >= 0x84 && payload[0] < 0xA0 && payload[1] == 0x01
 }
 
 #[inline]
 pub fn is_transaction_node(payload: &[u8]) -> bool {
-    payload.len() >= 2
-        && payload[0] >= 0x80
-        && payload[0] < 0xA0
-        && payload[1] == 0x00
+    payload.len() >= 2 && payload[0] >= 0x80 && payload[0] < 0xA0 && payload[1] == 0x00
+}
+
+/// Fast Block metadata decoder that skips all unnecessary fields
+#[inline]
+pub fn decode_block_metadata(data: &[u8]) -> Result<(u64, SlotMeta)> {
+    let mut d = Decoder::new(data);
+
+    // Verify it's an array
+    let array_len = d.array()?.ok_or_else(|| {
+        NodeDecodeError::Cbor(CborError::message("indefinite array not supported"))
+    })?;
+
+    if array_len < 5 {
+        return Err(NodeDecodeError::Cbor(CborError::message(
+            "block array too short",
+        )));
+    }
+
+    // [0] kind - verify it's 2 (Block)
+    let kind = d.u64()?;
+    if kind != 2 {
+        return Err(NodeDecodeError::UnknownKind(kind));
+    }
+
+    // [1] slot - decode this
+    let slot = d.u64()?;
+
+    // [2] shredding - skip
+    d.skip()?;
+
+    // [3] entries - skip
+    d.skip()?;
+
+    // [4] meta - decode this
+    let meta: SlotMeta = d.decode()?;
+
+    // Don't need to read [5] rewards
+
+    Ok((slot, meta))
+}
+
+/// Fast Entry hash decoder that skips all unnecessary fields
+#[inline]
+pub fn decode_entry_hash(data: &[u8]) -> Result<&[u8]> {
+    let mut d = Decoder::new(data);
+
+    // Verify it's an array
+    let array_len = d.array()?.ok_or_else(|| {
+        NodeDecodeError::Cbor(CborError::message("indefinite array not supported"))
+    })?;
+
+    if array_len < 3 {
+        return Err(NodeDecodeError::Cbor(CborError::message(
+            "entry array too short",
+        )));
+    }
+
+    // [0] kind - verify it's 1 (Entry)
+    let kind = d.u64()?;
+    if kind != 1 {
+        return Err(NodeDecodeError::UnknownKind(kind));
+    }
+
+    // [1] num_hashes - skip
+    d.skip()?;
+
+    // [2] hash - decode this as bytes
+    let hash = d.bytes()?;
+
+    // Don't need to read [3] transactions
+
+    Ok(hash)
 }

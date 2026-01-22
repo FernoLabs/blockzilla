@@ -61,14 +61,10 @@ pub(crate) enum Cmd {
     },
 
     /// Pass 1 only: build registry.bin from CAR
-    BuildRegistry {
-        epoch: u64,
-    },
+    BuildRegistry { epoch: u64 },
 
     /// Pass 2 only: build compact.bin from CAR + registry.bin
-    Compact {
-        epoch: u64,
-    },
+    Compact { epoch: u64 },
 
     /// Process all epochs found in the cache directory
     BuildAll,

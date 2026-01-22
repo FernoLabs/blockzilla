@@ -8,7 +8,7 @@ use std::io::Read;
 const MAX_UVARINT_LEN_64: usize = 10;
 
 pub struct CarBlockReader<R: Read> {
-    reader: io::BufReader<R>,
+    pub reader: io::BufReader<R>,
 }
 
 impl<R: Read> CarBlockReader<R> {
@@ -48,7 +48,11 @@ impl<R: Read> CarBlockReader<R> {
             let mut cid_buf = [0; 36];
             self.reader.read_exact(&mut cid_buf)?;
 
-            let done = out.read_entry_payload_into(&mut self.reader, &cid_buf, entry_len)?;
+            let payload_len = entry_len
+                .checked_sub(cid_buf.len())
+                .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
+
+            let done = out.read_entry_payload_into(&mut self.reader, payload_len)?;
             if done {
                 return Ok(true);
             }

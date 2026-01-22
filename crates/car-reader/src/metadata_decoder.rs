@@ -153,10 +153,9 @@ pub fn decode_transaction_status_meta(
     metadata_bytes: &[u8],
 ) -> Result<TransactionStatusMeta, MetadataDecodeError> {
     let mut meta = TransactionStatusMeta::default();
-    decode_transaction_status_meta_into(slot,metadata_bytes,&mut meta)?;
+    decode_transaction_status_meta_into(slot, metadata_bytes, &mut meta)?;
     Ok(meta)
 }
-
 
 #[inline(always)]
 fn decode_bincode(

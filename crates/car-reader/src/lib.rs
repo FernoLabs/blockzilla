@@ -5,6 +5,7 @@
 
 pub mod car_block_group;
 pub mod car_stream;
+pub mod car_stream_par;
 mod convert_metadata;
 pub mod error;
 pub mod metadata_decoder;
@@ -12,7 +13,6 @@ pub mod node;
 pub mod reader;
 pub mod stored_transaction;
 pub mod versioned_transaction;
-pub mod car_stream_par;
 
 pub use reader::CarBlockReader;
 

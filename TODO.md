@@ -3,6 +3,12 @@
 - reader benchmark
 - compact benchmark
 
+- handle block reward
+
+- validation
+  - compute blockhash
+  - verify tx signature
+
 - merge blockhash and registry builder
 
 - String dedup in string table acrose epoch ?
@@ -23,20 +29,21 @@
   - Evaluate `wincode` for low-allocation streaming encoding  
   - Evaluate `rkyv` for zero-copy / archive-friendly layouts  
 
-- wincode optimisation
-  - can we use slice with shortu16 len decode ?
-
 - proper parser ?
   - current parser is hand rolled and suboptimal
 
 Optimize transaction error storage (u32 + u32 + potentail tuple)
+Make reqwest in reader optional
 
-make reqwest in reader optionel
+# Backlog
 
-## Backlog
+- explore pzstd
+  - multiple frame decodeing to allow multithreading ?
+  - one frame per block ? 
+  - seekable zstd https://github.com/facebook/zstd/blob/dev/contrib/seekable_format/zstd_seekable_compression_format.md
 
-- explore https://crates.io/crates/gxhash
-- explore perfec hash function for registry (may reduce memory usage drastcly while keeping perf)
-  - https://crates.io/crates/ph
-- try reucing size of hashtable for registry by only storing half pubk (maybe faster compact / read)
-- detect pubkeys inside instruction and log and replace them with ids  
+- cloudflare worker for rpc endpoints
+  - get block
+    - read index
+    - read offest of epoch
+    - return json encoded

@@ -1,7 +1,11 @@
 use crossbeam_channel::{Receiver, Sender};
 use std::{sync::Arc, thread};
 
-use crate::{car_stream::CarStream, car_stream_par::car_group_pool::{CarBlockGroupPool, PooledGroup}, error::CarReadError};
+use crate::{
+    car_stream::CarStream,
+    car_stream_par::car_group_pool::{CarBlockGroupPool, PooledGroup},
+    error::CarReadError,
+};
 
 pub struct UnorderedCarGroupStream {
     rx: Receiver<PooledGroup>,
@@ -29,14 +33,17 @@ pub fn spawn_car_group_producer<R: std::io::Read + Send + 'static>(
     mut stream: CarStream<R>,
     channel_bound: usize,
     pool: Arc<CarBlockGroupPool>,
-) -> (UnorderedCarGroupStream, thread::JoinHandle<Result<(), CarReadError>>) {
-    let (tx, rx): (Sender<PooledGroup>, Receiver<PooledGroup>) = crossbeam_channel::bounded(channel_bound);
+) -> (
+    UnorderedCarGroupStream,
+    thread::JoinHandle<Result<(), CarReadError>>,
+) {
+    let (tx, rx): (Sender<PooledGroup>, Receiver<PooledGroup>) =
+        crossbeam_channel::bounded(channel_bound);
 
     let handle = thread::spawn(move || -> Result<(), CarReadError> {
         loop {
             // Acquire reusable group.
             let mut pg = pool.checkout();
-            
 
             // Read next group directly into the pooled buffer.
             match stream.next_group_into(pg.as_mut()) {

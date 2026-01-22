@@ -78,7 +78,9 @@ fn process_single_epoch(cli: &Cli, epoch: u64) -> Result<()> {
         );
     }
 
-    if !(cli.resume && file_nonempty(&compact_path)) {
+    if !(cli.resume
+        && (file_nonempty(&compact_path) || file_nonempty(&compact_path.with_extension("bin.zst"))))
+    {
         crate::compact::run(cli, epoch)
             .with_context(|| format!("Failed to build compact for epoch {}", epoch))?;
     } else {

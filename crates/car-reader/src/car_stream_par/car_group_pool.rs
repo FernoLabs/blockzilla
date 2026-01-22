@@ -26,10 +26,7 @@ impl CarBlockGroupPool {
     /// Checkout a group from the pool (blocks until available).
     #[inline]
     pub fn checkout(self: &Arc<Self>) -> PooledGroup {
-        let mut g = self
-            .rx
-            .recv()
-            .expect("CarBlockGroupPool: channel closed");
+        let mut g = self.rx.recv().expect("CarBlockGroupPool: channel closed");
 
         // Reset logical contents but keep allocations.
         g.clear();

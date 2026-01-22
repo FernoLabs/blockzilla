@@ -3,7 +3,7 @@ use tracing::{Level, info};
 
 use car_reader::{
     CarBlockReader,
-    car_block_group::{CarBlockGroup, TxIter},
+    car_block_group::CarBlockGroup,
     error::{CarReadError as CarError, CarReadResult as Result},
 };
 
@@ -207,14 +207,12 @@ impl<R: Read> CarGroupReader<R> {
     }
 
     #[inline(always)]
-    fn next_group_into_safe(&mut self, group: &mut CarBlockGroup) -> Result<bool> {
+    fn next_group_into(&mut self, group: &mut CarBlockGroup) -> Result<bool> {
         self.car.read_until_block_into(group)
     }
 }
 
-/// -------- single-thread (duplicated, small) --------
-
-fn run_stream_single_thread_safe<R: Read>(mut car: CarGroupReader<R>, args: &Args) -> Result<()> {
+fn run_stream_single_thread<R: Read>(mut car: CarGroupReader<R>, args: &Args) -> Result<()> {
     let stats_every = Duration::from_secs(args.stats_every.max(1));
     let start = Instant::now();
     let end = if args.seconds == 0 {
@@ -229,7 +227,7 @@ fn run_stream_single_thread_safe<R: Read>(mut car: CarGroupReader<R>, args: &Arg
     let mut group = CarBlockGroup::new();
 
     loop {
-        let ok = car.next_group_into_safe(&mut group)?;
+        let ok = car.next_group_into(&mut group)?;
         if !ok {
             break;
         }
@@ -275,7 +273,7 @@ fn run_stream_single_thread_safe<R: Read>(mut car: CarGroupReader<R>, args: &Arg
     Ok(())
 }
 
-fn run_stream_parallel_safe<R: Read + Send + 'static>(
+fn run_stream_parallel<R: Read + Send + 'static>(
     mut car: CarGroupReader<R>,
     args: &Args,
 ) -> Result<()> {
@@ -402,7 +400,7 @@ fn run_stream_parallel_safe<R: Read + Send + 'static>(
         }
 
         let mut pg = pool.checkout();
-        let ok = car.next_group_into_safe(pg.as_mut())?;
+        let ok = car.next_group_into(pg.as_mut())?;
         if !ok {
             break;
         }
@@ -446,7 +444,7 @@ fn main() -> Result<()> {
             }
 
             let car = CarGroupReader::new(reader, args.buf_size)?;
-            run_stream_single_thread_safe(car, &args)
+            run_stream_single_thread(car, &args)
         }
 
         Some(input) => {
@@ -483,9 +481,9 @@ fn main() -> Result<()> {
                 let car = CarGroupReader::new(reader, args.buf_size)?;
 
                 if args.jobs <= 1 {
-                    run_stream_single_thread_safe(car, &args)
+                    run_stream_single_thread(car, &args)
                 } else {
-                    run_stream_parallel_safe(car, &args)
+                    run_stream_parallel(car, &args)
                 }
             } else {
                 let path = Path::new(input);
@@ -507,9 +505,9 @@ fn main() -> Result<()> {
                     let car = CarGroupReader::new(zstd, args.buf_size)?;
 
                     if args.jobs <= 1 {
-                        run_stream_single_thread_safe(car, &args)
+                        run_stream_single_thread(car, &args)
                     } else {
-                        run_stream_parallel_safe(car, &args)
+                        run_stream_parallel(car, &args)
                     }
                 } else {
                     info!("Using file mode");
@@ -520,9 +518,9 @@ fn main() -> Result<()> {
                     let car = CarGroupReader::new(reader, args.buf_size)?;
 
                     if args.jobs <= 1 {
-                        run_stream_single_thread_safe(car, &args)
+                        run_stream_single_thread(car, &args)
                     } else {
-                        run_stream_parallel_safe(car, &args)
+                        run_stream_parallel(car, &args)
                     }
                 }
             }

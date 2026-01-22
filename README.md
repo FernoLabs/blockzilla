@@ -25,3 +25,12 @@ cargo run --release --bin optimize-car-archive build 800
 ```
 cargo run --release --bin blockzilla analyze --input blockzilla-v1/epoch-800/compact.bin
 ```
+
+## test and benchmark
+
+```
+cargo flamegraph --profile release-debug --bin reader --features reader -- --decode-tx epochs/bench-0-900.car
+cargo flamegraph --bench big_block --profile release-debug -- --bench
+```
+
+dot -Tpng graph.dot -Gdpi=150 -o graph.png
