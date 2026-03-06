@@ -33,4 +33,4 @@ cargo flamegraph --profile release-debug --bin reader --features reader -- --dec
 cargo flamegraph --bench big_block --profile release-debug -- --bench
 ```
 
-dot -Tpng graph.dot -Gdpi=150 -o graph.png
+
