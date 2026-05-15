@@ -2,15 +2,17 @@
 
 ⚠️🚧 EXPERIMENTAL / R&D CODE – NOT PRODUCTION READY 🚧⚠️
 
-This repo contains the tooling used to build and maintain [blockzilla](http://blockzilla.dev) the [ferno](https://ferno.ag) Solana archive node.
+This repo contains the tooling used to build and maintain [Blockzilla](http://blockzilla.dev), the [Ferno](https://ferno.ag) Solana archive node.
 
-## Downlaod and setup cache of epochs
+## Download and set up the epoch cache
 
-```
-# download and compress epoch 0 to 900
+```bash
+# Download and compress epochs 0 to 900
 ./build_cache.sh 0 900
-# you can also just dl one epoch for test (you will need previous epoch to)
-./build_cache.sh 799 800 
+
+# You can also download a single epoch for testing
+# Note: you will also need the previous epoch
+./build_cache.sh 799 800
 ```
 
 ## Compress archive
