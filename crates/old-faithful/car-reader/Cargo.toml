@@ -29,7 +29,6 @@ wincode = { version = "0.5.4", features = ["derive"] }
 zstd = { version = "0.13.3", optional = true }
 ruzstd = { version = "0.8.3", optional = true }
 prost = "0.14.3"
-prost-types = "0.14.3"
 quick-protobuf = "0.8.1"
 sha2 = "0.11.0"
 serde = { version = "1.0.228", features = ["derive"] }

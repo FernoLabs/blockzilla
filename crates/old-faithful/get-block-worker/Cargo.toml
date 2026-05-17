@@ -40,7 +40,6 @@ worker = [
     "dep:sha2",
     "dep:url",
     "dep:worker",
-    "dep:worker-macros",
     "of-car-reader/compact-index",
     "of-car-reader/zstd-wasm",
 ]
@@ -65,5 +64,4 @@ js-sys = { version = "0.3.98", optional = true }
 prost = { version = "0.14.3", optional = true }
 url = { version = "2.5.7", optional = true }
 worker = { version = "0.8.3", features = ["http"], optional = true }
-worker-macros = { version = "0.8.3", features = ["http"], optional = true }
 wincode = "0.5.4"

@@ -28,7 +28,6 @@ tracing-subscriber = "0.3.23"
 blockzilla-format = { path = "../crates/blockzilla-format" }
 blockzilla-log-parser = { path = "../crates/blockzilla-log-parser" }
 of-car-reader = { path = "../crates/old-faithful/car-reader" }
-prost = "0.14.3"
 zstd = "0.13.3"
 serde = "1.0.228"
 anyhow = "1.0.102"
