@@ -338,7 +338,6 @@ dependencies = [
  "data-encoding",
  "of-car-reader",
  "postcard",
- "prost",
  "serde",
  "solana-pubkey",
  "tracing",
@@ -2218,7 +2217,6 @@ dependencies = [
  "serde_json",
  "solana-short-vec",
  "tempfile",
- "wincode",
  "zstd",
 ]
 
@@ -2235,7 +2233,6 @@ dependencies = [
  "postcard",
  "prost",
  "reqwest",
- "serde",
  "solana-pubkey",
  "solana-short-vec",
  "tracing",
@@ -2256,7 +2253,6 @@ dependencies = [
  "pb-rs",
  "prost",
  "prost-build",
- "prost-types",
  "quick-protobuf",
  "reqwest",
  "ruzstd",
@@ -2295,7 +2291,6 @@ dependencies = [
  "url",
  "wincode",
  "worker",
- "worker-macros",
 ]
 
 [[package]]
