@@ -5,17 +5,34 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+known-program-logs = ["blockzilla-format/known-program-logs"]
+
 [[bin]]
 name = "blockzilla"
 path = "src/main.rs"
 
+[[bin]]
+name = "car-log-audit"
+path = "src/bin/car_log_audit.rs"
+
+[[bin]]
+name = "big-block-log-bench"
+path = "src/bin/big_block_log_bench.rs"
+
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+clap = { version = "4.6.1", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 blockzilla-format = { path = "../crates/blockzilla-format" }
-prost = "0.14"
+blockzilla-log-parser = { path = "../crates/blockzilla-log-parser" }
+of-car-reader = { path = "../crates/old-faithful/car-reader" }
+prost = "0.14.3"
 zstd = "0.13.3"
 serde = "1.0.228"
-anyhow = "1.0.100"
+anyhow = "1.0.102"
 postcard = "1.1.3"
+data-encoding = "2.11.0"
+solana-pubkey = "4.2.0"
+wincode = { version = "0.5.4", features = ["derive"] }

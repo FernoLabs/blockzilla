@@ -3,27 +3,21 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
-/// TODO: confirm account-compression program id
 pub const STR_ID: &str = "AccountCompression11111111111111111111111111111";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum AccountCompressionLog {
     /// canopy.rs: "Canopy byte length {} is not a multiple of {}"
     CanopyLengthMismatch {
-        /// TODO: type (usize)
         canopy_bytes_len: StrId,
-        /// TODO: type (usize)
         node_size: StrId,
     },
 
     /// error.rs: error_msg<T>
     /// "Failed to load {}. Size is {}, expected {}"
     FailedToLoadTypeSizeMismatch {
-        /// TODO: type (type_name::<T>())
         type_name: StrId,
-        /// TODO: type (usize)
         data_len: StrId,
-        /// TODO: type (usize)
         expected_size: StrId,
     },
 }

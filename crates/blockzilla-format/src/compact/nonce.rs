@@ -6,6 +6,7 @@ use std::fmt;
 use wincode::{SchemaRead, SchemaWrite};
 
 #[derive(Debug, Clone, Copy, SchemaRead, SchemaWrite)]
+#[repr(transparent)]
 pub struct Nonce<'a>(pub &'a [u8; 32]);
 
 impl<'a> Serialize for Nonce<'a> {

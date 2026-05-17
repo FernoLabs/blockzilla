@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
-use gxhash::GxHasher;
 use ph::fmph;
 use solana_pubkey::Pubkey;
-use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::{
     fs::File,
@@ -10,12 +8,7 @@ use std::{
     path::Path,
 };
 
-#[inline]
-fn gxhash64<T: Hash + ?Sized>(v: &T) -> u64 {
-    let mut h = GxHasher::default();
-    v.hash(&mut h);
-    h.finish()
-}
+use crate::CompactPubkey;
 
 pub struct KeyIndex {
     /// Minimal perfect hash over all pubkeys
@@ -24,8 +17,8 @@ pub struct KeyIndex {
     /// mphf_index -> 1-based id
     values: Vec<u32>,
 
-    /// Small hot cache for base58 string lookups
-    cache: HotCache,
+    /// mphf_index -> exact key, used to distinguish misses from arbitrary MPHF outputs.
+    keys_by_mphf: Vec<[u8; 32]>,
 }
 
 impl KeyIndex {
@@ -34,15 +27,12 @@ impl KeyIndex {
     /// All lookups are assumed to be members of the registry.
     pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
         let n = keys_in_file_order.len();
-        let hot_cap = n.min(10_000);
 
         // MPHF build
         let mphf: fmph::GOFunction = keys_in_file_order.as_slice().into();
 
         let mut values = vec![0u32; n];
-
-        // size cache at ~50% load
-        let mut cache = HotCache::new(hot_cap * 2);
+        let mut keys_by_mphf = vec![[0u8; 32]; n];
 
         for (i, k) in keys_in_file_order.iter().enumerate() {
             let id = i as u32 + 1;
@@ -50,40 +40,49 @@ impl KeyIndex {
             let idx = mphf.get_or_panic(k) as usize;
             debug_assert!(idx < n);
             values[idx] = id;
-
-            // populate hot string cache
-            if i < hot_cap {
-                let s = Pubkey::new_from_array(*k).to_string();
-                cache.insert(gxhash64(s.as_bytes()), id);
-            }
+            keys_by_mphf[idx] = *k;
         }
 
         Self {
             mphf,
             values,
-            cache,
+            keys_by_mphf,
         }
+    }
+
+    /// Checked lookup. Returns None when `k` is not in the registry.
+    #[inline(always)]
+    pub fn lookup(&self, k: &[u8; 32]) -> Option<u32> {
+        let idx = self.mphf.get(k)? as usize;
+        if self.keys_by_mphf.get(idx)? != k {
+            return None;
+        }
+        let id = self.values[idx];
+        (id != 0).then_some(id)
     }
 
     /// Fast path: key MUST exist.
     #[inline(always)]
     pub fn lookup_unchecked(&self, k: &[u8; 32]) -> u32 {
-        let idx = self.mphf.get_or_panic(k) as usize;
-        let id = self.values[idx];
-        debug_assert!(id != 0);
-        id
+        self.lookup(k).expect("registry key missing")
+    }
+
+    #[inline(always)]
+    pub fn compact(&self, k: &[u8; 32]) -> CompactPubkey {
+        self.lookup(k)
+            .map(CompactPubkey::id)
+            .unwrap_or_else(|| CompactPubkey::raw(*k))
     }
 
     /// Lookup from base58 string.
-    ///
-    /// Safe as long as all inputs belong to the registry.
     pub fn lookup_str(&self, k: &str) -> Option<u32> {
-        if let Some(id) = self.cache.get(gxhash64(k.as_bytes())) {
-            return Some(id);
-        }
-
         let pk = Pubkey::from_str(k).ok()?;
-        Some(self.lookup_unchecked(pk.as_array()))
+        self.lookup(pk.as_array())
+    }
+
+    pub fn compact_str(&self, k: &str) -> Option<CompactPubkey> {
+        let pk = Pubkey::from_str(k).ok()?;
+        Some(self.compact(pk.as_array()))
     }
 }
 
@@ -148,48 +147,20 @@ pub fn write_registry(path: &Path, keys: &[[u8; 32]]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct HotCache {
-    keys: Vec<u64>,
-    values: Vec<u32>,
-    mask: usize,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl HotCache {
-    fn new(capacity: usize) -> Self {
-        let cap = capacity.next_power_of_two().max(8);
-        Self {
-            keys: vec![0; cap],
-            values: vec![0; cap],
-            mask: cap - 1,
-        }
-    }
+    #[test]
+    fn lookup_ids_are_one_based_and_missing_keys_fall_back_to_raw() {
+        let first = [0u8; 32];
+        let second = [1u8; 32];
+        let missing = [2u8; 32];
+        let index = KeyIndex::build(vec![first, second]);
 
-    #[inline(always)]
-    fn insert(&mut self, k: u64, v: u32) {
-        let mut i = k as usize & self.mask;
-        loop {
-            if self.keys[i] == 0 {
-                self.keys[i] = k;
-                self.values[i] = v;
-                return;
-            }
-            i = (i + 1) & self.mask;
-        }
-    }
-
-    #[inline(always)]
-    fn get(&self, k: u64) -> Option<u32> {
-        let mut i = k as usize & self.mask;
-        loop {
-            let kk = self.keys[i];
-            if kk == 0 {
-                return None;
-            }
-            if kk == k {
-                return Some(self.values[i]);
-            }
-            i = (i + 1) & self.mask;
-        }
+        assert_eq!(index.lookup(&first), Some(1));
+        assert_eq!(index.lookup(&second), Some(2));
+        assert_eq!(index.lookup(&missing), None);
+        assert_eq!(index.compact(&missing), CompactPubkey::raw(missing));
     }
 }

@@ -3,7 +3,6 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
-/// TODO: confirm program id
 pub const STR_ID: &str = "AddressLookupTab1e1111111111111111111111111";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -11,31 +10,57 @@ pub enum AddressLookupTableLog {
     /// entrypoint.rs:18 msg!(error.to_str::<AddressLookupTableError>())
     Error(AddressLookupTableErrorLog),
 
+    /// processor.rs:572..588 `Instruction: <name>`
+    Instruction(AddressLookupTableInstructionLog),
+
     /// processor.rs:157
-    NotARecentSlot {
-        /// TODO: type
-        untrusted_recent_slot: StrId,
-    },
+    NotARecentSlot { untrusted_recent_slot: StrId },
 
     /// processor.rs:173
-    TableAddressMustMatchDerivedAddress {
-        /// TODO: type (Pubkey)
-        derived_table_key: StrId,
-    },
+    TableAddressMustMatchDerivedAddress { derived_table_key: StrId },
 
     /// processor.rs:327
     ExtendedLookupTableLengthWouldExceedMaxCapacity {
-        /// TODO: type (usize)
         new_table_addresses_len: StrId,
-        /// TODO: type (usize const)
         lookup_table_max_addresses: StrId,
     },
 
     /// processor.rs:531
-    TableCannotBeClosedUntilFullyDeactivatedInBlocks {
-        /// TODO: type (u64/usize)
-        remaining_blocks: StrId,
-    },
+    TableCannotBeClosedUntilFullyDeactivatedInBlocks { remaining_blocks: StrId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub enum AddressLookupTableInstructionLog {
+    CreateLookupTable,
+    FreezeLookupTable,
+    ExtendLookupTable,
+    DeactivateLookupTable,
+    CloseLookupTable,
+}
+
+impl AddressLookupTableInstructionLog {
+    #[inline]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "Instruction: CreateLookupTable" => Some(Self::CreateLookupTable),
+            "Instruction: FreezeLookupTable" => Some(Self::FreezeLookupTable),
+            "Instruction: ExtendLookupTable" => Some(Self::ExtendLookupTable),
+            "Instruction: DeactivateLookupTable" => Some(Self::DeactivateLookupTable),
+            "Instruction: CloseLookupTable" => Some(Self::CloseLookupTable),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateLookupTable => "Instruction: CreateLookupTable",
+            Self::FreezeLookupTable => "Instruction: FreezeLookupTable",
+            Self::ExtendLookupTable => "Instruction: ExtendLookupTable",
+            Self::DeactivateLookupTable => "Instruction: DeactivateLookupTable",
+            Self::CloseLookupTable => "Instruction: CloseLookupTable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -94,6 +119,9 @@ impl AddressLookupTableLog {
         if let Some(e) = AddressLookupTableErrorLog::parse(payload) {
             return Some(Self::Error(e));
         }
+        if let Some(ix) = AddressLookupTableInstructionLog::parse(payload) {
+            return Some(Self::Instruction(ix));
+        }
 
         // "{} is not a recent slot"
         if let Some(x) = parse_one_braced(payload, " is not a recent slot") {
@@ -139,6 +167,7 @@ impl AddressLookupTableLog {
     pub fn as_str(&self, st: &StringTable) -> String {
         match self {
             Self::Error(e) => e.as_str().to_string(),
+            Self::Instruction(ix) => ix.as_str().to_string(),
             Self::NotARecentSlot {
                 untrusted_recent_slot,
             } => format!(

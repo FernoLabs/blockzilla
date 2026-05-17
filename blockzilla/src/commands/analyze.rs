@@ -12,54 +12,47 @@ use tracing::info;
 use blockzilla_format::{
     CompactBlockRecord, CompactTxWithMeta, PostcardFramedReader,
     compact::{CompactMessage, CompactTransaction},
+    log::LogEvent,
 };
-
-// Adjust these imports if your log types live elsewhere.
-use blockzilla_format::log::LogEvent;
 
 #[derive(Default, Debug, Clone)]
 pub struct LogEventStat {
     pub count: u64,
-    pub bytes: u64, // sum(postcard serialized_size(event))
+    pub bytes: u64,
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct EpochReport {
-    // counts
     pub blocks: u64,
     pub txs: u64,
     pub metas_some: u64,
 
-    // original size accounting
     pub bytes_header: u64,
     pub bytes_tx: u64,
     pub bytes_meta: u64,
-    pub bytes_frame_prefix: u64, // 4 * blocks
+    pub bytes_frame_prefix: u64,
 
-    // compactness / composition (tx only)
-    pub instr_data_raw_bytes: u64, // sum(ix.data.len())
-    pub tx_serialized_bytes: u64,  // sum(postcard size of tx)
+    pub instr_data_raw_bytes: u64,
+    pub tx_serialized_bytes: u64,
 
-    // tx breakdown buckets (serialized sizes)
     pub sigs_bytes: u64,
 
     pub msg_header_bytes: u64,
     pub msg_recent_blockhash_bytes: u64,
     pub msg_account_keys_bytes: u64,
 
-    pub ix_container_bytes: u64, // serialized size of Vec<CompactInstruction>
-    pub ix_accounts_bytes: u64,  // serialized size of all ix.accounts Vecs
-    pub ix_data_bytes: u64,      // serialized size of all ix.data Vecs
+    pub ix_container_bytes: u64,
+    pub ix_accounts_bytes: u64,
+    pub ix_data_bytes: u64,
 
-    pub atl_container_bytes: u64, // serialized size of address_table_lookups Vec
-    pub atl_payload_bytes: u64,   // serialized size of ATL fields
+    pub atl_container_bytes: u64,
+    pub atl_payload_bytes: u64,
 
-    // meta breakdown (extra details)
-    pub bytes_meta_logs: u64,            // serialized size of meta.logs
-    pub bytes_meta_logs_strings: u64,    // serialized size of logs.strings
-    pub bytes_meta_logs_data: u64,       // serialized size of logs.data
-    pub bytes_meta_logs_events: u64,     // serialized size of logs.events Vec container
-    pub bytes_meta_logs_events_sum: u64, // sum(serialized size of each event)
+    pub bytes_meta_logs: u64,
+    pub bytes_meta_logs_strings: u64,
+    pub bytes_meta_logs_data: u64,
+    pub bytes_meta_logs_events: u64,
+    pub bytes_meta_logs_events_sum: u64,
 
     pub meta_logs_some: u64,
     pub meta_log_lines: u64,
@@ -79,7 +72,6 @@ impl EpochReport {
         self.bytes_total_payload() + self.bytes_frame_prefix
     }
 
-    /// "Good compact tx" score: raw instruction bytes / serialized tx bytes
     pub fn compactness(&self) -> f64 {
         if self.tx_serialized_bytes == 0 {
             0.0
@@ -122,7 +114,6 @@ fn fmt_dur(secs: u64) -> String {
 
 #[inline]
 fn log_event_kind_name(e: &LogEvent) -> String {
-    // Parse "Variant(...)" -> "Variant"
     let s = format!("{:?}", e);
     s.split(['(', '{']).next().unwrap_or(&s).to_string()
 }
@@ -136,8 +127,8 @@ struct DiscAgg {
 
 pub fn analyze_epoch_file(
     path: &PathBuf,
-    progress_every: u64,       // blocks, 0 disables
-    limit_blocks: Option<u64>, // optional early stop + ETA
+    progress_every: u64,
+    limit_blocks: Option<u64>,
 ) -> Result<EpochReport> {
     info!("analyze-epoch input={} (framed)", path.display());
 
@@ -148,7 +139,6 @@ pub fn analyze_epoch_file(
     let mut rep = EpochReport::default();
     let mut next_progress = progress_every.max(1);
 
-    // Fast aggregation keyed by discriminant (avoid allocating String per event)
     let mut disc_map: HashMap<Discriminant<LogEvent>, DiscAgg> = HashMap::new();
 
     while let Some(block) = reader
@@ -168,7 +158,6 @@ pub fn analyze_epoch_file(
         rep.txs += block.txs.len() as u64;
 
         for CompactTxWithMeta { tx, metadata } in &block.txs {
-            // tx sizing
             let tx_sz = sz(&tx)?;
             rep.bytes_tx += tx_sz;
 
@@ -209,7 +198,6 @@ pub fn analyze_epoch_file(
                 }
             }
 
-            // meta sizing (details)
             let Some(meta) = metadata.as_ref() else {
                 continue;
             };
@@ -223,15 +211,11 @@ pub fn analyze_epoch_file(
             rep.meta_logs_some += 1;
             rep.bytes_meta_logs += sz(logs)?;
 
-            // Assumes CompactLogStream has these fields:
-            // logs.strings.strings: Vec<String>
-            // logs.data.arrays: Vec<Vec<Vec<u8>>>
-            // logs.events: Vec<LogEvent>
             rep.bytes_meta_logs_strings += sz(&logs.strings)?;
-            rep.meta_log_lines += logs.strings.strings.len() as u64;
+            rep.meta_log_lines += logs.strings.len() as u64;
 
             rep.bytes_meta_logs_data += sz(&logs.data)?;
-            rep.meta_log_data_arrays += logs.data.arrays.len() as u64;
+            rep.meta_log_data_arrays += logs.data.len() as u64;
 
             rep.bytes_meta_logs_events += sz(&logs.events)?;
             rep.meta_log_events += logs.events.len() as u64;
@@ -275,7 +259,6 @@ pub fn analyze_epoch_file(
         }
     }
 
-    // finalize per-kind stats with stable ordering
     for (_disc, agg) in disc_map {
         rep.meta_log_event_stats
             .entry(agg.name)
@@ -300,7 +283,6 @@ pub fn analyze_epoch_file(
 }
 
 pub fn print_epoch_report(rep: &EpochReport) {
-    // original size report
     let payload_total = rep.bytes_total_payload() as f64;
     let pct_payload = |x: u64| {
         if payload_total > 0.0 {
@@ -340,7 +322,6 @@ pub fn print_epoch_report(rep: &EpochReport) {
         rep.bytes_frame_prefix, ""
     );
 
-    // tx composition / compactness
     println!();
     println!("tx_serialized_bytes={}", rep.tx_serialized_bytes);
     println!("instr_data_raw_bytes={}", rep.instr_data_raw_bytes);
@@ -414,7 +395,6 @@ pub fn print_epoch_report(rep: &EpochReport) {
         );
     }
 
-    // meta details
     println!();
     println!("meta_bytes_total={}", rep.bytes_meta);
     if rep.metas_some > 0 {

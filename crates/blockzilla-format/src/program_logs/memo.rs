@@ -8,24 +8,13 @@ pub const STR_ID: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum MemoLog {
     /// processor.rs:18 "Signed by {:?}"
-    SignedByDebug {
-        /// TODO: type (Pubkey)
-        address: StrId,
-    },
+    SignedByDebug { address: StrId },
 
     /// processor.rs:28 "Invalid UTF-8, from byte {}"
-    InvalidUtf8FromByte {
-        /// TODO: type (usize)
-        valid_up_to: StrId,
-    },
+    InvalidUtf8FromByte { valid_up_to: StrId },
 
     /// processor.rs:31 "Memo (len {}): {:?}"
-    MemoLenAndDebug {
-        /// TODO: type (usize)
-        len: StrId,
-        /// TODO: type (bytes/string)
-        memo: StrId,
-    },
+    MemoLenAndDebug { len: StrId, memo: StrId },
 }
 
 impl MemoLog {
@@ -38,7 +27,6 @@ impl MemoLog {
         }
 
         if let Some(x) = parse_one_braced(payload, "Invalid UTF-8, from byte ", "") {
-            // note: format string has no trailing punctuation
             return Some(Self::InvalidUtf8FromByte {
                 valid_up_to: st.push(x),
             });

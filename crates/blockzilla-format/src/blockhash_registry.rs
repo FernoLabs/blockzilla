@@ -83,11 +83,7 @@ impl BlockhashRegistry {
         }
     }
 
-    /// Helper: for a given current-epoch position `pos` (0-based),
-    /// return the "previous blockhash id" you want in your CompactBlockHeader.
-    ///
-    /// For pos == 0, returns 0 (your convention).
-    /// For pos > 0, returns pos - 1.
+    /// Returns the previous blockhash id for a current-epoch position.
     #[inline(always)]
     pub fn previous_id_for_pos(pos: u32) -> u32 {
         if pos == 0 { 0 } else { pos - 1 }

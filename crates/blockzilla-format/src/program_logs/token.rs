@@ -97,11 +97,7 @@ impl TokenErrorLog {
 pub enum TokenLog {
     Error(TokenErrorLog),
     PleaseUpgrade,
-
-    // missing in parse/as_str previously
     GetAccountDataSize,
-
-    // newly added from msg! list
     InstructionBatch,
     InstructionInitializeMint,
     InstructionInitializeMint2,
@@ -114,6 +110,7 @@ pub enum TokenLog {
     InstructionTransfer,
     InstructionTransferChecked,
     InstructionApprove,
+    InstructionApproveChecked,
     InstructionRevoke,
     InstructionSetAuthority,
     InstructionMintTo,
@@ -162,6 +159,7 @@ impl TokenLog {
             "Transfer" => Some(Self::InstructionTransfer),
             "TransferChecked" => Some(Self::InstructionTransferChecked),
             "Approve" => Some(Self::InstructionApprove),
+            "ApproveChecked" => Some(Self::InstructionApproveChecked),
             "Revoke" => Some(Self::InstructionRevoke),
             "SetAuthority" => Some(Self::InstructionSetAuthority),
             "MintTo" => Some(Self::InstructionMintTo),
@@ -205,6 +203,7 @@ impl TokenLog {
             Self::InstructionTransfer => "Instruction: Transfer",
             Self::InstructionTransferChecked => "Instruction: TransferChecked",
             Self::InstructionApprove => "Instruction: Approve",
+            Self::InstructionApproveChecked => "Instruction: ApproveChecked",
             Self::InstructionRevoke => "Instruction: Revoke",
             Self::InstructionSetAuthority => "Instruction: SetAuthority",
             Self::InstructionMintTo => "Instruction: MintTo",

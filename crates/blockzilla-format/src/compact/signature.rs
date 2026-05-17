@@ -6,6 +6,7 @@ use std::fmt;
 use wincode::{SchemaRead, SchemaWrite};
 
 #[derive(Debug, Clone, Copy, SchemaRead, SchemaWrite)]
+#[repr(transparent)]
 pub struct Signature<'a>(pub &'a [u8; 64]);
 
 impl<'a> Serialize for Signature<'a> {

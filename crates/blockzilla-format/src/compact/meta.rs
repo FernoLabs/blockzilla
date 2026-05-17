@@ -1,11 +1,17 @@
 use anyhow::{Context, Result};
+use of_car_reader::metadata_decoder::{
+    InnerInstructionVisit, ReturnDataVisit, TokenBalanceVisit, TransactionStatusMetaVisitor,
+    visit_protobuf_transaction_status_meta,
+};
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use std::str::FromStr;
+use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{CompactLogStream, KeyIndex};
+use crate::{CompactLogStream, CompactPubkey, KeyIndex};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactMetaV1 {
     pub err: Option<Vec<u8>>,
 
@@ -21,8 +27,8 @@ pub struct CompactMetaV1 {
 
     pub rewards: Vec<CompactReward>,
 
-    pub loaded_writable_indices: Vec<u32>,
-    pub loaded_readonly_indices: Vec<u32>,
+    pub loaded_writable_addresses: Vec<CompactPubkey>,
+    pub loaded_readonly_addresses: Vec<CompactPubkey>,
 
     pub return_data: Option<CompactReturnData>,
 
@@ -30,13 +36,13 @@ pub struct CompactMetaV1 {
     pub cost_units: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactInnerInstructions {
     pub index: u32,
     pub instructions: Vec<CompactInnerInstruction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactInnerInstruction {
     pub program_id_index: u32, // message index
     pub accounts: Vec<u8>,
@@ -44,28 +50,27 @@ pub struct CompactInnerInstruction {
     pub stack_height: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactReturnData {
-    pub program_id_index: u32, // registry index
+    pub program_id: CompactPubkey,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactTokenBalance {
     pub account_index: u32,
 
-    // registry indices or 0 if missing or not found
-    pub mint_index: u32,
-    pub owner_index: u32,
-    pub program_id_index: u32,
+    pub mint: Option<CompactPubkey>,
+    pub owner: Option<CompactPubkey>,
+    pub program_id: Option<CompactPubkey>,
 
     pub amount: u64,
     pub decimals: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactReward {
-    pub pubkey_index: u32,
+    pub pubkey: CompactPubkey,
     pub lamports: i64,
     pub post_balance: u64,
     pub reward_type: i32,
@@ -73,20 +78,20 @@ pub struct CompactReward {
 }
 
 pub fn compact_meta_from_proto(
-    meta: &car_reader::confirmed_block::TransactionStatusMeta,
+    meta: &of_car_reader::confirmed_block::TransactionStatusMeta,
     index: &KeyIndex,
 ) -> Result<CompactMetaV1> {
     let err = meta.err.as_ref().map(|e| e.err.clone());
 
-    let loaded_writable_indices = meta
+    let loaded_writable_addresses = meta
         .loaded_writable_addresses
         .iter()
-        .map(|a| index.lookup_unchecked(a.as_slice().try_into().unwrap()))
+        .map(|a| index.compact(a.as_slice().try_into().unwrap()))
         .collect();
-    let loaded_readonly_indices = meta
+    let loaded_readonly_addresses = meta
         .loaded_readonly_addresses
         .iter()
-        .map(|a| index.lookup_unchecked(a.as_slice().try_into().unwrap()))
+        .map(|a| index.compact(a.as_slice().try_into().unwrap()))
         .collect();
 
     let inner_instructions = if meta.inner_instructions_none {
@@ -118,24 +123,23 @@ pub fn compact_meta_from_proto(
         Some(crate::log::parse_logs(&meta.log_messages, index))
     };
 
-    //TODO: fix error amangement it is easier to just unwrap to avoid typing issue for now
     let pre_token_balances = meta
         .pre_token_balances
         .iter()
-        .map(|tb| compact_token_balance(tb, index).unwrap())
-        .collect();
+        .map(|tb| compact_token_balance(tb, index))
+        .collect::<Result<Vec<_>>>()?;
 
     let post_token_balances = meta
         .post_token_balances
         .iter()
-        .map(|tb| compact_token_balance(tb, index).unwrap())
-        .collect();
+        .map(|tb| compact_token_balance(tb, index))
+        .collect::<Result<Vec<_>>>()?;
 
     let rewards = meta
         .rewards
         .iter()
-        .map(|rw| compact_reward(rw, index).unwrap())
-        .collect();
+        .map(|rw| compact_reward(rw, index))
+        .collect::<Result<Vec<_>>>()?;
 
     let return_data = if meta.return_data_none {
         None
@@ -143,9 +147,8 @@ pub fn compact_meta_from_proto(
         meta.return_data
             .as_ref()
             .map(|rd| -> Result<CompactReturnData> {
-                let ix = index.lookup_unchecked(rd.program_id.as_slice().try_into().unwrap());
                 Ok(CompactReturnData {
-                    program_id_index: ix,
+                    program_id: index.compact(rd.program_id.as_slice().try_into().unwrap()),
                     data: rd.data.clone(),
                 })
             })
@@ -167,8 +170,8 @@ pub fn compact_meta_from_proto(
 
         rewards,
 
-        loaded_writable_indices,
-        loaded_readonly_indices,
+        loaded_writable_addresses,
+        loaded_readonly_addresses,
 
         return_data,
 
@@ -177,21 +180,316 @@ pub fn compact_meta_from_proto(
     })
 }
 
-#[inline]
-fn lookup_pubkey_index_optional(index: &KeyIndex, s: &str) -> u32 {
-    if s.is_empty() {
-        return 0;
+pub fn compact_meta_from_protobuf_visit(bytes: &[u8], index: &KeyIndex) -> Result<CompactMetaV1> {
+    let mut visitor = CompactMetaVisitor::new(index);
+    visit_protobuf_transaction_status_meta(bytes, &mut visitor)
+        .map_err(|err| anyhow::anyhow!("protobuf visit: {err}"))?;
+    visitor.finish()
+}
+
+struct CompactMetaVisitor<'a> {
+    index: &'a KeyIndex,
+    err: Option<Vec<u8>>,
+    fee: u64,
+    pre_balances: Vec<u64>,
+    post_balances: Vec<u64>,
+    inner_instructions: Vec<CompactInnerInstructions>,
+    inner_instructions_none: bool,
+    log_messages: Vec<String>,
+    log_messages_none: bool,
+    pre_token_balances: Vec<CompactTokenBalance>,
+    post_token_balances: Vec<CompactTokenBalance>,
+    rewards: Vec<CompactReward>,
+    loaded_writable_addresses: Vec<CompactPubkey>,
+    loaded_readonly_addresses: Vec<CompactPubkey>,
+    return_data: Option<CompactReturnData>,
+    return_data_none: bool,
+    compute_units_consumed: Option<u64>,
+    cost_units: Option<u64>,
+    error: Option<anyhow::Error>,
+}
+
+impl<'a> CompactMetaVisitor<'a> {
+    fn new(index: &'a KeyIndex) -> Self {
+        Self {
+            index,
+            err: None,
+            fee: 0,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: Vec::new(),
+            inner_instructions_none: false,
+            log_messages: Vec::new(),
+            log_messages_none: false,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            return_data_none: false,
+            compute_units_consumed: None,
+            cost_units: None,
+            error: None,
+        }
     }
-    index.lookup_str(s).expect("invalid pubkey")
+
+    fn record_error(&mut self, err: anyhow::Error) {
+        if self.error.is_none() {
+            self.error = Some(err);
+        }
+    }
+
+    fn finish(self) -> Result<CompactMetaV1> {
+        if let Some(err) = self.error {
+            return Err(err);
+        }
+
+        let inner_instructions = if self.inner_instructions_none {
+            None
+        } else {
+            Some(self.inner_instructions)
+        };
+        let logs = if self.log_messages_none {
+            None
+        } else {
+            Some(crate::log::parse_logs(&self.log_messages, self.index))
+        };
+        let return_data = if self.return_data_none {
+            None
+        } else {
+            self.return_data
+        };
+
+        Ok(CompactMetaV1 {
+            err: self.err,
+            fee: self.fee,
+            pre_balances: self.pre_balances,
+            post_balances: self.post_balances,
+            inner_instructions,
+            logs,
+            pre_token_balances: self.pre_token_balances,
+            post_token_balances: self.post_token_balances,
+            rewards: self.rewards,
+            loaded_writable_addresses: self.loaded_writable_addresses,
+            loaded_readonly_addresses: self.loaded_readonly_addresses,
+            return_data,
+            compute_units_consumed: self.compute_units_consumed,
+            cost_units: self.cost_units,
+        })
+    }
+}
+
+impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
+    #[inline]
+    fn wants_status_error(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_pre_balances(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_post_balances(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_inner_instructions(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_log_messages(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_pre_token_balances(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_post_token_balances(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_rewards(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_loaded_addresses(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn wants_return_data(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn status_error(&mut self, err: &'b [u8]) {
+        self.err = Some(err.to_vec());
+    }
+
+    #[inline]
+    fn fee(&mut self, fee: u64) {
+        self.fee = fee;
+    }
+
+    #[inline]
+    fn pre_balance(&mut self, _index: usize, lamports: u64) {
+        self.pre_balances.push(lamports);
+    }
+
+    #[inline]
+    fn post_balance(&mut self, _index: usize, lamports: u64) {
+        self.post_balances.push(lamports);
+    }
+
+    #[inline]
+    fn inner_instruction(&mut self, instruction: InnerInstructionVisit<'b>) {
+        if self
+            .inner_instructions
+            .last()
+            .is_none_or(|group| group.index != instruction.outer_instruction_index)
+        {
+            self.inner_instructions.push(CompactInnerInstructions {
+                index: instruction.outer_instruction_index,
+                instructions: Vec::new(),
+            });
+        }
+
+        let Some(group) = self.inner_instructions.last_mut() else {
+            return;
+        };
+        group.instructions.push(CompactInnerInstruction {
+            program_id_index: instruction.program_id_index,
+            accounts: instruction.accounts.to_vec(),
+            data: instruction.data.to_vec(),
+            stack_height: instruction.stack_height,
+        });
+    }
+
+    #[inline]
+    fn inner_instructions_none(&mut self, none: bool) {
+        self.inner_instructions_none = none;
+    }
+
+    #[inline]
+    fn log_message(&mut self, message: &'b str) {
+        self.log_messages.push(message.to_owned());
+    }
+
+    #[inline]
+    fn log_messages_none(&mut self, none: bool) {
+        self.log_messages_none = none;
+    }
+
+    #[inline]
+    fn pre_token_balance(&mut self, balance: TokenBalanceVisit<'b>) {
+        match compact_token_balance_visit(balance, self.index) {
+            Ok(balance) => self.pre_token_balances.push(balance),
+            Err(err) => self.record_error(err),
+        }
+    }
+
+    #[inline]
+    fn post_token_balance(&mut self, balance: TokenBalanceVisit<'b>) {
+        match compact_token_balance_visit(balance, self.index) {
+            Ok(balance) => self.post_token_balances.push(balance),
+            Err(err) => self.record_error(err),
+        }
+    }
+
+    #[inline]
+    fn reward_raw(&mut self, bytes: &'b [u8]) {
+        match of_car_reader::confirmed_block::Reward::decode(bytes)
+            .map_err(anyhow::Error::from)
+            .and_then(|reward| compact_reward(&reward, self.index))
+        {
+            Ok(reward) => self.rewards.push(reward),
+            Err(err) => self.record_error(err),
+        }
+    }
+
+    #[inline]
+    fn loaded_writable_address(&mut self, address: &'b [u8]) {
+        match address.try_into() {
+            Ok(address) => self
+                .loaded_writable_addresses
+                .push(self.index.compact(address)),
+            Err(_) => self.record_error(anyhow::anyhow!(
+                "invalid writable loaded address len {}",
+                address.len()
+            )),
+        }
+    }
+
+    #[inline]
+    fn loaded_readonly_address(&mut self, address: &'b [u8]) {
+        match address.try_into() {
+            Ok(address) => self
+                .loaded_readonly_addresses
+                .push(self.index.compact(address)),
+            Err(_) => self.record_error(anyhow::anyhow!(
+                "invalid readonly loaded address len {}",
+                address.len()
+            )),
+        }
+    }
+
+    #[inline]
+    fn return_data(&mut self, return_data: ReturnDataVisit<'b>) {
+        match return_data.program_id.try_into() {
+            Ok(program_id) => {
+                self.return_data = Some(CompactReturnData {
+                    program_id: self.index.compact(program_id),
+                    data: return_data.data.to_vec(),
+                });
+            }
+            Err(_) => self.record_error(anyhow::anyhow!(
+                "invalid return data program id len {}",
+                return_data.program_id.len()
+            )),
+        }
+    }
+
+    #[inline]
+    fn return_data_none(&mut self, none: bool) {
+        self.return_data_none = none;
+    }
+
+    #[inline]
+    fn compute_units_consumed(&mut self, units: u64) {
+        self.compute_units_consumed = Some(units);
+    }
+
+    #[inline]
+    fn cost_units(&mut self, units: u64) {
+        self.cost_units = Some(units);
+    }
+}
+
+#[inline]
+fn compact_pubkey_optional(index: &KeyIndex, s: &str) -> Option<CompactPubkey> {
+    if s.is_empty() {
+        return None;
+    }
+    index.compact_str(s)
 }
 
 fn compact_token_balance(
-    tb: &car_reader::confirmed_block::TokenBalance,
+    tb: &of_car_reader::confirmed_block::TokenBalance,
     index: &KeyIndex,
 ) -> Result<CompactTokenBalance> {
-    let mint_index = lookup_pubkey_index_optional(index, &tb.mint);
-    let owner_index = lookup_pubkey_index_optional(index, &tb.owner);
-    let program_id_index = lookup_pubkey_index_optional(index, &tb.program_id);
+    let mint = compact_pubkey_optional(index, &tb.mint);
+    let owner = compact_pubkey_optional(index, &tb.owner);
+    let program_id = compact_pubkey_optional(index, &tb.program_id);
 
     let (amount, decimals) = match &tb.ui_token_amount {
         None => (0u64, 0u8),
@@ -206,27 +504,54 @@ fn compact_token_balance(
 
     Ok(CompactTokenBalance {
         account_index: tb.account_index,
-        mint_index,
-        owner_index,
-        program_id_index,
+        mint,
+        owner,
+        program_id,
+        amount,
+        decimals,
+    })
+}
+
+fn compact_token_balance_visit(
+    tb: TokenBalanceVisit<'_>,
+    index: &KeyIndex,
+) -> Result<CompactTokenBalance> {
+    let mint = compact_pubkey_optional(index, tb.mint);
+    let owner = compact_pubkey_optional(index, tb.owner);
+    let program_id = compact_pubkey_optional(index, tb.program_id);
+
+    let (amount, decimals) = match tb.ui_token_amount {
+        None => (0u64, 0u8),
+        Some(uta) => {
+            let amount = uta
+                .amount
+                .parse::<u64>()
+                .context("parse token amount u64")?;
+            (amount, uta.decimals as u8)
+        }
+    };
+
+    Ok(CompactTokenBalance {
+        account_index: tb.account_index,
+        mint,
+        owner,
+        program_id,
         amount,
         decimals,
     })
 }
 
 fn compact_reward(
-    rw: &car_reader::confirmed_block::Reward,
+    rw: &of_car_reader::confirmed_block::Reward,
     index: &KeyIndex,
 ) -> Result<CompactReward> {
     let pk = Pubkey::from_str(&rw.pubkey)
         .context("reward pubkey parse")?
         .to_bytes();
-    let pubkey_index = index.lookup_unchecked(&pk);
-
     let commission = rw.commission.parse::<u8>().ok();
 
     Ok(CompactReward {
-        pubkey_index,
+        pubkey: index.compact(&pk),
         lamports: rw.lamports,
         post_balance: rw.post_balance,
         reward_type: rw.reward_type,

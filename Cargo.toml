@@ -1,10 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/car-reader",
+    "crates/old-faithful/car-reader",
+    "crates/blockzilla-log-parser",
     "crates/blockzilla-format",
-    "crates/optimize-car-archive",
-    "blockzilla", "crates/sget",
+    "crates/old-faithful/archive-importer",
+    "crates/old-faithful/get-block-worker",
+    "crates/live-producer",
+    "blockzilla", "crates/old-faithful/signature-index", "crates/replay-runtime",
+    "crates/old-faithful/slot-ranges",
+    "crates/old-faithful/token-index",
+    "crates/old-faithful/account-index",
 ]
 exclude = ["solana-prog/"]
 

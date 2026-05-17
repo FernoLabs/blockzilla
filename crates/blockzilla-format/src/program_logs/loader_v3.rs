@@ -3,80 +3,170 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{StrId, StringTable};
 
-/// BPF Upgradeable Loader (commonly referred to as loader-v3)
-/// TODO: confirm id in your environment (Agave/Solana)
+/// BPF Upgradeable Loader.
 pub const STR_ID: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
+pub const V1_STR_ID: &str = "BPFLoader1111111111111111111111111111111111";
+pub const V2_STR_ID: &str = "BPFLoader2111111111111111111111111111111111";
+
+#[inline]
+pub fn is_bpf_loader_id(program: &str) -> bool {
+    matches!(program, STR_ID | V1_STR_ID | V2_STR_ID)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum LoaderV3Log {
+    Static(LoaderV3StaticLog),
+
     /// processor.rs:111 "Write overflow: {} < {}"
     WriteOverflow {
-        /// TODO: type (usize)
         buffer_data_len: StrId,
-        /// TODO: type (usize)
         end_offset: StrId,
     },
 
     /// processor.rs:307 "Deployed program: {}"
     DeployedProgram {
-        /// TODO: type (Pubkey)
+        program_key: StrId,
+    },
+
+    /// processor.rs:358 "Deployed program {:?}"
+    DeployedProgramPlain {
         program_key: StrId,
     },
 
     /// processor.rs:492 "Upgraded program: {}"
     UpgradedProgram {
-        /// TODO: type (Pubkey)
+        program_key: StrId,
+    },
+
+    /// processor.rs:534 "Upgraded program {:?}"
+    UpgradedProgramPlain {
         program_key: StrId,
     },
 
     /// processor.rs:600 "New authority: {:?}"
     NewAuthorityDebug {
-        /// TODO: type (Option<Pubkey>)
+        new_authority: StrId,
+    },
+
+    /// processor.rs:591/659 "New authority {:?}"
+    NewAuthorityDebugPlain {
         new_authority: StrId,
     },
 
     /// processor.rs:733 "Closed Uninitialized {}"
     ClosedUninitialized {
-        /// TODO: type (Pubkey)
         key: StrId,
     },
 
     /// processor.rs:736 "Closed Buffer {}"
     ClosedBuffer {
-        /// TODO: type (Pubkey)
         key: StrId,
     },
 
     /// processor.rs:739 "Closed Program {}"
     ClosedProgram {
-        /// TODO: type (Pubkey)
         key: StrId,
     },
 
     /// processor.rs:795 "Extended ProgramData length of {} bytes exceeds max account data length of {} bytes"
     ExtendedProgramDataLengthExceedsMax {
-        /// TODO: type (usize)
         new_len: StrId,
-        /// TODO: type (usize const)
         max_permitted_data_length: StrId,
     },
 
     /// processor.rs:871 "Extended ProgramData account by {} bytes"
     ExtendedProgramDataAccountBy {
-        /// TODO: type (usize)
         additional_bytes: StrId,
     },
 
     /// processor.rs:970 "New authority: {:?}"
     NewAuthorityDebug2 {
-        /// TODO: type (Pubkey)
         new_authority: StrId,
     },
+}
+
+macro_rules! loader_v3_static_logs {
+    ($( $variant:ident => $text:literal, )+ ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+        pub enum LoaderV3StaticLog {
+            $( $variant, )+
+        }
+
+        impl LoaderV3StaticLog {
+            #[inline]
+            pub fn parse(text: &str) -> Option<Self> {
+                match text {
+                    $( $text => Some(Self::$variant), )+
+                    _ => None,
+                }
+            }
+
+            #[inline]
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $text, )+
+                }
+            }
+        }
+    };
+}
+
+loader_v3_static_logs! {
+    BpfLoaderManagementInstructionsNoLongerSupported => "BPF loader management instructions are no longer supported",
+    DeprecatedLoaderNoLongerSupported => "Deprecated loader is no longer supported",
+    InvalidBpfLoaderId => "Invalid BPF loader id",
+    ProgramIsNotCached => "Program is not cached",
+    ProgramIsNotDeployed => "Program is not deployed",
+    BufferAccountAlreadyInitialized => "Buffer account already initialized",
+    BufferIsImmutable => "Buffer is immutable",
+    IncorrectBufferAuthorityProvided => "Incorrect buffer authority provided",
+    BufferAuthorityDidNotSign => "Buffer authority did not sign",
+    InvalidBufferAccount => "Invalid Buffer account",
+    ProgramAccountAlreadyInitialized => "Program account already initialized",
+    ProgramAccountTooSmall => "Program account too small",
+    ProgramAccountNotRentExempt => "Program account not rent-exempt",
+    BufferAndUpgradeAuthorityDontMatch => "Buffer and upgrade authority don't match",
+    UpgradeAuthorityDidNotSign => "Upgrade authority did not sign",
+    BufferAccountTooSmall => "Buffer account too small",
+    MaxDataLengthTooSmallToHoldBufferData => "Max data length is too small to hold Buffer data",
+    MaxDataLengthTooLarge => "Max data length is too large",
+    ProgramDataAddressIsNotDerived => "ProgramData address is not derived",
+    ProgramAccountNotWriteable => "Program account not writeable",
+    ProgramAccountNotOwnedByLoader => "Program account not owned by loader",
+    ProgramAndProgramDataAccountMismatch => "Program and ProgramData account mismatch",
+    InvalidProgramAccount => "Invalid Program account",
+    ProgramDataAccountNotLargeEnough => "ProgramData account not large enough",
+    BufferAccountBalanceTooLowToFundUpgrade => "Buffer account balance too low to fund upgrade",
+    ProgramWasDeployedInThisBlockAlready => "Program was deployed in this block already",
+    ProgramNotUpgradeable => "Program not upgradeable",
+    IncorrectUpgradeAuthorityProvided => "Incorrect upgrade authority provided",
+    InvalidProgramDataAccount => "Invalid ProgramData account",
+    BufferAuthorityIsNotOptional => "Buffer authority is not optional",
+    AccountDoesNotSupportAuthorities => "Account does not support authorities",
+    NewAuthorityDidNotSign => "New authority did not sign",
+    RecipientSameAsAccountBeingClosed => "Recipient is the same as the account being closed",
+    ProgramAccountIsNotWritable => "Program account is not writable",
+    ProgramDataAccountDoesNotMatchProgramDataAccount => "ProgramData account does not match ProgramData account",
+    AccountDoesNotSupportClosing => "Account does not support closing",
+    AdditionalBytesMustBeGreaterThanZero => "Additional bytes must be greater than 0",
+    ProgramDataOwnerIsInvalid => "ProgramData owner is invalid",
+    ProgramDataIsNotWritable => "ProgramData is not writable",
+    ProgramAccountDoesNotMatchProgramDataAccount => "Program account does not match ProgramData account",
+    ProgramWasExtendedInThisBlockAlready => "Program was extended in this block already",
+    CannotExtendProgramDataAccountsThatAreNotUpgradeable => "Cannot extend ProgramData accounts that are not upgradeable",
+    ProgramDataStateIsInvalid => "ProgramData state is invalid",
+    AccountIsImmutable => "Account is immutable",
+    IncorrectAuthorityProvided => "Incorrect authority provided",
+    AuthorityDidNotSign => "Authority did not sign",
 }
 
 impl LoaderV3Log {
     #[inline]
     pub fn parse(payload: &str, st: &mut StringTable) -> Option<Self> {
+        if let Some(log) = LoaderV3StaticLog::parse(payload) {
+            return Some(Self::Static(log));
+        }
+
         // "Write overflow: {} < {}"
         if let Some((a, b)) = parse_two_braced(payload, "Write overflow: ", " < ") {
             return Some(Self::WriteOverflow {
@@ -90,9 +180,19 @@ impl LoaderV3Log {
                 program_key: st.push(x.trim()),
             });
         }
+        if let Some(x) = payload.strip_prefix("Deployed program ") {
+            return Some(Self::DeployedProgramPlain {
+                program_key: st.push(x.trim()),
+            });
+        }
 
         if let Some(x) = payload.strip_prefix("Upgraded program: ") {
             return Some(Self::UpgradedProgram {
+                program_key: st.push(x.trim()),
+            });
+        }
+        if let Some(x) = payload.strip_prefix("Upgraded program ") {
+            return Some(Self::UpgradedProgramPlain {
                 program_key: st.push(x.trim()),
             });
         }
@@ -101,6 +201,11 @@ impl LoaderV3Log {
         if let Some(x) = payload.strip_prefix("New authority: ") {
             // covers both :600 and :970 variants
             return Some(Self::NewAuthorityDebug {
+                new_authority: st.push(x.trim()),
+            });
+        }
+        if let Some(x) = payload.strip_prefix("New authority ") {
+            return Some(Self::NewAuthorityDebugPlain {
                 new_authority: st.push(x.trim()),
             });
         }
@@ -146,6 +251,7 @@ impl LoaderV3Log {
     #[inline]
     pub fn as_str(&self, st: &StringTable) -> String {
         match self {
+            Self::Static(log) => log.as_str().to_string(),
             Self::WriteOverflow {
                 buffer_data_len,
                 end_offset,
@@ -157,11 +263,20 @@ impl LoaderV3Log {
             Self::DeployedProgram { program_key } => {
                 format!("Deployed program: {}", st.resolve(*program_key))
             }
+            Self::DeployedProgramPlain { program_key } => {
+                format!("Deployed program {}", st.resolve(*program_key))
+            }
             Self::UpgradedProgram { program_key } => {
                 format!("Upgraded program: {}", st.resolve(*program_key))
             }
+            Self::UpgradedProgramPlain { program_key } => {
+                format!("Upgraded program {}", st.resolve(*program_key))
+            }
             Self::NewAuthorityDebug { new_authority } => {
-                format!("New authority: {:?}", st.resolve(*new_authority))
+                format!("New authority: {}", st.resolve(*new_authority))
+            }
+            Self::NewAuthorityDebugPlain { new_authority } => {
+                format!("New authority {}", st.resolve(*new_authority))
             }
             Self::ClosedUninitialized { key } => {
                 format!("Closed Uninitialized {}", st.resolve(*key))
@@ -181,7 +296,7 @@ impl LoaderV3Log {
                 st.resolve(*additional_bytes)
             ),
             Self::NewAuthorityDebug2 { new_authority } => {
-                format!("New authority: {:?}", st.resolve(*new_authority))
+                format!("New authority: {}", st.resolve(*new_authority))
             }
         }
     }

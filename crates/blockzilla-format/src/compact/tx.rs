@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{Nonce, Signature};
+use crate::{CompactPubkey, Nonce, Signature};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactTransaction<'a> {
@@ -16,7 +17,9 @@ pub enum CompactMessage<'a> {
     V0(#[serde(borrow)] CompactV0Message<'a>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[wincode(assert_zero_copy)]
+#[repr(C)]
 pub struct CompactMessageHeader {
     pub num_required_signatures: u8,
     pub num_readonly_signed_accounts: u8,
@@ -35,7 +38,7 @@ pub struct CompactInstruction<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactLegacyMessage<'a> {
     pub header: CompactMessageHeader,
-    pub account_keys: Vec<u32>,
+    pub account_keys: Vec<CompactPubkey>,
     pub recent_blockhash: CompactRecentBlockhash<'a>,
     #[serde(borrow)]
     pub instructions: Vec<CompactInstruction<'a>>,
@@ -43,7 +46,7 @@ pub struct CompactLegacyMessage<'a> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactAddressTableLookup<'a> {
-    pub account_key: u32, // registry index of the table address
+    pub account_key: CompactPubkey,
     #[serde(borrow)]
     pub writable_indexes: &'a [u8],
     #[serde(borrow)]
@@ -62,7 +65,7 @@ pub enum CompactRecentBlockhash<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactV0Message<'a> {
     pub header: CompactMessageHeader,
-    pub account_keys: Vec<u32>,
+    pub account_keys: Vec<CompactPubkey>,
     pub recent_blockhash: CompactRecentBlockhash<'a>,
     #[serde(borrow)]
     pub instructions: Vec<CompactInstruction<'a>>,
