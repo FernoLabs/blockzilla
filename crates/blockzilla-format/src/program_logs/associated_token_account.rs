@@ -97,12 +97,15 @@ impl TokenErrorLog {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum TokenLog {
     Error(TokenErrorLog),
     InstructionCreate,
     InstructionCreateIdempotent,
     InstructionRecoverNested,
+    BareCreate,
+    BareCreateIdempotent,
+    BareRecoverNested,
 
     InitAta,
 }
@@ -111,12 +114,36 @@ impl TokenLog {
     /// `text` is the payload after "Program log: "
     #[inline]
     pub fn parse(text: &str) -> Option<Self> {
+        Self::parse_common(text, false)
+    }
+
+    /// The associated token account program logs `msg!("{:?}", instruction)`,
+    /// so the primary instruction logs are bare `Create`, not
+    /// `Instruction: Create`. Only accept that form when the active program id
+    /// is known to be the ATA program, otherwise app logs named `Create` would
+    /// be misclassified.
+    #[inline]
+    pub fn parse_for_program(text: &str) -> Option<Self> {
+        Self::parse_common(text, true)
+    }
+
+    #[inline]
+    fn parse_common(text: &str, allow_bare_instruction: bool) -> Option<Self> {
         if let Some(e) = TokenErrorLog::parse(text) {
             return Some(Self::Error(e));
         }
 
         if text == "Initialize the associated token account" {
             return Some(Self::InitAta);
+        }
+
+        if allow_bare_instruction {
+            match text.trim() {
+                "Create" => return Some(Self::BareCreate),
+                "CreateIdempotent" => return Some(Self::BareCreateIdempotent),
+                "RecoverNested" => return Some(Self::BareRecoverNested),
+                _ => {}
+            }
         }
 
         let name = text.strip_prefix("Instruction: ")?.trim();
@@ -135,6 +162,9 @@ impl TokenLog {
             Self::InstructionCreate => "Instruction: Create",
             Self::InstructionCreateIdempotent => "Instruction: CreateIdempotent",
             Self::InstructionRecoverNested => "Instruction: RecoverNested",
+            Self::BareCreate => "Create",
+            Self::BareCreateIdempotent => "CreateIdempotent",
+            Self::BareRecoverNested => "RecoverNested",
             Self::InitAta => "Initialize the associated token account",
         }
     }

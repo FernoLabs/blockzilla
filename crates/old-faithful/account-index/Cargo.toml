@@ -1,0 +1,20 @@
+[package]
+name = "of-account-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.102"
+bs58 = "0.5.1"
+of-car-reader = { path = "../car-reader" }
+clap = { version = "4.6.1", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+solana-short-vec = { version = "3.2.1", default-features = false }
+wincode = "0.5.4"
+zstd = "0.13.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"

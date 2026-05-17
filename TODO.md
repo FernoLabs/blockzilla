@@ -37,6 +37,10 @@ Make reqwest in reader optional
 
 # Backlog
 
+- Archive V2 durable nonce follow-up
+  - Verify `OwnedCompactRecentBlockhash::Nonce` values against nonce-account state so raw recent-blockhash fallback cannot hide a parser/modeling mistake.
+  - Add/extend nonce-account indexing; durable nonce accounts will likely need their own lookup path.
+
 - explore pzstd
   - multiple frame decodeing to allow multithreading ?
   - one frame per block ? 
@@ -47,3 +51,13 @@ Make reqwest in reader optional
     - read index
     - read offest of epoch
     - return json encoded
+
+- live archive producer
+  - keep the live producer in its own deployable `blockzilla-live-producer` crate
+  - build Blockzilla archive from our own feed first, not from CAR first
+  - use Triton CAR as repair source for missed PoH entries and shredding data
+  - keep regular RPC fallback visibly incomplete when PoH/shredding is missing
+  - add normalized live block intake structs and completeness states
+  - add shred stream sidecar for historical shred research
+  - append blockhash and signature sidecars live
+  - count pubkeys live from epoch start, then write ordered registry and repack at epoch close

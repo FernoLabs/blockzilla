@@ -1,0 +1,30 @@
+[package]
+name = "of-signature-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bench]]
+name = "get_transaction"
+harness = false
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.22.1"
+bs58 = "0.5.1"
+of-car-reader = { path = "../car-reader" }
+clap = { version = "4.6.1", features = ["derive"] }
+gxhash = "3.5.0"
+memmap2 = "0.9.10"
+ph = { version = "0.11.0", features = ["gxhash"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "rustls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tempfile = "3.27.0"
+wincode = "0.5.4"
+xorf = "0.12.0"
+zstd = "0.13.3"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }

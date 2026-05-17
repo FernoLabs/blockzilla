@@ -1,20 +1,25 @@
 use serde::{Deserialize, Serialize};
-use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{KeyIndex, KeyStore, StrId, StringTable};
+use crate::{CompactPubkey, KeyIndex, KeyStore, StrId, StringTable};
 
 /// SPL Token-2022 program id
 pub const STR_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 /// Compact id for any pubkey that exists in the Registry.
 /// This is not “program id” specific here, it is simply the registry index + 1.
-pub type PubkeyId = u32;
+pub type PubkeyId = CompactPubkey;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum Token2022Log {
     /// entrypoint.rs:17 msg!(error.to_str::<TokenError>())
     Error(Token2022ErrorLog),
+
+    /// Static `msg!` payloads from the Token-2022 processor and extensions.
+    Static(Token2022StaticLog),
+
+    /// processor.rs:437
+    CalculatedFee { calculated_fee: u64, fee: u64 },
 
     /// extension/confidential_transfer/processor.rs:188
     AccountNeedsResizePlusBytesDebug { bytes: usize },
@@ -37,6 +42,148 @@ pub enum Token2022Log {
 
     /// extension/transfer_fee/processor.rs:266
     ErrorHarvestingFrom4 { account_key: PubkeyId, error: StrId },
+}
+
+macro_rules! token_2022_static_logs {
+    ($( $variant:ident => $text:literal, )+ ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+        pub enum Token2022StaticLog {
+            $( $variant, )+
+        }
+
+        impl Token2022StaticLog {
+            #[inline]
+            pub fn parse(text: &str) -> Option<Self> {
+                match text {
+                    $( $text => Some(Self::$variant), )+
+                    _ => None,
+                }
+            }
+
+            #[inline]
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $text, )+
+                }
+            }
+        }
+    };
+}
+
+token_2022_static_logs! {
+    WarningPermanentDelegate => "Warning: Mint has a permanent delegate, so tokens in this account may be seized at any time",
+    PermissionedBurnAuthorityNoneUseStandardBurn => "Permissioned burn authority is None; use the standard burn",
+    InstructionBatch => "Instruction: Batch",
+    InstructionInitializeMint => "Instruction: InitializeMint",
+    InstructionInitializeMint2 => "Instruction: InitializeMint2",
+    InstructionInitializeAccount => "Instruction: InitializeAccount",
+    InstructionInitializeAccount2 => "Instruction: InitializeAccount2",
+    InstructionInitializeAccount3 => "Instruction: InitializeAccount3",
+    InstructionInitializeMultisig => "Instruction: InitializeMultisig",
+    InstructionInitializeMultisig2 => "Instruction: InitializeMultisig2",
+    InstructionTransfer => "Instruction: Transfer",
+    InstructionApprove => "Instruction: Approve",
+    InstructionRevoke => "Instruction: Revoke",
+    InstructionSetAuthority => "Instruction: SetAuthority",
+    InstructionMintTo => "Instruction: MintTo",
+    InstructionBurn => "Instruction: Burn",
+    InstructionCloseAccount => "Instruction: CloseAccount",
+    InstructionFreezeAccount => "Instruction: FreezeAccount",
+    InstructionThawAccount => "Instruction: ThawAccount",
+    InstructionTransferChecked => "Instruction: TransferChecked",
+    InstructionApproveChecked => "Instruction: ApproveChecked",
+    InstructionMintToChecked => "Instruction: MintToChecked",
+    InstructionBurnChecked => "Instruction: BurnChecked",
+    InstructionSyncNative => "Instruction: SyncNative",
+    InstructionGetAccountDataSize => "Instruction: GetAccountDataSize",
+    InstructionInitializeMintCloseAuthority => "Instruction: InitializeMintCloseAuthority",
+    InstructionInitializeImmutableOwner => "Instruction: InitializeImmutableOwner",
+    InstructionAmountToUiAmount => "Instruction: AmountToUiAmount",
+    InstructionUiAmountToAmount => "Instruction: UiAmountToAmount",
+    InstructionReallocate => "Instruction: Reallocate",
+    InstructionCreateNativeMint => "Instruction: CreateNativeMint",
+    InstructionInitializeNonTransferableMint => "Instruction: InitializeNonTransferableMint",
+    InstructionInitializePermanentDelegate => "Instruction: InitializePermanentDelegate",
+    InstructionWithdrawExcessLamports => "Instruction: WithdrawExcessLamports",
+    InstructionConfidentialMintBurnExtension => "Instruction: ConfidentialMintBurnExtension",
+    InstructionScaledUiAmountExtension => "Instruction: ScaledUiAmountExtension",
+    InstructionPausableExtension => "Instruction: PausableExtension",
+    InstructionPermissionedBurnExtension => "Instruction: PermissionedBurnExtension",
+    InstructionUnwrapLamports => "Instruction: UnwrapLamports",
+    PausableInitialize => "PausableInstruction::Initialize",
+    PausablePause => "PausableInstruction::Pause",
+    PausableResume => "PausableInstruction::Resume",
+    GroupPointerInitialize => "GroupPointerInstruction::Initialize",
+    GroupPointerUpdate => "GroupPointerInstruction::Update",
+    GroupMemberPointerInitialize => "GroupMemberPointerInstruction::Initialize",
+    GroupMemberPointerUpdate => "GroupMemberPointerInstruction::Update",
+    CpiGuardEnable => "CpiGuardInstruction::Enable",
+    CpiGuardDisable => "CpiGuardInstruction::Disable",
+    DefaultAccountStateInitialize => "DefaultAccountStateInstruction::Initialize",
+    DefaultAccountStateUpdate => "DefaultAccountStateInstruction::Update",
+    RequiredMemoTransfersEnable => "RequiredMemoTransfersInstruction::Enable",
+    RequiredMemoTransfersDisable => "RequiredMemoTransfersInstruction::Disable",
+    MetadataMintMustBeInitializedInMint => "Metadata for a mint must be initialized in the mint itself.",
+    MetadataPointerExtensionRequired => "A mint with metadata must have the metadata-pointer extension initialized",
+    TokenMetadataInitialize => "TokenMetadataInstruction: Initialize",
+    TokenMetadataUpdateField => "TokenMetadataInstruction: UpdateField",
+    TokenMetadataRemoveKey => "TokenMetadataInstruction: RemoveKey",
+    TokenMetadataUpdateAuthority => "TokenMetadataInstruction: UpdateAuthority",
+    TokenMetadataEmit => "TokenMetadataInstruction: Emit",
+    ScaledUiAmountInitialize => "ScaledUiAmountMintInstruction::Initialize",
+    ScaledUiAmountUpdateScale => "ScaledUiAmountMintInstruction::UpdateScale",
+    PermissionedBurnInitialize => "PermissionedBurnInstruction::Initialize",
+    PermissionedBurnBurn => "PermissionedBurnInstruction::Burn",
+    PermissionedBurnBurnChecked => "PermissionedBurnInstruction::BurnChecked",
+    PermissionedBurnConfidentialBurn => "PermissionedBurnInstruction::ConfidentialBurn",
+    ConfidentialTransferEncryptionPubkeyMismatch => "Encryption public-key mismatch",
+    ConfidentialTransferAvailableBalanceMismatch => "Available balance mismatch",
+    ConfidentialTransferInitializeMint => "ConfidentialTransferInstruction::InitializeMint",
+    ConfidentialTransferUpdateMint => "ConfidentialTransferInstruction::UpdateMint",
+    ConfidentialTransferConfigureAccount => "ConfidentialTransferInstruction::ConfigureAccount",
+    ConfidentialTransferApproveAccount => "ConfidentialTransferInstruction::ApproveAccount",
+    ConfidentialTransferEmptyAccount => "ConfidentialTransferInstruction::EmptyAccount",
+    ConfidentialTransferDeposit => "ConfidentialTransferInstruction::Deposit",
+    ConfidentialTransferWithdraw => "ConfidentialTransferInstruction::Withdraw",
+    ConfidentialTransferTransfer => "ConfidentialTransferInstruction::Transfer",
+    ConfidentialTransferApplyPendingBalance => "ConfidentialTransferInstruction::ApplyPendingBalance",
+    ConfidentialTransferDisableConfidentialCredits => "ConfidentialTransferInstruction::DisableConfidentialCredits",
+    ConfidentialTransferEnableConfidentialCredits => "ConfidentialTransferInstruction::EnableConfidentialCredits",
+    ConfidentialTransferDisableNonConfidentialCredits => "ConfidentialTransferInstruction::DisableNonConfidentialCredits",
+    ConfidentialTransferEnableNonConfidentialCredits => "ConfidentialTransferInstruction::EnableNonConfidentialCredits",
+    ConfidentialTransferTransferWithFee => "ConfidentialTransferInstruction::TransferWithFee",
+    ConfidentialTransferConfigureAccountWithRegistry => "ConfidentialTransferInstruction::ConfigureAccountWithRegistry",
+    TransferHookRequiresAuthorityOrProgramId => "The transfer hook extension requires at least an authority or a program id for initialization, neither was provided",
+    TransferHookInitialize => "TransferHookInstruction::Initialize",
+    TransferHookUpdate => "TransferHookInstruction::Update",
+    MetadataPointerRequiresAuthorityOrAddress => "The metadata pointer extension requires at least an authority or an address for initialization, neither was provided",
+    MetadataPointerInitialize => "MetadataPointerInstruction::Initialize",
+    MetadataPointerUpdate => "MetadataPointerInstruction::Update",
+    InterestBearingMintInitialize => "InterestBearingMintInstruction::Initialize",
+    InterestBearingMintUpdateRate => "InterestBearingMintInstruction::UpdateRate",
+    ConfidentialMintBurnInitializeMint => "ConfidentialMintBurnInstruction::InitializeMint",
+    ConfidentialMintBurnRotateSupplyElGamal => "ConfidentialMintBurnInstruction::RotateSupplyElGamal",
+    ConfidentialMintBurnUpdateDecryptableSupply => "ConfidentialMintBurnInstruction::UpdateDecryptableSupply",
+    ConfidentialMintBurnConfidentialMint => "ConfidentialMintBurnInstruction::ConfidentialMint",
+    ConfidentialMintBurnConfidentialBurn => "ConfidentialMintBurnInstruction::ConfidentialBurn",
+    ConfidentialMintBurnApplyPendingBurn => "ConfidentialMintBurnInstruction::ApplyPendingBurn",
+    ConfidentialTransferFeeInitializeConfig => "ConfidentialTransferFeeInstruction::InitializeConfidentialTransferFeeConfig",
+    ConfidentialTransferFeeWithdrawFromMint => "ConfidentialTransferFeeInstruction::WithdrawWithheldTokensFromMint",
+    ConfidentialTransferFeeWithdrawFromAccounts => "ConfidentialTransferFeeInstruction::WithdrawWithheldTokensFromAccounts",
+    ConfidentialTransferFeeHarvestToMint => "ConfidentialTransferFeeInstruction::HarvestWithheldTokensToMint",
+    ConfidentialTransferFeeEnableHarvestToMint => "ConfidentialTransferFeeInstruction::EnableHarvestToMint",
+    ConfidentialTransferFeeDisableHarvestToMint => "ConfidentialTransferFeeInstruction::DisableHarvestToMint",
+    TransferFeeTransferCheckedWithFee => "TransferFeeInstruction: TransferCheckedWithFee",
+    TransferFeeWithdrawFromMint => "TransferFeeInstruction: WithdrawWithheldTokensFromMint",
+    TransferFeeWithdrawFromAccounts => "TransferFeeInstruction: WithdrawWithheldTokensFromAccounts",
+    TransferFeeHarvestToMint => "TransferFeeInstruction: HarvestWithheldTokensToMint",
+    TransferFeeSetTransferFee => "TransferFeeInstruction: SetTransferFee",
+    TokenGroupMintMustBeInitializedInMint => "Group configurations for a mint must be initialized in the mint itself.",
+    TokenGroupMemberMustBeInitializedInMint => "Group member configurations for a mint must be initialized in the mint itself.",
+    TokenGroupInitializeGroup => "TokenGroupInstruction: InitializeGroup",
+    TokenGroupUpdateGroupMaxSize => "TokenGroupInstruction: UpdateGroupMaxSize",
+    TokenGroupUpdateGroupAuthority => "TokenGroupInstruction: UpdateGroupAuthority",
+    TokenGroupInitializeMember => "TokenGroupInstruction: InitializeMember",
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -399,32 +546,49 @@ impl Token2022ErrorLog {
 
 impl Token2022Log {
     #[inline]
-    pub fn parse(payload: &str, index: &KeyIndex, st: &mut StringTable) -> Option<Self> {
+    pub fn parse_without_registry(payload: &str) -> Option<Self> {
         if let Some(e) = Token2022ErrorLog::parse(payload) {
             return Some(Self::Error(e));
         }
 
-        // "account needs resize, +{:?} bytes"
-        // In practice the {:?} for usize prints a plain integer.
+        if let Some(log) = Token2022StaticLog::parse(payload) {
+            return Some(Self::Static(log));
+        }
+
+        if let Some((calculated_fee, fee)) =
+            parse_two_braced(payload, "Calculated fee ", ", received ")
+            && let (Ok(calculated_fee), Ok(fee)) = (calculated_fee.parse(), fee.parse())
+        {
+            return Some(Self::CalculatedFee {
+                calculated_fee,
+                fee,
+            });
+        }
+
         if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes")
             && let Ok(bytes) = x.parse::<usize>()
         {
             return Some(Self::AccountNeedsResizePlusBytesDebug { bytes });
         }
 
-        // NOTE: you had a second enum variant for another site, but the log string is the same.
-        // If you later want to distinguish these, you need an additional discriminator in the log line.
+        None
+    }
+
+    #[inline]
+    pub fn parse(payload: &str, index: &KeyIndex, st: &mut StringTable) -> Option<Self> {
+        if let Some(log) = Self::parse_without_registry(payload) {
+            return Some(log);
+        }
+
         if let Some(x) = parse_one_braced(payload, "account needs resize, +", " bytes")
             && let Ok(bytes) = x.parse::<usize>()
         {
-            // If you want to prefer the other variant instead, swap which one you return here.
-            // For now we keep Debug as the canonical one, and Debug2 remains for future use.
             let _ = bytes;
         }
 
         // "Error harvesting from {}: {}"
         if let Some((a, b)) = parse_two_braced(payload, "Error harvesting from ", ": ") {
-            let account_key = index.lookup_str(a)?;
+            let account_key = index.compact_str(a)?;
             return Some(Self::ErrorHarvestingFrom {
                 account_key,
                 error: st.push(b),
@@ -438,6 +602,12 @@ impl Token2022Log {
     pub fn as_str(&self, st: &StringTable, store: &KeyStore) -> String {
         match self {
             Self::Error(e) => e.as_str().to_string(),
+            Self::Static(log) => log.as_str().to_string(),
+
+            Self::CalculatedFee {
+                calculated_fee,
+                fee,
+            } => format!("Calculated fee {calculated_fee}, received {fee}"),
 
             Self::AccountNeedsResizePlusBytesDebug { bytes } => {
                 format!("account needs resize, +{:?} bytes", bytes)
@@ -460,15 +630,9 @@ impl Token2022Log {
 
 #[inline]
 fn pubkey_id_to_string(store: &KeyStore, id: PubkeyId) -> String {
-    // Id=0 reserved/invalid.
-    if id == 0 {
-        return "<invalid-pubkey-id-0>".to_string();
-    }
-    let bytes = match store.get(id) {
-        Some(b) => b,
-        None => return format!("<pubkey-id-oob:{}>", id),
-    };
-    Pubkey::new_from_array(*bytes).to_string()
+    id.to_pubkey(store)
+        .map(|pubkey| pubkey.to_string())
+        .unwrap_or_else(|| format!("<pubkey-id-oob:{id:?}>"))
 }
 
 #[inline]

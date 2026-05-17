@@ -1,0 +1,27 @@
+[package]
+name = "of-slot-ranges"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "of-slot-ranges"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "of-car-slot-index"
+path = "src/bin/car_slot_index.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:bs58", "dep:clap", "dep:futures", "dep:reqwest", "dep:zstd"]
+
+[dependencies]
+anyhow = "1.0.102"
+of-car-reader = { path = "../car-reader", default-features = false, features = ["compact-index"] }
+bs58 = { version = "0.5.1", optional = true }
+clap = { version = "4.6.1", features = ["derive"], optional = true }
+futures = { version = "0.3.32", features = ["executor"], optional = true }
+reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "http2", "blocking"], optional = true }
+zstd = { version = "0.13.3", optional = true }

@@ -1,0 +1,69 @@
+[package]
+name = "of-get-block-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "of-get-block-worker"
+path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+server = [
+    "dep:anyhow",
+    "dep:async-trait",
+    "dep:axum",
+    "dep:clap",
+    "dep:of-slot-ranges",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:sha2",
+    "dep:time",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "of-car-reader/compact-index",
+    "of-car-reader/zstd-native",
+]
+worker = [
+    "dep:anyhow",
+    "dep:js-sys",
+    "dep:of-slot-ranges",
+    "dep:prost",
+    "dep:serde",
+    "dep:sha2",
+    "dep:url",
+    "dep:worker",
+    "dep:worker-macros",
+    "of-car-reader/compact-index",
+    "of-car-reader/zstd-wasm",
+]
+
+[dependencies]
+anyhow = { version = "1.0.102", optional = true }
+async-trait = { version = "0.1.89", optional = true }
+axum = { version = "0.8.9", features = ["json"], optional = true }
+bs58 = "0.5.1"
+clap = { version = "4.6.1", features = ["derive", "env"], optional = true }
+of-car-reader = { path = "../car-reader", default-features = false }
+of-slot-ranges = { path = "../slot-ranges", default-features = false, optional = true }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"], optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = "1.0.149"
+sha2 = { version = "0.11.0", optional = true }
+time = { version = "0.3.44", features = ["formatting", "macros"], optional = true }
+tokio = { version = "1.52.3", features = ["fs", "macros", "net", "rt-multi-thread"], optional = true }
+tracing = { version = "0.1.44", optional = true }
+tracing-subscriber = { version = "0.3.23", optional = true }
+js-sys = { version = "0.3.98", optional = true }
+prost = { version = "0.14.3", optional = true }
+url = { version = "2.5.7", optional = true }
+worker = { version = "0.8.3", features = ["http"], optional = true }
+worker-macros = { version = "0.8.3", features = ["http"], optional = true }
+wincode = "0.5.4"

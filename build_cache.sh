@@ -11,6 +11,7 @@ START="${1:-}"
 END="${2:-}"
 DEST_DIR="${3:-./epochs}"
 BASE_URL="${4:-https://files.old-faithful.net}"
+GENESIS_URL="${GENESIS_URL:-https://api.mainnet-beta.solana.com/genesis.tar.bz2}"
 
 if [[ -z "${START}" || -z "${END}" ]]; then
   echo "Usage: $0 <start> <end> [dest_dir] [base_url] [--verify] [--min-free-pct=N]" >&2
@@ -49,7 +50,7 @@ for arg in "${@:-}"; do
 done
 
 # -------- requirements --------
-for cmd in aria2c zstd df awk; do
+for cmd in aria2c zstd df awk tar; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Error: $cmd not found in PATH" >&2
     exit 1
@@ -129,6 +130,31 @@ compress_one() {
   echo "$(timestamp) compress: done  $(basename "$zst")  free=$(free_pct)%"
 }
 
+download_genesis() {
+  local genesis="${DEST_DIR}/genesis.tar.bz2"
+
+  if [[ -s "$genesis" ]]; then
+    echo "$(timestamp) genesis: exists $(basename "$genesis") - skip"
+    return 0
+  fi
+
+  echo "$(timestamp) genesis: download ${GENESIS_URL}"
+  aria2c -d "${DEST_DIR}" -o "genesis.tar.bz2" -c "${GENESIS_URL}" -x 4 -s 4 --file-allocation=none
+
+  if aria_unfinished_for "$genesis"; then
+    echo "$(timestamp) genesis: unfinished aria2 sidecar still present" >&2
+    return 1
+  fi
+
+  if [[ ! -s "$genesis" ]]; then
+    echo "$(timestamp) genesis: download failed - ${genesis} missing or empty." >&2
+    return 1
+  fi
+
+  tar -tjf "$genesis" >/dev/null
+  echo "$(timestamp) genesis: ready $(basename "$genesis")"
+}
+
 download_and_compress_epoch() {
   local i="$1"
   local car="${DEST_DIR}/epoch-${i}.car"
@@ -180,6 +206,10 @@ download_and_compress_epoch() {
 
 echo "$(timestamp) config: dest=${DEST_DIR} base_url=${BASE_URL} keep_free>=${MIN_FREE_PCT}% zstd=-${ZSTD_LVL} T=${ZSTD_THREADS} verify=${VERIFY}"
 echo "$(timestamp) fs: $(df -P "${DEST_DIR}" | awk 'NR==2{print $1" on "$6", free "100-$5"%"}')"
+
+if (( START <= 0 && END >= 0 )); then
+  download_genesis
+fi
 
 # Process only the requested range
 for i in $(seq "${START}" "${END}"); do

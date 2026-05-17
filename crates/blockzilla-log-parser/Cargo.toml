@@ -1,0 +1,14 @@
+[package]
+name = "blockzilla-log-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Borrowed parser for Solana runtime log lines"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "parse_line"
+harness = false

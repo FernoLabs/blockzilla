@@ -1,12 +1,19 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
+*.o
 
 # Data directories
 /cache/
 /blockzilla-v1/
 /blockzilla-v2/
+/local-archive-v2-runs/
+/piggy-analysis/
+/local-slices/
+account-index-local/
+account-index-local-merged/
+touched-accounts/
+epochs/
 
 # IDE
 .vscode/
@@ -19,5 +26,13 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-epochs/
 solana-prog/
+
+# Generated outputs
+/.wrangler/
+/flamegraph.svg
+*.log
+__pycache__/
+*.pyc
+apps/**/build/
+crates/**/build/
