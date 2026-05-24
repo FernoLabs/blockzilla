@@ -1,22 +1,26 @@
 use crate::{
-    get_block::{GetBlockConfig, render_get_block_json},
+    get_block::{GetBlockConfig, render_get_block_json_bytes, render_get_block_time},
     source::Source,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use of_car_reader::{
+    CarBlockReader,
+    car_block_group::CarBlockGroup,
     compact_index::decode_offset_and_size,
     node::{Node, decode_node, peek_node_type},
     slot_ranges::{
-        SLOT_RANGE_V2_ENTRY_SIZE, SlotRangeWithPreviousBlockhash, decode_slot_range_v2_entry,
-        epoch_for_slot, slot_in_epoch, slot_range_v2_entry_offset,
+        SLOT_RANGE_ENTRY_SIZE, SLOT_RANGE_V2_ENTRY_SIZE, SlotRange, decode_slot_range_entry,
+        decode_slot_range_v2_entry, epoch_for_slot, slot_in_epoch, slot_range_entry_offset,
+        slot_range_v2_entry_offset,
     },
 };
 use of_slot_ranges::{AsyncCompactIndex, RangeReader};
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fs::File,
     future::Future,
-    io::{Read, Seek, SeekFrom},
+    io::{Cursor, Read, Seek, SeekFrom},
     path::PathBuf,
     pin::Pin,
     sync::Arc,
@@ -37,9 +41,15 @@ pub struct GetBlockOptions {
     pub config: GetBlockConfig,
 }
 
-struct FetchedBlock {
-    bytes: Vec<u8>,
-    previous_blockhash: [u8; 32],
+#[derive(Clone)]
+pub struct FetchedBlock {
+    pub bytes: Vec<u8>,
+    pub previous_blockhash: Option<[u8; 32]>,
+}
+
+struct SlotRangeLookup {
+    range: SlotRange,
+    previous_blockhash: Option<[u8; 32]>,
 }
 
 impl Archive {
@@ -52,32 +62,55 @@ impl Archive {
         slot: u64,
         options: GetBlockOptions,
     ) -> Result<Option<Value>> {
+        let Some(bytes) = self.get_block_json_bytes(slot, options).await? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|err| anyhow!("parse generated getBlock JSON for slot {slot}: {err}"))
+    }
+
+    pub async fn get_block_json_bytes(
+        &self,
+        slot: u64,
+        options: GetBlockOptions,
+    ) -> Result<Option<Vec<u8>>> {
         let Some(block) = self.fetch_block(slot, options.config.rewards).await? else {
             return Ok(None);
         };
 
-        render_get_block_json(block.bytes, Some(block.previous_blockhash), options.config)
+        render_get_block_json_bytes(block.bytes, block.previous_blockhash, options.config)
             .map(Some)
             .map_err(|err| anyhow!("decode slot {slot} into getBlock JSON: {err}"))
     }
 
     pub async fn get_block_time(&self, slot: u64) -> Result<Option<Value>> {
-        let Some(block) = self
-            .get_block_json(
-                slot,
-                GetBlockOptions {
-                    config: GetBlockConfig {
-                        rewards: false,
-                        transaction_details: crate::get_block::TransactionDetails::None,
-                        ..Default::default()
-                    },
-                },
-            )
-            .await?
-        else {
+        let Some(bytes) = self.get_block_time_json_bytes(slot).await? else {
             return Ok(None);
         };
-        Ok(block.get("blockTime").cloned())
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|err| anyhow!("parse generated getBlockTime JSON for slot {slot}: {err}"))
+    }
+
+    pub async fn get_block_time_json_bytes(&self, slot: u64) -> Result<Option<Vec<u8>>> {
+        let Some(block) = self.fetch_block(slot, false).await? else {
+            return Ok(None);
+        };
+        let block_time = render_get_block_time(block.bytes)
+            .map_err(|err| anyhow!("decode slot {slot} blockTime: {err}"))?;
+        Ok(Some(match block_time {
+            Some(block_time) => block_time.to_string().into_bytes(),
+            None => b"null".to_vec(),
+        }))
+    }
+
+    pub async fn fetch_block_payload(
+        &self,
+        slot: u64,
+        include_rewards: bool,
+    ) -> Result<Option<FetchedBlock>> {
+        self.fetch_block(slot, include_rewards).await
     }
 
     async fn fetch_block(&self, slot: u64, include_rewards: bool) -> Result<Option<FetchedBlock>> {
@@ -106,25 +139,21 @@ impl Archive {
                     entry.range.offset, entry.range.len
                 )
             })?;
+        let previous_blockhash = match entry.previous_blockhash {
+            Some(previous_blockhash) => Some(previous_blockhash),
+            None => self.resolve_previous_blockhash(slot, &bytes).await?,
+        };
 
         if include_rewards && let Some(reward) = missing_block_rewards_entry(&bytes)? {
-            let (offset, len) = self
-                .lookup_car_entry_range_for_cid(epoch, &reward.cid)
+            let rewards_entries = self
+                .fetch_rewards_entry_chain(epoch, &car_path, &reward.cid)
                 .await?;
-            if len > MAX_REWARDS_ENTRY_BYTES {
-                bail!("rewards entry is {len} bytes, above {MAX_REWARDS_ENTRY_BYTES}");
-            }
-            let rewards_entry = self
-                .source
-                .get_range(&car_path, offset, len as usize)
-                .await
-                .context("read rewards CAR entry")?;
-            bytes.splice(reward.insert_at..reward.insert_at, rewards_entry);
+            bytes.splice(reward.insert_at..reward.insert_at, rewards_entries);
         }
 
         Ok(Some(FetchedBlock {
             bytes,
-            previous_blockhash: entry.previous_blockhash,
+            previous_blockhash,
         }))
     }
 
@@ -132,16 +161,38 @@ impl Archive {
         &self,
         epoch: u64,
         slot_in_epoch: u64,
-    ) -> Result<Option<SlotRangeWithPreviousBlockhash>> {
-        let Some(path) = self.find_slot_index_path(epoch) else {
+    ) -> Result<Option<SlotRangeLookup>> {
+        if let Some(path) = self.find_slot_index_v2_path(epoch) {
+            let mut file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
+            let range = read_v2_entry_from_file(&mut file, slot_in_epoch)?;
+            return Ok(Some(SlotRangeLookup {
+                range: range.range,
+                previous_blockhash: Some(range.previous_blockhash),
+            }));
+        }
+
+        let Some(path) = self.find_slot_index_legacy_path(epoch) else {
             return Ok(None);
         };
         let mut file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
-        Ok(Some(read_v2_entry_from_file(&mut file, slot_in_epoch)?))
+        Ok(Some(SlotRangeLookup {
+            range: read_legacy_entry_from_file(&mut file, slot_in_epoch)?,
+            previous_blockhash: None,
+        }))
     }
 
-    fn find_slot_index_path(&self, epoch: u64) -> Option<PathBuf> {
+    fn find_slot_index_v2_path(&self, epoch: u64) -> Option<PathBuf> {
         let name = format!("epoch-{epoch}-slot-ranges-v2.raw");
+        [
+            self.index_dir.join("slot-index").join(&name),
+            self.index_dir.join(&name),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+    }
+
+    fn find_slot_index_legacy_path(&self, epoch: u64) -> Option<PathBuf> {
+        let name = format!("epoch-{epoch}-slot-ranges.raw");
         [
             self.index_dir.join("slot-index").join(&name),
             self.index_dir.join(&name),
@@ -167,6 +218,84 @@ impl Archive {
         }
         Ok(decode_offset_and_size(&value)?)
     }
+
+    async fn fetch_rewards_entry_chain(
+        &self,
+        epoch: u64,
+        car_path: &str,
+        root_cid: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut queue = vec![root_cid.to_vec()];
+        let mut seen = HashSet::<Vec<u8>>::new();
+
+        while let Some(cid) = queue.pop() {
+            if !seen.insert(cid.clone()) {
+                continue;
+            }
+            let (offset, len) = self.lookup_car_entry_range_for_cid(epoch, &cid).await?;
+            if len > MAX_REWARDS_ENTRY_BYTES {
+                bail!("rewards continuation entry is {len} bytes, above {MAX_REWARDS_ENTRY_BYTES}");
+            }
+            let entry = self
+                .source
+                .get_range(car_path, offset, len as usize)
+                .await
+                .context("read rewards CAR entry")?;
+            for next in rewards_continuation_cids(&entry)? {
+                if !seen.contains(&next) {
+                    queue.push(next);
+                }
+            }
+            out.extend_from_slice(&entry);
+        }
+
+        Ok(out)
+    }
+
+    async fn resolve_previous_blockhash(
+        &self,
+        slot: u64,
+        block_bytes: &[u8],
+    ) -> Result<Option<[u8; 32]>> {
+        let Some(parent_slot) = decode_block_parent_slot(block_bytes.to_vec())
+            .with_context(|| format!("decode parent slot for slot {slot}"))?
+        else {
+            return Ok(None);
+        };
+        if parent_slot == slot {
+            return Ok(None);
+        }
+
+        let Some(parent_entry) =
+            self.read_slot_index_optional(epoch_for_slot(parent_slot), slot_in_epoch(parent_slot))?
+        else {
+            return Ok(None);
+        };
+        if parent_entry.range.is_empty() {
+            return Ok(None);
+        }
+        if parent_entry.range.len > MAX_CAR_BLOCK_BYTES {
+            bail!(
+                "parent slot {parent_slot} CAR range is {} bytes, above the {MAX_CAR_BLOCK_BYTES} byte limit",
+                parent_entry.range.len
+            );
+        }
+
+        let parent_car_path = car_path(epoch_for_slot(parent_slot));
+        let parent_bytes = self
+            .source
+            .get_range(
+                &parent_car_path,
+                parent_entry.range.offset,
+                parent_entry.range.len as usize,
+            )
+            .await
+            .with_context(|| format!("read parent CAR range for slot {parent_slot}"))?;
+        decode_blockhash(parent_bytes)
+            .map(Some)
+            .with_context(|| format!("decode blockhash for parent slot {parent_slot}"))
+    }
 }
 
 fn car_path(epoch: u64) -> String {
@@ -176,12 +305,45 @@ fn car_path(epoch: u64) -> String {
 fn read_v2_entry_from_file(
     file: &mut File,
     slot_in_epoch: u64,
-) -> Result<SlotRangeWithPreviousBlockhash> {
+) -> Result<of_car_reader::slot_ranges::SlotRangeWithPreviousBlockhash> {
     let offset = slot_range_v2_entry_offset(slot_in_epoch)?;
     let mut bytes = [0u8; SLOT_RANGE_V2_ENTRY_SIZE];
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(&mut bytes)?;
     Ok(decode_slot_range_v2_entry(&bytes)?)
+}
+
+fn read_legacy_entry_from_file(file: &mut File, slot_in_epoch: u64) -> Result<SlotRange> {
+    let offset = slot_range_entry_offset(slot_in_epoch)?;
+    let mut bytes = [0u8; SLOT_RANGE_ENTRY_SIZE];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut bytes)?;
+    Ok(decode_slot_range_entry(&bytes)?)
+}
+
+fn decode_block_parent_slot(bytes: Vec<u8>) -> Result<Option<u64>> {
+    let len = bytes.len();
+    let cursor = Cursor::new(bytes);
+    let mut reader = CarBlockReader::with_capacity(cursor, len);
+    let mut block = CarBlockGroup::without_rewards_and_transaction_payloads();
+    if !reader.read_until_block_into(&mut block)? {
+        bail!("CAR slice did not contain a block node");
+    }
+    Ok(block.parent_slot)
+}
+
+fn decode_blockhash(bytes: Vec<u8>) -> Result<[u8; 32]> {
+    let len = bytes.len();
+    let cursor = Cursor::new(bytes);
+    let mut reader = CarBlockReader::with_capacity(cursor, len);
+    let mut block = CarBlockGroup::without_rewards_and_transaction_payloads();
+    if !reader.read_until_block_into(&mut block)? {
+        bail!("CAR slice did not contain a block node");
+    }
+    if !block.has_blockhash {
+        bail!("block did not contain an entry hash");
+    }
+    Ok(block.blockhash)
 }
 
 struct MissingRewardEntry {
@@ -263,6 +425,62 @@ fn block_rewards_cid(payload: &[u8]) -> Result<Option<Vec<u8>>> {
                 rewards.normalized_bytes().len()
             )
         })
+}
+
+fn rewards_continuation_cids(car_entries: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let mut pos = 0usize;
+    let mut out = Vec::new();
+    while pos < car_entries.len() {
+        let (entry_len, varint_len) = read_uvarint64(&car_entries[pos..])?;
+        let entry_len = usize::try_from(entry_len).context("CAR entry length exceeds usize")?;
+        if entry_len < CAR_CID_LEN {
+            bail!("CAR entry length is smaller than CID length");
+        }
+        let payload_start = pos
+            .checked_add(varint_len)
+            .and_then(|value| value.checked_add(CAR_CID_LEN))
+            .ok_or_else(|| anyhow!("CAR payload offset overflow"))?;
+        let next_pos = pos
+            .checked_add(varint_len)
+            .and_then(|value| value.checked_add(entry_len))
+            .ok_or_else(|| anyhow!("CAR entry end overflow"))?;
+        if next_pos > car_entries.len() {
+            bail!("CAR entry extends past fetched reward range");
+        }
+        let payload = &car_entries[payload_start..next_pos];
+        out.extend(rewards_payload_next_cids(payload)?);
+        pos = next_pos;
+    }
+    Ok(out)
+}
+
+fn rewards_payload_next_cids(payload: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let node = decode_node(payload).context("decode rewards continuation node")?;
+    let next = match node {
+        Node::Rewards(rewards) => rewards.data.next,
+        Node::DataFrame(frame) => frame.next,
+        _ => None,
+    };
+    let Some(next) = next else {
+        return Ok(Vec::new());
+    };
+    next.iter()
+        .map(|cid| {
+            let cid = cid.map_err(|err| anyhow!(err.to_string()))?;
+            if cid.inline_raw_bytes().is_some() {
+                return Ok(None);
+            }
+            cid.car_cid_bytes()
+                .map(|bytes| Some(bytes.to_vec()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "CID ref has {} bytes and is not an inline identity CID",
+                        cid.normalized_bytes().len()
+                    )
+                })
+        })
+        .filter_map(|result| result.transpose())
+        .collect()
 }
 
 fn read_uvarint64(bytes: &[u8]) -> Result<(u64, usize)> {

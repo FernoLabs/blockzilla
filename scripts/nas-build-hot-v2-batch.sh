@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BIN="${BIN:-/home/ach/dev/blockzilla-v1-hot-retry-20260517/target/release/optimize-car-archive}"
+BIN="${BIN:-./target/release/blockzilla}"
 CAR_DIR="${CAR_DIR:-/volume1/blockzilla}"
 OUT_ROOT="${OUT_ROOT:-/volume1/blockzilla-v2}"
 LOG_ROOT="${LOG_ROOT:-/home/ach/dev/archive-v2-runs}"
@@ -11,6 +11,10 @@ EPOCHS="${EPOCHS:-10 50 100 200 300 400 500 600 700}"
 LEVEL="${LEVEL:-1}"
 
 mkdir -p "$OUT_ROOT" "$RUN_DIR"
+
+if [[ ! -x "$BIN" ]]; then
+  cargo build --release -p blockzilla --bin blockzilla
+fi
 
 echo "run_id=$RUN_ID"
 echo "binary=$BIN"

@@ -18,8 +18,8 @@ use blockzilla_format::{
     ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync,
     CompactBlockHeader, CompactInnerInstruction, CompactInnerInstructions, CompactLogStream,
     CompactMessageHeader, CompactMetaV1, CompactPohEntry, CompactPubkey, CompactReturnData,
-    CompactReward, CompactShredding, CompactTokenBalance, KeyIndex, KeyStore,
-    OwnedCompactAddressTableLookup, OwnedCompactInstruction, OwnedCompactLegacyMessage,
+    CompactReward, CompactShredding, CompactTokenBalance, CompactTransactionError, KeyIndex,
+    KeyStore, OwnedCompactAddressTableLookup, OwnedCompactInstruction, OwnedCompactLegacyMessage,
     OwnedCompactMessage, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
     OwnedCompactV0Message, SplitCompactIndexRecord, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
     WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block, WincodeArchiveV2BlockHeader,
@@ -2130,7 +2130,7 @@ fn find_previous_epoch_sidecar_dir(
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.contains(&marker) {
+        if !matches_epoch_dir_name(&name, &marker) {
             continue;
         }
         if has_blockhash_seed_sidecars(&path) {
@@ -2140,6 +2140,13 @@ fn find_previous_epoch_sidecar_dir(
     }
     candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     Ok(candidates.pop().map(|(_, _, path)| path))
+}
+
+fn matches_epoch_dir_name(name: &str, marker: &str) -> bool {
+    let Some(rest) = name.strip_prefix(marker) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with('-')
 }
 
 fn default_previous_epoch_sidecar_dir(output_dir: &Path, previous_epoch: u64) -> Option<PathBuf> {
@@ -9176,7 +9183,11 @@ fn no_registry_meta_from_protobuf_visit(bytes: &[u8]) -> Result<WincodeArchiveV2
 fn no_registry_meta_from_proto(
     meta: &TransactionStatusMeta,
 ) -> Result<WincodeArchiveV2NoRegistryMeta> {
-    let err = meta.err.as_ref().map(|err| err.err.clone());
+    let err = meta
+        .err
+        .as_ref()
+        .map(|err| CompactTransactionError::from_stored_wincode_bytes(&err.err))
+        .transpose()?;
     let inner_instructions = if meta.inner_instructions_none {
         None
     } else {
@@ -9493,7 +9504,7 @@ fn bytes_to_pubkey(bytes: &[u8], label: &str) -> Result<[u8; 32]> {
 
 #[derive(Default)]
 struct NoRegistryMetaVisitor {
-    err: Option<Vec<u8>>,
+    err: Option<CompactTransactionError>,
     fee: u64,
     pre_balances: Vec<u64>,
     post_balances: Vec<u64>,
@@ -9613,7 +9624,10 @@ impl<'a> TransactionStatusMetaVisitor<'a> for NoRegistryMetaVisitor {
 
     #[inline]
     fn status_error(&mut self, err: &'a [u8]) {
-        self.err = Some(err.to_vec());
+        match CompactTransactionError::from_stored_wincode_bytes(err) {
+            Ok(err) => self.err = Some(err),
+            Err(err) => self.record_error(err),
+        }
     }
 
     #[inline]

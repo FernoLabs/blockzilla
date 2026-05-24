@@ -17,7 +17,8 @@ use of_car_reader::slot_ranges::{
 use of_car_reader::{CarBlockReader, car_block_group::CarBlockGroup};
 use of_slot_ranges::{AsyncCompactIndex, RangeReader};
 use serde::Serialize;
-use std::{future::Future, io::Cursor, pin::Pin};
+use std::{collections::HashSet, future::Future, io::Cursor, pin::Pin};
+use wasm_bindgen::JsCast;
 use worker::*;
 
 const BLOCK_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
@@ -249,6 +250,62 @@ pub(crate) struct FetchedBlock {
     pub(crate) previous_blockhash: Option<[u8; 32]>,
 }
 
+pub(crate) struct ProfiledFetchedBlock {
+    pub(crate) block: FetchedBlock,
+    pub(crate) profile: FetchProfile,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FetchProfile {
+    pub(crate) slot: u64,
+    pub(crate) epoch: u64,
+    pub(crate) slot_in_epoch: u64,
+    pub(crate) total_us: u128,
+    pub(crate) slot_index_us: u128,
+    pub(crate) block_download_us: u128,
+    pub(crate) block_download_bytes: usize,
+    pub(crate) block_range_offset: u64,
+    pub(crate) block_range_len: u32,
+    pub(crate) previous_blockhash_us: u128,
+    pub(crate) parent_slot_decode_us: u128,
+    pub(crate) parent_slot_index_us: u128,
+    pub(crate) parent_block_download_us: u128,
+    pub(crate) parent_block_download_bytes: usize,
+    pub(crate) parent_blockhash_decode_us: u128,
+    pub(crate) rewards_scan_us: u128,
+    pub(crate) reward_lookup_us: u128,
+    pub(crate) reward_download_us: u128,
+    pub(crate) reward_download_bytes: usize,
+    pub(crate) reward_splice_us: u128,
+}
+
+struct FetchTimer(f64);
+
+impl FetchTimer {
+    fn start() -> Self {
+        Self(now_ms())
+    }
+
+    fn elapsed_us(&self) -> u128 {
+        ((now_ms() - self.0).max(0.0) * 1000.0) as u128
+    }
+}
+
+fn now_ms() -> f64 {
+    let global = js_sys::global();
+    let performance = js_sys::Reflect::get(&global, &"performance".into()).ok();
+    if let Some(performance) = performance
+        && let Ok(now) = js_sys::Reflect::get(&performance, &"now".into())
+        && let Some(now) = now.dyn_ref::<js_sys::Function>()
+        && let Ok(value) = now.call0(&performance)
+        && let Some(value) = value.as_f64()
+    {
+        return value;
+    }
+
+    js_sys::Date::now()
+}
+
 #[derive(Clone, Copy)]
 struct SlotRangeLookup {
     range: SlotRange,
@@ -260,10 +317,42 @@ pub(crate) async fn get_block(
     slot: u64,
     include_rewards: bool,
 ) -> FetchResult<FetchedBlock> {
+    get_block_inner(storage, slot, include_rewards, None).await
+}
+
+pub(crate) async fn get_block_profiled(
+    storage: &Storage,
+    slot: u64,
+    include_rewards: bool,
+) -> FetchResult<ProfiledFetchedBlock> {
+    let mut profile = FetchProfile::default();
+    let total = FetchTimer::start();
+    let block = get_block_inner(storage, slot, include_rewards, Some(&mut profile)).await?;
+    profile.total_us = total.elapsed_us();
+    Ok(ProfiledFetchedBlock { block, profile })
+}
+
+async fn get_block_inner(
+    storage: &Storage,
+    slot: u64,
+    include_rewards: bool,
+    mut profile: Option<&mut FetchProfile>,
+) -> FetchResult<FetchedBlock> {
     let epoch = epoch_for_slot(slot);
     let slot_in_epoch = slot_in_epoch_for_slot(slot);
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.slot = slot;
+        profile.epoch = epoch;
+        profile.slot_in_epoch = slot_in_epoch;
+    }
 
+    let started = FetchTimer::start();
     let slot_range = get_range_from_source(&storage.slot_index, epoch, slot_in_epoch).await?;
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.slot_index_us += started.elapsed_us();
+        profile.block_range_offset = slot_range.range.offset;
+        profile.block_range_len = slot_range.range.len;
+    }
 
     if slot_range.range.len == 0 {
         return Ok(FetchedBlock {
@@ -279,6 +368,7 @@ pub(crate) async fn get_block(
     }
 
     let car_path = format!("{}/epoch-{}.car", epoch, epoch);
+    let started = FetchTimer::start();
     let mut block_bytes = storage
         .archive
         .get_range(
@@ -287,31 +377,48 @@ pub(crate) async fn get_block(
             slot_range.range.len as usize,
         )
         .await?;
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.block_download_us += started.elapsed_us();
+        profile.block_download_bytes += block_bytes.len();
+    }
+    let started = FetchTimer::start();
     let previous_blockhash = match slot_range.previous_blockhash {
         Some(previous_blockhash) => Some(previous_blockhash),
-        None => resolve_previous_blockhash(storage, slot, &block_bytes).await?,
+        None => {
+            resolve_previous_blockhash_profiled(storage, slot, &block_bytes, profile.as_deref_mut())
+                .await?
+        }
     };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.previous_blockhash_us += started.elapsed_us();
+    }
 
-    if include_rewards && let Some(reward) = missing_block_rewards_entry(&block_bytes)? {
-        let (rewards_start, rewards_len) =
-            lookup_car_entry_range_for_cid(&storage.archive, epoch, &reward.cid)
+    let started = FetchTimer::start();
+    let missing_reward = if include_rewards {
+        missing_block_rewards_entry(&block_bytes)?
+    } else {
+        None
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.rewards_scan_us += started.elapsed_us();
+    }
+    if let Some(reward) = missing_reward {
+        let started = FetchTimer::start();
+        let rewards_entries =
+            fetch_rewards_entry_chain(&storage.archive, epoch, &car_path, &reward.cid)
                 .await
                 .map_err(|err| FetchError::RewardLookup {
                     reason: err.to_string(),
                 })?;
-        if rewards_len > MAX_REWARDS_ENTRY_BYTES {
-            return Err(FetchError::RewardLookup {
-                reason: format!(
-                    "rewards entry is {rewards_len} bytes, above the {MAX_REWARDS_ENTRY_BYTES} byte limit"
-                ),
-            });
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.reward_lookup_us += started.elapsed_us();
+            profile.reward_download_bytes += rewards_entries.len();
         }
-
-        let rewards_entry = storage
-            .archive
-            .get_range(&car_path, rewards_start, rewards_len as usize)
-            .await?;
-        block_bytes.splice(reward.insert_at..reward.insert_at, rewards_entry);
+        let started = FetchTimer::start();
+        block_bytes.splice(reward.insert_at..reward.insert_at, rewards_entries);
+        if let Some(profile) = profile {
+            profile.reward_splice_us += started.elapsed_us();
+        }
     }
 
     Ok(FetchedBlock {
@@ -444,24 +551,71 @@ async fn lookup_car_entry_range_for_cid(
     Ok(decode_offset_and_size(&offset_and_size)?)
 }
 
-async fn resolve_previous_blockhash(
+async fn fetch_rewards_entry_chain(
+    source: &ObjectSource,
+    epoch: u64,
+    car_path: &str,
+    root_cid: &[u8],
+) -> AnyhowResult<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut queue = vec![root_cid.to_vec()];
+    let mut seen = HashSet::<Vec<u8>>::new();
+
+    while let Some(cid) = queue.pop() {
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
+        let (offset, len) = lookup_car_entry_range_for_cid(source, epoch, &cid).await?;
+        if len > MAX_REWARDS_ENTRY_BYTES {
+            return Err(anyhow!(
+                "rewards continuation entry is {len} bytes, above {MAX_REWARDS_ENTRY_BYTES}"
+            ));
+        }
+        let entry = source
+            .get_range(car_path, offset, len as usize)
+            .await
+            .map_err(|err| anyhow!("{car_path}: {}", err.client_message()))?;
+        for next in rewards_continuation_cids(&entry)? {
+            if !seen.contains(&next) {
+                queue.push(next);
+            }
+        }
+        out.extend_from_slice(&entry);
+    }
+
+    Ok(out)
+}
+
+async fn resolve_previous_blockhash_profiled(
     storage: &Storage,
     slot: u64,
     block_bytes: &[u8],
+    mut profile: Option<&mut FetchProfile>,
 ) -> FetchResult<Option<[u8; 32]>> {
+    let started = FetchTimer::start();
     let Some(parent_slot) = decode_block_parent_slot(block_bytes.to_vec())? else {
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.parent_slot_decode_us += started.elapsed_us();
+        }
         return Ok(None);
     };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.parent_slot_decode_us += started.elapsed_us();
+    }
     if parent_slot == slot {
         return Ok(None);
     }
 
+    let started = FetchTimer::start();
     let parent_range = get_range_from_source(
         &storage.slot_index,
         epoch_for_slot(parent_slot),
         slot_in_epoch_for_slot(parent_slot),
     )
     .await?;
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.parent_slot_index_us += started.elapsed_us();
+    }
     if parent_range.range.is_empty() {
         return Ok(None);
     }
@@ -474,6 +628,7 @@ async fn resolve_previous_blockhash(
 
     let parent_epoch = epoch_for_slot(parent_slot);
     let parent_car_path = format!("{}/epoch-{}.car", parent_epoch, parent_epoch);
+    let started = FetchTimer::start();
     let parent_bytes = storage
         .archive
         .get_range(
@@ -482,14 +637,24 @@ async fn resolve_previous_blockhash(
             parent_range.range.len as usize,
         )
         .await?;
-    decode_blockhash(parent_bytes).map(Some)
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.parent_block_download_us += started.elapsed_us();
+        profile.parent_block_download_bytes += parent_bytes.len();
+    }
+
+    let started = FetchTimer::start();
+    let blockhash = decode_blockhash(parent_bytes).map(Some);
+    if let Some(profile) = profile {
+        profile.parent_blockhash_decode_us += started.elapsed_us();
+    }
+    blockhash
 }
 
 fn decode_block_parent_slot(bytes: Vec<u8>) -> FetchResult<Option<u64>> {
     let len = bytes.len();
     let cursor = Cursor::new(bytes);
     let mut reader = CarBlockReader::with_capacity(cursor, len);
-    let mut block = CarBlockGroup::without_rewards();
+    let mut block = CarBlockGroup::without_rewards_and_transaction_payloads();
     if !reader
         .read_until_block_into(&mut block)
         .map_err(|err| FetchError::MalformedCarSlice {
@@ -507,7 +672,7 @@ fn decode_blockhash(bytes: Vec<u8>) -> FetchResult<[u8; 32]> {
     let len = bytes.len();
     let cursor = Cursor::new(bytes);
     let mut reader = CarBlockReader::with_capacity(cursor, len);
-    let mut block = CarBlockGroup::without_rewards();
+    let mut block = CarBlockGroup::without_rewards_and_transaction_payloads();
     if !reader
         .read_until_block_into(&mut block)
         .map_err(|err| FetchError::MalformedCarSlice {
@@ -692,6 +857,65 @@ fn block_rewards_cid(payload: &[u8]) -> FetchResult<Option<Vec<u8>>> {
             ),
         })
         .map(Some)
+}
+
+fn rewards_continuation_cids(car_entries: &[u8]) -> AnyhowResult<Vec<Vec<u8>>> {
+    let mut pos = 0usize;
+    let mut out = Vec::new();
+    while pos < car_entries.len() {
+        let (entry_len, varint_len) =
+            read_uvarint64(&car_entries[pos..]).map_err(|err| anyhow!(err.client_message()))?;
+        let entry_len =
+            usize::try_from(entry_len).map_err(|_| anyhow!("CAR entry length exceeds usize"))?;
+        if entry_len < CAR_CID_LEN {
+            return Err(anyhow!("CAR entry length is smaller than CID length"));
+        }
+        let payload_start = pos
+            .checked_add(varint_len)
+            .and_then(|value| value.checked_add(CAR_CID_LEN))
+            .ok_or_else(|| anyhow!("CAR payload offset overflow"))?;
+        let next_pos = pos
+            .checked_add(varint_len)
+            .and_then(|value| value.checked_add(entry_len))
+            .ok_or_else(|| anyhow!("CAR entry end overflow"))?;
+        if next_pos > car_entries.len() {
+            return Err(anyhow!("CAR entry extends past fetched reward range"));
+        }
+        let payload = &car_entries[payload_start..next_pos];
+        out.extend(rewards_payload_next_cids(payload)?);
+        pos = next_pos;
+    }
+    Ok(out)
+}
+
+fn rewards_payload_next_cids(payload: &[u8]) -> AnyhowResult<Vec<Vec<u8>>> {
+    let node =
+        decode_node(payload).map_err(|err| anyhow!("decode rewards continuation node: {err}"))?;
+    let next = match node {
+        Node::Rewards(rewards) => rewards.data.next,
+        Node::DataFrame(frame) => frame.next,
+        _ => None,
+    };
+    let Some(next) = next else {
+        return Ok(Vec::new());
+    };
+    next.iter()
+        .map(|cid| {
+            let cid = cid.map_err(|err| anyhow!(err.to_string()))?;
+            if cid.inline_raw_bytes().is_some() {
+                return Ok(None);
+            }
+            cid.car_cid_bytes()
+                .map(|bytes| Some(bytes.to_vec()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "CID ref has {} bytes and is not an inline identity CID",
+                        cid.normalized_bytes().len()
+                    )
+                })
+        })
+        .filter_map(|result| result.transpose())
+        .collect()
 }
 
 fn read_uvarint64(bytes: &[u8]) -> FetchResult<(u64, usize)> {

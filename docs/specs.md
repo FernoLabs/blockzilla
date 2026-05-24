@@ -220,16 +220,18 @@ The global benchmark report must include runner wall-clock time. Global and per-
 - should mostly contain data structures and IO codecs
 - should focus on single-core streaming reads
 
-`of-archive-importer`
-
-- consumes CAR files via `of-car-reader`
-- produces optimized Blockzilla archives
-- correctness comes first, then size and speed
-- should support multi-step builds when registry/index data is needed first
-
 `blockzilla`
 
+- is the main user-facing Archive V2 CLI
+- consumes CAR files via `of-car-reader`
+- produces optimized Blockzilla archives
 - reads the optimized archive
 - streams decoded data for analytics and extraction
 - should support commands using either `of-car-reader` directly or the optimized archive
 - should output counters such as blocks, transactions, instructions, inner instructions, and TPS
+
+`of-archive-importer`
+
+- is legacy compatibility for older compact/archive conversion scripts
+- should not gain new token/index benchmark commands
+- can be removed once NAS scripts and docs no longer depend on it

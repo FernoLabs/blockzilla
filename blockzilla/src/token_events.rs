@@ -54,15 +54,19 @@ const EVENTS_MAGIC: &[u8; 8] = b"BZTEVT01";
 const EVENT_RECORD_BYTES: usize = 48;
 const TOKEN_IX_MAGIC: &[u8; 8] = b"BZTIX001";
 const TOKEN_IX_RECORD_BYTES: usize = 64;
+const PROGRAM_TOUCH_MAGIC: &[u8; 8] = b"BZPGTX01";
+const PROGRAM_TOUCH_RECORD_BYTES: usize = 40;
 const NO_ID: u32 = u32::MAX;
 const NO_INNER_IX: u16 = u16::MAX;
 
 const EVENT_FLAG_INNER: u16 = 1 << 0;
 const EVENT_FLAG_TX_ERROR: u16 = 1 << 1;
 const TOKEN_IX_FLAG_DIRECT_MINT: u16 = 1 << 2;
+const PROGRAM_TOUCH_FLAG_ACCOUNT_LIST: u16 = 1 << 2;
 
 const TOKEN_PROGRAM_ID_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_ID_STR: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+const PUMPFUN_PROGRAM_ID_STR: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
 #[derive(Debug)]
 pub(crate) struct TokenEventDumpConfig {
@@ -89,6 +93,21 @@ pub(crate) struct TokenInstructionDumpConfig {
     pub workers: usize,
     pub chunk_size: usize,
     pub mint_filter: Option<String>,
+    pub no_output: bool,
+    pub outer_only: bool,
+    pub max_blocks: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProgramTransactionDumpConfig {
+    pub input: PathBuf,
+    pub output_dir: PathBuf,
+    pub format: TokenEventInputFormat,
+    pub index: Option<PathBuf>,
+    pub registry: Option<PathBuf>,
+    pub programs: Vec<String>,
+    pub workers: usize,
+    pub chunk_size: usize,
     pub no_output: bool,
     pub outer_only: bool,
     pub max_blocks: Option<u64>,
@@ -278,6 +297,55 @@ impl TokenInstructionStats {
     }
 }
 
+#[derive(Debug, Default)]
+struct ProgramTransactionStats {
+    blocks: u64,
+    txs: u64,
+    outer_ixs: u64,
+    inner_ixs: u64,
+    matched_ixs: u64,
+    matched_outer_ixs: u64,
+    matched_inner_ixs: u64,
+    matched_txs: u64,
+    matched_account_txs: u64,
+    records_encoded: u64,
+    metadata_needed: u64,
+    metadata_inner_needed: u64,
+    metadata_loaded_needed: u64,
+    metadata_decoded: u64,
+    metadata_skipped: u64,
+    skipped_raw_txs: u64,
+    skipped_raw_metadata: u64,
+    skipped_unresolved_programs: u64,
+    read_bytes: u64,
+    decoded_bytes: u64,
+}
+
+impl ProgramTransactionStats {
+    fn merge(&mut self, other: Self) {
+        self.blocks += other.blocks;
+        self.txs += other.txs;
+        self.outer_ixs += other.outer_ixs;
+        self.inner_ixs += other.inner_ixs;
+        self.matched_ixs += other.matched_ixs;
+        self.matched_outer_ixs += other.matched_outer_ixs;
+        self.matched_inner_ixs += other.matched_inner_ixs;
+        self.matched_txs += other.matched_txs;
+        self.matched_account_txs += other.matched_account_txs;
+        self.records_encoded += other.records_encoded;
+        self.metadata_needed += other.metadata_needed;
+        self.metadata_inner_needed += other.metadata_inner_needed;
+        self.metadata_loaded_needed += other.metadata_loaded_needed;
+        self.metadata_decoded += other.metadata_decoded;
+        self.metadata_skipped += other.metadata_skipped;
+        self.skipped_raw_txs += other.skipped_raw_txs;
+        self.skipped_raw_metadata += other.skipped_raw_metadata;
+        self.skipped_unresolved_programs += other.skipped_unresolved_programs;
+        self.read_bytes += other.read_bytes;
+        self.decoded_bytes += other.decoded_bytes;
+    }
+}
+
 impl DumpStats {
     fn merge(&mut self, other: Self) {
         self.blocks += other.blocks;
@@ -373,6 +441,35 @@ impl TokenInstructionRecord {
         out[36..40].copy_from_slice(&self.mint_id.to_le_bytes());
         out[40..48].copy_from_slice(&self.amount.to_le_bytes());
         out[48] = self.raw_tag;
+        out
+    }
+}
+
+#[derive(Debug)]
+struct ProgramTouchRecord {
+    slot: u64,
+    signature_ordinal: u64,
+    tx_index: u32,
+    block_id: u32,
+    outer_ix: u16,
+    inner_ix: u16,
+    program_match_index: u16,
+    flags: u16,
+    instruction_data_tag: u8,
+}
+
+impl ProgramTouchRecord {
+    fn encode(&self) -> [u8; PROGRAM_TOUCH_RECORD_BYTES] {
+        let mut out = [0u8; PROGRAM_TOUCH_RECORD_BYTES];
+        out[0..8].copy_from_slice(&self.slot.to_le_bytes());
+        out[8..16].copy_from_slice(&self.signature_ordinal.to_le_bytes());
+        out[16..20].copy_from_slice(&self.tx_index.to_le_bytes());
+        out[20..24].copy_from_slice(&self.block_id.to_le_bytes());
+        out[24..26].copy_from_slice(&self.outer_ix.to_le_bytes());
+        out[26..28].copy_from_slice(&self.inner_ix.to_le_bytes());
+        out[28..30].copy_from_slice(&self.program_match_index.to_le_bytes());
+        out[30..32].copy_from_slice(&self.flags.to_le_bytes());
+        out[32] = self.instruction_data_tag;
         out
     }
 }
@@ -908,12 +1005,22 @@ pub(crate) fn dump_token_instructions(config: TokenInstructionDumpConfig) -> Res
         .with_context(|| format!("create {}", config.output_dir.display()))?;
 
     let input_format = infer_format(&config.input, config.format);
+    anyhow::ensure!(
+        input_format != TokenEventInputFormat::HotRawZstd,
+        "whole-file zstd raw blocks are excluded from token instruction analysis; use hot-zstd block archives or hot-raw blocks"
+    );
+    anyhow::ensure!(
+        !matches!(
+            input_format,
+            TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd
+        ) || (config.no_output && config.outer_only),
+        "CAR token instruction scan is benchmark-only; pass --no-output --outer-only"
+    );
     let raw_blocks = match input_format {
         TokenEventInputFormat::HotZstd => false,
         TokenEventInputFormat::HotRaw => true,
-        other => anyhow::bail!(
-            "token instruction dump currently supports hot-zstd and hot-raw only, got {other:?}"
-        ),
+        TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd => false,
+        other => anyhow::bail!("token instruction dump does not support {other:?}"),
     };
     let input_file_bytes = std::fs::metadata(&config.input)
         .with_context(|| format!("stat {}", config.input.display()))?
@@ -927,7 +1034,16 @@ pub(crate) fn dump_token_instructions(config: TokenInstructionDumpConfig) -> Res
         .registry
         .clone()
         .unwrap_or_else(|| input_dir.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE));
-    let account_id_mode = Arc::new(AccountIdMode::Blockzilla(load_key_index(&registry_path)?));
+    let account_id_mode = Arc::new(
+        if matches!(
+            input_format,
+            TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd
+        ) {
+            AccountIdMode::Local
+        } else {
+            AccountIdMode::Blockzilla(load_key_index(&registry_path)?)
+        },
+    );
     let known = HotKnownKeys::new(
         account_id_mode.as_ref(),
         config
@@ -961,22 +1077,39 @@ pub(crate) fn dump_token_instructions(config: TokenInstructionDumpConfig) -> Res
 
     let mut stats = TokenInstructionStats::default();
     let started = Instant::now();
-    scan_hot_token_instructions_parallel(
-        &config.input,
-        &index_path,
-        raw_blocks,
-        account_id_mode,
-        known,
-        mint_filter,
-        instructions.as_mut(),
-        config.max_blocks,
-        config.workers,
-        config.chunk_size,
-        config.no_output,
-        config.outer_only,
-        &config.output_dir,
-        &mut stats,
-    )?;
+    match input_format {
+        TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd => {
+            scan_car_token_instructions_outer(
+                &config.input,
+                input_format == TokenEventInputFormat::CarZstd,
+                known,
+                mint_filter,
+                config.max_blocks,
+                &mut stats,
+            )?;
+        }
+        TokenEventInputFormat::HotZstd | TokenEventInputFormat::HotRaw => {
+            scan_hot_token_instructions_parallel(
+                &config.input,
+                &index_path,
+                raw_blocks,
+                account_id_mode,
+                known,
+                mint_filter,
+                instructions.as_mut(),
+                config.max_blocks,
+                config.workers,
+                config.chunk_size,
+                config.no_output,
+                config.outer_only,
+                &config.output_dir,
+                &mut stats,
+            )?;
+        }
+        TokenEventInputFormat::Auto | TokenEventInputFormat::HotRawZstd => {
+            unreachable!("unsupported token instruction format handled earlier")
+        }
+    }
     if let Some(instructions) = instructions.as_mut() {
         instructions
             .flush()
@@ -1132,6 +1265,227 @@ pub(crate) fn dump_token_instructions(config: TokenInstructionDumpConfig) -> Res
     Ok(())
 }
 
+pub(crate) fn dump_pumpfun_transactions(config: ProgramTransactionDumpConfig) -> Result<()> {
+    std::fs::create_dir_all(&config.output_dir)
+        .with_context(|| format!("create {}", config.output_dir.display()))?;
+
+    let input_format = infer_format(&config.input, config.format);
+    anyhow::ensure!(
+        input_format != TokenEventInputFormat::HotRawZstd,
+        "program transaction dump does not support whole-file zstd raw blocks"
+    );
+    anyhow::ensure!(
+        !matches!(
+            input_format,
+            TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd
+        ) || (config.no_output && config.outer_only),
+        "CAR program transaction scan is benchmark-only; pass --no-output --outer-only"
+    );
+    let raw_blocks = match input_format {
+        TokenEventInputFormat::HotZstd => false,
+        TokenEventInputFormat::HotRaw => true,
+        TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd => false,
+        other => anyhow::bail!("program transaction dump does not support {other:?}"),
+    };
+    let input_file_bytes = std::fs::metadata(&config.input)
+        .with_context(|| format!("stat {}", config.input.display()))?
+        .len();
+    let input_dir = config.input.parent().unwrap_or_else(|| Path::new("."));
+    let index_path = config
+        .index
+        .clone()
+        .unwrap_or_else(|| archive_v2_hot_index_path(&config.input));
+    let registry_path = config
+        .registry
+        .clone()
+        .unwrap_or_else(|| input_dir.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE));
+    let account_id_mode = Arc::new(
+        if matches!(
+            input_format,
+            TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd
+        ) {
+            AccountIdMode::Local
+        } else {
+            AccountIdMode::Blockzilla(load_key_index(&registry_path)?)
+        },
+    );
+    let program_strings = if config.programs.is_empty() {
+        vec![PUMPFUN_PROGRAM_ID_STR.to_string()]
+    } else {
+        config.programs.clone()
+    };
+    let programs = program_strings
+        .iter()
+        .map(|program| {
+            Pubkey::from_str(program)
+                .with_context(|| format!("parse program id {program}"))
+                .map(|key| account_id_mode.known_key(key.to_bytes()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let output_path = config.output_dir.join("program_touches.bin");
+    let mut output = if config.no_output {
+        None
+    } else {
+        let output_file = File::create(&output_path)
+            .with_context(|| format!("create {}", output_path.display()))?;
+        let mut writer = BufWriter::with_capacity(BUFFER_SIZE, output_file);
+        writer.write_all(PROGRAM_TOUCH_MAGIC)?;
+        Some(writer)
+    };
+
+    let mut stats = ProgramTransactionStats::default();
+    let started = Instant::now();
+    match input_format {
+        TokenEventInputFormat::Car | TokenEventInputFormat::CarZstd => {
+            scan_car_program_transactions_outer(
+                &config.input,
+                input_format == TokenEventInputFormat::CarZstd,
+                &programs,
+                config.max_blocks,
+                &mut stats,
+            )?;
+        }
+        TokenEventInputFormat::HotZstd | TokenEventInputFormat::HotRaw => {
+            scan_hot_program_transactions_parallel(
+                &config.input,
+                &index_path,
+                raw_blocks,
+                account_id_mode,
+                Arc::new(programs),
+                output.as_mut(),
+                config.max_blocks,
+                config.workers,
+                config.chunk_size,
+                config.no_output,
+                config.outer_only,
+                &config.output_dir,
+                &mut stats,
+            )?;
+        }
+        TokenEventInputFormat::Auto | TokenEventInputFormat::HotRawZstd => {
+            unreachable!("unsupported program transaction format handled earlier")
+        }
+    }
+    if let Some(output) = output.as_mut() {
+        output
+            .flush()
+            .with_context(|| format!("flush {}", output_path.display()))?;
+    }
+
+    let elapsed = started.elapsed().as_secs_f64();
+    let output_bytes = if config.no_output {
+        0
+    } else {
+        std::fs::metadata(&output_path)?.len()
+    };
+    let programs_display = program_strings.join(",");
+    let meta = format!(
+        "format_version=1\n\
+         record_bytes={PROGRAM_TOUCH_RECORD_BYTES}\n\
+         input={}\n\
+         input_file_bytes={input_file_bytes}\n\
+         input_format={input_format:?}\n\
+         index={}\n\
+         registry={}\n\
+         programs={programs_display}\n\
+         no_output={}\n\
+         outer_only={}\n\
+         workers={}\n\
+         chunk_size={}\n\
+         blocks={}\n\
+         txs={}\n\
+         outer_ixs={}\n\
+         inner_ixs={}\n\
+         matched_ixs={}\n\
+         matched_outer_ixs={}\n\
+         matched_inner_ixs={}\n\
+         matched_txs={}\n\
+         matched_account_txs={}\n\
+         records_encoded={}\n\
+         metadata_needed={}\n\
+         metadata_inner_needed={}\n\
+         metadata_loaded_needed={}\n\
+         metadata_decoded={}\n\
+         metadata_skipped={}\n\
+         skipped_raw_txs={}\n\
+         skipped_raw_metadata={}\n\
+         skipped_unresolved_programs={}\n\
+         read_bytes={}\n\
+         decoded_bytes={}\n\
+         output_bytes={output_bytes}\n\
+         elapsed_s={elapsed:.3}\n\
+         blocks_s={:.2}\n\
+         tx_s={:.2}\n\
+         matched_ix_s={:.2}\n\
+         matched_tx_s={:.2}\n\
+         read_MiB_s={:.2}\n\
+         decoded_MiB_s={:.2}\n",
+        config.input.display(),
+        index_path.display(),
+        registry_path.display(),
+        config.no_output,
+        config.outer_only,
+        config.workers.max(1),
+        config.chunk_size.max(1),
+        stats.blocks,
+        stats.txs,
+        stats.outer_ixs,
+        stats.inner_ixs,
+        stats.matched_ixs,
+        stats.matched_outer_ixs,
+        stats.matched_inner_ixs,
+        stats.matched_txs,
+        stats.matched_account_txs,
+        stats.records_encoded,
+        stats.metadata_needed,
+        stats.metadata_inner_needed,
+        stats.metadata_loaded_needed,
+        stats.metadata_decoded,
+        stats.metadata_skipped,
+        stats.skipped_raw_txs,
+        stats.skipped_raw_metadata,
+        stats.skipped_unresolved_programs,
+        stats.read_bytes,
+        stats.decoded_bytes,
+        rate(stats.blocks, elapsed),
+        rate(stats.txs, elapsed),
+        rate(stats.matched_ixs, elapsed),
+        rate(stats.matched_txs, elapsed),
+        mib_rate(stats.read_bytes, elapsed),
+        mib_rate(stats.decoded_bytes, elapsed),
+    );
+    std::fs::write(config.output_dir.join("meta.txt"), meta)?;
+    println!(
+        "program_transactions format={input_format:?} workers={} chunk_size={} no_output={} outer_only={} programs={} blocks={} txs={} outer_ixs={} inner_ixs={} matched_ixs={} matched_txs={} matched_account_txs={} records_encoded={} metadata_needed={} metadata_decoded={} skipped_raw_txs={} skipped_raw_metadata={} skipped_unresolved_programs={} elapsed_s={elapsed:.3} blocks_s={:.2} tx_s={:.2} matched_ix_s={:.2} matched_tx_s={:.2} input_file_bytes={input_file_bytes} read_MiB_s={:.2} decoded_MiB_s={:.2} output_bytes={output_bytes}",
+        config.workers.max(1),
+        config.chunk_size.max(1),
+        config.no_output,
+        config.outer_only,
+        programs_display,
+        stats.blocks,
+        stats.txs,
+        stats.outer_ixs,
+        stats.inner_ixs,
+        stats.matched_ixs,
+        stats.matched_txs,
+        stats.matched_account_txs,
+        stats.records_encoded,
+        stats.metadata_needed,
+        stats.metadata_decoded,
+        stats.skipped_raw_txs,
+        stats.skipped_raw_metadata,
+        stats.skipped_unresolved_programs,
+        rate(stats.blocks, elapsed),
+        rate(stats.txs, elapsed),
+        rate(stats.matched_ixs, elapsed),
+        rate(stats.matched_txs, elapsed),
+        mib_rate(stats.read_bytes, elapsed),
+        mib_rate(stats.decoded_bytes, elapsed),
+    );
+    Ok(())
+}
+
 pub(crate) fn dump_usdc_token_events(config: TokenEventDumpConfig) -> Result<()> {
     let mint = Pubkey::from_str(&config.mint)
         .with_context(|| format!("parse mint {}", config.mint))?
@@ -1140,6 +1494,10 @@ pub(crate) fn dump_usdc_token_events(config: TokenEventDumpConfig) -> Result<()>
         .with_context(|| format!("create {}", config.output_dir.display()))?;
 
     let input_format = infer_format(&config.input, config.format);
+    anyhow::ensure!(
+        input_format != TokenEventInputFormat::HotRawZstd,
+        "whole-file zstd raw blocks are excluded from token dump analysis; use raw CAR, CAR.ZST, hot-zstd block archives, or hot-raw blocks"
+    );
     let input_file_bytes = std::fs::metadata(&config.input)
         .with_context(|| format!("stat {}", config.input.display()))?
         .len();
@@ -1783,6 +2141,296 @@ fn scan_car_tx(
     }
     if tx_had_event {
         stats.txs_with_events += 1;
+    }
+    Ok(())
+}
+
+fn open_car_scanner<R>(
+    input: &Path,
+    compressed: bool,
+    scan: impl FnOnce(Box<dyn Read>) -> Result<R>,
+) -> Result<R> {
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    if compressed {
+        let reader = BufReader::with_capacity(BUFFER_SIZE, file);
+        let decoder = zstd::Decoder::with_buffer(reader)
+            .with_context(|| format!("open zstd {}", input.display()))?;
+        scan(Box::new(decoder))
+    } else {
+        scan(Box::new(BufReader::with_capacity(BUFFER_SIZE, file)))
+    }
+}
+
+fn scan_car_token_instructions_outer(
+    input: &Path,
+    compressed: bool,
+    known: HotKnownKeys,
+    mint_filter: Option<KnownHotKey>,
+    max_blocks: Option<u64>,
+    stats: &mut TokenInstructionStats,
+) -> Result<()> {
+    open_car_scanner(input, compressed, |reader| {
+        let mut reader = CarBlockReader::with_capacity(reader, BUFFER_SIZE);
+        reader.skip_header().context("skip CAR header")?;
+        let mut scratch = Vec::with_capacity(1 << 20);
+        let mut progress = ProgressTracker::new(if compressed {
+            "Token Instructions Car-Zstd"
+        } else {
+            "Token Instructions Car"
+        });
+        let block_limit = max_blocks.unwrap_or(u64::MAX);
+
+        while let Some(entry) = reader
+            .read_entry_payload_with_scratch(&mut scratch)
+            .context("read CAR entry")?
+        {
+            stats.read_bytes = reader.offset;
+            stats.decoded_bytes = reader.offset;
+            let node_kind = peek_node_type(entry.payload).context("peek node type")?;
+            if node_kind == 2 {
+                if let Node::Block(block) =
+                    decode_node(entry.payload).context("decode block node")?
+                {
+                    stats.blocks += 1;
+                    progress.update_slot(block.slot);
+                    progress.update(1, 0);
+                    if stats.blocks >= block_limit {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if node_kind != 0 {
+                continue;
+            }
+
+            let Node::Transaction(tx) =
+                decode_node(entry.payload).context("decode transaction node")?
+            else {
+                continue;
+            };
+            stats.txs += 1;
+            progress.update_slot(tx.slot);
+            progress.update(0, 1);
+            if tx.data.next.is_some() {
+                stats.skipped_raw_txs += 1;
+                continue;
+            }
+            let versioned_tx = match wincode::deserialize::<VersionedTransaction<'_>>(tx.data.data)
+            {
+                Ok(tx) => tx,
+                Err(_) => {
+                    stats.skipped_raw_txs += 1;
+                    continue;
+                }
+            };
+            scan_car_token_instruction_tx_outer(&versioned_tx, known, mint_filter, stats)?;
+        }
+        progress.final_report();
+        Ok(())
+    })
+}
+
+fn scan_car_token_instruction_tx_outer(
+    tx: &VersionedTransaction<'_>,
+    known: HotKnownKeys,
+    mint_filter: Option<KnownHotKey>,
+    stats: &mut TokenInstructionStats,
+) -> Result<()> {
+    let outer = match &tx.message {
+        VersionedMessage::Legacy(message) => scan_car_token_instruction_refs_outer(
+            &message.account_keys,
+            &message.instructions,
+            known,
+            mint_filter,
+            stats,
+        ),
+        VersionedMessage::V0(message) => scan_car_token_instruction_refs_outer(
+            &message.account_keys,
+            &message.instructions,
+            known,
+            mint_filter,
+            stats,
+        ),
+    };
+    outer
+}
+
+fn scan_car_token_instruction_refs_outer(
+    account_keys: &[&[u8; 32]],
+    instructions: &[CompiledInstruction],
+    known: HotKnownKeys,
+    mint_filter: Option<KnownHotKey>,
+    stats: &mut TokenInstructionStats,
+) -> Result<()> {
+    for instruction in instructions {
+        stats.outer_ixs += 1;
+        let Some(program) = account_keys
+            .get(instruction.program_id_index as usize)
+            .map(|key| HotKeyRef::Raw(**key))
+        else {
+            stats.skipped_unresolved_programs += 1;
+            continue;
+        };
+        let token_program = if known.token_program.matches(program) {
+            TokenProgramKind::Token
+        } else if known.token_2022_program.matches(program) {
+            TokenProgramKind::Token2022
+        } else {
+            continue;
+        };
+        stats.record_token_program_instruction(token_program, &instruction.data);
+        let Some(decoded) = decode_token_instruction(&instruction.accounts, &instruction.data)
+        else {
+            stats.unknown_token_ixs += 1;
+            continue;
+        };
+        stats.record_decoded_token_instruction(decoded.kind);
+        if let Some(mint_filter) = mint_filter {
+            let mint = decoded.mint.map(HotKeyRef::Raw).or_else(|| {
+                decoded
+                    .mint_index
+                    .and_then(|index| account_keys.get(index as usize).map(|key| **key))
+                    .map(HotKeyRef::Raw)
+            });
+            if !mint.is_some_and(|mint| mint_filter.matches(mint)) {
+                stats.skipped_by_mint_filter += 1;
+                continue;
+            }
+            stats.direct_mint_ixs += 1;
+        }
+        stats.token_ixs += 1;
+    }
+    Ok(())
+}
+
+fn scan_car_program_transactions_outer(
+    input: &Path,
+    compressed: bool,
+    programs: &[KnownHotKey],
+    max_blocks: Option<u64>,
+    stats: &mut ProgramTransactionStats,
+) -> Result<()> {
+    open_car_scanner(input, compressed, |reader| {
+        let mut reader = CarBlockReader::with_capacity(reader, BUFFER_SIZE);
+        reader.skip_header().context("skip CAR header")?;
+        let mut scratch = Vec::with_capacity(1 << 20);
+        let mut progress = ProgressTracker::new(if compressed {
+            "Program Transactions Car-Zstd"
+        } else {
+            "Program Transactions Car"
+        });
+        let block_limit = max_blocks.unwrap_or(u64::MAX);
+
+        while let Some(entry) = reader
+            .read_entry_payload_with_scratch(&mut scratch)
+            .context("read CAR entry")?
+        {
+            stats.read_bytes = reader.offset;
+            stats.decoded_bytes = reader.offset;
+            let node_kind = peek_node_type(entry.payload).context("peek node type")?;
+            if node_kind == 2 {
+                if let Node::Block(block) =
+                    decode_node(entry.payload).context("decode block node")?
+                {
+                    stats.blocks += 1;
+                    progress.update_slot(block.slot);
+                    progress.update(1, 0);
+                    if stats.blocks >= block_limit {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if node_kind != 0 {
+                continue;
+            }
+
+            let Node::Transaction(tx) =
+                decode_node(entry.payload).context("decode transaction node")?
+            else {
+                continue;
+            };
+            stats.txs += 1;
+            progress.update_slot(tx.slot);
+            progress.update(0, 1);
+            if tx.data.next.is_some() {
+                stats.skipped_raw_txs += 1;
+                continue;
+            }
+            let versioned_tx = match wincode::deserialize::<VersionedTransaction<'_>>(tx.data.data)
+            {
+                Ok(tx) => tx,
+                Err(_) => {
+                    stats.skipped_raw_txs += 1;
+                    continue;
+                }
+            };
+            scan_car_program_transaction_tx_outer(&versioned_tx, programs, stats)?;
+        }
+        progress.final_report();
+        Ok(())
+    })
+}
+
+fn scan_car_program_transaction_tx_outer(
+    tx: &VersionedTransaction<'_>,
+    programs: &[KnownHotKey],
+    stats: &mut ProgramTransactionStats,
+) -> Result<()> {
+    match &tx.message {
+        VersionedMessage::Legacy(message) => scan_car_program_transaction_refs_outer(
+            &message.account_keys,
+            &message.instructions,
+            programs,
+            stats,
+        ),
+        VersionedMessage::V0(message) => scan_car_program_transaction_refs_outer(
+            &message.account_keys,
+            &message.instructions,
+            programs,
+            stats,
+        ),
+    }
+}
+
+fn scan_car_program_transaction_refs_outer(
+    account_keys: &[&[u8; 32]],
+    instructions: &[CompiledInstruction],
+    programs: &[KnownHotKey],
+    stats: &mut ProgramTransactionStats,
+) -> Result<()> {
+    let account_match = account_keys.iter().find_map(|key| {
+        let key = HotKeyRef::Raw(**key);
+        programs
+            .iter()
+            .enumerate()
+            .find(|(_, program)| program.matches(key))
+            .and_then(|(index, _)| u16::try_from(index).ok())
+    });
+    let mut tx_matched = account_match.is_some();
+    if account_match.is_some() {
+        stats.matched_account_txs += 1;
+    }
+    for instruction in instructions {
+        stats.outer_ixs += 1;
+        let Some(program) = account_keys
+            .get(instruction.program_id_index as usize)
+            .map(|key| HotKeyRef::Raw(**key))
+        else {
+            stats.skipped_unresolved_programs += 1;
+            continue;
+        };
+        let matched = programs.iter().any(|known| known.matches(program));
+        if !matched {
+            continue;
+        }
+        stats.matched_ixs += 1;
+        stats.matched_outer_ixs += 1;
+        tx_matched = true;
+    }
+    if tx_matched {
+        stats.matched_txs += 1;
     }
     Ok(())
 }
@@ -2527,6 +3175,159 @@ fn scan_hot_token_instructions_parallel(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn scan_hot_program_transactions_parallel(
+    input: &Path,
+    index_path: &Path,
+    raw_blocks: bool,
+    account_id_mode: Arc<AccountIdMode>,
+    programs: Arc<Vec<KnownHotKey>>,
+    output: Option<&mut BufWriter<File>>,
+    max_blocks: Option<u64>,
+    workers: usize,
+    chunk_size: usize,
+    no_output: bool,
+    outer_only: bool,
+    output_dir: &Path,
+    stats: &mut ProgramTransactionStats,
+) -> Result<()> {
+    let index = read_archive_v2_hot_block_index(index_path)?;
+    if raw_blocks {
+        anyhow::ensure!(
+            index.flags & ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS != 0,
+            "{} is not a raw-block index",
+            index_path.display()
+        );
+    } else {
+        anyhow::ensure!(
+            index.flags & ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS == 0,
+            "{} is a raw-block index, not independent zstd blocks",
+            index_path.display()
+        );
+        anyhow::ensure!(
+            index.flags & ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY == 0,
+            "dictionary-compressed hot blocks are not supported by this program dumper yet"
+        );
+    }
+    let file_bytes = std::fs::metadata(input)
+        .with_context(|| format!("stat {}", input.display()))?
+        .len();
+    anyhow::ensure!(
+        file_bytes == index.blob_file_bytes,
+        "index was built for {} bytes, input has {} bytes",
+        index.blob_file_bytes,
+        file_bytes
+    );
+    let limit = max_blocks
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(index.rows.len())
+        .min(index.rows.len());
+    let rows = Arc::new(index.rows[..limit].to_vec());
+    let file = Arc::new(File::open(input).with_context(|| format!("open {}", input.display()))?);
+    let workers = workers.max(1);
+    let chunk_size = chunk_size.max(1);
+    let next = Arc::new(AtomicUsize::new(0));
+    let parts_dir = output_dir.join("program-touches.parts.tmp");
+    if !no_output {
+        std::fs::create_dir_all(&parts_dir)
+            .with_context(|| format!("create {}", parts_dir.display()))?;
+    }
+
+    let mut handles = Vec::with_capacity(workers);
+    for worker_id in 0..workers {
+        let rows = Arc::clone(&rows);
+        let file = Arc::clone(&file);
+        let account_id_mode = Arc::clone(&account_id_mode);
+        let programs = Arc::clone(&programs);
+        let next = Arc::clone(&next);
+        let parts_dir = parts_dir.clone();
+        handles.push(thread::spawn(
+            move || -> Result<(ProgramTransactionStats, Vec<EventPart>)> {
+                let mut worker_stats = ProgramTransactionStats::default();
+                let mut parts = Vec::new();
+                let mut compressed = Vec::with_capacity(2 << 20);
+                let mut block_bytes = Vec::with_capacity(2 << 20);
+                let mut decompressor = zstd::bulk::Decompressor::new()?;
+                loop {
+                    let start = next.fetch_add(chunk_size, Ordering::Relaxed);
+                    if start >= rows.len() {
+                        break;
+                    }
+                    let end = start.saturating_add(chunk_size).min(rows.len());
+                    let mut chunk_out = Vec::new();
+                    for row in &rows[start..end] {
+                        read_hot_row_bytes(
+                            &file,
+                            row,
+                            raw_blocks,
+                            &mut compressed,
+                            &mut block_bytes,
+                            &mut decompressor,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "worker {worker_id} read hot program block_id {}",
+                                row.block_id
+                            )
+                        })?;
+                        worker_stats.read_bytes += if raw_blocks {
+                            row.uncompressed_len as u64
+                        } else {
+                            row.compressed_len as u64
+                        };
+                        worker_stats.decoded_bytes += row.uncompressed_len as u64;
+                        scan_hot_program_block_bytes(
+                            &block_bytes,
+                            row.block_id,
+                            row.slot,
+                            row.first_signature_ordinal,
+                            &account_id_mode,
+                            &programs,
+                            no_output,
+                            outer_only,
+                            &mut worker_stats,
+                            &mut chunk_out,
+                        )?;
+                    }
+                    if !no_output && !chunk_out.is_empty() {
+                        let path = parts_dir.join(format!("program-touches.part.{start:010}.bin"));
+                        std::fs::write(&path, &chunk_out)
+                            .with_context(|| format!("write {}", path.display()))?;
+                        parts.push(EventPart {
+                            start_row: start,
+                            path,
+                        });
+                    }
+                }
+                Ok((worker_stats, parts))
+            },
+        ));
+    }
+
+    let mut parts = Vec::new();
+    for handle in handles {
+        let (worker_stats, mut worker_parts) = handle
+            .join()
+            .map_err(|_| anyhow!("parallel hot program transaction worker panicked"))??;
+        stats.merge(worker_stats);
+        parts.append(&mut worker_parts);
+    }
+    parts.sort_by_key(|part| part.start_row);
+    if let Some(output) = output {
+        for part in parts {
+            let mut file =
+                File::open(&part.path).with_context(|| format!("open {}", part.path.display()))?;
+            std::io::copy(&mut file, output)
+                .with_context(|| format!("merge {}", part.path.display()))?;
+            let _ = std::fs::remove_file(&part.path);
+        }
+    }
+    if !no_output {
+        let _ = std::fs::remove_dir(&parts_dir);
+    }
+    Ok(())
+}
+
 fn read_hot_row_bytes(
     file: &File,
     row: &blockzilla_format::ArchiveV2HotBlockIndexRow,
@@ -2555,6 +3356,305 @@ fn read_hot_row_bytes(
     block_bytes.clear();
     block_bytes.extend_from_slice(&decoded);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_hot_program_block_bytes(
+    block_bytes: &[u8],
+    block_id: u32,
+    slot: u64,
+    first_signature_ordinal: u64,
+    account_id_mode: &AccountIdMode,
+    programs: &[KnownHotKey],
+    no_output: bool,
+    outer_only: bool,
+    stats: &mut ProgramTransactionStats,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let block: ArchiveV2HotBlockBlob =
+        wincode::config::deserialize(block_bytes, wincode_leb128_config())
+            .with_context(|| format!("decode hot block_id {block_id}"))?;
+    anyhow::ensure!(
+        block.header.slot == slot,
+        "hot block_id {} slot mismatch: decoded={} index={}",
+        block_id,
+        block.header.slot,
+        slot
+    );
+    stats.blocks += 1;
+    stats.txs += block.tx_rows.len() as u64;
+    let mut signature_ordinal = first_signature_ordinal;
+    for tx_row in &block.tx_rows {
+        let tx_signature_ordinal = signature_ordinal;
+        signature_ordinal += tx_row.signature_count as u64;
+        scan_hot_program_tx(
+            &block,
+            tx_row,
+            block_id,
+            slot,
+            tx_signature_ordinal,
+            account_id_mode,
+            programs,
+            no_output,
+            outer_only,
+            stats,
+            out,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_hot_program_tx(
+    block: &ArchiveV2HotBlockBlob,
+    tx_row: &ArchiveV2HotTxRow,
+    block_id: u32,
+    slot: u64,
+    signature_ordinal: u64,
+    _account_id_mode: &AccountIdMode,
+    programs: &[KnownHotKey],
+    no_output: bool,
+    outer_only: bool,
+    stats: &mut ProgramTransactionStats,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    if tx_row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
+        stats.skipped_raw_txs += 1;
+        return Ok(());
+    }
+    let message_slice = hot_region(
+        &block.message_bytes,
+        tx_row.message_offset,
+        tx_row.message_len,
+        "message",
+        block_id,
+        tx_row.tx_index,
+    )?;
+    let message: ArchiveV2HotMessagePayload =
+        wincode::config::deserialize(message_slice, wincode_leb128_config()).with_context(
+            || {
+                format!(
+                    "decode hot program message block_id={} slot={} tx_index={}",
+                    block_id, slot, tx_row.tx_index
+                )
+            },
+        )?;
+    let need_loaded = !outer_only && tx_row.flags & ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES != 0;
+    let need_inner = !outer_only && tx_row.flags & ARCHIVE_V2_TX_FLAG_HAS_INNER_IX != 0;
+    let need_meta = need_loaded || need_inner;
+    if need_meta {
+        stats.metadata_needed += 1;
+        if need_loaded {
+            stats.metadata_loaded_needed += 1;
+        }
+        if need_inner {
+            stats.metadata_inner_needed += 1;
+        }
+    }
+    let full_meta;
+    let inner_meta;
+    if need_loaded {
+        full_meta = decode_hot_program_instruction_meta(block, tx_row, block_id, slot, stats)?;
+        inner_meta = None;
+    } else if need_inner {
+        full_meta = None;
+        inner_meta = decode_hot_program_inner_meta(block, tx_row, block_id, slot, stats)?;
+    } else {
+        full_meta = None;
+        inner_meta = None;
+    };
+    let inner_groups = full_meta
+        .as_ref()
+        .and_then(|meta| meta.inner_instructions.as_deref())
+        .or_else(|| {
+            inner_meta
+                .as_ref()
+                .and_then(|meta| meta.inner_instructions.as_deref())
+        });
+    let keys = HotKeyLookup::new(&message, full_meta.as_ref());
+    scan_hot_program_refs(
+        &message,
+        inner_groups,
+        &keys,
+        programs,
+        block_id,
+        slot,
+        tx_row.tx_index,
+        signature_ordinal,
+        tx_row.flags & ARCHIVE_V2_TX_FLAG_HAS_ERROR != 0,
+        no_output,
+        outer_only,
+        stats,
+        out,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_hot_program_refs(
+    message: &ArchiveV2HotMessagePayload,
+    inner_groups: Option<&[CompactInnerInstructions]>,
+    keys: &HotKeyLookup<'_>,
+    programs: &[KnownHotKey],
+    block_id: u32,
+    slot: u64,
+    tx_index: u32,
+    signature_ordinal: u64,
+    tx_error: bool,
+    no_output: bool,
+    outer_only: bool,
+    stats: &mut ProgramTransactionStats,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let outer = match message {
+        ArchiveV2HotMessagePayload::Legacy(message) => message.instructions.as_slice(),
+        ArchiveV2HotMessagePayload::V0(message) => message.instructions.as_slice(),
+    };
+    let inner_groups = if outer_only { None } else { inner_groups };
+    let account_match_index = hot_program_account_match(keys, programs);
+    let mut tx_matched = account_match_index.is_some();
+    if let Some(program_match_index) = account_match_index {
+        stats.matched_account_txs += 1;
+        if !no_output {
+            let record = ProgramTouchRecord {
+                slot,
+                signature_ordinal,
+                tx_index,
+                block_id,
+                outer_ix: NO_INNER_IX,
+                inner_ix: NO_INNER_IX,
+                program_match_index,
+                flags: PROGRAM_TOUCH_FLAG_ACCOUNT_LIST
+                    | if tx_error { EVENT_FLAG_TX_ERROR } else { 0 },
+                instruction_data_tag: 0,
+            };
+            out.extend_from_slice(&record.encode());
+            stats.records_encoded += 1;
+        }
+    }
+    for (outer_ix, instruction) in outer.iter().enumerate() {
+        let outer_ix_u16 =
+            u16::try_from(outer_ix).context("outer instruction index exceeds u16")?;
+        let instruction = instruction_ref(outer_ix_u16, NO_INNER_IX, instruction);
+        tx_matched |= scan_one_hot_program_ref(
+            instruction,
+            keys,
+            programs,
+            block_id,
+            slot,
+            tx_index,
+            signature_ordinal,
+            tx_error,
+            no_output,
+            stats,
+            out,
+        )?;
+        if let Some(groups) = inner_groups {
+            for group in groups
+                .iter()
+                .filter(|group| group.index as usize == outer_ix)
+            {
+                for (inner_ix, inner) in group.instructions.iter().enumerate() {
+                    let instruction = inner_instruction_ref(
+                        outer_ix_u16,
+                        u16::try_from(inner_ix).context("inner instruction index exceeds u16")?,
+                        inner,
+                    );
+                    tx_matched |= scan_one_hot_program_ref(
+                        instruction,
+                        keys,
+                        programs,
+                        block_id,
+                        slot,
+                        tx_index,
+                        signature_ordinal,
+                        tx_error,
+                        no_output,
+                        stats,
+                        out,
+                    )?;
+                }
+            }
+        }
+    }
+    if tx_matched {
+        stats.matched_txs += 1;
+    }
+    Ok(())
+}
+
+fn hot_program_account_match(keys: &HotKeyLookup<'_>, programs: &[KnownHotKey]) -> Option<u16> {
+    keys.static_keys
+        .iter()
+        .chain(keys.loaded_writable.iter())
+        .chain(keys.loaded_readonly.iter())
+        .map(|key| HotKeyRef::from_compact(*key))
+        .find_map(|key| {
+            programs
+                .iter()
+                .enumerate()
+                .find(|(_, known)| known.matches(key))
+                .and_then(|(index, _)| u16::try_from(index).ok())
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_one_hot_program_ref(
+    instruction: InstructionRef<'_>,
+    keys: &HotKeyLookup<'_>,
+    programs: &[KnownHotKey],
+    block_id: u32,
+    slot: u64,
+    tx_index: u32,
+    signature_ordinal: u64,
+    tx_error: bool,
+    no_output: bool,
+    stats: &mut ProgramTransactionStats,
+    out: &mut Vec<u8>,
+) -> Result<bool> {
+    if instruction.inner_ix == NO_INNER_IX {
+        stats.outer_ixs += 1;
+    } else {
+        stats.inner_ixs += 1;
+    }
+    let Some(program) = keys.get(instruction.program_id_index) else {
+        stats.skipped_unresolved_programs += 1;
+        return Ok(false);
+    };
+    let Some((program_match_index, _)) = programs
+        .iter()
+        .enumerate()
+        .find(|(_, known)| known.matches(program))
+    else {
+        return Ok(false);
+    };
+    stats.matched_ixs += 1;
+    if instruction.inner_ix == NO_INNER_IX {
+        stats.matched_outer_ixs += 1;
+    } else {
+        stats.matched_inner_ixs += 1;
+    }
+    if !no_output {
+        let record = ProgramTouchRecord {
+            slot,
+            signature_ordinal,
+            tx_index,
+            block_id,
+            outer_ix: instruction.outer_ix,
+            inner_ix: instruction.inner_ix,
+            program_match_index: u16::try_from(program_match_index)
+                .context("program match index exceeds u16")?,
+            flags: if tx_error { EVENT_FLAG_TX_ERROR } else { 0 }
+                | if instruction.inner_ix == NO_INNER_IX {
+                    0
+                } else {
+                    EVENT_FLAG_INNER
+                },
+            instruction_data_tag: instruction.data.first().copied().unwrap_or_default(),
+        };
+        out.extend_from_slice(&record.encode());
+        stats.records_encoded += 1;
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3404,6 +4504,41 @@ fn decode_hot_instruction_meta(
     Ok(Some(meta))
 }
 
+fn decode_hot_program_instruction_meta(
+    block: &ArchiveV2HotBlockBlob,
+    tx_row: &ArchiveV2HotTxRow,
+    block_id: u32,
+    slot: u64,
+    stats: &mut ProgramTransactionStats,
+) -> Result<Option<CompactMetaInstructionView>> {
+    if tx_row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 {
+        stats.metadata_skipped += 1;
+        return Ok(None);
+    }
+    if tx_row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0 {
+        stats.skipped_raw_metadata += 1;
+        return Ok(None);
+    }
+    let metadata_slice = hot_region(
+        &block.metadata_bytes,
+        tx_row.metadata_offset,
+        tx_row.metadata_len,
+        "metadata",
+        block_id,
+        tx_row.tx_index,
+    )?;
+    let meta = wincode::config::deserialize(metadata_slice, wincode_leb128_config()).with_context(
+        || {
+            format!(
+                "decode hot program metadata view block_id={} slot={} tx_index={}",
+                block_id, slot, tx_row.tx_index
+            )
+        },
+    )?;
+    stats.metadata_decoded += 1;
+    Ok(Some(meta))
+}
+
 fn decode_hot_instruction_inner_meta(
     block: &ArchiveV2HotBlockBlob,
     tx_row: &ArchiveV2HotTxRow,
@@ -3431,6 +4566,41 @@ fn decode_hot_instruction_inner_meta(
         || {
             format!(
                 "decode hot instruction metadata inner view block_id={} slot={} tx_index={}",
+                block_id, slot, tx_row.tx_index
+            )
+        },
+    )?;
+    stats.metadata_decoded += 1;
+    Ok(Some(meta))
+}
+
+fn decode_hot_program_inner_meta(
+    block: &ArchiveV2HotBlockBlob,
+    tx_row: &ArchiveV2HotTxRow,
+    block_id: u32,
+    slot: u64,
+    stats: &mut ProgramTransactionStats,
+) -> Result<Option<CompactMetaInnerInstructionView>> {
+    if tx_row.flags & ARCHIVE_V2_TX_FLAG_HAS_METADATA == 0 {
+        stats.metadata_skipped += 1;
+        return Ok(None);
+    }
+    if tx_row.flags & ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK != 0 {
+        stats.skipped_raw_metadata += 1;
+        return Ok(None);
+    }
+    let metadata_slice = hot_region(
+        &block.metadata_bytes,
+        tx_row.metadata_offset,
+        tx_row.metadata_len,
+        "metadata",
+        block_id,
+        tx_row.tx_index,
+    )?;
+    let meta = wincode::config::deserialize(metadata_slice, wincode_leb128_config()).with_context(
+        || {
+            format!(
+                "decode hot program inner metadata view block_id={} slot={} tx_index={}",
                 block_id, slot, tx_row.tx_index
             )
         },

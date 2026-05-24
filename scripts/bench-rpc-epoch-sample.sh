@@ -13,12 +13,15 @@ Examples:
   DRY_RUN=1 scripts/bench-rpc-epoch-sample.sh 700 800
 
 Environment:
-  SLOT_INDEX_DIR       Directory with epoch-N-slot-ranges.raw or -v2.raw.
+  SLOT_INDEX_DIR       Directory with epoch-N-slot-ranges-v2.raw files
+                       (or legacy .raw files when REQUIRE_V2=0).
                        Default: /volume1/blockzilla/slot-index
   SAMPLES_PER_EPOCH   Present slots to sample from each epoch. Default: 3
   SAMPLE_MODE         spread or random. Default: spread
   SEED                Random seed for SAMPLE_MODE=random. Default: 1
+  REQUIRE_V2          Only sample epoch-N-slot-ranges-v2.raw indexes. Default: 1
   PREFER_V2           Prefer epoch-N-slot-ranges-v2.raw when present. Default: 1
+                       Only used when REQUIRE_V2=0.
   DRY_RUN=1           Print sampled slots and exit without curl.
 
 All other bench-rpc-getblock.sh environment variables are forwarded, including
@@ -44,13 +47,14 @@ slot_index_dir="${SLOT_INDEX_DIR:-/volume1/blockzilla/slot-index}"
 samples_per_epoch="${SAMPLES_PER_EPOCH:-3}"
 sample_mode="${SAMPLE_MODE:-spread}"
 seed="${SEED:-1}"
+require_v2="${REQUIRE_V2:-1}"
 prefer_v2="${PREFER_V2:-1}"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 slots_file="$tmpdir/slots.txt"
 
-python3 - "$slot_index_dir" "$samples_per_epoch" "$sample_mode" "$seed" "$prefer_v2" "$@" >"$slots_file" <<'PY'
+python3 - "$slot_index_dir" "$samples_per_epoch" "$sample_mode" "$seed" "$require_v2" "$prefer_v2" "$@" >"$slots_file" <<'PY'
 import os
 import random
 import struct
@@ -62,8 +66,9 @@ slot_index_dir = sys.argv[1]
 samples_per_epoch = int(sys.argv[2])
 sample_mode = sys.argv[3]
 seed = int(sys.argv[4])
-prefer_v2 = sys.argv[5] != "0"
-epoch_specs = sys.argv[6:]
+require_v2 = sys.argv[5] != "0"
+prefer_v2 = sys.argv[6] != "0"
+epoch_specs = sys.argv[7:]
 
 if samples_per_epoch < 1:
     raise SystemExit("SAMPLES_PER_EPOCH must be >= 1")
@@ -96,6 +101,12 @@ def expand_epoch_specs(specs):
 def index_path(epoch):
     raw = os.path.join(slot_index_dir, f"epoch-{epoch}-slot-ranges.raw")
     v2 = os.path.join(slot_index_dir, f"epoch-{epoch}-slot-ranges-v2.raw")
+    if require_v2:
+        if os.path.isfile(v2):
+            return v2, 44
+        raise FileNotFoundError(
+            f"missing v2 slot index for epoch {epoch} under {slot_index_dir}"
+        )
     if prefer_v2 and os.path.isfile(v2):
         return v2, 44
     if os.path.isfile(raw):

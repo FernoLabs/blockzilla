@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use of_car_reader::{
     CarBlockReader,
@@ -8,8 +8,11 @@ use of_car_reader::{
         write_slot_ranges_raw, write_slot_ranges_v2_raw,
     },
 };
+use reqwest::blocking::Client;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, VecDeque},
+    env,
     fs::{self, File},
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -17,6 +20,7 @@ use std::{
     thread,
     time::Instant,
 };
+use time::{OffsetDateTime, macros::format_description};
 
 const DEFAULT_BUFFER_MIB: usize = 64;
 const NODE_KIND_PREFIX_LEN: usize = 2;
@@ -26,9 +30,9 @@ const BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
 #[command(name = "of-car-slot-index")]
 #[command(about = "Build Old Faithful slot range indexes by streaming .car or .car.zst files")]
 struct Cli {
-    /// CAR file(s) or directory roots containing epoch-N.car / epoch-N.car.zst.
+    /// CAR file(s), directory roots, HTTP(S) URLs, or s3://bucket/key URLs.
     #[arg(required = true)]
-    inputs: Vec<PathBuf>,
+    inputs: Vec<String>,
 
     /// Directory for epoch-N-slot-ranges.raw and epoch-N-slot-ranges-v2.raw.
     #[arg(long = "output-dir", default_value = "out")]
@@ -42,6 +46,32 @@ struct Cli {
     /// Defaults to blockhash-dir.
     #[arg(long = "seed-blockhash-dir")]
     seed_blockhash_dir: Option<PathBuf>,
+
+    /// Extra HTTP header as NAME=VALUE for HTTP(S) inputs. May be repeated.
+    #[arg(long = "header")]
+    headers: Vec<String>,
+
+    /// Read a bearer token from this environment variable and send `Authorization: Bearer <token>`.
+    #[arg(long)]
+    bearer_token_env: Option<String>,
+
+    /// S3-compatible endpoint for s3:// inputs, for example `https://s3.us-west-004.backblazeb2.com`.
+    /// If omitted, AWS S3 virtual-hosted URLs are used.
+    #[arg(long)]
+    s3_endpoint: Option<String>,
+
+    /// S3 signing region for s3:// inputs.
+    #[arg(long, default_value = "us-east-1")]
+    s3_region: String,
+
+    #[arg(long, default_value = "AWS_ACCESS_KEY_ID")]
+    s3_access_key_id_env: String,
+
+    #[arg(long, default_value = "AWS_SECRET_ACCESS_KEY")]
+    s3_secret_access_key_env: String,
+
+    #[arg(long)]
+    s3_session_token_env: Option<String>,
 
     /// Base58 previous blockhash for the first present block. Intended for
     /// one-off single-epoch runs; seed-blockhash-dir is better for batches.
@@ -69,6 +99,11 @@ struct Cli {
     #[arg(long)]
     no_v2: bool,
 
+    /// Write only epoch-N-slot-ranges.raw. This skips v2 rows and blockhash
+    /// registry output for workers that source previousBlockhash elsewhere.
+    #[arg(long)]
+    raw_only: bool,
+
     /// Fail v2 builds for epoch > 0 when no previous blockhash seed is found.
     #[arg(long)]
     require_seed: bool,
@@ -88,9 +123,17 @@ struct Config {
     blockhash_dir: PathBuf,
     seed_blockhash_dir: PathBuf,
     seed_previous_blockhash: Option<[u8; 32]>,
+    headers: Vec<(String, String)>,
+    bearer_token: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_region: String,
+    s3_access_key_id_env: String,
+    s3_secret_access_key_env: String,
+    s3_session_token_env: Option<String>,
     jobs: usize,
     prefer_zst: bool,
     no_v2: bool,
+    raw_only: bool,
     require_seed: bool,
     overwrite: bool,
     buffer_bytes: usize,
@@ -99,16 +142,29 @@ struct Config {
 #[derive(Debug, Clone)]
 struct EpochInput {
     epoch: u64,
-    path: PathBuf,
+    source: InputSource,
+}
+
+#[derive(Debug, Clone)]
+enum InputSource {
+    Local(PathBuf),
+    Http(String),
+    S3(S3Object),
+}
+
+#[derive(Debug, Clone)]
+struct S3Object {
+    bucket: String,
+    key: String,
 }
 
 #[derive(Debug)]
 struct BuildSummary {
     epoch: u64,
-    path: PathBuf,
+    source: String,
     raw_out: PathBuf,
     v2_out: Option<PathBuf>,
-    registry_out: PathBuf,
+    registry_out: Option<PathBuf>,
     entries: u64,
     entry_nodes: u64,
     blocks: u64,
@@ -123,6 +179,7 @@ struct BuildSummary {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let output_dir = cli.output_dir;
+    let raw_only = cli.raw_only;
     let blockhash_dir = cli
         .blockhash_dir
         .unwrap_or_else(|| output_dir.join("blockhash-registry"));
@@ -135,15 +192,34 @@ fn main() -> Result<()> {
         .as_deref()
         .map(decode_base58_hash)
         .transpose()?;
+    let headers = cli
+        .headers
+        .into_iter()
+        .map(parse_header)
+        .collect::<Result<Vec<_>>>()?;
+    let bearer_token = cli
+        .bearer_token_env
+        .as_deref()
+        .map(env::var)
+        .transpose()
+        .context("read bearer token env")?;
 
     let config = Arc::new(Config {
         output_dir,
         blockhash_dir,
         seed_blockhash_dir,
         seed_previous_blockhash,
+        headers,
+        bearer_token,
+        s3_endpoint: cli.s3_endpoint,
+        s3_region: cli.s3_region,
+        s3_access_key_id_env: cli.s3_access_key_id_env,
+        s3_secret_access_key_env: cli.s3_secret_access_key_env,
+        s3_session_token_env: cli.s3_session_token_env,
         jobs: cli.jobs.max(1),
         prefer_zst: cli.prefer_zst,
-        no_v2: cli.no_v2,
+        no_v2: cli.no_v2 || raw_only,
+        raw_only,
         require_seed: cli.require_seed,
         overwrite: cli.overwrite,
         buffer_bytes: cli
@@ -159,17 +235,24 @@ fn main() -> Result<()> {
 
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("create {}", config.output_dir.display()))?;
-    fs::create_dir_all(&config.blockhash_dir)
-        .with_context(|| format!("create {}", config.blockhash_dir.display()))?;
+    if !config.raw_only {
+        fs::create_dir_all(&config.blockhash_dir)
+            .with_context(|| format!("create {}", config.blockhash_dir.display()))?;
+    }
 
     let jobs = config.jobs.min(inputs.len()).max(1);
     eprintln!(
-        "of-car-slot-index: epochs={} jobs={} output={} blockhash_dir={} no_v2={}",
+        "of-car-slot-index: epochs={} jobs={} output={} blockhash_dir={} no_v2={} raw_only={}",
         inputs.len(),
         jobs,
         config.output_dir.display(),
-        config.blockhash_dir.display(),
-        config.no_v2
+        if config.raw_only {
+            "-".to_string()
+        } else {
+            config.blockhash_dir.display().to_string()
+        },
+        config.no_v2,
+        config.raw_only
     );
 
     let work = Arc::new(Mutex::new(VecDeque::from(inputs)));
@@ -221,31 +304,37 @@ fn main() -> Result<()> {
 }
 
 fn discover_inputs(
-    inputs: &[PathBuf],
+    inputs: &[String],
     config: &Config,
     start_epoch: Option<u64>,
     end_epoch: Option<u64>,
 ) -> Result<Vec<EpochInput>> {
-    let mut by_epoch = BTreeMap::<u64, PathBuf>::new();
+    let mut by_epoch = BTreeMap::<u64, InputSource>::new();
     for input in inputs {
-        if input.is_dir() {
-            for entry in fs::read_dir(input).with_context(|| format!("read {}", input.display()))? {
+        if let Some(source) = remote_input_source(input)? {
+            add_input_source(&mut by_epoch, source, config, start_epoch, end_epoch)?;
+            continue;
+        }
+
+        let path = PathBuf::from(input);
+        if path.is_dir() {
+            for entry in fs::read_dir(&path).with_context(|| format!("read {}", path.display()))? {
                 let path = entry?.path();
                 add_input_path(&mut by_epoch, path, config, start_epoch, end_epoch)?;
             }
         } else {
-            add_input_path(&mut by_epoch, input.clone(), config, start_epoch, end_epoch)?;
+            add_input_path(&mut by_epoch, path, config, start_epoch, end_epoch)?;
         }
     }
 
     Ok(by_epoch
         .into_iter()
-        .map(|(epoch, path)| EpochInput { epoch, path })
+        .map(|(epoch, source)| EpochInput { epoch, source })
         .collect())
 }
 
 fn add_input_path(
-    by_epoch: &mut BTreeMap<u64, PathBuf>,
+    by_epoch: &mut BTreeMap<u64, InputSource>,
     path: PathBuf,
     config: &Config,
     start_epoch: Option<u64>,
@@ -257,16 +346,47 @@ fn add_input_path(
     let Some(epoch) = epoch_from_path(&path) else {
         return Ok(());
     };
+    add_epoch_source(
+        by_epoch,
+        epoch,
+        InputSource::Local(path),
+        config,
+        start_epoch,
+        end_epoch,
+    )
+}
+
+fn add_input_source(
+    by_epoch: &mut BTreeMap<u64, InputSource>,
+    source: InputSource,
+    config: &Config,
+    start_epoch: Option<u64>,
+    end_epoch: Option<u64>,
+) -> Result<()> {
+    let Some(epoch) = epoch_from_source(&source) else {
+        return Ok(());
+    };
+    add_epoch_source(by_epoch, epoch, source, config, start_epoch, end_epoch)
+}
+
+fn add_epoch_source(
+    by_epoch: &mut BTreeMap<u64, InputSource>,
+    epoch: u64,
+    source: InputSource,
+    config: &Config,
+    start_epoch: Option<u64>,
+    end_epoch: Option<u64>,
+) -> Result<()> {
     if start_epoch.is_some_and(|start| epoch < start) || end_epoch.is_some_and(|end| epoch > end) {
         return Ok(());
     }
 
     match by_epoch.get(&epoch) {
-        Some(existing) if prefer_candidate(existing, &path, config.prefer_zst) => {
-            by_epoch.insert(epoch, path);
+        Some(existing) if prefer_candidate(existing, &source, config.prefer_zst) => {
+            by_epoch.insert(epoch, source);
         }
         None => {
-            by_epoch.insert(epoch, path);
+            by_epoch.insert(epoch, source);
         }
         Some(_) => {}
     }
@@ -278,15 +398,15 @@ fn build_epoch(input: EpochInput, config: &Config) -> Result<BuildSummary> {
     let paths = output_paths(input.epoch, config);
     if !config.overwrite
         && paths.raw_out.is_file()
-        && paths.registry_out.is_file()
+        && (config.raw_only || paths.registry_out.is_file())
         && (config.no_v2 || paths.v2_out.is_file())
     {
         return Ok(BuildSummary {
             epoch: input.epoch,
-            path: input.path,
+            source: input.source.display(),
             raw_out: paths.raw_out,
             v2_out: (!config.no_v2).then_some(paths.v2_out),
-            registry_out: paths.registry_out,
+            registry_out: (!config.raw_only).then_some(paths.registry_out),
             entries: 0,
             entry_nodes: 0,
             blocks: 0,
@@ -305,37 +425,48 @@ fn build_epoch(input: EpochInput, config: &Config) -> Result<BuildSummary> {
         seed_previous_blockhash(input.epoch, config)?
     };
 
-    let scan = if is_zstd_path(&input.path) {
-        let file =
-            File::open(&input.path).with_context(|| format!("open {}", input.path.display()))?;
-        let file = BufReader::with_capacity(config.buffer_bytes, file);
-        let decoder = zstd::Decoder::with_buffer(file)
-            .with_context(|| format!("open zstd {}", input.path.display()))?;
+    let source_label = input.source.display();
+    let reader = input
+        .source
+        .open(config)
+        .with_context(|| format!("open {source_label}"))?;
+    let scan = if input.source.is_zstd() {
+        let decoder =
+            zstd::Decoder::new(reader).with_context(|| format!("open zstd {source_label}"))?;
         scan_car_reader(
             decoder,
             input.epoch,
             previous_blockhash,
             config.buffer_bytes,
+            !config.raw_only,
+            !config.no_v2,
         )
     } else {
-        let file =
-            File::open(&input.path).with_context(|| format!("open {}", input.path.display()))?;
-        scan_car_reader(file, input.epoch, previous_blockhash, config.buffer_bytes)
+        scan_car_reader(
+            reader,
+            input.epoch,
+            previous_blockhash,
+            config.buffer_bytes,
+            !config.raw_only,
+            !config.no_v2,
+        )
     }
-    .with_context(|| format!("scan {}", input.path.display()))?;
+    .with_context(|| format!("scan {source_label}"))?;
 
     write_raw_atomic(&paths.raw_out, &scan.raw_ranges)?;
-    write_registry_atomic(&paths.registry_out, &scan.blockhashes)?;
+    if !config.raw_only {
+        write_registry_atomic(&paths.registry_out, &scan.blockhashes)?;
+    }
     if !config.no_v2 {
         write_v2_atomic(&paths.v2_out, &scan.v2_ranges)?;
     }
 
     Ok(BuildSummary {
         epoch: input.epoch,
-        path: input.path,
+        source: source_label,
         raw_out: paths.raw_out,
         v2_out: (!config.no_v2).then_some(paths.v2_out),
-        registry_out: paths.registry_out,
+        registry_out: (!config.raw_only).then_some(paths.registry_out),
         entries: scan.entries,
         entry_nodes: scan.entry_nodes,
         blocks: scan.blocks,
@@ -387,13 +518,23 @@ fn scan_car_reader<R: Read>(
     epoch: u64,
     seed_previous_blockhash: Option<[u8; 32]>,
     buffer_bytes: usize,
+    collect_blockhashes: bool,
+    build_v2: bool,
 ) -> Result<ScanOutput> {
     let mut reader = CarBlockReader::with_capacity(reader, buffer_bytes);
     reader.skip_header().context("read CAR header")?;
 
     let mut raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
-    let mut v2_ranges = vec![SlotRangeWithPreviousBlockhash::EMPTY; SLOTS_PER_EPOCH as usize];
-    let mut blockhashes = Vec::with_capacity(SLOTS_PER_EPOCH as usize);
+    let mut v2_ranges = if build_v2 {
+        vec![SlotRangeWithPreviousBlockhash::EMPTY; SLOTS_PER_EPOCH as usize]
+    } else {
+        Vec::new()
+    };
+    let mut blockhashes = if collect_blockhashes {
+        Vec::with_capacity(SLOTS_PER_EPOCH as usize)
+    } else {
+        Vec::new()
+    };
     let mut scratch = Vec::with_capacity(1024);
     let mut pending_start: Option<u64> = None;
     let mut pending_blockhash = [0u8; 32];
@@ -421,18 +562,21 @@ fn scan_car_reader<R: Read>(
         };
 
         if is_entry_node(entry.prefix) {
-            let hash = decode_entry_hash(payload)
-                .with_context(|| format!("decode entry hash at {}", entry.location.car_offset))?;
-            if hash.len() != 32 {
-                return Err(anyhow!(
-                    "entry hash length {} at CAR offset {}",
-                    hash.len(),
-                    entry.location.car_offset
-                ));
-            }
-            pending_blockhash.copy_from_slice(hash);
-            pending_has_blockhash = true;
             entry_nodes += 1;
+            if collect_blockhashes {
+                let hash = decode_entry_hash(payload).with_context(|| {
+                    format!("decode entry hash at {}", entry.location.car_offset)
+                })?;
+                if hash.len() != 32 {
+                    return Err(anyhow!(
+                        "entry hash length {} at CAR offset {}",
+                        hash.len(),
+                        entry.location.car_offset
+                    ));
+                }
+                pending_blockhash.copy_from_slice(hash);
+                pending_has_blockhash = true;
+            }
             continue;
         }
 
@@ -443,7 +587,7 @@ fn scan_car_reader<R: Read>(
         let (slot, _meta) = decode_block_metadata(payload)
             .with_context(|| format!("decode block metadata at {}", entry.location.car_offset))?;
         blocks += 1;
-        if !pending_has_blockhash {
+        if collect_blockhashes && !pending_has_blockhash {
             return Err(anyhow!(
                 "block slot {slot} at offset {} had no preceding Entry hash",
                 entry.location.car_offset
@@ -468,15 +612,19 @@ fn scan_car_reader<R: Read>(
             }
 
             let range = SlotRange { offset: start, len };
-            let previous = previous_blockhash
-                .or_else(|| (slot == 0).then_some(blockhash))
-                .unwrap_or([0; 32]);
             raw_ranges[idx] = range;
-            v2_ranges[idx] = SlotRangeWithPreviousBlockhash {
-                range,
-                previous_blockhash: previous,
-            };
-            blockhashes.push(blockhash);
+            if build_v2 {
+                let previous = previous_blockhash
+                    .or_else(|| (slot == 0 && collect_blockhashes).then_some(blockhash))
+                    .unwrap_or([0; 32]);
+                v2_ranges[idx] = SlotRangeWithPreviousBlockhash {
+                    range,
+                    previous_blockhash: previous,
+                };
+            }
+            if collect_blockhashes {
+                blockhashes.push(blockhash);
+            }
             present_slots += 1;
             first_slot.get_or_insert(slot);
             last_slot = Some(slot);
@@ -484,7 +632,9 @@ fn scan_car_reader<R: Read>(
             out_of_epoch_blocks += 1;
         }
 
-        previous_blockhash = Some(blockhash);
+        if collect_blockhashes {
+            previous_blockhash = Some(blockhash);
+        }
         pending_start = None;
         pending_blockhash = [0; 32];
         pending_has_blockhash = false;
@@ -611,7 +761,11 @@ fn print_summary(summary: &BuildSummary) {
                 .as_ref()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "-".to_string()),
-            summary.registry_out.display()
+            summary
+                .registry_out
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string())
         );
         return;
     }
@@ -619,7 +773,7 @@ fn print_summary(summary: &BuildSummary) {
     eprintln!(
         "epoch={}: built from {} entries={} entry_nodes={} blocks={} present_slots={} first_slot={} last_slot={} out_of_epoch_blocks={} elapsed_s={:.2} raw={} v2={} registry={}",
         summary.epoch,
-        summary.path.display(),
+        summary.source,
         summary.entries,
         summary.entry_nodes,
         summary.blocks,
@@ -634,13 +788,49 @@ fn print_summary(summary: &BuildSummary) {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "-".to_string()),
-        summary.registry_out.display(),
+        summary
+            .registry_out
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string()),
     );
 }
 
-fn prefer_candidate(existing: &Path, candidate: &Path, prefer_zst: bool) -> bool {
-    let existing_zst = is_zstd_path(existing);
-    let candidate_zst = is_zstd_path(candidate);
+impl InputSource {
+    fn display(&self) -> String {
+        match self {
+            Self::Local(path) => path.display().to_string(),
+            Self::Http(url) => url.clone(),
+            Self::S3(object) => format!("s3://{}/{}", object.bucket, object.key),
+        }
+    }
+
+    fn is_zstd(&self) -> bool {
+        match self {
+            Self::Local(path) => is_zstd_name(&path.display().to_string()),
+            Self::Http(url) => is_zstd_name(url),
+            Self::S3(object) => is_zstd_name(&object.key),
+        }
+    }
+
+    fn open(&self, config: &Config) -> Result<Box<dyn Read + Send>> {
+        match self {
+            Self::Local(path) => {
+                let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+                Ok(Box::new(BufReader::with_capacity(
+                    config.buffer_bytes,
+                    file,
+                )))
+            }
+            Self::Http(url) => open_http_input(url, config),
+            Self::S3(object) => open_s3_input(object, config),
+        }
+    }
+}
+
+fn prefer_candidate(existing: &InputSource, candidate: &InputSource, prefer_zst: bool) -> bool {
+    let existing_zst = existing.is_zstd();
+    let candidate_zst = candidate.is_zstd();
     if prefer_zst {
         !existing_zst && candidate_zst
     } else {
@@ -650,6 +840,30 @@ fn prefer_candidate(existing: &Path, candidate: &Path, prefer_zst: bool) -> bool
 
 fn epoch_from_path(path: &Path) -> Option<u64> {
     let filename = path.file_name()?.to_str()?;
+    epoch_from_filename(filename)
+}
+
+fn epoch_from_source(source: &InputSource) -> Option<u64> {
+    match source {
+        InputSource::Local(path) => epoch_from_path(path),
+        InputSource::Http(url) => epoch_from_name(url),
+        InputSource::S3(object) => epoch_from_name(&object.key),
+    }
+}
+
+fn epoch_from_name(name: &str) -> Option<u64> {
+    let clean = name
+        .split_once('?')
+        .map(|(head, _)| head)
+        .unwrap_or(name)
+        .split_once('#')
+        .map(|(head, _)| head)
+        .unwrap_or(name);
+    let filename = clean.rsplit('/').next()?;
+    epoch_from_filename(filename)
+}
+
+fn epoch_from_filename(filename: &str) -> Option<u64> {
     let rest = filename.strip_prefix("epoch-")?;
     if !(rest.ends_with(".car") || rest.ends_with(".car.zst")) {
         return None;
@@ -664,10 +878,190 @@ fn epoch_from_path(path: &Path) -> Option<u64> {
     rest[..digits_len].parse().ok()
 }
 
-fn is_zstd_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("zst"))
+fn is_zstd_name(name: &str) -> bool {
+    name.split_once('?')
+        .map(|(head, _)| head)
+        .unwrap_or(name)
+        .split_once('#')
+        .map(|(head, _)| head)
+        .unwrap_or(name)
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.ends_with(".zst"))
+}
+
+fn remote_input_source(input: &str) -> Result<Option<InputSource>> {
+    if input.starts_with("http://") || input.starts_with("https://") {
+        return Ok(Some(InputSource::Http(input.to_string())));
+    }
+    if let Some(rest) = input.strip_prefix("s3://") {
+        let Some((bucket, key)) = rest.split_once('/') else {
+            bail!("s3 input must be s3://bucket/key, got {input}");
+        };
+        if bucket.is_empty() || key.is_empty() {
+            bail!("s3 input must include a non-empty bucket and key, got {input}");
+        }
+        return Ok(Some(InputSource::S3(S3Object {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+        })));
+    }
+    Ok(None)
+}
+
+fn parse_header(value: String) -> Result<(String, String)> {
+    let Some((name, raw_value)) = value.split_once('=') else {
+        bail!("header must be NAME=VALUE");
+    };
+    if name.trim().is_empty() {
+        bail!("header name cannot be empty");
+    }
+    Ok((name.trim().to_string(), raw_value.to_string()))
+}
+
+fn open_http_input(url: &str, config: &Config) -> Result<Box<dyn Read + Send>> {
+    let client = Client::builder()
+        .tcp_nodelay(true)
+        .build()
+        .context("build HTTP client")?;
+    let mut request = client.get(url);
+    for (name, value) in &config.headers {
+        request = request.header(name, value);
+    }
+    if let Some(token) = &config.bearer_token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().with_context(|| format!("GET {url}"))?;
+    if !response.status().is_success() {
+        bail!("{url} returned HTTP {}", response.status());
+    }
+    Ok(Box::new(response))
+}
+
+fn open_s3_input(object: &S3Object, config: &Config) -> Result<Box<dyn Read + Send>> {
+    let access_key = env::var(&config.s3_access_key_id_env)
+        .with_context(|| format!("read ${}", config.s3_access_key_id_env))?;
+    let secret_key = env::var(&config.s3_secret_access_key_env)
+        .with_context(|| format!("read ${}", config.s3_secret_access_key_env))?;
+    let session_token = config
+        .s3_session_token_env
+        .as_ref()
+        .map(env::var)
+        .transpose()
+        .context("read S3 session token env")?;
+
+    if config.s3_endpoint.is_none() && config.s3_region == "auto" {
+        bail!(
+            "--s3-region must be set for AWS S3 inputs, or pass --s3-endpoint for S3-compatible storage"
+        );
+    }
+    let endpoint = config
+        .s3_endpoint
+        .clone()
+        .unwrap_or_else(|| aws_s3_endpoint(&object.bucket, &config.s3_region));
+    let endpoint = endpoint.trim_end_matches('/').to_string();
+    let url = if config.s3_endpoint.is_some() {
+        format!(
+            "{}/{}/{}",
+            endpoint,
+            uri_encode_path_segment(&object.bucket),
+            uri_encode_path(&object.key)
+        )
+    } else {
+        format!("{}/{}", endpoint, uri_encode_path(&object.key))
+    };
+    let host = host_from_url(&url)?;
+    let canonical_uri = if config.s3_endpoint.is_some() {
+        format!(
+            "/{}/{}",
+            uri_encode_path_segment(&object.bucket),
+            uri_encode_path(&object.key)
+        )
+    } else {
+        format!("/{}", uri_encode_path(&object.key))
+    };
+    let (date, amz_date) = amz_dates()?;
+
+    let mut headers = vec![
+        ("host".to_string(), host.clone()),
+        (
+            "x-amz-content-sha256".to_string(),
+            "UNSIGNED-PAYLOAD".to_string(),
+        ),
+        ("x-amz-date".to_string(), amz_date.clone()),
+    ];
+    if let Some(token) = &session_token {
+        headers.push(("x-amz-security-token".to_string(), token.clone()));
+    }
+    headers.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let canonical_headers = headers
+        .iter()
+        .map(|(name, value)| format!("{name}:{}\n", value.trim()))
+        .collect::<String>();
+    let signed_headers = headers
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+    let canonical_request =
+        format!("GET\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\nUNSIGNED-PAYLOAD");
+    let credential_scope = format!("{date}/{}/s3/aws4_request", config.s3_region);
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        hex_lower(&Sha256::digest(canonical_request.as_bytes()))
+    );
+    let signing_key = signing_key(&secret_key, &date, &config.s3_region);
+    let signature = hex_lower(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    );
+
+    let client = Client::builder()
+        .tcp_nodelay(true)
+        .build()
+        .context("build HTTP client")?;
+    let mut request = client
+        .get(&url)
+        .header("host", host)
+        .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+        .header("x-amz-date", amz_date)
+        .header("authorization", authorization);
+    if let Some(token) = &session_token {
+        request = request.header("x-amz-security-token", token);
+    }
+
+    let response = request
+        .send()
+        .with_context(|| format!("S3 GET s3://{}/{}", object.bucket, object.key))?;
+    if !response.status().is_success() {
+        bail!(
+            "S3 GET s3://{}/{} returned HTTP {}",
+            object.bucket,
+            object.key,
+            response.status()
+        );
+    }
+    Ok(Box::new(response))
+}
+
+fn aws_s3_endpoint(bucket: &str, region: &str) -> String {
+    if region == "us-east-1" {
+        format!("https://{bucket}.s3.amazonaws.com")
+    } else {
+        format!("https://{bucket}.s3.{region}.amazonaws.com")
+    }
+}
+
+fn host_from_url(url: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("parse URL {url}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("URL must include a host: {url}"))?;
+    Ok(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
 }
 
 fn decode_base58_hash(value: &str) -> Result<[u8; 32]> {
@@ -681,4 +1075,83 @@ fn decode_base58_hash(value: &str) -> Result<[u8; 32]> {
 
 fn display_opt_u64(value: Option<u64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn amz_dates() -> Result<(String, String)> {
+    let now = OffsetDateTime::now_utc();
+    let date = now.format(format_description!("[year][month][day]"))?;
+    let amz_date = now.format(format_description!(
+        "[year][month][day]T[hour][minute][second]Z"
+    ))?;
+    Ok((date, amz_date))
+}
+
+fn signing_key(secret_key: &str, date: &str, region: &str) -> [u8; 32] {
+    let k_date = hmac_sha256(format!("AWS4{secret_key}").as_bytes(), date.as_bytes());
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
+    let k_service = hmac_sha256(&k_region, b"s3");
+    hmac_sha256(&k_service, b"aws4_request")
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        key_block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36u8; 64];
+    let mut outer_pad = [0x5cu8; 64];
+    for i in 0..64 {
+        inner_pad[i] ^= key_block[i];
+        outer_pad[i] ^= key_block[i];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_hash);
+    let out = outer.finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&out);
+    bytes
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn uri_encode_path(path: &str) -> String {
+    path.split('/')
+        .map(uri_encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn uri_encode_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(byte & 0x0f) as usize]));
+            }
+        }
+    }
+    out
 }

@@ -21,6 +21,34 @@ queries, and snapshot queries are left to `--proxy-url`.
 
 ## Build the v2 Slot Index
 
+For deployments that read `getBlockTime` and `previousBlockhash` from a
+database, build the raw slot-to-CAR range index from the Old Faithful compact
+indexes:
+
+```sh
+cargo install of-slot-ranges
+
+of-slot-ranges \
+  --start-epoch 800 \
+  --end-epoch 800 \
+  --indexes-dir /path/to/indexes \
+  --output-dir ./slot-index \
+  --raw-only
+```
+
+The raw index stores one 12-byte row per epoch slot:
+
+```text
+offset:u64_le len:u32_le
+```
+
+Local files, local directories, HTTP(S) URLs, and `s3://bucket/key` inputs are
+accepted by the `of-car-slot-index` CAR-scan fallback when compact indexes are
+not available.
+
+If the worker must resolve `previousBlockhash` from the slot index itself, build
+the v2 format:
+
 ```sh
 cargo run -p of-get-block-worker -- build-slot-index-v2 \
   --epoch 800 \
@@ -48,6 +76,40 @@ cargo run -p of-get-block-worker -- serve \
 
 The server listens on `127.0.0.1:8899` by default and accepts standard JSON-RPC
 2.0 HTTP POST bodies.
+
+## Native Benchmark
+
+The native benchmark calls the Rust archive/render path directly, without a
+Cloudflare Worker or local HTTP server:
+
+```sh
+cargo run -p of-get-block-worker --release -- bench \
+  --index-dir . \
+  --base-url https://files.old-faithful.net \
+  --slots-file ./slots.txt \
+  --mode full \
+  --mode accounts \
+  --mode signatures \
+  --mode none \
+  --iterations 3 \
+  --concurrency 4 \
+  --out-dir /tmp/of-get-block-worker-bench
+```
+
+By default this measures end-to-end source fetch plus decode/render. To isolate
+local CPU/render throughput, preload each slot once and measure only rendering:
+
+```sh
+cargo run -p of-get-block-worker --release -- bench \
+  --index-dir . \
+  --base-url https://files.old-faithful.net \
+  --slots-file ./slots.txt \
+  --mode full \
+  --iterations 5 \
+  --warmup 1 \
+  --concurrency 4 \
+  --render-only
+```
 
 ## Deploy the Cloudflare Worker
 

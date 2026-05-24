@@ -22,7 +22,6 @@ mod genesis_epoch0;
 mod lossless_v2;
 mod pass1;
 mod split_compact;
-mod token_events;
 
 pub(crate) fn file_nonempty(path: &Path) -> bool {
     std::fs::metadata(path)
@@ -33,7 +32,7 @@ pub(crate) fn file_nonempty(path: &Path) -> bool {
 #[derive(Parser)]
 #[command(name = "blockzilla-optimizer")]
 #[command(
-    about = "Two-pass optimizer: build registry (counts) then build compact (postcard framed)"
+    about = "Legacy Blockzilla archive conversion CLI; use `blockzilla` for new Archive V2 work"
 )]
 #[command(version)]
 pub(crate) struct Cli {
@@ -41,7 +40,7 @@ pub(crate) struct Cli {
     #[arg(long, default_value = "epochs", global = true)]
     pub(crate) cache_dir: PathBuf,
 
-    /// Output directory for blockzilla archives
+    /// Output directory for legacy blockzilla archives
     #[arg(long, default_value = "blockzilla-v1", global = true)]
     pub(crate) output_dir: PathBuf,
 
@@ -59,7 +58,7 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
-    /// Run both passes: build registry.bin then compact.bin
+    /// Legacy V1 path: build registry.bin then compact.bin
     Build {
         /// Epoch number
         epoch: u64,
@@ -72,7 +71,7 @@ pub(crate) enum Cmd {
     /// Pass 1 only: build registry.bin from CAR
     BuildRegistry { epoch: u64 },
 
-    /// Pass 2 only: build compact.bin from CAR + registry.bin
+    /// Legacy V1 path: build compact.bin from CAR + registry.bin
     Compact { epoch: u64 },
 
     /// Process all epochs found in the cache directory
@@ -357,76 +356,6 @@ pub(crate) enum Cmd {
         chunk_size: usize,
     },
 
-    /// Dump compact USDC token-account events from CAR and hot-block Archive V2 sources.
-    DumpUsdcTokenEvents {
-        /// Input .car, .car.zst, archive-v2-blocks.zstd, archive-v2-blocks.wincode, or archive-v2-blocks.wincode.zst.
-        input: PathBuf,
-        /// Output directory for events.bin, wallets.bin, token_accounts.bin, signatures.bin, and meta.txt.
-        output_dir: PathBuf,
-        /// Input storage format.
-        #[arg(long, value_enum, default_value_t = TokenEventInputFormat::Auto)]
-        format: TokenEventInputFormat,
-        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
-        #[arg(long)]
-        index: Option<PathBuf>,
-        /// Pubkey registry path. Defaults to registry.bin next to the input archive. For CAR inputs, pass the matching Blockzilla epoch registry.
-        #[arg(long)]
-        registry: Option<PathBuf>,
-        /// Signatures sidecar path. Defaults to signatures.bin next to the input archive.
-        #[arg(long)]
-        signatures: Option<PathBuf>,
-        /// Store wallet/token-account fields in local debug registries instead of Blockzilla registry ids.
-        #[arg(long)]
-        local_account_ids: bool,
-        /// Worker threads for hot block archives in Blockzilla account-id mode. Whole-file zstd remains sequential.
-        #[arg(long, default_value_t = 1)]
-        workers: usize,
-        /// Number of consecutive hot index rows claimed per worker batch.
-        #[arg(long, default_value_t = 512)]
-        chunk_size: usize,
-        /// Mint to track. Defaults to native USDC.
-        #[arg(long, default_value = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")]
-        mint: String,
-        /// Stop after N blocks. Intended for smoke tests.
-        #[arg(long)]
-        max_blocks: Option<u64>,
-    },
-
-    /// Dump decoded token-program instructions from hot-block Archive V2 sources.
-    DumpTokenInstructions {
-        /// Input archive-v2-blocks.zstd or archive-v2-blocks.wincode file.
-        input: PathBuf,
-        /// Output directory for token_instructions.bin and meta.txt.
-        output_dir: PathBuf,
-        /// Input storage format.
-        #[arg(long, value_enum, default_value_t = TokenEventInputFormat::Auto)]
-        format: TokenEventInputFormat,
-        /// Index path. Defaults to archive-v2-blocks.index next to the input archive.
-        #[arg(long)]
-        index: Option<PathBuf>,
-        /// Pubkey registry path. Defaults to registry.bin next to the input archive.
-        #[arg(long)]
-        registry: Option<PathBuf>,
-        /// Worker threads for hot block archives.
-        #[arg(long, default_value_t = 1)]
-        workers: usize,
-        /// Number of consecutive hot index rows claimed per worker batch.
-        #[arg(long, default_value_t = 512)]
-        chunk_size: usize,
-        /// Optional direct mint filter. Unchecked transfers do not carry a mint and will be skipped by this filter.
-        #[arg(long)]
-        mint: Option<String>,
-        /// Benchmark mode: scan and count token instructions but do not write token_instructions.bin.
-        #[arg(long)]
-        no_output: bool,
-        /// Benchmark mode: scan only outer instructions and skip metadata/inner instructions.
-        #[arg(long)]
-        outer_only: bool,
-        /// Stop after N blocks. Intended for smoke tests.
-        #[arg(long)]
-        max_blocks: Option<u64>,
-    },
-
     /// Extract the largest hot-block Archive V2 block into a single framed wincode record.
     ExtractLargestArchiveV2HotBlock {
         /// Input archive-v2-blocks.zstd file
@@ -606,16 +535,6 @@ pub(crate) enum Cmd {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum TokenEventInputFormat {
-    Auto,
-    Car,
-    CarZstd,
-    HotZstd,
-    HotRaw,
-    HotRawZstd,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum CarBenchInputFormat {
     Auto,
     Car,
@@ -768,56 +687,6 @@ fn main() -> Result<()> {
             workers,
             chunk_size,
         ),
-        Cmd::DumpUsdcTokenEvents {
-            input,
-            output_dir,
-            format,
-            index,
-            registry,
-            signatures,
-            local_account_ids,
-            workers,
-            chunk_size,
-            mint,
-            max_blocks,
-        } => token_events::dump_usdc_token_events(token_events::TokenEventDumpConfig {
-            input,
-            output_dir,
-            format,
-            index,
-            registry,
-            signatures,
-            blockzilla_account_ids: !local_account_ids,
-            workers,
-            chunk_size,
-            mint,
-            max_blocks,
-        }),
-        Cmd::DumpTokenInstructions {
-            input,
-            output_dir,
-            format,
-            index,
-            registry,
-            workers,
-            chunk_size,
-            mint,
-            no_output,
-            outer_only,
-            max_blocks,
-        } => token_events::dump_token_instructions(token_events::TokenInstructionDumpConfig {
-            input,
-            output_dir,
-            format,
-            index,
-            registry,
-            workers,
-            chunk_size,
-            mint_filter: mint,
-            no_output,
-            outer_only,
-            max_blocks,
-        }),
         Cmd::ExtractLargestArchiveV2HotBlock {
             input,
             output,

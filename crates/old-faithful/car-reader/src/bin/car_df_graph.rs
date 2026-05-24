@@ -403,7 +403,7 @@ fn read_cid_array_ids<'a>(
     Ok(out)
 }
 
-/// Standalone DataFrame node: parse next array at field [5]
+/// Standalone DataFrame node: parse next array at field `5`.
 fn dataframe_next_array_ids(
     payload: &[u8],
 ) -> core::result::Result<(Vec<u64>, NextFieldClass), minicbor::decode::Error> {

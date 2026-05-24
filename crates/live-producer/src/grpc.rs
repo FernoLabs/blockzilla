@@ -10,16 +10,17 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use blockzilla_format::{
     CompactBlockHeader, CompactInnerInstruction, CompactInnerInstructions, CompactMessageHeader,
-    CompactPohEntry, LiveBlockMissingField, LivePubkeyCountRecord, LiveSignatureIndexRecord,
-    SplitCompactIndexHeader, SplitCompactIndexRecord, WincodeArchiveV2NoRegistryAddressTableLookup,
-    WincodeArchiveV2NoRegistryBlock, WincodeArchiveV2NoRegistryBlockHeader,
-    WincodeArchiveV2NoRegistryInstruction, WincodeArchiveV2NoRegistryLegacyMessage,
-    WincodeArchiveV2NoRegistryMessage, WincodeArchiveV2NoRegistryMeta,
-    WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward,
-    WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance,
-    WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2NoRegistryTx,
-    WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord,
-    WincodeLeb128FramedReader, WincodeLeb128FramedWriter, encode_with_scratch, read_u32_varint,
+    CompactPohEntry, CompactTransactionError, LiveBlockMissingField, LivePubkeyCountRecord,
+    LiveSignatureIndexRecord, SplitCompactIndexHeader, SplitCompactIndexRecord,
+    WincodeArchiveV2NoRegistryAddressTableLookup, WincodeArchiveV2NoRegistryBlock,
+    WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryInstruction,
+    WincodeArchiveV2NoRegistryLegacyMessage, WincodeArchiveV2NoRegistryMessage,
+    WincodeArchiveV2NoRegistryMeta, WincodeArchiveV2NoRegistryReturnData,
+    WincodeArchiveV2NoRegistryReward, WincodeArchiveV2NoRegistryRewards,
+    WincodeArchiveV2NoRegistryTokenBalance, WincodeArchiveV2NoRegistryTransaction,
+    WincodeArchiveV2NoRegistryTx, WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2Payload,
+    WincodeArchiveV2PohRecord, WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
+    encode_with_scratch, read_u32_varint,
 };
 use futures::StreamExt;
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
@@ -1284,7 +1285,11 @@ fn convert_grpc_meta(meta: &GrpcTransactionStatusMeta) -> Result<WincodeArchiveV
     };
 
     Ok(WincodeArchiveV2NoRegistryMeta {
-        err: meta.err.as_ref().map(|err| err.err.clone()),
+        err: meta
+            .err
+            .as_ref()
+            .map(|err| CompactTransactionError::from_stored_wincode_bytes(&err.err))
+            .transpose()?,
         fee: meta.fee,
         pre_balances: meta.pre_balances.clone(),
         post_balances: meta.post_balances.clone(),

@@ -1,0 +1,7 @@
+{
+  "name": "blockzilla-get-block-worker",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy --strict"
+  }
+}

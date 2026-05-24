@@ -57,3 +57,6 @@ Notes:
 - The main remaining cost is still metadata and message deserialization. The fixture has inner-instruction metadata on every tx (`metadata_inner_needed=3,108,414`) but loaded addresses on only 232,435 txs.
 - 4 workers beat 8 workers on this local fixture after the prefix optimization, probably because the input is small enough that scheduling and output merging dominate beyond 4 workers.
 - On larger NAS epochs, 8 workers may still win if disk and decompression have enough work. Use both 4 and 8 in the next real-epoch benchmark.
+- Whole-file-zstd raw blocks are excluded from token dump analysis. Its size tracks block-zstd closely enough that token-index runs should focus on CAR/CAR.ZST, block-zstd hot blocks, and raw hot blocks.
+- Early epoch 10 `dump-usdc-token-events` confirmation, single worker: raw CAR scanned 25,742,343 txs in 62.87s (`409,425 tx/s`), while CAR.ZST scanned the same epoch in 57.93s (`444,350 tx/s`). CAR.ZST was about 1.09x faster than raw CAR on this run, likely because the smaller compressed input offsets zstd decode cost.
+- The same epoch 10 block-zstd Archive V2 scan took 9.07s (`2,839,833 tx/s`), about 6.4x faster than CAR.ZST for this token-event workload.

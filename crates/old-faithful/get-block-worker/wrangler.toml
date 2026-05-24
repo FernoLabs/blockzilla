@@ -8,6 +8,7 @@ command = "cargo install -q worker-build && worker-build --release . --no-defaul
 [[r2_buckets]]
 binding = "SLOT_RANGES"
 bucket_name = "blockzilla"
+remote = true
 
 [vars]
 OF_SLOT_INDEX_SOURCE = "r2"

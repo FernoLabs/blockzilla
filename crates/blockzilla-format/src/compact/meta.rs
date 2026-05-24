@@ -3,6 +3,9 @@ use of_car_reader::metadata_decoder::{
     InnerInstructionVisit, ReturnDataVisit, TokenBalanceVisit, TransactionStatusMetaVisitor,
     visit_protobuf_transaction_status_meta,
 };
+use of_car_reader::stored_transaction::{
+    InstructionError as StoredInstructionError, StoredTransactionError,
+};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
@@ -13,7 +16,7 @@ use crate::{CompactLogStream, CompactPubkey, KeyIndex};
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct CompactMetaV1 {
-    pub err: Option<Vec<u8>>,
+    pub err: Option<CompactTransactionError>,
 
     pub fee: u64,
     pub pre_balances: Vec<u64>,
@@ -34,6 +37,299 @@ pub struct CompactMetaV1 {
 
     pub compute_units_consumed: Option<u64>,
     pub cost_units: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[wincode(tag_encoding = "u8")]
+pub enum CompactTransactionError {
+    AccountInUse,
+    AccountLoadedTwice,
+    AccountNotFound,
+    ProgramAccountNotFound,
+    InsufficientFundsForFee,
+    InvalidAccountForFee,
+    AlreadyProcessed,
+    BlockhashNotFound,
+    InstructionError(u8, CompactInstructionError),
+    CallChainTooDeep,
+    MissingSignatureForFee,
+    InvalidAccountIndex,
+    SignatureFailure,
+    InvalidProgramForExecution,
+    SanitizeFailure,
+    ClusterMaintenance,
+    AccountBorrowOutstanding,
+    WouldExceedMaxBlockCostLimit,
+    UnsupportedVersion,
+    InvalidWritableAccount,
+    WouldExceedMaxAccountCostLimit,
+    WouldExceedAccountDataBlockLimit,
+    TooManyAccountLocks,
+    AddressLookupTableNotFound,
+    InvalidAddressLookupTableOwner,
+    InvalidAddressLookupTableData,
+    InvalidAddressLookupTableIndex,
+    InvalidRentPayingAccount,
+    WouldExceedMaxVoteCostLimit,
+    WouldExceedAccountDataTotalLimit,
+    DuplicateInstruction(u8),
+    InsufficientFundsForRent { account_index: u8 },
+    MaxLoadedAccountsDataSizeExceeded,
+    InvalidLoadedAccountsDataSizeLimit,
+    ResanitizationNeeded,
+    ProgramExecutionTemporarilyRestricted { account_index: u8 },
+    UnbalancedTransaction,
+    ProgramCacheHitMaxLimit,
+    CommitCancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[wincode(tag_encoding = "u8")]
+pub enum CompactInstructionError {
+    GenericError,
+    InvalidArgument,
+    InvalidInstructionData,
+    InvalidAccountData,
+    AccountDataTooSmall,
+    InsufficientFunds,
+    IncorrectProgramId,
+    MissingRequiredSignature,
+    AccountAlreadyInitialized,
+    UninitializedAccount,
+    UnbalancedInstruction,
+    ModifiedProgramId,
+    ExternalAccountLamportSpend,
+    ExternalAccountDataModified,
+    ReadonlyLamportChange,
+    ReadonlyDataModified,
+    DuplicateAccountIndex,
+    ExecutableModified,
+    RentEpochModified,
+    NotEnoughAccountKeys,
+    AccountDataSizeChanged,
+    AccountNotExecutable,
+    AccountBorrowFailed,
+    AccountBorrowOutstanding,
+    DuplicateAccountOutOfSync,
+    Custom(u32),
+    InvalidError,
+    ExecutableDataModified,
+    ExecutableLamportChange,
+    ExecutableAccountNotRentExempt,
+    UnsupportedProgramId,
+    CallDepth,
+    MissingAccount,
+    ReentrancyNotAllowed,
+    MaxSeedLengthExceeded,
+    InvalidSeeds,
+    InvalidRealloc,
+    ComputationalBudgetExceeded,
+    PrivilegeEscalation,
+    ProgramEnvironmentSetupFailure,
+    ProgramFailedToComplete,
+    ProgramFailedToCompile,
+    Immutable,
+    IncorrectAuthority,
+    BorshIoError(String),
+    AccountNotRentExempt,
+    InvalidAccountOwner,
+    ArithmeticOverflow,
+    UnsupportedSysvar,
+    IllegalOwner,
+    MaxAccountsDataAllocationsExceeded,
+    MaxAccountsExceeded,
+    MaxInstructionTraceLengthExceeded,
+    BuiltinProgramsMustConsumeComputeUnits,
+}
+
+impl CompactTransactionError {
+    pub fn from_stored_wincode_bytes(bytes: &[u8]) -> Result<Self> {
+        let stored = decode_stored_transaction_error_bytes(bytes)?;
+        Ok(Self::from(stored))
+    }
+}
+
+impl From<StoredTransactionError> for CompactTransactionError {
+    fn from(err: StoredTransactionError) -> Self {
+        match err {
+            StoredTransactionError::AccountInUse => Self::AccountInUse,
+            StoredTransactionError::AccountLoadedTwice => Self::AccountLoadedTwice,
+            StoredTransactionError::AccountNotFound => Self::AccountNotFound,
+            StoredTransactionError::ProgramAccountNotFound => Self::ProgramAccountNotFound,
+            StoredTransactionError::InsufficientFundsForFee => Self::InsufficientFundsForFee,
+            StoredTransactionError::InvalidAccountForFee => Self::InvalidAccountForFee,
+            StoredTransactionError::AlreadyProcessed => Self::AlreadyProcessed,
+            StoredTransactionError::BlockhashNotFound => Self::BlockhashNotFound,
+            StoredTransactionError::InstructionError(index, err) => {
+                Self::InstructionError(index, CompactInstructionError::from(err))
+            }
+            StoredTransactionError::CallChainTooDeep => Self::CallChainTooDeep,
+            StoredTransactionError::MissingSignatureForFee => Self::MissingSignatureForFee,
+            StoredTransactionError::InvalidAccountIndex => Self::InvalidAccountIndex,
+            StoredTransactionError::SignatureFailure => Self::SignatureFailure,
+            StoredTransactionError::InvalidProgramForExecution => Self::InvalidProgramForExecution,
+            StoredTransactionError::SanitizeFailure => Self::SanitizeFailure,
+            StoredTransactionError::ClusterMaintenance => Self::ClusterMaintenance,
+            StoredTransactionError::AccountBorrowOutstanding => Self::AccountBorrowOutstanding,
+            StoredTransactionError::WouldExceedMaxBlockCostLimit => {
+                Self::WouldExceedMaxBlockCostLimit
+            }
+            StoredTransactionError::UnsupportedVersion => Self::UnsupportedVersion,
+            StoredTransactionError::InvalidWritableAccount => Self::InvalidWritableAccount,
+            StoredTransactionError::WouldExceedMaxAccountCostLimit => {
+                Self::WouldExceedMaxAccountCostLimit
+            }
+            StoredTransactionError::WouldExceedAccountDataBlockLimit => {
+                Self::WouldExceedAccountDataBlockLimit
+            }
+            StoredTransactionError::TooManyAccountLocks => Self::TooManyAccountLocks,
+            StoredTransactionError::AddressLookupTableNotFound => Self::AddressLookupTableNotFound,
+            StoredTransactionError::InvalidAddressLookupTableOwner => {
+                Self::InvalidAddressLookupTableOwner
+            }
+            StoredTransactionError::InvalidAddressLookupTableData => {
+                Self::InvalidAddressLookupTableData
+            }
+            StoredTransactionError::InvalidAddressLookupTableIndex => {
+                Self::InvalidAddressLookupTableIndex
+            }
+            StoredTransactionError::InvalidRentPayingAccount => Self::InvalidRentPayingAccount,
+            StoredTransactionError::WouldExceedMaxVoteCostLimit => {
+                Self::WouldExceedMaxVoteCostLimit
+            }
+            StoredTransactionError::WouldExceedAccountDataTotalLimit => {
+                Self::WouldExceedAccountDataTotalLimit
+            }
+            StoredTransactionError::DuplicateInstruction(index) => {
+                Self::DuplicateInstruction(index)
+            }
+            StoredTransactionError::InsufficientFundsForRent { account_index } => {
+                Self::InsufficientFundsForRent { account_index }
+            }
+            StoredTransactionError::MaxLoadedAccountsDataSizeExceeded => {
+                Self::MaxLoadedAccountsDataSizeExceeded
+            }
+            StoredTransactionError::InvalidLoadedAccountsDataSizeLimit => {
+                Self::InvalidLoadedAccountsDataSizeLimit
+            }
+            StoredTransactionError::ResanitizationNeeded => Self::ResanitizationNeeded,
+            StoredTransactionError::ProgramExecutionTemporarilyRestricted { account_index } => {
+                Self::ProgramExecutionTemporarilyRestricted { account_index }
+            }
+            StoredTransactionError::UnbalancedTransaction => Self::UnbalancedTransaction,
+            StoredTransactionError::ProgramCacheHitMaxLimit => Self::ProgramCacheHitMaxLimit,
+            StoredTransactionError::CommitCancelled => Self::CommitCancelled,
+        }
+    }
+}
+
+impl From<StoredInstructionError> for CompactInstructionError {
+    fn from(err: StoredInstructionError) -> Self {
+        match err {
+            StoredInstructionError::GenericError => Self::GenericError,
+            StoredInstructionError::InvalidArgument => Self::InvalidArgument,
+            StoredInstructionError::InvalidInstructionData => Self::InvalidInstructionData,
+            StoredInstructionError::InvalidAccountData => Self::InvalidAccountData,
+            StoredInstructionError::AccountDataTooSmall => Self::AccountDataTooSmall,
+            StoredInstructionError::InsufficientFunds => Self::InsufficientFunds,
+            StoredInstructionError::IncorrectProgramId => Self::IncorrectProgramId,
+            StoredInstructionError::MissingRequiredSignature => Self::MissingRequiredSignature,
+            StoredInstructionError::AccountAlreadyInitialized => Self::AccountAlreadyInitialized,
+            StoredInstructionError::UninitializedAccount => Self::UninitializedAccount,
+            StoredInstructionError::UnbalancedInstruction => Self::UnbalancedInstruction,
+            StoredInstructionError::ModifiedProgramId => Self::ModifiedProgramId,
+            StoredInstructionError::ExternalAccountLamportSpend => {
+                Self::ExternalAccountLamportSpend
+            }
+            StoredInstructionError::ExternalAccountDataModified => {
+                Self::ExternalAccountDataModified
+            }
+            StoredInstructionError::ReadonlyLamportChange => Self::ReadonlyLamportChange,
+            StoredInstructionError::ReadonlyDataModified => Self::ReadonlyDataModified,
+            StoredInstructionError::DuplicateAccountIndex => Self::DuplicateAccountIndex,
+            StoredInstructionError::ExecutableModified => Self::ExecutableModified,
+            StoredInstructionError::RentEpochModified => Self::RentEpochModified,
+            StoredInstructionError::NotEnoughAccountKeys => Self::NotEnoughAccountKeys,
+            StoredInstructionError::AccountDataSizeChanged => Self::AccountDataSizeChanged,
+            StoredInstructionError::AccountNotExecutable => Self::AccountNotExecutable,
+            StoredInstructionError::AccountBorrowFailed => Self::AccountBorrowFailed,
+            StoredInstructionError::AccountBorrowOutstanding => Self::AccountBorrowOutstanding,
+            StoredInstructionError::DuplicateAccountOutOfSync => Self::DuplicateAccountOutOfSync,
+            StoredInstructionError::Custom(code) => Self::Custom(code),
+            StoredInstructionError::InvalidError => Self::InvalidError,
+            StoredInstructionError::ExecutableDataModified => Self::ExecutableDataModified,
+            StoredInstructionError::ExecutableLamportChange => Self::ExecutableLamportChange,
+            StoredInstructionError::ExecutableAccountNotRentExempt => {
+                Self::ExecutableAccountNotRentExempt
+            }
+            StoredInstructionError::UnsupportedProgramId => Self::UnsupportedProgramId,
+            StoredInstructionError::CallDepth => Self::CallDepth,
+            StoredInstructionError::MissingAccount => Self::MissingAccount,
+            StoredInstructionError::ReentrancyNotAllowed => Self::ReentrancyNotAllowed,
+            StoredInstructionError::MaxSeedLengthExceeded => Self::MaxSeedLengthExceeded,
+            StoredInstructionError::InvalidSeeds => Self::InvalidSeeds,
+            StoredInstructionError::InvalidRealloc => Self::InvalidRealloc,
+            StoredInstructionError::ComputationalBudgetExceeded => {
+                Self::ComputationalBudgetExceeded
+            }
+            StoredInstructionError::PrivilegeEscalation => Self::PrivilegeEscalation,
+            StoredInstructionError::ProgramEnvironmentSetupFailure => {
+                Self::ProgramEnvironmentSetupFailure
+            }
+            StoredInstructionError::ProgramFailedToComplete => Self::ProgramFailedToComplete,
+            StoredInstructionError::ProgramFailedToCompile => Self::ProgramFailedToCompile,
+            StoredInstructionError::Immutable => Self::Immutable,
+            StoredInstructionError::IncorrectAuthority => Self::IncorrectAuthority,
+            StoredInstructionError::BorshIoError(message) => Self::BorshIoError(message),
+            StoredInstructionError::AccountNotRentExempt => Self::AccountNotRentExempt,
+            StoredInstructionError::InvalidAccountOwner => Self::InvalidAccountOwner,
+            StoredInstructionError::ArithmeticOverflow => Self::ArithmeticOverflow,
+            StoredInstructionError::UnsupportedSysvar => Self::UnsupportedSysvar,
+            StoredInstructionError::IllegalOwner => Self::IllegalOwner,
+            StoredInstructionError::MaxAccountsDataAllocationsExceeded => {
+                Self::MaxAccountsDataAllocationsExceeded
+            }
+            StoredInstructionError::MaxAccountsExceeded => Self::MaxAccountsExceeded,
+            StoredInstructionError::MaxInstructionTraceLengthExceeded => {
+                Self::MaxInstructionTraceLengthExceeded
+            }
+            StoredInstructionError::BuiltinProgramsMustConsumeComputeUnits => {
+                Self::BuiltinProgramsMustConsumeComputeUnits
+            }
+        }
+    }
+}
+
+fn decode_stored_transaction_error_bytes(bytes: &[u8]) -> Result<StoredTransactionError> {
+    match wincode::deserialize::<StoredTransactionError>(bytes) {
+        Ok(err) => Ok(err),
+        Err(err) => decode_unit_borsh_io_instruction_error(bytes)
+            .map_err(|_| anyhow::anyhow!("decode transaction error: {err}")),
+    }
+}
+
+fn decode_unit_borsh_io_instruction_error(
+    bytes: &[u8],
+) -> std::result::Result<StoredTransactionError, ()> {
+    const TRANSACTION_ERROR_INSTRUCTION_ERROR: u32 = 8;
+    const INSTRUCTION_ERROR_BORSH_IO_ERROR: u32 = 44;
+
+    if bytes.len() != 9 {
+        return Err(());
+    }
+
+    let transaction_error_tag = u32::from_le_bytes(bytes[0..4].try_into().expect("checked length"));
+    let instruction_error_tag = u32::from_le_bytes(bytes[5..9].try_into().expect("checked length"));
+    if transaction_error_tag != TRANSACTION_ERROR_INSTRUCTION_ERROR
+        || instruction_error_tag != INSTRUCTION_ERROR_BORSH_IO_ERROR
+    {
+        return Err(());
+    }
+
+    Ok(StoredTransactionError::InstructionError(
+        bytes[4],
+        StoredInstructionError::BorshIoError(String::new()),
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -81,7 +377,11 @@ pub fn compact_meta_from_proto(
     meta: &of_car_reader::confirmed_block::TransactionStatusMeta,
     index: &KeyIndex,
 ) -> Result<CompactMetaV1> {
-    let err = meta.err.as_ref().map(|e| e.err.clone());
+    let err = meta
+        .err
+        .as_ref()
+        .map(|e| CompactTransactionError::from_stored_wincode_bytes(&e.err))
+        .transpose()?;
 
     let loaded_writable_addresses = meta
         .loaded_writable_addresses
@@ -189,7 +489,7 @@ pub fn compact_meta_from_protobuf_visit(bytes: &[u8], index: &KeyIndex) -> Resul
 
 struct CompactMetaVisitor<'a> {
     index: &'a KeyIndex,
-    err: Option<Vec<u8>>,
+    err: Option<CompactTransactionError>,
     fee: u64,
     pre_balances: Vec<u64>,
     post_balances: Vec<u64>,
@@ -333,7 +633,10 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
 
     #[inline]
     fn status_error(&mut self, err: &'b [u8]) {
-        self.err = Some(err.to_vec());
+        match CompactTransactionError::from_stored_wincode_bytes(err) {
+            Ok(err) => self.err = Some(err),
+            Err(err) => self.record_error(err),
+        }
     }
 
     #[inline]
@@ -557,4 +860,46 @@ fn compact_reward(
         reward_type: rw.reward_type,
         commission,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_transaction_error_decodes_stored_wincode_bytes() {
+        let bytes = wincode::serialize(&StoredTransactionError::InstructionError(
+            0,
+            StoredInstructionError::Custom(0),
+        ))
+        .expect("serialize stored transaction error");
+
+        let compact = CompactTransactionError::from_stored_wincode_bytes(&bytes)
+            .expect("decode stored transaction error");
+
+        assert!(matches!(
+            compact,
+            CompactTransactionError::InstructionError(0, CompactInstructionError::Custom(0))
+        ));
+    }
+
+    #[test]
+    fn compact_transaction_error_decodes_legacy_unit_borsh_io_error() {
+        let bytes = [
+            8, 0, 0, 0, // StoredTransactionError::InstructionError
+            7, // instruction index
+            44, 0, 0, 0, // StoredInstructionError::BorshIoError as old unit variant
+        ];
+
+        let compact = CompactTransactionError::from_stored_wincode_bytes(&bytes)
+            .expect("decode legacy stored transaction error");
+
+        assert!(matches!(
+            compact,
+            CompactTransactionError::InstructionError(
+                7,
+                CompactInstructionError::BorshIoError(ref message)
+            ) if message.is_empty()
+        ));
+    }
 }

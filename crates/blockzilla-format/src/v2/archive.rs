@@ -17,7 +17,16 @@ pub const ARCHIVE_V2_SHREDDING_FILE: &str = "shredding.wincode";
 pub const ARCHIVE_V2_PUBKEY_REGISTRY_FILE: &str = "registry.bin";
 pub const ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE: &str = "registry_counts.bin";
 pub const ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
+pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE: &str = "blockhash_index_v3.bin";
 pub const ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE: &str = "prev_blockhash_tail.bin";
+pub const ARCHIVE_V2_BLOCK_ACCESS_FILE: &str = "archive-v2-block-access.wincode";
+pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE: &str = "archive-v2-block-access.index";
+pub const ARCHIVE_V2_GET_BLOCK_INDEX_FILE: &str = "archive-v2-get-block.index";
+
+pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC: &[u8; 8] = b"BZBHIX3!";
+pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION: u16 = 3;
+pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN: usize = 8 + 2 + 2 + 8;
+pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN: usize = 8 + 32 + 8;
 
 pub const ARCHIVE_V2_HOT_INDEX_MAGIC: &[u8; 8] = b"BZV2HIX1";
 pub const ARCHIVE_V2_HOT_INDEX_VERSION: u16 = 1;
@@ -30,6 +39,13 @@ pub const ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY: u32 = 1 << 0;
 pub const ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS: u32 = 1 << 1;
 pub const ARCHIVE_V2_HOT_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8 + 8 + 4 + 4;
 pub const ARCHIVE_V2_HOT_INDEX_ROW_LEN: usize = 4 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 4;
+
+pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC: &[u8; 8] = b"BZV2AIX1";
+pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION: u16 = 1;
+pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8 + 8 + 4;
+pub const ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN: usize = 4 + 8 + 8 + 4 + 4 + 4;
+
+pub const ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN: usize = 8 + 4 + 8 + 4;
 
 #[derive(Debug)]
 pub struct ArchiveV2HotBlockIndex {
@@ -52,11 +68,78 @@ pub struct ArchiveV2HotBlockIndexRow {
     pub signature_count: u32,
 }
 
+#[derive(Debug)]
+pub struct ArchiveV2BlockAccessIndex {
+    pub blob_file_bytes: u64,
+    pub flags: u32,
+    pub rows: Vec<ArchiveV2BlockAccessIndexRow>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveV2BlockAccessIndexRow {
+    pub block_id: u32,
+    pub slot: u64,
+    pub access_offset: u64,
+    pub access_len: u32,
+    pub tx_count: u32,
+    pub signature_count: u32,
+}
+
+#[derive(Debug)]
+pub struct ArchiveV2GetBlockIndex {
+    pub rows: Vec<ArchiveV2GetBlockIndexRow>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveV2GetBlockIndexRow {
+    pub block_offset: u64,
+    pub block_len: u32,
+    pub access_offset: u64,
+    pub access_len: u32,
+}
+
+impl ArchiveV2GetBlockIndexRow {
+    pub const fn missing() -> Self {
+        Self {
+            block_offset: 0,
+            block_len: 0,
+            access_offset: 0,
+            access_len: 0,
+        }
+    }
+
+    pub fn is_missing(&self) -> bool {
+        self.block_len == 0 || self.access_len == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveV2BlockhashIndexV3Row {
+    pub slot: u64,
+    pub blockhash: [u8; 32],
+    /// Unix timestamp seconds. `0` means the CAR block had no block time.
+    pub block_time: i64,
+}
+
 pub fn archive_v2_hot_index_path(input: &Path) -> PathBuf {
     input
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(ARCHIVE_V2_BLOCK_INDEX_FILE)
+}
+
+pub fn archive_v2_block_access_index_path(input: &Path) -> PathBuf {
+    input
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE)
+}
+
+pub fn archive_v2_get_block_index_path(input: &Path) -> PathBuf {
+    input
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(ARCHIVE_V2_GET_BLOCK_INDEX_FILE)
 }
 
 pub fn write_archive_v2_hot_block_index(
@@ -95,6 +178,76 @@ pub fn write_archive_v2_hot_block_index(
         writer.write_all(&row.first_tx_ordinal.to_le_bytes())?;
         writer.write_all(&row.first_signature_ordinal.to_le_bytes())?;
         writer.write_all(&row.signature_count.to_le_bytes())?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
+pub fn write_archive_v2_block_access_index(
+    path: &Path,
+    blob_file_bytes: u64,
+    flags: u32,
+    rows: &[ArchiveV2BlockAccessIndexRow],
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output dir {}", parent.display()))?;
+    }
+    let tmp_path = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE)
+    ));
+    let file = File::create(&tmp_path).with_context(|| format!("create {}", tmp_path.display()))?;
+    let mut writer = BufWriter::with_capacity(8 << 20, file);
+    writer.write_all(ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC)?;
+    writer.write_all(&ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION.to_le_bytes())?;
+    writer.write_all(&0u16.to_le_bytes())?;
+    writer.write_all(&(rows.len() as u64).to_le_bytes())?;
+    writer.write_all(&blob_file_bytes.to_le_bytes())?;
+    writer.write_all(&flags.to_le_bytes())?;
+    for row in rows {
+        writer.write_all(&row.block_id.to_le_bytes())?;
+        writer.write_all(&row.slot.to_le_bytes())?;
+        writer.write_all(&row.access_offset.to_le_bytes())?;
+        writer.write_all(&row.access_len.to_le_bytes())?;
+        writer.write_all(&row.tx_count.to_le_bytes())?;
+        writer.write_all(&row.signature_count.to_le_bytes())?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
+pub fn write_archive_v2_get_block_index(
+    path: &Path,
+    rows: &[ArchiveV2GetBlockIndexRow],
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output dir {}", parent.display()))?;
+    }
+    let tmp_path = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(ARCHIVE_V2_GET_BLOCK_INDEX_FILE)
+    ));
+    let file = File::create(&tmp_path).with_context(|| format!("create {}", tmp_path.display()))?;
+    let mut writer = BufWriter::with_capacity(8 << 20, file);
+    for row in rows {
+        writer.write_all(&row.block_offset.to_le_bytes())?;
+        writer.write_all(&row.block_len.to_le_bytes())?;
+        writer.write_all(&row.access_offset.to_le_bytes())?;
+        writer.write_all(&row.access_len.to_le_bytes())?;
     }
     writer
         .flush()
@@ -167,6 +320,96 @@ pub fn read_archive_v2_hot_block_index(path: &Path) -> Result<ArchiveV2HotBlockI
     })
 }
 
+pub fn read_archive_v2_block_access_index(path: &Path) -> Result<ArchiveV2BlockAccessIndex> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(8 << 20, file);
+    let mut header = [0u8; ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN];
+    reader
+        .read_exact(&mut header)
+        .with_context(|| format!("read {}", path.display()))?;
+    anyhow::ensure!(
+        &header[..8] == ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC,
+        "{} is not an Archive V2 block-access index",
+        path.display()
+    );
+    let version = u16::from_le_bytes(header[8..10].try_into().unwrap());
+    anyhow::ensure!(
+        version == ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION,
+        "{} has unsupported Archive V2 block-access index version {version}",
+        path.display()
+    );
+    let row_count = u64::from_le_bytes(header[12..20].try_into().unwrap());
+    let blob_file_bytes = u64::from_le_bytes(header[20..28].try_into().unwrap());
+    let flags = u32::from_le_bytes(header[28..32].try_into().unwrap());
+    let row_count_usize = usize::try_from(row_count).context("index row count exceeds usize")?;
+    let expected_len = ARCHIVE_V2_BLOCK_ACCESS_INDEX_HEADER_LEN as u64
+        + row_count * ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN as u64;
+    let actual_len = std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    anyhow::ensure!(
+        actual_len == expected_len,
+        "{} has size {}, expected {} for {} rows",
+        path.display(),
+        actual_len,
+        expected_len,
+        row_count
+    );
+
+    let mut rows = Vec::with_capacity(row_count_usize);
+    let mut row_buf = [0u8; ARCHIVE_V2_BLOCK_ACCESS_INDEX_ROW_LEN];
+    for _ in 0..row_count_usize {
+        reader
+            .read_exact(&mut row_buf)
+            .with_context(|| format!("read row from {}", path.display()))?;
+        rows.push(ArchiveV2BlockAccessIndexRow {
+            block_id: u32::from_le_bytes(row_buf[0..4].try_into().unwrap()),
+            slot: u64::from_le_bytes(row_buf[4..12].try_into().unwrap()),
+            access_offset: u64::from_le_bytes(row_buf[12..20].try_into().unwrap()),
+            access_len: u32::from_le_bytes(row_buf[20..24].try_into().unwrap()),
+            tx_count: u32::from_le_bytes(row_buf[24..28].try_into().unwrap()),
+            signature_count: u32::from_le_bytes(row_buf[28..32].try_into().unwrap()),
+        });
+    }
+    Ok(ArchiveV2BlockAccessIndex {
+        blob_file_bytes,
+        flags,
+        rows,
+    })
+}
+
+pub fn read_archive_v2_get_block_index(path: &Path) -> Result<ArchiveV2GetBlockIndex> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(8 << 20, file);
+    let actual_len = std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    anyhow::ensure!(
+        actual_len.is_multiple_of(ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN as u64),
+        "{} has size {}, not a multiple of get-block row size {}",
+        path.display(),
+        actual_len,
+        ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN
+    );
+    let row_count = actual_len / ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN as u64;
+    let row_count_usize = usize::try_from(row_count).context("index row count exceeds usize")?;
+
+    let mut rows = Vec::with_capacity(row_count_usize);
+    let mut row_buf = [0u8; ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN];
+    for _ in 0..row_count_usize {
+        reader
+            .read_exact(&mut row_buf)
+            .with_context(|| format!("read row from {}", path.display()))?;
+        rows.push(ArchiveV2GetBlockIndexRow {
+            block_offset: u64::from_le_bytes(row_buf[0..8].try_into().unwrap()),
+            block_len: u32::from_le_bytes(row_buf[8..12].try_into().unwrap()),
+            access_offset: u64::from_le_bytes(row_buf[12..20].try_into().unwrap()),
+            access_len: u32::from_le_bytes(row_buf[20..24].try_into().unwrap()),
+        });
+    }
+    Ok(ArchiveV2GetBlockIndex { rows })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +474,80 @@ mod tests {
                 expected.first_signature_ordinal
             );
             assert_eq!(actual.signature_count, expected.signature_count);
+        }
+    }
+
+    #[test]
+    fn archive_v2_block_access_index_roundtrips() {
+        let path = std::env::temp_dir().join(format!(
+            "blockzilla-access-index-roundtrip-{}-{}.index",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let rows = [
+            ArchiveV2BlockAccessIndexRow {
+                block_id: 0,
+                slot: 42,
+                access_offset: 0,
+                access_len: 77,
+                tx_count: 7,
+                signature_count: 9,
+            },
+            ArchiveV2BlockAccessIndexRow {
+                block_id: 1,
+                slot: 43,
+                access_offset: 77,
+                access_len: 88,
+                tx_count: 8,
+                signature_count: 10,
+            },
+        ];
+
+        write_archive_v2_block_access_index(&path, 165, 3, &rows).unwrap();
+        let index = read_archive_v2_block_access_index(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(index.blob_file_bytes, 165);
+        assert_eq!(index.flags, 3);
+        assert_eq!(index.rows.len(), rows.len());
+        for (actual, expected) in index.rows.iter().zip(rows) {
+            assert_eq!(actual.block_id, expected.block_id);
+            assert_eq!(actual.slot, expected.slot);
+            assert_eq!(actual.access_offset, expected.access_offset);
+            assert_eq!(actual.access_len, expected.access_len);
+            assert_eq!(actual.tx_count, expected.tx_count);
+            assert_eq!(actual.signature_count, expected.signature_count);
+        }
+    }
+
+    #[test]
+    fn archive_v2_get_block_index_roundtrips() {
+        let path = std::env::temp_dir().join(format!(
+            "blockzilla-get-block-index-roundtrip-{}-{}.index",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let rows = [
+            ArchiveV2GetBlockIndexRow::missing(),
+            ArchiveV2GetBlockIndexRow {
+                block_offset: 100,
+                block_len: 123,
+                access_offset: 555,
+                access_len: 88,
+            },
+        ];
+
+        write_archive_v2_get_block_index(&path, &rows).unwrap();
+        let index = read_archive_v2_get_block_index(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(index.rows.len(), rows.len());
+        assert!(index.rows[0].is_missing());
+        for (actual, expected) in index.rows.iter().zip(rows) {
+            assert_eq!(actual.block_offset, expected.block_offset);
+            assert_eq!(actual.block_len, expected.block_len);
+            assert_eq!(actual.access_offset, expected.access_offset);
+            assert_eq!(actual.access_len, expected.access_len);
         }
     }
 

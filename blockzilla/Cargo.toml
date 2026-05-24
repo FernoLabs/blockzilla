@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["known-program-logs"]
 known-program-logs = ["blockzilla-format/known-program-logs"]
 
 [[bin]]
@@ -21,6 +21,10 @@ path = "src/bin/car_log_audit.rs"
 name = "big-block-log-bench"
 path = "src/bin/big_block_log_bench.rs"
 
+[[bin]]
+name = "blockhash-scan-bench"
+path = "src/bin/blockhash_scan_bench.rs"
+
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 tracing = "0.1.44"
@@ -34,4 +38,12 @@ anyhow = "1.0.102"
 postcard = "1.1.3"
 data-encoding = "2.11.0"
 solana-pubkey = "4.2.0"
+solana-short-vec = { version = "3.2.1", default-features = false }
 wincode = { version = "0.5.4", features = ["derive"] }
+minicbor = { version = "2.2.2", features = ["full"] }
+gxhash = "3.5.0"
+prost = "0.14.3"
+reqwest = { version = "0.13.3", default-features = false, features = [
+    "blocking",
+    "rustls",
+] }
