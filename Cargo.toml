@@ -8,6 +8,7 @@ members = [
     "crates/old-faithful/get-block-worker",
     "crates/live-producer",
     "blockzilla", "crates/old-faithful/signature-index", "crates/replay-runtime",
+    "blockzilla-get-block-worker",
     "crates/old-faithful/slot-ranges",
     "crates/old-faithful/token-index",
     "crates/old-faithful/account-index",
@@ -18,7 +19,7 @@ exclude = ["solana-prog/"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/ferno-ag/blockzilla"
+repository = "https://github.com/FernoLabs/blockzilla"
 
 [profile.release]
 opt-level = 3

@@ -1,9 +1,13 @@
 #![allow(clippy::items_after_test_module)]
 
-//! CAR (Content Addressable aRchive) reader implementation
+//! Readers and helpers for Old Faithful Solana CAR archives.
 //!
-//! This crate provides zero-copy parsing and reading of CAR files.
-//! Designed to be reusable, auditable, and verifiable against other implementations.
+//! `of-car-reader` provides the low-level CAR stream reader, Solana block-node
+//! metadata decoding, slot range encoding helpers, and compact-index primitives
+//! used by Ferno's Old Faithful tools.
+//!
+//! Most applications should start with [`CarBlockReader`] when streaming CAR
+//! files, or [`slot_ranges`] when reading and writing worker slot indexes.
 
 pub mod car_block_group;
 pub mod car_stream;

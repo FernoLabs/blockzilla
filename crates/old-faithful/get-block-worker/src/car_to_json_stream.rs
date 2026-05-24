@@ -1,6 +1,12 @@
 use crate::get_block::{GetBlockConfig, GetBlockEncoding, TransactionDetails};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use of_car_reader::confirmed_block::{self as proto, RewardType, Rewards};
-use of_car_reader::metadata_decoder::{ZstdReusableDecoder, decode_rewards_from_frame};
+use of_car_reader::confirmed_block_borrowed::solana::storage::ConfirmedBlock as borrowed_proto;
+use of_car_reader::metadata_decoder::{
+    BorrowedTransactionStatusMetaView, ZstdReusableDecoder, decode_rewards_from_frame,
+    slot_uses_protobuf_metadata,
+};
 use of_car_reader::node::OwnedDataFrame;
 use of_car_reader::stored_transaction::{InstructionError, StoredTransactionError};
 use of_car_reader::versioned_transaction::{
@@ -8,8 +14,103 @@ use of_car_reader::versioned_transaction::{
     VersionedTransaction,
 };
 use of_car_reader::{CarBlockReader, car_block_group::CarBlockGroup};
-use std::fmt::Display;
-use std::io::{Cursor, Write as _};
+use std::io::Cursor;
+
+const IN_MEMORY_CAR_READER_BUFFER_BYTES: usize = 64 * 1024;
+
+type ProfileStarted = profile_timer::Started;
+
+struct ProfileTimer(Option<ProfileStarted>);
+
+impl ProfileTimer {
+    fn start(enabled: bool) -> Self {
+        if enabled {
+            Self(profile_timer::start())
+        } else {
+            Self(None)
+        }
+    }
+
+    fn elapsed_us(self) -> u128 {
+        self.0.map_or(0, profile_timer::elapsed_us)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod profile_timer {
+    use std::time::Instant;
+
+    pub type Started = Instant;
+
+    pub fn start() -> Option<Started> {
+        Some(Instant::now())
+    }
+
+    pub fn elapsed_us(started: Started) -> u128 {
+        started.elapsed().as_micros()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "worker"))]
+mod profile_timer {
+    use wasm_bindgen::JsCast;
+
+    pub type Started = f64;
+
+    pub fn start() -> Option<Started> {
+        Some(now_ms())
+    }
+
+    pub fn elapsed_us(started: Started) -> u128 {
+        ((now_ms() - started).max(0.0) * 1000.0) as u128
+    }
+
+    fn now_ms() -> f64 {
+        let global = js_sys::global();
+        let performance = js_sys::Reflect::get(&global, &"performance".into()).ok();
+        if let Some(performance) = performance
+            && let Ok(now) = js_sys::Reflect::get(&performance, &"now".into())
+            && let Some(now) = now.dyn_ref::<js_sys::Function>()
+            && let Ok(value) = now.call0(&performance)
+            && let Some(value) = value.as_f64()
+        {
+            return value;
+        }
+
+        js_sys::Date::now()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "worker")))]
+mod profile_timer {
+    pub type Started = ();
+
+    pub fn start() -> Option<Started> {
+        None
+    }
+
+    pub fn elapsed_us(_started: Started) -> u128 {
+        0
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RenderProfile {
+    pub mode: &'static str,
+    pub include_rewards: bool,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub transactions: usize,
+    pub read_car_us: u128,
+    pub decode_rewards_us: u128,
+    pub write_header_us: u128,
+    pub write_rewards_us: u128,
+    pub decode_transactions_us: u128,
+    pub write_transactions_us: u128,
+    pub write_transaction_json_us: u128,
+    pub write_meta_json_us: u128,
+    pub total_us: u128,
+}
 
 pub fn car_bytes_to_json_config(
     bytes: Vec<u8>,
@@ -20,22 +121,45 @@ pub fn car_bytes_to_json_config(
         return Err("requested getBlock encoding mode is not served locally".to_string());
     }
 
-    let decode = match config.transaction_details {
-        TransactionDetails::Full | TransactionDetails::Accounts => car_bytes_to_json_bytes,
-        TransactionDetails::Signatures | TransactionDetails::None => car_bytes_to_json_light_bytes,
+    let mode = match config.transaction_details {
+        TransactionDetails::Full => TransactionRenderMode::Full,
+        TransactionDetails::Accounts => TransactionRenderMode::Accounts,
+        TransactionDetails::Signatures => TransactionRenderMode::Signatures,
+        TransactionDetails::None => TransactionRenderMode::None,
     };
-    let bytes = decode(bytes, previous_blockhash, config.rewards)?;
-    let mut block: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|err| format!("failed to parse generated block JSON: {err}"))?;
+    car_bytes_to_json_bytes_inner(bytes, previous_blockhash, config.rewards, mode, None)
+}
 
-    match config.transaction_details {
-        TransactionDetails::Full => {}
-        TransactionDetails::Signatures => keep_only_signatures(&mut block),
-        TransactionDetails::None => drop_transaction_details(&mut block),
-        TransactionDetails::Accounts => keep_only_accounts(&mut block),
+pub fn car_bytes_to_json_config_profiled(
+    bytes: Vec<u8>,
+    previous_blockhash: Option<[u8; 32]>,
+    config: GetBlockConfig,
+) -> Result<(Vec<u8>, RenderProfile), String> {
+    if config.encoding != GetBlockEncoding::Json {
+        return Err("requested getBlock encoding mode is not served locally".to_string());
     }
 
-    serde_json::to_vec(&block).map_err(|err| format!("failed to encode block JSON: {err}"))
+    let mode = match config.transaction_details {
+        TransactionDetails::Full => TransactionRenderMode::Full,
+        TransactionDetails::Accounts => TransactionRenderMode::Accounts,
+        TransactionDetails::Signatures => TransactionRenderMode::Signatures,
+        TransactionDetails::None => TransactionRenderMode::None,
+    };
+    let mut profile = RenderProfile {
+        mode: mode.label(),
+        include_rewards: config.rewards,
+        input_bytes: bytes.len(),
+        ..Default::default()
+    };
+    let bytes = car_bytes_to_json_bytes_inner(
+        bytes,
+        previous_blockhash,
+        config.rewards,
+        mode,
+        Some(&mut profile),
+    )?;
+    profile.output_bytes = bytes.len();
+    Ok((bytes, profile))
 }
 
 pub fn car_bytes_to_json_bytes(
@@ -43,7 +167,13 @@ pub fn car_bytes_to_json_bytes(
     previous_blockhash: Option<[u8; 32]>,
     include_rewards: bool,
 ) -> Result<Vec<u8>, String> {
-    car_bytes_to_json_bytes_inner(bytes, previous_blockhash, include_rewards, true)
+    car_bytes_to_json_bytes_inner(
+        bytes,
+        previous_blockhash,
+        include_rewards,
+        TransactionRenderMode::Full,
+        None,
+    )
 }
 
 pub fn car_bytes_to_json_light_bytes(
@@ -51,24 +181,191 @@ pub fn car_bytes_to_json_light_bytes(
     previous_blockhash: Option<[u8; 32]>,
     include_rewards: bool,
 ) -> Result<Vec<u8>, String> {
-    car_bytes_to_json_bytes_inner(bytes, previous_blockhash, include_rewards, false)
+    car_bytes_to_json_bytes_inner(
+        bytes,
+        previous_blockhash,
+        include_rewards,
+        TransactionRenderMode::FullLight,
+        None,
+    )
+}
+
+pub fn car_bytes_to_block_time(bytes: Vec<u8>) -> Result<Option<i64>, String> {
+    let block = read_car_block(bytes, false, TransactionReadMode::None)?;
+    Ok(rpc_block_time(block.block_time))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionRenderMode {
+    Full,
+    FullLight,
+    Accounts,
+    Signatures,
+    None,
+}
+
+impl TransactionRenderMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::FullLight => "full-light",
+            Self::Accounts => "accounts",
+            Self::Signatures => "signatures",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionReadMode {
+    Full,
+    SignaturePrefix,
+    None,
 }
 
 fn car_bytes_to_json_bytes_inner(
     bytes: Vec<u8>,
     previous_blockhash: Option<[u8; 32]>,
     include_rewards: bool,
-    include_transaction_meta: bool,
+    mode: TransactionRenderMode,
+    mut profile: Option<&mut RenderProfile>,
 ) -> Result<Vec<u8>, String> {
+    let total_started = ProfileTimer::start(profile.is_some());
     let input_len = bytes.len();
-    let mut block = read_car_block(bytes, include_rewards)?;
+    let transaction_read_mode = match mode {
+        TransactionRenderMode::Full
+        | TransactionRenderMode::FullLight
+        | TransactionRenderMode::Accounts => TransactionReadMode::Full,
+        TransactionRenderMode::Signatures => TransactionReadMode::SignaturePrefix,
+        TransactionRenderMode::None => TransactionReadMode::None,
+    };
+    let started = ProfileTimer::start(profile.is_some());
+    let mut block = read_car_block(bytes, include_rewards, transaction_read_mode)?;
+    let tx_count = block.get_len().0;
+    add_profile_us(&mut profile, |profile| {
+        profile.read_car_us += started.elapsed_us();
+        profile.transactions = tx_count;
+    });
     let rewards = if include_rewards {
-        decode_block_rewards_proto(block.rewards.as_ref())?
+        let started = ProfileTimer::start(profile.is_some());
+        let rewards = decode_block_rewards_proto(block.rewards.as_ref())?;
+        add_profile_us(&mut profile, |profile| {
+            profile.decode_rewards_us += started.elapsed_us();
+        });
+        rewards
     } else {
         None
     };
 
-    let mut w = JsonWriter::with_capacity(json_capacity_hint(input_len, include_transaction_meta));
+    let mut w = JsonWriter::with_capacity(json_capacity_hint(input_len, mode, tx_count));
+    let started = ProfileTimer::start(profile.is_some());
+    write_block_header(&mut w, &block, previous_blockhash)?;
+    add_profile_us(&mut profile, |profile| {
+        profile.write_header_us += started.elapsed_us();
+    });
+    if include_rewards {
+        w.raw(b",\"rewards\":");
+        let started = ProfileTimer::start(profile.is_some());
+        write_rewards(&mut w, rewards.as_ref())?;
+        add_profile_us(&mut profile, |profile| {
+            profile.write_rewards_us += started.elapsed_us();
+        });
+    }
+
+    match mode {
+        TransactionRenderMode::Full => {
+            if can_use_borrowed_metadata_fast_path(&block) {
+                write_full_transactions_borrowed(&mut w, &mut block, &mut profile)?
+            } else {
+                write_full_transactions_owned(&mut w, &mut block, &mut profile)?
+            }
+        }
+        TransactionRenderMode::FullLight => {
+            w.raw(b",\"transactions\":[");
+            let mut tx_iter = block.transactions_no_meta();
+            let mut first = true;
+            loop {
+                let started = ProfileTimer::start(profile.is_some());
+                let next = tx_iter
+                    .next_tx()
+                    .map_err(|err| format!("Failed to parse transaction: {err}"))?;
+                add_profile_us(&mut profile, |profile| {
+                    profile.decode_transactions_us += started.elapsed_us();
+                });
+                let Some(tx) = next else {
+                    break;
+                };
+                if !first {
+                    w.raw(b",");
+                }
+                first = false;
+                let started = ProfileTimer::start(profile.is_some());
+                write_block_transaction_light(&mut w, tx, &mut profile)?;
+                add_profile_us(&mut profile, |profile| {
+                    profile.write_transactions_us += started.elapsed_us();
+                });
+            }
+            w.raw(b"]");
+        }
+        TransactionRenderMode::Accounts => {
+            if can_use_borrowed_metadata_fast_path(&block) {
+                write_accounts_transactions_borrowed(&mut w, &mut block, &mut profile)?
+            } else {
+                write_accounts_transactions(&mut w, &mut block, &mut profile)?
+            }
+        }
+        TransactionRenderMode::Signatures => write_signatures(&mut w, &mut block, &mut profile)?,
+        TransactionRenderMode::None => {}
+    }
+
+    w.raw(b"}");
+    let bytes = w.into_inner();
+    add_profile_us(&mut profile, |profile| {
+        profile.output_bytes = bytes.len();
+        profile.total_us = total_started.elapsed_us();
+    });
+    Ok(bytes)
+}
+
+fn add_profile_us(
+    profile: &mut Option<&mut RenderProfile>,
+    update: impl FnOnce(&mut RenderProfile),
+) {
+    if let Some(profile) = profile.as_deref_mut() {
+        update(profile);
+    }
+}
+
+fn json_capacity_hint(input_len: usize, mode: TransactionRenderMode, tx_count: usize) -> usize {
+    match mode {
+        TransactionRenderMode::Full => input_len.saturating_mul(3),
+        TransactionRenderMode::Accounts => input_len.saturating_mul(3),
+        TransactionRenderMode::FullLight => input_len.saturating_mul(2),
+        TransactionRenderMode::Signatures => tx_count.saturating_mul(96).saturating_add(256),
+        TransactionRenderMode::None => 256,
+    }
+    .clamp(4 * 1024, 32 * 1024 * 1024)
+}
+
+fn can_use_borrowed_metadata_fast_path(block: &CarBlockGroup) -> bool {
+    block.slot.is_some_and(slot_uses_protobuf_metadata) && !force_owned_metadata_path()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn force_owned_metadata_path() -> bool {
+    std::env::var_os("OF_GET_BLOCK_FORCE_OWNED_METADATA").is_some()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn force_owned_metadata_path() -> bool {
+    false
+}
+
+fn write_block_header(
+    w: &mut JsonWriter,
+    block: &CarBlockGroup,
+    previous_blockhash: Option<[u8; 32]>,
+) -> Result<(), String> {
     w.raw(b"{\"blockhash\":");
     w.bs58(block.blockhash)?;
     w.raw(b",\"previousBlockhash\":");
@@ -76,62 +373,39 @@ fn car_bytes_to_json_bytes_inner(
     w.raw(b",\"parentSlot\":");
     w.display(block.parent_slot.unwrap_or_default())?;
     w.raw(b",\"blockTime\":");
-    write_option_i64(&mut w, rpc_block_time(block.block_time))?;
+    write_option_i64(w, rpc_block_time(block.block_time))?;
     w.raw(b",\"blockHeight\":");
-    write_option_u64(&mut w, block.block_height)?;
-    if include_rewards {
-        w.raw(b",\"rewards\":");
-        write_rewards(&mut w, rewards.as_ref())?;
-    }
-    w.raw(b",\"transactions\":[");
-
-    if include_transaction_meta {
-        let mut tx_iter = block.transactions();
-        let mut first = true;
-        while let Some((tx, meta)) = tx_iter
-            .next_tx()
-            .map_err(|err| format!("Failed to parse transaction: {err}"))?
-        {
-            if !first {
-                w.raw(b",");
-            }
-            first = false;
-            write_block_transaction(&mut w, tx, meta)?;
-        }
-    } else {
-        let mut tx_iter = block.transactions_no_meta();
-        let mut first = true;
-        while let Some(tx) = tx_iter
-            .next_tx()
-            .map_err(|err| format!("Failed to parse transaction: {err}"))?
-        {
-            if !first {
-                w.raw(b",");
-            }
-            first = false;
-            write_block_transaction_light(&mut w, tx)?;
-        }
-    }
-
-    w.raw(b"]}");
-    Ok(w.into_inner())
+    write_option_u64(w, block.block_height)?;
+    Ok(())
 }
 
-fn json_capacity_hint(input_len: usize, include_transaction_meta: bool) -> usize {
-    let multiplier = if include_transaction_meta { 3 } else { 2 };
-    input_len
-        .saturating_mul(multiplier)
-        .clamp(4 * 1024, 32 * 1024 * 1024)
-}
-
-fn read_car_block(bytes: Vec<u8>, include_rewards: bool) -> Result<CarBlockGroup, String> {
+fn read_car_block(
+    bytes: Vec<u8>,
+    include_rewards: bool,
+    transaction_read_mode: TransactionReadMode,
+) -> Result<CarBlockGroup, String> {
     let len = bytes.len();
     let cursor = Cursor::new(bytes);
-    let mut reader = CarBlockReader::with_capacity(cursor, len);
-    let mut block = if include_rewards {
-        CarBlockGroup::new()
-    } else {
-        CarBlockGroup::without_rewards()
+    let reader_capacity = match transaction_read_mode {
+        TransactionReadMode::Full => len,
+        TransactionReadMode::SignaturePrefix | TransactionReadMode::None => {
+            len.min(IN_MEMORY_CAR_READER_BUFFER_BYTES)
+        }
+    };
+    let mut reader = CarBlockReader::with_capacity(cursor, reader_capacity);
+    let mut block = match (include_rewards, transaction_read_mode) {
+        (true, TransactionReadMode::Full) => CarBlockGroup::new(),
+        (false, TransactionReadMode::Full) => CarBlockGroup::without_rewards(),
+        (true, TransactionReadMode::SignaturePrefix) => {
+            CarBlockGroup::with_transaction_signature_prefixes()
+        }
+        (false, TransactionReadMode::SignaturePrefix) => {
+            CarBlockGroup::without_rewards_and_transaction_signature_prefixes()
+        }
+        (true, TransactionReadMode::None) => CarBlockGroup::without_transaction_payloads(),
+        (false, TransactionReadMode::None) => {
+            CarBlockGroup::without_rewards_and_transaction_payloads()
+        }
     };
 
     let res = reader
@@ -186,10 +460,38 @@ impl JsonWriter {
     }
 
     fn bs58(&mut self, bytes: impl AsRef<[u8]>) -> Result<(), String> {
+        let bytes = bytes.as_ref();
         self.out.push(b'"');
-        bs58::encode(bytes)
-            .onto(&mut self.out)
-            .map_err(|err| format!("failed to encode base58: {err}"))?;
+        match bytes.len() {
+            32 => {
+                let bytes: &[u8; 32] = bytes.try_into().expect("checked 32-byte base58 input");
+                let mut buf = [0u8; five8::BASE58_ENCODED_32_MAX_LEN];
+                let len = five8::encode_32(bytes, &mut buf) as usize;
+                self.out.extend_from_slice(&buf[..len]);
+            }
+            64 => {
+                let bytes: &[u8; 64] = bytes.try_into().expect("checked 64-byte base58 input");
+                let mut buf = [0u8; five8::BASE58_ENCODED_64_MAX_LEN];
+                let len = five8::encode_64(bytes, &mut buf) as usize;
+                self.out.extend_from_slice(&buf[..len]);
+            }
+            _ => {
+                let start = self.out.len();
+                let max_len = base58_max_encoded_len(bytes.len());
+                self.out.resize(start + max_len, 0);
+                match base58_turbo::BITCOIN.encode_into(bytes, &mut self.out[start..]) {
+                    Ok(len) => {
+                        self.out.truncate(start + len);
+                    }
+                    Err(_) => {
+                        self.out.truncate(start);
+                        bs58::encode(bytes)
+                            .onto(&mut self.out)
+                            .map_err(|err| format!("failed to encode base58: {err}"))?;
+                    }
+                }
+            }
+        }
         self.out.push(b'"');
         Ok(())
     }
@@ -202,15 +504,48 @@ impl JsonWriter {
         }
     }
 
-    fn display(&mut self, value: impl Display) -> Result<(), String> {
-        write!(&mut self.out, "{value}")
-            .map_err(|err| format!("failed to write JSON number: {err}"))
+    fn display(&mut self, value: impl JsonNumber) -> Result<(), String> {
+        value.write_json(&mut self.out);
+        Ok(())
     }
 
     fn f64(&mut self, value: f64) -> Result<(), String> {
-        serde_json::to_writer(&mut self.out, &value)
-            .map_err(|err| format!("failed to encode JSON float: {err}"))
+        if value.is_finite() {
+            let mut buffer = ryu::Buffer::new();
+            self.raw(buffer.format(value).as_bytes());
+            Ok(())
+        } else {
+            serde_json::to_writer(&mut self.out, &value)
+                .map_err(|err| format!("failed to encode JSON float: {err}"))
+        }
     }
+
+    fn bool(&mut self, value: bool) {
+        self.raw(if value { b"true" } else { b"false" });
+    }
+}
+
+trait JsonNumber {
+    fn write_json(self, out: &mut Vec<u8>);
+}
+
+macro_rules! impl_json_number {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JsonNumber for $ty {
+                fn write_json(self, out: &mut Vec<u8>) {
+                    let mut buffer = itoa::Buffer::new();
+                    out.extend_from_slice(buffer.format(self).as_bytes());
+                }
+            }
+        )*
+    };
+}
+
+impl_json_number!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+fn base58_max_encoded_len(byte_len: usize) -> usize {
+    byte_len.saturating_mul(138).saturating_add(99) / 100 + 1
 }
 
 fn write_option_i64(w: &mut JsonWriter, value: Option<i64>) -> Result<(), String> {
@@ -246,8 +581,12 @@ fn write_rewards(w: &mut JsonWriter, rewards: Option<&Rewards>) -> Result<(), St
         return Ok(());
     };
 
+    write_reward_array(w, &rewards.rewards)
+}
+
+fn write_reward_array(w: &mut JsonWriter, rewards: &[proto::Reward]) -> Result<(), String> {
     w.raw(b"[");
-    for (index, reward) in rewards.rewards.iter().enumerate() {
+    for (index, reward) in rewards.iter().enumerate() {
         if index != 0 {
             w.raw(b",");
         }
@@ -275,6 +614,39 @@ fn write_rewards(w: &mut JsonWriter, rewards: Option<&Rewards>) -> Result<(), St
     Ok(())
 }
 
+fn write_reward_array_borrowed(
+    w: &mut JsonWriter,
+    rewards: &[borrowed_proto::Reward<'_>],
+) -> Result<(), String> {
+    w.raw(b"[");
+    for (index, reward) in rewards.iter().enumerate() {
+        if index != 0 {
+            w.raw(b",");
+        }
+        w.raw(b"{\"pubkey\":");
+        w.string(reward.pubkey.as_ref())?;
+        w.raw(b",\"lamports\":");
+        w.display(reward.lamports)?;
+        w.raw(b",\"postBalance\":");
+        w.display(reward.post_balance)?;
+        w.raw(b",\"rewardType\":");
+        if let Some(reward_type) = reward_type_to_rpc_borrowed(reward.reward_type) {
+            w.string(reward_type)?;
+        } else {
+            w.raw(b"null");
+        }
+        w.raw(b",\"commission\":");
+        if let Ok(commission) = reward.commission.parse::<u8>() {
+            w.display(commission)?;
+        } else {
+            w.raw(b"null");
+        }
+        w.raw(b"}");
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
 fn reward_type_to_rpc(reward_type: i32) -> Option<&'static str> {
     match RewardType::try_from(reward_type).ok()? {
         RewardType::Fee => Some("Fee"),
@@ -285,19 +657,134 @@ fn reward_type_to_rpc(reward_type: i32) -> Option<&'static str> {
     }
 }
 
+fn reward_type_to_rpc_borrowed(reward_type: borrowed_proto::RewardType) -> Option<&'static str> {
+    match reward_type {
+        borrowed_proto::RewardType::Fee => Some("Fee"),
+        borrowed_proto::RewardType::Rent => Some("Rent"),
+        borrowed_proto::RewardType::Staking => Some("Staking"),
+        borrowed_proto::RewardType::Voting => Some("Voting"),
+        borrowed_proto::RewardType::Unspecified => None,
+    }
+}
+
+fn write_full_transactions_owned(
+    w: &mut JsonWriter,
+    block: &mut CarBlockGroup,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b",\"transactions\":[");
+    let mut tx_iter = block.transactions();
+    let mut first = true;
+    loop {
+        let started = ProfileTimer::start(profile.is_some());
+        let next = tx_iter
+            .next_tx()
+            .map_err(|err| format!("Failed to parse transaction: {err}"))?;
+        add_profile_us(profile, |profile| {
+            profile.decode_transactions_us += started.elapsed_us();
+        });
+        let Some((tx, meta)) = next else {
+            break;
+        };
+        if !first {
+            w.raw(b",");
+        }
+        first = false;
+        let started = ProfileTimer::start(profile.is_some());
+        write_block_transaction(w, tx, meta, profile)?;
+        add_profile_us(profile, |profile| {
+            profile.write_transactions_us += started.elapsed_us();
+        });
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_full_transactions_borrowed(
+    w: &mut JsonWriter,
+    block: &mut CarBlockGroup,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b",\"transactions\":[");
+    let mut tx_iter = block.transactions_borrowed_metadata();
+    let mut first = true;
+    loop {
+        let started = ProfileTimer::start(profile.is_some());
+        let next = tx_iter
+            .next_tx()
+            .map_err(|err| format!("Failed to parse transaction: {err}"))?;
+        add_profile_us(profile, |profile| {
+            profile.decode_transactions_us += started.elapsed_us();
+        });
+        let Some(tx) = next else {
+            break;
+        };
+        if !first {
+            w.raw(b",");
+        }
+        first = false;
+        let started = ProfileTimer::start(profile.is_some());
+        write_block_transaction_borrowed(w, tx.transaction, tx.metadata.as_ref(), profile)?;
+        add_profile_us(profile, |profile| {
+            profile.write_transactions_us += started.elapsed_us();
+        });
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
 fn write_block_transaction(
     w: &mut JsonWriter,
     tx: &VersionedTransaction<'_>,
     meta: Option<&proto::TransactionStatusMeta>,
+    profile: &mut Option<&mut RenderProfile>,
 ) -> Result<(), String> {
     w.raw(b"{\"transaction\":");
+    let started = ProfileTimer::start(profile.is_some());
     write_encoded_transaction(w, tx)?;
+    add_profile_us(profile, |profile| {
+        profile.write_transaction_json_us += started.elapsed_us();
+    });
     w.raw(b",\"meta\":");
+    let started = ProfileTimer::start(profile.is_some());
     if let Some(meta) = meta {
         write_transaction_meta(w, meta)?;
     } else {
         w.raw(b"null");
     }
+    add_profile_us(profile, |profile| {
+        profile.write_meta_json_us += started.elapsed_us();
+    });
+    w.raw(b",\"version\":");
+    write_transaction_version(w, tx)?;
+    w.raw(b"}");
+    Ok(())
+}
+
+fn write_block_transaction_borrowed(
+    w: &mut JsonWriter,
+    tx: &VersionedTransaction<'_>,
+    meta: Option<&BorrowedTransactionStatusMetaView<'_>>,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b"{\"transaction\":");
+    let started = ProfileTimer::start(profile.is_some());
+    write_encoded_transaction(w, tx)?;
+    add_profile_us(profile, |profile| {
+        profile.write_transaction_json_us += started.elapsed_us();
+    });
+    w.raw(b",\"meta\":");
+    let started = ProfileTimer::start(profile.is_some());
+    if let Some(meta) = meta {
+        write_transaction_meta_borrowed(w, meta)?;
+    } else {
+        w.raw(b"null");
+    }
+    add_profile_us(profile, |profile| {
+        profile.write_meta_json_us += started.elapsed_us();
+    });
+    w.raw(b",\"version\":");
+    write_transaction_version(w, tx)?;
     w.raw(b"}");
     Ok(())
 }
@@ -305,10 +792,186 @@ fn write_block_transaction(
 fn write_block_transaction_light(
     w: &mut JsonWriter,
     tx: &VersionedTransaction<'_>,
+    profile: &mut Option<&mut RenderProfile>,
 ) -> Result<(), String> {
     w.raw(b"{\"transaction\":");
+    let started = ProfileTimer::start(profile.is_some());
     write_encoded_transaction(w, tx)?;
+    add_profile_us(profile, |profile| {
+        profile.write_transaction_json_us += started.elapsed_us();
+    });
     w.raw(b"}");
+    Ok(())
+}
+
+fn write_accounts_transactions(
+    w: &mut JsonWriter,
+    block: &mut CarBlockGroup,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b",\"transactions\":[");
+    let mut tx_iter = block.transactions();
+    let mut first = true;
+    loop {
+        let started = ProfileTimer::start(profile.is_some());
+        let next = tx_iter
+            .next_tx()
+            .map_err(|err| format!("Failed to parse transaction: {err}"))?;
+        add_profile_us(profile, |profile| {
+            profile.decode_transactions_us += started.elapsed_us();
+        });
+        let Some((tx, meta)) = next else {
+            break;
+        };
+        if !first {
+            w.raw(b",");
+        }
+        first = false;
+        let started = ProfileTimer::start(profile.is_some());
+        write_accounts_transaction(w, tx, meta, profile)?;
+        add_profile_us(profile, |profile| {
+            profile.write_transactions_us += started.elapsed_us();
+        });
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_accounts_transactions_borrowed(
+    w: &mut JsonWriter,
+    block: &mut CarBlockGroup,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b",\"transactions\":[");
+    let mut tx_iter = block.transactions_borrowed_metadata();
+    let mut first = true;
+    loop {
+        let started = ProfileTimer::start(profile.is_some());
+        let next = tx_iter
+            .next_tx()
+            .map_err(|err| format!("Failed to parse transaction: {err}"))?;
+        add_profile_us(profile, |profile| {
+            profile.decode_transactions_us += started.elapsed_us();
+        });
+        let Some(tx) = next else {
+            break;
+        };
+        if !first {
+            w.raw(b",");
+        }
+        first = false;
+        let started = ProfileTimer::start(profile.is_some());
+        write_accounts_transaction_borrowed(w, tx.transaction, tx.metadata.as_ref(), profile)?;
+        add_profile_us(profile, |profile| {
+            profile.write_transactions_us += started.elapsed_us();
+        });
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_accounts_transaction(
+    w: &mut JsonWriter,
+    tx: &VersionedTransaction<'_>,
+    meta: Option<&proto::TransactionStatusMeta>,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b"{\"transaction\":{\"accountKeys\":");
+    let started = ProfileTimer::start(profile.is_some());
+    write_account_key_objects(w, tx, meta)?;
+    w.raw(b",\"signatures\":");
+    write_signature_array(w, tx)?;
+    add_profile_us(profile, |profile| {
+        profile.write_transaction_json_us += started.elapsed_us();
+    });
+    w.raw(b"},\"meta\":");
+    let started = ProfileTimer::start(profile.is_some());
+    if let Some(meta) = meta {
+        write_accounts_transaction_meta(w, meta)?;
+    } else {
+        w.raw(b"null");
+    }
+    add_profile_us(profile, |profile| {
+        profile.write_meta_json_us += started.elapsed_us();
+    });
+    w.raw(b",\"version\":");
+    write_transaction_version(w, tx)?;
+    w.raw(b"}");
+    Ok(())
+}
+
+fn write_accounts_transaction_borrowed(
+    w: &mut JsonWriter,
+    tx: &VersionedTransaction<'_>,
+    meta: Option<&BorrowedTransactionStatusMetaView<'_>>,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b"{\"transaction\":{\"accountKeys\":");
+    let started = ProfileTimer::start(profile.is_some());
+    write_account_key_objects_borrowed(w, tx, meta)?;
+    w.raw(b",\"signatures\":");
+    write_signature_array(w, tx)?;
+    add_profile_us(profile, |profile| {
+        profile.write_transaction_json_us += started.elapsed_us();
+    });
+    w.raw(b"},\"meta\":");
+    let started = ProfileTimer::start(profile.is_some());
+    if let Some(meta) = meta {
+        write_accounts_transaction_meta_borrowed(w, meta)?;
+    } else {
+        w.raw(b"null");
+    }
+    add_profile_us(profile, |profile| {
+        profile.write_meta_json_us += started.elapsed_us();
+    });
+    w.raw(b",\"version\":");
+    write_transaction_version(w, tx)?;
+    w.raw(b"}");
+    Ok(())
+}
+
+fn write_signatures(
+    w: &mut JsonWriter,
+    block: &mut CarBlockGroup,
+    profile: &mut Option<&mut RenderProfile>,
+) -> Result<(), String> {
+    w.raw(b",\"signatures\":[");
+    let mut tx_iter = block.first_signatures();
+    let mut first = true;
+    loop {
+        let started = ProfileTimer::start(profile.is_some());
+        let next = tx_iter
+            .next_signature()
+            .map_err(|err| format!("Failed to parse transaction: {err}"))?;
+        add_profile_us(profile, |profile| {
+            profile.decode_transactions_us += started.elapsed_us();
+        });
+        let Some(signature) = next else {
+            break;
+        };
+        if !first {
+            w.raw(b",");
+        }
+        first = false;
+        let started = ProfileTimer::start(profile.is_some());
+        w.bs58(signature)?;
+        add_profile_us(profile, |profile| {
+            profile.write_transactions_us += started.elapsed_us();
+        });
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_signature_array(w: &mut JsonWriter, tx: &VersionedTransaction<'_>) -> Result<(), String> {
+    w.raw(b"[");
+    for (index, signature) in tx.signatures.iter().enumerate() {
+        if index != 0 {
+            w.raw(b",");
+        }
+        w.bs58(signature)?;
+    }
+    w.raw(b"]");
     Ok(())
 }
 
@@ -327,6 +990,22 @@ fn write_encoded_transaction(
     write_message(w, &tx.message)?;
     w.raw(b"}");
     Ok(())
+}
+
+fn write_transaction_version(
+    w: &mut JsonWriter,
+    tx: &VersionedTransaction<'_>,
+) -> Result<(), String> {
+    match tx.message {
+        VersionedMessage::Legacy(_) => {
+            w.raw(b"\"legacy\"");
+            Ok(())
+        }
+        VersionedMessage::V0(_) => {
+            w.raw(b"0");
+            Ok(())
+        }
+    }
 }
 
 fn write_message(w: &mut JsonWriter, message: &VersionedMessage<'_>) -> Result<(), String> {
@@ -398,6 +1077,170 @@ fn write_message_fields(
     Ok(())
 }
 
+fn write_account_key_objects(
+    w: &mut JsonWriter,
+    tx: &VersionedTransaction<'_>,
+    meta: Option<&proto::TransactionStatusMeta>,
+) -> Result<(), String> {
+    let (header, account_keys) = match &tx.message {
+        VersionedMessage::Legacy(message) => (message.header, message.account_keys.as_slice()),
+        VersionedMessage::V0(message) => (message.header, message.account_keys.as_slice()),
+    };
+
+    let required_signatures = header.num_required_signatures as usize;
+    let readonly_signed = header.num_readonly_signed_accounts as usize;
+    let readonly_unsigned = header.num_readonly_unsigned_accounts as usize;
+    let signed_writable = required_signatures.saturating_sub(readonly_signed);
+    let unsigned_writable_end = account_keys.len().saturating_sub(readonly_unsigned);
+
+    w.raw(b"[");
+    let mut first = true;
+    for (index, key) in account_keys.iter().enumerate() {
+        let signer = index < required_signatures;
+        let header_writable = if signer {
+            index < signed_writable
+        } else {
+            index < unsigned_writable_end
+        };
+        write_account_key_object(
+            w,
+            &mut first,
+            *key,
+            signer,
+            header_writable,
+            AccountKeySource::Transaction,
+        )?;
+    }
+
+    if let Some(meta) = meta {
+        for address in &meta.loaded_writable_addresses {
+            write_account_key_object(
+                w,
+                &mut first,
+                address,
+                false,
+                true,
+                AccountKeySource::LookupTable,
+            )?;
+        }
+        for address in &meta.loaded_readonly_addresses {
+            write_account_key_object(
+                w,
+                &mut first,
+                address,
+                false,
+                false,
+                AccountKeySource::LookupTable,
+            )?;
+        }
+    }
+
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_account_key_objects_borrowed(
+    w: &mut JsonWriter,
+    tx: &VersionedTransaction<'_>,
+    meta: Option<&BorrowedTransactionStatusMetaView<'_>>,
+) -> Result<(), String> {
+    let (header, account_keys) = match &tx.message {
+        VersionedMessage::Legacy(message) => (message.header, message.account_keys.as_slice()),
+        VersionedMessage::V0(message) => (message.header, message.account_keys.as_slice()),
+    };
+
+    let required_signatures = header.num_required_signatures as usize;
+    let readonly_signed = header.num_readonly_signed_accounts as usize;
+    let readonly_unsigned = header.num_readonly_unsigned_accounts as usize;
+    let signed_writable = required_signatures.saturating_sub(readonly_signed);
+    let unsigned_writable_end = account_keys.len().saturating_sub(readonly_unsigned);
+
+    w.raw(b"[");
+    let mut first = true;
+    for (index, key) in account_keys.iter().enumerate() {
+        let signer = index < required_signatures;
+        let header_writable = if signer {
+            index < signed_writable
+        } else {
+            index < unsigned_writable_end
+        };
+        write_account_key_object(
+            w,
+            &mut first,
+            *key,
+            signer,
+            header_writable,
+            AccountKeySource::Transaction,
+        )?;
+    }
+
+    if let Some(meta) = meta {
+        for address in &meta.loaded_writable_addresses {
+            write_account_key_object(
+                w,
+                &mut first,
+                address.as_ref(),
+                false,
+                true,
+                AccountKeySource::LookupTable,
+            )?;
+        }
+        for address in &meta.loaded_readonly_addresses {
+            write_account_key_object(
+                w,
+                &mut first,
+                address.as_ref(),
+                false,
+                false,
+                AccountKeySource::LookupTable,
+            )?;
+        }
+    }
+
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_account_key_object(
+    w: &mut JsonWriter,
+    first: &mut bool,
+    pubkey: impl AsRef<[u8]>,
+    signer: bool,
+    writable: bool,
+    source: AccountKeySource,
+) -> Result<(), String> {
+    if !*first {
+        w.raw(b",");
+    }
+    *first = false;
+
+    w.raw(b"{\"pubkey\":");
+    w.bs58(pubkey)?;
+    w.raw(b",\"signer\":");
+    w.bool(signer);
+    w.raw(b",\"source\":");
+    w.raw(source.json_literal());
+    w.raw(b",\"writable\":");
+    w.bool(writable);
+    w.raw(b"}");
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum AccountKeySource {
+    Transaction,
+    LookupTable,
+}
+
+impl AccountKeySource {
+    fn json_literal(self) -> &'static [u8] {
+        match self {
+            Self::Transaction => b"\"transaction\"",
+            Self::LookupTable => b"\"lookupTable\"",
+        }
+    }
+}
+
 fn write_message_header(w: &mut JsonWriter, header: MessageHeader) -> Result<(), String> {
     w.raw(b"{\"numRequiredSignatures\":");
     w.display(header.num_required_signatures)?;
@@ -432,6 +1275,8 @@ fn write_transaction_meta(
 ) -> Result<(), String> {
     w.raw(b"{\"err\":");
     write_transaction_error(w, meta.err.as_ref())?;
+    w.raw(b",\"status\":");
+    write_transaction_status(w, meta.err.as_ref())?;
     w.raw(b",\"fee\":");
     w.display(meta.fee)?;
     w.raw(b",\"preBalances\":");
@@ -444,12 +1289,114 @@ fn write_transaction_meta(
     write_token_balances(w, &meta.post_token_balances)?;
     w.raw(b",\"logMessages\":");
     write_log_messages(w, meta)?;
-    w.raw(b",\"computeUnitsConsumed\":");
-    write_option_u64(w, meta.compute_units_consumed)?;
+    if let Some(compute_units_consumed) = meta.compute_units_consumed {
+        w.raw(b",\"computeUnitsConsumed\":");
+        w.display(compute_units_consumed)?;
+    }
+    if let Some(cost_units) = meta.cost_units {
+        w.raw(b",\"costUnits\":");
+        w.display(cost_units)?;
+    }
     w.raw(b",\"innerInstructions\":");
     write_inner_instructions(w, meta)?;
     w.raw(b",\"loadedAddresses\":");
     write_loaded_addresses(w, meta)?;
+    w.raw(b",\"rewards\":");
+    write_transaction_rewards(w, &meta.rewards)?;
+    if !meta.return_data_none
+        && let Some(return_data) = meta.return_data.as_ref()
+    {
+        w.raw(b",\"returnData\":");
+        write_return_data(w, return_data)?;
+    }
+    w.raw(b"}");
+    Ok(())
+}
+
+fn write_accounts_transaction_meta(
+    w: &mut JsonWriter,
+    meta: &proto::TransactionStatusMeta,
+) -> Result<(), String> {
+    w.raw(b"{\"err\":");
+    write_transaction_error(w, meta.err.as_ref())?;
+    w.raw(b",\"status\":");
+    write_transaction_status(w, meta.err.as_ref())?;
+    w.raw(b",\"fee\":");
+    w.display(meta.fee)?;
+    w.raw(b",\"preBalances\":");
+    write_u64_array(w, &meta.pre_balances)?;
+    w.raw(b",\"postBalances\":");
+    write_u64_array(w, &meta.post_balances)?;
+    w.raw(b",\"preTokenBalances\":");
+    write_token_balances(w, &meta.pre_token_balances)?;
+    w.raw(b",\"postTokenBalances\":");
+    write_token_balances(w, &meta.post_token_balances)?;
+    w.raw(b"}");
+    Ok(())
+}
+
+fn write_transaction_meta_borrowed(
+    w: &mut JsonWriter,
+    meta: &BorrowedTransactionStatusMetaView<'_>,
+) -> Result<(), String> {
+    w.raw(b"{\"err\":");
+    write_transaction_error_borrowed(w, meta.err.as_ref())?;
+    w.raw(b",\"status\":");
+    write_transaction_status_borrowed(w, meta.err.as_ref())?;
+    w.raw(b",\"fee\":");
+    w.display(meta.fee)?;
+    w.raw(b",\"preBalances\":");
+    write_u64_array(w, &meta.pre_balances)?;
+    w.raw(b",\"postBalances\":");
+    write_u64_array(w, &meta.post_balances)?;
+    w.raw(b",\"preTokenBalances\":");
+    write_token_balances_borrowed(w, &meta.pre_token_balances)?;
+    w.raw(b",\"postTokenBalances\":");
+    write_token_balances_borrowed(w, &meta.post_token_balances)?;
+    w.raw(b",\"logMessages\":");
+    write_log_messages_borrowed(w, meta)?;
+    if let Some(compute_units_consumed) = meta.compute_units_consumed {
+        w.raw(b",\"computeUnitsConsumed\":");
+        w.display(compute_units_consumed)?;
+    }
+    if let Some(cost_units) = meta.cost_units {
+        w.raw(b",\"costUnits\":");
+        w.display(cost_units)?;
+    }
+    w.raw(b",\"innerInstructions\":");
+    write_inner_instructions_borrowed(w, meta)?;
+    w.raw(b",\"loadedAddresses\":");
+    write_loaded_addresses_borrowed(w, meta)?;
+    w.raw(b",\"rewards\":");
+    write_transaction_rewards_borrowed(w, &meta.rewards)?;
+    if !meta.return_data_none
+        && let Some(return_data) = meta.return_data.as_ref()
+    {
+        w.raw(b",\"returnData\":");
+        write_return_data_borrowed(w, return_data)?;
+    }
+    w.raw(b"}");
+    Ok(())
+}
+
+fn write_accounts_transaction_meta_borrowed(
+    w: &mut JsonWriter,
+    meta: &BorrowedTransactionStatusMetaView<'_>,
+) -> Result<(), String> {
+    w.raw(b"{\"err\":");
+    write_transaction_error_borrowed(w, meta.err.as_ref())?;
+    w.raw(b",\"status\":");
+    write_transaction_status_borrowed(w, meta.err.as_ref())?;
+    w.raw(b",\"fee\":");
+    w.display(meta.fee)?;
+    w.raw(b",\"preBalances\":");
+    write_u64_array(w, &meta.pre_balances)?;
+    w.raw(b",\"postBalances\":");
+    write_u64_array(w, &meta.post_balances)?;
+    w.raw(b",\"preTokenBalances\":");
+    write_token_balances_borrowed(w, &meta.pre_token_balances)?;
+    w.raw(b",\"postTokenBalances\":");
+    write_token_balances_borrowed(w, &meta.post_token_balances)?;
     w.raw(b"}");
     Ok(())
 }
@@ -459,7 +1406,7 @@ fn write_token_balances(
     balances: &[proto::TokenBalance],
 ) -> Result<(), String> {
     if balances.is_empty() {
-        w.raw(b"null");
+        w.raw(b"[]");
         return Ok(());
     }
 
@@ -491,7 +1438,7 @@ fn write_token_balances(
             w.raw(b",\"decimals\":");
             w.display(amount.decimals)?;
             w.raw(b",\"uiAmount\":");
-            w.f64(amount.ui_amount)?;
+            write_ui_amount(w, amount)?;
             w.raw(b",\"uiAmountString\":");
             w.string(&amount.ui_amount_string)?;
             w.raw(b"}");
@@ -502,6 +1449,106 @@ fn write_token_balances(
     }
     w.raw(b"]");
     Ok(())
+}
+
+fn write_token_balances_borrowed(
+    w: &mut JsonWriter,
+    balances: &[borrowed_proto::TokenBalance<'_>],
+) -> Result<(), String> {
+    if balances.is_empty() {
+        w.raw(b"[]");
+        return Ok(());
+    }
+
+    w.raw(b"[");
+    for (index, balance) in balances.iter().enumerate() {
+        if index != 0 {
+            w.raw(b",");
+        }
+        w.raw(b"{\"accountIndex\":");
+        w.display(balance.account_index)?;
+        w.raw(b",\"mint\":");
+        w.string(balance.mint.as_ref())?;
+        w.raw(b",\"owner\":");
+        if balance.owner.is_empty() {
+            w.raw(b"null");
+        } else {
+            w.string(balance.owner.as_ref())?;
+        }
+        w.raw(b",\"programId\":");
+        if balance.program_id.is_empty() {
+            w.raw(b"null");
+        } else {
+            w.string(balance.program_id.as_ref())?;
+        }
+        w.raw(b",\"uiTokenAmount\":");
+        if let Some(amount) = balance.ui_token_amount.as_ref() {
+            w.raw(b"{\"amount\":");
+            w.string(amount.amount.as_ref())?;
+            w.raw(b",\"decimals\":");
+            w.display(amount.decimals)?;
+            w.raw(b",\"uiAmount\":");
+            write_ui_amount_borrowed(w, amount)?;
+            w.raw(b",\"uiAmountString\":");
+            w.string(amount.ui_amount_string.as_ref())?;
+            w.raw(b"}");
+        } else {
+            w.raw(b"null");
+        }
+        w.raw(b"}");
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_transaction_rewards(w: &mut JsonWriter, rewards: &[proto::Reward]) -> Result<(), String> {
+    if rewards.is_empty() {
+        w.raw(b"null");
+        return Ok(());
+    }
+
+    write_reward_array(w, rewards)
+}
+
+fn write_transaction_rewards_borrowed(
+    w: &mut JsonWriter,
+    rewards: &[borrowed_proto::Reward<'_>],
+) -> Result<(), String> {
+    if rewards.is_empty() {
+        w.raw(b"null");
+        return Ok(());
+    }
+
+    write_reward_array_borrowed(w, rewards)
+}
+
+fn write_ui_amount(w: &mut JsonWriter, amount: &proto::UiTokenAmount) -> Result<(), String> {
+    if amount.amount == "0" {
+        w.raw(b"null");
+        return Ok(());
+    }
+
+    let value = amount
+        .ui_amount_string
+        .parse::<f64>()
+        .unwrap_or(amount.ui_amount);
+    w.f64(value)
+}
+
+fn write_ui_amount_borrowed(
+    w: &mut JsonWriter,
+    amount: &borrowed_proto::UiTokenAmount<'_>,
+) -> Result<(), String> {
+    if amount.amount == "0" {
+        w.raw(b"null");
+        return Ok(());
+    }
+
+    let value = amount
+        .ui_amount_string
+        .parse::<f64>()
+        .unwrap_or(amount.ui_amount);
+    w.f64(value)
 }
 
 fn write_log_messages(
@@ -519,6 +1566,26 @@ fn write_log_messages(
             w.raw(b",");
         }
         w.string(log)?;
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
+fn write_log_messages_borrowed(
+    w: &mut JsonWriter,
+    meta: &BorrowedTransactionStatusMetaView<'_>,
+) -> Result<(), String> {
+    if meta.log_messages_none {
+        w.raw(b"null");
+        return Ok(());
+    }
+
+    w.raw(b"[");
+    for (index, log) in meta.log_messages.iter().enumerate() {
+        if index != 0 {
+            w.raw(b",");
+        }
+        w.string(log.as_ref())?;
     }
     w.raw(b"]");
     Ok(())
@@ -553,6 +1620,35 @@ fn write_inner_instructions(
     Ok(())
 }
 
+fn write_inner_instructions_borrowed(
+    w: &mut JsonWriter,
+    meta: &BorrowedTransactionStatusMetaView<'_>,
+) -> Result<(), String> {
+    if meta.inner_instructions_none {
+        w.raw(b"null");
+        return Ok(());
+    }
+
+    w.raw(b"[");
+    for (index, inner) in meta.inner_instructions.iter().enumerate() {
+        if index != 0 {
+            w.raw(b",");
+        }
+        w.raw(b"{\"index\":");
+        w.display(inner.index)?;
+        w.raw(b",\"instructions\":[");
+        for (instruction_index, instruction) in inner.instructions.iter().enumerate() {
+            if instruction_index != 0 {
+                w.raw(b",");
+            }
+            write_inner_instruction_borrowed(w, instruction)?;
+        }
+        w.raw(b"]}");
+    }
+    w.raw(b"]");
+    Ok(())
+}
+
 fn write_inner_instruction(
     w: &mut JsonWriter,
     instruction: &proto::InnerInstruction,
@@ -569,15 +1665,29 @@ fn write_inner_instruction(
     Ok(())
 }
 
+fn write_inner_instruction_borrowed(
+    w: &mut JsonWriter,
+    instruction: &borrowed_proto::InnerInstruction<'_>,
+) -> Result<(), String> {
+    w.raw(b"{\"programIdIndex\":");
+    w.display(instruction.program_id_index)?;
+    w.raw(b",\"accounts\":");
+    write_u8_array(w, instruction.accounts.as_ref())?;
+    w.raw(b",\"data\":");
+    w.bs58(instruction.data.as_ref())?;
+    w.raw(b",\"stackHeight\":");
+    write_option_u32(
+        w,
+        (instruction.stack_height != 0).then_some(instruction.stack_height),
+    )?;
+    w.raw(b"}");
+    Ok(())
+}
+
 fn write_loaded_addresses(
     w: &mut JsonWriter,
     meta: &proto::TransactionStatusMeta,
 ) -> Result<(), String> {
-    if meta.loaded_readonly_addresses.is_empty() && meta.loaded_writable_addresses.is_empty() {
-        w.raw(b"null");
-        return Ok(());
-    }
-
     w.raw(b"{\"writable\":[");
     for (index, address) in meta.loaded_writable_addresses.iter().enumerate() {
         if index != 0 {
@@ -596,6 +1706,77 @@ fn write_loaded_addresses(
     Ok(())
 }
 
+fn write_loaded_addresses_borrowed(
+    w: &mut JsonWriter,
+    meta: &BorrowedTransactionStatusMetaView<'_>,
+) -> Result<(), String> {
+    w.raw(b"{\"writable\":[");
+    for (index, address) in meta.loaded_writable_addresses.iter().enumerate() {
+        if index != 0 {
+            w.raw(b",");
+        }
+        w.bs58(address.as_ref())?;
+    }
+    w.raw(b"],\"readonly\":[");
+    for (index, address) in meta.loaded_readonly_addresses.iter().enumerate() {
+        if index != 0 {
+            w.raw(b",");
+        }
+        w.bs58(address.as_ref())?;
+    }
+    w.raw(b"]}");
+    Ok(())
+}
+
+fn write_return_data(w: &mut JsonWriter, return_data: &proto::ReturnData) -> Result<(), String> {
+    w.raw(b"{\"programId\":");
+    w.bs58(&return_data.program_id)?;
+    w.raw(b",\"data\":[");
+    w.string(&BASE64.encode(&return_data.data))?;
+    w.raw(b",\"base64\"]}");
+    Ok(())
+}
+
+fn write_return_data_borrowed(
+    w: &mut JsonWriter,
+    return_data: &borrowed_proto::ReturnData<'_>,
+) -> Result<(), String> {
+    w.raw(b"{\"programId\":");
+    w.bs58(return_data.program_id.as_ref())?;
+    w.raw(b",\"data\":[");
+    w.string(&BASE64.encode(return_data.data.as_ref()))?;
+    w.raw(b",\"base64\"]}");
+    Ok(())
+}
+
+fn write_transaction_status(
+    w: &mut JsonWriter,
+    err: Option<&proto::TransactionError>,
+) -> Result<(), String> {
+    if let Some(err) = err {
+        w.raw(b"{\"Err\":");
+        write_transaction_error(w, Some(err))?;
+        w.raw(b"}");
+    } else {
+        w.raw(b"{\"Ok\":null}");
+    }
+    Ok(())
+}
+
+fn write_transaction_status_borrowed(
+    w: &mut JsonWriter,
+    err: Option<&borrowed_proto::TransactionError<'_>>,
+) -> Result<(), String> {
+    if let Some(err) = err {
+        w.raw(b"{\"Err\":");
+        write_transaction_error_borrowed(w, Some(err))?;
+        w.raw(b"}");
+    } else {
+        w.raw(b"{\"Ok\":null}");
+    }
+    Ok(())
+}
+
 fn write_transaction_error(
     w: &mut JsonWriter,
     err: Option<&proto::TransactionError>,
@@ -605,7 +1786,23 @@ fn write_transaction_error(
         return Ok(());
     };
 
-    let decoded = decode_transaction_error_bytes(&err.err)
+    write_transaction_error_bytes(w, &err.err)
+}
+
+fn write_transaction_error_borrowed(
+    w: &mut JsonWriter,
+    err: Option<&borrowed_proto::TransactionError<'_>>,
+) -> Result<(), String> {
+    let Some(err) = err else {
+        w.raw(b"null");
+        return Ok(());
+    };
+
+    write_transaction_error_bytes(w, err.err.as_ref())
+}
+
+fn write_transaction_error_bytes(w: &mut JsonWriter, bytes: &[u8]) -> Result<(), String> {
+    let decoded = decode_transaction_error_bytes(bytes)
         .map_err(|err| format!("Failed to decode transaction error: {err}"))?;
     write_stored_transaction_error(w, decoded)
 }
@@ -838,175 +2035,6 @@ fn write_u64_array(w: &mut JsonWriter, values: &[u64]) -> Result<(), String> {
     Ok(())
 }
 
-fn keep_only_signatures(block: &mut serde_json::Value) {
-    let signatures = block
-        .get("transactions")
-        .and_then(serde_json::Value::as_array)
-        .map(|transactions| {
-            transactions
-                .iter()
-                .filter_map(|tx| {
-                    tx.get("transaction")?
-                        .get("signatures")?
-                        .as_array()?
-                        .first()
-                        .cloned()
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if let Some(map) = block.as_object_mut() {
-        map.remove("transactions");
-        map.insert(
-            "signatures".to_string(),
-            serde_json::Value::Array(signatures),
-        );
-    }
-}
-
-fn drop_transaction_details(block: &mut serde_json::Value) {
-    if let Some(map) = block.as_object_mut() {
-        map.remove("transactions");
-        map.remove("signatures");
-    }
-}
-
-fn keep_only_accounts(block: &mut serde_json::Value) {
-    let Some(transactions) = block
-        .get_mut("transactions")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return;
-    };
-
-    for tx in transactions {
-        let account_keys = accounts_only_keys(tx);
-        let signatures = tx
-            .get("transaction")
-            .and_then(|transaction| transaction.get("signatures"))
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-        let version = tx
-            .get("transaction")
-            .and_then(|transaction| transaction.get("message"))
-            .and_then(|message| message.get("addressTableLookups"))
-            .map(|_| serde_json::Value::from(0))
-            .unwrap_or_else(|| serde_json::Value::String("legacy".to_string()));
-
-        if let Some(map) = tx.as_object_mut() {
-            map.insert(
-                "transaction".to_string(),
-                serde_json::json!({
-                    "accountKeys": account_keys,
-                    "signatures": signatures,
-                }),
-            );
-            if let Some(meta) = map.get_mut("meta") {
-                prune_accounts_meta(meta);
-            }
-            map.insert("version".to_string(), version);
-        }
-    }
-}
-
-fn accounts_only_keys(tx: &serde_json::Value) -> Vec<serde_json::Value> {
-    let Some(message) = tx
-        .get("transaction")
-        .and_then(|transaction| transaction.get("message"))
-    else {
-        return Vec::new();
-    };
-    let Some(static_keys) = message
-        .get("accountKeys")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return Vec::new();
-    };
-    let header = message.get("header");
-    let required_signatures = header
-        .and_then(|h| h.get("numRequiredSignatures"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as usize;
-    let readonly_signed = header
-        .and_then(|h| h.get("numReadonlySignedAccounts"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as usize;
-    let readonly_unsigned = header
-        .and_then(|h| h.get("numReadonlyUnsignedAccounts"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as usize;
-    let signed_writable = required_signatures.saturating_sub(readonly_signed);
-    let unsigned_writable_end = static_keys.len().saturating_sub(readonly_unsigned);
-
-    let mut out = Vec::with_capacity(static_keys.len());
-    for (index, key) in static_keys.iter().enumerate() {
-        let signer = index < required_signatures;
-        let writable = if signer {
-            index < signed_writable
-        } else {
-            index < unsigned_writable_end
-        };
-        out.push(serde_json::json!({
-            "pubkey": key,
-            "signer": signer,
-            "source": "transaction",
-            "writable": writable,
-        }));
-    }
-
-    let loaded = tx
-        .get("meta")
-        .and_then(|meta| meta.get("loadedAddresses"))
-        .and_then(serde_json::Value::as_object);
-    if let Some(loaded) = loaded {
-        append_loaded_account_keys(&mut out, loaded.get("writable"), true);
-        append_loaded_account_keys(&mut out, loaded.get("readonly"), false);
-    }
-
-    out
-}
-
-fn append_loaded_account_keys(
-    out: &mut Vec<serde_json::Value>,
-    keys: Option<&serde_json::Value>,
-    writable: bool,
-) {
-    let Some(keys) = keys.and_then(serde_json::Value::as_array) else {
-        return;
-    };
-    for key in keys {
-        out.push(serde_json::json!({
-            "pubkey": key,
-            "signer": false,
-            "source": "lookupTable",
-            "writable": writable,
-        }));
-    }
-}
-
-fn prune_accounts_meta(meta: &mut serde_json::Value) {
-    let Some(map) = meta.as_object_mut() else {
-        return;
-    };
-    let err = map.get("err").cloned().unwrap_or(serde_json::Value::Null);
-    let status = if err.is_null() {
-        serde_json::json!({ "Ok": null })
-    } else {
-        serde_json::json!({ "Err": err.clone() })
-    };
-
-    let keep = [
-        "err",
-        "fee",
-        "postBalances",
-        "postTokenBalances",
-        "preBalances",
-        "preTokenBalances",
-    ];
-    map.retain(|key, _| keep.contains(&key.as_str()));
-    map.insert("status".to_string(), status);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,5 +2055,132 @@ mod tests {
             ) => assert!(message.is_empty()),
             _ => panic!("unexpected decode"),
         }
+    }
+
+    #[test]
+    fn writes_rpc_meta_shape_for_empty_optional_lists() {
+        let meta = proto::TransactionStatusMeta {
+            err: None,
+            fee: 5000,
+            pre_balances: vec![10],
+            post_balances: vec![5],
+            inner_instructions: Vec::new(),
+            inner_instructions_none: true,
+            log_messages: Vec::new(),
+            log_messages_none: true,
+            pre_token_balances: vec![proto::TokenBalance {
+                account_index: 1,
+                mint: "mint".to_string(),
+                ui_token_amount: Some(proto::UiTokenAmount {
+                    ui_amount: 0.0,
+                    decimals: 6,
+                    amount: "0".to_string(),
+                    ui_amount_string: "0".to_string(),
+                }),
+                owner: "owner".to_string(),
+                program_id: "program".to_string(),
+            }],
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            return_data_none: true,
+            compute_units_consumed: Some(12),
+            cost_units: Some(34),
+        };
+
+        let mut writer = JsonWriter::with_capacity(512);
+        write_transaction_meta(&mut writer, &meta).expect("write meta");
+        let value: serde_json::Value =
+            serde_json::from_slice(&writer.into_inner()).expect("valid JSON");
+
+        assert_eq!(value["status"], serde_json::json!({ "Ok": null }));
+        assert_eq!(
+            value["preTokenBalances"][0]["uiTokenAmount"]["uiAmount"],
+            serde_json::json!(null)
+        );
+        assert_eq!(value["postTokenBalances"], serde_json::json!([]));
+        assert_eq!(
+            value["loadedAddresses"],
+            serde_json::json!({ "writable": [], "readonly": [] })
+        );
+        assert_eq!(value["rewards"], serde_json::json!(null));
+        assert_eq!(value["costUnits"], serde_json::json!(34));
+        assert!(value.get("returnData").is_none());
+    }
+
+    #[test]
+    fn writes_return_data_when_present() {
+        let meta = proto::TransactionStatusMeta {
+            err: None,
+            fee: 0,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: Vec::new(),
+            inner_instructions_none: true,
+            log_messages: Vec::new(),
+            log_messages_none: true,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: Some(proto::ReturnData {
+                program_id: vec![1; 32],
+                data: b"hello".to_vec(),
+            }),
+            return_data_none: false,
+            compute_units_consumed: None,
+            cost_units: None,
+        };
+
+        let mut writer = JsonWriter::with_capacity(512);
+        write_transaction_meta(&mut writer, &meta).expect("write meta");
+        let value: serde_json::Value =
+            serde_json::from_slice(&writer.into_inner()).expect("valid JSON");
+
+        assert_eq!(
+            value["returnData"]["data"],
+            serde_json::json!(["aGVsbG8=", "base64"])
+        );
+        assert!(value["returnData"]["programId"].is_string());
+        assert!(value.get("computeUnitsConsumed").is_none());
+        assert!(value.get("costUnits").is_none());
+    }
+
+    #[test]
+    fn fast_base58_paths_match_bs58() {
+        for len in [0usize, 1, 3, 31, 32, 33, 64, 65, 256, 1024] {
+            let bytes = (0..len)
+                .map(|index| ((index * 37 + 11) & 0xff) as u8)
+                .collect::<Vec<_>>();
+            let mut writer = JsonWriter::with_capacity(base58_max_encoded_len(len) + 2);
+            writer.bs58(&bytes).expect("write base58");
+
+            let expected = format!("\"{}\"", bs58::encode(&bytes).into_string());
+            assert_eq!(
+                String::from_utf8(writer.into_inner()).expect("utf8"),
+                expected,
+                "base58 mismatch for {len} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn writes_ui_amount_from_decimal_string() {
+        let amount = proto::UiTokenAmount {
+            ui_amount: 71106423.22310276,
+            decimals: 9,
+            amount: "71106423223102772".to_string(),
+            ui_amount_string: "71106423.223102772".to_string(),
+        };
+
+        let mut writer = JsonWriter::with_capacity(64);
+        write_ui_amount(&mut writer, &amount).expect("write ui amount");
+        let value: serde_json::Value =
+            serde_json::from_slice(&writer.into_inner()).expect("valid JSON");
+
+        assert_eq!(value, serde_json::json!(71106423.22310278));
     }
 }

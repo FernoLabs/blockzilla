@@ -42,7 +42,7 @@ epoch-N/
 
 `archive-v2-blocks.zstd` contains concatenated independently compressed block blobs. `archive-v2-blocks.index` is the authoritative block offset table. `archive-v2-meta.wincode` stores archive-level records such as header, genesis, and footer.
 
-For production batches, store the completed epoch directories under one stable archive root such as `<archive-root>/blockzilla-v2/epoch-N/`. Builders should process epochs sequentially enough that `epoch-(N-1)` is available before `epoch-N` starts. When the current epoch needs the previous recent-blockhash window, it should read `epoch-(N-1)/blockhash_registry.bin` plus `archive-v2-blocks.index` or `poh.wincode`; if those sidecars are missing, the fallback is to build that previous epoch blockhash/PoH sidecar directory, not to do an anonymous one-off seed scan.
+For production batches, store the completed epoch directories under one stable archive root such as `<archive-root>/blockzilla-v2/epoch-N/`. Builders should process epochs sequentially enough that `epoch-(N-1)` is available before `epoch-N` starts. When the current epoch needs the previous recent-blockhash window, it should read `epoch-(N-1)/blockhash_registry.bin` plus `archive-v2-blocks.index` when available. If the hot index is missing, the fallback is the brutal blockhash scan: stream the previous CAR, remember the latest Entry hash, and append that hash whenever the next Block node arrives.
 
 `signatures.bin` stores raw transaction signatures in archive transaction order. `signature.index/` maps signatures to block-local transaction positions.
 

@@ -1,3 +1,5 @@
+use solana_short_vec::decode_shortu16_len;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::mem::MaybeUninit;
 use wincode::Deserialize;
@@ -14,6 +16,63 @@ use crate::node::{
     decode_node, peek_node_type,
 };
 use crate::versioned_transaction::VersionedTransaction;
+
+const TX_BUF_INITIAL_CAPACITY: usize = 12 << 20;
+const TX_RANGES_INITIAL_CAPACITY: usize = 12_000;
+const SCRATCH_WITH_TX_INITIAL_CAPACITY: usize = 3 << 20;
+const SCRATCH_NO_TX_INITIAL_CAPACITY: usize = 64 << 10;
+const TX_SIGNATURE_NODE_PREFIX_BYTES: usize = 256;
+
+#[derive(Debug, Clone)]
+struct PendingDataFrame {
+    frame: OwnedDataFrame,
+    next: Vec<PendingDataFrameRef>,
+}
+
+#[derive(Debug, Clone)]
+enum PendingDataFrameRef {
+    Cid([u8; 36]),
+    Inline(Vec<u8>),
+}
+
+impl PendingDataFrame {
+    fn from_borrowed(frame: &crate::node::DataFrame<'_>) -> CarReadResult<Self> {
+        let next = frame
+            .next
+            .as_ref()
+            .map(|refs| {
+                refs.iter()
+                    .map(|cid| {
+                        let cid = cid.map_err(|err| CarReadError::InvalidData(err.to_string()))?;
+                        PendingDataFrameRef::from_cbor(cid)
+                    })
+                    .collect::<CarReadResult<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        Ok(Self {
+            frame: OwnedDataFrame::from(frame),
+            next,
+        })
+    }
+}
+
+impl PendingDataFrameRef {
+    fn from_cbor(value: CborCidRef<'_>) -> CarReadResult<Self> {
+        if let Some(bytes) = value.inline_raw_bytes() {
+            return Ok(Self::Inline(bytes.to_vec()));
+        }
+        if let Some(bytes) = value.car_cid_bytes() {
+            let mut cid = [0u8; 36];
+            cid.copy_from_slice(bytes);
+            return Ok(Self::Cid(cid));
+        }
+        Err(CarReadError::InvalidData(
+            "unsupported dataframe continuation CID".to_string(),
+        ))
+    }
+}
 
 /// Simple, fast CarBlockGroup that stores:
 /// - Transaction payloads in file order (no CID resolution)
@@ -46,11 +105,16 @@ pub struct CarBlockGroup {
     pub shredding: Vec<Shredding>,
     pub rewards: Option<OwnedDataFrame>,
     pub rewards_slot: Option<u64>,
+    pending_rewards: Option<PendingDataFrame>,
+    dataframes: HashMap<[u8; 36], PendingDataFrame>,
 
     // scratch buffer for reading
     scratch: Vec<u8>,
     txs_assigned_to_entries: u32,
+    tx_count_seen: u32,
     read_rewards: bool,
+    read_transactions: bool,
+    transaction_prefix_bytes: Option<usize>,
 }
 
 impl Default for CarBlockGroup {
@@ -61,10 +125,40 @@ impl Default for CarBlockGroup {
 
 impl CarBlockGroup {
     pub fn new() -> Self {
+        Self::with_read_options(true, true, None)
+    }
+
+    fn with_read_options(
+        read_rewards: bool,
+        read_transactions: bool,
+        transaction_prefix_bytes: Option<usize>,
+    ) -> Self {
+        let tx_buf_capacity = if read_transactions {
+            transaction_prefix_bytes
+                .map(|prefix| {
+                    prefix
+                        .saturating_mul(TX_RANGES_INITIAL_CAPACITY)
+                        .min(TX_BUF_INITIAL_CAPACITY)
+                })
+                .unwrap_or(TX_BUF_INITIAL_CAPACITY)
+        } else {
+            0
+        };
+        let tx_ranges_capacity = if read_transactions {
+            TX_RANGES_INITIAL_CAPACITY
+        } else {
+            0
+        };
+        let scratch_capacity = if read_transactions && transaction_prefix_bytes.is_none() {
+            SCRATCH_WITH_TX_INITIAL_CAPACITY
+        } else {
+            SCRATCH_NO_TX_INITIAL_CAPACITY
+        };
+
         Self {
-            tx_buf: Vec::with_capacity(12 << 20), // 12 MB
-            tx_ranges: Vec::with_capacity(12_000),
-            scratch: Vec::with_capacity(3 << 20), // 3 MB
+            tx_buf: Vec::with_capacity(tx_buf_capacity),
+            tx_ranges: Vec::with_capacity(tx_ranges_capacity),
+            scratch: Vec::with_capacity(scratch_capacity),
 
             slot: None,
             parent_slot: None,
@@ -81,16 +175,35 @@ impl CarBlockGroup {
             shredding: Vec::with_capacity(128),
             rewards: None,
             rewards_slot: None,
+            pending_rewards: None,
+            dataframes: HashMap::new(),
 
             txs_assigned_to_entries: 0,
-            read_rewards: true,
+            tx_count_seen: 0,
+            read_rewards,
+            read_transactions,
+            transaction_prefix_bytes,
         }
     }
 
     pub fn without_rewards() -> Self {
-        let mut group = Self::new();
-        group.read_rewards = false;
-        group
+        Self::with_read_options(false, true, None)
+    }
+
+    pub fn without_transaction_payloads() -> Self {
+        Self::with_read_options(true, false, None)
+    }
+
+    pub fn without_rewards_and_transaction_payloads() -> Self {
+        Self::with_read_options(false, false, None)
+    }
+
+    pub fn with_transaction_signature_prefixes() -> Self {
+        Self::with_read_options(true, true, Some(TX_SIGNATURE_NODE_PREFIX_BYTES))
+    }
+
+    pub fn without_rewards_and_transaction_signature_prefixes() -> Self {
+        Self::with_read_options(false, true, Some(TX_SIGNATURE_NODE_PREFIX_BYTES))
     }
 
     #[inline]
@@ -112,19 +225,37 @@ impl CarBlockGroup {
         self.shredding.clear();
         self.rewards = None;
         self.rewards_slot = None;
+        self.pending_rewards = None;
+        self.dataframes.clear();
 
         self.scratch.clear();
         self.txs_assigned_to_entries = 0;
+        self.tx_count_seen = 0;
     }
 
     /// Returns (tx_count, tx_buf_bytes)
     pub fn get_len(&self) -> (usize, usize) {
-        (self.tx_ranges.len(), self.tx_buf.len())
+        let tx_count = if self.read_transactions {
+            self.tx_ranges.len()
+        } else {
+            self.tx_count_seen as usize
+        };
+        (tx_count, self.tx_buf.len())
     }
 
     #[inline]
     pub fn entry_count(&self) -> usize {
         self.entry_tx_counts.len()
+    }
+
+    #[inline]
+    pub fn reads_transaction_payloads(&self) -> bool {
+        self.read_transactions && self.transaction_prefix_bytes.is_none()
+    }
+
+    #[inline]
+    pub fn transaction_prefix_bytes(&self) -> Option<usize> {
+        self.transaction_prefix_bytes
     }
 
     /// Read one CAR entry payload into the group.
@@ -135,29 +266,151 @@ impl CarBlockGroup {
         reader: &mut R,
         payload_len: usize,
     ) -> CarReadResult<bool> {
+        self.read_entry_payload_with_cid_into(None, reader, payload_len)
+    }
+
+    #[inline]
+    pub fn read_entry_payload_with_cid_into<R: Read>(
+        &mut self,
+        cid: Option<&[u8; 36]>,
+        reader: &mut R,
+        payload_len: usize,
+    ) -> CarReadResult<bool> {
         if payload_len == 0 {
             return Err(CarReadError::UnexpectedEof(format!(
                 "Empty payload len ({payload_len})"
             )));
         }
 
-        self.scratch.clear();
-        self.scratch.resize(payload_len, 0u8);
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        scratch.resize(payload_len, 0u8);
 
-        if let Err(e) = reader.read_exact(&mut self.scratch) {
-            self.scratch.clear();
+        if let Err(e) = reader.read_exact(&mut scratch) {
+            scratch.clear();
+            self.scratch = scratch;
             return Err(CarReadError::Io(e.to_string()));
         }
 
-        let node_type = peek_node_type(&self.scratch)
+        let result = self.read_entry_payload_slice_with_cid_into(cid, &scratch, payload_len);
+        self.scratch = scratch;
+        result
+    }
+
+    #[inline]
+    pub fn read_entry_maybe_payload_into(
+        &mut self,
+        prefix: &[u8],
+        payload: Option<&[u8]>,
+        payload_len: usize,
+    ) -> CarReadResult<bool> {
+        self.read_entry_maybe_payload_with_cid_into(None, prefix, payload, payload_len)
+    }
+
+    #[inline]
+    pub fn read_entry_maybe_payload_with_cid_into(
+        &mut self,
+        cid: Option<&[u8; 36]>,
+        prefix: &[u8],
+        payload: Option<&[u8]>,
+        payload_len: usize,
+    ) -> CarReadResult<bool> {
+        if payload_len == 0 {
+            return Err(CarReadError::UnexpectedEof(format!(
+                "Empty payload len ({payload_len})"
+            )));
+        }
+
+        let node_type = peek_node_type(prefix)
+            .map_err(|err| CarReadError::InvalidData(format!("Can't read node type ({err})")))?;
+        if node_type == 0 {
+            if !self.read_transactions {
+                self.tx_count_seen = self
+                    .tx_count_seen
+                    .checked_add(1)
+                    .ok_or_else(|| CarReadError::InvalidData("tx count overflow".to_string()))?;
+                return Ok(false);
+            }
+
+            if self.transaction_prefix_bytes.is_some() {
+                return self.read_entry_payload_slice_impl(prefix, payload_len);
+            }
+        }
+
+        let payload = payload.ok_or_else(|| {
+            CarReadError::InvalidData("non-transaction CAR payload was skipped".to_string())
+        })?;
+        self.read_entry_payload_slice_with_cid_into(cid, payload, payload_len)
+    }
+
+    #[inline]
+    pub fn read_entry_payload_slice_into(
+        &mut self,
+        payload: &[u8],
+        payload_len: usize,
+    ) -> CarReadResult<bool> {
+        self.read_entry_payload_slice_impl(payload, payload_len)
+    }
+
+    #[inline]
+    pub fn read_entry_payload_slice_with_cid_into(
+        &mut self,
+        cid: Option<&[u8; 36]>,
+        payload: &[u8],
+        payload_len: usize,
+    ) -> CarReadResult<bool> {
+        self.read_entry_payload_slice_with_cid_impl(cid, payload, payload_len)
+    }
+
+    fn read_entry_payload_slice_impl(
+        &mut self,
+        payload: &[u8],
+        payload_len: usize,
+    ) -> CarReadResult<bool> {
+        self.read_entry_payload_slice_with_cid_impl(None, payload, payload_len)
+    }
+
+    fn read_entry_payload_slice_with_cid_impl(
+        &mut self,
+        cid: Option<&[u8; 36]>,
+        payload: &[u8],
+        payload_len: usize,
+    ) -> CarReadResult<bool> {
+        if payload_len == 0 {
+            return Err(CarReadError::UnexpectedEof(format!(
+                "Empty payload len ({payload_len})"
+            )));
+        }
+        if payload.len() > payload_len {
+            return Err(CarReadError::InvalidData(format!(
+                "payload length exceeds frame length: got {}, expected at most {payload_len}",
+                payload.len()
+            )));
+        }
+
+        let node_type = peek_node_type(payload)
             .map_err(|err| CarReadError::InvalidData(format!("Can't read node type ({err})")))?;
 
         //println!("{node_type} {payload_len}");
 
         // Transaction: store in file order
         if node_type == 0 {
+            if !self.read_transactions {
+                self.tx_count_seen = self
+                    .tx_count_seen
+                    .checked_add(1)
+                    .ok_or_else(|| CarReadError::InvalidData("tx count overflow".to_string()))?;
+                return Ok(false);
+            }
+            if self.transaction_prefix_bytes.is_none() && payload.len() != payload_len {
+                return Err(CarReadError::InvalidData(format!(
+                    "payload length mismatch: got {}, expected {payload_len}",
+                    payload.len()
+                )));
+            }
+
             let start = self.tx_buf.len();
-            let end = start + payload_len;
+            let end = start + payload.len();
 
             if end > u32::MAX as usize {
                 return Err(CarReadError::InvalidData(
@@ -165,14 +418,21 @@ impl CarBlockGroup {
                 ));
             }
 
-            self.tx_buf.extend_from_slice(&self.scratch);
+            self.tx_buf.extend_from_slice(payload);
             self.tx_ranges.push((start as u32, end as u32));
             return Ok(false);
         }
 
+        if payload.len() != payload_len {
+            return Err(CarReadError::InvalidData(format!(
+                "payload length mismatch: got {}, expected {payload_len}",
+                payload.len()
+            )));
+        }
+
         // Entry: extract PoH info and transaction grouping in file order
         if node_type == 1 {
-            let (num_hashes, hash_bytes, tx_count) = decode_entry_summary(&self.scratch)
+            let (num_hashes, hash_bytes, tx_count) = decode_entry_summary(payload)
                 .map_err(|e| CarReadError::InvalidData(e.to_string()))?;
 
             if hash_bytes.len() != 32 {
@@ -190,8 +450,7 @@ impl CarBlockGroup {
             let tx_count = u32::try_from(tx_count).map_err(|_| {
                 CarReadError::InvalidData("entry tx count exceeds u32::MAX".to_string())
             })?;
-            let seen_txs = u32::try_from(self.tx_ranges.len())
-                .map_err(|_| CarReadError::InvalidData("tx count exceeds u32::MAX".to_string()))?;
+            let seen_txs = self.seen_transaction_count()?;
             let assigned_after = self
                 .txs_assigned_to_entries
                 .checked_add(tx_count)
@@ -215,27 +474,50 @@ impl CarBlockGroup {
             }
 
             let node =
-                decode_node(&self.scratch).map_err(|e| CarReadError::InvalidData(e.to_string()))?;
+                decode_node(payload).map_err(|e| CarReadError::InvalidData(e.to_string()))?;
             let Node::Rewards(rewards) = node else {
                 return Err(CarReadError::InvalidData(
                     "expected rewards node".to_string(),
                 ));
             };
 
-            if rewards.data.next.is_some() {
-                return Err(CarReadError::InvalidData(
-                    "rewards dataframe continuations are not supported yet".to_string(),
-                ));
-            }
-
             self.rewards_slot = Some(rewards.slot);
-            self.rewards = Some(OwnedDataFrame::from(&rewards.data));
+            let rewards = PendingDataFrame::from_borrowed(&rewards.data)?;
+            if rewards.next.is_empty() {
+                self.rewards = Some(rewards.frame);
+                self.pending_rewards = None;
+            } else {
+                self.rewards = None;
+                self.pending_rewards = Some(rewards);
+            }
+            return Ok(false);
+        }
+
+        if node_type == 6 {
+            if !self.read_rewards {
+                return Ok(false);
+            }
+            let Some(cid) = cid else {
+                return Err(CarReadError::InvalidData(
+                    "dataframe node missing CAR CID".to_string(),
+                ));
+            };
+
+            let node =
+                decode_node(payload).map_err(|e| CarReadError::InvalidData(e.to_string()))?;
+            let Node::DataFrame(frame) = node else {
+                return Err(CarReadError::InvalidData(
+                    "expected dataframe node".to_string(),
+                ));
+            };
+            self.dataframes
+                .insert(*cid, PendingDataFrame::from_borrowed(&frame)?);
             return Ok(false);
         }
 
         // Block: extract metadata, shredding, rewards linkage and signal completion
         if node_type == 2 {
-            let block = decode_block_summary_into(&self.scratch, &mut self.shredding)
+            let block = decode_block_summary_into(payload, &mut self.shredding)
                 .map_err(|e| CarReadError::InvalidData(e.to_string()))?;
 
             if block.entry_count != self.entry_count() {
@@ -246,8 +528,7 @@ impl CarBlockGroup {
                 )));
             }
 
-            let seen_txs = u32::try_from(self.tx_ranges.len())
-                .map_err(|_| CarReadError::InvalidData("tx count exceeds u32::MAX".to_string()))?;
+            let seen_txs = self.seen_transaction_count()?;
             if self.txs_assigned_to_entries != seen_txs {
                 return Err(CarReadError::InvalidData(format!(
                     "entry grouping covers {} txs but block contains {seen_txs}",
@@ -256,6 +537,12 @@ impl CarBlockGroup {
             }
 
             if self.read_rewards {
+                if self.rewards.is_none()
+                    && let Some(pending_rewards) = self.pending_rewards.take()
+                {
+                    self.rewards = Some(self.resolve_pending_dataframe(pending_rewards)?);
+                }
+
                 if self.rewards.is_none()
                     && let Some(inline_rewards) = block.inline_rewards
                 {
@@ -289,6 +576,53 @@ impl CarBlockGroup {
         Ok(false)
     }
 
+    fn resolve_pending_dataframe(
+        &self,
+        pending: PendingDataFrame,
+    ) -> CarReadResult<OwnedDataFrame> {
+        let mut frame = pending.frame;
+        let mut seen = HashSet::new();
+        self.append_pending_refs(&mut frame.data, &pending.next, &mut seen)?;
+        Ok(frame)
+    }
+
+    fn append_pending_refs(
+        &self,
+        out: &mut Vec<u8>,
+        refs: &[PendingDataFrameRef],
+        seen: &mut HashSet<[u8; 36]>,
+    ) -> CarReadResult<()> {
+        for next in refs {
+            match next {
+                PendingDataFrameRef::Inline(bytes) => out.extend_from_slice(bytes),
+                PendingDataFrameRef::Cid(cid) => {
+                    if !seen.insert(*cid) {
+                        return Err(CarReadError::InvalidData(
+                            "cycle in rewards dataframe continuation chain".to_string(),
+                        ));
+                    }
+                    let Some(frame) = self.dataframes.get(cid) else {
+                        return Err(CarReadError::InvalidData(
+                            "missing rewards dataframe continuation".to_string(),
+                        ));
+                    };
+                    out.extend_from_slice(&frame.frame.data);
+                    self.append_pending_refs(out, &frame.next, seen)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn seen_transaction_count(&self) -> CarReadResult<u32> {
+        if self.read_transactions {
+            u32::try_from(self.tx_ranges.len())
+                .map_err(|_| CarReadError::InvalidData("tx count exceeds u32::MAX".to_string()))
+        } else {
+            Ok(self.tx_count_seen)
+        }
+    }
+
     /// Iterate transactions in file order
     pub fn transactions<'a>(&'a mut self) -> TxIter<'a> {
         TxIter {
@@ -315,6 +649,16 @@ impl CarBlockGroup {
 
             reusable_tx: MaybeUninit::uninit(),
             has_tx: false,
+        }
+    }
+
+    /// Iterate first transaction signatures in file order without decoding transactions.
+    pub fn first_signatures<'a>(&'a mut self) -> FirstSignatureIter<'a> {
+        FirstSignatureIter {
+            tx_buf_ptr: self.tx_buf.as_ptr(),
+            tx_buf_len: self.tx_buf.len(),
+            tx_ranges: &self.tx_ranges,
+            pos: 0,
         }
     }
 
@@ -520,6 +864,107 @@ mod tests {
     }
 
     #[test]
+    fn reads_rewards_dataframe_continuations_by_cid() {
+        let mut car = Vec::new();
+        push_uvarint(&mut car, 1);
+        car.push(0);
+
+        let continuation_cid = [0x07; 36];
+
+        push_car_entry(&mut car, &[0x01; 36], &transaction_node(42, &[0x10]));
+        push_car_entry(&mut car, &[0x02; 36], &entry_node(3, [0x11; 32], 1));
+        push_car_entry(&mut car, &[0x05; 36], &entry_node(4, [0x22; 32], 0));
+        push_car_entry(
+            &mut car,
+            &continuation_cid,
+            &dataframe_node(Some(7), Some(1), Some(2), &[0xcc, 0xdd]),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x03; 36],
+            &rewards_node_with_next_cids(
+                42,
+                Some(7),
+                Some(0),
+                Some(2),
+                &[0xaa, 0xbb],
+                &[continuation_cid],
+            ),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x04; 36],
+            &block_node(42, 41, 1_700_000_000, 99),
+        );
+
+        let mut reader = CarBlockReader::with_capacity(Cursor::new(car), 1024);
+        reader.skip_header().expect("skip header");
+
+        let mut group = CarBlockGroup::new();
+        assert!(
+            reader
+                .read_until_block_into(&mut group)
+                .expect("read first block")
+        );
+
+        let rewards = group.rewards.as_ref().expect("continued rewards");
+        assert_eq!(group.rewards_slot, Some(42));
+        assert_eq!(rewards.hash, Some(7));
+        assert_eq!(rewards.index, Some(0));
+        assert_eq!(rewards.total, Some(2));
+        assert_eq!(rewards.data, vec![0xaa, 0xbb, 0xcc, 0xdd]);
+    }
+
+    #[test]
+    fn reads_rewards_dataframe_continuations_without_transaction_payloads() {
+        let mut car = Vec::new();
+        push_uvarint(&mut car, 1);
+        car.push(0);
+
+        let continuation_cid = [0x08; 36];
+
+        push_car_entry(&mut car, &[0x01; 36], &transaction_node(42, &[0x10]));
+        push_car_entry(&mut car, &[0x02; 36], &entry_node(3, [0x11; 32], 1));
+        push_car_entry(&mut car, &[0x05; 36], &entry_node(4, [0x22; 32], 0));
+        push_car_entry(
+            &mut car,
+            &continuation_cid,
+            &dataframe_node(Some(7), Some(1), Some(2), &[0xcc]),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x03; 36],
+            &rewards_node_with_next_cids(
+                42,
+                Some(7),
+                Some(0),
+                Some(2),
+                &[0xaa, 0xbb],
+                &[continuation_cid],
+            ),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x04; 36],
+            &block_node(42, 41, 1_700_000_000, 99),
+        );
+
+        let mut reader = CarBlockReader::with_capacity(Cursor::new(car), 1024);
+        reader.skip_header().expect("skip header");
+
+        let mut group = CarBlockGroup::without_transaction_payloads();
+        assert!(
+            reader
+                .read_until_block_into(&mut group)
+                .expect("read first block")
+        );
+
+        let rewards = group.rewards.as_ref().expect("continued rewards");
+        assert_eq!(group.get_len().0, 1);
+        assert_eq!(rewards.data, vec![0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
     fn borrowed_metadata_iterator_decodes_protobuf_views() {
         let slot = 80_000_000;
         let metadata = TransactionStatusMeta {
@@ -686,6 +1131,59 @@ mod tests {
         assert_eq!(visitor.logs, vec!["Program log: visitor metadata only"]);
     }
 
+    #[test]
+    fn first_signature_iterator_reads_signature_prefix_only() {
+        let slot = 80_000_000;
+        let signature = [0x42; 64];
+        let mut large_signed_tx = minimal_legacy_transaction_with_signature(signature);
+        large_signed_tx.extend_from_slice(&[0xaa; 512]);
+        let large_signed_node = transaction_node(slot, &large_signed_tx);
+
+        let mut car = Vec::new();
+        push_uvarint(&mut car, 1);
+        car.push(0);
+
+        push_car_entry(
+            &mut car,
+            &[0x01; 36],
+            &transaction_node(slot, &minimal_legacy_transaction()),
+        );
+        push_car_entry(&mut car, &[0x02; 36], &large_signed_node);
+        push_car_entry(&mut car, &[0x03; 36], &entry_node(3, [0x11; 32], 2));
+        push_car_entry(&mut car, &[0x04; 36], &entry_node(4, [0x22; 32], 0));
+        push_car_entry(
+            &mut car,
+            &[0x05; 36],
+            &rewards_node(slot, Some(7), Some(0), Some(1), &[0xaa]),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x06; 36],
+            &block_node(slot, slot - 1, 1_700_000_000, 99),
+        );
+
+        let mut reader = CarBlockReader::with_capacity(Cursor::new(car), 1024);
+        reader.skip_header().expect("skip header");
+
+        let mut group = CarBlockGroup::with_transaction_signature_prefixes();
+        assert!(
+            reader
+                .read_until_block_into(&mut group)
+                .expect("read first block")
+        );
+
+        let (tx_count, tx_bytes) = group.get_len();
+        assert_eq!(tx_count, 2);
+        assert!(tx_bytes < large_signed_node.len());
+
+        let mut iter = group.first_signatures();
+        assert_eq!(
+            iter.next_signature().expect("first signature").copied(),
+            Some(signature)
+        );
+        assert!(iter.next_signature().expect("end").is_none());
+    }
+
     #[derive(Default)]
     struct CollectingLogVisitor {
         logs: Vec<String>,
@@ -773,6 +1271,18 @@ mod tests {
         out
     }
 
+    fn minimal_legacy_transaction_with_signature(signature: [u8; 64]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(102);
+        out.push(1); // signatures len
+        out.extend_from_slice(&signature);
+        out.extend_from_slice(&[1, 0, 0]); // message header
+        out.push(1); // account keys len
+        out.extend_from_slice(&[0x55; 32]); // payer
+        out.extend_from_slice(&[0; 32]); // recent blockhash
+        out.push(0); // instructions len
+        out
+    }
+
     fn entry_node(num_hashes: u64, hash: [u8; 32], tx_count: usize) -> Vec<u8> {
         let mut e = Encoder::new(Vec::new());
         e.array(4).expect("entry array").u64(1).expect("kind");
@@ -795,6 +1305,32 @@ mod tests {
         let mut e = Encoder::new(Vec::new());
         e.array(3).expect("rewards array").u64(5).expect("kind");
         e.u64(slot).expect("slot");
+        encode_dataframe(&mut e, hash, index, total, data);
+        e.into_writer()
+    }
+
+    fn rewards_node_with_next_cids(
+        slot: u64,
+        hash: Option<u64>,
+        index: Option<u64>,
+        total: Option<u64>,
+        data: &[u8],
+        next: &[[u8; 36]],
+    ) -> Vec<u8> {
+        let mut e = Encoder::new(Vec::new());
+        e.array(3).expect("rewards array").u64(5).expect("kind");
+        e.u64(slot).expect("slot");
+        encode_dataframe_with_next_cids(&mut e, hash, index, total, data, next);
+        e.into_writer()
+    }
+
+    fn dataframe_node(
+        hash: Option<u64>,
+        index: Option<u64>,
+        total: Option<u64>,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut e = Encoder::new(Vec::new());
         encode_dataframe(&mut e, hash, index, total, data);
         e.into_writer()
     }
@@ -870,6 +1406,27 @@ mod tests {
         e.null().expect("next");
     }
 
+    fn encode_dataframe_with_next_cids<W: Write>(
+        e: &mut Encoder<W>,
+        hash: Option<u64>,
+        index: Option<u64>,
+        total: Option<u64>,
+        data: &[u8],
+        next: &[[u8; 36]],
+    ) where
+        W::Error: std::fmt::Debug,
+    {
+        e.array(6).expect("dataframe array").u64(6).expect("kind");
+        encode_optional_u64(e, hash);
+        encode_optional_u64(e, index);
+        encode_optional_u64(e, total);
+        e.bytes(data).expect("data");
+        e.array(next.len() as u64).expect("next");
+        for cid in next {
+            encode_car_cid_ref(e, cid);
+        }
+    }
+
     fn encode_optional_u64<W: Write>(e: &mut Encoder<W>, value: Option<u64>)
     where
         W::Error: std::fmt::Debug,
@@ -887,6 +1444,16 @@ mod tests {
     {
         e.tag(minicbor::data::Tag::new(42)).expect("cid tag");
         let bytes = [fill; 37];
+        e.bytes(&bytes).expect("cid bytes");
+    }
+
+    fn encode_car_cid_ref<W: Write>(e: &mut Encoder<W>, cid: &[u8; 36])
+    where
+        W::Error: std::fmt::Debug,
+    {
+        let mut bytes = [0u8; 37];
+        bytes[1..].copy_from_slice(cid);
+        e.tag(minicbor::data::Tag::new(42)).expect("cid tag");
         e.bytes(&bytes).expect("cid bytes");
     }
 
@@ -1057,6 +1624,147 @@ impl<'a> TxNoMetaIter<'a> {
         }
         Ok(Some(unsafe { self.reusable_tx.assume_init_ref() }))
     }
+}
+
+pub struct FirstSignatureIter<'a> {
+    tx_buf_ptr: *const u8,
+    tx_buf_len: usize,
+    tx_ranges: &'a [(u32, u32)],
+    pos: usize,
+}
+
+impl<'a> FirstSignatureIter<'a> {
+    #[inline(always)]
+    fn tx_payload(&self, s: u32, e: u32) -> &'a [u8] {
+        let s = s as usize;
+        let e = e as usize;
+        debug_assert!(s <= e);
+        debug_assert!(e <= self.tx_buf_len);
+        unsafe { std::slice::from_raw_parts(self.tx_buf_ptr.add(s), e - s) }
+    }
+
+    #[inline]
+    pub fn next_signature(&mut self) -> Result<Option<&'a [u8; 64]>, GroupError> {
+        while self.pos < self.tx_ranges.len() {
+            let (s, e) = self.tx_ranges[self.pos];
+            self.pos += 1;
+
+            let payload = self.tx_payload(s, e);
+            let Some(signature) = first_signature_from_transaction_node_prefix(payload)? else {
+                continue;
+            };
+            return Ok(Some(signature));
+        }
+
+        Ok(None)
+    }
+}
+
+#[inline]
+fn first_signature_from_transaction_node_prefix(
+    payload: &[u8],
+) -> Result<Option<&[u8; 64]>, GroupError> {
+    let mut d = minicbor::Decoder::new(payload);
+    let array_len = d
+        .array()
+        .map_err(|err| GroupError::Node(NodeDecodeError::Cbor(err)))?
+        .ok_or_else(|| GroupError::Other("indefinite transaction node array".to_string()))?;
+    if array_len < 2 {
+        return Err(GroupError::TxDecode);
+    }
+
+    let kind = d
+        .u64()
+        .map_err(|err| GroupError::Node(NodeDecodeError::Cbor(err)))?;
+    if kind != 0 {
+        return Ok(None);
+    }
+
+    let frame_len = d
+        .array()
+        .map_err(|err| GroupError::Node(NodeDecodeError::Cbor(err)))?
+        .ok_or_else(|| GroupError::Other("indefinite transaction data frame".to_string()))?;
+    if frame_len < 5 {
+        return Err(GroupError::TxDecode);
+    }
+    d.skip()
+        .map_err(|err| GroupError::Node(NodeDecodeError::Cbor(err)))?;
+    d.skip()
+        .map_err(|err| GroupError::Node(NodeDecodeError::Cbor(err)))?;
+    d.skip()
+        .map_err(|err| GroupError::Node(NodeDecodeError::Cbor(err)))?;
+    d.skip()
+        .map_err(|err| GroupError::Node(NodeDecodeError::Cbor(err)))?;
+
+    let tx_data = cbor_byte_string_value_prefix(&payload[d.position()..])?;
+    first_signature_from_transaction(tx_data)
+}
+
+#[inline]
+fn cbor_byte_string_value_prefix(input: &[u8]) -> Result<&[u8], GroupError> {
+    let first = *input.first().ok_or(GroupError::TxDecode)?;
+    if first >> 5 != 2 {
+        return Err(GroupError::TxDecode);
+    }
+
+    let info = first & 0x1f;
+    let (len, header_len) = match info {
+        0..=23 => (info as usize, 1usize),
+        24 => (*input.get(1).ok_or(GroupError::TxDecode)? as usize, 2usize),
+        25 => {
+            let bytes: [u8; 2] = input
+                .get(1..3)
+                .ok_or(GroupError::TxDecode)?
+                .try_into()
+                .map_err(|_| GroupError::TxDecode)?;
+            (u16::from_be_bytes(bytes) as usize, 3usize)
+        }
+        26 => {
+            let bytes: [u8; 4] = input
+                .get(1..5)
+                .ok_or(GroupError::TxDecode)?
+                .try_into()
+                .map_err(|_| GroupError::TxDecode)?;
+            (
+                usize::try_from(u32::from_be_bytes(bytes)).map_err(|_| GroupError::TxDecode)?,
+                5usize,
+            )
+        }
+        27 => {
+            let bytes: [u8; 8] = input
+                .get(1..9)
+                .ok_or(GroupError::TxDecode)?
+                .try_into()
+                .map_err(|_| GroupError::TxDecode)?;
+            (
+                usize::try_from(u64::from_be_bytes(bytes)).map_err(|_| GroupError::TxDecode)?,
+                9usize,
+            )
+        }
+        _ => return Err(GroupError::TxDecode),
+    };
+
+    let value = input.get(header_len..).ok_or(GroupError::TxDecode)?;
+    let available_len = value.len().min(len);
+    Ok(&value[..available_len])
+}
+
+#[inline]
+fn first_signature_from_transaction(tx_data: &[u8]) -> Result<Option<&[u8; 64]>, GroupError> {
+    let (signature_count, prefix_len) =
+        decode_shortu16_len(tx_data).map_err(|_| GroupError::TxDecode)?;
+    if signature_count == 0 {
+        return Ok(None);
+    }
+
+    let first_signature_end = prefix_len.checked_add(64).ok_or(GroupError::TxDecode)?;
+    let signature = tx_data
+        .get(prefix_len..first_signature_end)
+        .ok_or(GroupError::TxDecode)?;
+    signature
+        .try_into()
+        .map(Some)
+        .map_err(|_| GroupError::TxDecode)
 }
 
 pub struct TxMetadata<'iter> {

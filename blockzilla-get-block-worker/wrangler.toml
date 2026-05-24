@@ -1,0 +1,23 @@
+name = "blockzilla-get-block-worker"
+main = "build/index.js"
+compatibility_date = "2026-05-20"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release . --no-default-features --features worker"
+
+[vars]
+BZ_ARCHIVE_SOURCE = "r2"
+BZ_ARCHIVE_PREFIX = "blockzilla-v2"
+BZ_R2_BUCKET_BINDING = "BZ_ARCHIVE_BUCKET"
+
+[limits]
+cpu_ms = 300_000
+
+[[r2_buckets]]
+binding = "BZ_ARCHIVE_BUCKET"
+bucket_name = "blockzilla"
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

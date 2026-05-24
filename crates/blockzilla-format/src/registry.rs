@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
+#[cfg(not(target_arch = "wasm32"))]
 use ph::fmph;
 use solana_pubkey::Pubkey;
+#[cfg(target_arch = "wasm32")]
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::{
     fs::File,
@@ -12,13 +15,20 @@ use crate::CompactPubkey;
 
 pub struct KeyIndex {
     /// Minimal perfect hash over all pubkeys
+    #[cfg(not(target_arch = "wasm32"))]
     mphf: fmph::GOFunction,
 
     /// mphf_index -> 1-based id
+    #[cfg(not(target_arch = "wasm32"))]
     values: Vec<u32>,
 
     /// mphf_index -> exact key, used to distinguish misses from arbitrary MPHF outputs.
+    #[cfg(not(target_arch = "wasm32"))]
     keys_by_mphf: Vec<[u8; 32]>,
+
+    /// Key -> 1-based id fallback for wasm builds, where the native MPHF dependency is unavailable.
+    #[cfg(target_arch = "wasm32")]
+    ids: HashMap<[u8; 32], u32>,
 }
 
 impl KeyIndex {
@@ -26,39 +36,60 @@ impl KeyIndex {
     ///
     /// All lookups are assumed to be members of the registry.
     pub fn build(keys_in_file_order: Vec<[u8; 32]>) -> Self {
-        let n = keys_in_file_order.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let n = keys_in_file_order.len();
 
-        // MPHF build
-        let mphf: fmph::GOFunction = keys_in_file_order.as_slice().into();
+            // MPHF build
+            let mphf: fmph::GOFunction = keys_in_file_order.as_slice().into();
 
-        let mut values = vec![0u32; n];
-        let mut keys_by_mphf = vec![[0u8; 32]; n];
+            let mut values = vec![0u32; n];
+            let mut keys_by_mphf = vec![[0u8; 32]; n];
 
-        for (i, k) in keys_in_file_order.iter().enumerate() {
-            let id = i as u32 + 1;
+            for (i, k) in keys_in_file_order.iter().enumerate() {
+                let id = i as u32 + 1;
 
-            let idx = mphf.get_or_panic(k) as usize;
-            debug_assert!(idx < n);
-            values[idx] = id;
-            keys_by_mphf[idx] = *k;
+                let idx = mphf.get_or_panic(k) as usize;
+                debug_assert!(idx < n);
+                values[idx] = id;
+                keys_by_mphf[idx] = *k;
+            }
+
+            Self {
+                mphf,
+                values,
+                keys_by_mphf,
+            }
         }
 
-        Self {
-            mphf,
-            values,
-            keys_by_mphf,
+        #[cfg(target_arch = "wasm32")]
+        {
+            let ids = keys_in_file_order
+                .into_iter()
+                .enumerate()
+                .map(|(i, key)| (key, i as u32 + 1))
+                .collect();
+            Self { ids }
         }
     }
 
     /// Checked lookup. Returns None when `k` is not in the registry.
     #[inline(always)]
     pub fn lookup(&self, k: &[u8; 32]) -> Option<u32> {
-        let idx = self.mphf.get(k)? as usize;
-        if self.keys_by_mphf.get(idx)? != k {
-            return None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let idx = self.mphf.get(k)? as usize;
+            if self.keys_by_mphf.get(idx)? != k {
+                return None;
+            }
+            let id = self.values[idx];
+            (id != 0).then_some(id)
         }
-        let id = self.values[idx];
-        (id != 0).then_some(id)
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.ids.get(k).copied()
+        }
     }
 
     /// Fast path: key MUST exist.

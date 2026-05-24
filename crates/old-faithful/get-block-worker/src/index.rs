@@ -119,7 +119,7 @@ fn decode_blockhash_from_car_slice(bytes: Vec<u8>) -> Result<[u8; 32]> {
     let len = bytes.len();
     let cursor = Cursor::new(bytes);
     let mut reader = CarBlockReader::with_capacity(cursor, len);
-    let mut block = CarBlockGroup::without_rewards();
+    let mut block = CarBlockGroup::without_rewards_and_transaction_payloads();
     if !reader.read_until_block_into(&mut block)? {
         return Err(anyhow!("CAR slice did not contain a block node"));
     }

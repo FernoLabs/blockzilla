@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Readers and index primitives for Old Faithful Solana CAR archives"
+readme = "Readme.md"
+keywords = ["solana", "car", "old-faithful"]
+exclude = [
+    ".DS_Store",
+    "benches/*",
+    "src/bin/profile_big_block.rs",
+]
 
 [[bin]]
 name = "reader"
@@ -51,3 +59,6 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 [build-dependencies]
 pb-rs = "0.10.0"
 prost-build = "0.14.3"
+
+[package.metadata.cargo-machete]
+ignored = ["pb-rs", "prost-build"]

@@ -249,6 +249,7 @@ pub struct ZstdReusableDecoder {
 }
 
 const INITIAL_ZSTD_OUTPUT_BYTES: usize = 128 * 1024;
+#[cfg(any(feature = "zstd-native", feature = "zstd-wasm"))]
 const MAX_ZSTD_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 
 impl Default for ZstdReusableDecoder {

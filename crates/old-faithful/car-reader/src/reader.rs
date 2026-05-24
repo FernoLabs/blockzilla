@@ -1,6 +1,7 @@
 use crate::car_block_group::CarBlockGroup;
 use crate::error::CarReadError;
 use crate::error::CarReadResult;
+use crate::node::peek_node_type;
 use crate::reconstruct::{Cid36, NodeLocation};
 use std::io;
 use std::io::BufRead;
@@ -8,6 +9,7 @@ use std::io::Read;
 
 const MAX_UVARINT_LEN_64: usize = 10;
 const CAR_CID_LEN: usize = 36;
+const NODE_KIND_PREFIX_BYTES: usize = 16;
 
 pub struct CarBlockReader<R: Read> {
     pub reader: io::BufReader<R>,
@@ -34,6 +36,12 @@ pub struct CarEntryMaybePayload<'a> {
     pub entry_len: usize,
     pub varint_len: usize,
     pub total_len: usize,
+}
+
+pub enum CarPayloadRead {
+    Skip,
+    Prefix(usize),
+    Full,
 }
 
 impl<R: Read> CarBlockReader<R> {
@@ -72,6 +80,10 @@ impl<R: Read> CarBlockReader<R> {
     pub fn read_until_block_into(&mut self, out: &mut CarBlockGroup) -> CarReadResult<bool> {
         out.clear();
 
+        if !out.reads_transaction_payloads() {
+            return self.read_until_block_selecting_payloads_into(out);
+        }
+
         loop {
             let entry_len = match read_uvarint64_with_len(&mut self.reader) {
                 Ok((v, varint_len)) => {
@@ -92,9 +104,47 @@ impl<R: Read> CarBlockReader<R> {
                 .checked_sub(cid_buf.len())
                 .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
 
-            let done = out.read_entry_payload_into(&mut self.reader, payload_len)?;
+            let cid = Cid36::from_car_bytes(cid_buf);
+            let done = out.read_entry_payload_with_cid_into(
+                Some(cid.car_bytes()),
+                &mut self.reader,
+                payload_len,
+            )?;
             self.offset += payload_len as u64;
             self.entry_index += 1;
+            if done {
+                return Ok(true);
+            }
+        }
+    }
+
+    fn read_until_block_selecting_payloads_into(
+        &mut self,
+        out: &mut CarBlockGroup,
+    ) -> CarReadResult<bool> {
+        let mut scratch = Vec::new();
+        let transaction_prefix_bytes = out.transaction_prefix_bytes();
+        loop {
+            let Some(entry) = self.read_entry_payload_select_with_scratch(
+                &mut scratch,
+                NODE_KIND_PREFIX_BYTES,
+                |prefix| match peek_node_type(prefix) {
+                    Ok(0) => transaction_prefix_bytes
+                        .map(CarPayloadRead::Prefix)
+                        .unwrap_or(CarPayloadRead::Skip),
+                    Ok(_) | Err(_) => CarPayloadRead::Full,
+                },
+            )?
+            else {
+                return Ok(false);
+            };
+
+            let done = out.read_entry_maybe_payload_with_cid_into(
+                Some(entry.cid.car_bytes()),
+                entry.prefix,
+                entry.payload,
+                entry.payload_len,
+            )?;
             if done {
                 return Ok(true);
             }
@@ -257,6 +307,76 @@ impl<R: Read> CarBlockReader<R> {
             cid: Cid36::from_car_bytes(cid_buf),
             prefix: &scratch[..prefix_len],
             payload: read_payload.then_some(&scratch[..]),
+            payload_len,
+            entry_len,
+            varint_len,
+            total_len,
+        }))
+    }
+
+    /// Reads a small initial payload prefix, then lets the caller decide whether
+    /// to skip, extend to a larger prefix, or materialize the full payload.
+    pub fn read_entry_payload_select_with_scratch<'a, F>(
+        &mut self,
+        scratch: &'a mut Vec<u8>,
+        initial_prefix_len: usize,
+        select_payload: F,
+    ) -> CarReadResult<Option<CarEntryMaybePayload<'a>>>
+    where
+        F: FnOnce(&[u8]) -> CarPayloadRead,
+    {
+        let entry_offset = self.offset;
+        let current_entry_index = self.entry_index;
+
+        let (entry_len, varint_len) = match read_uvarint64_with_len(&mut self.reader) {
+            Ok((value, varint_len)) => {
+                self.offset += varint_len as u64;
+                (value as usize, varint_len)
+            }
+            Err(CarReadError::Eof) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+
+        let mut cid_buf = [0u8; CAR_CID_LEN];
+        self.reader.read_exact(&mut cid_buf)?;
+        self.offset += cid_buf.len() as u64;
+
+        let payload_len = entry_len
+            .checked_sub(CAR_CID_LEN)
+            .ok_or_else(|| CarReadError::InvalidData("entry_len < cid_len".to_string()))?;
+        let total_len = varint_len
+            .checked_add(entry_len)
+            .ok_or_else(|| CarReadError::InvalidData("entry length overflow".to_string()))?;
+        let initial_prefix_len = initial_prefix_len.min(payload_len);
+
+        scratch.clear();
+        scratch.resize(initial_prefix_len, 0u8);
+        self.reader.read_exact(scratch)?;
+        self.offset += initial_prefix_len as u64;
+
+        let target_len = match select_payload(scratch) {
+            CarPayloadRead::Skip => initial_prefix_len,
+            CarPayloadRead::Prefix(len) => len.min(payload_len),
+            CarPayloadRead::Full => payload_len,
+        };
+
+        if target_len > initial_prefix_len {
+            scratch.resize(target_len, 0u8);
+            self.reader.read_exact(&mut scratch[initial_prefix_len..])?;
+            self.offset += (target_len - initial_prefix_len) as u64;
+        }
+
+        self.skip_payload_bytes(payload_len - target_len)?;
+        self.entry_index += 1;
+
+        Ok(Some(CarEntryMaybePayload {
+            location: NodeLocation {
+                entry_index: current_entry_index,
+                car_offset: entry_offset,
+            },
+            cid: Cid36::from_car_bytes(cid_buf),
+            prefix: &scratch[..target_len],
+            payload: (target_len == payload_len).then_some(&scratch[..]),
             payload_len,
             entry_len,
             varint_len,

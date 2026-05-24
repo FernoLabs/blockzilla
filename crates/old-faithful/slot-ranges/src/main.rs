@@ -69,6 +69,13 @@ struct Cli {
     /// Rebuild only the v2 output file when it already exists.
     #[arg(long)]
     overwrite_v2: bool,
+
+    /// Write only `epoch-N-slot-ranges.raw`.
+    ///
+    /// This skips v2 output and avoids reading local CAR bodies when `--cars-dir`
+    /// is provided only to decode the CAR header length.
+    #[arg(long)]
+    raw_only: bool,
 }
 
 fn main() -> Result<()> {
@@ -174,7 +181,10 @@ fn main() -> Result<()> {
             write_slot_ranges_raw_file(&out_path, &output.ranges)?;
         }
 
-        if out_v2_path.exists() && !cli.overwrite && !cli.overwrite_v2 {
+        if cli.raw_only {
+            previous_epoch_last_blockhash = None;
+            eprintln!("epoch={epoch}: raw-only, skip slot ranges v2");
+        } else if out_v2_path.exists() && !cli.overwrite && !cli.overwrite_v2 {
             eprintln!("epoch={epoch}: keep existing {}", out_v2_path.display());
             if let Some(last) =
                 last_blockhash_from_archive_v2(epoch, cli.archive_v2_dir.as_deref(), true)?

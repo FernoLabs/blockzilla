@@ -18,8 +18,9 @@ use wincode::{
 use crate::CompactLogStream;
 use crate::{
     CompactBlockHeader, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
-    CompactPubkey, CompactReward, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
-    OwnedCompactTransaction, SplitCompactIndexRecord,
+    CompactPubkey, CompactReward, CompactShredding, CompactTransactionError,
+    OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
+    SplitCompactIndexRecord, wincode_leb128_config,
 };
 
 mod archive;
@@ -29,6 +30,8 @@ pub const WINCODE_LOG_ARCHIVE_V2_VERSION: u16 = 2;
 pub const WINCODE_LOG_ARCHIVE_KEYS_FREQUENCY_SORTED: u32 = 1 << 0;
 pub const WINCODE_ARCHIVE_V2_VERSION: u16 = 2;
 pub const WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION: u16 = 2;
+pub const WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION: u16 = 2;
+pub const WINCODE_BLOCKZILLA_GET_BLOCK_BUNDLE_VERSION: u16 = 1;
 pub const ARCHIVE_V2_HOT_TX_ROW_LEN: usize = 28;
 
 #[derive(Debug, Clone, Copy)]
@@ -470,6 +473,149 @@ pub struct ArchiveV2HotBlockHeader {
 }
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+struct ArchiveV2HotBlockBlobLegacyShredding {
+    header: ArchiveV2HotBlockHeaderLegacyShredding,
+    tx_count: u32,
+    tx_rows: Vec<ArchiveV2HotTxRow>,
+    message_bytes: Vec<u8>,
+    metadata_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+struct ArchiveV2HotBlockHeaderLegacyShredding {
+    slot: u64,
+    parent_slot: u64,
+    blockhash_id: u32,
+    previous_blockhash_id: u32,
+    block_time: Option<i64>,
+    block_height: Option<u64>,
+    shredding: Vec<CompactShredding>,
+    rewards: Option<ArchiveV2HotRewards>,
+}
+
+impl From<ArchiveV2HotBlockBlobLegacyShredding> for ArchiveV2HotBlockBlob {
+    fn from(value: ArchiveV2HotBlockBlobLegacyShredding) -> Self {
+        Self {
+            header: ArchiveV2HotBlockHeader {
+                slot: value.header.slot,
+                parent_slot: value.header.parent_slot,
+                blockhash_id: value.header.blockhash_id,
+                previous_blockhash_id: value.header.previous_blockhash_id,
+                block_time: value.header.block_time,
+                block_height: value.header.block_height,
+                rewards: value.header.rewards,
+            },
+            tx_count: value.tx_count,
+            tx_rows: value.tx_rows,
+            message_bytes: value.message_bytes,
+            metadata_bytes: value.metadata_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+struct ArchiveV2HotBlockBlobLegacyRewardsVec {
+    header: ArchiveV2HotBlockHeaderLegacyRewardsVec,
+    tx_count: u32,
+    tx_rows: Vec<ArchiveV2HotTxRow>,
+    message_bytes: Vec<u8>,
+    metadata_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+struct ArchiveV2HotBlockHeaderLegacyRewardsVec {
+    slot: u64,
+    parent_slot: u64,
+    blockhash_id: u32,
+    previous_blockhash_id: u32,
+    block_time: Option<i64>,
+    block_height: Option<u64>,
+    rewards: Vec<CompactReward>,
+}
+
+impl From<ArchiveV2HotBlockBlobLegacyRewardsVec> for ArchiveV2HotBlockBlob {
+    fn from(value: ArchiveV2HotBlockBlobLegacyRewardsVec) -> Self {
+        let rewards = (!value.header.rewards.is_empty()).then_some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: value.header.rewards,
+        });
+        Self {
+            header: ArchiveV2HotBlockHeader {
+                slot: value.header.slot,
+                parent_slot: value.header.parent_slot,
+                blockhash_id: value.header.blockhash_id,
+                previous_blockhash_id: value.header.previous_blockhash_id,
+                block_time: value.header.block_time,
+                block_height: value.header.block_height,
+                rewards,
+            },
+            tx_count: value.tx_count,
+            tx_rows: value.tx_rows,
+            message_bytes: value.message_bytes,
+            metadata_bytes: value.metadata_bytes,
+        }
+    }
+}
+
+pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<ArchiveV2HotBlockBlob> {
+    match wincode::config::deserialize(bytes, wincode_leb128_config()) {
+        Ok(block) => Ok(block),
+        Err(primary_error) => {
+            if let Ok(block) = wincode::config::deserialize::<ArchiveV2HotBlockBlobLegacyShredding, _>(
+                bytes,
+                wincode_leb128_config(),
+            ) {
+                return Ok(block.into());
+            }
+            match wincode::config::deserialize::<ArchiveV2HotBlockBlobLegacyRewardsVec, _>(
+                bytes,
+                wincode_leb128_config(),
+            ) {
+                Ok(block) => Ok(block.into()),
+                Err(_) => Err(primary_error),
+            }
+        }
+    }
+}
+
+/// Per-block access sidecar for registry-free hot-path rendering.
+///
+/// Hot block blobs keep transaction structure compact by storing pubkeys and
+/// recent blockhashes as ids. This wincode sidecar carries only the id->bytes
+/// entries that are needed by one block, plus the block's signatures.
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct ArchiveV2BlockAccessBlob {
+    pub version: u16,
+    pub flags: u32,
+    pub blockhash: [u8; 32],
+    pub previous_blockhash: [u8; 32],
+    pub signature_counts: Vec<u8>,
+    pub signatures: Vec<u8>,
+    pub pubkeys: Vec<ArchiveV2BlockAccessPubkey>,
+    pub blockhashes: Vec<ArchiveV2BlockAccessBlockhash>,
+    pub vote_hashes: Vec<ArchiveV2BlockAccessVoteHash>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct ArchiveV2BlockAccessPubkey {
+    pub id: u32,
+    pub pubkey: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct ArchiveV2BlockAccessBlockhash {
+    pub id: i32,
+    pub blockhash: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct ArchiveV2BlockAccessVoteHash {
+    pub block_id: u32,
+    pub bank_hash: Option<[u8; 32]>,
+    pub block_id_hash: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct ArchiveV2HotRewards {
     pub num_partitions: Option<u64>,
     pub decoded: Vec<CompactReward>,
@@ -809,7 +955,7 @@ pub struct WincodeArchiveV2NoRegistryV0Message {
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct WincodeArchiveV2NoRegistryMeta {
-    pub err: Option<Vec<u8>>,
+    pub err: Option<CompactTransactionError>,
     pub fee: u64,
     pub pre_balances: Vec<u64>,
     pub post_balances: Vec<u64>,
@@ -848,6 +994,29 @@ pub struct WincodeArchiveV2NoRegistryReward {
 pub struct WincodeArchiveV2NoRegistryReturnData {
     pub program_id: [u8; 32],
     pub data: Vec<u8>,
+}
+
+/// Binary getBlock envelope returned by `blockzilla-get-block-worker`.
+///
+/// This is not a replacement for `ArchiveV2HotBlockBlob`. It packages the two
+/// block-local blobs a client needs to reconstruct a JSON getBlock response:
+/// the independently compressed hot block and, unless omitted by request, the
+/// block-access sidecar with signatures and id-to-value mappings.
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct BlockzillaGetBlockBundleV1 {
+    pub version: u16,
+    pub slot: u64,
+    pub hot_block_encoding: BlockzillaGetBlockBlobEncoding,
+    pub hot_block: Vec<u8>,
+    pub block_access_encoding: BlockzillaGetBlockBlobEncoding,
+    pub block_access: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[wincode(tag_encoding = "u8")]
+pub enum BlockzillaGetBlockBlobEncoding {
+    Wincode,
+    ZstdWincode,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, SchemaRead, SchemaWrite)]

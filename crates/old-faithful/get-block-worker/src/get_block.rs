@@ -1,4 +1,7 @@
-use crate::car_to_json_stream::car_bytes_to_json_config;
+use crate::car_to_json_stream::{
+    RenderProfile, car_bytes_to_block_time, car_bytes_to_json_config,
+    car_bytes_to_json_config_profiled,
+};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +74,28 @@ pub fn render_get_block_json(
     previous_blockhash: Option<[u8; 32]>,
     config: GetBlockConfig,
 ) -> Result<Value, String> {
-    let bytes = car_bytes_to_json_config(bytes, previous_blockhash, config)?;
+    let bytes = render_get_block_json_bytes(bytes, previous_blockhash, config)?;
     serde_json::from_slice(&bytes).map_err(|err| format!("failed to parse generated JSON: {err}"))
+}
+
+pub fn render_get_block_json_bytes(
+    bytes: Vec<u8>,
+    previous_blockhash: Option<[u8; 32]>,
+    config: GetBlockConfig,
+) -> Result<Vec<u8>, String> {
+    car_bytes_to_json_config(bytes, previous_blockhash, config)
+}
+
+pub fn render_get_block_json_bytes_profiled(
+    bytes: Vec<u8>,
+    previous_blockhash: Option<[u8; 32]>,
+    config: GetBlockConfig,
+) -> Result<(Vec<u8>, RenderProfile), String> {
+    car_bytes_to_json_config_profiled(bytes, previous_blockhash, config)
+}
+
+pub fn render_get_block_time(bytes: Vec<u8>) -> Result<Option<i64>, String> {
+    car_bytes_to_block_time(bytes)
 }
 
 pub fn contains_json_parsed(value: &Value) -> bool {

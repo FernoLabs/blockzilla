@@ -1,5 +1,6 @@
 # Rust
 /target/
+**/target/
 **/*.rs.bk
 *.o
 
@@ -31,6 +32,7 @@ solana-prog/
 
 # Generated outputs
 /.wrangler/
+**/.wrangler/
 /flamegraph.svg
 *.log
 __pycache__/
