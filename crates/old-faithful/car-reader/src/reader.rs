@@ -11,26 +11,45 @@ const MAX_UVARINT_LEN_64: usize = 10;
 const CAR_CID_LEN: usize = 36;
 const NODE_KIND_PREFIX_BYTES: usize = 16;
 
+/// Low-level streaming reader for Old Faithful CAR archives.
+///
+/// `CarBlockReader` keeps track of the current CAR byte offset and entry index.
+/// Use it directly when building indexes or scanners. For normal block-by-block
+/// processing, [`crate::CarStream`] is the smaller wrapper around this type.
 pub struct CarBlockReader<R: Read> {
     pub reader: io::BufReader<R>,
+    /// Current byte offset in the CAR stream, including the header if it has
+    /// already been read.
     pub offset: u64,
+    /// Number of CAR entries read after the header.
     pub entry_index: u64,
 }
 
+/// Borrowed payload for one fully loaded CAR entry.
 pub struct CarEntryPayload<'a> {
+    /// Entry index and CAR byte offset.
     pub location: NodeLocation,
+    /// CAR CID bytes for this entry.
     pub cid: Cid36,
+    /// Entry payload bytes without the CID prefix.
     pub payload: &'a [u8],
+    /// Payload length in bytes.
     pub payload_len: usize,
+    /// CAR entry length from the entry varint, including CID and payload.
     pub entry_len: usize,
+    /// Number of bytes used by the entry length varint.
     pub varint_len: usize,
+    /// Total on-wire entry length, including varint, CID, and payload.
     pub total_len: usize,
 }
 
+/// Borrowed payload for an entry where the caller may have skipped the body.
 pub struct CarEntryMaybePayload<'a> {
     pub location: NodeLocation,
     pub cid: Cid36,
+    /// Prefix bytes that were always read before the selection callback ran.
     pub prefix: &'a [u8],
+    /// Full payload when selected, or `None` when skipped.
     pub payload: Option<&'a [u8]>,
     pub payload_len: usize,
     pub entry_len: usize,
@@ -38,13 +57,18 @@ pub struct CarEntryMaybePayload<'a> {
     pub total_len: usize,
 }
 
+/// Payload loading decision for [`CarBlockReader::read_entry_payload_select_with_scratch`].
 pub enum CarPayloadRead {
+    /// Skip the rest of the payload after reading the requested prefix.
     Skip,
+    /// Read only this many bytes from the payload.
     Prefix(usize),
+    /// Read the full payload.
     Full,
 }
 
 impl<R: Read> CarBlockReader<R> {
+    /// Create a CAR reader with a specific internal I/O buffer size.
     pub fn with_capacity(inner: R, io_buf_bytes: usize) -> Self {
         Self {
             reader: io::BufReader::with_capacity(io_buf_bytes, inner),
@@ -53,6 +77,7 @@ impl<R: Read> CarBlockReader<R> {
         }
     }
 
+    /// Read and return the raw CAR header bytes, including its length varint.
     pub fn read_header_bytes(&mut self) -> CarReadResult<Vec<u8>> {
         let (header_len, header_varint) = read_uvarint64_with_bytes(&mut self.reader)?;
         let header_len = header_len as usize;
@@ -66,6 +91,9 @@ impl<R: Read> CarBlockReader<R> {
         Ok(out)
     }
 
+    /// Read and discard the CAR header.
+    ///
+    /// Call this once before reading entries or blocks from a normal CAR file.
     pub fn skip_header(&mut self) -> CarReadResult<()> {
         let _ = self.read_header_bytes()?;
         Ok(())
