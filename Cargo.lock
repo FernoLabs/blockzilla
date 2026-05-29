@@ -2457,6 +2457,7 @@ dependencies = [
  "pb-rs",
  "prost",
  "prost-build",
+ "protoc-bin-vendored",
  "quick-protobuf",
  "reqwest",
  "ruzstd",
