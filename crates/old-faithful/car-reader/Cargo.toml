@@ -59,6 +59,7 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 [build-dependencies]
 pb-rs = "0.10.0"
 prost-build = "0.14.3"
+protoc-bin-vendored = "3.2.0"
 
 [package.metadata.cargo-machete]
-ignored = ["pb-rs", "prost-build"]
+ignored = ["pb-rs", "prost-build", "protoc-bin-vendored"]
