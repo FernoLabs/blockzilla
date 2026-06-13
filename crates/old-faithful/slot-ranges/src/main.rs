@@ -97,12 +97,8 @@ fn main() -> Result<()> {
             .output_dir
             .join(format!("epoch-{epoch}-slot-ranges-v2.raw"));
 
-        if out_path.exists() && out_v2_path.exists() && !cli.overwrite && !cli.overwrite_v2 {
-            eprintln!(
-                "skip epoch={epoch} exists: {}, {}",
-                out_path.display(),
-                out_v2_path.display()
-            );
+        if out_v2_path.exists() && !cli.overwrite && !cli.overwrite_v2 {
+            eprintln!("skip epoch={epoch} exists: {}", out_v2_path.display());
             if let Some(last) =
                 last_blockhash_from_archive_v2(epoch, cli.archive_v2_dir.as_deref(), true)?
             {
@@ -112,6 +108,8 @@ fn main() -> Result<()> {
             }
             continue;
         }
+
+        let mut index_block_slots = None;
 
         if out_path.exists() && !cli.overwrite {
             eprintln!("epoch={epoch}: keep existing {}", out_path.display());
@@ -179,6 +177,7 @@ fn main() -> Result<()> {
 
             eprintln!("epoch={epoch}: write {}", out_path.display());
             write_slot_ranges_raw_file(&out_path, &output.ranges)?;
+            index_block_slots = Some(output.block_slots);
         }
 
         if cli.raw_only {
@@ -218,6 +217,7 @@ fn main() -> Result<()> {
                 &epoch_dir,
                 epoch,
                 &raw_ranges,
+                index_block_slots.as_deref(),
                 initial_previous_blockhash,
             )?;
             previous_epoch_last_blockhash = v2.last_blockhash;
@@ -319,6 +319,7 @@ fn build_slot_ranges_v2_from_archive_v2_sidecars(
     epoch_dir: &Path,
     epoch: u64,
     raw_ranges: &[SlotRange],
+    index_block_slots: Option<&[u64]>,
     initial_previous_blockhash: Option<[u8; 32]>,
 ) -> Result<SlotRangesV2Build> {
     if raw_ranges.len() != SLOTS_PER_EPOCH as usize {
@@ -331,6 +332,7 @@ fn build_slot_ranges_v2_from_archive_v2_sidecars(
             epoch_dir,
             epoch,
             raw_ranges,
+            index_block_slots,
             initial_previous_blockhash,
         );
     }
@@ -400,15 +402,37 @@ fn build_slot_ranges_v2_from_blockhash_registry_sidecar(
     epoch_dir: &Path,
     epoch: u64,
     raw_ranges: &[SlotRange],
+    index_block_slots: Option<&[u64]>,
     initial_previous_blockhash: Option<[u8; 32]>,
 ) -> Result<SlotRangesV2Build> {
     let blockhashes = read_blockhash_registry(&epoch_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE))?;
-    let present_slots = raw_ranges
+    let raw_present_slots = raw_ranges
         .iter()
         .copied()
         .filter(|range| !range.is_empty())
         .count();
-    let blockhash_id_offset = blockhash_id_offset(present_slots, blockhashes.len())?;
+    let raw_block_slots: Vec<u64>;
+    let block_slots = if raw_present_slots == blockhashes.len()
+        || raw_present_slots.checked_add(1) == Some(blockhashes.len())
+    {
+        raw_block_slots = raw_ranges
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(slot_in_epoch, range)| {
+                (!range.is_empty()).then(|| epoch * SLOTS_PER_EPOCH + slot_in_epoch as u64)
+            })
+            .collect();
+        &raw_block_slots
+    } else if let Some(slots) = index_block_slots {
+        slots
+    } else {
+        return Err(anyhow!(
+            "blockhash registry has {} hashes for {raw_present_slots} non-empty raw ranges; rebuild v1 ranges or provide block slot order",
+            blockhashes.len()
+        ));
+    };
+    let blockhash_id_offset = blockhash_id_offset(block_slots.len(), blockhashes.len())?;
     let genesis_previous_blockhash = (blockhash_id_offset == 1)
         .then(|| blockhashes.first().copied())
         .flatten();
@@ -416,15 +440,17 @@ fn build_slot_ranges_v2_from_blockhash_registry_sidecar(
     let mut ranges = vec![SlotRangeWithPreviousBlockhash::EMPTY; SLOTS_PER_EPOCH as usize];
     let mut previous_blockhash = initial_previous_blockhash.or(genesis_previous_blockhash);
     let mut last_blockhash = None;
-    let mut block_i = 0usize;
     let epoch_start = epoch
         .checked_mul(SLOTS_PER_EPOCH)
         .ok_or_else(|| anyhow!("epoch start slot overflow for epoch {epoch}"))?;
 
-    for (slot_in_epoch, range) in raw_ranges.iter().copied().enumerate() {
-        if range.is_empty() {
+    for (block_i, slot) in block_slots.iter().copied().enumerate() {
+        if epoch_for_slot(slot) != epoch {
             continue;
         }
+        let slot_in_epoch =
+            usize::try_from(slot_in_epoch(slot)).context("slot-in-epoch exceeds usize")?;
+        let range = raw_ranges[slot_in_epoch];
 
         let hash_index = block_i
             .checked_add(blockhash_id_offset as usize)
@@ -439,21 +465,14 @@ fn build_slot_ranges_v2_from_blockhash_registry_sidecar(
         };
         previous_blockhash = Some(blockhash);
         last_blockhash = Some(blockhash);
-        block_i += 1;
     }
 
     eprintln!(
-        "epoch={epoch}: built v2 from blockhash registry only present_slots={present_slots} blockhash_id_offset={blockhash_id_offset} first_slot={} last_slot={}",
-        raw_ranges
-            .iter()
-            .position(|range| !range.is_empty())
-            .map(|slot| epoch_start + slot as u64)
-            .unwrap_or(epoch_start),
-        raw_ranges
-            .iter()
-            .rposition(|range| !range.is_empty())
-            .map(|slot| epoch_start + slot as u64)
-            .unwrap_or(epoch_start),
+        "epoch={epoch}: built v2 from blockhash registry only block_slots={} raw_present_slots={} blockhash_id_offset={blockhash_id_offset} first_slot={} last_slot={}",
+        block_slots.len(),
+        raw_present_slots,
+        block_slots.first().copied().unwrap_or(epoch_start),
+        block_slots.last().copied().unwrap_or(epoch_start),
     );
 
     Ok(SlotRangesV2Build {

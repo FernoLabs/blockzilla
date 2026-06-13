@@ -4,6 +4,7 @@ use of_car_reader::compact_index::{
     decode_offset_and_size, truncate_entry_hash,
 };
 use of_car_reader::slot_ranges::{SLOTS_PER_EPOCH, SlotRange};
+use std::collections::HashSet;
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use std::future::{Ready, ready};
 
@@ -38,7 +39,28 @@ pub struct BuildSlotRangesStats {
 #[derive(Clone, Debug)]
 pub struct BuildSlotRangesOutput {
     pub ranges: Vec<SlotRange>,
+    /// Slots present in the Old Faithful slot-to-CID index, in epoch order.
+    ///
+    /// This can be larger than the number of non-empty raw ranges because some
+    /// blocks may occupy no byte range after range reconstruction. Keep it for
+    /// consumers that need blockhash ordering.
+    pub block_slots: Vec<u64>,
     pub stats: BuildSlotRangesStats,
+}
+
+#[derive(Clone, Debug)]
+pub struct BuildBlockSlotsStats {
+    pub present_slots: u32,
+    pub unique_block_slots: u32,
+    pub slot_bucket_payload_bytes_read: u64,
+    pub max_slot_bucket_payload_bytes: usize,
+    pub slot_node_read_fallbacks: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct BuildBlockSlotsOutput {
+    pub block_slots: Vec<u64>,
+    pub stats: BuildBlockSlotsStats,
 }
 
 pub trait RangeReader {
@@ -47,6 +69,127 @@ pub trait RangeReader {
         Self: 'a;
 
     fn read_exact_at<'a>(&'a mut self, offset: u64, out: &'a mut [u8]) -> Self::ReadFuture<'a>;
+}
+
+pub async fn build_block_slots_from_slot_index<S>(
+    epoch: u64,
+    slot_index: &mut AsyncCompactIndex<S>,
+    config: BuildSlotRangesConfig,
+) -> Result<BuildBlockSlotsOutput>
+where
+    S: RangeReader,
+{
+    if slot_index.version() != 1 {
+        return Err(anyhow!(
+            "unsupported compact index version slot={}",
+            slot_index.version()
+        ));
+    }
+
+    let epoch_start_slot = epoch
+        .checked_mul(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("epoch start slot overflow"))?;
+    let cid_value_size = slot_index.value_size();
+    let bitset_len = (SLOTS_PER_EPOCH as usize).div_ceil(8);
+    let mut stats = BuildBlockSlotsStats {
+        present_slots: 0,
+        unique_block_slots: 0,
+        slot_bucket_payload_bytes_read: 0,
+        max_slot_bucket_payload_bytes: 0,
+        slot_node_read_fallbacks: 0,
+    };
+
+    let mut slot_groups = Vec::with_capacity(SLOTS_PER_EPOCH as usize);
+    for i in 0..SLOTS_PER_EPOCH {
+        let slot = epoch_start_slot + i;
+        let bucket = bucket_hash(&slot.to_le_bytes(), slot_index.num_buckets());
+        slot_groups.push((bucket, i as u32));
+    }
+    slot_groups.sort_unstable_by_key(|(bucket, slot)| (*bucket, *slot));
+
+    let mut slot_has_cid = vec![0u8; bitset_len];
+    let mut slot_cids = vec![0u8; (SLOTS_PER_EPOCH as usize) * cid_value_size];
+    let mut bucket_buf = Vec::new();
+
+    let mut group_start = 0usize;
+    while group_start < slot_groups.len() {
+        let bucket = slot_groups[group_start].0;
+        let mut group_end = group_start + 1;
+        while group_end < slot_groups.len() && slot_groups[group_end].0 == bucket {
+            group_end += 1;
+        }
+
+        let header = slot_index.meta().bucket_header(bucket)?;
+        let hash_len = header.hash_len as usize;
+        let payload_len =
+            bucket_payload_len(hash_len, slot_index.value_size(), header.num_entries)?;
+        stats.max_slot_bucket_payload_bytes = stats.max_slot_bucket_payload_bytes.max(payload_len);
+
+        if payload_len > config.max_bucket_payload_bytes {
+            if !config.allow_node_read_fallback {
+                return Err(anyhow!(
+                    "{} bucket {bucket} payload is {} bytes, over configured cap {}",
+                    slot_index.source(),
+                    payload_len,
+                    config.max_bucket_payload_bytes
+                ));
+            }
+
+            for &(_, i) in &slot_groups[group_start..group_end] {
+                let slot = epoch_start_slot + i as u64;
+                let key = slot.to_le_bytes();
+                let out = &mut slot_cids
+                    [(i as usize) * cid_value_size..(i as usize + 1) * cid_value_size];
+                if slot_index.lookup_into_node_reads(&key, out).await? {
+                    set_bit(&mut slot_has_cid, i as usize);
+                }
+                stats.slot_node_read_fallbacks += 1;
+            }
+        } else {
+            bucket_buf.clear();
+            bucket_buf.resize(payload_len, 0);
+            slot_index
+                .read_bucket_payload_into(bucket, &mut bucket_buf)
+                .await?;
+            stats.slot_bucket_payload_bytes_read += payload_len as u64;
+
+            for &(_, i) in &slot_groups[group_start..group_end] {
+                let slot = epoch_start_slot + i as u64;
+                let key = slot.to_le_bytes();
+                let target = truncate_entry_hash(header.hash_domain, &key, hash_len);
+                if let Some(value) = bst_lookup(
+                    &bucket_buf,
+                    header.num_entries,
+                    hash_len,
+                    cid_value_size,
+                    target,
+                ) {
+                    let out = &mut slot_cids
+                        [(i as usize) * cid_value_size..(i as usize + 1) * cid_value_size];
+                    out.copy_from_slice(value);
+                    set_bit(&mut slot_has_cid, i as usize);
+                }
+            }
+        }
+
+        group_start = group_end;
+    }
+
+    let mut block_slots = Vec::new();
+    let mut seen_block_cids = HashSet::new();
+    for i in 0..SLOTS_PER_EPOCH as usize {
+        if !get_bit(&slot_has_cid, i) {
+            continue;
+        }
+        stats.present_slots += 1;
+        let cid = &slot_cids[i * cid_value_size..(i + 1) * cid_value_size];
+        if seen_block_cids.insert(cid.to_vec()) {
+            block_slots.push(epoch_start_slot + i as u64);
+        }
+    }
+    stats.unique_block_slots = block_slots.len() as u32;
+
+    Ok(BuildBlockSlotsOutput { block_slots, stats })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -299,12 +442,17 @@ where
     drop(slot_groups);
 
     let mut cid_groups = Vec::new();
+    let mut block_slots = Vec::new();
+    let mut seen_block_cids = HashSet::new();
     for i in 0..SLOTS_PER_EPOCH as usize {
         if !get_bit(&slot_has_cid, i) {
             continue;
         }
         stats.present_slots += 1;
         let cid = &slot_cids[i * cid_value_size..(i + 1) * cid_value_size];
+        if seen_block_cids.insert(cid.to_vec()) {
+            block_slots.push(epoch_start_slot + i as u64);
+        }
         let bucket = bucket_hash(cid, cid_index.num_buckets());
         cid_groups.push((bucket, i as u32));
     }
@@ -392,20 +540,27 @@ where
         let cur_end_excl_abs = slot_end_excl_abs[i];
         let start_abs = prev_end_excl_abs.unwrap_or(car_header_size);
 
-        if cur_end_excl_abs > start_abs {
-            let len64 = cur_end_excl_abs - start_abs;
-            if len64 <= u32::MAX as u64 {
-                ranges[i] = SlotRange {
-                    offset: start_abs,
-                    len: len64 as u32,
-                };
-            }
+        if cur_end_excl_abs <= start_abs {
+            continue;
         }
 
+        let len64 = cur_end_excl_abs - start_abs;
+        if len64 > u32::MAX as u64 {
+            continue;
+        }
+
+        ranges[i] = SlotRange {
+            offset: start_abs,
+            len: len64 as u32,
+        };
         prev_end_excl_abs = Some(cur_end_excl_abs);
     }
 
-    Ok(BuildSlotRangesOutput { ranges, stats })
+    Ok(BuildSlotRangesOutput {
+        ranges,
+        block_slots,
+        stats,
+    })
 }
 
 pub fn decode_car_header_total_size(prefix: &[u8], source: &str) -> Result<u64> {
