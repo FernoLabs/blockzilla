@@ -25,6 +25,7 @@ use time::{OffsetDateTime, macros::format_description};
 const DEFAULT_BUFFER_MIB: usize = 64;
 const NODE_KIND_PREFIX_LEN: usize = 2;
 const BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
+const ZSTD_LONG_WINDOW_LOG_MAX: u32 = 31;
 
 #[derive(Debug, Parser)]
 #[command(name = "of-car-slot-index")]
@@ -431,8 +432,7 @@ fn build_epoch(input: EpochInput, config: &Config) -> Result<BuildSummary> {
         .open(config)
         .with_context(|| format!("open {source_label}"))?;
     let scan = if input.source.is_zstd() {
-        let decoder =
-            zstd::Decoder::new(reader).with_context(|| format!("open zstd {source_label}"))?;
+        let decoder = zstd_decoder_with_long_window(reader, &source_label)?;
         scan_car_reader(
             decoder,
             input.epoch,
@@ -681,6 +681,25 @@ fn seed_previous_blockhash(epoch: u64, config: &Config) -> Result<Option<[u8; 32
         path.display()
     );
     Ok(None)
+}
+
+fn zstd_decoder_with_long_window<R: Read>(
+    reader: R,
+    source_label: &str,
+) -> Result<zstd::Decoder<'static, BufReader<R>>> {
+    let dctx = Box::leak(Box::new(zstd::zstd_safe::DCtx::create()));
+    dctx.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
+        ZSTD_LONG_WINDOW_LOG_MAX,
+    ))
+    .map_err(|code| {
+        anyhow!(
+            "set zstd windowLogMax={ZSTD_LONG_WINDOW_LOG_MAX} for {source_label}: {}",
+            zstd::zstd_safe::get_error_name(code)
+        )
+    })?;
+
+    let reader = BufReader::with_capacity(DEFAULT_BUFFER_MIB * 1024 * 1024, reader);
+    Ok(zstd::Decoder::with_context(reader, dctx))
 }
 
 fn write_raw_atomic(path: &Path, ranges: &[SlotRange]) -> Result<()> {

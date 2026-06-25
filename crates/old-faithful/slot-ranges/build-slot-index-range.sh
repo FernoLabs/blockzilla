@@ -16,6 +16,8 @@ Environment:
                     the blockhash order.
   OVERWRITE_V2=1    Rebuild epoch-*-slot-ranges-v2.raw while reusing existing
                     epoch-*-slot-ranges.raw when present.
+  OVERWRITE=1       Rebuild epoch-*-slot-ranges.raw too, useful when compact
+                    index slot order is needed for v2 blockhash alignment.
   SYNC_R2_AFTER=1   Push SLOT_INDEX_DIR to r2:blockzilla/slot-index after build.
 
 This downloads missing Old Faithful compact index files, builds slot-range
@@ -53,8 +55,12 @@ if [[ "${OVERWRITE_V2:-0}" == "1" ]]; then
   args+=("--overwrite-v2")
 fi
 
+if [[ "${OVERWRITE:-0}" == "1" ]]; then
+  args+=("--overwrite")
+fi
+
 cd "$REPO_ROOT"
-cargo run --release -p of-slot-ranges -- "${args[@]}"
+"${CARGO_BIN:-cargo}" run --release -p of-slot-ranges --bin of-slot-ranges -- "${args[@]}"
 
 if [[ "${SYNC_R2_AFTER:-0}" == "1" ]]; then
   "$SCRIPT_DIR/sync-slot-index-r2.sh" push "$SLOT_INDEX_DIR"

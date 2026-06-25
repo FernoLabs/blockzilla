@@ -1,19 +1,13 @@
-name = "cloudflare-solana-rpc"
+name = "of-get-block-worker"
 main = "build/index.js"
 compatibility_date = "2026-05-18"
 
-[build]
-command = "cargo install -q worker-build && worker-build --release . --no-default-features --features worker"
-
 [[r2_buckets]]
-binding = "SLOT_RANGES"
+binding = "OF_INDEXES"
 bucket_name = "blockzilla"
-remote = true
 
-[vars]
-OF_SLOT_INDEX_SOURCE = "r2"
-OF_ARCHIVE_SOURCE = "http"
-OF_ARCHIVE_BASE_URL = "https://files.old-faithful.net"
+[build]
+command = "cargo install -q worker-build && worker-build --release ."
 
 [observability]
 [observability.logs]

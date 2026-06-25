@@ -1,169 +1,110 @@
 # of-get-block-worker
 
-`of-get-block-worker` serves a deliberately narrow Solana JSON-RPC surface from Old Faithful
-CAR files plus local sidecar indexes. Old Faithful data is historical, so the
-local server only answers methods that are tied to an explicit block slot and do
-not pretend to describe the current cluster. Methods outside that surface can be
-forwarded to an upstream Solana RPC with `--proxy-url`.
+Minimal Cloudflare Worker for serving Solana `getBlock` from official Old
+Faithful archives.
 
-`jsonParsed` is rejected explicitly. Other encodings/detail modes that are not
-served locally can be handled by the proxy.
+The Worker is intentionally narrow and auditable:
 
-Locally served methods:
+- reads only `https://files.old-faithful.net`
+- uses official Old Faithful compact indexes
+- uses HTTP range requests only
+- has no R2 bucket, S3, mirror, database, or sidecar index dependency
+- serves JSON-RPC over HTTP POST
+
+## Deploy
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/rpcpool/yellowstone-faithful/tree/master/crates/old-faithful/get-block-worker)
+
+Or deploy with Wrangler:
+
+```sh
+npm install
+npm run deploy
+```
+
+`wrangler.toml` builds the Rust Worker with:
+
+```sh
+worker-build --release .
+```
+
+## JSON-RPC
+
+POST `/` with a standard JSON-RPC 2.0 request.
+
+Supported methods:
 
 - `getBlock`
 - `getBlockTime`
 - `getVersion`
 
-Cluster-state and ledger-summary methods such as `getSlot`, `getBlockHeight`,
-`getBlocks`, `getEpochInfo`, `getHealth`, `getBlockCommitment`, leader schedule
-queries, and snapshot queries are left to `--proxy-url`.
-
-## Build the v2 Slot Index
-
-For deployments that read `getBlockTime` and `previousBlockhash` from a
-database, build the raw slot-to-CAR range index from the Old Faithful compact
-indexes:
+Example:
 
 ```sh
-cargo install of-slot-ranges
-
-of-slot-ranges \
-  --start-epoch 800 \
-  --end-epoch 800 \
-  --indexes-dir /path/to/indexes \
-  --output-dir ./slot-index \
-  --raw-only
+curl -X POST "$WORKER_URL" \
+  -H 'content-type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[424223999,{"transactionDetails":"none","rewards":false}]}'
 ```
 
-The raw index stores one 12-byte row per epoch slot:
+The Worker rejects `jsonParsed` and batch requests on purpose. The goal is a
+fast historical `getBlock` implementation, not a full Solana RPC replacement.
+
+## HTTP Routes
+
+- `GET /info`: Worker capabilities and latest complete Old Faithful epoch/slot.
+- `GET /block/:slot`: rendered block JSON for quick manual checks.
+- `GET /block-lite/:slot`: lighter block JSON for quick manual checks.
+
+## Throughput Benchmark
+
+Use the bundled bench script against a deployed Worker to measure delivery
+rate, transfer rate, latency, cache status, and the point where 429/5xx starts.
+
+Hot-cache ceiling, reusing one slot:
+
+```sh
+WORKER_URL=https://your-worker.workers.dev \
+  npm run bench -- --ramp 1,2,4,8,16,32,64 --duration 20 --same-slot
+```
+
+Harder Worker/archive path, using different URLs:
+
+```sh
+WORKER_URL=https://your-worker.workers.dev \
+  npm run bench -- --route block-lite --format json --rewards false \
+  --start 424223999 --ramp 1,2,4,8,16,32 --duration 20 --cache-bust
+```
+
+The script prints `blocks/s`, `MiB/s`, average response size, p50/p95/p99
+latency, HTTP status counts, and `CF-Cache-Status` counts when present.
+
+## Availability
+
+Old Faithful epochs contain `432000` slots. Some Solana slots are skipped, so
+slot ranges are estimated from epoch timing but block existence is decided by
+the official Old Faithful indexes.
+
+`/info` reports:
+
+- `latest_complete_epoch`
+- `latest_available_slot`
+- `slots_per_epoch`
+- whether the matching CAR and compact index objects are available
+
+The optional cluster epoch hint uses `OF_CLUSTER_RPC_URL` when set, otherwise it
+tries `https://api.mainnet-beta.solana.com`. The Worker works without this hint;
+it is only used to choose a smarter cache TTL for `/info`.
+
+## Source Layout
 
 ```text
-offset:u64_le len:u32_le
+src/lib.rs                 Cloudflare Worker routes and Old Faithful range lookup
+src/rpc.rs                 JSON-RPC request/response handling
+src/source.rs              official Old Faithful HTTP range reader
+src/get_block.rs           getBlock parameter parsing and rendering dispatch
+src/car_to_json.rs         protobuf response rendering
+src/car_to_json_stream.rs  JSON response renderer
 ```
 
-Local files, local directories, HTTP(S) URLs, and `s3://bucket/key` inputs are
-accepted by the `of-car-slot-index` CAR-scan fallback when compact indexes are
-not available.
-
-If the worker must resolve `previousBlockhash` from the slot index itself, build
-the v2 format:
-
-```sh
-cargo run -p of-get-block-worker -- build-slot-index-v2 \
-  --epoch 800 \
-  --out ./slot-index/epoch-800-slot-ranges-v2.raw
-```
-
-The v2 index stores one 44-byte row per epoch slot:
-
-```text
-offset:u64_le len:u32_le previous_blockhash:[u8;32]
-```
-
-For the first produced block in an epoch, pass
-`--seed-previous-blockhash <base58>` when the previous epoch is not available in
-the same build flow.
-
-## Serve JSON-RPC
-
-```sh
-cargo run -p of-get-block-worker -- serve \
-  --index-dir . \
-  --base-url https://files.old-faithful.net \
-  --proxy-url https://api.mainnet-beta.solana.com
-```
-
-The server listens on `127.0.0.1:8899` by default and accepts standard JSON-RPC
-2.0 HTTP POST bodies.
-
-## Native Benchmark
-
-The native benchmark calls the Rust archive/render path directly, without a
-Cloudflare Worker or local HTTP server:
-
-```sh
-cargo run -p of-get-block-worker --release -- bench \
-  --index-dir . \
-  --base-url https://files.old-faithful.net \
-  --slots-file ./slots.txt \
-  --mode full \
-  --mode accounts \
-  --mode signatures \
-  --mode none \
-  --iterations 3 \
-  --concurrency 4 \
-  --out-dir /tmp/of-get-block-worker-bench
-```
-
-By default this measures end-to-end source fetch plus decode/render. To isolate
-local CPU/render throughput, preload each slot once and measure only rendering:
-
-```sh
-cargo run -p of-get-block-worker --release -- bench \
-  --index-dir . \
-  --base-url https://files.old-faithful.net \
-  --slots-file ./slots.txt \
-  --mode full \
-  --iterations 5 \
-  --warmup 1 \
-  --concurrency 4 \
-  --render-only
-```
-
-## Deploy the Cloudflare Worker
-
-The Cloudflare Worker is built from this same `of-get-block-worker` crate with the `worker`
-feature. There is no separate Worker app crate.
-
-```sh
-cd crates/old-faithful/get-block-worker
-npx wrangler@latest deploy --strict
-```
-
-`wrangler.toml` runs:
-
-```sh
-worker-build --release . --no-default-features --features worker
-```
-
-The Worker and native server share the same getBlock config parsing and response
-rendering path. Storage access differs by target only at the transport/source
-adapter layer.
-
-## Source Modes
-
-Public or authenticated HTTP:
-
-```sh
-cargo run -p of-get-block-worker -- serve \
-  --index-dir . \
-  --base-url https://example.invalid/old-faithful \
-  --header 'Authorization=Bearer token'
-```
-
-Bearer token from the environment:
-
-```sh
-export OF_SOURCE_TOKEN=...
-cargo run -p of-get-block-worker -- serve \
-  --index-dir . \
-  --base-url https://example.invalid/old-faithful \
-  --bearer-token-env OF_SOURCE_TOKEN
-```
-
-S3-compatible storage, including Backblaze B2 and Cloudflare R2:
-
-```sh
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-
-cargo run -p of-get-block-worker -- serve \
-  --index-dir . \
-  --source-kind s3 \
-  --s3-endpoint https://s3.us-west-004.backblazeb2.com \
-  --s3-region us-west-004 \
-  --s3-bucket my-old-faithful-mirror
-```
-
-For Cloudflare R2, use the R2 S3 endpoint and keep `--s3-region auto`.
+There are no native binaries in this package. Index building and archive tooling
+belong in `of-car-reader` / `of-slot-ranges`; this crate is the deployable Worker.

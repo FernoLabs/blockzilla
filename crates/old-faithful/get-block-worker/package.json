@@ -2,13 +2,10 @@
   "name": "of-get-block-worker",
   "private": true,
   "scripts": {
+    "bench": "node scripts/bench-worker.mjs",
     "deploy": "wrangler deploy --strict"
   },
-  "cloudflare": {
-    "bindings": {
-      "SLOT_RANGES": {
-        "description": "R2 bucket containing `slot-index/epoch-N-slot-ranges.raw` and optional `slot-index/epoch-N-slot-ranges-v2.raw` sidecars. The Worker can deploy with an empty bucket, but block endpoints require populated sidecars."
-      }
-    }
+  "devDependencies": {
+    "wrangler": "^4.98.0"
   }
 }

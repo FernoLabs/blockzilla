@@ -7,11 +7,13 @@ members = [
     "crates/old-faithful/archive-importer",
     "crates/old-faithful/get-block-worker",
     "crates/live-producer",
+    "crates/hivezilla",
     "blockzilla", "crates/old-faithful/signature-index", "crates/replay-runtime",
     "blockzilla-get-block-worker",
     "crates/old-faithful/slot-ranges",
     "crates/old-faithful/token-index",
     "crates/old-faithful/account-index",
+    "crates/token-price-api",
 ]
 exclude = ["solana-prog/"]
 
@@ -26,7 +28,7 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = false
+strip = true
 debug = false
 incremental = false
 overflow-checks = false

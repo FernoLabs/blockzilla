@@ -5,6 +5,16 @@ use minicbor::{Decode, Decoder, Encode};
 use serde::{Deserialize, Serialize};
 
 pub type Result<T> = core::result::Result<T, NodeDecodeError>;
+pub type CarCid = [u8; 36];
+
+#[inline]
+pub fn car_cid_from_bytes(bytes: &[u8]) -> Option<CarCid> {
+    let mut cid = [0u8; 36];
+    (bytes.len() == cid.len()).then(|| {
+        cid.copy_from_slice(bytes);
+        cid
+    })
+}
 
 #[derive(Debug)]
 pub enum NodeDecodeError {
@@ -340,6 +350,11 @@ impl<'a> CborCidRef<'a> {
     pub fn car_cid_bytes(&self) -> Option<&'a [u8]> {
         let bytes = self.normalized_bytes();
         (bytes.len() == 36).then_some(bytes)
+    }
+
+    #[inline]
+    pub fn car_cid(&self) -> Option<CarCid> {
+        car_cid_from_bytes(self.car_cid_bytes()?)
     }
 
     #[inline]

@@ -27,6 +27,7 @@ use crate::{BUFFER_SIZE, ProgressTracker, genesis_epoch0};
 
 const MAX_BLOCKHASHES_PER_EPOCH: usize = 432_000;
 const MESSAGE_VERSION_PREFIX: u8 = 0x80;
+const ZSTD_WINDOW_LOG_MAX: u32 = 31;
 
 fn require_block(block: &LosslessCarBlock) -> Result<&of_car_reader::reconstruct::RawBlockNode> {
     block
@@ -64,8 +65,11 @@ fn open_car_input(path: &Path) -> Result<Box<dyn Read>> {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zst"))
     {
-        let decoder = zstd::Decoder::with_buffer(file)
+        let mut decoder = zstd::Decoder::with_buffer(file)
             .with_context(|| format!("init zstd decoder for {}", path.display()))?;
+        decoder
+            .window_log_max(ZSTD_WINDOW_LOG_MAX)
+            .with_context(|| format!("set zstd window_log_max for {}", path.display()))?;
         Ok(Box::new(decoder))
     } else {
         Ok(Box::new(file))

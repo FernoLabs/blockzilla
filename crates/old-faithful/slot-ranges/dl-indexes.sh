@@ -2,6 +2,8 @@
 set -euo pipefail
 
 BASE_URL="https://files.old-faithful.net"
+DOWNLOAD_SLOT_INDEX="${DOWNLOAD_SLOT_INDEX:-1}"
+DOWNLOAD_CID_INDEX="${DOWNLOAD_CID_INDEX:-1}"
 
 START_EPOCH="${1:-0}"
 END_EPOCH="${2:-0}"
@@ -53,7 +55,7 @@ for ((e=START_EPOCH; e<=END_EPOCH; e++)); do
   cid_idx="epoch-$e-$epoch_cid-mainnet-cid-to-offset-and-size.index"
 
   # aria2 input format: URL then indented options lines.
-  if [[ ! -s "$epoch_dir/$slot_idx" ]]; then
+  if [[ "$DOWNLOAD_SLOT_INDEX" == "1" && ! -s "$epoch_dir/$slot_idx" ]]; then
     {
       echo "$BASE_URL/$e/$slot_idx"
       echo "  dir=$epoch_dir"
@@ -61,7 +63,7 @@ for ((e=START_EPOCH; e<=END_EPOCH; e++)); do
     } >> "$LIST_FILE"
   fi
 
-  if [[ ! -s "$epoch_dir/$cid_idx" ]]; then
+  if [[ "$DOWNLOAD_CID_INDEX" == "1" && ! -s "$epoch_dir/$cid_idx" ]]; then
     {
       echo "$BASE_URL/$e/$cid_idx"
       echo "  dir=$epoch_dir"

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use bincode::Options;
 use blockzilla_format::{
     ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
     ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE,
@@ -62,6 +63,10 @@ use of_car_reader::{
 };
 use prost::Message;
 use solana_pubkey::Pubkey;
+use solana_vote_interface::{
+    instruction::VoteInstruction,
+    state::{TowerSync as SolanaTowerSync, VoteStateUpdate as SolanaVoteStateUpdate},
+};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::{
@@ -116,6 +121,7 @@ const ARCHIVE_V2_ZSTD_INDEX_MAGIC: &[u8; 8] = b"BZV2ZIX1";
 const ARCHIVE_V2_ZSTD_INDEX_VERSION: u16 = 1;
 const ARCHIVE_V2_ZSTD_INDEX_FLAG_DICTIONARY: u32 = 1 << 0;
 const ARCHIVE_V2_INDEX_SCAN_BUFFER_SIZE: usize = 4 << 10;
+const VOTE_INSTRUCTION_DECODE_LIMIT: u64 = 1232;
 const WINCODE_ARCHIVE_V2_RECORD_HEADER_TAG: u8 = 0;
 const WINCODE_ARCHIVE_V2_RECORD_BLOCK_TAG: u8 = 1;
 const WINCODE_ARCHIVE_V2_RECORD_INDEX_TAG: u8 = 2;
@@ -201,7 +207,17 @@ pub(crate) fn build(
         rolling_blockhashes.insert(genesis.genesis_hash, 0, 0)?;
     }
 
-    while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
+    while let Some(raw) = scanner
+        .next_node_timed(Some(&mut timings))
+        .with_context(|| {
+            format!(
+                "scan hot archive input {} after blocks={} car_entries={}",
+                input.display(),
+                footer.blocks,
+                footer.car_entries
+            )
+        })?
+    {
         footer.car_entries += 1;
         footer.car_payload_bytes += raw.payload_len as u64;
         footer.decoded_node_payload_bytes += raw.payload_len as u64;
@@ -1030,7 +1046,13 @@ fn hot_instructions_from_owned(
             let data =
                 parse_hot_vote_instruction_data(&instruction.data, slot_to_block_id, vote_hashes)
                     .with_context(|| "parse vote instruction data")?;
-            if !matches!(data, ArchiveV2HotInstructionData::Raw(_)) {
+            if matches!(
+                data,
+                ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(_)
+                    | ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch { .. }
+                    | ArchiveV2HotInstructionData::VoteTowerSync(_)
+                    | ArchiveV2HotInstructionData::VoteTowerSyncSwitch { .. }
+            ) {
                 has_compact_vote = true;
                 vote_hashes.compact_vote_ix += 1;
             }
@@ -1107,38 +1129,102 @@ fn parse_hot_vote_instruction_data(
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<ArchiveV2HotInstructionData> {
-    let Some((&tag0, rest)) = data.split_first() else {
-        return Ok(ArchiveV2HotInstructionData::Raw(Vec::new()));
-    };
-    if rest.len() < 3 {
-        return Ok(ArchiveV2HotInstructionData::Raw(data.to_vec()));
+    if data.is_empty() {
+        return Ok(ArchiveV2HotInstructionData::UnknownVote(Vec::new()));
     }
-    let variant = u32::from_le_bytes([tag0, rest[0], rest[1], rest[2]]);
-    let mut cursor = VoteInstructionCursor::new(&data[4..]);
-    let parsed = match variant {
-        12 => {
-            let update = parse_vote_state_update(&mut cursor, slot_to_block_id, vote_hashes)?;
-            cursor.ensure_eof()?;
+
+    let instruction_result: std::result::Result<VoteInstruction, _> = bincode::options()
+        .with_limit(VOTE_INSTRUCTION_DECODE_LIMIT)
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize(data);
+    let instruction = match instruction_result {
+        Ok(instruction) => instruction,
+        Err(err) => {
+            match try_parse_historical_tower_sync_instruction_data(
+                data,
+                slot_to_block_id,
+                vote_hashes,
+            )
+            .with_context(|| {
+                format!(
+                    "parse historical vote tower sync instruction variant={} len={} prefix={}",
+                    vote_instruction_variant_label(data),
+                    data.len(),
+                    hex_prefix(data, 32)
+                )
+            }) {
+                Ok(Some(parsed)) => return Ok(parsed),
+                Ok(None) if is_tower_sync_vote_variant(data) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Ok(None) => {}
+                Err(_) if is_tower_sync_vote_variant(data) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Err(historical_err) => return Err(historical_err),
+            }
+            Err::<VoteInstruction, _>(err).with_context(|| {
+                format!(
+                    "canonical vote instruction decode failed: variant={} len={} prefix={}",
+                    vote_instruction_variant_label(data),
+                    data.len(),
+                    hex_prefix(data, 32)
+                )
+            })?
+        }
+    };
+
+    let parsed = match instruction {
+        VoteInstruction::CompactUpdateVoteState(update) => {
+            let update =
+                match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
+                {
+                    Ok(update) => update,
+                    Err(err) if is_uncompactable_vote_update_error(&err) => {
+                        return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                    }
+                    Err(err) => return Err(err),
+                };
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update)
         }
-        13 => {
-            let update = parse_vote_state_update(&mut cursor, slot_to_block_id, vote_hashes)?;
-            let switch_proof_hash = vote_hashes.ref_aux_hash(cursor.read_hash()?);
-            cursor.ensure_eof()?;
+        VoteInstruction::CompactUpdateVoteStateSwitch(update, switch_proof_hash) => {
+            let update =
+                match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
+                {
+                    Ok(update) => update,
+                    Err(err) if is_uncompactable_vote_update_error(&err) => {
+                        return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                    }
+                    Err(err) => return Err(err),
+                };
+            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
                 update,
                 switch_proof_hash,
             }
         }
-        14 => {
-            let tower = parse_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
-            cursor.ensure_eof()?;
+        VoteInstruction::TowerSync(tower) => {
+            let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
+            {
+                Ok(tower) => tower,
+                Err(err) if is_uncompactable_vote_update_error(&err) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Err(err) => return Err(err),
+            };
             ArchiveV2HotInstructionData::VoteTowerSync(tower)
         }
-        15 => {
-            let tower = parse_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
-            let switch_proof_hash = vote_hashes.ref_aux_hash(cursor.read_hash()?);
-            cursor.ensure_eof()?;
+        VoteInstruction::TowerSyncSwitch(tower, switch_proof_hash) => {
+            let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
+            {
+                Ok(tower) => tower,
+                Err(err) if is_uncompactable_vote_update_error(&err) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Err(err) => return Err(err),
+            };
+            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
             ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
                 tower,
                 switch_proof_hash,
@@ -1149,22 +1235,135 @@ fn parse_hot_vote_instruction_data(
     Ok(parsed)
 }
 
-fn parse_hot_compute_budget_instruction_data(data: &[u8]) -> Result<ArchiveV2HotInstructionData> {
-    let Ok(Some(parsed)) = try_parse_hot_compute_budget_instruction_data(data) else {
-        return Ok(ArchiveV2HotInstructionData::Raw(data.to_vec()));
+fn is_uncompactable_vote_update_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("vote lockout history length")
+        && message.contains("exceeds MAX_LOCKOUT_HISTORY")
+}
+
+fn try_parse_historical_tower_sync_instruction_data(
+    data: &[u8],
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+) -> Result<Option<ArchiveV2HotInstructionData>> {
+    if data.len() < 4 {
+        return Ok(None);
+    }
+    let mut cursor = VoteInstructionCursor::new(data);
+    let variant = cursor.read_u32_le()?;
+    let parsed = match variant {
+        14 => {
+            let tower = read_historical_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
+            cursor.ensure_eof()?;
+            ArchiveV2HotInstructionData::VoteTowerSync(tower)
+        }
+        15 => {
+            let tower = read_historical_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
+            let switch_proof_hash = vote_hashes.ref_aux_hash(cursor.read_pubkey()?);
+            cursor.ensure_eof()?;
+            ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
+                tower,
+                switch_proof_hash,
+            }
+        }
+        _ => return Ok(None),
     };
-    Ok(parsed)
+    Ok(Some(parsed))
+}
+
+fn read_historical_tower_sync(
+    cursor: &mut VoteInstructionCursor<'_>,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+) -> Result<ArchiveV2VoteTowerSync> {
+    let lockout_len = cursor.read_u64_le()?;
+    anyhow::ensure!(
+        lockout_len <= 31,
+        "historical tower sync lockout history length {} exceeds MAX_LOCKOUT_HISTORY",
+        lockout_len
+    );
+    let mut lockouts = Vec::with_capacity(lockout_len as usize);
+    for _ in 0..lockout_len {
+        let slot = cursor.read_u64_le()?;
+        let confirmation_count = cursor.read_u32_le()?;
+        let confirmation_count = u8::try_from(confirmation_count)
+            .context("historical vote confirmation count exceeds u8::MAX")?;
+        lockouts.push((slot, confirmation_count));
+    }
+    let root = cursor.read_option_u64_le()?;
+    let hash = cursor.read_pubkey()?;
+    let timestamp = cursor.read_option_i64_le()?;
+    let block_id = cursor.read_pubkey()?;
+
+    let (update, last_slot) = archive_vote_state_update_from_parts(
+        root,
+        lockouts.into_iter().map(Ok),
+        hash,
+        timestamp,
+        slot_to_block_id,
+        vote_hashes,
+    )?;
+    let block_id_hash = vote_hashes.ref_block_id_hash(last_slot, block_id, slot_to_block_id)?;
+    Ok(ArchiveV2VoteTowerSync {
+        update,
+        block_id_hash,
+    })
+}
+
+fn vote_instruction_variant_label(data: &[u8]) -> String {
+    if data.len() < 4 {
+        return "short".to_string();
+    }
+    u32::from_le_bytes([data[0], data[1], data[2], data[3]]).to_string()
+}
+
+fn is_tower_sync_vote_variant(data: &[u8]) -> bool {
+    data.len() >= 4
+        && matches!(
+            u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+            14 | 15
+        )
+}
+
+fn hex_prefix(data: &[u8], max_len: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = &data[..data.len().min(max_len)];
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    if data.len() > max_len {
+        out.push_str("...");
+    }
+    out
+}
+
+fn parse_hot_compute_budget_instruction_data(data: &[u8]) -> Result<ArchiveV2HotInstructionData> {
+    match try_parse_hot_compute_budget_instruction_data(data).with_context(|| {
+        format!(
+            "parse compute budget instruction data len={} prefix={}",
+            data.len(),
+            hex_prefix(data, 32)
+        )
+    })? {
+        Some(parsed) => Ok(parsed),
+        None => Ok(ArchiveV2HotInstructionData::Raw(data.to_vec())),
+    }
 }
 
 fn try_parse_hot_compute_budget_instruction_data(
     data: &[u8],
 ) -> Result<Option<ArchiveV2HotInstructionData>> {
     let Some((&tag, rest)) = data.split_first() else {
-        return Ok(None);
+        anyhow::bail!("empty compute budget instruction data");
     };
     let mut cursor = VoteInstructionCursor::new(rest);
     let parsed = match tag {
         0 => {
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             cursor.ensure_eof()?;
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::Unused,
@@ -1172,28 +1371,36 @@ fn try_parse_hot_compute_budget_instruction_data(
         }
         1 => {
             let bytes = cursor.read_u32_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::RequestHeapFrame(bytes),
             )
         }
         2 => {
             let units = cursor.read_u32_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(units),
             )
         }
         3 => {
             let micro_lamports = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::SetComputeUnitPrice(micro_lamports),
             )
         }
         4 => {
             let bytes = cursor.read_u32_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::SetLoadedAccountsDataSizeLimit(bytes),
             )
@@ -1204,23 +1411,36 @@ fn try_parse_hot_compute_budget_instruction_data(
 }
 
 fn parse_hot_system_instruction_data(data: &[u8]) -> Result<ArchiveV2HotInstructionData> {
-    let Ok(Some(parsed)) = try_parse_hot_system_instruction_data(data) else {
-        return Ok(ArchiveV2HotInstructionData::Raw(data.to_vec()));
-    };
-    Ok(parsed)
+    match try_parse_hot_system_instruction_data(data) {
+        Some(parsed) => Ok(parsed),
+        None => Ok(ArchiveV2HotInstructionData::UnknownSystem(data.to_vec())),
+    }
 }
 
-fn try_parse_hot_system_instruction_data(
+fn try_parse_hot_system_instruction_data(data: &[u8]) -> Option<ArchiveV2HotInstructionData> {
+    try_parse_hot_system_instruction_data_inner(data)
+        .ok()
+        .flatten()
+}
+
+fn try_parse_hot_system_instruction_data_inner(
     data: &[u8],
 ) -> Result<Option<ArchiveV2HotInstructionData>> {
     let mut cursor = VoteInstructionCursor::new(data);
     let variant = cursor.read_u32_le()?;
+    macro_rules! preserve_raw_on_trailing_bytes {
+        () => {
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
+        };
+    }
     let parsed = match variant {
         0 => {
             let lamports = cursor.read_u64_le()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::CreateAccount {
                 lamports,
                 space,
@@ -1229,12 +1449,12 @@ fn try_parse_hot_system_instruction_data(
         }
         1 => {
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::Assign { owner })
         }
         2 => {
             let lamports = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::Transfer {
                 lamports,
             })
@@ -1245,7 +1465,7 @@ fn try_parse_hot_system_instruction_data(
             let lamports = cursor.read_u64_le()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::CreateAccountWithSeed {
                     base,
@@ -1257,33 +1477,33 @@ fn try_parse_hot_system_instruction_data(
             )
         }
         4 => {
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::AdvanceNonceAccount)
         }
         5 => {
             let lamports = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::WithdrawNonceAccount { lamports },
             )
         }
         6 => {
             let authority = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::InitializeNonceAccount { authority },
             )
         }
         7 => {
             let authority = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::AuthorizeNonceAccount { authority },
             )
         }
         8 => {
             let space = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::Allocate { space })
         }
         9 => {
@@ -1291,7 +1511,7 @@ fn try_parse_hot_system_instruction_data(
             let seed = cursor.read_system_seed()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::AllocateWithSeed {
                 base,
                 seed,
@@ -1303,7 +1523,7 @@ fn try_parse_hot_system_instruction_data(
             let base = cursor.read_pubkey()?;
             let seed = cursor.read_system_seed()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::AssignWithSeed {
                 base,
                 seed,
@@ -1314,7 +1534,7 @@ fn try_parse_hot_system_instruction_data(
             let lamports = cursor.read_u64_le()?;
             let from_seed = cursor.read_system_seed()?;
             let from_owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::TransferWithSeed {
                 lamports,
                 from_seed,
@@ -1322,14 +1542,14 @@ fn try_parse_hot_system_instruction_data(
             })
         }
         12 => {
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::UpgradeNonceAccount)
         }
         13 => {
             let lamports = cursor.read_u64_le()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::CreateAccountAllowPrefund {
                     lamports,
@@ -1343,57 +1563,87 @@ fn try_parse_hot_system_instruction_data(
     Ok(Some(parsed))
 }
 
-fn parse_tower_sync(
-    cursor: &mut VoteInstructionCursor<'_>,
+fn archive_tower_sync_from_solana(
+    tower: &SolanaTowerSync,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<ArchiveV2VoteTowerSync> {
-    let (update, last_slot) = parse_vote_state_update_parts(cursor, slot_to_block_id, vote_hashes)?;
+    let (update, last_slot) = archive_vote_state_update_from_parts(
+        tower.root,
+        tower.lockouts.iter().map(|lockout| {
+            Ok((
+                lockout.slot(),
+                u8::try_from(lockout.confirmation_count())
+                    .context("vote confirmation count exceeds u8::MAX")?,
+            ))
+        }),
+        tower.hash.to_bytes(),
+        tower.timestamp,
+        slot_to_block_id,
+        vote_hashes,
+    )?;
     let block_id_hash =
-        vote_hashes.ref_block_id_hash(last_slot, cursor.read_hash()?, slot_to_block_id)?;
+        vote_hashes.ref_block_id_hash(last_slot, tower.block_id.to_bytes(), slot_to_block_id)?;
     Ok(ArchiveV2VoteTowerSync {
         update,
         block_id_hash,
     })
 }
 
-fn parse_vote_state_update(
-    cursor: &mut VoteInstructionCursor<'_>,
+fn archive_vote_state_update_from_solana(
+    update: &SolanaVoteStateUpdate,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<ArchiveV2VoteStateUpdate> {
-    Ok(parse_vote_state_update_parts(cursor, slot_to_block_id, vote_hashes)?.0)
+    Ok(archive_vote_state_update_from_parts(
+        update.root,
+        update.lockouts.iter().map(|lockout| {
+            Ok((
+                lockout.slot(),
+                u8::try_from(lockout.confirmation_count())
+                    .context("vote confirmation count exceeds u8::MAX")?,
+            ))
+        }),
+        update.hash.to_bytes(),
+        update.timestamp,
+        slot_to_block_id,
+        vote_hashes,
+    )?
+    .0)
 }
 
-fn parse_vote_state_update_parts(
-    cursor: &mut VoteInstructionCursor<'_>,
+fn archive_vote_state_update_from_parts<I>(
+    root: Option<u64>,
+    lockouts: I,
+    hash: [u8; 32],
+    timestamp: Option<i64>,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
-) -> Result<(ArchiveV2VoteStateUpdate, Option<u64>)> {
-    let root_raw = cursor.read_u64_le()?;
-    let root = (root_raw != u64::MAX).then_some(root_raw);
-    let len = cursor.read_short_vec_len()?;
+) -> Result<(ArchiveV2VoteStateUpdate, Option<u64>)>
+where
+    I: IntoIterator<Item = Result<(u64, u8)>>,
+{
+    let lockouts = lockouts.into_iter().collect::<Result<Vec<_>>>()?;
     anyhow::ensure!(
-        len <= 31,
-        "vote lockout history length {len} exceeds MAX_LOCKOUT_HISTORY"
+        lockouts.len() <= 31,
+        "vote lockout history length {} exceeds MAX_LOCKOUT_HISTORY",
+        lockouts.len()
     );
-    let mut lockout_offsets = Vec::with_capacity(len);
+    let mut lockout_offsets = Vec::with_capacity(lockouts.len());
     let mut slot = root.unwrap_or_default();
     let mut last_slot = None;
-    for _ in 0..len {
-        let offset = cursor.read_var_u64()?;
-        slot = slot
-            .checked_add(offset)
-            .context("vote lockout slot overflow")?;
-        let confirmation_count = cursor.read_u8()?;
+    for (next_slot, confirmation_count) in lockouts {
+        let offset = next_slot
+            .checked_sub(slot)
+            .context("vote lockout slots are not monotonic")?;
+        slot = next_slot;
         lockout_offsets.push(ArchiveV2VoteLockoutOffset {
             offset,
             confirmation_count,
         });
         last_slot = Some(slot);
     }
-    let hash = vote_hashes.ref_bank_hash(last_slot, cursor.read_hash()?, slot_to_block_id)?;
-    let timestamp = cursor.read_option_i64()?;
+    let hash = vote_hashes.ref_bank_hash(last_slot, hash, slot_to_block_id)?;
     Ok((
         ArchiveV2VoteStateUpdate {
             root,
@@ -1415,6 +1665,10 @@ impl<'a> VoteInstructionCursor<'a> {
         Self { bytes, pos: 0 }
     }
 
+    fn is_eof(&self) -> bool {
+        self.pos == self.bytes.len()
+    }
+
     fn ensure_eof(&self) -> Result<()> {
         anyhow::ensure!(
             self.pos == self.bytes.len(),
@@ -1422,15 +1676,6 @@ impl<'a> VoteInstructionCursor<'a> {
             self.bytes.len().saturating_sub(self.pos)
         );
         Ok(())
-    }
-
-    fn read_u8(&mut self) -> Result<u8> {
-        let byte = *self
-            .bytes
-            .get(self.pos)
-            .ok_or_else(|| anyhow!("unexpected EOF in instruction data"))?;
-        self.pos += 1;
-        Ok(byte)
     }
 
     fn read_u32_le(&mut self) -> Result<u32> {
@@ -1448,8 +1693,25 @@ impl<'a> VoteInstructionCursor<'a> {
         Ok(i64::from_le_bytes(bytes))
     }
 
-    fn read_hash(&mut self) -> Result<[u8; 32]> {
-        self.read_array::<32>()
+    fn read_option_u64_le(&mut self) -> Result<Option<u64>> {
+        match self.read_option_tag()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_u64_le()?)),
+            tag => anyhow::bail!("invalid bincode Option<u64> tag {tag}"),
+        }
+    }
+
+    fn read_option_i64_le(&mut self) -> Result<Option<i64>> {
+        match self.read_option_tag()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_i64_le()?)),
+            tag => anyhow::bail!("invalid bincode Option<i64> tag {tag}"),
+        }
+    }
+
+    fn read_option_tag(&mut self) -> Result<u8> {
+        let tag = self.read_array::<1>()?;
+        Ok(tag[0])
     }
 
     fn read_pubkey(&mut self) -> Result<[u8; 32]> {
@@ -1489,61 +1751,6 @@ impl<'a> VoteInstructionCursor<'a> {
         out.copy_from_slice(&self.bytes[self.pos..end]);
         self.pos = end;
         Ok(out)
-    }
-
-    fn read_option_i64(&mut self) -> Result<Option<i64>> {
-        match self.read_u8()? {
-            0 => Ok(None),
-            1 => Ok(Some(self.read_i64_le()?)),
-            tag => anyhow::bail!("invalid vote timestamp option tag {tag}"),
-        }
-    }
-
-    fn read_short_vec_len(&mut self) -> Result<usize> {
-        let mut value = 0u16;
-        for nth in 0..3 {
-            let byte = self.read_u8()?;
-            if byte == 0 && nth != 0 {
-                anyhow::bail!("alias short_vec length encoding in vote instruction");
-            }
-            if nth == 2 && (byte & 0x7c) != 0 {
-                anyhow::bail!("short_vec length overflows u16 in vote instruction");
-            }
-            let payload = u16::from(byte & 0x7f);
-            value |= payload
-                .checked_shl((nth * 7) as u32)
-                .context("short_vec length shift overflow")?;
-            if byte & 0x80 == 0 {
-                return Ok(value as usize);
-            }
-            anyhow::ensure!(nth < 2, "short_vec length extends past three bytes");
-        }
-        anyhow::bail!("invalid short_vec length")
-    }
-
-    fn read_var_u64(&mut self) -> Result<u64> {
-        let mut value = 0u64;
-        let mut shift = 0u32;
-        loop {
-            anyhow::ensure!(shift < u64::BITS, "vote varint left shift overflow");
-            let byte = self.read_u8()?;
-            let payload = u64::from(byte & 0x7f);
-            anyhow::ensure!(
-                payload <= (u64::MAX >> shift),
-                "vote varint value overflows u64"
-            );
-            value |= payload
-                .checked_shl(shift)
-                .context("vote varint shift overflow")?;
-            if byte & 0x80 == 0 {
-                anyhow::ensure!(
-                    !(byte == 0 && (shift != 0 || value != 0)),
-                    "vote varint has invalid trailing zero"
-                );
-                return Ok(value);
-            }
-            shift += 7;
-        }
     }
 }
 
@@ -6844,7 +7051,7 @@ pub(crate) fn analyze_hot_instruction_data(
         },
     );
     println!(
-        "instruction_data_payload_summary tx_payload_decoded={} tx_payload_raw={} metadata_decoded={} metadata_raw={} metadata_none={} metadata_with_inner={} inner_groups={} hot_compact_vote_update_vote_state={} hot_compact_vote_update_vote_state_switch={} hot_compact_vote_tower_sync={} hot_compact_vote_tower_sync_switch={} hot_compact_compute_budget={} hot_compact_system={} prefix_len={} max_keys={}",
+        "instruction_data_payload_summary tx_payload_decoded={} tx_payload_raw={} metadata_decoded={} metadata_raw={} metadata_none={} metadata_with_inner={} inner_groups={} hot_compact_vote_update_vote_state={} hot_compact_vote_update_vote_state_switch={} hot_compact_vote_tower_sync={} hot_compact_vote_tower_sync_switch={} hot_compact_compute_budget={} hot_compact_system={} hot_unknown_system={} hot_unknown_vote={} prefix_len={} max_keys={}",
         stats.tx_payload_decoded,
         stats.tx_payload_raw,
         stats.metadata_decoded,
@@ -6858,6 +7065,8 @@ pub(crate) fn analyze_hot_instruction_data(
         stats.hot_compact_vote_tower_sync_switch,
         stats.hot_compact_compute_budget_total(),
         stats.hot_compact_system_total(),
+        stats.hot_unknown_system,
+        stats.hot_unknown_vote,
         stats.prefix_len,
         stats.max_keys,
     );
@@ -6905,6 +7114,20 @@ fn analyze_hot_top_level_instruction_data(
                     allow_unresolved_program,
                 )?;
                 stats.tx.bump(data, program);
+            }
+            ArchiveV2HotInstructionData::UnknownSystem(data) => {
+                stats.hot_unknown_system += 1;
+                stats.tx.bump(
+                    data,
+                    InstructionProgramKey::Pubkey(CompactPubkey::Raw(system_program_id_bytes())),
+                );
+            }
+            ArchiveV2HotInstructionData::UnknownVote(data) => {
+                stats.hot_unknown_vote += 1;
+                stats.tx.bump(
+                    data,
+                    InstructionProgramKey::Pubkey(CompactPubkey::Raw(vote_program_id_bytes())),
+                );
             }
             ArchiveV2HotInstructionData::ComputeBudget(data) => {
                 stats.bump_hot_compact_compute_budget(data);
@@ -7037,6 +7260,8 @@ struct ArchiveV2InstructionDataStats {
     hot_compact_vote_update_vote_state_switch: u64,
     hot_compact_vote_tower_sync: u64,
     hot_compact_vote_tower_sync_switch: u64,
+    hot_unknown_system: u64,
+    hot_unknown_vote: u64,
     hot_compute_budget_unused: u64,
     hot_compute_budget_request_heap_frame: u64,
     hot_compute_budget_set_compute_unit_limit: u64,
@@ -7079,6 +7304,8 @@ impl ArchiveV2InstructionDataStats {
             hot_compact_vote_update_vote_state_switch: 0,
             hot_compact_vote_tower_sync: 0,
             hot_compact_vote_tower_sync_switch: 0,
+            hot_unknown_system: 0,
+            hot_unknown_vote: 0,
             hot_compute_budget_unused: 0,
             hot_compute_budget_request_heap_frame: 0,
             hot_compute_budget_set_compute_unit_limit: 0,
@@ -7108,6 +7335,8 @@ impl ArchiveV2InstructionDataStats {
     fn bump_hot_compact_vote(&mut self, data: &ArchiveV2HotInstructionData) {
         match data {
             ArchiveV2HotInstructionData::Raw(_) => {}
+            ArchiveV2HotInstructionData::UnknownSystem(_) => {}
+            ArchiveV2HotInstructionData::UnknownVote(_) => {}
             ArchiveV2HotInstructionData::ComputeBudget(_) => {}
             ArchiveV2HotInstructionData::System(_) => {}
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(_) => {
@@ -10193,6 +10422,15 @@ struct ArchiveV2Timings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_vote_interface::state::Lockout;
+
+    fn hex_to_vec(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
 
     #[test]
     fn archive_v2_record_tags_match_index_fast_scanner() {
@@ -10512,37 +10750,87 @@ mod tests {
     }
 
     #[test]
-    fn hot_vote_parser_compacts_tower_sync_hashes_by_voted_block() {
+    fn hot_vote_parser_compacts_canonical_solana_vote_instructions() {
         let root = 1_000u64;
         let last_slot = root + 31;
-        let mut data = Vec::new();
-        data.extend_from_slice(&14u32.to_le_bytes());
-        data.extend_from_slice(&root.to_le_bytes());
-        data.push(31);
-        for confirmation_count in (1u8..=31).rev() {
-            data.push(1);
-            data.push(confirmation_count);
-        }
-        data.extend_from_slice(&[7u8; 32]);
-        data.push(1);
-        data.extend_from_slice(&1_234_567i64.to_le_bytes());
-        data.extend_from_slice(&[8u8; 32]);
-        assert_eq!(data.len(), 148);
+        let mut lockouts = VecDeque::new();
+        lockouts.push_back(Lockout::new_with_confirmation_count(root + 1, 31));
+        lockouts.push_back(Lockout::new_with_confirmation_count(last_slot, 1));
+        let mut update = SolanaVoteStateUpdate::new(lockouts.clone(), Some(root), [7u8; 32].into());
+        update.timestamp = Some(1_234_567);
 
         let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
         slots.insert(last_slot, 42);
+
+        let data =
+            bincode::serialize(&VoteInstruction::CompactUpdateVoteState(update.clone())).unwrap();
+        assert_eq!(vote_instruction_variant_label(&data), "12");
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&data, &slots, &mut vote_hashes).unwrap();
+        let ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(parsed_update) = parsed else {
+            panic!("expected CompactUpdateVoteState");
+        };
+        assert_eq!(parsed_update.root, Some(root));
+        assert_eq!(parsed_update.lockout_offsets.len(), 2);
+        assert_eq!(parsed_update.lockout_offsets[0].offset, 1);
+        assert_eq!(parsed_update.lockout_offsets[1].offset, 30);
+        assert_eq!(parsed_update.timestamp, Some(1_234_567));
+        assert_eq!(parsed_update.hash, ArchiveV2VoteHashRef::Block(42));
+        assert_eq!(vote_hashes.rows[42].bank_hash, Some([7u8; 32]));
+
+        let mut tower =
+            SolanaTowerSync::new(lockouts, Some(root), [7u8; 32].into(), [8u8; 32].into());
+        tower.timestamp = Some(1_234_567);
+        let data = bincode::serialize(&VoteInstruction::TowerSync(tower)).unwrap();
+        assert_eq!(vote_instruction_variant_label(&data), "14");
         let mut vote_hashes = VoteHashRegistryBuilder::default();
         let parsed = parse_hot_vote_instruction_data(&data, &slots, &mut vote_hashes).unwrap();
         let ArchiveV2HotInstructionData::VoteTowerSync(tower) = parsed else {
             panic!("expected TowerSync");
         };
         assert_eq!(tower.update.root, Some(root));
-        assert_eq!(tower.update.lockout_offsets.len(), 31);
+        assert_eq!(tower.update.lockout_offsets.len(), 2);
         assert_eq!(tower.update.timestamp, Some(1_234_567));
         assert_eq!(tower.update.hash, ArchiveV2VoteHashRef::Block(42));
         assert_eq!(tower.block_id_hash, ArchiveV2VoteHashRef::Block(42));
         assert_eq!(vote_hashes.rows[42].bank_hash, Some([7u8; 32]));
         assert_eq!(vote_hashes.rows[42].block_id_hash, Some([8u8; 32]));
+    }
+
+    #[test]
+    fn hot_vote_parser_compacts_historical_tower_sync_wire_form() {
+        let data = test_hex_bytes(
+            "0e0000000200000000000000adbf62180000000001000000bcbf6218000000000000000000f2b429ebfc9b4b2e1ee705e8d03d1bad2198ae2dc41a8b8e27a7ec0dab033621019c365d2d9d010000f2b429ebfc9b4b2e1ee705e8d03d1bad2198ae2dc41a8b8e27a7ec0dab033621",
+        );
+        let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
+        slots.insert(409_124_796, 17);
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+
+        let parsed = parse_hot_vote_instruction_data(&data, &slots, &mut vote_hashes).unwrap();
+        let ArchiveV2HotInstructionData::VoteTowerSync(tower) = parsed else {
+            panic!("expected historical TowerSync");
+        };
+        assert_eq!(tower.update.root, None);
+        assert_eq!(tower.update.lockout_offsets.len(), 2);
+        assert_eq!(tower.update.lockout_offsets[0].offset, 409_124_781);
+        assert_eq!(tower.update.lockout_offsets[0].confirmation_count, 1);
+        assert_eq!(tower.update.lockout_offsets[1].offset, 15);
+        assert_eq!(tower.update.lockout_offsets[1].confirmation_count, 0);
+        assert_eq!(tower.update.timestamp, Some(1_774_582_576_796));
+        assert_eq!(tower.update.hash, ArchiveV2VoteHashRef::Block(17));
+        assert_eq!(tower.block_id_hash, ArchiveV2VoteHashRef::Block(17));
+        assert_eq!(
+            vote_hashes.rows[17].bank_hash,
+            Some([
+                0xf2, 0xb4, 0x29, 0xeb, 0xfc, 0x9b, 0x4b, 0x2e, 0x1e, 0xe7, 0x05, 0xe8, 0xd0, 0x3d,
+                0x1b, 0xad, 0x21, 0x98, 0xae, 0x2d, 0xc4, 0x1a, 0x8b, 0x8e, 0x27, 0xa7, 0xec, 0x0d,
+                0xab, 0x03, 0x36, 0x21,
+            ])
+        );
+        assert_eq!(
+            vote_hashes.rows[17].block_id_hash,
+            vote_hashes.rows[17].bank_hash
+        );
     }
 
     #[test]
@@ -10622,12 +10910,121 @@ mod tests {
     }
 
     #[test]
-    fn hot_known_program_parsers_keep_invalid_instruction_payloads_raw() {
-        let parsed = parse_hot_compute_budget_instruction_data(&[2, 1]).unwrap();
-        assert!(matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == vec![2, 1]));
+    fn hot_known_program_parsers_preserve_uncompact_unknown_payloads_raw() {
+        let parsed = parse_hot_compute_budget_instruction_data(&[255, 1, 2, 3]).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == vec![255, 1, 2, 3])
+        );
 
-        let parsed = parse_hot_system_instruction_data(&[2, 0, 0]).unwrap();
-        assert!(matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == vec![2, 0, 0]));
+        let noncanonical_compute_unit_limit = [2, 0x40, 0x42, 0x0f, 0, 0, 0, 0, 0].to_vec();
+        let parsed =
+            parse_hot_compute_budget_instruction_data(&noncanonical_compute_unit_limit).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == noncanonical_compute_unit_limit)
+        );
+
+        let mut unknown_system = Vec::new();
+        unknown_system.extend_from_slice(&99u32.to_le_bytes());
+        unknown_system.extend_from_slice(&[1, 2, 3]);
+        let parsed = parse_hot_system_instruction_data(&unknown_system).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw == unknown_system)
+        );
+
+        let noncanonical_system_transfer = vec![
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x27, 0x07, 0x00, 0x00, 0x00, 0x00, 0xcf, 0x18,
+            0x15, 0x58, 0xd4, 0x4e, 0x99, 0x18,
+        ];
+        let parsed = parse_hot_system_instruction_data(&noncanonical_system_transfer).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw == noncanonical_system_transfer)
+        );
+
+        let parsed = parse_hot_system_instruction_data(&[]).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw.is_empty())
+        );
+
+        let truncated_system_transfer = vec![2, 0, 0];
+        let parsed = parse_hot_system_instruction_data(&truncated_system_transfer).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw == truncated_system_transfer)
+        );
+
+        let unknown_vote = hex_to_vec(
+            "0e0000000001a0afe1c0011f1029d1fd40bb7c95deb2380109cbb9cd198ec64594369d169f0a9d7af7e2aa3001b4b1a869000000001029d1fd40bb7c95deb2380109cbb9cd198ec64594369d169f0a9d7af7e2aa30",
+        );
+        let slots = GxHashMap::with_hasher(GxBuildHasher::default());
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&unknown_vote, &slots, &mut vote_hashes)
+            .expect("invalid on-chain vote payload should preserve as UnknownVote");
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == unknown_vote)
+        );
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
+
+        let root = 1_000u64;
+        let mut lockouts = VecDeque::new();
+        for i in 1..=32 {
+            lockouts.push_back(Lockout::new_with_confirmation_count(root + i, 1));
+        }
+        let update = SolanaVoteStateUpdate::new(lockouts, Some(root), [7u8; 32].into());
+        let too_many_lockouts =
+            bincode::serialize(&VoteInstruction::CompactUpdateVoteState(update)).unwrap();
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&too_many_lockouts, &slots, &mut vote_hashes)
+            .expect("uncompactable valid vote payload should preserve as UnknownVote");
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == too_many_lockouts)
+        );
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
+
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&[], &slots, &mut vote_hashes)
+            .expect("observed empty on-chain vote payload should preserve as UnknownVote");
+        assert!(matches!(
+            parsed,
+            ArchiveV2HotInstructionData::UnknownVote(raw) if raw.is_empty()
+        ));
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
+    }
+
+    #[test]
+    fn hot_known_program_parsers_reject_invalid_instruction_payloads() {
+        let err = parse_hot_compute_budget_instruction_data(&[2, 1])
+            .expect_err("truncated compute budget payload must hard fail");
+        assert!(format!("{err:#}").contains("parse compute budget instruction data"));
+
+        let err = parse_hot_compute_budget_instruction_data(&[])
+            .expect_err("empty compute budget payload must hard fail");
+        assert!(format!("{err:#}").contains("empty compute budget instruction data"));
+    }
+
+    #[test]
+    fn hot_vote_parser_rejects_invalid_instruction_payloads() {
+        let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
+        slots.insert(1_000, 42);
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+
+        let mut eof_vote = 12u32.to_le_bytes().to_vec();
+        eof_vote.extend_from_slice(&0u64.to_le_bytes());
+        eof_vote.push(0);
+        let err = parse_hot_vote_instruction_data(&eof_vote, &slots, &mut vote_hashes)
+            .expect_err("invalid vote payload must hard fail");
+        assert!(format!("{err:#}").contains("canonical vote instruction decode failed"));
+
+        let mut overflowing_short_vec = 12u32.to_le_bytes().to_vec();
+        overflowing_short_vec.extend_from_slice(&0u64.to_le_bytes());
+        overflowing_short_vec.extend_from_slice(&[0xff, 0xff, 0x7c]);
+        let err = parse_hot_vote_instruction_data(&overflowing_short_vec, &slots, &mut vote_hashes)
+            .expect_err("invalid vote payload must hard fail");
+        assert!(format!("{err:#}").contains("canonical vote instruction decode failed"));
+
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
     }
 
     #[test]
@@ -10649,5 +11046,16 @@ mod tests {
         assert_eq!(vote_hashes.block_id_refs, 1);
         assert_eq!(vote_hashes.block_id_raw, 1);
         assert_eq!(vote_hashes.block_id_conflict_raw, 1);
+    }
+
+    fn test_hex_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(pair, 16).unwrap()
+            })
+            .collect()
     }
 }
