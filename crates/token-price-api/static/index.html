@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blockzilla Token API</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-name">Blockzilla</div>
+          <div class="brand-subtitle">Token archive</div>
+        </div>
+        <div class="search-row">
+          <input id="token-search" type="search" placeholder="Search token address" autocomplete="off" />
+          <button id="reload-button" type="button" title="Reload token list">R</button>
+        </div>
+        <div class="list-header">
+          <span>Tokens</span>
+          <span id="token-count">0</span>
+        </div>
+        <div id="token-list" class="token-list"></div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1 id="token-title">Select a token</h1>
+            <div id="token-address" class="address-line"></div>
+          </div>
+          <div class="top-actions">
+            <select id="interval-select" title="Chart interval">
+              <option value="1m">1m</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+              <option value="4h">4h</option>
+              <option value="1d">1d</option>
+            </select>
+            <div class="segmented" role="tablist" aria-label="Chart mode">
+              <button id="line-mode" type="button" class="active">Line</button>
+              <button id="candle-mode" type="button">OHLC</button>
+            </div>
+          </div>
+        </header>
+
+        <section class="summary-grid" aria-label="Token summary">
+          <div class="summary-cell">
+            <div class="label">Price</div>
+            <div id="price-value" class="summary-value">-</div>
+          </div>
+          <div class="summary-cell">
+            <div class="label">24h change</div>
+            <div id="change-value" class="summary-value">-</div>
+          </div>
+          <div class="summary-cell">
+            <div class="label">24h volume</div>
+            <div id="volume-value" class="summary-value">-</div>
+          </div>
+          <div class="summary-cell">
+            <div class="label">Token accounts</div>
+            <div id="holders-value" class="summary-value">-</div>
+          </div>
+          <div class="summary-cell">
+            <div class="label">Archive range</div>
+            <div id="range-value" class="summary-value small">-</div>
+          </div>
+        </section>
+
+        <section class="chart-section">
+          <div class="chart-toolbar">
+            <div id="chart-title">Price chart</div>
+            <div id="chart-status">No token selected</div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="price-chart" width="1200" height="420"></canvas>
+          </div>
+        </section>
+
+        <section class="metadata-section">
+          <div class="metadata-toolbar">Token metadata</div>
+          <dl class="metadata-grid">
+            <div>
+              <dt>Decimals</dt>
+              <dd id="meta-decimals">-</dd>
+            </div>
+            <div>
+              <dt>Program</dt>
+              <dd id="meta-program" class="mono">-</dd>
+            </div>
+            <div>
+              <dt>Mint id</dt>
+              <dd id="meta-mint-id">-</dd>
+            </div>
+            <div>
+              <dt>Balance rows</dt>
+              <dd id="meta-balance-rows">-</dd>
+            </div>
+            <div>
+              <dt>Swap rows</dt>
+              <dd id="meta-swap-rows">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="table-section">
+          <div class="table-toolbar">
+            <div>Recent archival swaps</div>
+            <button id="open-json-button" type="button">JSON</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Side</th>
+                  <th>Price</th>
+                  <th>Volume</th>
+                  <th>Owner</th>
+                  <th>DEX</th>
+                </tr>
+              </thead>
+              <tbody id="trades-body">
+                <tr><td colspan="6" class="empty">No token selected</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

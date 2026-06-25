@@ -243,7 +243,32 @@ pub fn parse_genesis_bin(bytes: &[u8]) -> CarReadResult<GenesisConfig> {
 }
 
 pub fn pubkey_to_base58(pubkey: &[u8; 32]) -> String {
-    bs58::encode(pubkey).into_string()
+    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    let zeroes = pubkey.iter().take_while(|byte| **byte == 0).count();
+    let mut digits = Vec::<u8>::with_capacity(45);
+
+    for byte in pubkey {
+        let mut carry = *byte as u32;
+        for digit in digits.iter_mut().rev() {
+            carry += (*digit as u32) << 8;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.insert(0, (carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+
+    let mut out = String::with_capacity(zeroes + digits.len());
+    out.extend(std::iter::repeat_n('1', zeroes));
+    out.extend(
+        digits
+            .into_iter()
+            .map(|digit| ALPHABET[digit as usize] as char),
+    );
+    out
 }
 
 pub fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -501,6 +526,18 @@ mod tests {
         assert_eq!(archive.genesis.ticks_per_slot, 64);
         assert_eq!(archive.genesis.poh_params.hashes_per_tick, Some(12_500));
         assert_eq!(archive.genesis.cluster_id, 1);
+    }
+
+    #[test]
+    fn formats_pubkeys_as_base58() {
+        assert_eq!(
+            pubkey_to_base58(&[0; 32]),
+            "11111111111111111111111111111111"
+        );
+        assert_eq!(
+            pubkey_to_base58(&[1; 32]),
+            "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        );
     }
 
     fn minimal_genesis_bin() -> Vec<u8> {

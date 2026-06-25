@@ -12,8 +12,8 @@ use crate::metadata_decoder::{
     slot_uses_protobuf_metadata, visit_protobuf_transaction_status_meta,
 };
 use crate::node::{
-    CborCidRef, Node, NodeDecodeError, OwnedDataFrame, Shredding, SlotMeta, decode_entry_summary,
-    decode_node, peek_node_type,
+    CarCid, CborCidRef, Node, NodeDecodeError, OwnedDataFrame, Shredding, SlotMeta,
+    decode_entry_summary, decode_node, peek_node_type,
 };
 use crate::versioned_transaction::VersionedTransaction;
 
@@ -31,7 +31,7 @@ struct PendingDataFrame {
 
 #[derive(Debug, Clone)]
 enum PendingDataFrameRef {
-    Cid([u8; 36]),
+    Cid(CarCid),
     Inline(Vec<u8>),
 }
 
@@ -63,9 +63,7 @@ impl PendingDataFrameRef {
         if let Some(bytes) = value.inline_raw_bytes() {
             return Ok(Self::Inline(bytes.to_vec()));
         }
-        if let Some(bytes) = value.car_cid_bytes() {
-            let mut cid = [0u8; 36];
-            cid.copy_from_slice(bytes);
+        if let Some(cid) = value.car_cid() {
             return Ok(Self::Cid(cid));
         }
         Err(CarReadError::InvalidData(
@@ -662,6 +660,16 @@ impl CarBlockGroup {
         }
     }
 
+    /// Iterate raw transaction and metadata frames in file order without decoding either payload.
+    pub fn transaction_frames<'a>(&'a self) -> TransactionFrameIter<'a> {
+        TransactionFrameIter {
+            tx_buf_ptr: self.tx_buf.as_ptr(),
+            tx_buf_len: self.tx_buf.len(),
+            tx_ranges: &self.tx_ranges,
+            pos: 0,
+        }
+    }
+
     /// Iterate transactions in file order with protobuf metadata decoded as borrowed views.
     ///
     /// This opt-in iterator avoids allocating metadata strings and byte fields. It only supports
@@ -1023,6 +1031,93 @@ mod tests {
             assert_eq!(meta.cost_units, Some(91));
         }
         assert!(iter.next_tx().expect("borrowed iterator").is_none());
+    }
+
+    #[test]
+    fn transaction_frames_expose_raw_transaction_and_metadata_without_decoding() {
+        let slot = 80_000_000;
+        let tx_bytes = vec![0xde, 0xad, 0xbe, 0xef];
+        let metadata = vec![0xaa, 0xbb, 0xcc];
+
+        let mut car = Vec::new();
+        push_uvarint(&mut car, 1);
+        car.push(0);
+
+        push_car_entry(
+            &mut car,
+            &[0x01; 36],
+            &transaction_node_with_metadata(slot, &tx_bytes, &metadata),
+        );
+        push_car_entry(&mut car, &[0x02; 36], &entry_node(3, [0x11; 32], 1));
+        push_car_entry(&mut car, &[0x04; 36], &entry_node(4, [0x22; 32], 0));
+        push_car_entry(
+            &mut car,
+            &[0x05; 36],
+            &rewards_node(slot, Some(7), Some(0), Some(1), &[0xaa]),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x03; 36],
+            &block_node(slot, slot - 1, 1_700_000_000, 99),
+        );
+
+        let mut reader = CarBlockReader::with_capacity(Cursor::new(car), 1024);
+        reader.skip_header().expect("skip header");
+
+        let mut group = CarBlockGroup::new();
+        assert!(
+            reader
+                .read_until_block_into(&mut group)
+                .expect("read first block")
+        );
+
+        let mut frames = group.transaction_frames();
+        let frame = frames.next_frame().expect("frame iterator").expect("frame");
+        assert_eq!(frame.slot, slot);
+        assert_eq!(frame.index, None);
+        assert_eq!(frame.transaction_data, tx_bytes.as_slice());
+        assert_eq!(frame.metadata_data, Some(metadata.as_slice()));
+        assert!(frames.next_frame().expect("frame iterator").is_none());
+    }
+
+    #[test]
+    fn transaction_frames_treat_empty_metadata_as_missing() {
+        let slot = 80_000_000;
+        let tx_bytes = vec![0xde, 0xad, 0xbe, 0xef];
+
+        let mut car = Vec::new();
+        push_uvarint(&mut car, 1);
+        car.push(0);
+
+        push_car_entry(&mut car, &[0x01; 36], &transaction_node(slot, &tx_bytes));
+        push_car_entry(&mut car, &[0x02; 36], &entry_node(3, [0x11; 32], 1));
+        push_car_entry(&mut car, &[0x04; 36], &entry_node(4, [0x22; 32], 0));
+        push_car_entry(
+            &mut car,
+            &[0x05; 36],
+            &rewards_node(slot, Some(7), Some(0), Some(1), &[0xaa]),
+        );
+        push_car_entry(
+            &mut car,
+            &[0x03; 36],
+            &block_node(slot, slot - 1, 1_700_000_000, 99),
+        );
+
+        let mut reader = CarBlockReader::with_capacity(Cursor::new(car), 1024);
+        reader.skip_header().expect("skip header");
+
+        let mut group = CarBlockGroup::new();
+        assert!(
+            reader
+                .read_until_block_into(&mut group)
+                .expect("read first block")
+        );
+
+        let mut frames = group.transaction_frames();
+        let frame = frames.next_frame().expect("frame iterator").expect("frame");
+        assert_eq!(frame.transaction_data, tx_bytes.as_slice());
+        assert_eq!(frame.metadata_data, None);
+        assert!(frames.next_frame().expect("frame iterator").is_none());
     }
 
     #[test]
@@ -1654,6 +1749,59 @@ impl<'a> FirstSignatureIter<'a> {
                 continue;
             };
             return Ok(Some(signature));
+        }
+
+        Ok(None)
+    }
+}
+
+pub struct TransactionFrame<'a> {
+    pub slot: u64,
+    pub index: Option<u64>,
+    pub transaction_data: &'a [u8],
+    pub metadata_data: Option<&'a [u8]>,
+}
+
+pub struct TransactionFrameIter<'a> {
+    tx_buf_ptr: *const u8,
+    tx_buf_len: usize,
+    tx_ranges: &'a [(u32, u32)],
+    pos: usize,
+}
+
+impl<'a> TransactionFrameIter<'a> {
+    #[inline(always)]
+    fn tx_payload(&self, s: u32, e: u32) -> &'a [u8] {
+        let s = s as usize;
+        let e = e as usize;
+        debug_assert!(s <= e);
+        debug_assert!(e <= self.tx_buf_len);
+        unsafe { std::slice::from_raw_parts(self.tx_buf_ptr.add(s), e - s) }
+    }
+
+    #[inline]
+    pub fn next_frame(&mut self) -> Result<Option<TransactionFrame<'a>>, GroupError> {
+        while self.pos < self.tx_ranges.len() {
+            let (s, e) = self.tx_ranges[self.pos];
+            self.pos += 1;
+
+            let payload = self.tx_payload(s, e);
+            let node = decode_node(payload).map_err(GroupError::Node)?;
+            let Node::Transaction(tx) = node else {
+                continue;
+            };
+
+            if tx.data.next.is_some() || tx.metadata.next.is_some() {
+                return Err(GroupError::DataFrameHasNext);
+            }
+
+            let has_metadata = !tx.metadata.data.is_empty();
+            return Ok(Some(TransactionFrame {
+                slot: tx.slot,
+                index: tx.index,
+                transaction_data: tx.data.data,
+                metadata_data: has_metadata.then_some(tx.metadata.data),
+            }));
         }
 
         Ok(None)

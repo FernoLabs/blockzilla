@@ -120,6 +120,10 @@
 //! }
 //! ```
 //!
+//! If you need raw transaction bytes for another decoder, use
+//! [`CarBlockGroup::transaction_frames`]. It returns the transaction frame and
+//! optional metadata frame without deserializing either payload.
+//!
 //! # Scan raw CAR entries
 //!
 //! Use the lower-level reader when you want CAR offsets, CIDs, or node-type
@@ -184,7 +188,7 @@ pub mod slot_ranges;
 pub mod stored_transaction;
 pub mod versioned_transaction;
 
-pub use car_block_group::CarBlockGroup;
+pub use car_block_group::{CarBlockGroup, TransactionFrame};
 pub use car_stream::CarStream;
 pub use reader::CarBlockReader;
 

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use bincode::Options;
 use blockzilla_format::{
     ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN,
@@ -7,15 +8,16 @@ use blockzilla_format::{
     ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
     ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
-    ARCHIVE_V2_RAW_BLOCKS_FILE, ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SHREDDING_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_INNER_IX,
-    ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_LOGS,
-    ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA,
-    ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
-    ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash,
-    ArchiveV2BlockAccessIndexRow, ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash,
+    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE,
+    ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX, ARCHIVE_V2_TX_FLAG_HAS_ERROR,
+    ARCHIVE_V2_TX_FLAG_HAS_INNER_IX, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
+    ARCHIVE_V2_TX_FLAG_HAS_LOGS, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
+    ARCHIVE_V2_TX_FLAG_HAS_RETURN_DATA, ARCHIVE_V2_TX_FLAG_HAS_TOKEN_BALANCES,
+    ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK,
+    ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash, ArchiveV2BlockAccessIndexRow,
+    ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash,
     ArchiveV2ComputeBudgetInstructionData, ArchiveV2GetBlockIndexRow, ArchiveV2HotBlockBlob,
     ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction,
     ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
@@ -73,12 +75,16 @@ use of_car_reader::{
 };
 use prost::Message;
 use solana_pubkey::Pubkey;
+use solana_vote_interface::{
+    instruction::VoteInstruction,
+    state::{TowerSync as SolanaTowerSync, VoteStateUpdate as SolanaVoteStateUpdate},
+};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
@@ -88,7 +94,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tracing::info;
+use tracing::{info, warn};
 use wincode::{
     ReadResult, SchemaRead,
     config::{Config, ConfigCore},
@@ -112,6 +118,7 @@ const POH_FILE: &str = ARCHIVE_V2_POH_FILE;
 const SHREDDING_FILE: &str = ARCHIVE_V2_SHREDDING_FILE;
 const REGISTRY_FILE: &str = ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
 const REGISTRY_COUNTS_FILE: &str = ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE;
+const REGISTRY_INDEX_FILE: &str = ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE;
 const BLOCKHASH_REGISTRY_FILE: &str = ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE;
 const BLOCKHASH_INDEX_V3_FILE: &str = ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE;
 const PREV_BLOCKHASH_TAIL_FILE: &str = ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE;
@@ -129,13 +136,34 @@ const ARCHIVE_V2_ZSTD_INDEX_VERSION: u16 = 1;
 const ARCHIVE_V2_ZSTD_INDEX_FLAG_DICTIONARY: u32 = 1 << 0;
 const ARCHIVE_V2_INDEX_SCAN_BUFFER_SIZE: usize = 4 << 10;
 const BLOCKHASH_SCAN_BUFFER_SIZE: usize = 4 << 20;
+const ZSTD_LONG_WINDOW_LOG_MAX: u32 = 31;
 const NODE_KIND_PREFIX_LEN: usize = 2;
 const BLOCKHASH_SCAN_PREFIX_LEN: usize = 96;
+const HOT_REUSABLE_BUFFER_RETAIN_LIMIT: usize = 64 << 20;
+const HOT_HEAP_TRIM_INTERVAL_BLOCKS: u32 = 32;
+const VOTE_INSTRUCTION_DECODE_LIMIT: u64 = 1232;
 const WINCODE_ARCHIVE_V2_RECORD_HEADER_TAG: u8 = 0;
 const WINCODE_ARCHIVE_V2_RECORD_BLOCK_TAG: u8 = 1;
 const WINCODE_ARCHIVE_V2_RECORD_INDEX_TAG: u8 = 2;
 const WINCODE_ARCHIVE_V2_RECORD_FOOTER_TAG: u8 = 3;
 const WINCODE_ARCHIVE_V2_RECORD_GENESIS_TAG: u8 = 4;
+
+fn zstd_decoder_with_long_window<R: BufRead + 'static>(
+    reader: R,
+) -> Result<zstd::stream::read::Decoder<'static, R>> {
+    let dctx = Box::leak(Box::new(zstd::zstd_safe::DCtx::create()));
+    dctx.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
+        ZSTD_LONG_WINDOW_LOG_MAX,
+    ))
+    .map_err(|code| {
+        anyhow!(
+            "set zstd WindowLogMax={}: {}",
+            ZSTD_LONG_WINDOW_LOG_MAX,
+            zstd::zstd_safe::get_error_name(code)
+        )
+    })?;
+    Ok(zstd::stream::read::Decoder::with_context(reader, dctx))
+}
 
 pub(crate) fn build(
     input: &Path,
@@ -216,7 +244,17 @@ pub(crate) fn build(
         rolling_blockhashes.insert(genesis.genesis_hash, 0, 0)?;
     }
 
-    while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
+    while let Some(raw) = scanner
+        .next_node_timed(Some(&mut timings))
+        .with_context(|| {
+            format!(
+                "scan hot archive input {} after blocks={} car_entries={}",
+                input.display(),
+                footer.blocks,
+                footer.car_entries
+            )
+        })?
+    {
         footer.car_entries += 1;
         footer.car_payload_bytes += raw.payload_len as u64;
         footer.decoded_node_payload_bytes += raw.payload_len as u64;
@@ -366,9 +404,11 @@ pub(crate) fn build_hot_blocks(
     input: &Path,
     output_dir: &Path,
     previous_car: Option<&Path>,
+    registry_dir: Option<&Path>,
     level: i32,
     max_blocks: Option<u64>,
     resume: bool,
+    include_access: bool,
 ) -> Result<()> {
     anyhow::ensure!(
         level >= 0,
@@ -382,6 +422,7 @@ pub(crate) fn build_hot_blocks(
 
     let registry_path = output_dir.join(REGISTRY_FILE);
     let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
+    let registry_index_path = output_dir.join(REGISTRY_INDEX_FILE);
     let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
     let blockhash_has_required_genesis = match &genesis {
         Some(genesis) if crate::file_nonempty(&blockhash_registry_path) => {
@@ -393,7 +434,15 @@ pub(crate) fn build_hot_blocks(
         Some(_) => false,
         None => true,
     };
-    if !(resume
+    if let Some(registry_dir) = registry_dir {
+        reuse_hot_registry_sidecars(
+            registry_dir,
+            &registry_path,
+            &registry_counts_path,
+            &registry_index_path,
+            &blockhash_registry_path,
+        )?;
+    } else if !(resume
         && crate::file_nonempty(&registry_path)
         && crate::file_nonempty(&registry_counts_path)
         && crate::file_nonempty(&blockhash_registry_path)
@@ -407,8 +456,13 @@ pub(crate) fn build_hot_blocks(
         )?;
     }
 
-    let store = KeyStore::load(&registry_path)?;
-    let key_index = KeyIndex::build(store.keys.clone());
+    let key_index = load_or_build_registry_key_index(&registry_path, &registry_index_path, resume)?;
+    let known_program_ids = KnownProgramIds::from_index(&key_index);
+    let access_store = if include_access {
+        Some(KeyStore::load(&registry_path)?)
+    } else {
+        None
+    };
     let blockhashes = load_blockhash_registry_plain(&blockhash_registry_path)?;
     let blockhash_id_offset = blockhash_id_offset_for_genesis(&genesis, &blockhashes)?;
 
@@ -432,9 +486,13 @@ pub(crate) fn build_hot_blocks(
     let signatures_file = File::create(&signatures_path)
         .with_context(|| format!("create {}", signatures_path.display()))?;
     let mut signatures_writer = BufWriter::with_capacity(BUFFER_SIZE, signatures_file);
-    let access_file =
-        File::create(&access_path).with_context(|| format!("create {}", access_path.display()))?;
-    let mut access_writer = BufWriter::with_capacity(BUFFER_SIZE, access_file);
+    let mut access_writer = if include_access {
+        let access_file = File::create(&access_path)
+            .with_context(|| format!("create {}", access_path.display()))?;
+        Some(BufWriter::with_capacity(BUFFER_SIZE, access_file))
+    } else {
+        None
+    };
     let poh_file =
         File::create(&poh_path).with_context(|| format!("create {}", poh_path.display()))?;
     let mut poh_writer =
@@ -557,7 +615,7 @@ pub(crate) fn build_hot_blocks(
                 access_signature_bytes.clear();
                 let (hot_block, block_signature_count) = hot_block_from_archive_block(
                     record,
-                    &store,
+                    &known_program_ids,
                     &slot_to_block_id,
                     &mut vote_hashes,
                     &mut signatures_writer,
@@ -607,26 +665,40 @@ pub(crate) fn build_hot_blocks(
                     shredding: block_shredding,
                 })?;
                 timings.hot_poh_write += poh_started.elapsed();
-                access_bytes.clear();
-                let access_blob = build_archive_v2_block_access_blob(
-                    &hot_block,
-                    &store,
-                    &blockhashes,
-                    &previous_tail,
-                    &access_signature_bytes,
-                    &vote_hashes.rows,
-                )
-                .with_context(|| format!("slot {slot} block access sidecar"))?;
-                wincode::config::serialize_into(
-                    &mut access_bytes,
-                    &access_blob,
-                    wincode_leb128_config(),
-                )?;
-                let access_len = u32::try_from(access_bytes.len())
-                    .context("archive v2 block access payload exceeds u32::MAX")?;
-                access_writer
-                    .write_all(&access_bytes)
-                    .with_context(|| format!("write {}", access_path.display()))?;
+                if let (Some(access_writer), Some(store)) =
+                    (access_writer.as_mut(), access_store.as_ref())
+                {
+                    access_bytes.clear();
+                    let access_blob = build_archive_v2_block_access_blob(
+                        &hot_block,
+                        &store,
+                        &blockhashes,
+                        &previous_tail,
+                        &access_signature_bytes,
+                        &vote_hashes.rows,
+                    )
+                    .with_context(|| format!("slot {slot} block access sidecar"))?;
+                    wincode::config::serialize_into(
+                        &mut access_bytes,
+                        &access_blob,
+                        wincode_leb128_config(),
+                    )?;
+                    let access_len = u32::try_from(access_bytes.len())
+                        .context("archive v2 block access payload exceeds u32::MAX")?;
+                    access_writer
+                        .write_all(&access_bytes)
+                        .with_context(|| format!("write {}", access_path.display()))?;
+                    access_rows.push(ArchiveV2BlockAccessIndexRow {
+                        block_id,
+                        slot,
+                        access_offset,
+                        access_len,
+                        tx_count,
+                        signature_count: block_signature_count,
+                    });
+                    access_offset += access_len as u64;
+                    access_file_bytes += access_len as u64;
+                }
                 timings.wincode_encode += encode_started.elapsed();
 
                 rows.push(ArchiveV2HotBlockIndexRow {
@@ -640,19 +712,9 @@ pub(crate) fn build_hot_blocks(
                     first_signature_ordinal,
                     signature_count: block_signature_count,
                 });
-                access_rows.push(ArchiveV2BlockAccessIndexRow {
-                    block_id,
-                    slot,
-                    access_offset,
-                    access_len,
-                    tx_count,
-                    signature_count: block_signature_count,
-                });
                 blob_offset += compressed_len as u64;
-                access_offset += access_len as u64;
                 uncompressed_bytes += uncompressed_len as u64;
                 compressed_bytes += compressed_len as u64;
-                access_file_bytes += access_len as u64;
                 first_tx_ordinal += tx_count as u64;
                 first_signature_ordinal += block_signature_count as u64;
 
@@ -664,6 +726,13 @@ pub(crate) fn build_hot_blocks(
                 progress.update_slot(slot);
                 progress.update(1, tx_count as u64);
                 pending.clear();
+                trim_hot_memory(
+                    block_id,
+                    &mut block_bytes,
+                    &mut compressed_buf,
+                    &mut access_bytes,
+                    &mut access_signature_bytes,
+                );
                 if max_blocks.is_some_and(|limit| rows.len() as u64 >= limit) {
                     break;
                 }
@@ -681,14 +750,18 @@ pub(crate) fn build_hot_blocks(
     signatures_writer
         .flush()
         .with_context(|| format!("flush {}", signatures_path.display()))?;
-    access_writer
-        .flush()
-        .with_context(|| format!("flush {}", access_path.display()))?;
+    if let Some(access_writer) = access_writer.as_mut() {
+        access_writer
+            .flush()
+            .with_context(|| format!("flush {}", access_path.display()))?;
+    }
     poh_writer.flush()?;
     shredding_writer.flush()?;
     vote_hashes.write(&vote_hash_registry_path)?;
     write_archive_v2_hot_block_index(&index_path, blob_offset, level, 0, &rows)?;
-    write_archive_v2_block_access_index(&access_index_path, access_offset, 0, &access_rows)?;
+    if include_access {
+        write_archive_v2_block_access_index(&access_index_path, access_offset, 0, &access_rows)?;
+    }
     write_hot_meta(
         &mut meta_writer,
         &ArchiveV2HotMetaRecord::Footer(footer.clone()),
@@ -702,13 +775,14 @@ pub(crate) fn build_hot_blocks(
         0.0
     };
     info!(
-        "Archive V2 hot-block build complete in {:.2}s: blocks={} txs={} signatures={} level={} max_blocks={:?} uncompressed_bytes={} compressed_bytes={} access_bytes={} ratio_pct={:.2} compact_vote_ix={} vote_bank_hash_refs={} vote_bank_hash_raw={} vote_bank_hash_conflict_raw={} vote_block_id_refs={} vote_block_id_raw={} vote_block_id_zero={} vote_block_id_conflict_raw={} blocks_file={} index={} access={} access_index={} meta={} signatures={} vote_hash_registry={} poh={} shredding={}",
+        "Archive V2 hot-block build complete in {:.2}s: blocks={} txs={} signatures={} level={} max_blocks={:?} include_access={} uncompressed_bytes={} compressed_bytes={} access_bytes={} ratio_pct={:.2} compact_vote_ix={} vote_bank_hash_refs={} vote_bank_hash_raw={} vote_bank_hash_conflict_raw={} vote_block_id_refs={} vote_block_id_raw={} vote_block_id_zero={} vote_block_id_conflict_raw={} blocks_file={} index={} access={} access_index={} meta={} signatures={} vote_hash_registry={} poh={} shredding={}",
         elapsed,
         rows.len(),
         first_tx_ordinal,
         first_signature_ordinal,
         level,
         max_blocks,
+        include_access,
         uncompressed_bytes,
         compressed_bytes,
         access_file_bytes,
@@ -723,8 +797,16 @@ pub(crate) fn build_hot_blocks(
         vote_hashes.block_id_conflict_raw,
         blocks_path.display(),
         index_path.display(),
-        access_path.display(),
-        access_index_path.display(),
+        if include_access {
+            access_path.display().to_string()
+        } else {
+            "skipped".to_string()
+        },
+        if include_access {
+            access_index_path.display().to_string()
+        } else {
+            "skipped".to_string()
+        },
         meta_path.display(),
         signatures_path.display(),
         vote_hash_registry_path.display(),
@@ -760,6 +842,181 @@ pub(crate) fn build_hot_blocks(
         timings.hot_zstd_buffer_reserves,
         timings.hot_zstd_buffer_capacity_max,
     );
+    Ok(())
+}
+
+fn trim_hot_memory(
+    next_block_id: u32,
+    block_bytes: &mut Vec<u8>,
+    _compressed_buf: &mut Vec<u8>,
+    access_bytes: &mut Vec<u8>,
+    access_signature_bytes: &mut Vec<u8>,
+) {
+    trim_hot_reusable_buffer(block_bytes);
+    trim_hot_reusable_buffer(access_bytes);
+    trim_hot_reusable_buffer(access_signature_bytes);
+
+    if next_block_id.is_multiple_of(HOT_HEAP_TRIM_INTERVAL_BLOCKS) {
+        trim_process_heap();
+    }
+}
+
+fn trim_hot_reusable_buffer(buf: &mut Vec<u8>) {
+    buf.clear();
+    if buf.capacity() > HOT_REUSABLE_BUFFER_RETAIN_LIMIT {
+        *buf = Vec::with_capacity(HOT_REUSABLE_BUFFER_RETAIN_LIMIT);
+    }
+}
+
+#[cfg(all(unix, target_env = "gnu"))]
+fn trim_process_heap() {
+    unsafe {
+        let _ = malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(unix, target_env = "gnu")))]
+fn trim_process_heap() {}
+
+#[cfg(all(unix, target_env = "gnu"))]
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+fn reuse_hot_registry_sidecars(
+    registry_dir: &Path,
+    registry_path: &Path,
+    registry_counts_path: &Path,
+    registry_index_path: &Path,
+    blockhash_registry_path: &Path,
+) -> Result<()> {
+    let source_registry = registry_dir.join(REGISTRY_FILE);
+    let source_counts = registry_dir.join(REGISTRY_COUNTS_FILE);
+    let source_index = registry_dir.join(REGISTRY_INDEX_FILE);
+    let source_blockhash = registry_dir.join(BLOCKHASH_REGISTRY_FILE);
+    anyhow::ensure!(
+        crate::file_nonempty(&source_registry)
+            && crate::file_nonempty(&source_counts)
+            && crate::file_nonempty(&source_blockhash),
+        "registry dir {} must contain non-empty {}, {}, and {}",
+        registry_dir.display(),
+        REGISTRY_FILE,
+        REGISTRY_COUNTS_FILE,
+        BLOCKHASH_REGISTRY_FILE
+    );
+    link_or_copy_registry_sidecar(&source_registry, registry_path)?;
+    link_or_copy_registry_sidecar(&source_counts, registry_counts_path)?;
+    if crate::file_nonempty(&source_index) {
+        link_or_copy_registry_sidecar(&source_index, registry_index_path)?;
+    }
+    link_or_copy_registry_sidecar(&source_blockhash, blockhash_registry_path)?;
+    info!(
+        "Reusing Archive V2 registry sidecars from {}",
+        registry_dir.display()
+    );
+    Ok(())
+}
+
+fn link_or_copy_registry_sidecar(source: &Path, target: &Path) -> Result<()> {
+    if source == target {
+        return Ok(());
+    }
+    if crate::file_nonempty(target) {
+        std::fs::remove_file(target).with_context(|| format!("remove {}", target.display()))?;
+    }
+    match std::fs::hard_link(source, target) {
+        Ok(()) => Ok(()),
+        Err(link_err) => {
+            std::fs::copy(source, target)
+                .with_context(|| format!("copy {} to {}", source.display(), target.display()))?;
+            info!(
+                "Copied registry sidecar {} to {} after hard-link failed: {}",
+                source.display(),
+                target.display(),
+                link_err
+            );
+            Ok(())
+        }
+    }
+}
+
+fn load_or_build_registry_key_index(
+    registry_path: &Path,
+    registry_index_path: &Path,
+    resume: bool,
+) -> Result<KeyIndex> {
+    let expected_keys = registry_key_count(registry_path)?;
+    if resume && crate::file_nonempty(registry_index_path) {
+        let started = Instant::now();
+        match KeyIndex::load(registry_index_path) {
+            Ok(index) if index.len() == expected_keys => {
+                info!(
+                    "Loaded Archive V2 registry MPHF index in {:.2}s: keys={} path={}",
+                    started.elapsed().as_secs_f64(),
+                    index.len(),
+                    registry_index_path.display()
+                );
+                return Ok(index);
+            }
+            Ok(index) => {
+                warn!(
+                    "Ignoring stale Archive V2 registry MPHF index: path={} keys={} expected={}",
+                    registry_index_path.display(),
+                    index.len(),
+                    expected_keys
+                );
+            }
+            Err(err) => {
+                warn!(
+                    "Ignoring unreadable Archive V2 registry MPHF index: path={} error={:#}",
+                    registry_index_path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    let started = Instant::now();
+    info!(
+        "Building missing Archive V2 registry MPHF index in-process: {}",
+        registry_index_path.display()
+    );
+    let store = KeyStore::load(registry_path)
+        .with_context(|| format!("load registry {}", registry_path.display()))?;
+    let index = KeyIndex::build_from_slice(&store.keys);
+    write_registry_key_index_atomic(&index, registry_index_path)?;
+    info!(
+        "Built Archive V2 registry MPHF index in {:.2}s: keys={} path={}",
+        started.elapsed().as_secs_f64(),
+        index.len(),
+        registry_index_path.display()
+    );
+    Ok(index)
+}
+
+fn registry_key_count(registry_path: &Path) -> Result<usize> {
+    let len = std::fs::metadata(registry_path)
+        .with_context(|| format!("stat registry {}", registry_path.display()))?
+        .len();
+    anyhow::ensure!(
+        len % 32 == 0,
+        "invalid registry size {} (not multiple of 32): {}",
+        len,
+        registry_path.display()
+    );
+    let keys = len / 32;
+    usize::try_from(keys).context("registry key count exceeds usize")
+}
+
+fn write_registry_key_index_atomic(index: &KeyIndex, path: &Path) -> Result<()> {
+    let tmp_path = path.with_extension("mphf.tmp");
+    if crate::file_nonempty(&tmp_path) {
+        std::fs::remove_file(&tmp_path)
+            .with_context(|| format!("remove {}", tmp_path.display()))?;
+    }
+    index.write(&tmp_path)?;
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
     Ok(())
 }
 
@@ -913,7 +1170,7 @@ fn load_vote_hash_registry(path: &Path) -> Result<Vec<VoteHashRegistryRow>> {
 
 fn hot_block_from_archive_block(
     block: WincodeArchiveV2Block,
-    store: &KeyStore,
+    known_program_ids: &KnownProgramIds,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
     signatures_writer: &mut impl Write,
@@ -955,7 +1212,7 @@ fn hot_block_from_archive_block(
             .context("hot message byte region exceeds u32::MAX")?;
         let message_build_started = Instant::now();
         let (message, mut flags) =
-            hot_message_from_owned(tx.message, store, slot_to_block_id, vote_hashes)?;
+            hot_message_from_owned(tx.message, known_program_ids, slot_to_block_id, vote_hashes)?;
         timings.hot_message_build += message_build_started.elapsed();
         let message_encode_started = Instant::now();
         let before_message_len = message_bytes.len();
@@ -1250,6 +1507,8 @@ fn collect_access_instruction_vote_hash_refs(
             collect_access_vote_hash_ref(tower.block_id_hash, vote_hash_block_ids);
         }
         ArchiveV2HotInstructionData::Raw(_)
+        | ArchiveV2HotInstructionData::UnknownSystem(_)
+        | ArchiveV2HotInstructionData::UnknownVote(_)
         | ArchiveV2HotInstructionData::ComputeBudget(_)
         | ArchiveV2HotInstructionData::System(_) => {}
     }
@@ -1451,7 +1710,7 @@ fn hot_rewards_from_archive(rewards: WincodeArchiveV2Rewards) -> Result<ArchiveV
 
 fn hot_message_from_owned(
     message: OwnedCompactMessage,
-    store: &KeyStore,
+    known_program_ids: &KnownProgramIds,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<(ArchiveV2HotMessagePayload, u32)> {
@@ -1460,7 +1719,7 @@ fn hot_message_from_owned(
             let (instructions, has_compact_vote) = hot_instructions_from_owned(
                 message.instructions,
                 &message.account_keys,
-                store,
+                known_program_ids,
                 slot_to_block_id,
                 vote_hashes,
             )?;
@@ -1483,7 +1742,7 @@ fn hot_message_from_owned(
             let (instructions, has_compact_vote) = hot_instructions_from_owned(
                 message.instructions,
                 &message.account_keys,
-                store,
+                known_program_ids,
                 slot_to_block_id,
                 vote_hashes,
             )?;
@@ -1508,7 +1767,7 @@ fn hot_message_from_owned(
 fn hot_instructions_from_owned(
     instructions: Vec<OwnedCompactInstruction>,
     account_keys: &[CompactPubkey],
-    store: &KeyStore,
+    known_program_ids: &KnownProgramIds,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<(Vec<ArchiveV2HotInstruction>, bool)> {
@@ -1516,22 +1775,26 @@ fn hot_instructions_from_owned(
     let mut out = Vec::with_capacity(instructions.len());
     for instruction in instructions {
         let program_id =
-            resolve_static_program_id(account_keys, instruction.program_id_index, store);
-        let data = if program_id.is_some_and(|program_id| program_id == vote_program_id_bytes()) {
+            resolve_static_program_compact_id(account_keys, instruction.program_id_index);
+        let data = if known_program_ids.is_vote(program_id) {
             let data =
                 parse_hot_vote_instruction_data(&instruction.data, slot_to_block_id, vote_hashes)
                     .with_context(|| "parse vote instruction data")?;
-            if !matches!(data, ArchiveV2HotInstructionData::Raw(_)) {
+            if matches!(
+                data,
+                ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(_)
+                    | ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch { .. }
+                    | ArchiveV2HotInstructionData::VoteTowerSync(_)
+                    | ArchiveV2HotInstructionData::VoteTowerSyncSwitch { .. }
+            ) {
                 has_compact_vote = true;
                 vote_hashes.compact_vote_ix += 1;
             }
             data
-        } else if program_id
-            .is_some_and(|program_id| program_id == compute_budget_program_id_bytes())
-        {
+        } else if known_program_ids.is_compute_budget(program_id) {
             parse_hot_compute_budget_instruction_data(&instruction.data)
                 .with_context(|| "parse compute budget instruction data")?
-        } else if program_id.is_some_and(|program_id| program_id == system_program_id_bytes()) {
+        } else if known_program_ids.is_system(program_id) {
             parse_hot_system_instruction_data(&instruction.data)
                 .with_context(|| "parse system instruction data")?
         } else {
@@ -1546,14 +1809,46 @@ fn hot_instructions_from_owned(
     Ok((out, has_compact_vote))
 }
 
-fn resolve_static_program_id(
+fn resolve_static_program_compact_id(
     account_keys: &[CompactPubkey],
     program_id_index: u8,
-    store: &KeyStore,
-) -> Option<[u8; 32]> {
-    account_keys
-        .get(program_id_index as usize)
-        .and_then(|key| key.resolve(store))
+) -> Option<u32> {
+    match account_keys.get(program_id_index as usize)? {
+        CompactPubkey::Id(id) => Some(*id),
+        CompactPubkey::Raw(_) => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct KnownProgramIds {
+    vote: Option<u32>,
+    compute_budget: Option<u32>,
+    system: Option<u32>,
+}
+
+impl KnownProgramIds {
+    fn from_index(index: &KeyIndex) -> Self {
+        Self {
+            vote: index.lookup(&vote_program_id_bytes()),
+            compute_budget: index.lookup(&compute_budget_program_id_bytes()),
+            system: index.lookup(&system_program_id_bytes()),
+        }
+    }
+
+    #[inline]
+    fn is_vote(&self, id: Option<u32>) -> bool {
+        id.is_some() && id == self.vote
+    }
+
+    #[inline]
+    fn is_compute_budget(&self, id: Option<u32>) -> bool {
+        id.is_some() && id == self.compute_budget
+    }
+
+    #[inline]
+    fn is_system(&self, id: Option<u32>) -> bool {
+        id.is_some() && id == self.system
+    }
 }
 
 fn vote_program_id_bytes() -> [u8; 32] {
@@ -1598,38 +1893,102 @@ fn parse_hot_vote_instruction_data(
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<ArchiveV2HotInstructionData> {
-    let Some((&tag0, rest)) = data.split_first() else {
-        return Ok(ArchiveV2HotInstructionData::Raw(Vec::new()));
-    };
-    if rest.len() < 3 {
-        return Ok(ArchiveV2HotInstructionData::Raw(data.to_vec()));
+    if data.is_empty() {
+        return Ok(ArchiveV2HotInstructionData::UnknownVote(Vec::new()));
     }
-    let variant = u32::from_le_bytes([tag0, rest[0], rest[1], rest[2]]);
-    let mut cursor = VoteInstructionCursor::new(&data[4..]);
-    let parsed = match variant {
-        12 => {
-            let update = parse_vote_state_update(&mut cursor, slot_to_block_id, vote_hashes)?;
-            cursor.ensure_eof()?;
+
+    let instruction_result: std::result::Result<VoteInstruction, _> = bincode::options()
+        .with_limit(VOTE_INSTRUCTION_DECODE_LIMIT)
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize(data);
+    let instruction = match instruction_result {
+        Ok(instruction) => instruction,
+        Err(err) => {
+            match try_parse_historical_tower_sync_instruction_data(
+                data,
+                slot_to_block_id,
+                vote_hashes,
+            )
+            .with_context(|| {
+                format!(
+                    "parse historical vote tower sync instruction variant={} len={} prefix={}",
+                    vote_instruction_variant_label(data),
+                    data.len(),
+                    hex_prefix(data, 32)
+                )
+            }) {
+                Ok(Some(parsed)) => return Ok(parsed),
+                Ok(None) if is_tower_sync_vote_variant(data) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Ok(None) => {}
+                Err(_) if is_tower_sync_vote_variant(data) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Err(historical_err) => return Err(historical_err),
+            }
+            Err::<VoteInstruction, _>(err).with_context(|| {
+                format!(
+                    "canonical vote instruction decode failed: variant={} len={} prefix={}",
+                    vote_instruction_variant_label(data),
+                    data.len(),
+                    hex_prefix(data, 32)
+                )
+            })?
+        }
+    };
+
+    let parsed = match instruction {
+        VoteInstruction::CompactUpdateVoteState(update) => {
+            let update =
+                match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
+                {
+                    Ok(update) => update,
+                    Err(err) if is_uncompactable_vote_update_error(&err) => {
+                        return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                    }
+                    Err(err) => return Err(err),
+                };
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update)
         }
-        13 => {
-            let update = parse_vote_state_update(&mut cursor, slot_to_block_id, vote_hashes)?;
-            let switch_proof_hash = vote_hashes.ref_aux_hash(cursor.read_hash()?);
-            cursor.ensure_eof()?;
+        VoteInstruction::CompactUpdateVoteStateSwitch(update, switch_proof_hash) => {
+            let update =
+                match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
+                {
+                    Ok(update) => update,
+                    Err(err) if is_uncompactable_vote_update_error(&err) => {
+                        return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                    }
+                    Err(err) => return Err(err),
+                };
+            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
                 update,
                 switch_proof_hash,
             }
         }
-        14 => {
-            let tower = parse_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
-            cursor.ensure_eof()?;
+        VoteInstruction::TowerSync(tower) => {
+            let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
+            {
+                Ok(tower) => tower,
+                Err(err) if is_uncompactable_vote_update_error(&err) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Err(err) => return Err(err),
+            };
             ArchiveV2HotInstructionData::VoteTowerSync(tower)
         }
-        15 => {
-            let tower = parse_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
-            let switch_proof_hash = vote_hashes.ref_aux_hash(cursor.read_hash()?);
-            cursor.ensure_eof()?;
+        VoteInstruction::TowerSyncSwitch(tower, switch_proof_hash) => {
+            let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
+            {
+                Ok(tower) => tower,
+                Err(err) if is_uncompactable_vote_update_error(&err) => {
+                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+                }
+                Err(err) => return Err(err),
+            };
+            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
             ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
                 tower,
                 switch_proof_hash,
@@ -1640,22 +1999,135 @@ fn parse_hot_vote_instruction_data(
     Ok(parsed)
 }
 
-fn parse_hot_compute_budget_instruction_data(data: &[u8]) -> Result<ArchiveV2HotInstructionData> {
-    let Ok(Some(parsed)) = try_parse_hot_compute_budget_instruction_data(data) else {
-        return Ok(ArchiveV2HotInstructionData::Raw(data.to_vec()));
+fn is_uncompactable_vote_update_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("vote lockout history length")
+        && message.contains("exceeds MAX_LOCKOUT_HISTORY")
+}
+
+fn try_parse_historical_tower_sync_instruction_data(
+    data: &[u8],
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+) -> Result<Option<ArchiveV2HotInstructionData>> {
+    if data.len() < 4 {
+        return Ok(None);
+    }
+    let mut cursor = VoteInstructionCursor::new(data);
+    let variant = cursor.read_u32_le()?;
+    let parsed = match variant {
+        14 => {
+            let tower = read_historical_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
+            cursor.ensure_eof()?;
+            ArchiveV2HotInstructionData::VoteTowerSync(tower)
+        }
+        15 => {
+            let tower = read_historical_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
+            let switch_proof_hash = vote_hashes.ref_aux_hash(cursor.read_pubkey()?);
+            cursor.ensure_eof()?;
+            ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
+                tower,
+                switch_proof_hash,
+            }
+        }
+        _ => return Ok(None),
     };
-    Ok(parsed)
+    Ok(Some(parsed))
+}
+
+fn read_historical_tower_sync(
+    cursor: &mut VoteInstructionCursor<'_>,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+) -> Result<ArchiveV2VoteTowerSync> {
+    let lockout_len = cursor.read_u64_le()?;
+    anyhow::ensure!(
+        lockout_len <= 31,
+        "historical tower sync lockout history length {} exceeds MAX_LOCKOUT_HISTORY",
+        lockout_len
+    );
+    let mut lockouts = Vec::with_capacity(lockout_len as usize);
+    for _ in 0..lockout_len {
+        let slot = cursor.read_u64_le()?;
+        let confirmation_count = cursor.read_u32_le()?;
+        let confirmation_count = u8::try_from(confirmation_count)
+            .context("historical vote confirmation count exceeds u8::MAX")?;
+        lockouts.push((slot, confirmation_count));
+    }
+    let root = cursor.read_option_u64_le()?;
+    let hash = cursor.read_pubkey()?;
+    let timestamp = cursor.read_option_i64_le()?;
+    let block_id = cursor.read_pubkey()?;
+
+    let (update, last_slot) = archive_vote_state_update_from_parts(
+        root,
+        lockouts.into_iter().map(Ok),
+        hash,
+        timestamp,
+        slot_to_block_id,
+        vote_hashes,
+    )?;
+    let block_id_hash = vote_hashes.ref_block_id_hash(last_slot, block_id, slot_to_block_id)?;
+    Ok(ArchiveV2VoteTowerSync {
+        update,
+        block_id_hash,
+    })
+}
+
+fn vote_instruction_variant_label(data: &[u8]) -> String {
+    if data.len() < 4 {
+        return "short".to_string();
+    }
+    u32::from_le_bytes([data[0], data[1], data[2], data[3]]).to_string()
+}
+
+fn is_tower_sync_vote_variant(data: &[u8]) -> bool {
+    data.len() >= 4
+        && matches!(
+            u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+            14 | 15
+        )
+}
+
+fn hex_prefix(data: &[u8], max_len: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = &data[..data.len().min(max_len)];
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    if data.len() > max_len {
+        out.push_str("...");
+    }
+    out
+}
+
+fn parse_hot_compute_budget_instruction_data(data: &[u8]) -> Result<ArchiveV2HotInstructionData> {
+    match try_parse_hot_compute_budget_instruction_data(data).with_context(|| {
+        format!(
+            "parse compute budget instruction data len={} prefix={}",
+            data.len(),
+            hex_prefix(data, 32)
+        )
+    })? {
+        Some(parsed) => Ok(parsed),
+        None => Ok(ArchiveV2HotInstructionData::Raw(data.to_vec())),
+    }
 }
 
 fn try_parse_hot_compute_budget_instruction_data(
     data: &[u8],
 ) -> Result<Option<ArchiveV2HotInstructionData>> {
     let Some((&tag, rest)) = data.split_first() else {
-        return Ok(None);
+        anyhow::bail!("empty compute budget instruction data");
     };
     let mut cursor = VoteInstructionCursor::new(rest);
     let parsed = match tag {
         0 => {
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             cursor.ensure_eof()?;
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::Unused,
@@ -1663,28 +2135,36 @@ fn try_parse_hot_compute_budget_instruction_data(
         }
         1 => {
             let bytes = cursor.read_u32_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::RequestHeapFrame(bytes),
             )
         }
         2 => {
             let units = cursor.read_u32_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(units),
             )
         }
         3 => {
             let micro_lamports = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::SetComputeUnitPrice(micro_lamports),
             )
         }
         4 => {
             let bytes = cursor.read_u32_le()?;
-            cursor.ensure_eof()?;
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
             ArchiveV2HotInstructionData::ComputeBudget(
                 ArchiveV2ComputeBudgetInstructionData::SetLoadedAccountsDataSizeLimit(bytes),
             )
@@ -1695,23 +2175,36 @@ fn try_parse_hot_compute_budget_instruction_data(
 }
 
 fn parse_hot_system_instruction_data(data: &[u8]) -> Result<ArchiveV2HotInstructionData> {
-    let Ok(Some(parsed)) = try_parse_hot_system_instruction_data(data) else {
-        return Ok(ArchiveV2HotInstructionData::Raw(data.to_vec()));
-    };
-    Ok(parsed)
+    match try_parse_hot_system_instruction_data(data) {
+        Some(parsed) => Ok(parsed),
+        None => Ok(ArchiveV2HotInstructionData::UnknownSystem(data.to_vec())),
+    }
 }
 
-fn try_parse_hot_system_instruction_data(
+fn try_parse_hot_system_instruction_data(data: &[u8]) -> Option<ArchiveV2HotInstructionData> {
+    try_parse_hot_system_instruction_data_inner(data)
+        .ok()
+        .flatten()
+}
+
+fn try_parse_hot_system_instruction_data_inner(
     data: &[u8],
 ) -> Result<Option<ArchiveV2HotInstructionData>> {
     let mut cursor = VoteInstructionCursor::new(data);
     let variant = cursor.read_u32_le()?;
+    macro_rules! preserve_raw_on_trailing_bytes {
+        () => {
+            if !cursor.is_eof() {
+                return Ok(None);
+            }
+        };
+    }
     let parsed = match variant {
         0 => {
             let lamports = cursor.read_u64_le()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::CreateAccount {
                 lamports,
                 space,
@@ -1720,12 +2213,12 @@ fn try_parse_hot_system_instruction_data(
         }
         1 => {
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::Assign { owner })
         }
         2 => {
             let lamports = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::Transfer {
                 lamports,
             })
@@ -1736,7 +2229,7 @@ fn try_parse_hot_system_instruction_data(
             let lamports = cursor.read_u64_le()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::CreateAccountWithSeed {
                     base,
@@ -1748,33 +2241,33 @@ fn try_parse_hot_system_instruction_data(
             )
         }
         4 => {
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::AdvanceNonceAccount)
         }
         5 => {
             let lamports = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::WithdrawNonceAccount { lamports },
             )
         }
         6 => {
             let authority = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::InitializeNonceAccount { authority },
             )
         }
         7 => {
             let authority = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::AuthorizeNonceAccount { authority },
             )
         }
         8 => {
             let space = cursor.read_u64_le()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::Allocate { space })
         }
         9 => {
@@ -1782,7 +2275,7 @@ fn try_parse_hot_system_instruction_data(
             let seed = cursor.read_system_seed()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::AllocateWithSeed {
                 base,
                 seed,
@@ -1794,7 +2287,7 @@ fn try_parse_hot_system_instruction_data(
             let base = cursor.read_pubkey()?;
             let seed = cursor.read_system_seed()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::AssignWithSeed {
                 base,
                 seed,
@@ -1805,7 +2298,7 @@ fn try_parse_hot_system_instruction_data(
             let lamports = cursor.read_u64_le()?;
             let from_seed = cursor.read_system_seed()?;
             let from_owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::TransferWithSeed {
                 lamports,
                 from_seed,
@@ -1813,14 +2306,14 @@ fn try_parse_hot_system_instruction_data(
             })
         }
         12 => {
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(ArchiveV2SystemInstructionData::UpgradeNonceAccount)
         }
         13 => {
             let lamports = cursor.read_u64_le()?;
             let space = cursor.read_u64_le()?;
             let owner = cursor.read_pubkey()?;
-            cursor.ensure_eof()?;
+            preserve_raw_on_trailing_bytes!();
             ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::CreateAccountAllowPrefund {
                     lamports,
@@ -1834,57 +2327,87 @@ fn try_parse_hot_system_instruction_data(
     Ok(Some(parsed))
 }
 
-fn parse_tower_sync(
-    cursor: &mut VoteInstructionCursor<'_>,
+fn archive_tower_sync_from_solana(
+    tower: &SolanaTowerSync,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<ArchiveV2VoteTowerSync> {
-    let (update, last_slot) = parse_vote_state_update_parts(cursor, slot_to_block_id, vote_hashes)?;
+    let (update, last_slot) = archive_vote_state_update_from_parts(
+        tower.root,
+        tower.lockouts.iter().map(|lockout| {
+            Ok((
+                lockout.slot(),
+                u8::try_from(lockout.confirmation_count())
+                    .context("vote confirmation count exceeds u8::MAX")?,
+            ))
+        }),
+        tower.hash.to_bytes(),
+        tower.timestamp,
+        slot_to_block_id,
+        vote_hashes,
+    )?;
     let block_id_hash =
-        vote_hashes.ref_block_id_hash(last_slot, cursor.read_hash()?, slot_to_block_id)?;
+        vote_hashes.ref_block_id_hash(last_slot, tower.block_id.to_bytes(), slot_to_block_id)?;
     Ok(ArchiveV2VoteTowerSync {
         update,
         block_id_hash,
     })
 }
 
-fn parse_vote_state_update(
-    cursor: &mut VoteInstructionCursor<'_>,
+fn archive_vote_state_update_from_solana(
+    update: &SolanaVoteStateUpdate,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<ArchiveV2VoteStateUpdate> {
-    Ok(parse_vote_state_update_parts(cursor, slot_to_block_id, vote_hashes)?.0)
+    Ok(archive_vote_state_update_from_parts(
+        update.root,
+        update.lockouts.iter().map(|lockout| {
+            Ok((
+                lockout.slot(),
+                u8::try_from(lockout.confirmation_count())
+                    .context("vote confirmation count exceeds u8::MAX")?,
+            ))
+        }),
+        update.hash.to_bytes(),
+        update.timestamp,
+        slot_to_block_id,
+        vote_hashes,
+    )?
+    .0)
 }
 
-fn parse_vote_state_update_parts(
-    cursor: &mut VoteInstructionCursor<'_>,
+fn archive_vote_state_update_from_parts<I>(
+    root: Option<u64>,
+    lockouts: I,
+    hash: [u8; 32],
+    timestamp: Option<i64>,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
-) -> Result<(ArchiveV2VoteStateUpdate, Option<u64>)> {
-    let root_raw = cursor.read_u64_le()?;
-    let root = (root_raw != u64::MAX).then_some(root_raw);
-    let len = cursor.read_short_vec_len()?;
+) -> Result<(ArchiveV2VoteStateUpdate, Option<u64>)>
+where
+    I: IntoIterator<Item = Result<(u64, u8)>>,
+{
+    let lockouts = lockouts.into_iter().collect::<Result<Vec<_>>>()?;
     anyhow::ensure!(
-        len <= 31,
-        "vote lockout history length {len} exceeds MAX_LOCKOUT_HISTORY"
+        lockouts.len() <= 31,
+        "vote lockout history length {} exceeds MAX_LOCKOUT_HISTORY",
+        lockouts.len()
     );
-    let mut lockout_offsets = Vec::with_capacity(len);
+    let mut lockout_offsets = Vec::with_capacity(lockouts.len());
     let mut slot = root.unwrap_or_default();
     let mut last_slot = None;
-    for _ in 0..len {
-        let offset = cursor.read_var_u64()?;
-        slot = slot
-            .checked_add(offset)
-            .context("vote lockout slot overflow")?;
-        let confirmation_count = cursor.read_u8()?;
+    for (next_slot, confirmation_count) in lockouts {
+        let offset = next_slot
+            .checked_sub(slot)
+            .context("vote lockout slots are not monotonic")?;
+        slot = next_slot;
         lockout_offsets.push(ArchiveV2VoteLockoutOffset {
             offset,
             confirmation_count,
         });
         last_slot = Some(slot);
     }
-    let hash = vote_hashes.ref_bank_hash(last_slot, cursor.read_hash()?, slot_to_block_id)?;
-    let timestamp = cursor.read_option_i64()?;
+    let hash = vote_hashes.ref_bank_hash(last_slot, hash, slot_to_block_id)?;
     Ok((
         ArchiveV2VoteStateUpdate {
             root,
@@ -1906,6 +2429,10 @@ impl<'a> VoteInstructionCursor<'a> {
         Self { bytes, pos: 0 }
     }
 
+    fn is_eof(&self) -> bool {
+        self.pos == self.bytes.len()
+    }
+
     fn ensure_eof(&self) -> Result<()> {
         anyhow::ensure!(
             self.pos == self.bytes.len(),
@@ -1913,15 +2440,6 @@ impl<'a> VoteInstructionCursor<'a> {
             self.bytes.len().saturating_sub(self.pos)
         );
         Ok(())
-    }
-
-    fn read_u8(&mut self) -> Result<u8> {
-        let byte = *self
-            .bytes
-            .get(self.pos)
-            .ok_or_else(|| anyhow!("unexpected EOF in instruction data"))?;
-        self.pos += 1;
-        Ok(byte)
     }
 
     fn read_u32_le(&mut self) -> Result<u32> {
@@ -1939,8 +2457,25 @@ impl<'a> VoteInstructionCursor<'a> {
         Ok(i64::from_le_bytes(bytes))
     }
 
-    fn read_hash(&mut self) -> Result<[u8; 32]> {
-        self.read_array::<32>()
+    fn read_option_u64_le(&mut self) -> Result<Option<u64>> {
+        match self.read_option_tag()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_u64_le()?)),
+            tag => anyhow::bail!("invalid bincode Option<u64> tag {tag}"),
+        }
+    }
+
+    fn read_option_i64_le(&mut self) -> Result<Option<i64>> {
+        match self.read_option_tag()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_i64_le()?)),
+            tag => anyhow::bail!("invalid bincode Option<i64> tag {tag}"),
+        }
+    }
+
+    fn read_option_tag(&mut self) -> Result<u8> {
+        let tag = self.read_array::<1>()?;
+        Ok(tag[0])
     }
 
     fn read_pubkey(&mut self) -> Result<[u8; 32]> {
@@ -1981,67 +2516,32 @@ impl<'a> VoteInstructionCursor<'a> {
         self.pos = end;
         Ok(out)
     }
-
-    fn read_option_i64(&mut self) -> Result<Option<i64>> {
-        match self.read_u8()? {
-            0 => Ok(None),
-            1 => Ok(Some(self.read_i64_le()?)),
-            tag => anyhow::bail!("invalid vote timestamp option tag {tag}"),
-        }
-    }
-
-    fn read_short_vec_len(&mut self) -> Result<usize> {
-        let mut value = 0u16;
-        for nth in 0..3 {
-            let byte = self.read_u8()?;
-            if byte == 0 && nth != 0 {
-                anyhow::bail!("alias short_vec length encoding in vote instruction");
-            }
-            if nth == 2 && (byte & 0x7c) != 0 {
-                anyhow::bail!("short_vec length overflows u16 in vote instruction");
-            }
-            let payload = u16::from(byte & 0x7f);
-            value |= payload
-                .checked_shl((nth * 7) as u32)
-                .context("short_vec length shift overflow")?;
-            if byte & 0x80 == 0 {
-                return Ok(value as usize);
-            }
-            anyhow::ensure!(nth < 2, "short_vec length extends past three bytes");
-        }
-        anyhow::bail!("invalid short_vec length")
-    }
-
-    fn read_var_u64(&mut self) -> Result<u64> {
-        let mut value = 0u64;
-        let mut shift = 0u32;
-        loop {
-            anyhow::ensure!(shift < u64::BITS, "vote varint left shift overflow");
-            let byte = self.read_u8()?;
-            let payload = u64::from(byte & 0x7f);
-            anyhow::ensure!(
-                payload <= (u64::MAX >> shift),
-                "vote varint value overflows u64"
-            );
-            value |= payload
-                .checked_shl(shift)
-                .context("vote varint shift overflow")?;
-            if byte & 0x80 == 0 {
-                anyhow::ensure!(
-                    !(byte == 0 && (shift != 0 || value != 0)),
-                    "vote varint has invalid trailing zero"
-                );
-                return Ok(value);
-            }
-            shift += 7;
-        }
-    }
 }
 
 pub(crate) fn build_no_registry(input: &Path, output_dir: &Path) -> Result<()> {
+    let genesis = genesis_epoch0::maybe_load_for_input(input)?;
+    let scanner = RawCarScanner::open(input)?;
+    build_no_registry_from_scanner(scanner, output_dir, genesis, &input.display().to_string())
+}
+
+pub(crate) fn build_no_registry_from_url(url: &str, output_dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        url.starts_with("http://") || url.starts_with("https://"),
+        "no-registry URL input must start with http:// or https://, got {url}"
+    );
+    let genesis = genesis_epoch0::maybe_load_for_label(url, output_dir)?;
+    let scanner = RawCarScanner::open_url(url)?;
+    build_no_registry_from_scanner(scanner, output_dir, genesis, url)
+}
+
+fn build_no_registry_from_scanner<R: Read>(
+    mut scanner: RawCarScanner<R>,
+    output_dir: &Path,
+    genesis: Option<GenesisArchive>,
+    input_label: &str,
+) -> Result<()> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
-    let genesis = genesis_epoch0::maybe_load_for_input(input)?;
     let blockhash_id_offset = genesis.as_ref().map(|_| 1).unwrap_or(0);
 
     let archive_path = output_dir.join(ARCHIVE_NO_REGISTRY_FILE);
@@ -2074,7 +2574,6 @@ pub(crate) fn build_no_registry(input: &Path, output_dir: &Path) -> Result<()> {
             .with_context(|| format!("write {}", blockhash_registry_path.display()))?;
     }
 
-    let mut scanner = RawCarScanner::open(input)?;
     scanner.skip_header()?;
     let mut pending = PendingBlock::default();
     let mut footer = WincodeArchiveV2Footer::default();
@@ -2185,6 +2684,7 @@ pub(crate) fn build_no_registry(input: &Path, output_dir: &Path) -> Result<()> {
         .with_context(|| format!("flush {}", blockhash_registry_path.display()))?;
     progress.final_report();
     info!("Archive V2 no-registry build complete");
+    info!("  input: {input_label}");
     info!("  archive: {}", archive_path.display());
     info!("  poh: {}", poh_path.display());
     info!(
@@ -2219,6 +2719,87 @@ pub(crate) fn build_no_registry(input: &Path, output_dir: &Path) -> Result<()> {
         timings.metadata_owned_fallback,
         timings.tx_scratch_max,
         timings.metadata_scratch_max,
+    );
+    Ok(())
+}
+
+pub(crate) fn build_registries(input: &Path, output_dir: &Path, force: bool) -> Result<()> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))?;
+
+    let registry_path = output_dir.join(REGISTRY_FILE);
+    let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
+    let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
+    if !force
+        && crate::file_nonempty(&registry_path)
+        && crate::file_nonempty(&registry_counts_path)
+        && crate::file_nonempty(&blockhash_registry_path)
+    {
+        info!(
+            "Reusing existing Archive V2 registries: {}, {}, {}",
+            registry_path.display(),
+            registry_counts_path.display(),
+            blockhash_registry_path.display()
+        );
+        return Ok(());
+    }
+
+    build_registry_and_blockhash_for_input(
+        input,
+        &registry_path,
+        Some(&registry_counts_path),
+        &blockhash_registry_path,
+    )?;
+    info!(
+        "Archive V2 registries built: registry={} registry_counts={} blockhash_registry={}",
+        registry_path.display(),
+        registry_counts_path.display(),
+        blockhash_registry_path.display()
+    );
+    Ok(())
+}
+
+pub(crate) fn build_registry_index(
+    registry_path: &Path,
+    output: Option<&Path>,
+    force: bool,
+) -> Result<()> {
+    let output_path = output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| registry_path.with_file_name(REGISTRY_INDEX_FILE));
+    if !force && crate::file_nonempty(&output_path) {
+        info!(
+            "Reusing existing Archive V2 registry index: {}",
+            output_path.display()
+        );
+        return Ok(());
+    }
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output dir {}", parent.display()))?;
+    }
+
+    let started = Instant::now();
+    info!(
+        "Building Archive V2 registry MPHF index: registry={} output={}",
+        registry_path.display(),
+        output_path.display()
+    );
+    let load_started = Instant::now();
+    let store = KeyStore::load(registry_path)
+        .with_context(|| format!("load registry {}", registry_path.display()))?;
+    let load_elapsed = load_started.elapsed();
+    let build_started = Instant::now();
+    let index = KeyIndex::build(store.keys);
+    let build_elapsed = build_started.elapsed();
+    write_registry_key_index_atomic(&index, &output_path)?;
+    info!(
+        "Archive V2 registry MPHF index built in {:.2}s: keys={} load={:.2}s build={:.2}s output={}",
+        started.elapsed().as_secs_f64(),
+        index.len(),
+        load_elapsed.as_secs_f64(),
+        build_elapsed.as_secs_f64(),
+        output_path.display()
     );
     Ok(())
 }
@@ -2627,14 +3208,14 @@ fn load_or_build_previous_tail(
                     })?
             } else if crate::file_nonempty(&sidecar_dir.join(BLOCKHASH_REGISTRY_FILE)) {
                 info!(
-                    "Previous epoch has blockhash registry without slot sidecar; scanning CAR for tail slots: {}",
+                    "Previous epoch has blockhash registry without slot sidecar; loading registry tail without slots: {}",
                     sidecar_dir.display()
                 );
-                read_blockhash_tail_from_car(previous_car, ROLLING_BLOCKHASH_CAPACITY)
+                read_blockhash_tail_from_registry_only(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY)
                     .with_context(|| {
                         format!(
-                            "read previous blockhash tail from {}",
-                            previous_car.display()
+                            "read previous blockhash tail from registry {}",
+                            sidecar_dir.display()
                         )
                     })?
             } else {
@@ -2797,6 +3378,22 @@ fn read_blockhash_tail_from_poh_sidecar(
             Ok(PreviousBlockhash { hash, slot })
         })
         .collect()
+}
+
+fn read_blockhash_tail_from_registry_only(
+    sidecar_dir: &Path,
+    max_entries: usize,
+) -> Result<Vec<PreviousBlockhash>> {
+    let blockhashes = load_blockhash_registry_plain(&sidecar_dir.join(BLOCKHASH_REGISTRY_FILE))?;
+    let start = blockhashes.len().saturating_sub(max_entries);
+    let mut tail = Vec::with_capacity(blockhashes.len() - start);
+    for hash in &blockhashes[start..] {
+        tail.push(PreviousBlockhash {
+            hash: *hash,
+            slot: 0,
+        });
+    }
+    Ok(tail)
 }
 
 fn infer_blockhash_registry_offset(blockhash_count: usize, block_count: usize) -> Result<usize> {
@@ -3936,7 +4533,7 @@ fn open_wincode_bench_input(input: &Path) -> Result<Box<dyn Read>> {
     let reader = BufReader::with_capacity(BUFFER_SIZE, file);
     if input.extension().is_some_and(|ext| ext == "zst") {
         return Ok(Box::new(
-            zstd::stream::read::Decoder::new(reader)
+            zstd_decoder_with_long_window(reader)
                 .with_context(|| format!("zstd decode {}", input.display()))?,
         ));
     }
@@ -5905,7 +6502,7 @@ fn bench_raw_hot_blocks_whole_zstd(input: &Path, index: Option<&Path>) -> Result
         .len();
     let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
     let reader = BufReader::with_capacity(BUFFER_SIZE, file);
-    let mut decoder = zstd::stream::read::Decoder::new(reader)
+    let mut decoder = zstd_decoder_with_long_window(reader)
         .with_context(|| format!("zstd decode {}", input.display()))?;
     let mut block_buf = Vec::with_capacity(2 << 20);
     let mut stats = ArchiveV2ZstdBenchStats::default();
@@ -7716,7 +8313,7 @@ pub(crate) fn analyze_hot_instruction_data(
         },
     );
     println!(
-        "instruction_data_payload_summary tx_payload_decoded={} tx_payload_raw={} metadata_decoded={} metadata_raw={} metadata_none={} metadata_with_inner={} inner_groups={} hot_compact_vote_update_vote_state={} hot_compact_vote_update_vote_state_switch={} hot_compact_vote_tower_sync={} hot_compact_vote_tower_sync_switch={} hot_compact_compute_budget={} hot_compact_system={} prefix_len={} max_keys={}",
+        "instruction_data_payload_summary tx_payload_decoded={} tx_payload_raw={} metadata_decoded={} metadata_raw={} metadata_none={} metadata_with_inner={} inner_groups={} hot_compact_vote_update_vote_state={} hot_compact_vote_update_vote_state_switch={} hot_compact_vote_tower_sync={} hot_compact_vote_tower_sync_switch={} hot_compact_compute_budget={} hot_compact_system={} hot_unknown_system={} hot_unknown_vote={} prefix_len={} max_keys={}",
         stats.tx_payload_decoded,
         stats.tx_payload_raw,
         stats.metadata_decoded,
@@ -7730,6 +8327,8 @@ pub(crate) fn analyze_hot_instruction_data(
         stats.hot_compact_vote_tower_sync_switch,
         stats.hot_compact_compute_budget_total(),
         stats.hot_compact_system_total(),
+        stats.hot_unknown_system,
+        stats.hot_unknown_vote,
         stats.prefix_len,
         stats.max_keys,
     );
@@ -7777,6 +8376,20 @@ fn analyze_hot_top_level_instruction_data(
                     allow_unresolved_program,
                 )?;
                 stats.tx.bump(data, program);
+            }
+            ArchiveV2HotInstructionData::UnknownSystem(data) => {
+                stats.hot_unknown_system += 1;
+                stats.tx.bump(
+                    data,
+                    InstructionProgramKey::Pubkey(CompactPubkey::Raw(system_program_id_bytes())),
+                );
+            }
+            ArchiveV2HotInstructionData::UnknownVote(data) => {
+                stats.hot_unknown_vote += 1;
+                stats.tx.bump(
+                    data,
+                    InstructionProgramKey::Pubkey(CompactPubkey::Raw(vote_program_id_bytes())),
+                );
             }
             ArchiveV2HotInstructionData::ComputeBudget(data) => {
                 stats.bump_hot_compact_compute_budget(data);
@@ -7909,6 +8522,8 @@ struct ArchiveV2InstructionDataStats {
     hot_compact_vote_update_vote_state_switch: u64,
     hot_compact_vote_tower_sync: u64,
     hot_compact_vote_tower_sync_switch: u64,
+    hot_unknown_system: u64,
+    hot_unknown_vote: u64,
     hot_compute_budget_unused: u64,
     hot_compute_budget_request_heap_frame: u64,
     hot_compute_budget_set_compute_unit_limit: u64,
@@ -7951,6 +8566,8 @@ impl ArchiveV2InstructionDataStats {
             hot_compact_vote_update_vote_state_switch: 0,
             hot_compact_vote_tower_sync: 0,
             hot_compact_vote_tower_sync_switch: 0,
+            hot_unknown_system: 0,
+            hot_unknown_vote: 0,
             hot_compute_budget_unused: 0,
             hot_compute_budget_request_heap_frame: 0,
             hot_compute_budget_set_compute_unit_limit: 0,
@@ -7980,6 +8597,8 @@ impl ArchiveV2InstructionDataStats {
     fn bump_hot_compact_vote(&mut self, data: &ArchiveV2HotInstructionData) {
         match data {
             ArchiveV2HotInstructionData::Raw(_) => {}
+            ArchiveV2HotInstructionData::UnknownSystem(_) => {}
+            ArchiveV2HotInstructionData::UnknownVote(_) => {}
             ArchiveV2HotInstructionData::ComputeBudget(_) => {}
             ArchiveV2HotInstructionData::System(_) => {}
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(_) => {
@@ -10989,7 +11608,7 @@ impl RawCarScanner<Box<dyn Read>> {
         let reader = BufReader::with_capacity(io_buf_bytes, file);
         let input: Box<dyn Read> = if compressed {
             Box::new(
-                zstd::stream::read::Decoder::new(reader)
+                zstd_decoder_with_long_window(reader)
                     .with_context(|| format!("zstd decode {}", path.display()))?,
             )
         } else {
@@ -10997,6 +11616,39 @@ impl RawCarScanner<Box<dyn Read>> {
         };
         Ok(RawCarScanner {
             reader: CarBlockReader::with_capacity(input, io_buf_bytes),
+            scratch: Vec::new(),
+        })
+    }
+
+    fn open_url(url: &str) -> Result<Self> {
+        let response = reqwest::blocking::Client::builder()
+            .user_agent(concat!("blockzilla/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .context("build HTTP client")?
+            .get(url)
+            .send()
+            .with_context(|| format!("GET {url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("{url} returned HTTP {status}");
+        }
+        if let Some(len) = response.content_length() {
+            info!("Streaming CAR URL: {url} content_length={len}");
+        } else {
+            info!("Streaming CAR URL: {url} content_length=unknown");
+        }
+
+        let reader = BufReader::with_capacity(BUFFER_SIZE, response);
+        let input: Box<dyn Read> = if input_label_is_zstd(url) {
+            Box::new(
+                zstd_decoder_with_long_window(reader)
+                    .with_context(|| format!("zstd decode {url}"))?,
+            )
+        } else {
+            Box::new(reader)
+        };
+        Ok(RawCarScanner {
+            reader: CarBlockReader::with_capacity(input, BUFFER_SIZE),
             scratch: Vec::new(),
         })
     }
@@ -11061,6 +11713,11 @@ impl<R: Read> RawCarScanner<R> {
     }
 }
 
+fn input_label_is_zstd(label: &str) -> bool {
+    let without_query = label.split_once('?').map(|(head, _)| head).unwrap_or(label);
+    without_query.to_ascii_lowercase().ends_with(".zst")
+}
+
 #[derive(Default)]
 struct ArchiveV2Timings {
     scan_decode_node: Duration,
@@ -11091,6 +11748,15 @@ struct ArchiveV2Timings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_vote_interface::state::Lockout;
+
+    fn hex_to_vec(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
 
     #[test]
     fn archive_v2_record_tags_match_index_fast_scanner() {
@@ -11410,37 +12076,87 @@ mod tests {
     }
 
     #[test]
-    fn hot_vote_parser_compacts_tower_sync_hashes_by_voted_block() {
+    fn hot_vote_parser_compacts_canonical_solana_vote_instructions() {
         let root = 1_000u64;
         let last_slot = root + 31;
-        let mut data = Vec::new();
-        data.extend_from_slice(&14u32.to_le_bytes());
-        data.extend_from_slice(&root.to_le_bytes());
-        data.push(31);
-        for confirmation_count in (1u8..=31).rev() {
-            data.push(1);
-            data.push(confirmation_count);
-        }
-        data.extend_from_slice(&[7u8; 32]);
-        data.push(1);
-        data.extend_from_slice(&1_234_567i64.to_le_bytes());
-        data.extend_from_slice(&[8u8; 32]);
-        assert_eq!(data.len(), 148);
+        let mut lockouts = VecDeque::new();
+        lockouts.push_back(Lockout::new_with_confirmation_count(root + 1, 31));
+        lockouts.push_back(Lockout::new_with_confirmation_count(last_slot, 1));
+        let mut update = SolanaVoteStateUpdate::new(lockouts.clone(), Some(root), [7u8; 32].into());
+        update.timestamp = Some(1_234_567);
 
         let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
         slots.insert(last_slot, 42);
+
+        let data =
+            bincode::serialize(&VoteInstruction::CompactUpdateVoteState(update.clone())).unwrap();
+        assert_eq!(vote_instruction_variant_label(&data), "12");
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&data, &slots, &mut vote_hashes).unwrap();
+        let ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(parsed_update) = parsed else {
+            panic!("expected CompactUpdateVoteState");
+        };
+        assert_eq!(parsed_update.root, Some(root));
+        assert_eq!(parsed_update.lockout_offsets.len(), 2);
+        assert_eq!(parsed_update.lockout_offsets[0].offset, 1);
+        assert_eq!(parsed_update.lockout_offsets[1].offset, 30);
+        assert_eq!(parsed_update.timestamp, Some(1_234_567));
+        assert_eq!(parsed_update.hash, ArchiveV2VoteHashRef::Block(42));
+        assert_eq!(vote_hashes.rows[42].bank_hash, Some([7u8; 32]));
+
+        let mut tower =
+            SolanaTowerSync::new(lockouts, Some(root), [7u8; 32].into(), [8u8; 32].into());
+        tower.timestamp = Some(1_234_567);
+        let data = bincode::serialize(&VoteInstruction::TowerSync(tower)).unwrap();
+        assert_eq!(vote_instruction_variant_label(&data), "14");
         let mut vote_hashes = VoteHashRegistryBuilder::default();
         let parsed = parse_hot_vote_instruction_data(&data, &slots, &mut vote_hashes).unwrap();
         let ArchiveV2HotInstructionData::VoteTowerSync(tower) = parsed else {
             panic!("expected TowerSync");
         };
         assert_eq!(tower.update.root, Some(root));
-        assert_eq!(tower.update.lockout_offsets.len(), 31);
+        assert_eq!(tower.update.lockout_offsets.len(), 2);
         assert_eq!(tower.update.timestamp, Some(1_234_567));
         assert_eq!(tower.update.hash, ArchiveV2VoteHashRef::Block(42));
         assert_eq!(tower.block_id_hash, ArchiveV2VoteHashRef::Block(42));
         assert_eq!(vote_hashes.rows[42].bank_hash, Some([7u8; 32]));
         assert_eq!(vote_hashes.rows[42].block_id_hash, Some([8u8; 32]));
+    }
+
+    #[test]
+    fn hot_vote_parser_compacts_historical_tower_sync_wire_form() {
+        let data = test_hex_bytes(
+            "0e0000000200000000000000adbf62180000000001000000bcbf6218000000000000000000f2b429ebfc9b4b2e1ee705e8d03d1bad2198ae2dc41a8b8e27a7ec0dab033621019c365d2d9d010000f2b429ebfc9b4b2e1ee705e8d03d1bad2198ae2dc41a8b8e27a7ec0dab033621",
+        );
+        let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
+        slots.insert(409_124_796, 17);
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+
+        let parsed = parse_hot_vote_instruction_data(&data, &slots, &mut vote_hashes).unwrap();
+        let ArchiveV2HotInstructionData::VoteTowerSync(tower) = parsed else {
+            panic!("expected historical TowerSync");
+        };
+        assert_eq!(tower.update.root, None);
+        assert_eq!(tower.update.lockout_offsets.len(), 2);
+        assert_eq!(tower.update.lockout_offsets[0].offset, 409_124_781);
+        assert_eq!(tower.update.lockout_offsets[0].confirmation_count, 1);
+        assert_eq!(tower.update.lockout_offsets[1].offset, 15);
+        assert_eq!(tower.update.lockout_offsets[1].confirmation_count, 0);
+        assert_eq!(tower.update.timestamp, Some(1_774_582_576_796));
+        assert_eq!(tower.update.hash, ArchiveV2VoteHashRef::Block(17));
+        assert_eq!(tower.block_id_hash, ArchiveV2VoteHashRef::Block(17));
+        assert_eq!(
+            vote_hashes.rows[17].bank_hash,
+            Some([
+                0xf2, 0xb4, 0x29, 0xeb, 0xfc, 0x9b, 0x4b, 0x2e, 0x1e, 0xe7, 0x05, 0xe8, 0xd0, 0x3d,
+                0x1b, 0xad, 0x21, 0x98, 0xae, 0x2d, 0xc4, 0x1a, 0x8b, 0x8e, 0x27, 0xa7, 0xec, 0x0d,
+                0xab, 0x03, 0x36, 0x21,
+            ])
+        );
+        assert_eq!(
+            vote_hashes.rows[17].block_id_hash,
+            vote_hashes.rows[17].bank_hash
+        );
     }
 
     #[test]
@@ -11520,12 +12236,121 @@ mod tests {
     }
 
     #[test]
-    fn hot_known_program_parsers_keep_invalid_instruction_payloads_raw() {
-        let parsed = parse_hot_compute_budget_instruction_data(&[2, 1]).unwrap();
-        assert!(matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == vec![2, 1]));
+    fn hot_known_program_parsers_preserve_uncompact_unknown_payloads_raw() {
+        let parsed = parse_hot_compute_budget_instruction_data(&[255, 1, 2, 3]).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == vec![255, 1, 2, 3])
+        );
 
-        let parsed = parse_hot_system_instruction_data(&[2, 0, 0]).unwrap();
-        assert!(matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == vec![2, 0, 0]));
+        let noncanonical_compute_unit_limit = [2, 0x40, 0x42, 0x0f, 0, 0, 0, 0, 0].to_vec();
+        let parsed =
+            parse_hot_compute_budget_instruction_data(&noncanonical_compute_unit_limit).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::Raw(raw) if raw == noncanonical_compute_unit_limit)
+        );
+
+        let mut unknown_system = Vec::new();
+        unknown_system.extend_from_slice(&99u32.to_le_bytes());
+        unknown_system.extend_from_slice(&[1, 2, 3]);
+        let parsed = parse_hot_system_instruction_data(&unknown_system).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw == unknown_system)
+        );
+
+        let noncanonical_system_transfer = vec![
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x27, 0x07, 0x00, 0x00, 0x00, 0x00, 0xcf, 0x18,
+            0x15, 0x58, 0xd4, 0x4e, 0x99, 0x18,
+        ];
+        let parsed = parse_hot_system_instruction_data(&noncanonical_system_transfer).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw == noncanonical_system_transfer)
+        );
+
+        let parsed = parse_hot_system_instruction_data(&[]).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw.is_empty())
+        );
+
+        let truncated_system_transfer = vec![2, 0, 0];
+        let parsed = parse_hot_system_instruction_data(&truncated_system_transfer).unwrap();
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownSystem(raw) if raw == truncated_system_transfer)
+        );
+
+        let unknown_vote = hex_to_vec(
+            "0e0000000001a0afe1c0011f1029d1fd40bb7c95deb2380109cbb9cd198ec64594369d169f0a9d7af7e2aa3001b4b1a869000000001029d1fd40bb7c95deb2380109cbb9cd198ec64594369d169f0a9d7af7e2aa30",
+        );
+        let slots = GxHashMap::with_hasher(GxBuildHasher::default());
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&unknown_vote, &slots, &mut vote_hashes)
+            .expect("invalid on-chain vote payload should preserve as UnknownVote");
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == unknown_vote)
+        );
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
+
+        let root = 1_000u64;
+        let mut lockouts = VecDeque::new();
+        for i in 1..=32 {
+            lockouts.push_back(Lockout::new_with_confirmation_count(root + i, 1));
+        }
+        let update = SolanaVoteStateUpdate::new(lockouts, Some(root), [7u8; 32].into());
+        let too_many_lockouts =
+            bincode::serialize(&VoteInstruction::CompactUpdateVoteState(update)).unwrap();
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&too_many_lockouts, &slots, &mut vote_hashes)
+            .expect("uncompactable valid vote payload should preserve as UnknownVote");
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == too_many_lockouts)
+        );
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
+
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+        let parsed = parse_hot_vote_instruction_data(&[], &slots, &mut vote_hashes)
+            .expect("observed empty on-chain vote payload should preserve as UnknownVote");
+        assert!(matches!(
+            parsed,
+            ArchiveV2HotInstructionData::UnknownVote(raw) if raw.is_empty()
+        ));
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
+    }
+
+    #[test]
+    fn hot_known_program_parsers_reject_invalid_instruction_payloads() {
+        let err = parse_hot_compute_budget_instruction_data(&[2, 1])
+            .expect_err("truncated compute budget payload must hard fail");
+        assert!(format!("{err:#}").contains("parse compute budget instruction data"));
+
+        let err = parse_hot_compute_budget_instruction_data(&[])
+            .expect_err("empty compute budget payload must hard fail");
+        assert!(format!("{err:#}").contains("empty compute budget instruction data"));
+    }
+
+    #[test]
+    fn hot_vote_parser_rejects_invalid_instruction_payloads() {
+        let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
+        slots.insert(1_000, 42);
+        let mut vote_hashes = VoteHashRegistryBuilder::default();
+
+        let mut eof_vote = 12u32.to_le_bytes().to_vec();
+        eof_vote.extend_from_slice(&0u64.to_le_bytes());
+        eof_vote.push(0);
+        let err = parse_hot_vote_instruction_data(&eof_vote, &slots, &mut vote_hashes)
+            .expect_err("invalid vote payload must hard fail");
+        assert!(format!("{err:#}").contains("canonical vote instruction decode failed"));
+
+        let mut overflowing_short_vec = 12u32.to_le_bytes().to_vec();
+        overflowing_short_vec.extend_from_slice(&0u64.to_le_bytes());
+        overflowing_short_vec.extend_from_slice(&[0xff, 0xff, 0x7c]);
+        let err = parse_hot_vote_instruction_data(&overflowing_short_vec, &slots, &mut vote_hashes)
+            .expect_err("invalid vote payload must hard fail");
+        assert!(format!("{err:#}").contains("canonical vote instruction decode failed"));
+
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
     }
 
     #[test]
@@ -11547,5 +12372,16 @@ mod tests {
         assert_eq!(vote_hashes.block_id_refs, 1);
         assert_eq!(vote_hashes.block_id_raw, 1);
         assert_eq!(vote_hashes.block_id_conflict_raw, 1);
+    }
+
+    fn test_hex_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(pair, 16).unwrap()
+            })
+            .collect()
     }
 }

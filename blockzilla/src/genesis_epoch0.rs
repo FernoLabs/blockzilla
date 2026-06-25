@@ -20,6 +20,17 @@ pub(crate) fn maybe_load_for_input(input: &Path) -> Result<Option<GenesisArchive
         .with_context(|| format!("read {}", path.display()))
 }
 
+pub(crate) fn maybe_load_for_label(label: &str, dir: &Path) -> Result<Option<GenesisArchive>> {
+    if epoch_from_label(label) != Some(0) {
+        return Ok(None);
+    }
+    let path = ensure_in_dir(dir)?;
+    read_genesis_archive_from_file(&path)
+        .map(Some)
+        .map_err(|err| anyhow!("{err}"))
+        .with_context(|| format!("read {}", path.display()))
+}
+
 pub(crate) fn ensure_for_input(input: &Path) -> Result<PathBuf> {
     let dir = input.parent().unwrap_or_else(|| Path::new("."));
     ensure_in_dir(dir)
@@ -89,6 +100,16 @@ fn ensure_in_dir(dir: &Path) -> Result<PathBuf> {
 
 fn epoch_from_path(path: &Path) -> Option<u64> {
     let file_name = path.file_name()?.to_str()?;
+    epoch_from_file_name(file_name)
+}
+
+fn epoch_from_label(label: &str) -> Option<u64> {
+    let without_query = label.split_once('?').map(|(head, _)| head).unwrap_or(label);
+    let file_name = without_query.rsplit('/').next().unwrap_or(without_query);
+    epoch_from_file_name(file_name)
+}
+
+fn epoch_from_file_name(file_name: &str) -> Option<u64> {
     let rest = file_name.strip_prefix("epoch-")?;
     let number = rest
         .strip_suffix(".car.zst")

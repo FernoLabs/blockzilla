@@ -18,7 +18,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, RANGE};
 use std::fs;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_BUCKET_SIZE: usize = 64 * 1024 * 1024;
@@ -27,6 +27,8 @@ const MAX_BUCKET_SIZE: usize = 64 * 1024 * 1024;
 // We read a few extra bytes (16) to be robust against short reads and proxies,
 // but we still only *use* the first 10 for decoding.
 const CAR_HEADER_PREFIX_READ_LEN: usize = 16;
+const OLD_FAITHFUL_CAR_HEADER_TOTAL_SIZE: u64 = 59;
+const ZSTD_LONG_WINDOW_LOG_MAX: u32 = 31;
 
 #[derive(Parser, Debug)]
 #[command(name = "of-slot-ranges")]
@@ -114,70 +116,98 @@ fn main() -> Result<()> {
         if out_path.exists() && !cli.overwrite {
             eprintln!("epoch={epoch}: keep existing {}", out_path.display());
         } else {
-            let epoch_dir = cli.indexes_dir.join(epoch.to_string());
-            let cid_path = epoch_dir.join(format!("epoch-{epoch}.cid"));
-            let epoch_cid = fs::read_to_string(&cid_path)
-                .with_context(|| format!("read {}", cid_path.display()))?;
-            let epoch_cid = epoch_cid.trim().to_string();
+            let build_result = (|| -> Result<Vec<u64>> {
+                let epoch_dir = cli.indexes_dir.join(epoch.to_string());
+                let cid_path = epoch_dir.join(format!("epoch-{epoch}.cid"));
+                let epoch_cid = fs::read_to_string(&cid_path)
+                    .with_context(|| format!("read {}", cid_path.display()))?;
+                let epoch_cid = epoch_cid.trim().to_string();
 
-            let slot_idx_name = format!("epoch-{epoch}-{epoch_cid}-mainnet-slot-to-cid.index");
-            let cid_idx_name =
-                format!("epoch-{epoch}-{epoch_cid}-mainnet-cid-to-offset-and-size.index");
+                let slot_idx_name = format!("epoch-{epoch}-{epoch_cid}-mainnet-slot-to-cid.index");
+                let cid_idx_name =
+                    format!("epoch-{epoch}-{epoch_cid}-mainnet-cid-to-offset-and-size.index");
 
-            let slot_idx_path = epoch_dir.join(&slot_idx_name);
-            let cid_idx_path = epoch_dir.join(&cid_idx_name);
+                let slot_idx_path = epoch_dir.join(&slot_idx_name);
+                let cid_idx_path = epoch_dir.join(&cid_idx_name);
 
-            eprintln!(
-                "epoch={epoch}: open slot-to-cid.index: {}",
-                slot_idx_path.display()
-            );
-            eprintln!(
-                "epoch={epoch}: open cid-to-offset-and-size.index: {}",
-                cid_idx_path.display()
-            );
+                eprintln!(
+                    "epoch={epoch}: open slot-to-cid.index: {}",
+                    slot_idx_path.display()
+                );
+                eprintln!(
+                    "epoch={epoch}: open cid-to-offset-and-size.index: {}",
+                    cid_idx_path.display()
+                );
 
-            let slot_reader = LocalFileRangeReader::open(&slot_idx_path)?;
-            let cid_reader = LocalFileRangeReader::open(&cid_idx_path)?;
-            let mut slot_index = futures::executor::block_on(AsyncCompactIndex::open(
-                slot_reader,
-                slot_idx_path.display().to_string(),
-            ))?;
-            let mut cid_index = futures::executor::block_on(AsyncCompactIndex::open(
-                cid_reader,
-                cid_idx_path.display().to_string(),
-            ))?;
+                let slot_reader = LocalFileRangeReader::open(&slot_idx_path)?;
+                let cid_reader = LocalFileRangeReader::open(&cid_idx_path)?;
+                let mut slot_index = futures::executor::block_on(AsyncCompactIndex::open(
+                    slot_reader,
+                    slot_idx_path.display().to_string(),
+                ))?;
+                let mut cid_index = futures::executor::block_on(AsyncCompactIndex::open(
+                    cid_reader,
+                    cid_idx_path.display().to_string(),
+                ))?;
 
-            // IMPORTANT: We do NOT download CAR files.
-            // We either read the header from a local plain `.car` or fetch a tiny remote prefix.
-            let car_hdr = car_header_total_size(&http, epoch, cli.cars_dir.as_deref())?;
-            eprintln!("epoch={epoch}: car_header_size={car_hdr}");
+                // IMPORTANT: We do NOT download CAR files.
+                // Prefer local .car/.car.zst headers, then a tiny remote prefix, then a logged
+                // Old Faithful-specific fallback.
+                let (car_hdr, default_log) =
+                    car_header_total_size(&http, epoch, cli.cars_dir.as_deref())?;
+                if let Some(default_log) = default_log {
+                    append_header_default_log(&cli.output_dir, epoch, car_hdr, &default_log)?;
+                }
+                eprintln!("epoch={epoch}: car_header_size={car_hdr}");
 
-            let t0 = std::time::Instant::now();
-            let output = futures::executor::block_on(build_slot_ranges_from_indexes(
-                epoch,
-                car_hdr,
-                &mut slot_index,
-                &mut cid_index,
-                BuildSlotRangesConfig {
-                    max_bucket_payload_bytes: MAX_BUCKET_SIZE,
-                    allow_node_read_fallback: true,
-                },
-            ))?;
-            eprintln!(
-                "epoch={epoch}: done build ranges in {:.2}s present_slots={} slot_bucket_read={} MiB cid_bucket_read={} MiB max_slot_bucket={} MiB max_cid_bucket={} MiB slot_node_fallbacks={} cid_node_fallbacks={}",
-                t0.elapsed().as_secs_f64(),
-                output.stats.present_slots,
-                output.stats.slot_bucket_payload_bytes_read / (1024 * 1024),
-                output.stats.cid_bucket_payload_bytes_read / (1024 * 1024),
-                output.stats.max_slot_bucket_payload_bytes / (1024 * 1024),
-                output.stats.max_cid_bucket_payload_bytes / (1024 * 1024),
-                output.stats.slot_node_read_fallbacks,
-                output.stats.cid_node_read_fallbacks,
-            );
+                let t0 = std::time::Instant::now();
+                let output = futures::executor::block_on(build_slot_ranges_from_indexes(
+                    epoch,
+                    car_hdr,
+                    &mut slot_index,
+                    &mut cid_index,
+                    BuildSlotRangesConfig {
+                        max_bucket_payload_bytes: MAX_BUCKET_SIZE,
+                        allow_node_read_fallback: true,
+                    },
+                ))?;
+                eprintln!(
+                    "epoch={epoch}: done build ranges in {:.2}s present_slots={} slot_bucket_read={} MiB cid_bucket_read={} MiB max_slot_bucket={} MiB max_cid_bucket={} MiB slot_node_fallbacks={} cid_node_fallbacks={}",
+                    t0.elapsed().as_secs_f64(),
+                    output.stats.present_slots,
+                    output.stats.slot_bucket_payload_bytes_read / (1024 * 1024),
+                    output.stats.cid_bucket_payload_bytes_read / (1024 * 1024),
+                    output.stats.max_slot_bucket_payload_bytes / (1024 * 1024),
+                    output.stats.max_cid_bucket_payload_bytes / (1024 * 1024),
+                    output.stats.slot_node_read_fallbacks,
+                    output.stats.cid_node_read_fallbacks,
+                );
 
-            eprintln!("epoch={epoch}: write {}", out_path.display());
-            write_slot_ranges_raw_file(&out_path, &output.ranges)?;
-            index_block_slots = Some(output.block_slots);
+                eprintln!("epoch={epoch}: write {}", out_path.display());
+                write_slot_ranges_raw_file(&out_path, &output.ranges)?;
+                Ok(output.block_slots)
+            })();
+
+            match build_result {
+                Ok(block_slots) => index_block_slots = Some(block_slots),
+                Err(err) if cli.raw_only => {
+                    eprintln!("epoch={epoch}: SKIP raw-only slot ranges after error: {err:#}");
+                    if out_path.exists() {
+                        if let Err(remove_err) = fs::remove_file(&out_path) {
+                            eprintln!(
+                                "epoch={epoch}: warning: failed to remove stale raw output {}: {remove_err:#}",
+                                out_path.display()
+                            );
+                        }
+                    }
+                    if let Err(log_err) = append_epoch_skip_log(&cli.output_dir, epoch, &err) {
+                        eprintln!("epoch={epoch}: warning: failed to append skip log: {log_err:#}");
+                    }
+                    previous_epoch_last_blockhash = None;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         if cli.raw_only {
@@ -755,30 +785,52 @@ fn build_slot_ranges_v2_from_local_car(
 
 /* ---------------- CAR header size ---------------- */
 
-fn car_header_total_size(http: &Client, epoch: u64, cars_dir: Option<&Path>) -> Result<u64> {
+fn car_header_total_size(
+    http: &Client,
+    epoch: u64,
+    cars_dir: Option<&Path>,
+) -> Result<(u64, Option<String>)> {
     if let Some(local_car_path) = find_local_car(epoch, cars_dir) {
         eprintln!(
             "epoch={epoch}: read CAR header from local file: {}",
             local_car_path.display()
         );
-        return car_header_total_size_from_local_car(&local_car_path);
+        return car_header_total_size_from_local_car(&local_car_path).map(|size| (size, None));
     }
 
-    car_header_total_size_from_remote_car(http, epoch)
+    match car_header_total_size_from_remote_car(http, epoch) {
+        Ok(size) => Ok((size, None)),
+        Err(err) => {
+            let log = format!(
+                "url=https://files.old-faithful.net/{epoch}/epoch-{epoch}.car error={err:#}"
+            );
+            eprintln!(
+                "epoch={epoch}: warning: remote CAR header fetch failed ({err:#}); using Old Faithful default car_header_size={OLD_FAITHFUL_CAR_HEADER_TOTAL_SIZE}"
+            );
+            Ok((OLD_FAITHFUL_CAR_HEADER_TOTAL_SIZE, Some(log)))
+        }
+    }
 }
 
 fn find_local_car(epoch: u64, cars_dir: Option<&Path>) -> Option<PathBuf> {
     let cars_dir = cars_dir?;
     let file_name = format!("epoch-{epoch}.car");
+    let zst_file_name = format!("epoch-{epoch}.car.zst");
     let candidates = [
         cars_dir.join(&file_name),
         cars_dir.join(epoch.to_string()).join(&file_name),
+        cars_dir.join(&zst_file_name),
+        cars_dir.join(epoch.to_string()).join(&zst_file_name),
     ];
 
     candidates.into_iter().find(|path| path.is_file())
 }
 
 fn car_header_total_size_from_local_car(path: &Path) -> Result<u64> {
+    if is_zstd_path(path) {
+        return car_header_total_size_from_local_zstd_car(path);
+    }
+
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut prefix = [0u8; CAR_HEADER_PREFIX_READ_LEN];
     let prefix_len = file
@@ -787,6 +839,59 @@ fn car_header_total_size_from_local_car(path: &Path) -> Result<u64> {
     let source = path.display().to_string();
 
     decode_car_header_total_size(&prefix[..prefix_len], &source)
+}
+
+fn car_header_total_size_from_local_zstd_car(path: &Path) -> Result<u64> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut dctx = zstd::zstd_safe::DCtx::create();
+    dctx.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
+        ZSTD_LONG_WINDOW_LOG_MAX,
+    ))
+    .map_err(|code| {
+        anyhow!(
+            "set zstd windowLogMax={ZSTD_LONG_WINDOW_LOG_MAX} for {}: {}",
+            path.display(),
+            zstd::zstd_safe::get_error_name(code)
+        )
+    })?;
+    let mut decoder = zstd::Decoder::with_context(reader, &mut dctx);
+    let mut prefix = [0u8; CAR_HEADER_PREFIX_READ_LEN];
+    let prefix_len = decoder
+        .read(&mut prefix)
+        .with_context(|| format!("read zstd {}", path.display()))?;
+    let source = path.display().to_string();
+
+    decode_car_header_total_size(&prefix[..prefix_len], &source)
+}
+
+fn is_zstd_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext, "zst" | "zstd"))
+        .unwrap_or(false)
+}
+
+fn append_header_default_log(output_dir: &Path, epoch: u64, size: u64, reason: &str) -> Result<()> {
+    let path = output_dir.join("car-header-default-59.log");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    writeln!(file, "epoch={epoch}\tcar_header_size={size}\t{reason}")
+        .with_context(|| format!("write {}", path.display()))
+}
+
+fn append_epoch_skip_log(output_dir: &Path, epoch: u64, err: &anyhow::Error) -> Result<()> {
+    let path = output_dir.join("slot-range-skipped-epochs.log");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    writeln!(file, "epoch={epoch}\terror={err:#}")
+        .with_context(|| format!("write {}", path.display()))
 }
 
 fn car_header_total_size_from_remote_car(http: &Client, epoch: u64) -> Result<u64> {

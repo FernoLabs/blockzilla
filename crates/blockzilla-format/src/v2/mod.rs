@@ -728,6 +728,8 @@ pub struct ArchiveV2HotInstruction {
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum ArchiveV2HotInstructionData {
     Raw(Vec<u8>),
+    UnknownSystem(Vec<u8>),
+    UnknownVote(Vec<u8>),
     ComputeBudget(ArchiveV2ComputeBudgetInstructionData),
     System(ArchiveV2SystemInstructionData),
     VoteCompactUpdateVoteState(ArchiveV2VoteStateUpdate),

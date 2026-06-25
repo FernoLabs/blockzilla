@@ -16,6 +16,7 @@ pub const ARCHIVE_V2_POH_FILE: &str = "poh.wincode";
 pub const ARCHIVE_V2_SHREDDING_FILE: &str = "shredding.wincode";
 pub const ARCHIVE_V2_PUBKEY_REGISTRY_FILE: &str = "registry.bin";
 pub const ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE: &str = "registry_counts.bin";
+pub const ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE: &str = "registry.mphf";
 pub const ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
 pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE: &str = "blockhash_index_v3.bin";
 pub const ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE: &str = "prev_blockhash_tail.bin";

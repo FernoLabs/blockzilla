@@ -61,6 +61,37 @@ enum Commands {
         output_dir: PathBuf,
     },
 
+    /// Stream a CAR/CAR.ZST URL into no-registry Archive V2 without storing the CAR locally.
+    BuildArchiveV2NoRegistryFromUrl {
+        /// Input CAR or CAR.ZST URL.
+        url: String,
+        /// Output directory for the no-registry archive-v2 file.
+        output_dir: PathBuf,
+    },
+
+    /// Build only registry.bin, registry_counts.bin, and blockhash_registry.bin from a CAR/CAR.ZST.
+    BuildArchiveV2Registries {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Output directory for registry.bin, registry_counts.bin, and blockhash_registry.bin.
+        output_dir: PathBuf,
+        /// Rewrite registries even when they already exist.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Build registry.mphf from an existing registry.bin so compact jobs can reload the account lookup.
+    BuildArchiveV2RegistryIndex {
+        /// Input registry.bin file.
+        registry: PathBuf,
+        /// Output registry index path. Defaults to registry.mphf next to registry.bin.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Rewrite registry.mphf even when it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Build blockhash_registry.bin plus blockhash_index_v3.bin from a CAR file, skipping tx/metadata decode.
     BuildBlockhashRegistry {
         /// Input CAR or CAR.ZST file.
@@ -151,12 +182,18 @@ enum Commands {
         /// Previous epoch CAR/CAR.ZST used to seed strict recent blockhash resolution.
         #[arg(long)]
         previous_car: Option<PathBuf>,
+        /// Existing Archive V2 registry sidecar directory to reuse.
+        #[arg(long)]
+        registry_dir: Option<PathBuf>,
         /// zstd compression level for each independent block frame.
         #[arg(long, default_value_t = 1)]
         level: i32,
         /// Stop after N block records. Intended for smoke tests.
         #[arg(long)]
         max_blocks: Option<u64>,
+        /// Skip archive-v2-block-access.wincode and archive-v2-block-access.index generation.
+        #[arg(long)]
+        no_access: bool,
     },
 
     /// Benchmark indexed parallel reads of hot-block Archive V2.
@@ -631,6 +668,19 @@ fn main() -> Result<()> {
         Commands::BuildArchiveV2NoRegistry { input, output_dir } => {
             archive_v2::build_no_registry(&input, &output_dir)
         }
+        Commands::BuildArchiveV2NoRegistryFromUrl { url, output_dir } => {
+            archive_v2::build_no_registry_from_url(&url, &output_dir)
+        }
+        Commands::BuildArchiveV2Registries {
+            input,
+            output_dir,
+            force,
+        } => archive_v2::build_registries(&input, &output_dir, force),
+        Commands::BuildArchiveV2RegistryIndex {
+            registry,
+            output,
+            force,
+        } => archive_v2::build_registry_index(&registry, output.as_deref(), force),
         Commands::BuildBlockhashRegistry {
             input,
             output_dir,
@@ -667,15 +717,19 @@ fn main() -> Result<()> {
             input,
             output_dir,
             previous_car,
+            registry_dir,
             level,
             max_blocks,
+            no_access,
         } => archive_v2::build_hot_blocks(
             &input,
             &output_dir,
             previous_car.as_deref(),
+            registry_dir.as_deref(),
             level,
             max_blocks,
             resume,
+            !no_access,
         ),
         Commands::BenchArchiveV2HotBlocks {
             input,
