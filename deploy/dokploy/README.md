@@ -8,11 +8,13 @@ build archives, indexes, PoH sidecars, or signatures. It has no inbound port.
 
 1. Create a Dokploy **Compose** application from this repository and select
    `docker-compose.dokploy.yml` as the Compose file.
-2. Add the variables from `.env.example` in Dokploy. Store the real
-   `BLOCKZILLA_GRPC_X_TOKEN` only in Dokploy's environment/secret UI. Never put
-   it in Git or build arguments. The service reads the endpoint and opaque token
-   from the `.env` file that Dokploy materializes; neither is interpolated into
-   the Compose model or included in the Docker build context.
+2. On the deployment host, create `/etc/blockzilla/raw-recorder.env`, owned by
+   `root:root` with mode `0600`, containing only `BLOCKZILLA_GRPC_ENDPOINT` and
+   `BLOCKZILLA_GRPC_X_TOKEN`. Never put the token in Git, build arguments, or
+   deployment logs. The Compose model reads this host-side file without
+   interpolating either credential or including the file in the build context.
+   Set `BLOCKZILLA_RAW_SECRET_ENV_FILE` only if a different absolute path is
+   required.
 3. Before the first start, set `BLOCKZILLA_RAW_FROM_SLOT` to the earliest slot
    the provider can replay, if known. Leaving it empty starts at the provider's
    live position. The durable journal controls all later resumes.

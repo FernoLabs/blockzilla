@@ -12,13 +12,12 @@ services:
     restart: unless-stopped
     stop_grace_period: 45s
 
-    # Dokploy materializes the Environment panel as this file before invoking
-    # Compose. Read both connection credentials from the file instead of
-    # interpolating them into the Compose model, which also keeps them out of
-    # `docker compose config`.
+    # Keep connection credentials in a root-owned file on the deployment host.
+    # Dokploy Cloud's remote-server path can omit saved UI variables while
+    # materializing its generated .env; this file is outside the replaced checkout.
     env_file:
-      - path: .env
-        required: false
+      - path: ${BLOCKZILLA_RAW_SECRET_ENV_FILE:-/etc/blockzilla/raw-recorder.env}
+        required: true
     environment:
       BLOCKZILLA_GRPC_ACCEPT_COMPRESSION: "${BLOCKZILLA_GRPC_ACCEPT_COMPRESSION:-zstd}"
       BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW: "${BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW:-false}"
