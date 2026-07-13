@@ -5,7 +5,13 @@
 # Local credentials and operator-only configuration must never enter an image.
 .env
 .env.*
+*.env
+**/*.env
+**/yellowstone-x-token
+telegram-bot-token
+**/telegram-bot-token
 !.env.example
+!**/.env.example
 personal
 **/personal
 

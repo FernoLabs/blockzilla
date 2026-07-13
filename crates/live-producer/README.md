@@ -162,19 +162,35 @@ BLOCKZILLA_GRPC_X_TOKEN=... \
   --endpoint https://example.mainnet.rpcpool.com \
   --output-dir /path/with/free-space/mac-bridge \
   --from-slot 432621000 \
-  --min-free-bytes 17179869184
+  --min-free-bytes 17179869184 \
+  --idle-timeout-secs 180 \
+  --require-complete-poh
 
 cargo run --release -p blockzilla-live-producer -- inspect-grpc-raw \
   --output-dir /path/with/free-space/mac-bridge \
   --verify-payloads
+cargo run --release -p blockzilla-live-producer -- verify-grpc-raw-poh \
+  --output-dir /path/with/free-space/mac-bridge
 ```
 
 Each confirmed block update is retained as one independently decompressible
 zstd level-1 record in the checksummed segmented WAL. The WAL is synced before
 `raw-blocks.jsonl` advances; restart recovers an incomplete WAL tail,
 reconciles the WAL/journal crash window, validates the authoritative tail,
-continues frame IDs, and requests the slot after the last durable update. The
-journal records slot, parent, WAL segment/offset/length, compressed and raw
+continues frame IDs,
+and requests the last durable slot inclusively. The exact prior block is skipped
+after overlap is observed; a later first delivery emits a coverage warning.
+`--resume-coverage-warning-file PATH` also atomically publishes a small
+secret-free JSON event as soon as that warning is detected, allowing a
+long-running supervisor to alert without waiting for recorder exit. `PATH` is
+restricted to `OUTPUT_DIR/.monitoring/resume-coverage-warning.json`; the event
+and directory are synced before the recorder may append the later block, and a
+different pending event is never overwritten. The journal's durable tail always
+controls resume after the first retained block; `--from-slot` is only a bootstrap
+hint for an empty spool. The optional `--idle-timeout-secs` watchdog exits a
+transport that has not durably appended a block within the configured interval
+so an outer supervisor can reconnect. The journal records slot, parent,
+WAL segment/offset/length, compressed and raw
 lengths, blockhash, and the SHA-256 of the uncompressed protobuf envelope.
 `--min-free-bytes` defaults to 16 GiB and stops cleanly before appending when
 free space falls below that reserve; zero disables the guard.
@@ -185,6 +201,17 @@ rather than only the nested block. As with all prost/tonic clients, wire fields
 unknown to the compiled protobuf schema cannot be preserved. Run this command
 under a restart supervisor for transport failures or normal stream termination.
 For a continuous bridge, omit `--stop-at-epoch-boundary`.
+
+`--require-complete-poh` rejects a block before the WAL durability boundary
+unless its embedded entries are non-empty, contiguous, correctly partition the
+block's transactions, contain 32-byte hashes, and terminate at the block's
+blockhash. These are structural reconstructability checks; they do not
+cryptographically re-execute the PoH chain or prove arbitrary intermediate
+hashes. `verify-grpc-raw-poh` locks and audits a stopped/snapshotted WAL, requires
+at least one record by default, checks WAL/journal tail parity, and enforces the
+same entry invariants. Use `--min-records 0` only for an intentional empty-spool
+diagnostic. Both it and payload-validating `inspect-grpc-raw` require a stopped
+recorder or filesystem snapshot/copy for a consistent full-spool result.
 
 Capture live block updates with transactions and entries into the producer
 layout:

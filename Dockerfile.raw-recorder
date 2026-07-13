@@ -25,7 +25,7 @@ ARG TARGETPLATFORM
 
 RUN test "$TARGETPLATFORM" = "linux/amd64" \
     && apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates tini \
+    && apt-get install --yes --no-install-recommends ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 blockzilla \
     && useradd --uid 10001 --gid 10001 --no-create-home \

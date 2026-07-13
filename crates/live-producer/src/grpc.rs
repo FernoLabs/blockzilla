@@ -1791,12 +1791,25 @@ fn absolute_output_path(path: &Path) -> Result<PathBuf> {
 pub(crate) async fn connect_grpc(
     endpoint: &str,
 ) -> Result<yellowstone_grpc_client::GeyserGrpcClient> {
+    connect_grpc_with_max_decoding_message_size(endpoint, 128 * 1024 * 1024).await
+}
+
+pub(crate) async fn connect_grpc_with_max_decoding_message_size(
+    endpoint: &str,
+    max_decoding_message_size: u64,
+) -> Result<yellowstone_grpc_client::GeyserGrpcClient> {
     let transport = GrpcTransportOptions::from_env()?;
-    let token = env::var("BLOCKZILLA_GRPC_X_TOKEN")
-        .context("missing BLOCKZILLA_GRPC_X_TOKEN environment variable")?;
+    let token = grpc_x_token()?;
+    let max_decoding_message_size = usize::try_from(max_decoding_message_size)
+        .context("gRPC maximum decoding message size exceeds usize")?;
+    if max_decoding_message_size == 0 {
+        return Err(anyhow!(
+            "gRPC maximum decoding message size must be non-zero"
+        ));
+    }
     let mut builder = GeyserGrpcClient::build_from_shared(endpoint.to_string())?
         .x_token(Some(token))?
-        .max_decoding_message_size(128 * 1024 * 1024);
+        .max_decoding_message_size(max_decoding_message_size);
     if let Some(encoding) = transport.accept_compression {
         builder = builder.accept_compressed(encoding);
     }
@@ -1819,6 +1832,34 @@ pub(crate) async fn connect_grpc(
         builder = builder.tls_config(ClientTlsConfig::new().with_native_roots())?;
     }
     Ok(builder.connect().await?)
+}
+
+fn grpc_x_token() -> Result<String> {
+    let token = match env::var("BLOCKZILLA_GRPC_X_TOKEN") {
+        Ok(token) => token,
+        Err(env::VarError::NotPresent) => {
+            let path = env::var("BLOCKZILLA_GRPC_X_TOKEN_FILE").context(
+                "missing BLOCKZILLA_GRPC_X_TOKEN or BLOCKZILLA_GRPC_X_TOKEN_FILE environment variable",
+            )?;
+            let metadata =
+                fs::metadata(&path).with_context(|| format!("inspect gRPC x-token file {path}"))?;
+            if !metadata.is_file() {
+                return Err(anyhow!("gRPC x-token path is not a regular file: {path}"));
+            }
+            fs::read_to_string(&path)
+                .with_context(|| format!("read gRPC x-token file {path}"))?
+                .trim_end_matches(['\r', '\n'])
+                .to_owned()
+        }
+        Err(err) => return Err(err).context("read BLOCKZILLA_GRPC_X_TOKEN environment variable"),
+    };
+    if token.is_empty() {
+        return Err(anyhow!("gRPC x-token is empty"));
+    }
+    if token.contains(['\r', '\n']) {
+        return Err(anyhow!("gRPC x-token contains an embedded newline"));
+    }
+    Ok(token)
 }
 
 const GRPC_ACCEPT_COMPRESSION_ENV: &str = "BLOCKZILLA_GRPC_ACCEPT_COMPRESSION";

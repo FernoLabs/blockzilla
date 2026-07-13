@@ -14,7 +14,9 @@ use blockzilla_live_producer::{
         GrpcRawBlockStorage, backfill_compact_logs, backfill_pubkey_runs, capture_grpc_blocks,
         inspect_capture, probe_grpc, watch_grpc_epoch_boundaries,
     },
-    grpc_raw::{GrpcRawRecordConfig, inspect_grpc_raw_blocks, record_grpc_raw_blocks},
+    grpc_raw::{
+        GrpcRawRecordConfig, inspect_grpc_raw_blocks, record_grpc_raw_blocks, verify_grpc_raw_poh,
+    },
     ingest::IngestConfig,
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
@@ -44,6 +46,8 @@ enum Command {
     RecordGrpcRaw(RecordGrpcRawArgs),
     /// Inspect or fully validate an independently compressed raw gRPC spool.
     InspectGrpcRaw(InspectGrpcRawArgs),
+    /// Replay a raw gRPC spool and require complete, reconstructable PoH entries in every block.
+    VerifyGrpcRawPoh(VerifyGrpcRawPohArgs),
     SyncRpcEpoch(SyncRpcEpochArgs),
     WatchEpochsGrpc(WatchEpochsGrpcArgs),
     PlanEpochBackfill(PlanEpochBackfillArgs),
@@ -135,8 +139,17 @@ struct RecordGrpcRawArgs {
     #[arg(long, default_value_t = 86_400)]
     timeout_secs: u64,
 
+    /// Exit so a supervisor can reconnect after this many seconds without a durable block.
+    /// Zero disables the idle watchdog.
+    #[arg(long, default_value_t = 180)]
+    idle_timeout_secs: u64,
+
     #[arg(long)]
     from_slot: Option<u64>,
+
+    /// Atomically publish a secret-free JSON event if the provider skips the inclusive resume slot.
+    #[arg(long)]
+    resume_coverage_warning_file: Option<std::path::PathBuf>,
 
     #[arg(long, default_value_t = OLD_FAITHFUL_SLOTS_PER_EPOCH)]
     slots_per_epoch: u64,
@@ -151,12 +164,17 @@ struct RecordGrpcRawArgs {
     #[arg(long, default_value_t = 256 * 1024 * 1024)]
     segment_target_bytes: u64,
 
+    /// Per-update protobuf/WAL limit and tonic decoded-message ceiling.
     #[arg(long, default_value_t = 128 * 1024 * 1024)]
     max_record_bytes: u64,
 
     /// Stop cleanly before the filesystem falls below this many free bytes. Zero disables.
     #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
     min_free_bytes: u64,
+
+    /// Reject a block unless its embedded entries form complete, reconstructable PoH.
+    #[arg(long)]
+    require_complete_poh: bool,
 
     #[arg(long, default_value = "solana-mainnet")]
     cluster_id: String,
@@ -179,6 +197,19 @@ struct InspectGrpcRawArgs {
     /// Decompress, checksum, and prost-decode every record while retaining only one block.
     #[arg(long)]
     verify_payloads: bool,
+}
+
+#[derive(Debug, Args)]
+struct VerifyGrpcRawPohArgs {
+    #[arg(long, default_value = "blockzilla-grpc-raw")]
+    output_dir: std::path::PathBuf,
+
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    max_record_bytes: u64,
+
+    /// Fail unless at least this many complete records are verified. Zero permits an empty spool.
+    #[arg(long, default_value_t = 1)]
+    min_records: u64,
 }
 
 #[derive(Debug, Args)]
@@ -527,13 +558,16 @@ impl From<RecordGrpcRawArgs> for GrpcRawRecordConfig {
             output_dir: value.output_dir,
             max_blocks: value.max_blocks,
             timeout_secs: value.timeout_secs,
+            idle_timeout_secs: value.idle_timeout_secs,
             from_slot: value.from_slot,
+            resume_coverage_warning_file: value.resume_coverage_warning_file,
             slots_per_epoch: value.slots_per_epoch,
             stop_at_epoch_boundary: value.stop_at_epoch_boundary,
             compression_level: value.compression_level,
             segment_target_bytes: value.segment_target_bytes,
             max_record_bytes: value.max_record_bytes,
             min_free_bytes: value.min_free_bytes,
+            require_complete_poh: value.require_complete_poh,
             cluster_id: value.cluster_id,
             origin_node_id: value.origin_node_id,
             source_id: value.source_id,
@@ -732,6 +766,11 @@ async fn main() -> Result<()> {
                 args.max_record_bytes,
                 args.verify_payloads,
             )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::VerifyGrpcRawPoh(args) => {
+            let report =
+                verify_grpc_raw_poh(args.output_dir, args.max_record_bytes, args.min_records)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::SyncRpcEpoch(args) => {

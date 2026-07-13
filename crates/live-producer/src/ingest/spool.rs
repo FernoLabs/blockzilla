@@ -103,6 +103,105 @@ pub struct SpoolRecord {
     pub payload: Vec<u8>,
 }
 
+/// Read-only validation result that keeps the journal's exclusive writer lock held.
+///
+/// Holding the lock makes the reported durable tail stable for the lifetime of this value. The
+/// audit never creates, truncates, or writes journal files. An incomplete frame is tolerated only
+/// in the final (active) segment and is reported through [`Self::incomplete_tail_bytes`].
+#[derive(Debug)]
+pub struct LockedSpoolAudit {
+    journal_dir: PathBuf,
+    last_record: Option<DurableSpoolRecord>,
+    incomplete_tail_bytes: u64,
+    _journal_lock: File,
+}
+
+impl LockedSpoolAudit {
+    /// Non-blockingly lock and validate an existing spool journal without mutating it.
+    pub fn open(
+        spool_root: impl AsRef<Path>,
+        identity: SpoolJournalIdentity,
+        options: SpoolOptions,
+    ) -> Result<Self> {
+        let options = options.validate()?;
+        validate_path_component(&identity.cluster_id, "cluster id")?;
+        validate_path_component(&identity.origin_node_id, "origin node id")?;
+        validate_path_component(&identity.source_id, "source id")?;
+        let journal_dir = spool_root
+            .as_ref()
+            .join(&identity.cluster_id)
+            .join(&identity.origin_node_id)
+            .join(&identity.source_id)
+            .join(hex_journal_id(identity.journal_id));
+
+        let lock_path = journal_dir.join("writer.lock");
+        let journal_lock = open_regular_file_read_only(&lock_path)?;
+        try_lock_exclusive(&journal_lock, &lock_path)?;
+
+        let segment_ids = segment_ids(&journal_dir)?;
+        ensure!(
+            !segment_ids.is_empty(),
+            "spool journal has no segments: {}",
+            journal_dir.display()
+        );
+
+        let mut last_record: Option<DurableSpoolRecord> = None;
+        let mut incomplete_tail_bytes = 0;
+        for (index, segment_id) in segment_ids.iter().copied().enumerate() {
+            let path = segment_path(&journal_dir, segment_id);
+            let mut file = open_regular_file_read_only(&path)?;
+            let file_len = file.metadata()?.len();
+            let recovered = recover_segment(
+                &mut file,
+                &path,
+                segment_id,
+                options.max_record_bytes,
+                &identity,
+            )?;
+            let incomplete_bytes = file_len
+                .checked_sub(recovered.valid_len)
+                .context("spool recovery length exceeds segment length")?;
+            let is_final_segment = index + 1 == segment_ids.len();
+            ensure!(
+                is_final_segment || incomplete_bytes == 0,
+                "sealed spool segment has an incomplete tail: {}",
+                path.display()
+            );
+
+            if let (Some(previous), Some(first)) =
+                (last_record.as_ref(), recovered.first_record.as_ref())
+            {
+                ensure_record_follows(previous, first)?;
+            }
+            if recovered.last_record.is_some() {
+                last_record = recovered.last_record;
+            }
+            if is_final_segment {
+                incomplete_tail_bytes = incomplete_bytes;
+            }
+        }
+
+        Ok(Self {
+            journal_dir,
+            last_record,
+            incomplete_tail_bytes,
+            _journal_lock: journal_lock,
+        })
+    }
+
+    pub fn journal_dir(&self) -> &Path {
+        &self.journal_dir
+    }
+
+    pub fn last_record(&self) -> Option<&DurableSpoolRecord> {
+        self.last_record.as_ref()
+    }
+
+    pub fn incomplete_tail_bytes(&self) -> u64 {
+        self.incomplete_tail_bytes
+    }
+}
+
 #[derive(Debug)]
 pub struct SpoolWriter {
     journal_dir: PathBuf,
@@ -457,6 +556,7 @@ fn validate_sealed_segment(
 #[derive(Debug)]
 struct RecoveredSegment {
     valid_len: u64,
+    first_record: Option<DurableSpoolRecord>,
     last_record: Option<DurableSpoolRecord>,
 }
 
@@ -481,6 +581,7 @@ fn recover_segment(
     );
 
     let mut valid_len = SEGMENT_HEADER_LEN;
+    let mut first_record = None;
     let mut last_record = None;
     loop {
         let frame_offset = valid_len;
@@ -587,6 +688,7 @@ fn recover_segment(
             if !read_exact_or_incomplete_tail(&mut reader, &mut buffer[..chunk], path)? {
                 return Ok(RecoveredSegment {
                     valid_len,
+                    first_record,
                     last_record,
                 });
             }
@@ -639,10 +741,14 @@ fn recover_segment(
         if let Some(previous) = last_record.as_ref() {
             ensure_record_follows(previous, &recovered_record)?;
         }
+        if first_record.is_none() {
+            first_record = Some(recovered_record.clone());
+        }
         last_record = Some(recovered_record);
     }
     Ok(RecoveredSegment {
         valid_len,
+        first_record,
         last_record,
     })
 }
@@ -928,6 +1034,24 @@ fn open_regular_file(path: &Path, create_if_missing: bool) -> Result<(File, bool
     Ok((file, created))
 }
 
+fn open_regular_file_read_only(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open spool file read-only {}", path.display()))?;
+    ensure!(
+        file.metadata()?.file_type().is_file(),
+        "spool path is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
 fn open_file_descriptor(path: &Path, create_new: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
@@ -946,7 +1070,8 @@ fn open_file_descriptor(path: &Path, create_new: bool) -> io::Result<File> {
 #[cfg(unix)]
 fn try_lock_exclusive(file: &File, path: &Path) -> Result<()> {
     // SAFETY: `file` owns a valid descriptor for the duration of this call. The lock remains held
-    // by `_journal_lock` until the writer is dropped, and the OS releases it after a crash.
+    // by its owning writer or audit guard until that value is dropped, and the OS releases it
+    // after a crash.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result == 0 {
         Ok(())
@@ -1175,6 +1300,141 @@ mod tests {
         let _spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
         assert_eq!(fs::metadata(segment_path).unwrap().len(), valid_len);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn locked_audit_reports_matching_durable_tail_across_segments() {
+        let root = temp_root("audit-matching");
+        let options = SpoolOptions {
+            segment_target_bytes: 200,
+            max_record_bytes: 1024,
+        };
+        let expected = {
+            let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+            spool
+                .append_and_sync(metadata(1, &[1; 64]), &[1; 64])
+                .unwrap();
+            spool
+                .append_and_sync(metadata(2, &[2; 64]), &[2; 64])
+                .unwrap()
+        };
+
+        let audit = LockedSpoolAudit::open(&root, journal_identity(), options).unwrap();
+        assert_eq!(audit.last_record(), Some(&expected));
+        assert_eq!(audit.incomplete_tail_bytes(), 0);
+        assert!(audit.journal_dir().ends_with(hex_journal_id([7; 16])));
+
+        let error = SpoolWriter::open(&root, journal_identity(), options).unwrap_err();
+        assert!(error.to_string().contains("lock spool journal"));
+        drop(audit);
+        drop(SpoolWriter::open(&root, journal_identity(), options).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn locked_audit_reports_incomplete_active_tail_without_truncating() {
+        let root = temp_root("audit-incomplete-active");
+        let options = SpoolOptions {
+            segment_target_bytes: 1024 * 1024,
+            max_record_bytes: 1024,
+        };
+        let (active_path, expected) = {
+            let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+            let expected = spool
+                .append_and_sync(metadata(1, b"first"), b"first")
+                .unwrap();
+            (
+                segment_path(spool.journal_dir(), spool.current_segment_id()),
+                expected,
+            )
+        };
+        let mut file = OpenOptions::new().append(true).open(&active_path).unwrap();
+        file.write_all(FRAME_MAGIC).unwrap();
+        file.write_all(&FRAME_VERSION.to_le_bytes()).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+        let length_with_tail = fs::metadata(&active_path).unwrap().len();
+
+        let audit = LockedSpoolAudit::open(&root, journal_identity(), options).unwrap();
+        assert_eq!(audit.last_record(), Some(&expected));
+        assert_eq!(audit.incomplete_tail_bytes(), 6);
+        assert_eq!(fs::metadata(&active_path).unwrap().len(), length_with_tail);
+        drop(audit);
+        assert_eq!(fs::metadata(&active_path).unwrap().len(), length_with_tail);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn locked_audit_rejects_an_active_writer() {
+        let root = temp_root("audit-active-writer");
+        let options = SpoolOptions {
+            segment_target_bytes: 1024,
+            max_record_bytes: 1024,
+        };
+        let writer = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+        let error = LockedSpoolAudit::open(&root, journal_identity(), options).unwrap_err();
+        assert!(error.to_string().contains("lock spool journal"));
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn locked_audit_rejects_incomplete_non_final_segment_without_truncating() {
+        let root = temp_root("audit-incomplete-sealed");
+        let options = SpoolOptions {
+            segment_target_bytes: 200,
+            max_record_bytes: 1024,
+        };
+        let sealed_path = {
+            let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+            let first = spool
+                .append_and_sync(metadata(1, &[1; 64]), &[1; 64])
+                .unwrap();
+            spool
+                .append_and_sync(metadata(2, &[2; 64]), &[2; 64])
+                .unwrap();
+            segment_path(spool.journal_dir(), first.location.segment_id)
+        };
+        let mut file = OpenOptions::new().append(true).open(&sealed_path).unwrap();
+        file.write_all(FRAME_MAGIC).unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+        let length_with_tail = fs::metadata(&sealed_path).unwrap().len();
+
+        let error = LockedSpoolAudit::open(&root, journal_identity(), options).unwrap_err();
+        assert!(error.to_string().contains("incomplete tail"));
+        assert_eq!(fs::metadata(&sealed_path).unwrap().len(), length_with_tail);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn locked_audit_validates_observation_order_across_segments() {
+        let root = temp_root("audit-cross-order");
+        let donor_root = temp_root("audit-cross-order-donor");
+        let options = SpoolOptions {
+            segment_target_bytes: 1024 * 1024,
+            max_record_bytes: 1024,
+        };
+        let target_dir = {
+            let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+            spool
+                .append_and_sync(metadata(5, b"later"), b"later")
+                .unwrap();
+            spool.journal_dir().to_path_buf()
+        };
+        let donor_segment = {
+            let mut spool = SpoolWriter::open(&donor_root, journal_identity(), options).unwrap();
+            spool
+                .append_and_sync(metadata(1, b"earlier"), b"earlier")
+                .unwrap();
+            segment_path(spool.journal_dir(), 0)
+        };
+        fs::copy(donor_segment, segment_path(&target_dir, 1)).unwrap();
+
+        let error = LockedSpoolAudit::open(&root, journal_identity(), options).unwrap_err();
+        assert!(format!("{error:#}").contains("moved backward"));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(donor_root).unwrap();
     }
 
     #[test]

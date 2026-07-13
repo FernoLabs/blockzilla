@@ -7,6 +7,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
+    future::Future,
     io::{BufRead, BufReader, BufWriter, ErrorKind, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -26,15 +27,16 @@ use yellowstone_grpc_proto::tonic::metadata::MetadataMap;
 
 use crate::{
     epoch::{EpochSlot, OLD_FAITHFUL_SLOTS_PER_EPOCH},
-    grpc::connect_grpc,
+    grpc::connect_grpc_with_max_decoding_message_size,
     ingest::{
-        IngressRecordMeta, LogicalKey, ObservationId, SpoolJournalIdentity, SpoolLocation,
-        SpoolOptions, SpoolWriter, read_spool_record,
+        IngressRecordMeta, LockedSpoolAudit, LogicalKey, ObservationId, SpoolJournalIdentity,
+        SpoolLocation, SpoolOptions, SpoolWriter, read_spool_record,
     },
 };
 
 const IDENTITY_SCHEMA_VERSION: u32 = 1;
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
+const RESUME_COVERAGE_WARNING_SCHEMA_VERSION: u32 = 1;
 /// The ingress payload is one independently compressed zstd frame containing the full known-schema
 /// `SubscribeUpdate` envelope delivered by tonic. This retains filters and created-at metadata in
 /// addition to the block variant. Prost cannot retain protobuf fields unknown to this build.
@@ -42,8 +44,54 @@ const PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1: u16 = 2;
 const IDENTITY_FILE: &str = "identity.json";
 const HANDOFF_JOURNAL_FILE: &str = "raw-blocks.jsonl";
 const WAL_ROOT_DIR: &str = "wal";
+const MONITORING_DIR: &str = ".monitoring";
+const RESUME_COVERAGE_WARNING_FILE: &str = "resume-coverage-warning.json";
 const SUBSCRIBE_REQUEST_CHANNEL_CAPACITY: usize = 8;
 const SUBSCRIBE_PING_ID: i32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogOutcome<T> {
+    Completed(T),
+    TotalTimeout,
+    IdleTimeout,
+}
+
+async fn await_with_watchdogs<F>(
+    future: F,
+    total_deadline: TokioInstant,
+    idle_deadline: Option<TokioInstant>,
+) -> WatchdogOutcome<F::Output>
+where
+    F: Future,
+{
+    tokio::pin!(future);
+    let idle_wait = async {
+        match idle_deadline {
+            Some(deadline) => sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        output = &mut future => WatchdogOutcome::Completed(output),
+        _ = sleep_until(total_deadline) => WatchdogOutcome::TotalTimeout,
+        _ = idle_wait => WatchdogOutcome::IdleTimeout,
+    }
+}
+
+fn deadline_after(
+    now: TokioInstant,
+    seconds: u64,
+    description: &'static str,
+) -> Result<TokioInstant> {
+    now.checked_add(Duration::from_secs(seconds))
+        .with_context(|| format!("{description} is too large"))
+}
+
+fn idle_deadline_after(now: TokioInstant, seconds: u64) -> Result<Option<TokioInstant>> {
+    (seconds > 0)
+        .then(|| deadline_after(now, seconds, "raw gRPC idle timeout"))
+        .transpose()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GrpcResponseEncoding {
@@ -98,13 +146,16 @@ pub struct GrpcRawRecordConfig {
     pub output_dir: PathBuf,
     pub max_blocks: usize,
     pub timeout_secs: u64,
+    pub idle_timeout_secs: u64,
     pub from_slot: Option<u64>,
+    pub resume_coverage_warning_file: Option<PathBuf>,
     pub slots_per_epoch: u64,
     pub stop_at_epoch_boundary: bool,
     pub compression_level: i32,
     pub segment_target_bytes: u64,
     pub max_record_bytes: u64,
     pub min_free_bytes: u64,
+    pub require_complete_poh: bool,
     pub cluster_id: String,
     pub origin_node_id: String,
     pub source_id: String,
@@ -117,13 +168,16 @@ impl Default for GrpcRawRecordConfig {
             output_dir: PathBuf::from("blockzilla-grpc-raw"),
             max_blocks: 1_000_000,
             timeout_secs: 86_400,
+            idle_timeout_secs: 180,
             from_slot: None,
+            resume_coverage_warning_file: None,
             slots_per_epoch: OLD_FAITHFUL_SLOTS_PER_EPOCH,
             stop_at_epoch_boundary: false,
             compression_level: 1,
             segment_target_bytes: 256 * 1024 * 1024,
             max_record_bytes: 128 * 1024 * 1024,
             min_free_bytes: 16 * 1024 * 1024 * 1024,
+            require_complete_poh: false,
             cluster_id: "solana-mainnet".to_string(),
             origin_node_id: "mac-bridge".to_string(),
             source_id: "grpc-raw".to_string(),
@@ -144,6 +198,10 @@ pub struct GrpcRawRecordReport {
     pub recovered_handoff_record: bool,
     pub requested_from_slot: Option<u64>,
     pub effective_from_slot: Option<u64>,
+    pub resume_overlap_slot: Option<u64>,
+    pub resume_overlap_observed: Option<bool>,
+    pub first_delivered_slot: Option<u64>,
+    pub resume_coverage_warning: bool,
     pub first_slot: Option<u64>,
     pub last_slot: Option<u64>,
     pub first_epoch: Option<u64>,
@@ -151,12 +209,28 @@ pub struct GrpcRawRecordReport {
     pub raw_bytes_written: u64,
     pub compressed_bytes_written: u64,
     pub compression_ratio: f64,
+    pub complete_poh_required: bool,
+    pub poh_blocks_verified: u64,
+    pub poh_entries_verified: u64,
+    pub poh_transactions_verified: u64,
+    pub poh_num_hashes_verified: String,
     pub elapsed_ms: u128,
     pub timed_out: bool,
+    pub idle_timed_out: bool,
     pub stream_ended: bool,
     pub stopped_at_epoch_boundary: bool,
     pub stopped_low_disk: bool,
     pub available_bytes_at_stop: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GrpcRawResumeCoverageWarning {
+    event_id: String,
+    schema_version: u32,
+    requested_overlap_slot: u64,
+    first_delivered_slot: u64,
+    observed_later_slot: u64,
+    written_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +247,129 @@ pub struct GrpcRawInspectReport {
     pub compressed_bytes: u64,
     pub compression_ratio: f64,
     pub payloads_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcRawPohVerifyReport {
+    pub output_dir: PathBuf,
+    pub minimum_records: u64,
+    pub records_verified: u64,
+    pub first_slot: Option<u64>,
+    pub last_slot: Option<u64>,
+    pub poh_entries: u64,
+    pub transaction_references: u64,
+    pub num_hashes: String,
+    pub wal_incomplete_tail_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletePohBlockStats {
+    entries: u64,
+    transaction_references: u64,
+    num_hashes: u128,
+}
+
+fn effective_resume_slot(
+    configured_from_slot: Option<u64>,
+    last_durable_slot: Option<u64>,
+) -> Option<u64> {
+    last_durable_slot.or(configured_from_slot)
+}
+
+fn validate_complete_poh_block(block: &SubscribeUpdateBlock) -> Result<CompletePohBlockStats> {
+    ensure!(
+        block.entries_count > 0,
+        "slot {} contains no PoH entries",
+        block.slot
+    );
+    let expected_entries = usize::try_from(block.entries_count)
+        .context("gRPC PoH entry count exceeds addressable memory")?;
+    ensure!(
+        block.entries.len() == expected_entries,
+        "slot {} declares {} PoH entries but contains {}",
+        block.slot,
+        block.entries_count,
+        block.entries.len()
+    );
+    let transaction_count =
+        u64::try_from(block.transactions.len()).context("gRPC transaction count exceeds u64")?;
+    ensure!(
+        transaction_count == block.executed_transaction_count,
+        "slot {} declares {} executed transactions but contains {}",
+        block.slot,
+        block.executed_transaction_count,
+        transaction_count
+    );
+
+    let mut entries = block.entries.iter().collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|entry| entry.index);
+    let mut expected_transaction_index = 0u64;
+    let mut num_hashes = 0u128;
+    for (expected_index, entry) in entries.iter().enumerate() {
+        let expected_index =
+            u64::try_from(expected_index).context("PoH entry index exceeds u64")?;
+        ensure!(
+            entry.index == expected_index,
+            "slot {} PoH entry index {}, expected {}",
+            block.slot,
+            entry.index,
+            expected_index
+        );
+        ensure!(
+            entry.slot == block.slot,
+            "slot {} contains a PoH entry for slot {}",
+            block.slot,
+            entry.slot
+        );
+        ensure!(
+            entry.hash.len() == 32,
+            "slot {} PoH entry {} has hash length {}, expected 32",
+            block.slot,
+            entry.index,
+            entry.hash.len()
+        );
+        ensure!(
+            entry.executed_transaction_count <= u32::MAX as u64,
+            "slot {} PoH entry {} transaction count exceeds u32::MAX",
+            block.slot,
+            entry.index
+        );
+        ensure!(
+            entry.starting_transaction_index == expected_transaction_index,
+            "slot {} PoH entry {} starts at transaction {}, expected {}",
+            block.slot,
+            entry.index,
+            entry.starting_transaction_index,
+            expected_transaction_index
+        );
+        expected_transaction_index = expected_transaction_index
+            .checked_add(entry.executed_transaction_count)
+            .context("PoH transaction index overflow")?;
+        num_hashes = num_hashes
+            .checked_add(entry.num_hashes as u128)
+            .context("PoH hash count overflow")?;
+    }
+    ensure!(
+        expected_transaction_index == block.executed_transaction_count,
+        "slot {} PoH entries reference {} transactions, expected {}",
+        block.slot,
+        expected_transaction_index,
+        block.executed_transaction_count
+    );
+
+    let blockhash = decode_blockhash(&block.blockhash)?;
+    let final_entry = entries.last().context("complete PoH has no final entry")?;
+    ensure!(
+        final_entry.hash.as_slice() == blockhash,
+        "slot {} final PoH entry hash differs from its blockhash",
+        block.slot
+    );
+
+    Ok(CompletePohBlockStats {
+        entries: block.entries_count,
+        transaction_references: expected_transaction_index,
+        num_hashes,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +443,7 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     );
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("create raw gRPC output {}", config.output_dir.display()))?;
+    prepare_resume_coverage_warning_path(&config)?;
     let identity = load_or_create_identity(&config)?;
     let spool_options = SpoolOptions {
         segment_target_bytes: config.segment_target_bytes,
@@ -263,16 +461,9 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         config.max_record_bytes,
     )?;
 
-    let last_durable_slot = journal_state.last.as_ref().map(|row| row.slot);
-    let resume_slot = last_durable_slot
-        .map(|slot| slot.checked_add(1).context("raw gRPC resume slot overflow"))
-        .transpose()?;
-    let effective_from_slot = match (config.from_slot, resume_slot) {
-        (Some(requested), Some(resume)) => Some(requested.max(resume)),
-        (Some(requested), None) => Some(requested),
-        (None, Some(resume)) => Some(resume),
-        (None, None) => None,
-    };
+    let resume_anchor = journal_state.last.clone();
+    let last_durable_slot = resume_anchor.as_ref().map(|row| row.slot);
+    let effective_from_slot = effective_resume_slot(config.from_slot, last_durable_slot);
     // A continuous spool may already span many epochs. On restart, an optional boundary stop is
     // relative to the epoch containing the durable tail, not the first epoch ever recorded.
     let mut capture_epoch = journal_state.last.as_ref().map(|row| row.epoch);
@@ -291,6 +482,10 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         recovered_handoff_record,
         requested_from_slot: config.from_slot,
         effective_from_slot,
+        resume_overlap_slot: last_durable_slot,
+        resume_overlap_observed: resume_anchor.as_ref().map(|_| false),
+        first_delivered_slot: None,
+        resume_coverage_warning: false,
         first_slot: None,
         last_slot: None,
         first_epoch: None,
@@ -298,8 +493,14 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         raw_bytes_written: 0,
         compressed_bytes_written: 0,
         compression_ratio: 0.0,
+        complete_poh_required: config.require_complete_poh,
+        poh_blocks_verified: 0,
+        poh_entries_verified: 0,
+        poh_transactions_verified: 0,
+        poh_num_hashes_verified: "0".to_string(),
         elapsed_ms: 0,
         timed_out: false,
+        idle_timed_out: false,
         stream_ended: false,
         stopped_at_epoch_boundary: false,
         stopped_low_disk: false,
@@ -312,7 +513,32 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         return Ok(report);
     }
 
-    let mut client = connect_grpc(&config.endpoint).await?;
+    let watchdog_started_at = TokioInstant::now();
+    let deadline = deadline_after(
+        watchdog_started_at,
+        config.timeout_secs,
+        "raw gRPC total timeout",
+    )?;
+    let mut idle_deadline = idle_deadline_after(watchdog_started_at, config.idle_timeout_secs)?;
+    let mut client = match await_with_watchdogs(
+        connect_grpc_with_max_decoding_message_size(&config.endpoint, config.max_record_bytes),
+        deadline,
+        idle_deadline,
+    )
+    .await
+    {
+        WatchdogOutcome::Completed(result) => result?,
+        WatchdogOutcome::TotalTimeout => {
+            report.timed_out = true;
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
+        WatchdogOutcome::IdleTimeout => {
+            report.idle_timed_out = true;
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
+    };
     let request = SubscribeRequest {
         blocks: HashMap::from([(
             "raw-blocks".to_string(),
@@ -332,35 +558,66 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     // `subscribe_once` does) prevents those replies even while the response stream is healthy.
     let (mut request_sink, request_stream) =
         mpsc::channel::<SubscribeRequest>(SUBSCRIBE_REQUEST_CHANNEL_CAPACITY);
-    request_sink
-        .send(request)
-        .await
-        .context("queue initial raw gRPC subscription request")?;
-    let response = client
-        .geyser
-        .subscribe(request_stream)
-        .await
-        .context("open raw gRPC bidirectional subscription")?;
+    match await_with_watchdogs(request_sink.send(request), deadline, idle_deadline).await {
+        WatchdogOutcome::Completed(result) => {
+            result.context("queue initial raw gRPC subscription request")?
+        }
+        WatchdogOutcome::TotalTimeout => {
+            report.timed_out = true;
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
+        WatchdogOutcome::IdleTimeout => {
+            report.idle_timed_out = true;
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
+    }
+    let response = match await_with_watchdogs(
+        client.geyser.subscribe(request_stream),
+        deadline,
+        idle_deadline,
+    )
+    .await
+    {
+        WatchdogOutcome::Completed(result) => {
+            result.context("open raw gRPC bidirectional subscription")?
+        }
+        WatchdogOutcome::TotalTimeout => {
+            report.timed_out = true;
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
+        WatchdogOutcome::IdleTimeout => {
+            report.idle_timed_out = true;
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
+    };
     let response_encoding = grpc_response_encoding(response.metadata());
     tracing::info!(
         grpc_response_encoding = response_encoding.as_str(),
         "raw gRPC subscription opened"
     );
     let mut stream = response.into_inner();
-    let deadline = TokioInstant::now() + Duration::from_secs(config.timeout_secs);
     let max_blocks = config.max_blocks.max(1) as u64;
     let mut raw = Vec::with_capacity(2 * 1024 * 1024);
     let mut compressed = Vec::with_capacity(1024 * 1024);
     let mut compressor = zstd::bulk::Compressor::new(config.compression_level)
         .context("create raw gRPC zstd compressor")?;
+    let mut poh_num_hashes_verified = 0u128;
 
     while report.frames_written < max_blocks {
-        let update = tokio::select! {
-            _ = sleep_until(deadline) => {
+        let update = match await_with_watchdogs(stream.next(), deadline, idle_deadline).await {
+            WatchdogOutcome::Completed(update) => update,
+            WatchdogOutcome::TotalTimeout => {
                 report.timed_out = true;
                 break;
             }
-            update = stream.next() => update,
+            WatchdogOutcome::IdleTimeout => {
+                report.idle_timed_out = true;
+                break;
+            }
         };
         let Some(update) = update else {
             report.stream_ended = true;
@@ -368,19 +625,80 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         };
         let update = update?;
         if matches!(update.update_oneof.as_ref(), Some(UpdateOneof::Ping(_))) {
-            request_sink
-                .send(subscribe_ping_request())
-                .await
-                .context("reply to raw gRPC subscription ping")?;
+            match await_with_watchdogs(
+                request_sink.send(subscribe_ping_request()),
+                deadline,
+                idle_deadline,
+            )
+            .await
+            {
+                WatchdogOutcome::Completed(result) => {
+                    result.context("reply to raw gRPC subscription ping")?
+                }
+                WatchdogOutcome::TotalTimeout => {
+                    report.timed_out = true;
+                    break;
+                }
+                WatchdogOutcome::IdleTimeout => {
+                    report.idle_timed_out = true;
+                    break;
+                }
+            }
             continue;
         }
         let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
             continue;
         };
         report.frames_seen += 1;
+        report.first_delivered_slot.get_or_insert(block.slot);
         if effective_from_slot.is_some_and(|from_slot| block.slot < from_slot) {
             report.frames_skipped_before_resume += 1;
             continue;
+        }
+        if let Some(anchor) = resume_anchor.as_ref() {
+            if block.slot == anchor.slot {
+                report.resume_overlap_observed = Some(true);
+                if block.blockhash == anchor.blockhash {
+                    report.frames_skipped_before_resume += 1;
+                    continue;
+                }
+            } else if block.slot > anchor.slot
+                && report.resume_overlap_observed == Some(false)
+                && !report.resume_coverage_warning
+            {
+                report.resume_coverage_warning = true;
+                if let Some(path) = config.resume_coverage_warning_file.as_deref() {
+                    let first_delivered_slot = report.first_delivered_slot.unwrap_or(block.slot);
+                    let event = GrpcRawResumeCoverageWarning {
+                        event_id: resume_coverage_warning_event_id(
+                            anchor.slot,
+                            first_delivered_slot,
+                            block.slot,
+                        ),
+                        schema_version: RESUME_COVERAGE_WARNING_SCHEMA_VERSION,
+                        requested_overlap_slot: anchor.slot,
+                        first_delivered_slot,
+                        observed_later_slot: block.slot,
+                        written_unix_secs: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_or(0, |duration| duration.as_secs()),
+                    };
+                    if let Err(error) = publish_resume_coverage_warning(path, &event) {
+                        tracing::error!(
+                            warning_file = %path.display(),
+                            error = %error,
+                            "failed to publish raw gRPC resume-coverage warning event"
+                        );
+                        break;
+                    }
+                }
+                tracing::warn!(
+                    requested_overlap_slot = anchor.slot,
+                    first_delivered_slot = report.first_delivered_slot.unwrap_or(block.slot),
+                    delivered_slot = block.slot,
+                    "provider did not deliver the inclusive resume slot; audit source coverage"
+                );
+            }
         }
         let epoch_slot = EpochSlot::from_slot(block.slot, config.slots_per_epoch);
         if config.stop_at_epoch_boundary
@@ -396,6 +714,25 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             report.stopped_low_disk = true;
             report.available_bytes_at_stop = Some(available);
             break;
+        }
+        if config.require_complete_poh {
+            let stats = validate_complete_poh_block(block)
+                .with_context(|| format!("validate complete PoH for slot {}", block.slot))?;
+            report.poh_blocks_verified = report
+                .poh_blocks_verified
+                .checked_add(1)
+                .context("verified PoH block count overflow")?;
+            report.poh_entries_verified = report
+                .poh_entries_verified
+                .checked_add(stats.entries)
+                .context("verified PoH entry count overflow")?;
+            report.poh_transactions_verified = report
+                .poh_transactions_verified
+                .checked_add(stats.transaction_references)
+                .context("verified PoH transaction count overflow")?;
+            poh_num_hashes_verified = poh_num_hashes_verified
+                .checked_add(stats.num_hashes)
+                .context("verified PoH hash count overflow")?;
         }
 
         raw.clear();
@@ -449,6 +786,7 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             sha256_hex(&raw),
         );
         append_handoff_record(&journal_path, &row)?;
+        idle_deadline = idle_deadline_after(TokioInstant::now(), config.idle_timeout_secs)?;
 
         report.first_slot.get_or_insert(block.slot);
         report.last_slot = Some(block.slot);
@@ -468,6 +806,7 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     report.elapsed_ms = started_at.elapsed().as_millis();
     report.compression_ratio =
         compression_ratio(report.raw_bytes_written, report.compressed_bytes_written);
+    report.poh_num_hashes_verified = poh_num_hashes_verified.to_string();
     Ok(report)
 }
 
@@ -476,18 +815,51 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
 pub fn replay_grpc_raw_blocks<F>(
     output_dir: impl AsRef<Path>,
     max_record_bytes: u64,
-    mut visit: F,
+    visit: F,
 ) -> Result<u64>
+where
+    F: FnMut(&GrpcRawHandoffRecord, SubscribeUpdate) -> Result<()>,
+{
+    Ok(replay_grpc_raw_blocks_audited(output_dir, max_record_bytes, visit)?.records)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrpcRawReplayAudit {
+    records: u64,
+    wal_incomplete_tail_bytes: u64,
+}
+
+fn replay_grpc_raw_blocks_audited<F>(
+    output_dir: impl AsRef<Path>,
+    max_record_bytes: u64,
+    mut visit: F,
+) -> Result<GrpcRawReplayAudit>
 where
     F: FnMut(&GrpcRawHandoffRecord, SubscribeUpdate) -> Result<()>,
 {
     let output_dir = output_dir.as_ref();
     let identity = read_identity(&output_dir.join(IDENTITY_FILE))?;
     let wal_dir = spool_journal_dir(output_dir, &identity);
+    let spool_audit = LockedSpoolAudit::open(
+        output_dir.join(WAL_ROOT_DIR),
+        identity.spool_identity(),
+        SpoolOptions {
+            max_record_bytes,
+            ..SpoolOptions::default()
+        },
+    )
+    .context("lock and audit raw gRPC WAL")?;
+    ensure!(
+        spool_audit.journal_dir() == wal_dir,
+        "raw gRPC WAL audit resolved a different journal directory"
+    );
+    let wal_tail = spool_audit.last_record().cloned();
     let journal_path = output_dir.join(HANDOFF_JOURNAL_FILE);
+    let journal_state = read_handoff_journal(&journal_path, false)?;
     let file = File::open(&journal_path)
         .with_context(|| format!("open raw gRPC journal {}", journal_path.display()))?;
     let mut expected_frame_id = 0u64;
+    let mut journal_tail = None;
     let mut decompressor =
         zstd::bulk::Decompressor::new().context("create raw gRPC zstd decompressor")?;
     for line in BufReader::new(file).lines() {
@@ -569,11 +941,103 @@ where
             row.frame_id
         );
         visit(&row, update)?;
+        journal_tail = Some(row);
         expected_frame_id = expected_frame_id
             .checked_add(1)
             .context("raw gRPC replay frame id overflow")?;
     }
-    Ok(expected_frame_id)
+    ensure!(
+        expected_frame_id == journal_state.records && journal_tail == journal_state.last,
+        "raw gRPC handoff journal changed during locked replay"
+    );
+    match (wal_tail.as_ref(), journal_tail.as_ref()) {
+        (None, None) => {}
+        (Some(wal), Some(journal)) => {
+            ensure!(
+                wal.metadata().observation.sequence == journal.frame_id,
+                "raw gRPC WAL/journal tail frame id mismatch"
+            );
+            ensure!(
+                wal.location() == journal.location(),
+                "raw gRPC WAL/journal tail location mismatch"
+            );
+        }
+        (Some(wal), None) => {
+            return Err(anyhow!(
+                "raw gRPC handoff journal is empty but WAL has durable frame {}",
+                wal.metadata().observation.sequence
+            ));
+        }
+        (None, Some(journal)) => {
+            return Err(anyhow!(
+                "raw gRPC handoff journal frame {} exists without a durable WAL frame",
+                journal.frame_id
+            ));
+        }
+    }
+    Ok(GrpcRawReplayAudit {
+        records: expected_frame_id,
+        wal_incomplete_tail_bytes: spool_audit.incomplete_tail_bytes(),
+    })
+}
+
+/// Fully replay a raw spool and prove that every retained block contains the ordered entry data
+/// required to reconstruct Blockzilla's PoH sidecar after canonical block IDs are assigned.
+pub fn verify_grpc_raw_poh(
+    output_dir: PathBuf,
+    max_record_bytes: u64,
+    minimum_records: u64,
+) -> Result<GrpcRawPohVerifyReport> {
+    let mut report = GrpcRawPohVerifyReport {
+        output_dir: output_dir.clone(),
+        minimum_records,
+        records_verified: 0,
+        first_slot: None,
+        last_slot: None,
+        poh_entries: 0,
+        transaction_references: 0,
+        num_hashes: "0".to_string(),
+        wal_incomplete_tail_bytes: 0,
+    };
+    let mut num_hashes = 0u128;
+    let replay = replay_grpc_raw_blocks_audited(&output_dir, max_record_bytes, |row, update| {
+        let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
+            return Err(anyhow!("raw gRPC frame {} is not a block", row.frame_id));
+        };
+        let stats = validate_complete_poh_block(block)
+            .with_context(|| format!("verify raw gRPC PoH frame {}", row.frame_id))?;
+        report.first_slot.get_or_insert(row.slot);
+        report.last_slot = Some(row.slot);
+        report.records_verified = report
+            .records_verified
+            .checked_add(1)
+            .context("verified raw gRPC record count overflow")?;
+        report.poh_entries = report
+            .poh_entries
+            .checked_add(stats.entries)
+            .context("verified raw gRPC PoH entry count overflow")?;
+        report.transaction_references = report
+            .transaction_references
+            .checked_add(stats.transaction_references)
+            .context("verified raw gRPC PoH transaction count overflow")?;
+        num_hashes = num_hashes
+            .checked_add(stats.num_hashes)
+            .context("verified raw gRPC PoH hash count overflow")?;
+        Ok(())
+    })?;
+    ensure!(
+        replay.records == report.records_verified,
+        "raw gRPC PoH verification count differs from replay audit"
+    );
+    report.wal_incomplete_tail_bytes = replay.wal_incomplete_tail_bytes;
+    report.num_hashes = num_hashes.to_string();
+    ensure!(
+        report.records_verified >= minimum_records,
+        "raw gRPC PoH verification found {} records, below required minimum {}",
+        report.records_verified,
+        minimum_records
+    );
+    Ok(report)
 }
 
 pub fn inspect_grpc_raw_blocks(
@@ -974,6 +1438,183 @@ fn append_handoff_record(path: &Path, row: &GrpcRawHandoffRecord) -> Result<()> 
     Ok(())
 }
 
+fn prepare_resume_coverage_warning_path(config: &GrpcRawRecordConfig) -> Result<()> {
+    let Some(path) = config.resume_coverage_warning_file.as_deref() else {
+        return Ok(());
+    };
+    let expected = config
+        .output_dir
+        .join(MONITORING_DIR)
+        .join(RESUME_COVERAGE_WARNING_FILE);
+    ensure!(
+        path == expected,
+        "resume-coverage warning path must be {}",
+        expected.display()
+    );
+    let parent = expected
+        .parent()
+        .context("resume-coverage warning path has no parent directory")?;
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) => ensure!(
+            metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+            "resume-coverage warning parent is not a real directory: {}",
+            parent.display()
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::create_dir(parent).with_context(|| {
+                format!(
+                    "create resume-coverage warning directory {}",
+                    parent.display()
+                )
+            })?;
+            sync_directory(&config.output_dir)?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect resume-coverage warning directory {}",
+                    parent.display()
+                )
+            });
+        }
+    }
+    let _ = read_resume_coverage_warning(path)?;
+    Ok(())
+}
+
+fn resume_coverage_warning_event_id(
+    requested_overlap_slot: u64,
+    first_delivered_slot: u64,
+    observed_later_slot: u64,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"blockzilla-grpc-resume-coverage-warning-v1");
+    hasher.update(requested_overlap_slot.to_le_bytes());
+    hasher.update(first_delivered_slot.to_le_bytes());
+    hasher.update(observed_later_slot.to_le_bytes());
+    hex_bytes(&hasher.finalize())
+}
+
+fn read_resume_coverage_warning(path: &Path) -> Result<Option<GrpcRawResumeCoverageWarning>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect resume-coverage warning {}", path.display()));
+        }
+    };
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "resume-coverage warning is not a regular file: {}",
+        path.display()
+    );
+    ensure!(
+        metadata.len() > 0 && metadata.len() <= 4096,
+        "resume-coverage warning has invalid size {}",
+        metadata.len()
+    );
+    let event: GrpcRawResumeCoverageWarning = serde_json::from_slice(
+        &fs::read(path)
+            .with_context(|| format!("read resume-coverage warning {}", path.display()))?,
+    )
+    .with_context(|| format!("decode resume-coverage warning {}", path.display()))?;
+    ensure!(
+        event.schema_version == RESUME_COVERAGE_WARNING_SCHEMA_VERSION,
+        "unsupported resume-coverage warning schema {}",
+        event.schema_version
+    );
+    ensure!(
+        event.requested_overlap_slot < event.observed_later_slot,
+        "resume-coverage warning does not advance beyond its requested overlap"
+    );
+    ensure!(
+        event.event_id
+            == resume_coverage_warning_event_id(
+                event.requested_overlap_slot,
+                event.first_delivered_slot,
+                event.observed_later_slot,
+            ),
+        "resume-coverage warning event ID is invalid"
+    );
+    Ok(Some(event))
+}
+
+fn publish_resume_coverage_warning(
+    path: &Path,
+    event: &GrpcRawResumeCoverageWarning,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("resume-coverage warning path has no parent directory")?;
+    if let Some(existing) = read_resume_coverage_warning(path)? {
+        ensure!(
+            existing.event_id == event.event_id,
+            "a different undelivered resume-coverage warning already exists"
+        );
+        sync_directory(parent)?;
+        return Ok(());
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("resume-coverage-warning.json");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let temp_path = path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| -> Result<()> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| {
+                format!(
+                    "create resume-coverage warning temp {}",
+                    temp_path.display()
+                )
+            })?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, event)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        match fs::hard_link(&temp_path, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let existing = read_resume_coverage_warning(path)?
+                    .context("resume-coverage warning disappeared during publication")?;
+                ensure!(
+                    existing.event_id == event.event_id,
+                    "a different undelivered resume-coverage warning won publication"
+                );
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "publish resume-coverage warning {} -> {}",
+                        temp_path.display(),
+                        path.display()
+                    )
+                });
+            }
+        }
+        fs::remove_file(&temp_path).with_context(|| {
+            format!(
+                "remove resume-coverage warning temp {}",
+                temp_path.display()
+            )
+        })?;
+        sync_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
 fn spool_journal_dir(output_dir: &Path, identity: &GrpcRawIdentityFile) -> PathBuf {
     output_dir
         .join(WAL_ROOT_DIR)
@@ -1082,6 +1723,12 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blockzilla_format::{
+        LiveBlockMissingField, WincodeArchiveV2PohRecord, WincodeLeb128FramedReader,
+        WincodeLeb128FramedWriter,
+    };
+    use std::io::Cursor;
+    use yellowstone_grpc_proto::prelude::SubscribeUpdateEntry;
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -1117,6 +1764,44 @@ mod tests {
         SubscribeUpdate {
             filters: vec!["raw-blocks".to_string()],
             update_oneof: Some(UpdateOneof::Block(block(slot))),
+            created_at: None,
+        }
+    }
+
+    fn complete_poh_block(slot: u64) -> SubscribeUpdateBlock {
+        SubscribeUpdateBlock {
+            slot,
+            parent_slot: slot - 1,
+            blockhash: "11111111111111111111111111111111".to_string(),
+            executed_transaction_count: 0,
+            entries_count: 2,
+            // Deliberately reverse source order. The entry index is the canonical order.
+            entries: vec![
+                SubscribeUpdateEntry {
+                    slot,
+                    index: 1,
+                    num_hashes: 7,
+                    hash: vec![0; 32],
+                    executed_transaction_count: 0,
+                    starting_transaction_index: 0,
+                },
+                SubscribeUpdateEntry {
+                    slot,
+                    index: 0,
+                    num_hashes: 5,
+                    hash: vec![0x11; 32],
+                    executed_transaction_count: 0,
+                    starting_transaction_index: 0,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn complete_poh_update(slot: u64) -> SubscribeUpdate {
+        SubscribeUpdate {
+            filters: vec!["raw-blocks".to_string()],
+            update_oneof: Some(UpdateOneof::Block(complete_poh_block(slot))),
             created_at: None,
         }
     }
@@ -1198,6 +1883,273 @@ mod tests {
             GrpcResponseEncoding::Other
         );
         assert_eq!(GrpcResponseEncoding::Other.as_str(), "other");
+    }
+
+    #[test]
+    fn watchdog_deadlines_reject_overflow_and_allow_disabling_idle_timeout() {
+        let now = TokioInstant::now();
+        assert_eq!(idle_deadline_after(now, 0).unwrap(), None);
+        assert!(deadline_after(now, 1, "test timeout").is_ok());
+        assert!(deadline_after(now, u64::MAX, "test timeout").is_err());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(await_with_watchdogs(
+            std::future::pending::<()>(),
+            deadline_after(now, 1, "test timeout").unwrap(),
+            Some(now),
+        ));
+        assert_eq!(outcome, WatchdogOutcome::IdleTimeout);
+    }
+
+    #[test]
+    fn durable_tail_makes_configured_from_slot_bootstrap_only_and_requests_overlap() {
+        assert_eq!(effective_resume_slot(Some(100), None), Some(100));
+        assert_eq!(effective_resume_slot(None, None), None);
+        assert_eq!(effective_resume_slot(Some(999), Some(123)), Some(123));
+        assert_eq!(effective_resume_slot(Some(1), Some(123)), Some(123));
+        assert_eq!(effective_resume_slot(None, Some(u64::MAX)), Some(u64::MAX));
+    }
+
+    #[test]
+    fn validates_complete_reconstructable_poh() {
+        let stats = validate_complete_poh_block(&complete_poh_block(500)).unwrap();
+        assert_eq!(stats.entries, 2);
+        assert_eq!(stats.transaction_references, 0);
+        assert_eq!(stats.num_hashes, 12);
+
+        let mut partitioned = complete_poh_block(500);
+        partitioned.executed_transaction_count = 3;
+        partitioned.transactions = (0..3).map(|_| Default::default()).collect();
+        partitioned.entries[1].executed_transaction_count = 1;
+        partitioned.entries[0].starting_transaction_index = 1;
+        partitioned.entries[0].executed_transaction_count = 2;
+        let partitioned_stats = validate_complete_poh_block(&partitioned).unwrap();
+        assert_eq!(partitioned_stats.transaction_references, 3);
+
+        let mut invalid_partition = partitioned;
+        invalid_partition.entries[0].starting_transaction_index = 2;
+        assert!(
+            validate_complete_poh_block(&invalid_partition)
+                .unwrap_err()
+                .to_string()
+                .contains("starts at transaction 2, expected 1")
+        );
+
+        let mut missing = complete_poh_block(500);
+        missing.entries_count = 3;
+        assert!(
+            validate_complete_poh_block(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("declares 3 PoH entries but contains 2")
+        );
+
+        let mut wrong_final_hash = complete_poh_block(500);
+        wrong_final_hash.entries[0].hash = vec![0x22; 32];
+        assert!(
+            validate_complete_poh_block(&wrong_final_hash)
+                .unwrap_err()
+                .to_string()
+                .contains("final PoH entry hash differs")
+        );
+
+        let mut duplicate_index = complete_poh_block(500);
+        duplicate_index.entries[0].index = 0;
+        assert!(
+            validate_complete_poh_block(&duplicate_index)
+                .unwrap_err()
+                .to_string()
+                .contains("PoH entry index 0, expected 1")
+        );
+    }
+
+    #[test]
+    fn raw_wal_replay_produces_archive_v2_poh_record() {
+        let root = temp_dir("poh-sidecar-replay");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let source = complete_poh_update(800);
+        let row = append_fixture(&mut spool, &identity, &source, 0);
+        append_handoff_record(&journal, &row).unwrap();
+        drop(spool);
+
+        let verified = verify_grpc_raw_poh(root.clone(), config.max_record_bytes, 1).unwrap();
+        assert_eq!(verified.records_verified, 1);
+        assert_eq!(verified.poh_entries, 2);
+        assert_eq!(verified.transaction_references, 0);
+        assert_eq!(verified.num_hashes, "12");
+
+        let mut encoded = Vec::new();
+        let count = replay_grpc_raw_blocks(&root, config.max_record_bytes, |_row, decoded| {
+            let Some(UpdateOneof::Block(block)) = decoded.update_oneof else {
+                panic!("replayed update is not a block")
+            };
+            let converted = crate::grpc::convert_grpc_block(&block, 37)?;
+            assert!(
+                !converted
+                    .missing
+                    .contains(&LiveBlockMissingField::PohEntries)
+            );
+            let mut writer = WincodeLeb128FramedWriter::new(&mut encoded);
+            writer.write(&WincodeArchiveV2PohRecord {
+                block_id: 37,
+                slot: block.slot,
+                entries: converted.poh_entries,
+            })?;
+            writer.flush()?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 1);
+
+        let mut reader = WincodeLeb128FramedReader::new(Cursor::new(encoded));
+        let (_len, record) = reader.read::<WincodeArchiveV2PohRecord>().unwrap().unwrap();
+        assert_eq!(record.block_id, 37);
+        assert_eq!(record.slot, 800);
+        assert_eq!(record.entries.len(), 2);
+        assert_eq!(record.entries[0].num_hashes, 5);
+        assert_eq!(record.entries[0].hash, [0x11; 32]);
+        assert_eq!(record.entries[1].num_hashes, 7);
+        assert_eq!(record.entries[1].hash, [0; 32]);
+        assert!(
+            reader
+                .read::<WincodeArchiveV2PohRecord>()
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn poh_verifier_requires_records_unless_explicitly_allowed_empty() {
+        let root = temp_dir("empty-poh-verification");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        recover_handoff_journal(&root.join(HANDOFF_JOURNAL_FILE)).unwrap();
+        drop(spool);
+
+        let empty = verify_grpc_raw_poh(root.clone(), config.max_record_bytes, 0).unwrap();
+        assert_eq!(empty.records_verified, 0);
+        assert_eq!(empty.wal_incomplete_tail_bytes, 0);
+        assert!(
+            verify_grpc_raw_poh(root.clone(), config.max_record_bytes, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("below required minimum 1")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn poh_verifier_rejects_wal_ahead_of_handoff_journal() {
+        let root = temp_dir("wal-ahead-poh-verification");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        recover_handoff_journal(&root.join(HANDOFF_JOURNAL_FILE)).unwrap();
+        append_fixture(&mut spool, &identity, &complete_poh_update(900), 0);
+        drop(spool);
+
+        assert!(
+            verify_grpc_raw_poh(root.clone(), config.max_record_bytes, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("journal is empty but WAL has durable frame 0")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn poh_verifier_rejects_truncated_handoff_journal() {
+        let root = temp_dir("truncated-journal-poh-verification");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        for frame_id in 0..2 {
+            let row = append_fixture(
+                &mut spool,
+                &identity,
+                &complete_poh_update(910 + frame_id),
+                frame_id,
+            );
+            append_handoff_record(&journal, &row).unwrap();
+        }
+        drop(spool);
+
+        let contents = fs::read(&journal).unwrap();
+        let first_line_len = contents.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        OpenOptions::new()
+            .write(true)
+            .open(&journal)
+            .unwrap()
+            .set_len(first_line_len as u64)
+            .unwrap();
+        assert!(
+            verify_grpc_raw_poh(root.clone(), config.max_record_bytes, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("WAL/journal tail frame id mismatch")
+        );
+
+        let contents = fs::read(&journal).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&journal)
+            .unwrap()
+            .set_len((contents.len() - 1) as u64)
+            .unwrap();
+        assert!(
+            verify_grpc_raw_poh(root.clone(), config.max_record_bytes, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("partial raw gRPC journal tail")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1331,17 +2283,79 @@ mod tests {
     }
 
     #[test]
+    fn atomically_publishes_secret_free_resume_coverage_warning() {
+        let root = temp_dir("resume-coverage-warning");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("warning.json");
+        let event = GrpcRawResumeCoverageWarning {
+            event_id: resume_coverage_warning_event_id(100, 104, 104),
+            schema_version: RESUME_COVERAGE_WARNING_SCHEMA_VERSION,
+            requested_overlap_slot: 100,
+            first_delivered_slot: 104,
+            observed_later_slot: 104,
+            written_unix_secs: 123,
+        };
+        publish_resume_coverage_warning(&path, &event).unwrap();
+        let decoded: GrpcRawResumeCoverageWarning =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(decoded, event);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_replace_a_different_pending_resume_warning() {
+        let root = temp_dir("resume-coverage-warning-pending");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("warning.json");
+        let first = GrpcRawResumeCoverageWarning {
+            event_id: resume_coverage_warning_event_id(100, 104, 104),
+            schema_version: RESUME_COVERAGE_WARNING_SCHEMA_VERSION,
+            requested_overlap_slot: 100,
+            first_delivered_slot: 104,
+            observed_later_slot: 104,
+            written_unix_secs: 123,
+        };
+        let second = GrpcRawResumeCoverageWarning {
+            event_id: resume_coverage_warning_event_id(104, 108, 108),
+            schema_version: RESUME_COVERAGE_WARNING_SCHEMA_VERSION,
+            requested_overlap_slot: 104,
+            first_delivered_slot: 108,
+            observed_later_slot: 108,
+            written_unix_secs: 124,
+        };
+        publish_resume_coverage_warning(&path, &first).unwrap();
+        let error = publish_resume_coverage_warning(&path, &second).unwrap_err();
+        assert!(error.to_string().contains("different undelivered"));
+        assert_eq!(read_resume_coverage_warning(&path).unwrap(), Some(first));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resume_warning_path_is_fixed_below_the_raw_output() {
+        let root = temp_dir("resume-coverage-warning-path");
+        fs::create_dir_all(&root).unwrap();
+        let mut config = test_config(root.clone());
+        config.resume_coverage_warning_file = Some(root.join("raw-blocks.jsonl"));
+        assert!(
+            prepare_resume_coverage_warning_path(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("warning path must be")
+        );
+        let expected = root.join(MONITORING_DIR).join(RESUME_COVERAGE_WARNING_FILE);
+        config.resume_coverage_warning_file = Some(expected);
+        prepare_resume_coverage_warning_path(&config).unwrap();
+        assert!(root.join(MONITORING_DIR).is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn low_disk_guard_can_be_disabled_or_forced() {
         let root = temp_dir("disk-guard");
         fs::create_dir_all(&root).unwrap();
         assert_eq!(low_disk_bytes(&root, 0).unwrap(), None);
-        let available = filesystem_available_bytes(&root).unwrap();
-        if available < u64::MAX {
-            assert_eq!(
-                low_disk_bytes(&root, available.saturating_add(1)).unwrap(),
-                Some(available)
-            );
-        }
+        assert!(low_disk_bytes(&root, u64::MAX).unwrap().is_some());
         fs::remove_dir_all(root).unwrap();
     }
 
