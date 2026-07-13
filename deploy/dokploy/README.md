@@ -10,7 +10,9 @@ build archives, indexes, PoH sidecars, or signatures. It has no inbound port.
    `docker-compose.dokploy.yml` as the Compose file.
 2. Add the variables from `.env.example` in Dokploy. Store the real
    `BLOCKZILLA_GRPC_X_TOKEN` only in Dokploy's environment/secret UI. Never put
-   it in Git or build arguments.
+   it in Git or build arguments. The service reads this opaque token from the
+   `.env` file that Dokploy materializes; it is not interpolated into the
+   Compose model or included in the Docker build context.
 3. Before the first start, set `BLOCKZILLA_RAW_FROM_SLOT` to the earliest slot
    the provider can replay, if known. Leaving it empty starts at the provider's
    live position. The durable journal controls all later resumes.

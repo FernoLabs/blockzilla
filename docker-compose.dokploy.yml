@@ -12,9 +12,14 @@ services:
     restart: unless-stopped
     stop_grace_period: 45s
 
+    # Dokploy materializes the Environment panel as this file before invoking
+    # Compose. Read the opaque x-token from the file instead of interpolating it
+    # into the Compose model, which also keeps it out of `docker compose config`.
+    env_file:
+      - path: .env
+        required: false
     environment:
       BLOCKZILLA_GRPC_ENDPOINT: "${BLOCKZILLA_GRPC_ENDPOINT:?BLOCKZILLA_GRPC_ENDPOINT is required}"
-      BLOCKZILLA_GRPC_X_TOKEN: "${BLOCKZILLA_GRPC_X_TOKEN:?BLOCKZILLA_GRPC_X_TOKEN is required}"
       BLOCKZILLA_GRPC_ACCEPT_COMPRESSION: "${BLOCKZILLA_GRPC_ACCEPT_COMPRESSION:-zstd}"
       BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW: "${BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW:-false}"
       BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_INTERVAL_SECS: "${BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_INTERVAL_SECS:-30}"
