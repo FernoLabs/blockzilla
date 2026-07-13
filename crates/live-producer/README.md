@@ -23,6 +23,43 @@ The non-dry-run `run` command intentionally fails until a real source adapter is
 implemented. That keeps deployments from silently running without ingesting
 blocks.
 
+## Redundant ingest configuration
+
+The durable multi-source foundation has a separate versioned configuration. It
+supports multiple gRPC/UDP/QUIC shred inputs, primary/replica roles, per-source
+secret references, bounded event/byte queues, reconnect controls, mTLS material,
+and disk-spool limits. Literal secret values are not representable.
+
+Validate a primary or replica configuration without resolving or printing its
+credentials:
+
+```bash
+cargo run -p blockzilla-live-producer -- validate-ingest-config \
+  --config crates/live-producer/config/ingest-primary.example.json
+
+cargo run -p blockzilla-live-producer -- validate-ingest-config \
+  --config crates/live-producer/config/ingest-replica.example.json
+```
+
+The command prints only a redacted operational summary. `mode: "slave"` is
+accepted as a deprecated input alias and normalizes to `replica`.
+
+The initial implementation also provides source-independent block/entry/shred
+identities, deterministic duplicate/conflict/fork classification, a segmented
+raw spool that recomputes content digests, syncs each committed checksummed
+frame, validates sealed segments, and truncates only incomplete crash tails, and
+a checksummed receipt WAL. Both WALs enforce one writer and become fail-stop
+after ambiguous I/O errors. A network response alone cannot make replica data
+eligible for garbage collection: the exact signed receipt must first be verified
+and synced into the local receipt WAL. There is intentionally no segment unlink
+API until a sealed-segment ACK manifest can prove every frame is eligible.
+
+These primitives are not wired into the production socket adapters yet. The
+current `capture-grpc` process must not be replaced until replay, archive-writer
+recovery, and power-loss fault tests are complete. See
+[`docs/live-ingest-redundancy.md`](../../docs/live-ingest-redundancy.md) for the
+protocol and rollout sequence.
+
 ## Epoch boundaries
 
 The live builder uses Old Faithful-compatible boundaries by default:
@@ -90,7 +127,64 @@ The probe connects, reads basic unary status, then subscribes to block metadata
 and entry updates. It is intentionally light enough to verify PoH entry
 availability without streaming full transaction payloads.
 
+### gRPC transport tuning
+
+All transport settings are optional. An unset setting leaves tonic's current
+default unchanged, except response compression, whose explicit/default `none`
+value preserves the existing uncompressed behavior. Invalid values abort before
+the connection is opened.
+
+- `BLOCKZILLA_GRPC_ACCEPT_COMPRESSION=none|gzip|zstd` enables exactly one
+  response decompressor; it defaults to `none`.
+- `BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW=true|false` controls HTTP/2 adaptive
+  flow-control windows.
+- `BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_INTERVAL_SECS=N` sets the HTTP/2 ping
+  interval to a positive integer number of seconds.
+- `BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_TIMEOUT_SECS=N` sets the ping timeout to a
+  positive integer number of seconds.
+- `BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_WHILE_IDLE=true|false` controls whether
+  pings continue without active streams.
+- `BLOCKZILLA_GRPC_LOCAL_ADDRESS=IP` binds the client socket to a bare IPv4 or
+  IPv6 source address. This can select a physical interface for this process
+  without changing system routes; the address must already belong to the host.
+
+Values are exact and case-sensitive; whitespace, hostnames, CIDR notation,
+ports, zero durations, and alternative Boolean spellings are rejected.
+
 ## gRPC capture
+
+For a low-CPU outage bridge that records events without archive conversion or
+derived sidecars, use `record-grpc-raw`:
+
+```bash
+BLOCKZILLA_GRPC_X_TOKEN=... \
+  cargo run --release -p blockzilla-live-producer -- record-grpc-raw \
+  --endpoint https://example.mainnet.rpcpool.com \
+  --output-dir /path/with/free-space/mac-bridge \
+  --from-slot 432621000 \
+  --min-free-bytes 17179869184
+
+cargo run --release -p blockzilla-live-producer -- inspect-grpc-raw \
+  --output-dir /path/with/free-space/mac-bridge \
+  --verify-payloads
+```
+
+Each confirmed block update is retained as one independently decompressible
+zstd level-1 record in the checksummed segmented WAL. The WAL is synced before
+`raw-blocks.jsonl` advances; restart recovers an incomplete WAL tail,
+reconciles the WAL/journal crash window, validates the authoritative tail,
+continues frame IDs, and requests the slot after the last durable update. The
+journal records slot, parent, WAL segment/offset/length, compressed and raw
+lengths, blockhash, and the SHA-256 of the uncompressed protobuf envelope.
+`--min-free-bytes` defaults to 16 GiB and stops cleanly before appending when
+free space falls below that reserve; zero disables the guard.
+
+The compressed payload is the full `SubscribeUpdate` represented by the
+compiled Yellowstone schema, including its filters and creation timestamp,
+rather than only the nested block. As with all prost/tonic clients, wire fields
+unknown to the compiled protobuf schema cannot be preserved. Run this command
+under a restart supervisor for transport failures or normal stream termination.
+For a continuous bridge, omit `--stop-at-epoch-boundary`.
 
 Capture live block updates with transactions and entries into the producer
 layout:
@@ -101,6 +195,9 @@ BLOCKZILLA_GRPC_X_TOKEN=... \
   --endpoint https://example.mainnet.rpcpool.com \
   --archive-dir blockzilla-live \
   --max-blocks 1000000 \
+  --pubkey-index-mode runs \
+  --pubkey-hot-registry blockzilla-v2/epoch-N-1/registry.bin \
+  --pubkey-hot-count 1000 \
   --stop-at-epoch-boundary
 
 cargo run -p blockzilla-live-producer -- inspect-capture \
@@ -117,11 +214,35 @@ The capture writes wincode/LEB128 framed records:
 - `index/signatures.bin`
 - `index/signature-index.bin`
 - `index/pubkey-counts.bin`
+- `index/pubkey-touches.bin` when `--pubkey-index-mode touches` or
+  `counts-and-touches` is used
+- `index/pubkey-runs/*.bin` when `--pubkey-index-mode runs` or
+  `counts-and-runs` is used. These are raw sorted `(pubkey[32], count:u32)`
+  records. If `--pubkey-hot-registry` is supplied, `hot-run.bin` holds exact
+  counts for the first `--pubkey-hot-count` pubkeys from that previous registry.
 - `journal/grpc-blocks.jsonl`
 
 Each journal row records the OF-compatible `epoch` and `epoch_slot_index`. With
 `--stop-at-epoch-boundary`, capture stops before writing the first block from the
 next epoch so an orchestrator can flush/finalize the previous epoch cleanly.
+
+For fast low-memory capture, prefer `--pubkey-index-mode runs`. Capture
+sorts/dedupes pubkeys per block, spills bounded sorted count chunks, and avoids
+keeping the full live count map in memory. The optional hot-registry cache keeps
+exact counts for the previous epoch's top accounts in a tiny in-memory map, which
+reduces run volume without changing final registry correctness. The hot-block
+finalizer can then build `registry.bin` by merging sorted runs:
+
+```bash
+cargo run --release -p blockzilla --bin blockzilla -- build-archive-v2-hot-blocks-from-live \
+  blockzilla-live \
+  blockzilla-v2/epoch-N \
+  --registry-source runs
+```
+
+`--pubkey-index-mode touches` remains useful as a simpler comparison mode: it
+appends every raw 32-byte pubkey touch and lets the finalizer perform the whole
+external sort later with `--registry-source touches`.
 
 ## RPC getBlock backfill
 
@@ -150,6 +271,19 @@ cargo run --release -p blockzilla-live-producer -- bench-fixture \
   --archive-dir blockzilla-v1/live-grpc-100 \
   --iterations 2 \
   --hash-backend all \
+  --write-mode none
+```
+
+Approximate registry-order experiments can be layered onto the same run. This
+keeps exact counts as ground truth, but also tracks a bounded SpaceSaving
+heavy-hitter head and reports its exact varint-ID byte cost:
+
+```bash
+cargo run --release -p blockzilla-live-producer -- bench-fixture \
+  --archive-dir blockzilla-v1/live-grpc-100 \
+  --iterations 1 \
+  --hash-backend gxhash-u32 \
+  --heavy-hitter-capacity 32768,262144 \
   --write-mode none
 ```
 

@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_VERSION=1.96.0
+
+FROM --platform=$TARGETPLATFORM rust:${RUST_VERSION}-bookworm AS builder
+ARG TARGETPLATFORM
+
+RUN test "$TARGETPLATFORM" = "linux/amd64"
+
+WORKDIR /src
+
+# The repository's developer config uses target-cpu=native. A deployable image must
+# remain runnable after a Hetzner host migration, so override it with amd64 baseline.
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="-C target-cpu=x86-64"
+
+COPY . .
+
+RUN --mount=type=cache,id=blockzilla-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=blockzilla-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo build --locked --release -p blockzilla-live-producer --bin blockzilla-live-producer
+
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime
+ARG TARGETPLATFORM
+
+RUN test "$TARGETPLATFORM" = "linux/amd64" \
+    && apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 blockzilla \
+    && useradd --uid 10001 --gid 10001 --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin blockzilla \
+    && install -d -o 10001 -g 10001 -m 0700 /data /tmp
+
+COPY --from=builder --chown=0:0 /src/target/release/blockzilla-live-producer \
+    /usr/local/bin/blockzilla-live-producer
+COPY --chown=0:0 --chmod=0755 scripts/linux-raw-grpc-recorder.sh \
+    /usr/local/bin/blockzilla-raw-recorder
+
+USER 10001:10001
+WORKDIR /data
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-raw-recorder"]

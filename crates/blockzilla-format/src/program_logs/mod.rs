@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{KeyIndex, KeyStore, StrId, StringTable};
+use crate::{KeyStore, PubkeyCompactor, StrId, StringTable};
 
 pub const KNOWN_PROGRAM_LOGS_ENABLED: bool = cfg!(feature = "known-program-logs");
 
@@ -57,9 +57,9 @@ pub enum ProgramLog {
 }
 
 #[inline]
-pub fn parse_program_log_no_id(
+pub fn parse_program_log_no_id<C: PubkeyCompactor>(
     payload: &str,
-    index: &KeyIndex,
+    index: &C,
     st: &mut StringTable,
 ) -> ProgramLog {
     if payload.is_empty() {
@@ -110,10 +110,10 @@ pub fn parse_program_log_no_id(
 }
 
 #[inline]
-pub fn parse_program_log_for_program(
+pub fn parse_program_log_for_program<C: PubkeyCompactor>(
     program: &str,
     payload: &str,
-    index: &KeyIndex,
+    index: &C,
     st: &mut StringTable,
 ) -> ProgramLog {
     if payload.is_empty() {
@@ -242,10 +242,10 @@ macro_rules! try_parse {
 }
 
 #[inline]
-pub fn try_parse_program_log_with_table(
+pub fn try_parse_program_log_with_table<C: PubkeyCompactor>(
     program: &str,
     payload: &str,
-    index: &KeyIndex,
+    index: &C,
     st: &mut StringTable,
 ) -> Option<ProgramLog> {
     try_parse!(

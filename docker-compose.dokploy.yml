@@ -1,0 +1,79 @@
+name: ${COMPOSE_PROJECT_NAME:-blockzilla-live}
+
+services:
+  raw-recorder:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.raw-recorder
+      args:
+        RUST_VERSION: "1.96.0"
+    image: ${BLOCKZILLA_RAW_IMAGE:-blockzilla-live-recorder:local}
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+    environment:
+      BLOCKZILLA_GRPC_ENDPOINT: "${BLOCKZILLA_GRPC_ENDPOINT:?BLOCKZILLA_GRPC_ENDPOINT is required}"
+      BLOCKZILLA_GRPC_X_TOKEN: "${BLOCKZILLA_GRPC_X_TOKEN:?BLOCKZILLA_GRPC_X_TOKEN is required}"
+      BLOCKZILLA_GRPC_ACCEPT_COMPRESSION: "${BLOCKZILLA_GRPC_ACCEPT_COMPRESSION:-zstd}"
+      BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW: "${BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW:-false}"
+      BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_INTERVAL_SECS: "${BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_INTERVAL_SECS:-30}"
+      BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_TIMEOUT_SECS: "${BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_TIMEOUT_SECS:-10}"
+      BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_WHILE_IDLE: "${BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_WHILE_IDLE:-false}"
+      BLOCKZILLA_RAW_OUTPUT_DIR: "${BLOCKZILLA_RAW_OUTPUT_DIR:-/data/grpc-raw}"
+      BLOCKZILLA_RAW_FROM_SLOT: "${BLOCKZILLA_RAW_FROM_SLOT:-}"
+      BLOCKZILLA_RAW_MIN_FREE_BYTES: "${BLOCKZILLA_RAW_MIN_FREE_BYTES:-21474836480}"
+      BLOCKZILLA_RAW_MAX_BLOCKS: "${BLOCKZILLA_RAW_MAX_BLOCKS:-1000000000}"
+      BLOCKZILLA_RAW_TIMEOUT_SECS: "${BLOCKZILLA_RAW_TIMEOUT_SECS:-31536000}"
+      BLOCKZILLA_RAW_RESTART_DELAY_SECS: "${BLOCKZILLA_RAW_RESTART_DELAY_SECS:-5}"
+      BLOCKZILLA_RAW_LOW_DISK_RECHECK_SECS: "${BLOCKZILLA_RAW_LOW_DISK_RECHECK_SECS:-60}"
+      BLOCKZILLA_RAW_COMPRESSION_LEVEL: "${BLOCKZILLA_RAW_COMPRESSION_LEVEL:-1}"
+      BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES: "${BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES:-268435456}"
+      BLOCKZILLA_RAW_MAX_RECORD_BYTES: "${BLOCKZILLA_RAW_MAX_RECORD_BYTES:-134217728}"
+      BLOCKZILLA_RAW_CLUSTER_ID: "${BLOCKZILLA_RAW_CLUSTER_ID:-solana-mainnet}"
+      BLOCKZILLA_RAW_ORIGIN_NODE_ID: "${BLOCKZILLA_RAW_ORIGIN_NODE_ID:-hetzner-dokploy}"
+      BLOCKZILLA_RAW_SOURCE_ID: "${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner}"
+      BLOCKZILLA_RAW_STALE_AFTER_SECS: "${BLOCKZILLA_RAW_STALE_AFTER_SECS:-180}"
+      BLOCKZILLA_RAW_STARTUP_GRACE_SECS: "${BLOCKZILLA_RAW_STARTUP_GRACE_SECS:-300}"
+
+    volumes:
+      - type: volume
+        source: raw_data
+        target: /data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=1777,uid=10001,gid=10001
+
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: ${BLOCKZILLA_RAW_MEMORY_LIMIT:-768m}
+    mem_reservation: ${BLOCKZILLA_RAW_MEMORY_RESERVATION:-128m}
+    memswap_limit: ${BLOCKZILLA_RAW_MEMORY_LIMIT:-768m}
+    deploy:
+      resources:
+        limits:
+          memory: ${BLOCKZILLA_RAW_MEMORY_LIMIT:-768m}
+          pids: 64
+        reservations:
+          memory: ${BLOCKZILLA_RAW_MEMORY_RESERVATION:-128m}
+
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/blockzilla-raw-recorder", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  raw_data:
+    name: ${BLOCKZILLA_RAW_VOLUME_NAME:-blockzilla-live-raw-data}

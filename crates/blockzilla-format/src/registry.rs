@@ -16,6 +16,7 @@ use crate::CompactPubkey;
 const KEY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
 const KEY_INDEX_VERSION: u16 = 2;
 const KEY_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8;
+const REGISTRY_IO_BUFFER_SIZE: usize = 8 << 20;
 
 pub struct KeyIndex {
     /// Minimal perfect hash over all pubkeys
@@ -33,6 +34,53 @@ pub struct KeyIndex {
     /// Key -> 1-based id fallback for wasm builds, where the native MPHF dependency is unavailable.
     #[cfg(target_arch = "wasm32")]
     ids: HashMap<[u8; 32], u32>,
+}
+
+pub trait PubkeyCompactor {
+    fn compact_str(&self, k: &str) -> Option<CompactPubkey>;
+}
+
+pub struct RawPubkeyCompactor;
+
+impl PubkeyCompactor for RawPubkeyCompactor {
+    #[inline]
+    fn compact_str(&self, k: &str) -> Option<CompactPubkey> {
+        let bytes = known_raw_pubkey(k).or_else(|| decode_pubkey_base58_32(k))?;
+        Some(CompactPubkey::raw(bytes))
+    }
+}
+
+#[inline]
+fn decode_pubkey_base58_32(k: &str) -> Option<[u8; 32]> {
+    let mut bytes = [0u8; 32];
+    five8::decode_32(k, &mut bytes).ok()?;
+    Some(bytes)
+}
+
+#[inline]
+fn known_raw_pubkey(k: &str) -> Option<[u8; 32]> {
+    let pk = match k {
+        "11111111111111111111111111111111" => {
+            solana_pubkey::pubkey!("11111111111111111111111111111111")
+        }
+        "ComputeBudget111111111111111111111111111111" => {
+            solana_pubkey::pubkey!("ComputeBudget111111111111111111111111111111")
+        }
+        "Vote111111111111111111111111111111111111111" => {
+            solana_pubkey::pubkey!("Vote111111111111111111111111111111111111111")
+        }
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" => {
+            solana_pubkey::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        }
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" => {
+            solana_pubkey::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+        }
+        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => {
+            solana_pubkey::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+        }
+        _ => return None,
+    };
+    Some(pk.to_bytes())
 }
 
 impl KeyIndex {
@@ -102,7 +150,7 @@ impl KeyIndex {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn write(&self, path: &Path) -> Result<()> {
         let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
-        let mut writer = BufWriter::with_capacity(64 << 20, file);
+        let mut writer = BufWriter::with_capacity(REGISTRY_IO_BUFFER_SIZE, file);
         writer.write_all(KEY_INDEX_MAGIC)?;
         writer.write_all(&KEY_INDEX_VERSION.to_le_bytes())?;
         writer.write_all(&(KEY_INDEX_HEADER_LEN as u16).to_le_bytes())?;
@@ -125,7 +173,7 @@ impl KeyIndex {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let mut reader = BufReader::with_capacity(64 << 20, file);
+        let mut reader = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, file);
 
         let mut magic = [0u8; 8];
         reader.read_exact(&mut magic)?;
@@ -213,6 +261,13 @@ impl KeyIndex {
     }
 }
 
+impl PubkeyCompactor for KeyIndex {
+    #[inline]
+    fn compact_str(&self, k: &str) -> Option<CompactPubkey> {
+        KeyIndex::compact_str(self, k)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn key_tag(key: &[u8; 32]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -276,7 +331,7 @@ impl KeyStore {
         );
 
         let n = len_bytes / 32;
-        let mut r = BufReader::with_capacity(64 << 20, f);
+        let mut r = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, f);
 
         let mut keys = Vec::with_capacity(n);
         for _ in 0..n {
@@ -291,11 +346,19 @@ impl KeyStore {
 
 /// Write registry.bin (raw 32-byte pubkeys, no header)
 pub fn write_registry(path: &Path, keys: &[[u8; 32]]) -> Result<()> {
+    write_registry_iter(path, keys.iter().copied())
+}
+
+/// Write registry.bin from a streaming key source.
+pub fn write_registry_iter<I>(path: &Path, keys: I) -> Result<()>
+where
+    I: IntoIterator<Item = [u8; 32]>,
+{
     let f = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
-    let mut w = BufWriter::with_capacity(64 << 20, f);
+    let mut w = BufWriter::with_capacity(REGISTRY_IO_BUFFER_SIZE, f);
 
     for k in keys {
-        w.write_all(k).context("write pubkey")?;
+        w.write_all(&k).context("write pubkey")?;
     }
 
     w.flush().context("flush registry")?;

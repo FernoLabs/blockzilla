@@ -255,8 +255,7 @@ impl<R: Read> CarBlockReader<R> {
             .ok_or_else(|| CarReadError::InvalidData("entry length overflow".to_string()))?;
 
         scratch.clear();
-        scratch.resize(payload_len, 0u8);
-        self.reader.read_exact(scratch)?;
+        append_exact_from_bufread(&mut self.reader, scratch, payload_len)?;
         self.offset += payload_len as u64;
         self.entry_index += 1;
 
@@ -313,14 +312,12 @@ impl<R: Read> CarBlockReader<R> {
         let prefix_len = prefix_len.min(payload_len);
 
         scratch.clear();
-        scratch.resize(prefix_len, 0u8);
-        self.reader.read_exact(scratch)?;
+        append_exact_from_bufread(&mut self.reader, scratch, prefix_len)?;
         self.offset += prefix_len as u64;
 
         let read_payload = should_read_payload(scratch);
         if read_payload {
-            scratch.resize(payload_len, 0u8);
-            self.reader.read_exact(&mut scratch[prefix_len..])?;
+            append_exact_from_bufread(&mut self.reader, scratch, payload_len - prefix_len)?;
             self.offset += (payload_len - prefix_len) as u64;
         } else {
             self.skip_payload_bytes(payload_len - prefix_len)?;
@@ -378,8 +375,7 @@ impl<R: Read> CarBlockReader<R> {
         let initial_prefix_len = initial_prefix_len.min(payload_len);
 
         scratch.clear();
-        scratch.resize(initial_prefix_len, 0u8);
-        self.reader.read_exact(scratch)?;
+        append_exact_from_bufread(&mut self.reader, scratch, initial_prefix_len)?;
         self.offset += initial_prefix_len as u64;
 
         let target_len = match select_payload(scratch) {
@@ -389,8 +385,7 @@ impl<R: Read> CarBlockReader<R> {
         };
 
         if target_len > initial_prefix_len {
-            scratch.resize(target_len, 0u8);
-            self.reader.read_exact(&mut scratch[initial_prefix_len..])?;
+            append_exact_from_bufread(&mut self.reader, scratch, target_len - initial_prefix_len)?;
             self.offset += (target_len - initial_prefix_len) as u64;
         }
 
@@ -458,6 +453,45 @@ impl<R: Read> CarBlockReader<R> {
         let mut scratch = Vec::new();
         self.read_lossless_node_with_scratch(&mut scratch)
     }
+}
+
+/// Append exactly `additional` bytes without first zero-filling the
+/// destination's spare capacity.
+///
+/// `Vec::extend_from_slice` safely writes into spare capacity, while the
+/// `BufRead` interface lets us avoid exposing uninitialized bytes to an
+/// arbitrary `Read` implementation.
+fn append_exact_from_bufread<R: BufRead>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    additional: usize,
+) -> CarReadResult<()> {
+    let target_len = out
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| CarReadError::InvalidData("payload length overflow".to_string()))?;
+    out.reserve(additional);
+
+    while out.len() < target_len {
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(CarReadError::Io(err.to_string())),
+        };
+        if available.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            )
+            .into());
+        }
+
+        let consumed = (target_len - out.len()).min(available.len());
+        out.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+    }
+
+    Ok(())
 }
 
 /// Returns the payload slice from a complete raw CAR entry frame.
@@ -597,7 +631,25 @@ pub fn read_uvarint64_with_len<R: BufRead>(r: &mut R) -> CarReadResult<(u64, usi
 
 #[cfg(test)]
 mod tests {
-    use super::{CarBlockReader, entry_payload_slice};
+    use std::io::{self, BufReader, Cursor, Read};
+
+    use super::{CarBlockReader, CarPayloadRead, append_exact_from_bufread, entry_payload_slice};
+    use crate::error::CarReadError;
+
+    fn framing_car(payloads: &[&[u8]]) -> Vec<u8> {
+        let mut car = vec![0]; // Empty CAR header for framing-level tests.
+        for (index, payload) in payloads.iter().enumerate() {
+            let entry_len = 36usize.checked_add(payload.len()).unwrap();
+            assert!(
+                entry_len < 128,
+                "test helper only supports one-byte lengths"
+            );
+            car.push(entry_len as u8);
+            car.extend_from_slice(&[index as u8; 36]);
+            car.extend_from_slice(payload);
+        }
+        car
+    }
 
     #[test]
     fn entry_payload_slice_extracts_payload() {
@@ -611,11 +663,7 @@ mod tests {
 
     #[test]
     fn prefix_reader_can_skip_payload_tail() {
-        let mut car = Vec::new();
-        car.push(0); // Empty CAR header for this framing-level test.
-        car.push(40); // CID + 4 payload bytes.
-        car.extend_from_slice(&[0u8; 36]);
-        car.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let car = framing_car(&[&[0xaa, 0xbb, 0xcc, 0xdd]]);
 
         let mut reader = CarBlockReader::with_capacity(&car[..], 16);
         reader.skip_header().unwrap();
@@ -634,5 +682,154 @@ mod tests {
         assert_eq!(entry.total_len, 41);
         assert_eq!(reader.offset, car.len() as u64);
         assert_eq!(reader.entry_index, 1);
+    }
+
+    #[test]
+    fn prefix_reader_can_materialize_payload_tail() {
+        let payload = [0xaau8, 0xbb, 0xcc, 0xdd, 0xee];
+        let car = framing_car(&[&payload]);
+        let mut reader = CarBlockReader::with_capacity(&car[..], 2);
+        reader.skip_header().unwrap();
+        let mut scratch = Vec::with_capacity(32);
+        let capacity = scratch.capacity();
+
+        let entry = reader
+            .read_entry_payload_if_prefix_with_scratch(&mut scratch, 2, |prefix| {
+                assert_eq!(prefix, [0xaa, 0xbb]);
+                true
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(entry.prefix, [0xaa, 0xbb]);
+        assert_eq!(entry.payload, Some(payload.as_slice()));
+        drop(entry);
+        assert_eq!(scratch.capacity(), capacity);
+        assert_eq!(reader.offset, car.len() as u64);
+        assert_eq!(reader.entry_index, 1);
+    }
+
+    #[test]
+    fn exact_append_reuses_capacity_across_small_fill_buf_chunks() {
+        let input = [1u8, 2, 3, 4, 5];
+        let mut reader = BufReader::with_capacity(2, Cursor::new(input));
+        let mut out = Vec::with_capacity(32);
+        out.extend_from_slice(&[9, 8]);
+        let capacity = out.capacity();
+
+        append_exact_from_bufread(&mut reader, &mut out, input.len()).unwrap();
+
+        assert_eq!(out, [9, 8, 1, 2, 3, 4, 5]);
+        assert_eq!(out.capacity(), capacity);
+    }
+
+    #[test]
+    fn exact_append_retries_interrupted_reads() {
+        struct InterruptOnce<R> {
+            inner: R,
+            interrupted: bool,
+        }
+
+        impl<R: Read> Read for InterruptOnce<R> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.inner.read(buf)
+            }
+        }
+
+        let input = [4u8, 3, 2, 1];
+        let source = InterruptOnce {
+            inner: Cursor::new(input),
+            interrupted: false,
+        };
+        let mut reader = BufReader::with_capacity(2, source);
+        let mut out = Vec::new();
+
+        append_exact_from_bufread(&mut reader, &mut out, input.len()).unwrap();
+
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn full_payload_reader_reuses_scratch_capacity() {
+        let payload = [0x10u8, 0x20, 0x30, 0x40, 0x50];
+        let car = framing_car(&[&payload]);
+        let mut reader = CarBlockReader::with_capacity(&car[..], 2);
+        reader.skip_header().unwrap();
+        let mut scratch = Vec::with_capacity(64);
+        scratch.extend_from_slice(&[0xff; 16]);
+        let capacity = scratch.capacity();
+
+        let entry = reader
+            .read_entry_payload_with_scratch(&mut scratch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.payload, payload);
+        assert_eq!(entry.payload_len, payload.len());
+        assert_eq!(entry.total_len, 1 + 36 + payload.len());
+        drop(entry);
+
+        assert_eq!(scratch.capacity(), capacity);
+        assert_eq!(reader.offset, car.len() as u64);
+        assert_eq!(reader.entry_index, 1);
+    }
+
+    #[test]
+    fn selective_reader_extends_prefix_or_materializes_full_payload() {
+        let first = [1u8, 2, 3, 4, 5];
+        let second = [6u8, 7, 8, 9];
+        let car = framing_car(&[&first, &second]);
+        let mut reader = CarBlockReader::with_capacity(&car[..], 2);
+        reader.skip_header().unwrap();
+        let mut scratch = Vec::with_capacity(64);
+        let capacity = scratch.capacity();
+
+        let prefix = reader
+            .read_entry_payload_select_with_scratch(&mut scratch, 1, |initial| {
+                assert_eq!(initial, [1]);
+                CarPayloadRead::Prefix(3)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(prefix.prefix, [1, 2, 3]);
+        assert!(prefix.payload.is_none());
+        drop(prefix);
+
+        let full = reader
+            .read_entry_payload_select_with_scratch(&mut scratch, 1, |initial| {
+                assert_eq!(initial, [6]);
+                CarPayloadRead::Full
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(full.prefix, second);
+        assert_eq!(full.payload, Some(second.as_slice()));
+        drop(full);
+
+        assert_eq!(scratch.capacity(), capacity);
+        assert_eq!(reader.offset, car.len() as u64);
+        assert_eq!(reader.entry_index, 2);
+    }
+
+    #[test]
+    fn truncated_full_payload_preserves_reader_error_and_offset_semantics() {
+        let mut car = vec![0, 40]; // Header, then CID + declared four-byte payload.
+        car.extend_from_slice(&[0u8; 36]);
+        car.extend_from_slice(&[0xaa, 0xbb]);
+        let mut reader = CarBlockReader::with_capacity(&car[..], 2);
+        reader.skip_header().unwrap();
+        let mut scratch = Vec::with_capacity(8);
+
+        let error = match reader.read_entry_payload_with_scratch(&mut scratch) {
+            Err(error) => error,
+            Ok(_) => panic!("truncated payload unexpectedly succeeded"),
+        };
+
+        assert!(matches!(error, CarReadError::Io(_)));
+        assert_eq!(reader.offset, 1 + 1 + 36);
+        assert_eq!(reader.entry_index, 0);
     }
 }

@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use blockzilla_log_parser::{
     FailedReason, ParsedLogLine, classify_failed_reason, parse_custom_program_error_reason,
@@ -10,7 +10,7 @@ use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::program_logs::{self, ProgramLog, system_program};
-use crate::{CompactPubkey, KeyIndex, KeyStore};
+use crate::{CompactPubkey, KeyIndex, KeyStore, PubkeyCompactor};
 
 pub type StrId = u32;
 pub type ProgramId = CompactPubkey;
@@ -403,9 +403,202 @@ pub enum LogEvent {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactLogParseCount {
+    pub label: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompactLogParseStatsReport {
+    pub lines: u64,
+    pub empty_lines: u64,
+    pub system_candidate_lines: u64,
+    pub system_parsed_lines: u64,
+    pub program_log_known: u64,
+    pub program_log_unknown: u64,
+    pub program_plain_log_known: u64,
+    pub program_plain_log_unknown: u64,
+    pub pubkey_cache_hits: u64,
+    pub pubkey_cache_misses: u64,
+    pub pubkey_cache_max_entries: usize,
+    pub shape_counts: Vec<CompactLogParseCount>,
+    pub program_counts: Vec<CompactLogParseCount>,
+    pub program_log_program_counts: Vec<CompactLogParseCount>,
+    pub program_log_variant_counts: Vec<CompactLogParseCount>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompactLogParseStats {
+    pub lines: u64,
+    pub empty_lines: u64,
+    pub system_candidate_lines: u64,
+    pub system_parsed_lines: u64,
+    pub program_log_known: u64,
+    pub program_log_unknown: u64,
+    pub program_plain_log_known: u64,
+    pub program_plain_log_unknown: u64,
+    pub pubkey_cache_hits: u64,
+    pub pubkey_cache_misses: u64,
+    pub pubkey_cache_max_entries: usize,
+    shape_counts: BTreeMap<&'static str, u64>,
+    program_counts: BTreeMap<String, u64>,
+    program_log_program_counts: BTreeMap<String, u64>,
+    program_log_variant_counts: BTreeMap<&'static str, u64>,
+}
+
+impl CompactLogParseStats {
+    #[inline]
+    fn increment_shape(&mut self, label: &'static str) {
+        increment_count(&mut self.shape_counts, label);
+    }
+
+    #[inline]
+    fn increment_program(&mut self, program: &str) {
+        increment_count(&mut self.program_counts, program.to_owned());
+    }
+
+    #[inline]
+    fn increment_program_log_program(&mut self, program: &str) {
+        increment_count(&mut self.program_log_program_counts, program.to_owned());
+    }
+
+    #[inline]
+    fn increment_program_log_variant(&mut self, label: &'static str) {
+        increment_count(&mut self.program_log_variant_counts, label);
+    }
+
+    #[inline]
+    fn record_program_log(&mut self, program: Option<&str>, log: &ProgramLog) {
+        if let Some(program) = program {
+            self.increment_program_log_program(program);
+        }
+        self.increment_program_log_variant(program_log_variant_label(log));
+        if matches!(log, ProgramLog::Unknown(_)) {
+            self.program_log_unknown = self.program_log_unknown.saturating_add(1);
+        } else {
+            self.program_log_known = self.program_log_known.saturating_add(1);
+        }
+    }
+
+    #[inline]
+    fn record_program_plain_log(&mut self, log: &ProgramLog) {
+        self.increment_program_log_variant(program_log_variant_label(log));
+        if matches!(log, ProgramLog::Unknown(_)) {
+            self.program_plain_log_unknown = self.program_plain_log_unknown.saturating_add(1);
+        } else {
+            self.program_plain_log_known = self.program_plain_log_known.saturating_add(1);
+        }
+    }
+
+    #[inline]
+    fn record_pubkey_cache(&mut self, cache: &LogPubkeyCache<'_>) {
+        self.pubkey_cache_hits = self.pubkey_cache_hits.saturating_add(cache.hits);
+        self.pubkey_cache_misses = self.pubkey_cache_misses.saturating_add(cache.misses);
+        self.pubkey_cache_max_entries = self.pubkey_cache_max_entries.max(cache.max_entries);
+    }
+
+    pub fn report(&self, limit: usize) -> CompactLogParseStatsReport {
+        CompactLogParseStatsReport {
+            lines: self.lines,
+            empty_lines: self.empty_lines,
+            system_candidate_lines: self.system_candidate_lines,
+            system_parsed_lines: self.system_parsed_lines,
+            program_log_known: self.program_log_known,
+            program_log_unknown: self.program_log_unknown,
+            program_plain_log_known: self.program_plain_log_known,
+            program_plain_log_unknown: self.program_plain_log_unknown,
+            pubkey_cache_hits: self.pubkey_cache_hits,
+            pubkey_cache_misses: self.pubkey_cache_misses,
+            pubkey_cache_max_entries: self.pubkey_cache_max_entries,
+            shape_counts: top_counts(&self.shape_counts, limit),
+            program_counts: top_counts(&self.program_counts, limit),
+            program_log_program_counts: top_counts(&self.program_log_program_counts, limit),
+            program_log_variant_counts: top_counts(&self.program_log_variant_counts, limit),
+        }
+    }
+}
+
+#[inline]
+fn increment_count<K>(counts: &mut BTreeMap<K, u64>, key: K)
+where
+    K: Ord,
+{
+    let entry = counts.entry(key).or_insert(0);
+    *entry = entry.saturating_add(1);
+}
+
+fn top_counts<K>(counts: &BTreeMap<K, u64>, limit: usize) -> Vec<CompactLogParseCount>
+where
+    K: Ord + ToString,
+{
+    let mut values = counts
+        .iter()
+        .map(|(label, count)| CompactLogParseCount {
+            label: label.to_string(),
+            count: *count,
+        })
+        .collect::<Vec<_>>();
+    values.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
+    values.truncate(limit);
+    values
+}
+
+const LOG_PUBKEY_CACHE_MAX: usize = 64;
+
+#[derive(Debug, Default)]
+struct LogPubkeyCache<'a> {
+    entries: Vec<(&'a str, Option<CompactPubkey>)>,
+    hits: u64,
+    misses: u64,
+    max_entries: usize,
+}
+
+impl<'a> LogPubkeyCache<'a> {
+    #[inline]
+    fn compact<C: PubkeyCompactor>(&mut self, index: &C, key: &'a str) -> Option<CompactPubkey> {
+        if let Some((_, value)) = self.entries.iter().find(|(cached, _)| *cached == key) {
+            self.hits = self.hits.saturating_add(1);
+            return *value;
+        }
+
+        let value = index.compact_str(key);
+        self.misses = self.misses.saturating_add(1);
+        if self.entries.len() < LOG_PUBKEY_CACHE_MAX {
+            self.entries.push((key, value));
+            self.max_entries = self.max_entries.max(self.entries.len());
+        }
+        value
+    }
+}
+
 #[inline]
 pub fn strip_trailing_dot(s: &str) -> &str {
     s.strip_suffix('.').unwrap_or(s).trim()
+}
+
+#[inline]
+fn could_be_system_program_log(line: &str) -> bool {
+    let line = match line.as_bytes().first().copied() {
+        Some(b' ' | b'\t' | b'\n' | b'\r') => line.trim_start(),
+        _ => line,
+    };
+    match line.as_bytes().first().copied() {
+        Some(b'A') => {
+            line.starts_with("Advance nonce account: ")
+                || line.starts_with("Allocate: ")
+                || line.starts_with("Assign: ")
+                || line.starts_with("Authorize nonce account: ")
+        }
+        Some(b'C') => line.starts_with("Create: ") || line.starts_with("Create Account: "),
+        Some(b'I') => {
+            line.starts_with("Initialize nonce account: ") || line.starts_with("Instruction: ")
+        }
+        Some(b'S') => line.starts_with("SystemProgram::"),
+        Some(b'T') => line.starts_with("Transfer: "),
+        Some(b'W') => line.starts_with("Withdraw nonce account: "),
+        _ => false,
+    }
 }
 
 #[inline]
@@ -420,27 +613,99 @@ fn pid_to_pubkey(store: &KeyStore, pid: ProgramId) -> Pubkey {
 }
 
 pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
+    parse_logs_with_compactor(lines, index)
+}
+
+pub fn parse_logs_with_compactor<C: PubkeyCompactor>(
+    lines: &[String],
+    index: &C,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor(lines.iter().map(String::as_str), lines.len(), index, None)
+}
+
+pub fn parse_logs_with_compactor_and_stats<C: PubkeyCompactor>(
+    lines: &[String],
+    index: &C,
+    stats: &mut CompactLogParseStats,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor(
+        lines.iter().map(String::as_str),
+        lines.len(),
+        index,
+        Some(stats),
+    )
+}
+
+pub fn parse_log_strs_with_compactor<C: PubkeyCompactor>(
+    lines: &[&str],
+    index: &C,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor(lines.iter().copied(), lines.len(), index, None)
+}
+
+pub fn parse_log_strs_with_compactor_and_stats<C: PubkeyCompactor>(
+    lines: &[&str],
+    index: &C,
+    stats: &mut CompactLogParseStats,
+) -> CompactLogStream {
+    parse_log_iter_with_compactor(lines.iter().copied(), lines.len(), index, Some(stats))
+}
+
+fn parse_log_iter_with_compactor<'a, I, C>(
+    lines: I,
+    estimated_len: usize,
+    index: &C,
+    mut stats: Option<&mut CompactLogParseStats>,
+) -> CompactLogStream
+where
+    I: IntoIterator<Item = &'a str>,
+    C: PubkeyCompactor,
+{
     let mut st = StringTable::default();
     let mut dt = DataTable::default();
-    let mut events = Vec::with_capacity(lines.len());
+    let mut events = Vec::with_capacity(estimated_len);
     let mut decode_buf = Vec::new();
-    let mut program_stack = Vec::<&str>::new();
+    let mut program_stack = Vec::<&'a str>::new();
+    let mut pubkey_cache = LogPubkeyCache::default();
 
     let cb_pid = index.compact_str(CB_PK);
 
     for line in lines {
+        if let Some(stats) = stats.as_deref_mut() {
+            stats.lines = stats.lines.saturating_add(1);
+        }
+
         let line = line.trim_end();
         if line.is_empty() {
+            if let Some(stats) = stats.as_deref_mut() {
+                stats.empty_lines = stats.empty_lines.saturating_add(1);
+            }
             continue;
         }
 
         // 1) First, let the SystemProgramLog try to parse any "system program-ish" lines.
-        if let Some(sys) = system_program::SystemProgramLog::parse(line, index, &mut st) {
-            events.push(LogEvent::System(sys));
-            continue;
+        if could_be_system_program_log(line) {
+            if let Some(stats) = stats.as_deref_mut() {
+                stats.system_candidate_lines = stats.system_candidate_lines.saturating_add(1);
+            }
+            if let Some(sys) = system_program::SystemProgramLog::parse(line, index, &mut st) {
+                if let Some(stats) = stats.as_deref_mut() {
+                    stats.system_parsed_lines = stats.system_parsed_lines.saturating_add(1);
+                    stats.increment_shape("System");
+                }
+                events.push(LogEvent::System(sys));
+                continue;
+            }
         }
 
         let parsed = parse_line(line);
+        if let Some(stats) = stats.as_deref_mut() {
+            stats.increment_shape(parsed_log_line_label(parsed));
+            if let Some(program) = parsed_log_primary_program(parsed, program_stack.last().copied())
+            {
+                stats.increment_program(program);
+            }
+        }
 
         match parsed {
             ParsedLogLine::CustomProgramError { code } => {
@@ -490,7 +755,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             }
             ParsedLogLine::StakeMergingAccounts => events.push(LogEvent::StakeMergingAccounts),
             ParsedLogLine::LoaderUpgradedProgram { program: pk_txt } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::LoaderUpgradedProgram { program });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -499,7 +764,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 }
             }
             ParsedLogLine::LoaderFinalizedAccount { account: pk_txt } => {
-                if let Some(account) = index.compact_str(pk_txt) {
+                if let Some(account) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::LoaderFinalizedAccount { account });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -508,7 +773,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 }
             }
             ParsedLogLine::RuntimeWritablePrivilegeEscalated { account: pk_txt } => {
-                if let Some(account) = index.compact_str(pk_txt) {
+                if let Some(account) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::RuntimeWritablePrivilegeEscalated { account });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -517,7 +782,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 }
             }
             ParsedLogLine::RuntimeSignerPrivilegeEscalated { account: pk_txt } => {
-                if let Some(account) = index.compact_str(pk_txt) {
+                if let Some(account) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::RuntimeSignerPrivilegeEscalated { account });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -526,7 +791,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 }
             }
             ParsedLogLine::RuntimeAccountOwnerBalanceVerificationFailed { account: pk_txt } => {
-                if let Some(account) = index.compact_str(pk_txt) {
+                if let Some(account) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { account });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -564,6 +829,9 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                     } else {
                         program_logs::parse_program_log_no_id(text, index, &mut st)
                     };
+                    if let Some(stats) = stats.as_deref_mut() {
+                        stats.record_program_log(program_stack.last().copied(), &log);
+                    }
                     events.push(LogEvent::ProgramLog(log));
                 }
             }
@@ -571,7 +839,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 program: pk_txt,
                 text,
             } => {
-                let Some(program) = index.compact_str(pk_txt) else {
+                let Some(program) = pubkey_cache.compact(index, pk_txt) else {
                     events.push(LogEvent::Unparsed {
                         text: st.push(line),
                     });
@@ -585,6 +853,9 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 } else {
                     let log =
                         program_logs::parse_program_log_for_program(pk_txt, text, index, &mut st);
+                    if let Some(stats) = stats.as_deref_mut() {
+                        stats.record_program_log(Some(pk_txt), &log);
+                    }
                     events.push(LogEvent::ProgramIdLog { program, log });
                 }
             }
@@ -601,7 +872,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 program: pk_txt,
                 data,
             } => {
-                let Some(program) = index.compact_str(pk_txt) else {
+                let Some(program) = pubkey_cache.compact(index, pk_txt) else {
                     events.push(LogEvent::Unparsed {
                         text: st.push(line),
                     });
@@ -624,7 +895,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             ParsedLogLine::ProgramNotCached {
                 program: Some(pk_txt),
             } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::ProgramNotCached {
                         program: Some(program),
                     });
@@ -640,7 +911,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
             ParsedLogLine::ProgramNotDeployed {
                 program: Some(pk_txt),
             } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::ProgramNotDeployed {
                         program: Some(program),
                     });
@@ -654,7 +925,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 program: pk_txt,
                 depth,
             } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::Invoke { program, depth });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -663,7 +934,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 }
             }
             ParsedLogLine::BpfInvoke { program: pk_txt } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::BpfInvoke { program });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -672,7 +943,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 }
             }
             ParsedLogLine::Success { program: pk_txt } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::Success { program });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -681,7 +952,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 }
             }
             ParsedLogLine::BpfSuccess { program: pk_txt } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::BpfSuccess { program });
                 } else {
                     events.push(LogEvent::Unparsed {
@@ -693,7 +964,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 program: pk_txt,
                 reason,
             } => {
-                let Some(program) = index.compact_str(pk_txt) else {
+                let Some(program) = pubkey_cache.compact(index, pk_txt) else {
                     events.push(LogEvent::Unparsed {
                         text: st.push(line),
                     });
@@ -722,7 +993,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 program: pk_txt,
                 reason,
             } => {
-                let Some(program) = index.compact_str(pk_txt) else {
+                let Some(program) = pubkey_cache.compact(index, pk_txt) else {
                     events.push(LogEvent::Unparsed {
                         text: st.push(line),
                     });
@@ -752,7 +1023,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 used,
                 limit,
             } => {
-                if let Some(program) = index.compact_str(pk_txt) {
+                if let Some(program) = pubkey_cache.compact(index, pk_txt) {
                     events.push(LogEvent::Consumed {
                         program,
                         used,
@@ -771,7 +1042,7 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                 program: pk_txt,
                 units,
             } => {
-                let program = index.compact_str(pk_txt);
+                let program = pubkey_cache.compact(index, pk_txt);
                 if program.is_some() && program == cb_pid {
                     events.push(LogEvent::CbRequestUnits { units });
                 } else {
@@ -801,6 +1072,9 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
                         }
                     });
                 if let Some(log) = log {
+                    if let Some(stats) = stats.as_deref_mut() {
+                        stats.record_program_plain_log(&log);
+                    }
                     events.push(LogEvent::ProgramPlainLog(log));
                 } else {
                     events.push(LogEvent::Plain {
@@ -813,10 +1087,124 @@ pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
         update_program_stack(parsed, &mut program_stack);
     }
 
+    if let Some(stats) = stats.as_deref_mut() {
+        stats.record_pubkey_cache(&pubkey_cache);
+    }
+
     CompactLogStream {
         events,
         strings: st,
         data: dt,
+    }
+}
+
+#[inline]
+fn parsed_log_line_label(parsed: ParsedLogLine<'_>) -> &'static str {
+    match parsed {
+        ParsedLogLine::CustomProgramError { .. } => "CustomProgramError",
+        ParsedLogLine::FailedToComplete { .. } => "FailedToComplete",
+        ParsedLogLine::UnknownProgram { .. } => "UnknownProgram",
+        ParsedLogLine::UnknownAccount { .. } => "UnknownAccount",
+        ParsedLogLine::LogTruncated => "LogTruncated",
+        ParsedLogLine::VerifyEd25519 => "VerifyEd25519",
+        ParsedLogLine::VerifySecp256k1 => "VerifySecp256k1",
+        ParsedLogLine::CloseContextState => "CloseContextState",
+        ParsedLogLine::ProgramAccountNotWritable => "ProgramAccountNotWritable",
+        ParsedLogLine::ProgramIdMismatch => "ProgramIdMismatch",
+        ParsedLogLine::ProgramNotUpgradeable => "ProgramNotUpgradeable",
+        ParsedLogLine::ProgramAndProgramDataAccountMismatch => {
+            "ProgramAndProgramDataAccountMismatch"
+        }
+        ParsedLogLine::ProgramWasExtendedInThisBlockAlready => {
+            "ProgramWasExtendedInThisBlockAlready"
+        }
+        ParsedLogLine::StakeMergingAccounts => "StakeMergingAccounts",
+        ParsedLogLine::LoaderUpgradedProgram { .. } => "LoaderUpgradedProgram",
+        ParsedLogLine::LoaderFinalizedAccount { .. } => "LoaderFinalizedAccount",
+        ParsedLogLine::BpfInvoke { .. } => "BpfInvoke",
+        ParsedLogLine::BpfSuccess { .. } => "BpfSuccess",
+        ParsedLogLine::BpfFailure { .. } => "BpfFailure",
+        ParsedLogLine::BpfConsumed { .. } => "BpfConsumed",
+        ParsedLogLine::RuntimeWritablePrivilegeEscalated { .. } => {
+            "RuntimeWritablePrivilegeEscalated"
+        }
+        ParsedLogLine::RuntimeSignerPrivilegeEscalated { .. } => "RuntimeSignerPrivilegeEscalated",
+        ParsedLogLine::RuntimeAccountOwnerBalanceVerificationFailed { .. } => {
+            "RuntimeAccountOwnerBalanceVerificationFailed"
+        }
+        ParsedLogLine::SystemTransferInsufficient { .. } => "SystemTransferInsufficient",
+        ParsedLogLine::SystemTransferFromMustNotCarryData => "SystemTransferFromMustNotCarryData",
+        ParsedLogLine::SystemAllocateAccountAlreadyInUse { .. } => {
+            "SystemAllocateAccountAlreadyInUse"
+        }
+        ParsedLogLine::SystemCreateAccountAlreadyInUse { .. } => "SystemCreateAccountAlreadyInUse",
+        ParsedLogLine::SystemCreateAccountDataSizeLimited { .. } => {
+            "SystemCreateAccountDataSizeLimited"
+        }
+        ParsedLogLine::ProgramLog { .. } => "ProgramLog",
+        ParsedLogLine::ProgramIdLog { .. } => "ProgramIdLog",
+        ParsedLogLine::ProgramData { .. } => "ProgramData",
+        ParsedLogLine::ProgramReturn { .. } => "ProgramReturn",
+        ParsedLogLine::ProgramConsumption { .. } => "ProgramConsumption",
+        ParsedLogLine::ProgramNotCached { .. } => "ProgramNotCached",
+        ParsedLogLine::ProgramNotDeployed { .. } => "ProgramNotDeployed",
+        ParsedLogLine::Invoke { .. } => "Invoke",
+        ParsedLogLine::Success { .. } => "Success",
+        ParsedLogLine::Failure { .. } => "Failure",
+        ParsedLogLine::Consumed { .. } => "Consumed",
+        ParsedLogLine::CbRequestUnits { .. } => "CbRequestUnits",
+        ParsedLogLine::UnparsedProgram => "UnparsedProgram",
+        ParsedLogLine::Plain { .. } => "Plain",
+    }
+}
+
+#[inline]
+fn parsed_log_primary_program<'a>(
+    parsed: ParsedLogLine<'a>,
+    active_program: Option<&'a str>,
+) -> Option<&'a str> {
+    match parsed {
+        ParsedLogLine::ProgramLog { .. } | ParsedLogLine::ProgramConsumption { .. } => {
+            active_program
+        }
+        ParsedLogLine::ProgramIdLog { program, .. }
+        | ParsedLogLine::ProgramReturn { program, .. }
+        | ParsedLogLine::BpfInvoke { program }
+        | ParsedLogLine::BpfSuccess { program }
+        | ParsedLogLine::BpfFailure { program, .. }
+        | ParsedLogLine::Invoke { program, .. }
+        | ParsedLogLine::Success { program }
+        | ParsedLogLine::Failure { program, .. }
+        | ParsedLogLine::Consumed { program, .. }
+        | ParsedLogLine::CbRequestUnits { program, .. } => Some(program),
+        ParsedLogLine::ProgramNotCached { program }
+        | ParsedLogLine::ProgramNotDeployed { program } => program,
+        _ => None,
+    }
+}
+
+#[inline]
+fn program_log_variant_label(log: &ProgramLog) -> &'static str {
+    match log {
+        ProgramLog::Empty => "Empty",
+        ProgramLog::Token(_) => "Token",
+        ProgramLog::Token2022(_) => "Token2022",
+        ProgramLog::Ata(_) => "Ata",
+        ProgramLog::AddressLookupTable(_) => "AddressLookupTable",
+        ProgramLog::LoaderV3(_) => "LoaderV3",
+        ProgramLog::LoaderV4(_) => "LoaderV4",
+        ProgramLog::Memo(_) => "Memo",
+        ProgramLog::Record(_) => "Record",
+        ProgramLog::TransferHook(_) => "TransferHook",
+        ProgramLog::AccountCompression(_) => "AccountCompression",
+        ProgramLog::Stake(_) => "Stake",
+        ProgramLog::ZkElgamalProof(_) => "ZkElgamalProof",
+        ProgramLog::AnchorInstruction { .. } => "AnchorInstruction",
+        ProgramLog::AnchorErrorOccurred { .. } => "AnchorErrorOccurred",
+        ProgramLog::AnchorErrorThrown { .. } => "AnchorErrorThrown",
+        ProgramLog::Unknown(_) => "Unknown",
+        #[cfg(feature = "known-program-logs")]
+        ProgramLog::Known(_) => "Known",
     }
 }
 

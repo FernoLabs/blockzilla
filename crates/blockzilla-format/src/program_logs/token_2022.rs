@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{CompactPubkey, KeyIndex, KeyStore, StrId, StringTable};
+use crate::{CompactPubkey, KeyStore, PubkeyCompactor, StrId, StringTable};
 
 /// SPL Token-2022 program id
 pub const STR_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -575,7 +575,11 @@ impl Token2022Log {
     }
 
     #[inline]
-    pub fn parse(payload: &str, index: &KeyIndex, st: &mut StringTable) -> Option<Self> {
+    pub fn parse<C: PubkeyCompactor>(
+        payload: &str,
+        index: &C,
+        st: &mut StringTable,
+    ) -> Option<Self> {
         if let Some(log) = Self::parse_without_registry(payload) {
             return Some(log);
         }
