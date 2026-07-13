@@ -9,10 +9,10 @@ RUN test "$TARGETPLATFORM" = "linux/amd64"
 
 WORKDIR /src
 
-# The repository's developer config uses target-cpu=native. A deployable image must
-# remain runnable after a Hetzner host migration, so override it with amd64 baseline.
+# The repository's developer config uses target-cpu=native. Keep the image portable
+# across amd64 hosts while enabling the exact AES/SSE2 features required by gxhash.
 ENV CARGO_INCREMENTAL=0 \
-    RUSTFLAGS="-C target-cpu=x86-64"
+    RUSTFLAGS="-C target-cpu=x86-64 -C target-feature=+aes,+sse2"
 
 COPY . .
 

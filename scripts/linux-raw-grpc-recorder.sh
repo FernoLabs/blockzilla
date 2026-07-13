@@ -148,6 +148,12 @@ if [ ! -x "$BIN" ]; then
   echo "missing executable: $BIN" >&2
   exit 2
 fi
+if [ "$(uname -m)" = x86_64 ] \
+  && ! grep -qE '(^|[[:space:]])aes([[:space:]]|$)' /proc/cpuinfo
+then
+  echo "x86_64 host does not expose the AES CPU feature required by gxhash" >&2
+  exit 2
+fi
 
 mkdir -p "$OUTPUT_DIR" "$STATE_DIR"
 : > "$STARTED_FILE"
