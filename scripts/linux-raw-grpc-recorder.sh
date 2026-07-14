@@ -420,45 +420,26 @@ alert_file() {
 
 alert_title() {
   case "$1" in
-    recorder_restarting) printf '%s\n' 'Recorder stopped unexpectedly' ;;
-    grpc_stale) printf '%s\n' 'No new gRPC data' ;;
-    volume_invalid) printf '%s\n' 'Backup volume unavailable' ;;
-    disk_check_failed) printf '%s\n' 'Disk-space check failed' ;;
-    disk_space) printf '%s\n' 'Backup disk space low' ;;
+    recorder_restarting) printf '%s\n' 'Recorder restarting' ;;
+    grpc_stale) printf '%s\n' 'No new gRPC blocks' ;;
+    volume_invalid) printf '%s\n' 'Backup disk unavailable' ;;
+    disk_check_failed) printf '%s\n' 'Cannot check backup disk' ;;
+    disk_space) printf '%s\n' 'Backup disk is low' ;;
     disk_critical) printf '%s\n' 'Backup disk critically low' ;;
     disk_warning) printf '%s\n' 'Backup disk running low' ;;
-    b2_usage_check_failed) printf '%s\n' 'Backblaze usage check failed' ;;
-    b2_usage) printf '%s\n' 'Backblaze free storage allowance' ;;
+    b2_usage_check_failed) printf '%s\n' 'Cannot check Backblaze storage' ;;
+    b2_usage) printf '%s\n' 'Backblaze storage is filling up' ;;
     b2_usage_warning) printf '%s\n' 'Backblaze archive near 10 GB' ;;
     b2_usage_critical) printf '%s\n' 'Backblaze archive almost full' ;;
-    primary_sync_stale) printf '%s\n' 'Blockzilla acknowledgement missing' ;;
-    generation_rotation_failed) printf '%s\n' 'Local backup rotation paused' ;;
-    replay_recovery_failed) printf '%s\n' 'Provider-gap recovery paused' ;;
-    provider_replay_gap) printf '%s\n' 'Provider history gap detected' ;;
-    resume_coverage) printf '%s\n' 'Upstream gRPC data gap detected' ;;
+    primary_sync_stale) printf '%s\n' 'Blockzilla confirmation missing' ;;
+    generation_rotation_failed) printf '%s\n' 'Local backup is paused' ;;
+    replay_recovery_failed) printf '%s\n' 'gRPC recovery is paused' ;;
+    provider_replay_gap) printf '%s\n' 'Some gRPC slots are missing' ;;
+    resume_coverage) printf '%s\n' 'gRPC reconnect not verified' ;;
     generation_upload_failed) printf '%s\n' 'Backblaze upload failed' ;;
-    generation_backlog) printf '%s\n' 'Backup pipeline blocked' ;;
+    generation_backlog) printf '%s\n' 'Backup storage problem' ;;
     *) printf '%s\n' "$1" | tr '_' ' ' ;;
   esac
-}
-
-human_bytes() {
-  human_value=$1
-  case "$human_value" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  if [ "$human_value" -ge 1073741824 ]; then
-    human_tenths=$((human_value * 10 / 1073741824))
-    printf '%s.%s GiB' "$((human_tenths / 10))" "$((human_tenths % 10))"
-  elif [ "$human_value" -ge 1048576 ]; then
-    human_tenths=$((human_value * 10 / 1048576))
-    printf '%s.%s MiB' "$((human_tenths / 10))" "$((human_tenths % 10))"
-  elif [ "$human_value" -ge 1024 ]; then
-    human_tenths=$((human_value * 10 / 1024))
-    printf '%s.%s KiB' "$((human_tenths / 10))" "$((human_tenths % 10))"
-  else
-    printf '%s bytes' "$human_value"
-  fi
 }
 
 human_decimal_bytes() {
@@ -467,13 +448,37 @@ human_decimal_bytes() {
     ''|*[!0-9]*) return 1 ;;
   esac
   if [ "$human_value" -ge 1000000000 ]; then
-    human_tenths=$((human_value * 10 / 1000000000))
-    printf '%s.%s GB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+    human_tenths=$(((human_value + 50000000) / 100000000))
+    if [ $((human_tenths % 10)) -eq 0 ]; then
+      printf '%s GB' "$((human_tenths / 10))"
+    else
+      printf '%s.%s GB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+    fi
   elif [ "$human_value" -ge 1000000 ]; then
-    human_tenths=$((human_value * 10 / 1000000))
-    printf '%s.%s MB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+    human_megabytes=$(((human_value + 500000) / 1000000))
+    if [ "$human_megabytes" -ge 1000 ]; then
+      printf '%s' '1 GB'
+    else
+      printf '%s MB' "$human_megabytes"
+    fi
   else
-    printf '%s bytes' "$human_value"
+    printf '%s' '<1 MB'
+  fi
+}
+
+human_duration() {
+  duration_seconds=$1
+  case "$duration_seconds" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ "$duration_seconds" -lt 120 ]; then
+    printf '%s' '1 minute'
+  elif [ "$duration_seconds" -lt 3600 ]; then
+    printf '%s minutes' "$(((duration_seconds + 30) / 60))"
+  elif [ "$duration_seconds" -lt 7200 ]; then
+    printf '%s' '1 hour'
+  else
+    printf '%s hours' "$(((duration_seconds + 1800) / 3600))"
   fi
 }
 
@@ -652,8 +657,10 @@ raise_alert_locked() {
   alert_silent_file=$(alert_file "$alert_key" silent)
   alert_closed_file=$(alert_file "$alert_key" closed)
   alert_heading=$(alert_title "$alert_key")
-  alert_text=$(printf 'Blockzilla backup alert\nProblem: %s\nSeverity: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
-    "$alert_heading" "$alert_level" "$ORIGIN_NODE_ID" "$(timestamp)" "$alert_message")
+  # Telegram already shows the send time, and this deployment has one backup
+  # node. Keep the useful information visible without a metadata preamble.
+  alert_text=$(printf 'Blockzilla backup - %s\n%s\n%s' \
+    "$alert_level" "$alert_heading" "$alert_message")
   if ! printf '%s\n' "$alert_text" > "$alert_active"; then
     ALERT_DELIVERY_RESULT=failed
     echo "$(timestamp) telegram_alert state_write_failed key=$alert_key" >&2
@@ -798,7 +805,12 @@ retry_pending_alert_locked() {
     return 0
   fi
   retry_text=$(sed -n '1,100p' "$retry_active")
-  retry_level=$(sed -n 's/^Severity: //p' "$retry_active" | head -n 1)
+  retry_level=$(sed -n '1s/^Blockzilla backup - //p' "$retry_active")
+  if ! alert_level_rank "$retry_level" >/dev/null 2>&1; then
+    # Accept incident files written by the previous message layout during a
+    # rolling deployment.
+    retry_level=$(sed -n 's/^Severity: //p' "$retry_active" | head -n 1)
+  fi
   alert_level_rank "$retry_level" >/dev/null 2>&1 || return 0
   if ! telegram_send "$retry_text"; then
     echo "$(timestamp) telegram_alert delivery_failed key=$retry_key" >&2
@@ -871,8 +883,18 @@ clear_alert_locked() {
     return 0
   fi
   alert_heading=$(alert_title "$alert_key")
-  alert_text=$(printf 'Blockzilla backup recovered\nResolved: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
-    "$alert_heading" "$ORIGIN_NODE_ID" "$(timestamp)" "$alert_message")
+  case "$alert_key" in
+    provider_replay_gap)
+      alert_recovery_state='RECORDING RESUMED'
+      alert_recovery_heading=$alert_heading
+      ;;
+    *)
+      alert_recovery_state=RECOVERED
+      alert_recovery_heading="Resolved: $alert_heading"
+      ;;
+  esac
+  alert_text=$(printf 'Blockzilla backup - %s\n%s\n%s' \
+    "$alert_recovery_state" "$alert_recovery_heading" "$alert_message")
   if ! telegram_send "$alert_text"; then
     echo "$(timestamp) telegram_recovery delivery_failed key=$alert_key" >&2
     return 0
@@ -901,6 +923,51 @@ clear_alert() {
   lock_clear_status=$?
   release_alert_lock
   return "$lock_clear_status"
+}
+
+retire_alert_locked() {
+  retire_key=$1
+  if [ "$TELEGRAM_ENABLED" != true ]; then
+    return 0
+  fi
+  retire_active=$(alert_file "$retire_key" active)
+  [ -e "$retire_active" ] || return 0
+  retire_delivery=$(alert_file "$retire_key" delivered)
+  retry_pending_alert_locked "$retire_key"
+  if ! load_alert_delivery_state "$retire_delivery"; then
+    # Never hide an opening that Telegram has not accepted yet. The active
+    # incident and journal floor remain so a later pass can retry delivery.
+    return 0
+  fi
+  retire_closed=$(alert_file "$retire_key" closed)
+  retire_now=$(date +%s)
+  if ! write_alert_delivery_time "$retire_key" "$retire_closed" "$retire_now"; then
+    return 0
+  fi
+  if ! rm -f "$retire_active" \
+    "$retire_delivery" \
+    "$(alert_file "$retire_key" silent)" \
+    "$(alert_file "$retire_key" last)" \
+    "$(alert_file "$retire_key" level)" \
+    "$(alert_file "$retire_key" handoff)" \
+    "$(alert_file "$retire_key" journal_size)"
+  then
+    echo "$(timestamp) telegram_alert silent_close_failed key=$retire_key" >&2
+  fi
+  return 0
+}
+
+retire_alert() {
+  lock_retire_key=$1
+  mkdir -p "$ALERT_STATE_DIR" 2>/dev/null || return 0
+  if ! acquire_alert_lock "$lock_retire_key"; then
+    echo "$(timestamp) telegram_alert state_lock_unavailable key=$lock_retire_key" >&2
+    return 0
+  fi
+  retire_alert_locked "$lock_retire_key"
+  lock_retire_status=$?
+  release_alert_lock
+  return "$lock_retire_status"
 }
 
 journal_size() {
@@ -951,26 +1018,42 @@ reset_rotated_journal_incident_floors() {
   reset_alert_journal_floor grpc_stale
   reset_alert_journal_floor recorder_restarting
   reset_alert_journal_floor provider_replay_gap
+  reset_alert_journal_floor resume_coverage
 }
 
 clear_alert_after_journal_growth() {
   growth_key=$1
   growth_message=$2
+  growth_recovery_mode=${3:-notify}
   growth_active=$(alert_file "$growth_key" active)
   growth_floor_file=$(alert_file "$growth_key" journal_size)
-  if [ ! -e "$growth_active" ] || [ ! -r "$growth_floor_file" ]; then
+  if [ ! -e "$growth_active" ]; then
     return 0
   fi
-  IFS= read -r growth_floor < "$growth_floor_file" || return 0
+  if [ -L "$growth_floor_file" ] || [ ! -r "$growth_floor_file" ]; then
+    # Releases before the journal-growth recovery model could leave a
+    # delivered incident without a floor. Bootstrap at the current size and
+    # require one later append before announcing that recording resumed.
+    reset_alert_journal_floor "$growth_key"
+    return 0
+  fi
+  if ! IFS= read -r growth_floor < "$growth_floor_file"; then
+    reset_alert_journal_floor "$growth_key"
+    return 0
+  fi
   growth_size=$(journal_size 2>/dev/null || printf '%s\n' 0)
   case "$growth_floor" in
-    ''|*[!0-9]*) return 0 ;;
+    ''|*[!0-9]*) reset_alert_journal_floor "$growth_key"; return 0 ;;
   esac
   case "$growth_size" in
     ''|*[!0-9]*) return 0 ;;
   esac
   if [ "$growth_size" -gt "$growth_floor" ]; then
-    clear_alert "$growth_key" "$growth_message"
+    if [ "$growth_recovery_mode" = silent ]; then
+      retire_alert "$growth_key"
+    else
+      clear_alert "$growth_key" "$growth_message"
+    fi
     if [ ! -e "$growth_active" ]; then
       rm -f "$growth_floor_file" 2>/dev/null || \
         echo "$(timestamp) telegram_recovery journal_floor_remove_failed key=$growth_key" >&2
@@ -982,14 +1065,19 @@ clear_replay_recovery_alert_if_floor_was_authoritative() {
   replay_floor_was_authoritative=$1
   if [ "$replay_floor_was_authoritative" = true ]; then
     clear_alert replay_recovery_failed \
-      "The trusted resume marker is durable. Capture can retry from the recorded selected resume slot; existing backup data was not deleted."
+      "Status: gRPC recovery is ready and backup will restart automatically.
+Data: Everything saved earlier is safe.
+Action: None."
   fi
 }
 
 raise_recorder_restart_alert() {
   restart_message=$1
   remember_alert_journal_floor recorder_restarting
-  raise_alert recorder_restarting ERROR "$restart_message"
+  raise_alert recorder_restarting ERROR \
+    "Status: The recorder stopped and is restarting automatically.
+Data: Everything already saved is safe.
+Action: Check the recorder logs only if this keeps happening."
 }
 
 file_age_seconds() {
@@ -1005,10 +1093,16 @@ file_age_seconds() {
 
 monitor_disk_alerts() {
   if ! monitor_free_bytes=$(available_bytes); then
-    raise_alert disk_check_failed ERROR "Unable to read free space for the recorder volume."
+    raise_alert disk_check_failed ERROR \
+      "Status: Hetzner free space is unavailable. Backup safety cannot be confirmed.
+Storage: Unknown.
+Action: Check the Hetzner disk."
     return 0
   fi
-  clear_alert disk_check_failed "Filesystem free-space checks are working again."
+  clear_alert disk_check_failed \
+    "Status: Hetzner disk checks are working again.
+Storage: $(human_decimal_bytes "$monitor_free_bytes") free.
+Action: None."
   update_disk_alerts "$monitor_free_bytes"
 }
 
@@ -1019,9 +1113,9 @@ update_disk_alerts() {
     pipeline_backlog=
     pipeline_backlog=$(sealed_generation_count 2>/dev/null) || pipeline_backlog=
     if [ -n "$pipeline_backlog" ]; then
-      pipeline_disk_context="$pipeline_backlog sealed generation(s) are waiting."
+      pipeline_disk_context="$pipeline_backlog backup batches are waiting locally."
     else
-      pipeline_disk_context="The sealed-generation count could not be measured."
+      pipeline_disk_context="The waiting backup count is unavailable."
     fi
     if [ "$disk_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
       pipeline_worker_running=false
@@ -1051,9 +1145,9 @@ update_disk_alerts() {
       # This is the fail-safe path when the independent spill worker is dead,
       # stuck past one handoff pass, or has not opened its own incident.
       raise_alert generation_backlog CRITICAL \
-        "Cause: The disk-first Hetzner cache reached its safety floor before Backblaze spill cleanup recovered headroom.
-Impact: $pipeline_disk_context Only $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$MIN_FREE_BYTES") floor. Durable capture is paused; existing data is retained.
-Action: Check Backblaze Caps & Alerts, API access, and the recorder volume. Automatic retries continue."
+        "Status: Hetzner disk is full. Backup is paused; saved data is safe.
+Storage: $(human_decimal_bytes "$disk_free_bytes") free; backup needs $(human_decimal_bytes "$MIN_FREE_BYTES"). $pipeline_disk_context
+Action: Restore Backblaze uploads or add Hetzner disk space. Automatic retry is on."
       return 0
     fi
     rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
@@ -1070,48 +1164,70 @@ Action: Check Backblaze Caps & Alerts, API access, and the recorder volume. Auto
   disk_space_active=$(alert_file disk_space active)
   if [ "$disk_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
     raise_alert disk_space CRITICAL \
-      "Impact: Only $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$MIN_FREE_BYTES") safety floor. Durable capture is paused; existing data is retained.
-Action: Free space on the recorder volume or restore remote upload throughput. The recorder retries automatically."
+      "Status: Backup is paused; saved data is safe.
+Storage: $(human_decimal_bytes "$disk_free_bytes") free; backup needs $(human_decimal_bytes "$MIN_FREE_BYTES").
+Action: Free Hetzner disk space or restore Backblaze uploads. Automatic retry is on."
   elif [ "$disk_free_bytes" -lt "$DISK_WARN_FREE_BYTES" ]; then
     raise_alert disk_space WARNING \
-      "Impact: $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$DISK_WARN_FREE_BYTES") warning threshold. No automatic WAL deletion is enabled.
-Action: Restore remote upload throughput before the safety floor is reached."
+      "Status: The Hetzner disk is getting low, but it still has room for recording.
+Storage: $(human_decimal_bytes "$disk_free_bytes") free; warning level is $(human_decimal_bytes "$DISK_WARN_FREE_BYTES").
+Action: Restore Backblaze uploads or add disk space."
   elif [ -e "$disk_space_active" ] \
     && [ "$disk_free_bytes" -lt "$DISK_WARNING_RECOVERY_BYTES" ]
   then
     : # Keep one incident active until the full warning hysteresis is reached.
   else
     clear_alert disk_space \
-      "Free space recovered above the warning threshold plus its hysteresis margin."
+      "Status: Backup disk space is healthy again.
+Storage: $(human_decimal_bytes "$disk_free_bytes") free.
+Action: None."
   fi
 }
 
 monitor_feed_alerts() {
+  # Consume a reconnect warning before closing a provider-history incident.
+  # The first post-gap append deliberately produces both signals; keeping the
+  # provider incident active here lets the warning coalesce into it.
+  monitor_resume_coverage_alert
   if [ -s "$JOURNAL_FILE" ]; then
     monitor_age=$(file_age_seconds "$JOURNAL_FILE") || return 0
     if [ "$monitor_age" -gt "$RAW_STALE_AFTER_SECS" ]; then
       remember_alert_journal_floor grpc_stale
       raise_alert grpc_stale ERROR \
-        "No durable block append for ${monitor_age}s (limit=${RAW_STALE_AFTER_SECS}s)."
+        "Status: No new gRPC block was saved for $(human_duration "$monitor_age").
+Data: Everything saved earlier is safe.
+Action: Check the gRPC provider or connection."
     else
       clear_alert_after_journal_growth grpc_stale \
-        "A new durable raw-journal record was appended after the stale-feed incident."
+        "Status: New gRPC blocks are being saved again.
+Data: New blocks are being saved; everything saved earlier is safe.
+Action: None."
     fi
     clear_alert_after_journal_growth recorder_restarting \
-      "A new durable block was appended after restart."
+      "Status: The recorder restarted and new blocks are being saved.
+Data: Backup is running again.
+Action: None."
     clear_alert_after_journal_growth provider_replay_gap \
-      "Durable capture resumed at the selected recovery slot derived from the validated provider floor; the recorded source gap remains unrepaired and retained for audit."
+      "Status: New gRPC blocks are being saved again.
+Data: The previously reported missing slots are still missing.
+Action: Repair that slot range from another source if needed."
+    clear_alert_after_journal_growth resume_coverage \
+      "Status: New gRPC blocks are being saved again.
+Data: The earlier reconnect range is still unverified.
+Action: Compare that range with another source if needed." \
+      silent
   elif [ -e "$STARTED_FILE" ]; then
     monitor_start_age=$(file_age_seconds "$STARTED_FILE") || return 0
     if [ "$monitor_start_age" -gt "$STARTUP_GRACE_SECS" ]; then
       remember_alert_journal_floor grpc_stale
       raise_alert grpc_stale ERROR \
-        "No durable raw journal was created within startup grace=${STARTUP_GRACE_SECS}s."
+        "Status: No gRPC block was saved after startup.
+Data: No new backup data is arriving.
+Action: Check the gRPC provider or connection."
     fi
   fi
 
   monitor_primary_sync_alert
-  monitor_resume_coverage_alert
 }
 
 monitor_resume_coverage_alert() {
@@ -1135,13 +1251,25 @@ monitor_resume_coverage_alert() {
     remove_resume_coverage_event
     return 0
   fi
-  if [ -n "$resume_requested_slot" ] && [ -n "$resume_first_slot" ]; then
-    resume_gap_detail="Impact: Hetzner already had slot $resume_requested_slot. The provider resumed at slot $resume_first_slot without replaying it, so continuity across the reconnect could not be verified. The recorder keeps the gap explicit and continues attempting newer blocks.
-Action: Check the upstream Yellowstone provider or repair this range from another source. Repeated reconnect gaps are grouped into this active incident until recovery."
-  else
-    resume_gap_detail="Impact: The provider skipped the requested durable resume slot, so continuity across the reconnect could not be verified. The recorder keeps the gap explicit and continues attempting newer blocks.
-Action: Check the upstream Yellowstone provider or repair the uncovered range from another source. Repeated reconnect gaps are grouped into this active incident until recovery."
+  provider_gap_active=$(alert_file provider_replay_gap active)
+  if [ ! -L "$provider_gap_active" ] && [ -f "$provider_gap_active" ]; then
+    # A provider-history recovery deliberately cannot replay its old anchor.
+    # That expected overlap warning is already covered by the stronger active
+    # missing-slot incident, so consuming it avoids a second alert lifecycle.
+    ALERT_DELIVERY_RESULT=suppressed
+    remove_resume_coverage_event
+    return 0
   fi
+  if [ -n "$resume_requested_slot" ] && [ -n "$resume_observed_slot" ]; then
+    resume_gap_detail="Status: The provider did not replay saved slot $resume_requested_slot after reconnect.
+Data: It later sent slot $resume_observed_slot, so coverage between them could not be verified.
+Action: Compare that range with another source and repair any gaps."
+  else
+    resume_gap_detail="Status: The provider did not replay the last saved slot after reconnect.
+Data: Reconnect coverage could not be verified; earlier saved blocks are safe.
+Action: Compare that range with another source and repair any gaps."
+  fi
+  remember_alert_journal_floor resume_coverage
   raise_alert resume_coverage WARNING \
     "$resume_gap_detail"
   # Suppression means this alert key already belongs to a delivered active
@@ -1367,7 +1495,9 @@ monitor_primary_sync_alert() {
     fi
     if [ "$heartbeat_should_alert" = true ]; then
       raise_alert primary_sync_stale WARNING \
-        "Configured primary-sync heartbeat is missing or unreadable. The sync/ACK protocol is not deletion authority."
+        "Status: Blockzilla confirmation is missing.
+Data: Nothing is deleted because of this alert.
+Action: Check the Blockzilla connection."
     fi
     return 0
   fi
@@ -1378,9 +1508,14 @@ monitor_primary_sync_alert() {
   heartbeat_age=$(file_age_seconds "$PRIMARY_SYNC_HEARTBEAT_FILE") || heartbeat_age=$PRIMARY_SYNC_STALE_AFTER_SECS
   if [ "$heartbeat_age" -gt "$PRIMARY_SYNC_STALE_AFTER_SECS" ]; then
     raise_alert primary_sync_stale WARNING \
-      "Primary-sync heartbeat age=${heartbeat_age}s exceeds limit=${PRIMARY_SYNC_STALE_AFTER_SECS}s."
+      "Status: No Blockzilla confirmation for $(human_duration "$heartbeat_age").
+Data: Nothing is deleted because of this alert.
+Action: Check the Blockzilla connection."
   else
-    clear_alert primary_sync_stale "The primary-sync heartbeat is fresh again."
+    clear_alert primary_sync_stale \
+      "Status: Blockzilla confirmations are arriving again.
+Data: Hetzner backup remains safe.
+Action: None."
   fi
 }
 
@@ -1429,13 +1564,18 @@ monitor_child() {
         monitor_journal_identity=$current_journal_identity
       fi
       retry_pending_alerts
-      clear_alert volume_invalid "The dedicated recorder volume is valid again."
+      clear_alert volume_invalid \
+        "Status: The Hetzner backup disk is available again.
+Data: Backup can continue.
+Action: None."
       monitor_disk_alerts
       monitor_feed_alerts
     else
       kill -TERM "$monitored_pid" 2>/dev/null || true
       raise_alert volume_invalid CRITICAL \
-        "The dedicated recorder volume or fail-closed marker became invalid; stopping capture."
+        "Status: The Hetzner backup disk is unavailable. Backup is paused.
+Data: Nothing was deleted.
+Action: Check the Hetzner volume mount."
       break
     fi
   done
@@ -1852,7 +1992,9 @@ reconcile_replay_recovery_with_verified_slot() {
   REPLAY_MIN_RESUME_SLOT=
   REPLAY_VERIFIED_ANCHOR_SLOT=
   clear_alert provider_replay_gap \
-    "Durable capture advanced beyond the selected recovery slot; the immutable provider-floor and source-gap evidence remains retained, and the missing interval is not reported as repaired."
+    "Status: New gRPC blocks are being saved again.
+Data: The previously reported missing slots are still missing.
+Action: Repair that slot range from another source if needed."
   echo "$(timestamp) raw_recorder replay_floor_retired durable_last_slot=$replay_reconcile_last_slot" >&2
 }
 
@@ -2487,20 +2629,20 @@ generation_upload_failure_details() {
   failure_status=$1
   case "$failure_status" in
     20)
-      pipeline_cause="Cause: Backblaze rejected verification because the daily download-bandwidth cap was reached."
-      pipeline_action="Action: Raise or remove the Backblaze Download Bandwidth cap, or wait for its daily reset. Hetzner keeps every unverified local generation."
+      pipeline_cause="Status: Backblaze download limit reached."
+      pipeline_action="Action: Raise the Backblaze download limit or wait for the daily reset."
       ;;
     21)
-      pipeline_cause="Cause: Backblaze rejected the commit because the daily Class C transaction cap was reached."
-      pipeline_action="Action: Raise or remove the Backblaze Class C transaction cap, or wait for its daily reset. Hetzner keeps every unverified local generation."
+      pipeline_cause="Status: Backblaze Class C limit reached."
+      pipeline_action="Action: Raise the Backblaze Class C limit or wait for the daily reset."
       ;;
     22)
-      pipeline_cause="Cause: Backblaze rejected the upload because the storage or spending cap was reached."
-      pipeline_action="Action: Add Backblaze capacity or raise the storage spending cap. Do not manually delete the retained Hetzner generations."
+      pipeline_cause="Status: Backblaze storage limit reached."
+      pipeline_action="Action: Increase the Backblaze storage limit."
       ;;
     *)
-      pipeline_cause="Cause: Backblaze could not commit and exactly verify the oldest sealed generation."
-      pipeline_action="Action: Check Backblaze credentials, Caps & Alerts, reachability, and recorder logs. Hetzner retries automatically every ${GENERATION_UPLOAD_RETRY_SECS}s."
+      pipeline_cause="Status: Backblaze upload failed."
+      pipeline_action="Action: Check Backblaze and the recorder logs. Automatic retry is on."
       ;;
   esac
 }
@@ -2579,48 +2721,46 @@ raise_generation_spill_gate_alert() {
   spill_gate_level=ERROR
   case "$spill_gate_failure" in
     queue)
-      spill_gate_cause="Hetzner could not inspect the sealed-generation queue safely."
+      spill_gate_status="Status: Cannot read local backup files. Backblaze upload is paused; saved data is safe."
       ;;
     free_space)
-      spill_gate_cause="Hetzner could not measure free space on the recorder filesystem."
+      spill_gate_status="Status: Cannot read Hetzner free space. Backblaze upload is paused; saved data is safe."
       ;;
     capacity)
-      spill_gate_cause="Hetzner could not measure the recorder filesystem capacity."
+      spill_gate_status="Status: Cannot read Hetzner disk size. Backblaze upload is paused; saved data is safe."
       ;;
     policy)
-      spill_gate_cause="Hetzner could not validate the disk spill watermarks from the measured filesystem values."
+      spill_gate_status="Status: Storage safety check failed. Backblaze upload is paused; saved data is safe."
       ;;
     *)
-      spill_gate_cause="Hetzner could not validate a required disk spill policy input."
+      spill_gate_status="Status: Storage safety check failed. Backblaze upload is paused; saved data is safe."
       ;;
   esac
   case "$spill_gate_backlog" in
     ''|*[!0-9]*)
-      spill_gate_backlog_detail="The sealed-generation count is unavailable."
+      spill_gate_backlog_detail="Waiting backup count unavailable."
       ;;
     *)
-      spill_gate_backlog_detail="$spill_gate_backlog sealed generation(s) remain local."
+      spill_gate_backlog_detail="$spill_gate_backlog backup batches waiting locally."
       ;;
   esac
   case "$spill_gate_free" in
     ''|*[!0-9]*)
-      spill_gate_space_detail="Free space is unavailable, so capture headroom cannot be proven."
+      spill_gate_space_detail="Storage: Free space unavailable. $spill_gate_backlog_detail"
       ;;
     *)
-      spill_gate_space_detail="$(human_bytes "$spill_gate_free") is free."
+      spill_gate_space_detail="Storage: $(human_decimal_bytes "$spill_gate_free") free. $spill_gate_backlog_detail"
       if [ "$spill_gate_free" -lt "$MIN_FREE_BYTES" ]; then
         spill_gate_level=CRITICAL
-        spill_gate_space_detail="$spill_gate_space_detail Capture is paused at its $(human_bytes "$MIN_FREE_BYTES") safety floor."
-      else
-        spill_gate_space_detail="$spill_gate_space_detail Capture can continue only while local headroom lasts."
+        spill_gate_space_detail="$spill_gate_space_detail Backup recording is paused."
       fi
       ;;
   esac
   rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
   raise_alert generation_backlog "$spill_gate_level" \
-    "Cause: $spill_gate_cause
-Impact: Backblaze spill cleanup is paused. $spill_gate_backlog_detail $spill_gate_space_detail No unverified local data was deleted.
-Action: Inspect the recorder filesystem and service logs. Automatic checks continue every ${GENERATION_UPLOAD_RETRY_SECS}s."
+    "$spill_gate_status
+$spill_gate_space_detail
+Action: Check the Hetzner disk and recorder service. Automatic retry is on."
 }
 
 generation_backlog_local_incident_active() {
@@ -2636,8 +2776,23 @@ generation_backlog_local_incident_active() {
     ''|*[!0-9]*|0) return 1 ;;
   esac
   [ "$gate_incident_bytes" -le 4096 ] || return 1
-  gate_incident_cause=$(sed -n '7p' "$gate_incident_file")
-  case "$gate_incident_cause" in
+  gate_incident_marker=$(sed -n '/^Status: /p' "$gate_incident_file" | head -n 1)
+  case "$gate_incident_marker" in
+    'Status: Cannot read local backup files. Backblaze upload is paused; saved data is safe.'|\
+    'Status: Cannot read Hetzner free space. Backblaze upload is paused; saved data is safe.'|\
+    'Status: Cannot read Hetzner disk size. Backblaze upload is paused; saved data is safe.'|\
+    'Status: Storage safety check failed. Backblaze upload is paused; saved data is safe.'|\
+    'Status: Cannot read local backup files. Upload cleanup is paused; saved data is safe.'|\
+    'Status: Cannot read Hetzner free space. Upload cleanup is paused; saved data is safe.'|\
+    'Status: Cannot read Hetzner disk size. Upload cleanup is paused; saved data is safe.'|\
+    'Status: Storage safety check failed. Upload cleanup is paused; saved data is safe.'|\
+    'Status: Hetzner disk is full. Backup is paused; saved data is safe.')
+      return 0
+      ;;
+  esac
+  # Accept the exact previous copy during a rolling deployment.
+  gate_incident_marker=$(sed -n '/^Cause: /p' "$gate_incident_file" | head -n 1)
+  case "$gate_incident_marker" in
     'Cause: Hetzner could not inspect the sealed-generation queue safely.'|\
     'Cause: Hetzner could not measure free space on the recorder filesystem.'|\
     'Cause: Hetzner could not measure the recorder filesystem capacity.'|\
@@ -2724,23 +2879,28 @@ generation_upload_worker() {
 
         if [ "$generation_upload_failed" = true ]; then
           pipeline_level=ERROR
-          if [ "$generation_space_valid" != true ] \
-            || [ "$generation_free_bytes" -lt "$MIN_FREE_BYTES" ]
-          then
+          if [ "$generation_space_valid" != true ]; then
             pipeline_level=CRITICAL
-            pipeline_capture="Capture is paused or cannot be admitted safely at its $(human_bytes "$MIN_FREE_BYTES") floor."
+            pipeline_capture="Backup status cannot be confirmed; saved data is safe."
+          elif [ "$generation_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
+            pipeline_level=CRITICAL
+            pipeline_capture="Backup is paused; saved data is safe."
           else
-            pipeline_capture="Capture can continue only while the remaining local headroom lasts."
+            pipeline_capture="Hetzner still has room for recording; saved data is safe."
           fi
+          case "$generation_backlog" in
+            ''|*[!0-9]*) generation_batch_detail="Waiting backup count unavailable." ;;
+            *) generation_batch_detail="$generation_backlog backup batches waiting locally." ;;
+          esac
           if [ "$generation_space_valid" = true ]; then
-            generation_free_detail="$(human_bytes "$generation_free_bytes") is free; spill recovery requires $(human_bytes "$GENERATION_SPILL_RECOVERY_BYTES")."
+            generation_free_detail="Storage: $(human_decimal_bytes "$generation_free_bytes") free. $generation_batch_detail"
           else
-            generation_free_detail="Free space could not be measured safely."
+            generation_free_detail="Storage: Free space unavailable. $generation_batch_detail"
           fi
           rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
           raise_alert generation_backlog "$pipeline_level" \
-            "$pipeline_cause
-Impact: $generation_backlog sealed generation(s) remain local. $generation_free_detail $pipeline_capture No unverified local data was deleted.
+            "$pipeline_cause $pipeline_capture
+$generation_free_detail
 $pipeline_action"
         elif [ -n "$generation_refresh_failure" ]; then
           raise_generation_spill_gate_alert "$generation_refresh_failure" \
@@ -2751,7 +2911,9 @@ $pipeline_action"
           && generation_backlog_local_incident_active
         then
           clear_alert generation_backlog \
-            "The sealed queue, free-space, filesystem-capacity, and spill-watermark checks are healthy again with $(human_bytes "$generation_free_bytes") free above the recovery watermark. Local retention remains intact."
+            "Status: Backup storage checks are working again.
+Storage: $(human_decimal_bytes "$generation_free_bytes") free. Saved data is safe.
+Action: None."
         elif [ "$generation_space_valid" = true ] \
           && [ "$generation_spill_active" = false ] \
           && [ "$generation_free_bytes" -ge "$GENERATION_SPILL_RECOVERY_BYTES" ] \
@@ -2759,7 +2921,9 @@ $pipeline_action"
             || [ "$generation_backlog" -eq 0 ]; }
         then
           clear_alert generation_backlog \
-            "The disk-first cache recovered to $(human_bytes "$generation_free_bytes") free, above its $(human_bytes "$GENERATION_SPILL_RECOVERY_BYTES") spill recovery watermark. Local capture can continue safely."
+            "Status: Backblaze uploads are working and backup recording can continue.
+Storage: $(human_decimal_bytes "$generation_free_bytes") free on Hetzner.
+Action: None."
         elif [ "$generation_space_valid" = true ] \
           && [ "$generation_spill_active" = true ] \
           && [ "$generation_backlog" -gt 0 ] \
@@ -2776,16 +2940,16 @@ $pipeline_action"
           && [ "$upload_status" -eq 0 ]
         then
           pipeline_level=ERROR
-          pipeline_capture="Capture can continue only while the remaining local headroom lasts."
+          pipeline_capture="Hetzner still has room for recording; saved data is safe."
           if [ "$generation_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
             pipeline_level=CRITICAL
-            pipeline_capture="Capture is paused at its $(human_bytes "$MIN_FREE_BYTES") safety floor."
+            pipeline_capture="Backup is paused; saved data is safe."
           fi
           rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
           raise_alert generation_backlog "$pipeline_level" \
-            "Cause: A Backblaze spill reported success, but the sealed queue and free disk space made no observable local progress.
-Impact: $generation_backlog sealed generation(s) remain and $(human_bytes "$generation_free_bytes") is free. $pipeline_capture No unverified local data was deleted.
-Action: Inspect the exact B2 receipt, upload-chain state, recorder volume, and concurrent rotations. Automatic retries continue every ${GENERATION_UPLOAD_RETRY_SECS}s."
+            "Status: Backblaze upload finished, but Hetzner space did not increase. $pipeline_capture
+Storage: $(human_decimal_bytes "$generation_free_bytes") free; $generation_backlog backup batches waiting locally.
+Action: Check the recorder logs. Automatic retry is on."
         fi
       else
         raise_generation_spill_gate_alert "$generation_gate_failure" \
@@ -2888,19 +3052,21 @@ update_b2_usage_alerts() {
 
   if [ "$usage_bytes" -ge "$B2_USAGE_CRITICAL_BYTES" ]; then
     raise_alert_once b2_usage CRITICAL \
-      "Cause: The archive stores $(human_decimal_bytes "$usage_bytes"), above the $(human_decimal_bytes "$B2_USAGE_CRITICAL_BYTES") critical threshold for the $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES") free allowance.
-Impact: Existing objects remain safe, but Backblaze may reject new uploads when the configured spending cap is reached. Nothing is deleted automatically.
-Action: If indefinite retention is intended, enable paid storage or raise the storage cap in Backblaze Caps & Alerts."
+      "Status: Backblaze is almost full. Existing data is safe.
+Storage: $(human_decimal_bytes "$usage_bytes") used of $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES").
+Action: Increase the Backblaze storage limit now."
   elif [ "$usage_bytes" -ge "$B2_USAGE_WARNING_BYTES" ]; then
     raise_alert_once b2_usage WARNING \
-      "Cause: The archive stores $(human_decimal_bytes "$usage_bytes"), above the $(human_decimal_bytes "$B2_USAGE_WARNING_BYTES") warning threshold for the $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES") free allowance.
-Impact: Existing objects remain safe. Hidden versions and unfinished parts are included in this measurement.
-Action: Before 10 GB, decide whether to enable paid storage or change the retention plan."
+      "Status: Backblaze storage is filling up. Existing data is safe.
+Storage: $(human_decimal_bytes "$usage_bytes") used of $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES").
+Action: Increase the storage limit before it reaches $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES")."
   elif [ -e "$usage_active" ] \
     && [ "$usage_bytes" -lt "$B2_USAGE_WARNING_RECOVERY_BYTES" ]
   then
     clear_alert b2_usage \
-      "Backblaze storage is back below the warning recovery threshold; current usage is $(human_decimal_bytes "$usage_bytes")."
+      "Status: Backblaze storage is below the alert level again.
+Storage: $(human_decimal_bytes "$usage_bytes") used of $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES").
+Action: None."
   fi
 }
 
@@ -2921,16 +3087,25 @@ b2_usage_scan_failed_alert() {
     return 0
   fi
   raise_alert_once b2_usage_check_failed ERROR \
-    "Unable to measure complete Backblaze account storage; capture and uploads continue."
+    "Status: Backblaze storage usage is unavailable.
+Storage: Unknown.
+Action: Check Backblaze if this remains active."
 }
 
 b2_usage_scan_recovered_alert() {
+  recovered_usage_bytes=${1:-}
   if [ -e "$(alert_file generation_backlog active)" ]; then
     discard_alert b2_usage_check_failed
     return 0
   fi
+  case "$recovered_usage_bytes" in
+    ''|*[!0-9]*) recovered_usage_detail='Storage: Current usage is available.' ;;
+    *) recovered_usage_detail="Storage: $(human_decimal_bytes "$recovered_usage_bytes") used of $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES")." ;;
+  esac
   clear_alert b2_usage_check_failed \
-    "Backblaze account-wide storage measurement is working again."
+    "Status: Backblaze storage checks are working again.
+$recovered_usage_detail
+Action: None."
 }
 
 b2_usage_worker() {
@@ -2941,7 +3116,7 @@ b2_usage_worker() {
     if ! validate_data_volume true >/dev/null 2>&1; then
       : # The dedicated volume incident is reported by the main monitor.
     elif run_b2_usage_scan; then
-      b2_usage_scan_recovered_alert
+      b2_usage_scan_recovered_alert "$B2_USAGE_BYTES"
       update_b2_usage_alerts "$B2_USAGE_BYTES"
       echo "$(timestamp) b2_usage stored_bytes=$B2_USAGE_BYTES allowance_bytes=$B2_USAGE_ALLOWANCE_BYTES" >&2
       if [ "$B2_USAGE_BYTES" -ge "$B2_USAGE_CRITICAL_BYTES" ]; then
@@ -3026,8 +3201,7 @@ if [ "${1:-}" = --telegram-test ]; then
   if ! validate_telegram_config; then
     exit 2
   fi
-  test_text=$(printf 'TEST BLOCKZILLA telegram\nnode=%s source=%s utc=%s\nOutbound alert delivery is working.' \
-    "$ORIGIN_NODE_ID" "$SOURCE_ID" "$(timestamp)")
+  test_text=$(printf 'Blockzilla backup - TEST\nTelegram alerts are working\nStatus: Test message received.\nAction: None.')
   if ! telegram_send "$test_text"; then
     echo "Telegram test delivery failed" >&2
     exit 1
@@ -3309,7 +3483,9 @@ while :; do
   if ! validate_data_volume; then
     write_state volume_invalid
     raise_alert volume_invalid CRITICAL \
-      "The dedicated recorder volume or fail-closed marker is invalid; capture is paused."
+      "Status: The Hetzner backup disk is unavailable. Backup is paused.
+Data: Nothing was deleted.
+Action: Check the Hetzner volume mount."
     echo "$(timestamp) raw_recorder paused_invalid_volume output=$OUTPUT_DIR" >&2
     sleep "$LOW_DISK_RECHECK_SECS"
     continue
@@ -3318,18 +3494,23 @@ while :; do
     if ! prepare_cache_layout; then
       write_state cache_rotation_failed
       raise_alert generation_rotation_failed CRITICAL \
-        "The bounded cache layout or an interrupted generation rotation could not be recovered; capture is paused."
+        "Status: The local backup file could not rotate. Backup is paused.
+Data: Everything already saved is safe.
+Action: Check the recorder logs. Automatic retry is on."
       echo "$(timestamp) raw_recorder paused_cache_recovery_failed" >&2
       sleep "$LOW_DISK_RECHECK_SECS"
       continue
     fi
     clear_alert generation_rotation_failed \
-      "The bounded cache layout and rotation transaction are consistent again."
+      "Status: Local backup files are rotating normally again.
+Data: Backup can continue.
+Action: None."
     if ! load_replay_recovery_floor; then
       write_state replay_recovery_failed
       raise_alert replay_recovery_failed CRITICAL \
-        "Impact: New gRPC capture is paused; existing local and Backblaze data is untouched.
-Action: The safety check will retry automatically and will not advance or delete the old cursor."
+        "Status: gRPC recovery check failed. Backup is paused.
+Data: Local and Backblaze data are safe.
+Action: Automatic retry is on."
       echo "$(timestamp) raw_recorder paused_replay_recovery_marker_invalid" >&2
       sleep "$LOW_DISK_RECHECK_SECS"
       continue
@@ -3352,8 +3533,9 @@ Action: The safety check will retry automatically and will not advance or delete
     if [ "$replay_floor_ready" != true ]; then
       write_state replay_recovery_failed
       raise_alert replay_recovery_failed CRITICAL \
-        "Impact: New gRPC capture is paused because the local generation could not be verified; existing data is untouched.
-Action: Verification will retry automatically without changing the durable cursor."
+        "Status: A local backup file could not be checked. Backup is paused.
+Data: Nothing was deleted.
+Action: Automatic retry is on."
       echo "$(timestamp) raw_recorder paused_replay_floor_retirement_failed" >&2
       sleep "$LOW_DISK_RECHECK_SECS"
       continue
@@ -3370,15 +3552,14 @@ Action: Verification will retry automatically without changing the durable curso
           replay_cushion_detail="Reconnect policy: slots $REPLAY_PROVIDER_AVAILABLE_SLOT through $((REPLAY_MIN_RESUME_SLOT - 1)) were deliberately bypassed so the next handshake can outrun the moving replay floor. The provider did not report this cushion as unavailable, and the choice is retained in the audit record."
         fi
         raise_alert provider_replay_gap WARNING \
-          "Provider replay failure: requested slots $REPLAY_RECOVERY_REQUESTED_SLOT through $((REPLAY_PROVIDER_AVAILABLE_SLOT - 1)) could not be returned.
-Impact: Slot $REPLAY_RECOVERY_ANCHOR_SLOT is already durable. Slots $((REPLAY_RECOVERY_ANCHOR_SLOT + 1)) through $((REPLAY_MIN_RESUME_SLOT - 1)) are not in this backup; earlier data remains safe.
-$replay_cushion_detail
-Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit record of the gap."
+          "Status: This backup is missing slots $((REPLAY_RECOVERY_ANCHOR_SLOT + 1))-$((REPLAY_MIN_RESUME_SLOT - 1)).
+Data: Earlier saved blocks are safe; this range is not in the backup.
+Action: Backup will continue at slot $REPLAY_MIN_RESUME_SLOT. Repair the missing range if needed."
       else
         raise_alert provider_replay_gap WARNING \
-          "Provider replay failure: requested slots $REPLAY_RECOVERY_REQUESTED_SLOT through $((REPLAY_MIN_RESUME_SLOT - 1)) could not be returned.
-Impact: Slot $REPLAY_RECOVERY_ANCHOR_SLOT is already durable. Slots $((REPLAY_RECOVERY_ANCHOR_SLOT + 1)) through $((REPLAY_MIN_RESUME_SLOT - 1)) are not in this backup; earlier data remains safe.
-Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit record of the gap."
+          "Status: This backup is missing slots $((REPLAY_RECOVERY_ANCHOR_SLOT + 1))-$((REPLAY_MIN_RESUME_SLOT - 1)).
+Data: Earlier saved blocks are safe; this range is not in the backup.
+Action: Backup will continue at slot $REPLAY_MIN_RESUME_SLOT. Repair the missing range if needed."
       fi
     fi
     if [ -z "$upload_worker_pid" ] \
@@ -3401,7 +3582,9 @@ Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit 
   elif ! mkdir -p "$OUTPUT_DIR"; then
     write_state volume_invalid
     raise_alert volume_invalid CRITICAL \
-      "The recorder output directory could not be created safely on the dedicated volume; capture is paused."
+      "Status: The Hetzner backup folder is unavailable. Backup is paused.
+Data: Nothing was deleted.
+Action: Check the Hetzner volume mount."
     echo "$(timestamp) raw_recorder paused_invalid_output output=$OUTPUT_DIR" >&2
     sleep "$LOW_DISK_RECHECK_SECS"
     continue
@@ -3409,23 +3592,34 @@ Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit 
   if ! validate_data_volume true; then
     write_state volume_invalid
     raise_alert volume_invalid CRITICAL \
-      "The recorder output directory could not be created safely on the dedicated volume; capture is paused."
+      "Status: The Hetzner backup folder is unavailable. Backup is paused.
+Data: Nothing was deleted.
+Action: Check the Hetzner volume mount."
     echo "$(timestamp) raw_recorder paused_invalid_output output=$OUTPUT_DIR" >&2
     sleep "$LOW_DISK_RECHECK_SECS"
     continue
   fi
-  clear_alert volume_invalid "The dedicated recorder volume is valid again."
+  clear_alert volume_invalid \
+    "Status: The Hetzner backup disk is available again.
+Data: Backup can continue.
+Action: None."
   # A durable gap event must keep retrying even when disk admission prevents a
   # recorder child (and its background monitor) from starting.
   monitor_resume_coverage_alert
   if ! free_bytes=$(available_bytes); then
     write_state disk_check_failed
-    raise_alert disk_check_failed ERROR "Unable to read free space for the recorder volume."
+    raise_alert disk_check_failed ERROR \
+      "Status: Hetzner free space is unavailable. Backup safety cannot be confirmed.
+Storage: Unknown.
+Action: Check the Hetzner disk."
     echo "$(timestamp) raw_recorder disk_check_failed output=$OUTPUT_DIR" >&2
     sleep "$RESTART_DELAY_SECS"
     continue
   fi
-  clear_alert disk_check_failed "Filesystem free-space checks are working again."
+  clear_alert disk_check_failed \
+    "Status: Hetzner disk checks are working again.
+Storage: $(human_decimal_bytes "$free_bytes") free.
+Action: None."
   update_disk_alerts "$free_bytes"
   if [ "$free_bytes" -lt "$MIN_FREE_BYTES" ]; then
     write_state low_disk
@@ -3516,8 +3710,9 @@ Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit 
     "$CHILD_REPORT_FILE"
   then
     raise_alert resume_coverage WARNING \
-      "Impact: The provider skipped the requested resume slot and Hetzner could not publish the durable alert event. Capture stopped before accepting that first later block.
-Action: Inspect the recorder monitoring volume; automatic retries will not overwrite an unreadable or uncommitted event."
+      "Status: The provider did not replay the saved slot, and the warning report could not be saved. Backup is paused.
+Data: Everything saved earlier is safe.
+Action: Check the Hetzner monitoring folder."
   fi
   if [ "$CACHE_MODE" = b2-generations ] \
     && [ "$status" -eq 0 ] \
@@ -3528,25 +3723,27 @@ Action: Inspect the recorder monitoring volume; automatic retries will not overw
     fi
     if persist_replay_recovery_from_report "$CHILD_REPORT_FILE"; then
       clear_alert replay_recovery_failed \
-        "The trusted resume marker and immutable gap record are now durable. Capture will restart automatically at slot $REPLAY_GAP_SELECTED_RESUME_SLOT; existing backup data was not deleted."
+        "Status: gRPC recovery is ready. Backup will restart at slot $REPLAY_GAP_SELECTED_RESUME_SLOT.
+Data: Everything saved earlier is safe.
+Action: None."
       remember_alert_journal_floor provider_replay_gap
       replay_cushion_detail=
       if [ "$REPLAY_GAP_SELECTED_RESUME_SLOT" -gt "$REPLAY_GAP_PROVIDER_AVAILABLE_SLOT" ]; then
         replay_cushion_detail="Reconnect policy: slots $REPLAY_GAP_PROVIDER_AVAILABLE_SLOT through $((REPLAY_GAP_SELECTED_RESUME_SLOT - 1)) were deliberately bypassed so the next handshake can outrun the moving replay floor. The provider did not report this cushion as unavailable, and the choice is retained in the audit record."
       fi
       raise_alert provider_replay_gap WARNING \
-        "Provider replay failure: requested slots $REPLAY_GAP_REQUESTED_SLOT through $((REPLAY_GAP_PROVIDER_AVAILABLE_SLOT - 1)) could not be returned.
-Impact: Slot $REPLAY_GAP_ANCHOR_SLOT is already durable. Slots $((REPLAY_GAP_ANCHOR_SLOT + 1)) through $((REPLAY_GAP_SELECTED_RESUME_SLOT - 1)) are not in this backup; earlier data remains safe.
-$replay_cushion_detail
-Action: Hetzner saved an immutable audit record and will resume at slot $REPLAY_GAP_SELECTED_RESUME_SLOT."
+        "Status: This backup is missing slots $((REPLAY_GAP_ANCHOR_SLOT + 1))-$((REPLAY_GAP_SELECTED_RESUME_SLOT - 1)).
+Data: Earlier saved blocks are safe; this range is not in the backup.
+Action: Backup will continue at slot $REPLAY_GAP_SELECTED_RESUME_SLOT. Repair the missing range if needed."
       write_state running
       echo "$(timestamp) raw_recorder replay_gap_recorded anchor_slot=$REPLAY_GAP_ANCHOR_SLOT requested_slot=$REPLAY_GAP_REQUESTED_SLOT provider_floor=$REPLAY_GAP_PROVIDER_AVAILABLE_SLOT selected_resume_slot=$REPLAY_GAP_SELECTED_RESUME_SLOT headroom_slots=$REPLAY_RESUME_HEADROOM_SLOTS; resuming capture" >&2
       continue
     fi
     write_state replay_recovery_failed
     raise_alert replay_recovery_failed CRITICAL \
-      "Impact: New gRPC capture is paused because the provider deleted old history before Hetzner could resume. Existing local and Backblaze data is safe.
-Action: Retrying every ${RESTART_DELAY_SECS}s; Hetzner will not skip forward until a trusted gap record is durable."
+      "Status: The gRPC provider no longer has the requested old slots. Backup is paused.
+Data: Local and Backblaze data are safe.
+Action: Automatic recovery is retrying."
     echo "$(timestamp) raw_recorder replay_recovery_persist_failed stage=${REPLAY_PERSIST_FAILURE_STAGE:-unknown}; retrying in ${RESTART_DELAY_SECS}s" >&2
     sleep "$RESTART_DELAY_SECS"
     continue
@@ -3560,21 +3757,27 @@ Action: Retrying every ${RESTART_DELAY_SECS}s; Hetzner will not skip forward unt
     fi
     if rotate_active_generation; then
       clear_alert generation_rotation_failed \
-        "The full generation was verified, sealed, and replaced by an exact-tail successor."
+        "Status: Local backup files are rotating normally again.
+Data: Backup can continue.
+Action: None."
       write_state running
       echo "$(timestamp) raw_recorder generation_rotated; resuming capture" >&2
       continue
     fi
     write_state cache_rotation_failed
     raise_alert generation_rotation_failed CRITICAL \
-      "A byte-limit generation could not be verified, seeded, or rotated; it was retained and capture is paused for retry."
+      "Status: The local backup file could not rotate. Backup is paused.
+Data: Everything already saved is safe.
+Action: Check the recorder logs. Automatic retry is on."
     echo "$(timestamp) raw_recorder generation_rotation_failed; retrying in ${RESTART_DELAY_SECS}s" >&2
     sleep "$RESTART_DELAY_SECS"
     continue
   fi
   if ! validate_data_volume true >/dev/null 2>&1; then
     raise_alert volume_invalid CRITICAL \
-      "The dedicated recorder volume or fail-closed marker is invalid; capture is paused."
+      "Status: The Hetzner backup disk is unavailable. Backup is paused.
+Data: Nothing was deleted.
+Action: Check the Hetzner volume mount."
   elif [ "$exit_reason" = low_disk_floor ]; then
     if current_free_bytes=$(available_bytes) && [ "$current_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
       # The disk monitor and child-exit path share the same incident key. A

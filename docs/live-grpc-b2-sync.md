@@ -213,17 +213,20 @@ The existing Yellowstone `grpc_stale` incident remains separate: it reports
 that the Hetzner recorder itself stopped durably receiving blocks.
 
 Telegram sends one opening per active incident, one message if its severity
-escalates, and one recovery. It does not send periodic reminders. Incident
-state lives on the recorder volume, so a container rebuild cannot resend every
-open problem. The 15-minute setting is a reopen debounce: a quick
-fail/recover/fail flap stays silent unless it remains open beyond the debounce.
-Only a pressure-triggered upload failure and the resulting hard-floor pressure
-are reported as one `Backup pipeline blocked` incident with human-readable
-capacity, current capture state, impact, and cap-specific action. A healthy
-sealed local backlog is intentional and silent. A second strictly validated
-resume-gap event is coalesced into its already-delivered incident instead of
-generating another message or blocking capture. A malformed event or a failed
-send remains pending and is never silently marked delivered.
+escalates, and at most one recovery. It does not send periodic reminders. A reconnect-
+verification warning retires silently after later journal growth because
+recording never stopped. Incident state lives on the recorder volume, so a
+container rebuild cannot resend every open problem. The 15-minute setting is a
+reopen debounce: a quick fail/recover/fail flap stays silent unless it remains
+open beyond the debounce.
+Only an upload failure and the resulting low-disk pressure are reported as one
+`Backup storage problem` incident. Its Telegram copy is capped at five useful
+lines, uses decimal `MB`/`GB`, says whether backup recording is running or
+paused when that state is known, and gives one action. Healthy local retention
+is silent. A second validated resume-gap event is coalesced into its already-
+delivered incident instead of generating another message or blocking capture.
+A malformed event or a failed send remains pending and is never silently marked
+delivered.
 
 If the provider has already discarded the requested replay slot, recovery is
 explicit rather than silent. The recorder accepts only a typed gRPC

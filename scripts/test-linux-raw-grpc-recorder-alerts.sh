@@ -19,6 +19,18 @@ eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
 
 mkdir -p "$ALERT_STATE_DIR" "$RESUME_COVERAGE_EVENT_DIR"
 
+assert_simple_storage_message() {
+  simple_message_file=$1
+  test "$(wc -l < "$simple_message_file" | tr -d ' ')" -le 5
+  test "$(wc -c < "$simple_message_file" | tr -d ' ')" -le 420
+  if grep -Eq 'KiB|MiB|GiB|sealed generation|spill|watermark|durable|WAL|cursor|allowance bytes' \
+    "$simple_message_file"
+  then
+    echo "storage alert contains internal jargon" >&2
+    exit 1
+  fi
+}
+
 make_event() {
   requested_slot=$1
   first_slot=$2
@@ -47,9 +59,13 @@ monitor_resume_coverage_alert
 test "$ALERT_DELIVERY_RESULT" = sent
 test ! -e "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_a"
-grep -q '^Problem: Upstream gRPC data gap detected$' \
+grep -q '^Blockzilla backup - WARNING$' \
   "$(alert_file resume_coverage active)"
-grep -q 'Impact: Hetzner already had slot 100. The provider resumed at slot 104' \
+grep -q '^gRPC reconnect not verified$' \
+  "$(alert_file resume_coverage active)"
+grep -q '^Status: The provider did not replay saved slot 100 after reconnect\.$' \
+  "$(alert_file resume_coverage active)"
+grep -q '^Data: It later sent slot 104, so coverage between them could not be verified\.$' \
   "$(alert_file resume_coverage active)"
 grep -q '^Action:' "$(alert_file resume_coverage active)"
 
@@ -161,6 +177,165 @@ clear_alert recorder_restarting "fixture recovered"
 test ! -e "$(alert_file recorder_restarting active)"
 test ! -e "$(alert_file recorder_restarting delivered)"
 
+# Reconnect and missing-slot incidents close only when recording moves forward.
+# Their clear messages must not claim that uncertain or missing data was fixed.
+saved_telegram_send_definition=$(declare -f telegram_send)
+focused_alert_message=$fixture_root/focused-alert-message
+focused_alert_send_count=0
+telegram_send() {
+  focused_alert_send_count=$((focused_alert_send_count + 1))
+  printf '%s\n' "$1" > "$focused_alert_message"
+  return 0
+}
+discard_alert resume_coverage
+raise_alert resume_coverage WARNING \
+  "Status: The provider did not replay saved slot 100 after reconnect.
+Data: It later sent slot 104, so coverage between them could not be verified.
+Action: Compare that range with another source and repair any gaps."
+grep -q '^Blockzilla backup - WARNING$' "$focused_alert_message"
+grep -q '^gRPC reconnect not verified$' "$focused_alert_message"
+grep -q '^Data: It later sent slot 104, so coverage between them could not be verified\.$' \
+  "$focused_alert_message"
+test "$(wc -l < "$focused_alert_message" | tr -d ' ')" -le 5
+focused_alert_count_before_retire=$focused_alert_send_count
+retire_alert resume_coverage
+test "$focused_alert_send_count" -eq "$focused_alert_count_before_retire"
+test ! -e "$(alert_file resume_coverage active)"
+test -e "$(alert_file resume_coverage closed)"
+
+# A confirmed provider-history gap uses the stronger missing-slot wording even
+# though its clear message only means that recording resumed.
+discard_alert provider_replay_gap
+raise_alert provider_replay_gap WARNING \
+  "Status: This backup is missing slots 101-103.
+Data: Earlier saved blocks are safe; this range is not in the backup.
+Action: Repair the missing range from another source if needed."
+clear_alert provider_replay_gap \
+  "Status: New gRPC blocks are being saved again.
+Data: The previously reported missing slots are still missing.
+Action: Repair that slot range from another source if needed."
+grep -q '^Blockzilla backup - RECORDING RESUMED$' "$focused_alert_message"
+grep -q '^Some gRPC slots are missing$' "$focused_alert_message"
+grep -q '^Data: The previously reported missing slots are still missing\.$' \
+  "$focused_alert_message"
+test "$(wc -l < "$focused_alert_message" | tr -d ' ')" -le 5
+
+# The first append after a planned provider-history recovery also emits an
+# overlap warning. It belongs to the stronger active provider-gap incident and
+# must not create a second opening/recovery pair.
+discard_alert resume_coverage
+discard_alert provider_replay_gap
+make_event 200 204 204
+raise_alert provider_replay_gap WARNING \
+  "Status: This backup is missing slots 201-203.
+Data: Earlier saved blocks are safe; this range is not in the backup.
+Action: Repair the missing range from another source if needed."
+focused_alert_count_before_correlation=$focused_alert_send_count
+monitor_resume_coverage_alert
+test "$ALERT_DELIVERY_RESULT" = suppressed
+test ! -e "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+test ! -e "$(alert_file resume_coverage active)"
+test -e "$(alert_file provider_replay_gap active)"
+test "$focused_alert_send_count" -eq "$focused_alert_count_before_correlation"
+test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_a"
+discard_alert provider_replay_gap
+
+# An incident created by the previous release has no journal-growth floor.
+# Bootstrap it at the current size and require a later append before recovery.
+discard_alert resume_coverage
+raise_alert resume_coverage WARNING \
+  "Status: The provider did not replay saved slot 300 after reconnect.
+Data: It later sent slot 304, so coverage between them could not be verified.
+Action: Compare that range with another source and repair any gaps."
+rm -f "$(alert_file resume_coverage journal_size)"
+mkdir -p "$OUTPUT_DIR"
+printf '%s\n' first-record > "$JOURNAL_FILE"
+saved_journal_size_definition=$(declare -f journal_size)
+journal_size() {
+  if [ -f "$JOURNAL_FILE" ]; then
+    wc -c < "$JOURNAL_FILE" | tr -d ' '
+  else
+    printf '%s\n' 0
+  fi
+}
+clear_alert_after_journal_growth resume_coverage \
+  "Status: New gRPC blocks are being saved again.
+Data: The earlier reconnect range is still unverified.
+Action: Compare that range with another source if needed." \
+  silent
+test -e "$(alert_file resume_coverage active)"
+test -s "$(alert_file resume_coverage journal_size)"
+focused_alert_count_before_silent_close=$focused_alert_send_count
+printf '%s\n' second-record >> "$JOURNAL_FILE"
+clear_alert_after_journal_growth resume_coverage \
+  "Status: New gRPC blocks are being saved again.
+Data: The earlier reconnect range is still unverified.
+Action: Compare that range with another source if needed." \
+  silent
+test ! -e "$(alert_file resume_coverage active)"
+test -e "$(alert_file resume_coverage closed)"
+test "$focused_alert_send_count" -eq "$focused_alert_count_before_silent_close"
+
+# Silent retirement never drops an opening that Telegram has not accepted.
+discard_alert resume_coverage
+printf '%s\n' retry-base > "$JOURNAL_FILE"
+remember_alert_journal_floor resume_coverage
+saved_focused_sender_definition=$(declare -f telegram_send)
+telegram_send() { return 1; }
+raise_alert resume_coverage WARNING \
+  "Status: The provider did not replay saved slot 400 after reconnect.
+Data: It later sent slot 404, so coverage between them could not be verified.
+Action: Compare that range with another source and repair any gaps."
+test -e "$(alert_file resume_coverage active)"
+test ! -e "$(alert_file resume_coverage delivered)"
+printf '%s\n' retry-growth >> "$JOURNAL_FILE"
+clear_alert_after_journal_growth resume_coverage \
+  "Status: New gRPC blocks are being saved again.
+Data: The earlier reconnect range is still unverified.
+Action: Compare that range with another source if needed." \
+  silent
+test -e "$(alert_file resume_coverage active)"
+test ! -e "$(alert_file resume_coverage delivered)"
+eval "$saved_focused_sender_definition"
+focused_alert_count_before_retry=$focused_alert_send_count
+clear_alert_after_journal_growth resume_coverage \
+  "Status: New gRPC blocks are being saved again.
+Data: The earlier reconnect range is still unverified.
+Action: Compare that range with another source if needed." \
+  silent
+test ! -e "$(alert_file resume_coverage active)"
+test "$focused_alert_send_count" -eq "$((focused_alert_count_before_retry + 1))"
+eval "$saved_journal_size_definition"
+rm -f "$JOURNAL_FILE"
+
+# Pending incident files from the previous message layout remain retryable
+# during a rolling deployment.
+discard_alert recorder_restarting
+printf '%s\n' \
+  'Blockzilla backup alert' \
+  'Problem: Recorder stopped unexpectedly' \
+  'Severity: ERROR' \
+  'Node: fixture' \
+  'Time (UTC): fixture' \
+  '' \
+  'fixture old-format incident' \
+  > "$(alert_file recorder_restarting active)"
+retry_pending_alert recorder_restarting
+load_alert_delivery_state "$(alert_file recorder_restarting delivered)"
+test "$ALERT_DELIVERED_LEVEL" = ERROR
+grep -q '^Severity: ERROR$' "$focused_alert_message"
+discard_alert recorder_restarting
+
+# Local hard-floor incidents written by the previous release are still
+# recognized so the recovery path cannot strand them.
+discard_alert generation_backlog
+printf '%s\n' \
+  'Cause: The disk-first Hetzner cache reached its safety floor before Backblaze spill cleanup recovered headroom.' \
+  > "$(alert_file generation_backlog active)"
+generation_backlog_local_incident_active
+discard_alert generation_backlog
+eval "$saved_telegram_send_definition"
+
 # A failed replay-floor persistence attempt must remain one open incident while
 # retries run without an authoritative marker. It recovers only after a trusted
 # floor existed and passed the next loop's checks.
@@ -173,7 +348,7 @@ REPLAY_MIN_RESUME_SLOT=200
 clear_replay_recovery_alert_if_floor_was_authoritative true
 test ! -e "$(alert_file replay_recovery_failed active)"
 test ! -e "$(alert_file replay_recovery_failed delivered)"
-test "$(alert_title replay_recovery_failed)" = "Provider-gap recovery paused"
+test "$(alert_title replay_recovery_failed)" = "gRPC recovery is paused"
 
 # Stopping the monitor must interrupt its interval immediately. Otherwise an
 # already-finished replay probe waits 30 seconds while the provider floor moves.
@@ -207,36 +382,79 @@ test -e "$(alert_file disk_space active)"
 update_disk_alerts 220
 test ! -e "$(alert_file disk_space active)"
 
-# Backblaze usage counts the whole account and escalates independently near the
-# decimal 10 GB allowance. Recovery requires the configured hysteresis margin.
-B2_USAGE_ALLOWANCE_BYTES=250
-B2_USAGE_WARNING_BYTES=150
-B2_USAGE_CRITICAL_BYTES=200
-B2_USAGE_WARNING_RECOVERY_BYTES=130
-b2_usage_send_count=0
+# Generic disk openings and recoveries obey the same five-line, decimal-unit
+# contract as the Backblaze-specific messages.
+saved_telegram_send_definition=$(declare -f telegram_send)
+disk_contract_message=$fixture_root/disk-contract-message
 telegram_send() {
-  b2_usage_send_count=$((b2_usage_send_count + 1))
+  printf '%s\n' "$1" > "$disk_contract_message"
   return 0
 }
-update_b2_usage_alerts 160
+saved_disk_min_free=$MIN_FREE_BYTES
+saved_disk_warn_free=$DISK_WARN_FREE_BYTES
+saved_disk_critical_recovery=$DISK_CRITICAL_RECOVERY_BYTES
+saved_disk_warning_recovery=$DISK_WARNING_RECOVERY_BYTES
+MIN_FREE_BYTES=400000000
+DISK_WARN_FREE_BYTES=800000000
+DISK_CRITICAL_RECOVERY_BYTES=450000000
+DISK_WARNING_RECOVERY_BYTES=850000000
+discard_alert disk_space
+update_disk_alerts 350000000
+grep -q '^Blockzilla backup - CRITICAL$' "$disk_contract_message"
+grep -q '^Storage: 350 MB free; backup needs 400 MB\.$' \
+  "$disk_contract_message"
+assert_simple_storage_message "$disk_contract_message"
+update_disk_alerts 900000000
+grep -q '^Blockzilla backup - RECOVERED$' "$disk_contract_message"
+grep -q '^Resolved: Backup disk is low$' "$disk_contract_message"
+grep -q '^Storage: 900 MB free\.$' "$disk_contract_message"
+assert_simple_storage_message "$disk_contract_message"
+MIN_FREE_BYTES=$saved_disk_min_free
+DISK_WARN_FREE_BYTES=$saved_disk_warn_free
+DISK_CRITICAL_RECOVERY_BYTES=$saved_disk_critical_recovery
+DISK_WARNING_RECOVERY_BYTES=$saved_disk_warning_recovery
+eval "$saved_telegram_send_definition"
+
+# Backblaze usage counts the whole account and uses simple GB copy near the
+# decimal 10 GB limit. Recovery requires the configured hysteresis margin.
+B2_USAGE_ALLOWANCE_BYTES=10000000000
+B2_USAGE_WARNING_BYTES=8000000000
+B2_USAGE_CRITICAL_BYTES=9500000000
+B2_USAGE_WARNING_RECOVERY_BYTES=7500000000
+b2_usage_send_count=0
+b2_usage_last_message=$fixture_root/b2-usage-last-message
+telegram_send() {
+  b2_usage_send_count=$((b2_usage_send_count + 1))
+  printf '%s\n' "$1" > "$b2_usage_last_message"
+  return 0
+}
+update_b2_usage_alerts 8100000000
 test "$b2_usage_send_count" -eq 1
 test -e "$(alert_file b2_usage active)"
+grep -q '^Storage: 8\.1 GB used of 10 GB\.$' "$b2_usage_last_message"
+assert_simple_storage_message "$b2_usage_last_message"
 load_alert_delivery_state "$(alert_file b2_usage delivered)"
 test "$ALERT_DELIVERED_LEVEL" = WARNING
-update_b2_usage_alerts 210
+update_b2_usage_alerts 9600000000
 test "$b2_usage_send_count" -eq 2
 test -e "$(alert_file b2_usage active)"
+grep -q '^Storage: 9\.6 GB used of 10 GB\.$' "$b2_usage_last_message"
+assert_simple_storage_message "$b2_usage_last_message"
 load_alert_delivery_state "$(alert_file b2_usage delivered)"
 test "$ALERT_DELIVERED_LEVEL" = CRITICAL
-update_b2_usage_alerts 185
+update_b2_usage_alerts 9200000000
 test "$b2_usage_send_count" -eq 2
 test -e "$(alert_file b2_usage active)"
-update_b2_usage_alerts 175
+update_b2_usage_alerts 8500000000
 test "$b2_usage_send_count" -eq 2
 test -e "$(alert_file b2_usage active)"
-update_b2_usage_alerts 125
+update_b2_usage_alerts 7400000000
 test "$b2_usage_send_count" -eq 3
 test ! -e "$(alert_file b2_usage active)"
+grep -q '^Blockzilla backup - RECOVERED$' "$b2_usage_last_message"
+grep -q '^Resolved: Backblaze storage is filling up$' "$b2_usage_last_message"
+grep -q '^Storage: 7\.4 GB used of 10 GB\.$' "$b2_usage_last_message"
+assert_simple_storage_message "$b2_usage_last_message"
 
 # A cap/API outage already represented by the correlated pipeline incident
 # must not fan out into a second Backblaze-usage-check opening and recovery.
@@ -272,8 +490,12 @@ telegram_send() {
   telegram_send_count=$((telegram_send_count + 1))
   return 0
 }
-test "$(human_bytes 402268160)" = "383.6 MiB"
-test "$(human_decimal_bytes 1206880746)" = "1.2 GB"
+test "$(human_decimal_bytes 402427904)" = "402 MB"
+test "$(human_decimal_bytes 1207959552)" = "1.2 GB"
+test "$(human_decimal_bytes 3221225472)" = "3.2 GB"
+test "$(human_decimal_bytes 10000000000)" = "10 GB"
+test "$(human_decimal_bytes 999999999)" = "1 GB"
+test "$(human_decimal_bytes 999999)" = "<1 MB"
 discard_alert generation_backlog
 raise_alert generation_backlog WARNING \
   "Cause: fixture backlog\nImpact: fixture impact\nAction: fixture action"
@@ -521,7 +743,7 @@ discard_alert generation_backlog
   generation_upload_worker
 )
 test "$(wc -l < "$no_progress_upload_log" | tr -d ' ')" -eq 1
-grep -q 'reported success, but the sealed queue and free disk space made no observable local progress' \
+grep -q 'Backblaze upload finished, but Hetzner space did not increase' \
   "$(alert_file generation_backlog active)"
 grep -q ' ERROR$' "$(alert_file generation_backlog delivered)"
 discard_alert generation_backlog
@@ -530,26 +752,58 @@ discard_alert generation_backlog
 # remain generic and cannot be promoted from an untyped provider response.
 generation_upload_failure_details 20
 case "$pipeline_cause $pipeline_action" in
-  *download-bandwidth*Download\ Bandwidth*) ;;
+  *Backblaze\ download\ limit\ reached*Raise\ the\ Backblaze\ download\ limit*) ;;
   *) echo "download-cap action was not specific" >&2; exit 1 ;;
 esac
 generation_upload_failure_details 21
 case "$pipeline_cause $pipeline_action" in
-  *Class\ C\ transaction\ cap*) ;;
+  *Backblaze\ Class\ C\ limit\ reached*Raise\ the\ Backblaze\ Class\ C\ limit*) ;;
   *) echo "Class-C action was not specific" >&2; exit 1 ;;
 esac
 generation_upload_failure_details 22
 case "$pipeline_cause $pipeline_action" in
-  *storage\ or\ spending\ cap*storage\ spending\ cap*) ;;
+  *Backblaze\ storage\ limit\ reached*Increase\ the\ Backblaze\ storage\ limit*) ;;
   *) echo "storage-cap action was not specific" >&2; exit 1 ;;
 esac
 generation_upload_failure_details 37
 case "$pipeline_cause $pipeline_action" in
-  *download-bandwidth*|*Class\ C*|*storage\ or\ spending*)
+  *download\ limit\ reached*|*Class\ C\ limit\ reached*|*storage\ limit\ reached*)
     echo "generic upload failure inherited a typed cap message" >&2
     exit 1
     ;;
 esac
+
+# The live Class-C + hard-floor case is five plain lines with decimal MB/GB,
+# no raw byte values, and no storage implementation jargon.
+production_spill_message=$fixture_root/production-spill-message
+discard_alert generation_backlog
+(
+  MIN_FREE_BYTES=402653184
+  MAX_GENERATION_BYTES=402653184
+  GENERATION_SPILL_START_PERCENT=25
+  GENERATION_SPILL_RECOVERY_PERCENT=35
+  validate_data_volume() { return 0; }
+  sealed_generation_count() { printf '%s\n' 6; }
+  available_bytes() { printf '%s\n' 402427904; }
+  filesystem_capacity_bytes() { printf '%s\n' 3221225472; }
+  upload_one_generation() { return 21; }
+  telegram_send() { printf '%s\n' "$1" > "$production_spill_message"; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+grep -q '^Blockzilla backup - CRITICAL$' "$production_spill_message"
+grep -q '^Status: Backblaze Class C limit reached\. Backup is paused; saved data is safe\.$' \
+  "$production_spill_message"
+grep -q '^Storage: 402 MB free\. 6 backup batches waiting locally\.$' \
+  "$production_spill_message"
+grep -q '^Action: Raise the Backblaze Class C limit or wait for the daily reset\.$' \
+  "$production_spill_message"
+assert_simple_storage_message "$production_spill_message"
+if grep -Eq '402427904|402653184|3221225472' "$production_spill_message"; then
+  echo "storage alert exposed raw byte values" >&2
+  exit 1
+fi
+discard_alert generation_backlog
 
 # One correlated incident opens once, escalates only at the hard floor, and
 # sends one recovery after high-water headroom returns.
@@ -571,7 +825,7 @@ run_failed_spill() {
 }
 run_failed_spill 200
 test "$(wc -l < "$spill_send_log" | tr -d ' ')" -eq 1
-grep -q 'daily Class C transaction cap was reached' \
+grep -q 'Backblaze Class C limit reached' \
   "$(alert_file generation_backlog active)"
 test ! -e "$(alert_file generation_upload_failed active)"
 run_failed_spill 200
@@ -632,7 +886,7 @@ discard_alert generation_backlog
   generation_upload_worker
 )
 test ! -s "$failed_gate_upload_log"
-grep -q 'could not measure the recorder filesystem capacity' \
+grep -q 'Cannot read Hetzner disk size' \
   "$(alert_file generation_backlog active)"
 grep -q ' ERROR$' "$(alert_file generation_backlog delivered)"
 discard_alert generation_backlog
@@ -646,7 +900,7 @@ discard_alert generation_backlog
   generation_upload_worker
 )
 test ! -s "$failed_gate_upload_log"
-grep -q 'could not measure free space on the recorder filesystem' \
+grep -q 'Cannot read Hetzner free space' \
   "$(alert_file generation_backlog active)"
 discard_alert generation_backlog
 (
@@ -660,7 +914,7 @@ discard_alert generation_backlog
   generation_upload_worker
 )
 test ! -s "$failed_gate_upload_log"
-grep -q 'could not validate the disk spill watermarks' \
+grep -q 'Storage safety check failed' \
   "$(alert_file generation_backlog active)"
 discard_alert generation_backlog
 (
@@ -673,7 +927,7 @@ discard_alert generation_backlog
   generation_upload_worker
 )
 test ! -s "$failed_gate_upload_log"
-grep -q 'could not inspect the sealed-generation queue safely' \
+grep -q 'Cannot read local backup files' \
   "$(alert_file generation_backlog active)"
 
 # Once every gate reads cleanly and headroom is above the high watermark, only
@@ -711,7 +965,7 @@ post_upload_space_calls=$fixture_root/post-upload-space-calls
   sleep() { exit 0; }
   generation_upload_worker
 )
-grep -q 'could not measure free space on the recorder filesystem' \
+grep -q 'Cannot read Hetzner free space' \
   "$(alert_file generation_backlog active)"
 discard_alert generation_backlog
 

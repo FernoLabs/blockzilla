@@ -249,21 +249,35 @@ seeded successor is already active.
 ## Telegram alerts
 
 The notifier is outbound-only and uses the Telegram Bot API over HTTPS. It sends
-one opening per incident, one severity escalation, and one recovery; steady
-incidents do not generate reminders. Incident state is durable across container
-rebuilds. The default 900-second setting debounces a quick reopen after recovery,
+one opening per incident, one severity escalation, and at most one recovery;
+steady incidents do not generate reminders. A reconnect-verification warning closes
+silently because recording never stopped. Incident state is durable across
+container rebuilds. The default 900-second setting debounces a quick reopen,
 while a failure that stays open beyond that window is announced. Failed
 deliveries remain pending for retry.
 
+Messages are intentionally short: at most five useful lines with a status,
+storage in decimal `MB`/`GB`, and one action. Telegram already supplies the
+timestamp, so node IDs, raw byte counts, and storage implementation terms are
+not shown. Example:
+
+```text
+Blockzilla backup - CRITICAL
+Backup storage problem
+Status: Backblaze Class C limit reached. Backup is paused; saved data is safe.
+Storage: 402 MB free. 6 backup batches waiting locally.
+Action: Raise the Backblaze Class C limit or wait for the daily reset.
+```
+
 | Alert | Meaning | Response |
 | --- | --- | --- |
-| Recorder restart / gRPC stale | The stream ended, the process failed, or no durable block arrived for 180 seconds. | Check endpoint reachability and credentials, then audit overlap after recovery. |
-| Resume coverage warning | Yellowstone did not return the inclusively requested durable slot. | Compare against another recorder and repair the uncovered range. |
-| Cache/volume invalid | The exact cache mount, marker, or rotation transaction is missing or inconsistent. Capture is stopped. | Restore the mount and inspect the transaction; never manufacture a marker on the root filesystem. |
-| Backup pipeline blocked | A disk-pressure spill failed, Backblaze reported download/Class-C/storage cap exhaustion, or the local cache reached its hard floor. Healthy sealed local retention is silent. These derivative symptoms are one incident, not several. | Follow the cap-specific action in the alert, or check credentials, reachability, and logs. Do not manually delete a sealed generation. |
-| Backblaze free-storage allowance | Complete account storage, including hidden versions and unfinished parts, reached 8.0 GB and escalated at 9.5 GB. Measurement failures are a separate alert. | If indefinite retention is intended, enable paid storage or raise the Backblaze storage cap before 10 GB; otherwise choose a retention plan. |
-| Disk critical | The disk-first cache fell below the 384 MiB hard floor before spill cleanup recovered space. Capture pauses and retains all remaining data. | Restore Backblaze spill capacity or add local capacity. Only exactly verified generations may be removed automatically. |
-| Primary-sync stale | Active only when a heartbeat path is configured. | Inspect the future authenticated primary/replica sync process. |
+| Recorder restart / no gRPC blocks | The recorder restarted or no block was saved for three minutes. | Check the gRPC connection if it stays active. |
+| gRPC reconnect not verified | The provider did not replay the last saved slot, so reconnect coverage is uncertain. | Compare the range with another source and repair any gaps. |
+| Missing gRPC slots | A confirmed provider-history range is absent from the backup. | Repair that range from another source if needed. |
+| Backup disk unavailable | Hetzner cannot use or inspect the backup disk, so recording is paused. | Check the Hetzner volume mount. |
+| Backup storage problem | Backblaze upload is blocked or Hetzner space is too low. | Follow the single action shown in the alert. |
+| Backblaze storage filling up | Account storage reached 8 GB and becomes critical at 9.5 GB of the 10 GB limit. | Increase the Backblaze storage limit before it is full. |
+| Blockzilla confirmation missing | Active only when a confirmation source is configured. | Check the Blockzilla connection. |
 
 Because the notifier runs inside this container, it cannot report total host
 loss, loss of all outbound networking, or a container killed before it sends.
