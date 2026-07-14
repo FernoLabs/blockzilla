@@ -34,6 +34,8 @@ CACHE_ROOT=${BLOCKZILLA_RAW_CACHE_ROOT:-/data/grpc-cache}
 MAX_GENERATION_BYTES=${BLOCKZILLA_RAW_MAX_GENERATION_BYTES:-402653184}
 GENERATION_BACKLOG_WARN_COUNT=${BLOCKZILLA_RAW_GENERATION_BACKLOG_WARN_COUNT:-2}
 GENERATION_UPLOAD_RETRY_SECS=${BLOCKZILLA_RAW_GENERATION_UPLOAD_RETRY_SECS:-60}
+REPLAY_RESUME_HEADROOM_SLOTS=${BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS:-100}
+MAX_REPLAY_RESUME_HEADROOM_SLOTS=10000
 GENERATION_UPLOADER_BIN=${BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN:-/usr/local/bin/blockzilla-s3-upload}
 GENERATION_CREDENTIALS_FILE=${BLOCKZILLA_B2_CREDENTIALS_FILE:-/run/secrets/backblaze_credentials}
 GENERATION_REMOTE_PREFIX=${BLOCKZILLA_B2_REMOTE_PREFIX:-grpc-raw/v1}
@@ -667,7 +669,7 @@ clear_replay_recovery_alert_if_floor_was_authoritative() {
   replay_floor_was_authoritative=$1
   if [ "$replay_floor_was_authoritative" = true ]; then
     clear_alert replay_recovery_failed \
-      "The trusted resume marker is durable. Capture can retry from the recorded provider floor; existing backup data was not deleted."
+      "The trusted resume marker is durable. Capture can retry from the recorded selected resume slot; existing backup data was not deleted."
   fi
 }
 
@@ -743,7 +745,7 @@ monitor_feed_alerts() {
     clear_alert_after_journal_growth recorder_restarting \
       "A new durable block was appended after restart."
     clear_alert_after_journal_growth provider_replay_gap \
-      "Durable capture resumed at the validated provider floor; the recorded source gap remains unrepaired and retained for audit."
+      "Durable capture resumed at the selected recovery slot derived from the validated provider floor; the recorded source gap remains unrepaired and retained for audit."
   elif [ -e "$STARTED_FILE" ]; then
     monitor_start_age=$(file_age_seconds "$STARTED_FILE") || return 0
     if [ "$monitor_start_age" -gt "$STARTUP_GRACE_SECS" ]; then
@@ -1130,6 +1132,8 @@ valid_replay_shell_uint() {
 load_replay_recovery_floor() {
   REPLAY_RECOVERY_ANCHOR_SLOT=
   REPLAY_RECOVERY_REQUESTED_SLOT=
+  REPLAY_RECOVERY_SCHEMA_VERSION=
+  REPLAY_PROVIDER_AVAILABLE_SLOT=
   REPLAY_MIN_RESUME_SLOT=
   if [ ! -e "$REPLAY_RECOVERY_FILE" ] && [ ! -L "$REPLAY_RECOVERY_FILE" ]; then
     return 0
@@ -1150,24 +1154,52 @@ load_replay_recovery_floor() {
   replay_recovery_actual=$(sed -n '1p' "$REPLAY_RECOVERY_FILE")
   replay_recovery_anchor=$(printf '%s\n' "$replay_recovery_actual" | sed -n \
     's/^{"anchor_slot":\([0-9][0-9]*\),"cluster_id":.*$/\1/p')
-  replay_recovery_floor=$(printf '%s\n' "$replay_recovery_actual" | sed -n \
-    's/^.*"minimum_resume_slot":\([0-9][0-9]*\),"origin_node_id":.*$/\1/p')
   replay_recovery_requested=$(printf '%s\n' "$replay_recovery_actual" | sed -n \
-    's/^.*"origin_node_id":"[^"]*","requested_slot":\([0-9][0-9]*\),"schema_version":.*$/\1/p')
+    's/^.*"requested_slot":\([0-9][0-9]*\),"schema_version":.*$/\1/p')
+  replay_recovery_schema=$(printf '%s\n' "$replay_recovery_actual" | sed -n \
+    's/^.*"schema_version":\([0-9][0-9]*\),.*"source_id":.*$/\1/p')
   valid_replay_shell_uint "$replay_recovery_anchor" || return 1
-  valid_replay_shell_uint "$replay_recovery_floor" || return 1
   valid_replay_shell_uint "$replay_recovery_requested" || return 1
-  replay_recovery_expected=$(printf \
-    '{"anchor_slot":%s,"cluster_id":"%s","minimum_resume_slot":%s,"origin_node_id":"%s","requested_slot":%s,"schema_version":1,"source_id":"%s"}' \
-    "$replay_recovery_anchor" "$CLUSTER_ID" "$replay_recovery_floor" \
-    "$ORIGIN_NODE_ID" "$replay_recovery_requested" "$SOURCE_ID")
+  valid_replay_shell_uint "$replay_recovery_schema" || return 1
+  case "$replay_recovery_schema" in
+    1)
+      replay_recovery_floor=$(printf '%s\n' "$replay_recovery_actual" | sed -n \
+        's/^.*"minimum_resume_slot":\([0-9][0-9]*\),"origin_node_id":.*$/\1/p')
+      valid_replay_shell_uint "$replay_recovery_floor" || return 1
+      replay_recovery_expected=$(printf \
+        '{"anchor_slot":%s,"cluster_id":"%s","minimum_resume_slot":%s,"origin_node_id":"%s","requested_slot":%s,"schema_version":1,"source_id":"%s"}' \
+        "$replay_recovery_anchor" "$CLUSTER_ID" "$replay_recovery_floor" \
+        "$ORIGIN_NODE_ID" "$replay_recovery_requested" "$SOURCE_ID")
+      [ "$replay_recovery_floor" -gt "$replay_recovery_requested" ] || return 1
+      ;;
+    2)
+      replay_recovery_provider=$(printf '%s\n' "$replay_recovery_actual" | sed -n \
+        's/^.*"provider_available_slot":\([0-9][0-9]*\),"requested_slot":.*$/\1/p')
+      replay_recovery_floor=$(printf '%s\n' "$replay_recovery_actual" | sed -n \
+        's/^.*"selected_resume_slot":\([0-9][0-9]*\),"source_id":.*$/\1/p')
+      valid_replay_shell_uint "$replay_recovery_provider" || return 1
+      valid_replay_shell_uint "$replay_recovery_floor" || return 1
+      replay_recovery_expected=$(printf \
+        '{"anchor_slot":%s,"cluster_id":"%s","origin_node_id":"%s","provider_available_slot":%s,"requested_slot":%s,"schema_version":2,"selected_resume_slot":%s,"source_id":"%s"}' \
+        "$replay_recovery_anchor" "$CLUSTER_ID" "$ORIGIN_NODE_ID" \
+        "$replay_recovery_provider" "$replay_recovery_requested" \
+        "$replay_recovery_floor" "$SOURCE_ID")
+      [ "$replay_recovery_provider" -gt "$replay_recovery_requested" ] \
+        && [ "$replay_recovery_floor" -ge "$replay_recovery_provider" ] \
+        && [ "$((replay_recovery_floor - replay_recovery_provider))" \
+          -le "$MAX_REPLAY_RESUME_HEADROOM_SLOTS" ] || return 1
+      REPLAY_PROVIDER_AVAILABLE_SLOT=$replay_recovery_provider
+      ;;
+    *) return 1 ;;
+  esac
   [ "$replay_recovery_actual" = "$replay_recovery_expected" ] || return 1
-  [ "$replay_recovery_requested" -ge "$replay_recovery_anchor" ] \
-    && [ "$replay_recovery_floor" -gt "$replay_recovery_requested" ] || return 1
+  [ "$replay_recovery_requested" -ge "$replay_recovery_anchor" ] || return 1
   validate_replay_gap_record "$replay_recovery_anchor" \
-    "$replay_recovery_requested" "$replay_recovery_floor" || return 1
+    "$replay_recovery_requested" "$replay_recovery_floor" \
+    "$REPLAY_PROVIDER_AVAILABLE_SLOT" || return 1
   REPLAY_RECOVERY_ANCHOR_SLOT=$replay_recovery_anchor
   REPLAY_RECOVERY_REQUESTED_SLOT=$replay_recovery_requested
+  REPLAY_RECOVERY_SCHEMA_VERSION=$replay_recovery_schema
   REPLAY_MIN_RESUME_SLOT=$replay_recovery_floor
 }
 
@@ -1228,27 +1260,49 @@ PY
 replay_gap_payload() {
   replay_payload_anchor=$1
   replay_payload_requested=$2
-  replay_payload_available=$3
-  printf \
-    '{"anchor_slot":%s,"available_slot":%s,"cluster_id":"%s","origin_node_id":"%s","requested_slot":%s,"schema_version":1,"source_id":"%s"}' \
-    "$replay_payload_anchor" "$replay_payload_available" "$CLUSTER_ID" \
-    "$ORIGIN_NODE_ID" "$replay_payload_requested" "$SOURCE_ID"
+  replay_payload_resume=$3
+  replay_payload_provider=${4:-}
+  if [ -z "$replay_payload_provider" ]; then
+    printf \
+      '{"anchor_slot":%s,"available_slot":%s,"cluster_id":"%s","origin_node_id":"%s","requested_slot":%s,"schema_version":1,"source_id":"%s"}' \
+      "$replay_payload_anchor" "$replay_payload_resume" "$CLUSTER_ID" \
+      "$ORIGIN_NODE_ID" "$replay_payload_requested" "$SOURCE_ID"
+  else
+    printf \
+      '{"anchor_slot":%s,"cluster_id":"%s","origin_node_id":"%s","provider_available_slot":%s,"requested_slot":%s,"schema_version":2,"selected_resume_slot":%s,"source_id":"%s"}' \
+      "$replay_payload_anchor" "$CLUSTER_ID" "$ORIGIN_NODE_ID" \
+      "$replay_payload_provider" "$replay_payload_requested" \
+      "$replay_payload_resume" "$SOURCE_ID"
+  fi
 }
 
 validate_replay_gap_record_in_generation() {
   replay_validate_generation=$1
   replay_validate_anchor=$2
   replay_validate_requested=$3
-  replay_validate_available=$4
+  replay_validate_resume=$4
+  replay_validate_provider=${5:-}
   valid_replay_shell_uint "$replay_validate_anchor" || return 1
   valid_replay_shell_uint "$replay_validate_requested" || return 1
-  valid_replay_shell_uint "$replay_validate_available" || return 1
-  [ "$replay_validate_requested" -ge "$replay_validate_anchor" ] \
-    && [ "$replay_validate_available" -gt "$replay_validate_requested" ] || return 1
+  valid_replay_shell_uint "$replay_validate_resume" || return 1
+  [ "$replay_validate_requested" -ge "$replay_validate_anchor" ] || return 1
+  if [ -n "$replay_validate_provider" ]; then
+    valid_replay_shell_uint "$replay_validate_provider" || return 1
+    [ "$replay_validate_provider" -gt "$replay_validate_requested" ] \
+      && [ "$replay_validate_resume" -ge "$replay_validate_provider" ] \
+      && [ "$((replay_validate_resume - replay_validate_provider))" \
+        -le "$MAX_REPLAY_RESUME_HEADROOM_SLOTS" ] || return 1
+  else
+    [ "$replay_validate_resume" -gt "$replay_validate_requested" ] || return 1
+  fi
   cache_real_directory "$replay_validate_generation" || return 1
   replay_validate_gap_dir=$replay_validate_generation/replay-gaps
   cache_real_directory "$replay_validate_gap_dir" || return 1
-  replay_validate_path=$replay_validate_gap_dir/replay-gap-$replay_validate_anchor-$replay_validate_requested-$replay_validate_available.json
+  if [ -n "$replay_validate_provider" ]; then
+    replay_validate_path=$replay_validate_gap_dir/replay-gap-$replay_validate_anchor-$replay_validate_requested-$replay_validate_provider-$replay_validate_resume.json
+  else
+    replay_validate_path=$replay_validate_gap_dir/replay-gap-$replay_validate_anchor-$replay_validate_requested-$replay_validate_resume.json
+  fi
   if [ -L "$replay_validate_path" ] \
     || [ ! -f "$replay_validate_path" ] \
     || [ ! -r "$replay_validate_path" ]
@@ -1259,7 +1313,8 @@ validate_replay_gap_record_in_generation() {
   valid_replay_shell_uint "$replay_validate_bytes" || return 1
   [ "$replay_validate_bytes" -le 1024 ] || return 1
   replay_validate_payload=$(replay_gap_payload "$replay_validate_anchor" \
-    "$replay_validate_requested" "$replay_validate_available") || return 1
+    "$replay_validate_requested" "$replay_validate_resume" \
+    "$replay_validate_provider") || return 1
   [ "$(wc -l < "$replay_validate_path" | tr -d ' ')" -eq 1 ] \
     && [ "$(sed -n '1p' "$replay_validate_path")" = "$replay_validate_payload" ]
 }
@@ -1272,7 +1327,8 @@ publish_replay_gap_record_to_generation() {
   replay_gap_generation=$1
   replay_gap_anchor=$2
   replay_gap_requested=$3
-  replay_gap_available=$4
+  replay_gap_resume=$4
+  replay_gap_provider=${5:-}
   REPLAY_PERSIST_FAILURE_STAGE=gap_generation_validate
   cache_real_directory "$replay_gap_generation" || return 1
   replay_target_gap_dir=$replay_gap_generation/replay-gaps
@@ -1287,15 +1343,20 @@ publish_replay_gap_record_to_generation() {
     REPLAY_PERSIST_FAILURE_STAGE=gap_directory_validate
     cache_real_directory "$replay_target_gap_dir" || return 1
   fi
-  replay_gap_path=$replay_target_gap_dir/replay-gap-$replay_gap_anchor-$replay_gap_requested-$replay_gap_available.json
+  if [ -n "$replay_gap_provider" ]; then
+    replay_gap_path=$replay_target_gap_dir/replay-gap-$replay_gap_anchor-$replay_gap_requested-$replay_gap_provider-$replay_gap_resume.json
+  else
+    replay_gap_path=$replay_target_gap_dir/replay-gap-$replay_gap_anchor-$replay_gap_requested-$replay_gap_resume.json
+  fi
   REPLAY_PERSIST_FAILURE_STAGE=gap_payload
   replay_gap_payload_value=$(replay_gap_payload "$replay_gap_anchor" \
-    "$replay_gap_requested" "$replay_gap_available") || return 1
+    "$replay_gap_requested" "$replay_gap_resume" \
+    "$replay_gap_provider") || return 1
   if [ -e "$replay_gap_path" ] || [ -L "$replay_gap_path" ]; then
     REPLAY_PERSIST_FAILURE_STAGE=gap_existing_validate
     validate_replay_gap_record_in_generation "$replay_gap_generation" \
       "$replay_gap_anchor" "$replay_gap_requested" \
-      "$replay_gap_available" || return 1
+      "$replay_gap_resume" "$replay_gap_provider" || return 1
     REPLAY_PERSIST_FAILURE_STAGE=gap_directory_sync
     sync_path "$replay_target_gap_dir" || return 1
     return 0
@@ -1331,14 +1392,24 @@ publish_replay_recovery_floor() {
   replay_floor_anchor=$1
   replay_floor_requested=$2
   replay_floor_value=$3
+  replay_floor_provider=${4:-}
   REPLAY_PERSIST_FAILURE_STAGE=floor_evidence_validate
   validate_replay_gap_record "$replay_floor_anchor" \
-    "$replay_floor_requested" "$replay_floor_value" || return 1
+    "$replay_floor_requested" "$replay_floor_value" \
+    "$replay_floor_provider" || return 1
   REPLAY_PERSIST_FAILURE_STAGE=floor_payload
-  replay_floor_payload=$(printf \
-    '{"anchor_slot":%s,"cluster_id":"%s","minimum_resume_slot":%s,"origin_node_id":"%s","requested_slot":%s,"schema_version":1,"source_id":"%s"}' \
-    "$replay_floor_anchor" "$CLUSTER_ID" "$replay_floor_value" \
-    "$ORIGIN_NODE_ID" "$replay_floor_requested" "$SOURCE_ID")
+  if [ -z "$replay_floor_provider" ]; then
+    replay_floor_payload=$(printf \
+      '{"anchor_slot":%s,"cluster_id":"%s","minimum_resume_slot":%s,"origin_node_id":"%s","requested_slot":%s,"schema_version":1,"source_id":"%s"}' \
+      "$replay_floor_anchor" "$CLUSTER_ID" "$replay_floor_value" \
+      "$ORIGIN_NODE_ID" "$replay_floor_requested" "$SOURCE_ID")
+  else
+    replay_floor_payload=$(printf \
+      '{"anchor_slot":%s,"cluster_id":"%s","origin_node_id":"%s","provider_available_slot":%s,"requested_slot":%s,"schema_version":2,"selected_resume_slot":%s,"source_id":"%s"}' \
+      "$replay_floor_anchor" "$CLUSTER_ID" "$ORIGIN_NODE_ID" \
+      "$replay_floor_provider" "$replay_floor_requested" \
+      "$replay_floor_value" "$SOURCE_ID")
+  fi
   replay_floor_tmp=$REPLAY_RECOVERY_FILE.$$
   rm -f "$replay_floor_tmp"
   REPLAY_PERSIST_FAILURE_STAGE=floor_temp_write
@@ -1401,10 +1472,12 @@ reconcile_replay_recovery_with_verified_slot() {
   fi
   REPLAY_RECOVERY_ANCHOR_SLOT=
   REPLAY_RECOVERY_REQUESTED_SLOT=
+  REPLAY_RECOVERY_SCHEMA_VERSION=
+  REPLAY_PROVIDER_AVAILABLE_SLOT=
   REPLAY_MIN_RESUME_SLOT=
   REPLAY_VERIFIED_ANCHOR_SLOT=
   clear_alert provider_replay_gap \
-    "Durable capture advanced beyond the validated provider floor; the immutable source-gap evidence remains retained and the missing interval is not reported as repaired."
+    "Durable capture advanced beyond the selected recovery slot; the immutable provider-floor and source-gap evidence remains retained, and the missing interval is not reported as repaired."
   echo "$(timestamp) raw_recorder replay_floor_retired durable_last_slot=$replay_reconcile_last_slot" >&2
 }
 
@@ -1452,6 +1525,14 @@ persist_replay_recovery_from_report() {
     && [ "$replay_effective" -eq "$replay_requested" ] \
     && [ "$replay_available" -gt "$replay_requested" ] \
     && [ "$replay_requested" -ge "$replay_anchor" ] || return 1
+  # The provider attests P as its oldest replayable slot. Select S=P+H locally
+  # so a new handshake can finish before P moves again, and persist P and S as
+  # distinct facts before the recorder is allowed to request S.
+  REPLAY_PERSIST_FAILURE_STAGE=resume_headroom
+  replay_resume_limit=$((999999999999999999 - REPLAY_RESUME_HEADROOM_SLOTS))
+  [ "$replay_available" -le "$replay_resume_limit" ] || return 1
+  replay_resume=$((replay_available + REPLAY_RESUME_HEADROOM_SLOTS))
+  [ "$replay_resume" -ge "$replay_available" ] || return 1
 
   REPLAY_PERSIST_FAILURE_STAGE=existing_floor
   load_replay_recovery_floor || return 1
@@ -1474,13 +1555,16 @@ persist_replay_recovery_from_report() {
   # A crash between them merely causes this exact idempotent record to be reused.
   REPLAY_PERSIST_FAILURE_STAGE=gap_record
   publish_replay_gap_record \
-    "$replay_anchor" "$replay_requested" "$replay_available" || return 1
+    "$replay_anchor" "$replay_requested" "$replay_resume" \
+    "$replay_available" || return 1
   REPLAY_PERSIST_FAILURE_STAGE=floor_pointer
   publish_replay_recovery_floor \
-    "$replay_anchor" "$replay_requested" "$replay_available" || return 1
+    "$replay_anchor" "$replay_requested" "$replay_resume" \
+    "$replay_available" || return 1
   REPLAY_GAP_ANCHOR_SLOT=$replay_anchor
   REPLAY_GAP_REQUESTED_SLOT=$replay_requested
-  REPLAY_GAP_AVAILABLE_SLOT=$replay_available
+  REPLAY_GAP_PROVIDER_AVAILABLE_SLOT=$replay_available
+  REPLAY_GAP_SELECTED_RESUME_SLOT=$replay_resume
   REPLAY_SKIP_RETIRE_VERIFY_ONCE=true
   REPLAY_PERSIST_FAILURE_STAGE=
 }
@@ -1741,7 +1825,7 @@ rotate_active_generation() {
   if [ "$REPLAY_RECOVERY_NEEDS_CARRY" = true ] \
     && ! publish_replay_gap_record_to_generation "$rotation_next" \
       "$REPLAY_RECOVERY_ANCHOR_SLOT" "$REPLAY_RECOVERY_REQUESTED_SLOT" \
-      "$REPLAY_MIN_RESUME_SLOT"
+      "$REPLAY_MIN_RESUME_SLOT" "$REPLAY_PROVIDER_AVAILABLE_SLOT"
   then
     echo "seeded cache generation could not retain provider replay-gap evidence" >&2
     rm -f "$verify_report" "$seed_report" "$seed_report.verified"
@@ -2323,6 +2407,7 @@ for numeric_setting in \
   "BLOCKZILLA_RAW_MAX_GENERATION_BYTES:$MAX_GENERATION_BYTES" \
   "BLOCKZILLA_RAW_GENERATION_BACKLOG_WARN_COUNT:$GENERATION_BACKLOG_WARN_COUNT" \
   "BLOCKZILLA_RAW_GENERATION_UPLOAD_RETRY_SECS:$GENERATION_UPLOAD_RETRY_SECS" \
+  "BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS:$REPLAY_RESUME_HEADROOM_SLOTS" \
   "BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:$B2_USAGE_ALLOWANCE_BYTES" \
   "BLOCKZILLA_B2_USAGE_WARNING_BYTES:$B2_USAGE_WARNING_BYTES" \
   "BLOCKZILLA_B2_USAGE_CRITICAL_BYTES:$B2_USAGE_CRITICAL_BYTES" \
@@ -2362,6 +2447,13 @@ fi
 B2_USAGE_WARNING_RECOVERY_BYTES=$((B2_USAGE_WARNING_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
 B2_USAGE_CRITICAL_RECOVERY_BYTES=$((B2_USAGE_CRITICAL_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
 if [ "$CACHE_MODE" = b2-generations ]; then
+  if ! valid_replay_shell_uint "$REPLAY_RESUME_HEADROOM_SLOTS" \
+    || [ "$REPLAY_RESUME_HEADROOM_SLOTS" \
+      -gt "$MAX_REPLAY_RESUME_HEADROOM_SLOTS" ]
+  then
+    echo "BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS must be between 0 and 10000" >&2
+    exit 2
+  fi
   if [ "$MAX_GENERATION_BYTES" -le "$MAX_RECORD_BYTES" ]; then
     echo "BLOCKZILLA_RAW_MAX_GENERATION_BYTES must exceed BLOCKZILLA_RAW_MAX_RECORD_BYTES" >&2
     exit 2
@@ -2555,10 +2647,22 @@ Action: Verification will retry automatically without changing the durable curso
       "$replay_floor_was_authoritative"
     if [ -n "$REPLAY_MIN_RESUME_SLOT" ]; then
       remember_alert_journal_floor provider_replay_gap
-      raise_alert provider_replay_gap WARNING \
-        "Missing range: slots $REPLAY_RECOVERY_REQUESTED_SLOT through $((REPLAY_MIN_RESUME_SLOT - 1)) are no longer available from the provider.
-Impact: That range is not in this backup; all previously recorded data remains safe.
+      if [ -n "$REPLAY_PROVIDER_AVAILABLE_SLOT" ]; then
+        replay_cushion_detail=
+        if [ "$REPLAY_MIN_RESUME_SLOT" -gt "$REPLAY_PROVIDER_AVAILABLE_SLOT" ]; then
+          replay_cushion_detail="Reconnect policy: slots $REPLAY_PROVIDER_AVAILABLE_SLOT through $((REPLAY_MIN_RESUME_SLOT - 1)) were deliberately bypassed so the next handshake can outrun the moving replay floor. The provider did not report this cushion as unavailable, and the choice is retained in the audit record."
+        fi
+        raise_alert provider_replay_gap WARNING \
+          "Provider replay failure: requested slots $REPLAY_RECOVERY_REQUESTED_SLOT through $((REPLAY_PROVIDER_AVAILABLE_SLOT - 1)) could not be returned.
+Impact: Slot $REPLAY_RECOVERY_ANCHOR_SLOT is already durable. Slots $((REPLAY_RECOVERY_ANCHOR_SLOT + 1)) through $((REPLAY_MIN_RESUME_SLOT - 1)) are not in this backup; earlier data remains safe.
+$replay_cushion_detail
 Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit record of the gap."
+      else
+        raise_alert provider_replay_gap WARNING \
+          "Provider replay failure: requested slots $REPLAY_RECOVERY_REQUESTED_SLOT through $((REPLAY_MIN_RESUME_SLOT - 1)) could not be returned.
+Impact: Slot $REPLAY_RECOVERY_ANCHOR_SLOT is already durable. Slots $((REPLAY_RECOVERY_ANCHOR_SLOT + 1)) through $((REPLAY_MIN_RESUME_SLOT - 1)) are not in this backup; earlier data remains safe.
+Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit record of the gap."
+      fi
     fi
     if [ -z "$upload_worker_pid" ] \
       || ! kill -0 "$upload_worker_pid" 2>/dev/null
@@ -2705,14 +2809,19 @@ Action: Inspect the recorder monitoring volume; automatic retries will not overw
     fi
     if persist_replay_recovery_from_report "$CHILD_REPORT_FILE"; then
       clear_alert replay_recovery_failed \
-        "The trusted resume marker and immutable gap record are now durable. Capture will restart automatically at slot $REPLAY_GAP_AVAILABLE_SLOT; existing backup data was not deleted."
+        "The trusted resume marker and immutable gap record are now durable. Capture will restart automatically at slot $REPLAY_GAP_SELECTED_RESUME_SLOT; existing backup data was not deleted."
       remember_alert_journal_floor provider_replay_gap
+      replay_cushion_detail=
+      if [ "$REPLAY_GAP_SELECTED_RESUME_SLOT" -gt "$REPLAY_GAP_PROVIDER_AVAILABLE_SLOT" ]; then
+        replay_cushion_detail="Reconnect policy: slots $REPLAY_GAP_PROVIDER_AVAILABLE_SLOT through $((REPLAY_GAP_SELECTED_RESUME_SLOT - 1)) were deliberately bypassed so the next handshake can outrun the moving replay floor. The provider did not report this cushion as unavailable, and the choice is retained in the audit record."
+      fi
       raise_alert provider_replay_gap WARNING \
-        "Missing range: slots $REPLAY_GAP_REQUESTED_SLOT through $((REPLAY_GAP_AVAILABLE_SLOT - 1)) are no longer available from the provider.
-Impact: That range is not in this backup; all previously recorded data remains safe.
-Action: Hetzner saved an immutable audit record and will resume at slot $REPLAY_GAP_AVAILABLE_SLOT."
+        "Provider replay failure: requested slots $REPLAY_GAP_REQUESTED_SLOT through $((REPLAY_GAP_PROVIDER_AVAILABLE_SLOT - 1)) could not be returned.
+Impact: Slot $REPLAY_GAP_ANCHOR_SLOT is already durable. Slots $((REPLAY_GAP_ANCHOR_SLOT + 1)) through $((REPLAY_GAP_SELECTED_RESUME_SLOT - 1)) are not in this backup; earlier data remains safe.
+$replay_cushion_detail
+Action: Hetzner saved an immutable audit record and will resume at slot $REPLAY_GAP_SELECTED_RESUME_SLOT."
       write_state running
-      echo "$(timestamp) raw_recorder replay_gap_recorded anchor_slot=$REPLAY_GAP_ANCHOR_SLOT requested_slot=$REPLAY_GAP_REQUESTED_SLOT resume_floor=$REPLAY_GAP_AVAILABLE_SLOT; resuming capture" >&2
+      echo "$(timestamp) raw_recorder replay_gap_recorded anchor_slot=$REPLAY_GAP_ANCHOR_SLOT requested_slot=$REPLAY_GAP_REQUESTED_SLOT provider_floor=$REPLAY_GAP_PROVIDER_AVAILABLE_SLOT selected_resume_slot=$REPLAY_GAP_SELECTED_RESUME_SLOT headroom_slots=$REPLAY_RESUME_HEADROOM_SLOTS; resuming capture" >&2
       continue
     fi
     write_state replay_recovery_failed

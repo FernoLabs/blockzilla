@@ -25,6 +25,7 @@ IMMUTABLE_GENERATION_SINGLE_PUT_LIMIT = 512 * 1024 * 1024
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SINGLE_PUT_ETAG_RE = re.compile(r"^[0-9a-f]{32}$")
 GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 GENERATION_MANIFEST_SCHEMA_VERSION = 1
 GENERATION_COMMIT_SCHEMA_VERSION = 1
@@ -858,6 +859,25 @@ def response_version_id(response, operation: str, key: str) -> str:
         raise RuntimeError(str(error)) from error
 
 
+def normalize_single_put_etag(value: str, label: str) -> str:
+    normalized = value.strip()
+    if len(normalized) >= 2 and normalized[0] == '"' and normalized[-1] == '"':
+        normalized = normalized[1:-1]
+    normalized = normalized.lower()
+    if not SINGLE_PUT_ETAG_RE.fullmatch(normalized):
+        raise ValueError(f"{label} must be a single-part 32-hexadecimal ETag")
+    return normalized
+
+
+def response_single_put_etag(response, operation: str, key: str) -> str:
+    try:
+        return normalize_single_put_etag(
+            response.headers.get("etag", ""), f"{operation} {key} ETag"
+        )
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+
+
 def single_put(
     client: S3Client,
     path: Path,
@@ -868,11 +888,16 @@ def single_put(
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != sha256:
         raise RuntimeError(f"local file changed while preparing {key}")
+    expected_etag = hashlib.md5(data, usedforsecurity=False).hexdigest()
     response = client.request(
         "PUT", key, headers=object_headers(content_type, sha256), body=data
     )
     try:
-        return response_version_id(response, "PUT", key)
+        version_id = response_version_id(response, "PUT", key)
+        returned_etag = response_single_put_etag(response, "PUT", key)
+        if not hmac.compare_digest(returned_etag, expected_etag):
+            raise RuntimeError(f"PUT {key} ETag mismatch")
+        return version_id, returned_etag
     finally:
         response.close()
 
@@ -886,11 +911,16 @@ def single_put_bytes(
 ):
     if hashlib.sha256(data).hexdigest() != sha256:
         raise RuntimeError(f"in-memory object digest mismatch for {key}")
+    expected_etag = hashlib.md5(data, usedforsecurity=False).hexdigest()
     response = client.request(
         "PUT", key, headers=object_headers(content_type, sha256), body=data
     )
     try:
-        return response_version_id(response, "PUT", key)
+        version_id = response_version_id(response, "PUT", key)
+        returned_etag = response_single_put_etag(response, "PUT", key)
+        if not hmac.compare_digest(returned_etag, expected_etag):
+            raise RuntimeError(f"PUT {key} ETag mismatch")
+        return version_id, returned_etag
     finally:
         response.close()
 
@@ -976,8 +1006,9 @@ def multipart_put(
         raise
 
 
-def sha256_file(path: Path) -> tuple[int, str]:
-    digest = hashlib.sha256()
+def file_digests(path: Path) -> tuple[int, str, str]:
+    sha256_digest = hashlib.sha256()
+    md5_digest = hashlib.md5(usedforsecurity=False)
     size = 0
     with path.open("rb") as handle:
         while True:
@@ -985,8 +1016,14 @@ def sha256_file(path: Path) -> tuple[int, str]:
             if not chunk:
                 break
             size += len(chunk)
-            digest.update(chunk)
-    return size, digest.hexdigest()
+            sha256_digest.update(chunk)
+            md5_digest.update(chunk)
+    return size, sha256_digest.hexdigest(), md5_digest.hexdigest()
+
+
+def sha256_file(path: Path) -> tuple[int, str]:
+    size, sha256, _md5 = file_digests(path)
+    return size, sha256
 
 
 def _head_matches(
@@ -995,6 +1032,7 @@ def _head_matches(
     expected_sha256: str,
     key: str,
     expected_version_id: str | None = None,
+    expected_etag: str | None = None,
 ) -> str:
     try:
         remote_size = int(response.headers.get("content-length", ""))
@@ -1013,7 +1051,38 @@ def _head_matches(
         validate_version_id(expected_version_id, "expected version ID"),
     ):
         raise RuntimeError(f"HEAD {key} returned a different object version")
+    if expected_etag is not None:
+        remote_etag = response_single_put_etag(response, "HEAD", key)
+        normalized_expected_etag = normalize_single_put_etag(
+            expected_etag, "expected ETag"
+        )
+        if not hmac.compare_digest(remote_etag, normalized_expected_etag):
+            raise RuntimeError(f"HEAD {key} ETag mismatch")
     return version_id
+
+
+def verify_remote_metadata(
+    client: S3Client,
+    key: str,
+    expected_size: int,
+    expected_sha256: str,
+    version_id: str,
+    expected_etag: str | None = None,
+):
+    expected_sha256 = validate_sha256(expected_sha256, "expected SHA-256")
+    version_id = validate_version_id(version_id)
+    head = client.request("HEAD", key, params={"versionId": version_id})
+    try:
+        _head_matches(
+            head,
+            expected_size,
+            expected_sha256,
+            key,
+            version_id,
+            expected_etag,
+        )
+    finally:
+        head.close()
 
 
 def verify_remote_object(
@@ -1022,15 +1091,19 @@ def verify_remote_object(
     expected_size: int,
     expected_sha256: str,
     version_id: str,
+    expected_etag: str | None = None,
 ):
     expected_sha256 = validate_sha256(expected_sha256, "expected SHA-256")
     version_id = validate_version_id(version_id)
     version_params = {"versionId": version_id}
-    head = client.request("HEAD", key, params=version_params)
-    try:
-        _head_matches(head, expected_size, expected_sha256, key, version_id)
-    finally:
-        head.close()
+    verify_remote_metadata(
+        client,
+        key,
+        expected_size,
+        expected_sha256,
+        version_id,
+        expected_etag,
+    )
 
     response = client.request(
         "GET",
@@ -1045,6 +1118,13 @@ def verify_remote_object(
         downloaded_version_id = response_version_id(response, "GET", key)
         if not hmac.compare_digest(downloaded_version_id, version_id):
             raise RuntimeError(f"GET {key} returned a different object version")
+        if expected_etag is not None:
+            downloaded_etag = response_single_put_etag(response, "GET", key)
+            if not hmac.compare_digest(
+                downloaded_etag,
+                normalize_single_put_etag(expected_etag, "expected ETag"),
+            ):
+                raise RuntimeError(f"GET {key} ETag mismatch")
         response.raw.decode_content = False
         while True:
             chunk = response.raw.read(READ_CHUNK_SIZE)
@@ -1098,16 +1178,42 @@ def latest_exact_object_version(
     key: str,
     expected_size: int,
     expected_sha256: str,
+    *,
+    full_readback: bool = True,
+    expected_etag: str | None = None,
 ) -> str | None:
     expected_sha256 = validate_sha256(expected_sha256, "expected SHA-256")
     response = client.request("HEAD", key, allowed_statuses=(404,))
     try:
         if response.status_code == 404:
             return None
-        version_id = _head_matches(response, expected_size, expected_sha256, key)
+        version_id = _head_matches(
+            response,
+            expected_size,
+            expected_sha256,
+            key,
+            expected_etag=expected_etag,
+        )
     finally:
         response.close()
-    verify_remote_object(client, key, expected_size, expected_sha256, version_id)
+    if full_readback:
+        verify_remote_object(
+            client,
+            key,
+            expected_size,
+            expected_sha256,
+            version_id,
+            expected_etag,
+        )
+    else:
+        verify_remote_metadata(
+            client,
+            key,
+            expected_size,
+            expected_sha256,
+            version_id,
+            expected_etag,
+        )
     return version_id
 
 
@@ -1121,12 +1227,13 @@ def upload_verified_file(
     *,
     expected_size: int | None = None,
     expected_sha256: str | None = None,
+    full_readback: bool = True,
 ):
     path = Path(path)
     before = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode):
         raise ValueError(f"upload source must be a regular file: {path}")
-    measured_size, measured_sha256 = sha256_file(path)
+    measured_size, measured_sha256, measured_md5 = file_digests(path)
     if expected_size is not None and measured_size != expected_size:
         raise RuntimeError(f"local file size changed before upload: {path}")
     if expected_sha256 is not None and not hmac.compare_digest(
@@ -1135,8 +1242,21 @@ def upload_verified_file(
         raise RuntimeError(f"local file SHA-256 changed before upload: {path}")
     size = measured_size
     sha256 = measured_sha256
+    single_part = size < multipart_threshold
+    if not full_readback and not single_part:
+        raise ValueError(
+            "metadata-only verification requires a single-PUT object with a plain MD5 ETag"
+        )
+    expected_etag = measured_md5 if single_part else None
 
-    existing_version_id = latest_exact_object_version(client, key, size, sha256)
+    existing_version_id = latest_exact_object_version(
+        client,
+        key,
+        size,
+        sha256,
+        full_readback=full_readback,
+        expected_etag=expected_etag,
+    )
     if existing_version_id is not None:
         return {
             "key": key,
@@ -1148,7 +1268,11 @@ def upload_verified_file(
     if size >= multipart_threshold:
         version_id = multipart_put(client, path, key, content_type, part_size, sha256)
     else:
-        version_id = single_put(client, path, key, content_type, sha256)
+        version_id, returned_etag = single_put(
+            client, path, key, content_type, sha256
+        )
+        if not hmac.compare_digest(returned_etag, expected_etag):
+            raise RuntimeError(f"PUT {key} ETag mismatch")
     after = path.stat(follow_symlinks=False)
     if (
         before.st_dev,
@@ -1162,8 +1286,22 @@ def upload_verified_file(
         after.st_mtime_ns,
     ):
         raise RuntimeError(f"local file changed during upload: {path}")
-    verify_remote_object(client, key, size, sha256, version_id)
-    if latest_exact_object_version(client, key, size, sha256) is None:
+    if full_readback:
+        verify_remote_object(
+            client, key, size, sha256, version_id, expected_etag
+        )
+    else:
+        verify_remote_metadata(
+            client, key, size, sha256, version_id, expected_etag
+        )
+    if latest_exact_object_version(
+        client,
+        key,
+        size,
+        sha256,
+        full_readback=full_readback,
+        expected_etag=expected_etag,
+    ) is None:
         raise RuntimeError(f"uploaded object disappeared before publication: {key}")
     return {
         "key": key,
@@ -1179,10 +1317,20 @@ def upload_verified_bytes(
     data: bytes,
     key: str,
     content_type: str = "application/json",
+    *,
+    full_readback: bool = True,
 ):
     sha256 = hashlib.sha256(data).hexdigest()
+    expected_etag = hashlib.md5(data, usedforsecurity=False).hexdigest()
     size = len(data)
-    existing_version_id = latest_exact_object_version(client, key, size, sha256)
+    existing_version_id = latest_exact_object_version(
+        client,
+        key,
+        size,
+        sha256,
+        full_readback=full_readback,
+        expected_etag=expected_etag,
+    )
     if existing_version_id is not None:
         return {
             "key": key,
@@ -1191,9 +1339,27 @@ def upload_verified_bytes(
             "version_id": existing_version_id,
             "already_present": True,
         }
-    version_id = single_put_bytes(client, data, key, content_type, sha256)
-    verify_remote_object(client, key, size, sha256, version_id)
-    if latest_exact_object_version(client, key, size, sha256) is None:
+    version_id, returned_etag = single_put_bytes(
+        client, data, key, content_type, sha256
+    )
+    if not hmac.compare_digest(returned_etag, expected_etag):
+        raise RuntimeError(f"PUT {key} ETag mismatch")
+    if full_readback:
+        verify_remote_object(
+            client, key, size, sha256, version_id, expected_etag
+        )
+    else:
+        verify_remote_metadata(
+            client, key, size, sha256, version_id, expected_etag
+        )
+    if latest_exact_object_version(
+        client,
+        key,
+        size,
+        sha256,
+        full_readback=full_readback,
+        expected_etag=expected_etag,
+    ) is None:
         raise RuntimeError(f"uploaded object disappeared before publication: {key}")
     return {
         "key": key,
@@ -1461,6 +1627,7 @@ def upload_generation(
                 multipart_threshold=IMMUTABLE_GENERATION_SINGLE_PUT_LIMIT + 1,
                 expected_size=record["size"],
                 expected_sha256=record["sha256"],
+                full_readback=False,
             )
             file_version_ids[record["path"]] = uploaded["version_id"]
 
@@ -1481,7 +1648,9 @@ def upload_generation(
         manifest_bytes = canonical_json_bytes(manifest)
         manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         manifest_key = f"{remote_prefix}/manifest.json"
-        uploaded_manifest = upload_verified_bytes(client, manifest_bytes, manifest_key)
+        uploaded_manifest = upload_verified_bytes(
+            client, manifest_bytes, manifest_key, full_readback=False
+        )
         manifest_version_id = uploaded_manifest["version_id"]
 
         commit_key = f"{remote_prefix}/_COMMITTED"
@@ -1495,7 +1664,9 @@ def upload_generation(
             predecessor_manifest_sha256,
         )
         commit_sha256 = hashlib.sha256(commit_bytes).hexdigest()
-        uploaded_commit = upload_verified_bytes(client, commit_bytes, commit_key)
+        uploaded_commit = upload_verified_bytes(
+            client, commit_bytes, commit_key, full_readback=False
+        )
         commit_version_id = uploaded_commit["version_id"]
 
         receipt = {

@@ -26,13 +26,19 @@ class FakeS3State:
         self.next_version_id = 1
         self.requests = []
         self.corrupt_get_keys = set()
+        self.corrupt_etag_keys = set()
         self.inject_after_put = {}
         self.lock = threading.Lock()
 
     def add_version(self, key, data, sha256):
         version_id = f"version-{self.next_version_id:08d}"
         self.next_version_id += 1
-        stored = {"data": data, "sha256": sha256, "version_id": version_id}
+        stored = {
+            "data": data,
+            "etag": hashlib.md5(data, usedforsecurity=False).hexdigest(),
+            "sha256": sha256,
+            "version_id": version_id,
+        }
         self.objects.setdefault(key, []).append(stored)
         return stored
 
@@ -96,6 +102,7 @@ class FakeS3Handler(BaseHTTPRequestHandler):
         requested_version = query.get("versionId", [None])[0]
         with self.state.lock:
             stored = self.state.object_version(key, requested_version)
+            corrupt_etag = key in self.state.corrupt_etag_keys
         if stored is None:
             self.send_empty(404)
             return
@@ -105,6 +112,9 @@ class FakeS3Handler(BaseHTTPRequestHandler):
             {
                 "x-amz-meta-sha256": stored["sha256"],
                 "x-amz-version-id": stored["version_id"],
+                "ETag": '"00000000000000000000000000000000"'
+                if corrupt_etag
+                else f'"{stored["etag"]}"',
             },
             include_body=False,
         )
@@ -118,6 +128,7 @@ class FakeS3Handler(BaseHTTPRequestHandler):
         with self.state.lock:
             stored = self.state.object_version(key, requested_version)
             corrupt = key in self.state.corrupt_get_keys
+            corrupt_etag = key in self.state.corrupt_etag_keys
         if stored is None:
             self.send_empty(404)
             return
@@ -130,6 +141,9 @@ class FakeS3Handler(BaseHTTPRequestHandler):
             {
                 "x-amz-meta-sha256": stored["sha256"],
                 "x-amz-version-id": stored["version_id"],
+                "ETag": '"00000000000000000000000000000000"'
+                if corrupt_etag
+                else f'"{stored["etag"]}"',
             },
         )
 
@@ -165,7 +179,16 @@ class FakeS3Handler(BaseHTTPRequestHandler):
             injected = self.state.inject_after_put.pop(key, None)
             if injected is not None:
                 self.state.add_version(key, injected["data"], injected["sha256"])
-        self.send_empty(200, {"x-amz-version-id": stored["version_id"]})
+            corrupt_etag = key in self.state.corrupt_etag_keys
+        self.send_empty(
+            200,
+            {
+                "ETag": '"00000000000000000000000000000000"'
+                if corrupt_etag
+                else f'"{stored["etag"]}"',
+                "x-amz-version-id": stored["version_id"],
+            },
+        )
 
     def do_POST(self):
         key, query = self.object_key()
@@ -206,7 +229,10 @@ class FakeS3Handler(BaseHTTPRequestHandler):
         self.send_bytes(
             200,
             b"<CompleteMultipartUploadResult/>",
-            {"x-amz-version-id": stored["version_id"]},
+            {
+                "ETag": f'"{stored["etag"]}-1"',
+                "x-amz-version-id": stored["version_id"],
+            },
         )
 
     def do_DELETE(self):
@@ -548,11 +574,64 @@ class S3UploaderTests(unittest.TestCase):
         )
         self.assertFalse(
             any(
+                method == "GET"
+                for method, _key, _headers, _query in self.state.requests
+            ),
+            "routine generation publication must not consume B2 download bytes",
+        )
+        self.assertFalse(
+            any(
                 "if-none-match" in headers
                 for method, _key, headers, _query in self.state.requests
                 if method == "PUT"
             )
         )
+
+    def test_generation_upload_rejects_a_wrong_single_put_etag(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "grpc-raw/v1/generation-bad-etag"
+        self.state.corrupt_etag_keys.add(f"{prefix}/files/identity.json")
+        receipt_path = self.root / "bad-etag-receipt.json"
+        with self.assertRaisesRegex(RuntimeError, "ETag mismatch"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-bad-etag",
+                prefix,
+                receipt_path,
+            )
+        self.assertFalse(receipt_path.exists())
+
+    def test_generation_retry_rejects_a_wrong_remote_head_etag(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "grpc-raw/v1/generation-bad-head-etag"
+        receipt_path = self.root / "bad-head-etag-receipt.json"
+        receipt = uploader.upload_generation(
+            self.client,
+            generation,
+            "generation-bad-head-etag",
+            prefix,
+            receipt_path,
+        )
+        receipt_bytes = receipt_path.read_bytes()
+        puts_before_retry = sum(
+            method == "PUT" for method, _key, _headers, _query in self.state.requests
+        )
+        self.state.corrupt_etag_keys.add(f"{prefix}/files/identity.json")
+        with self.assertRaisesRegex(RuntimeError, "HEAD .* ETag mismatch"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-bad-head-etag",
+                prefix,
+                receipt_path,
+            )
+        puts_after_retry = sum(
+            method == "PUT" for method, _key, _headers, _query in self.state.requests
+        )
+        self.assertEqual(puts_after_retry, puts_before_retry)
+        self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+        self.assertEqual(json.loads(receipt_bytes), receipt)
 
     def test_upload_generation_cli_uses_credentials_file(self):
         generation, _writer_lock = self.create_generation()

@@ -34,21 +34,27 @@ B2 remains the catch-up path and source of truth during either host's outage.
 
 The deployed recorder already fsyncs each raw gRPC block, seals a bounded local
 generation, uploads exact version-pinned objects, publishes `manifest.json` and
-`_COMMITTED`, verifies every pinned object with `HEAD` plus a full `GET` hash,
-and writes a chained local receipt. It then removes only the sealed local cache
-copy. The B2 generation is retained indefinitely.
+`_COMMITTED`, and writes a chained local receipt. Routine publication verifies
+each single-PUT object using the signed request SHA-256, Backblaze's returned
+version ID and content ETag, then an exact-version `HEAD` of the length,
+SHA-256 metadata, version ID, and ETag. It deliberately does not download each
+new generation again: that previously consumed roughly twice the ingest volume
+from B2's separate daily download cap. Full payload hashing still happens when
+Blockzilla or an operator restores the exact versions. The recorder then removes
+only the sealed local cache copy. The B2 generation is retained indefinitely.
 
 Blockzilla does not currently pull or acknowledge those generations. Therefore
-today's local removal means only “B2 has an independently verified copy,” not
-“Blockzilla processed this generation.”
+today's local removal means only “B2 accepted an exact version-pinned copy whose
+remote metadata and ETag were verified,” not “Blockzilla processed this
+generation.”
 
 ## Three independent watermarks
 
 Track these separately for each `(cluster_id, origin_node_id, journal_id)`:
 
 1. `captured`: exact observations are durable in the Hetzner WAL.
-2. `b2_committed`: the immutable B2 generation and predecessor chain are fully
-   verified.
+2. `b2_committed`: the immutable B2 generation and predecessor chain were
+   accepted under exact version IDs and their remote metadata/ETags verified.
 3. `blockzilla_raw_durable`: Blockzilla has downloaded, verified, atomically
    installed, and fsynced that exact generation.
 4. `blockzilla_archive_committed`: every observation is committed to the
@@ -200,6 +206,12 @@ whose advertised available slot is strictly newer. Before resubscribing, the
 supervisor fsyncs an immutable gap record inside the active generation and a
 validated resume-floor marker under `monitoring/`. It then resumes the same
 generation at that floor, retaining the old durable tail as the coverage anchor.
+Because the provider's oldest replayable slot can move during a new TLS/gRPC
+handshake, the selected resume slot defaults to 100 slots above the advertised
+floor. Schema-2 evidence records the provider-confirmed unavailable interval and
+this deliberate reconnect cushion as separate ranges; the cushion is never
+misreported as provider data loss. The headroom is configurable with
+`BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS`.
 The first later block therefore records the exact uncovered interval and raises
 a Telegram incident. A normal ping, restart, or later successful append never
 rewrites that interval as synchronized; the gap record is included when the
@@ -215,7 +227,7 @@ generation is committed to B2.
 | Crash before NAS fsync | No ACK is published. Staging is recovered or removed on restart. |
 | Crash after NAS fsync but before ACK | The local receipt is replayed and the same ACK is republished. |
 | Digest, fork, or tail conflict | Generation is quarantined durably; the normal ACK chain stops and alerts. |
-| Provider replay window expired | Preserve the durable tail, commit an immutable gap record, alert, and resume only from the strictly validated provider floor. Never report the uncovered interval as synchronized. |
+| Provider replay window expired | Preserve the durable tail, commit immutable provider-floor and reconnect-policy evidence, alert, and resume only from the selected slot after the validated provider floor. Never report the uncovered interval as synchronized. |
 | Hetzner replacement | Resume only from an externally preserved signed chain checkpoint and stable stream identity; never infer continuity from a slot number. |
 
 ## Implementation sequence

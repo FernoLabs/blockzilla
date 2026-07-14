@@ -28,6 +28,7 @@ ORIGIN_NODE_ID=hetzner-test
 SOURCE_ID=grpc-raw-test
 GENERATION_REMOTE_PREFIX=grpc-raw/v1
 GENERATION_PYTHON_BIN=${PYTHON_BIN:-python3}
+REPLAY_RESUME_HEADROOM_SLOTS=0
 
 # Tests run on macOS and Linux; durability ordering is tested independently from
 # the platform-specific sync(1) spelling used in production.
@@ -98,7 +99,11 @@ reset_rotation_fixture() {
   printf '%s\n' 99999 > "$(alert_file recorder_restarting journal_size)"
   REPLAY_RECOVERY_ANCHOR_SLOT=
   REPLAY_RECOVERY_REQUESTED_SLOT=
+  REPLAY_RECOVERY_SCHEMA_VERSION=
+  REPLAY_PROVIDER_AVAILABLE_SLOT=
   REPLAY_MIN_RESUME_SLOT=
+  REPLAY_GAP_PROVIDER_AVAILABLE_SLOT=
+  REPLAY_GAP_SELECTED_RESUME_SLOT=
   REPLAY_VERIFIED_ANCHOR_SLOT=
   REPLAY_SKIP_RETIRE_VERIFY_ONCE=false
   unset BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT || true
@@ -325,6 +330,112 @@ test "$UPLOAD_CHAIN_HASH" = "$(printf 'a%.0s' $(seq 1 64))"
 test "$("$GENERATION_PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["predecessor_manifest_sha256"])' \
   "$GENERATION_RECEIPT_DIR/$second_upload_id.json")" = "$(printf 'a%.0s' $(seq 1 64))"
 
+# Legacy replay evidence remains readable during the schema-2 rollout.
+reset_rotation_fixture
+publish_replay_gap_record 123 123 200
+publish_replay_recovery_floor 123 123 200
+load_replay_recovery_floor
+test "$REPLAY_MIN_RESUME_SLOT" -eq 200
+test -z "$REPLAY_PROVIDER_AVAILABLE_SLOT"
+test "$REPLAY_RECOVERY_SCHEMA_VERSION" -eq 1
+test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200.json"
+
+# The next provider failure upgrades only the new link in the chain to v2.
+REPLAY_RESUME_HEADROOM_SLOTS=32
+replay_report=$fixture_root/replay-report.json
+write_replay_report "$replay_report" 123 200 250
+persist_replay_recovery_from_report "$replay_report"
+load_replay_recovery_floor
+test "$REPLAY_RECOVERY_SCHEMA_VERSION" -eq 2
+test "$REPLAY_PROVIDER_AVAILABLE_SLOT" -eq 250
+test "$REPLAY_MIN_RESUME_SLOT" -eq 282
+test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200.json"
+test -f "$REPLAY_GAP_DIR/replay-gap-123-200-250-282.json"
+
+# A configured cushion is distinguished from the provider-advertised floor in
+# both immutable evidence and the mutable resume pointer.
+reset_rotation_fixture
+REPLAY_RESUME_HEADROOM_SLOTS=32
+replay_report=$fixture_root/replay-report.json
+write_replay_report "$replay_report" 123 123 200
+persist_replay_recovery_from_report "$replay_report"
+load_replay_recovery_floor
+test "$REPLAY_PROVIDER_AVAILABLE_SLOT" -eq 200
+test "$REPLAY_MIN_RESUME_SLOT" -eq 232
+test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200-232.json"
+grep -q '"provider_available_slot":200' \
+  "$REPLAY_GAP_DIR/replay-gap-123-123-200-232.json"
+grep -q '"selected_resume_slot":232' \
+  "$REPLAY_GAP_DIR/replay-gap-123-123-200-232.json"
+REPLAY_RESUME_HEADROOM_SLOTS=7
+load_replay_recovery_floor
+test "$REPLAY_MIN_RESUME_SLOT" -eq 232
+printf '%s\n' 231 > "$ACTIVE_GENERATION_DIR/slot"
+if retire_replay_recovery_floor_if_advanced; then
+  echo "replay floor retired before selected resume slot" >&2
+  exit 1
+fi
+test -f "$REPLAY_RECOVERY_FILE"
+printf '%s\n' 232 > "$ACTIVE_GENERATION_DIR/slot"
+retire_replay_recovery_floor_if_advanced
+test ! -e "$REPLAY_RECOVERY_FILE"
+REPLAY_RESUME_HEADROOM_SLOTS=0
+
+# Headroom overflow fails before creating either immutable or mutable evidence.
+reset_rotation_fixture
+REPLAY_RESUME_HEADROOM_SLOTS=100
+write_replay_report "$replay_report" \
+  999999999999999900 999999999999999900 999999999999999950
+if persist_replay_recovery_from_report "$replay_report"; then
+  echo "replay resume headroom overflow was accepted" >&2
+  exit 1
+fi
+test ! -e "$REPLAY_RECOVERY_FILE"
+test ! -e "$REPLAY_GAP_DIR"
+REPLAY_RESUME_HEADROOM_SLOTS=0
+
+# Distinct provider facts cannot collide even when they select the same slot,
+# and a pointer with tampered P or S never detaches from immutable evidence.
+reset_rotation_fixture
+publish_replay_gap_record 123 123 232 200
+publish_replay_gap_record 123 123 232 201
+test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200-232.json"
+test -f "$REPLAY_GAP_DIR/replay-gap-123-123-201-232.json"
+publish_replay_recovery_floor 123 123 232 200
+cp "$REPLAY_RECOVERY_FILE" "$REPLAY_RECOVERY_FILE.valid"
+sed 's/"provider_available_slot":200/"provider_available_slot":202/' \
+  "$REPLAY_RECOVERY_FILE.valid" > "$REPLAY_RECOVERY_FILE"
+if load_replay_recovery_floor; then
+  echo "tampered provider replay floor was accepted" >&2
+  exit 1
+fi
+sed 's/"selected_resume_slot":232/"selected_resume_slot":233/' \
+  "$REPLAY_RECOVERY_FILE.valid" > "$REPLAY_RECOVERY_FILE"
+if load_replay_recovery_floor; then
+  echo "tampered selected replay slot was accepted" >&2
+  exit 1
+fi
+rm -f "$REPLAY_RECOVERY_FILE.valid"
+
+# Even canonical, mutually matching v2 evidence cannot authorize a resume
+# cushion larger than the recorder's absolute 10,000-slot safety bound.
+reset_rotation_fixture
+mkdir "$REPLAY_GAP_DIR"
+oversized_gap_payload=$(replay_gap_payload 123 123 10201 200)
+printf '%s\n' "$oversized_gap_payload" > \
+  "$REPLAY_GAP_DIR/replay-gap-123-123-200-10201.json"
+printf \
+  '{"anchor_slot":123,"cluster_id":"%s","origin_node_id":"%s","provider_available_slot":200,"requested_slot":123,"schema_version":2,"selected_resume_slot":10201,"source_id":"%s"}\n' \
+  "$CLUSTER_ID" "$ORIGIN_NODE_ID" "$SOURCE_ID" > "$REPLAY_RECOVERY_FILE"
+if validate_replay_gap_record 123 123 10201 200; then
+  echo "oversized immutable replay cushion was accepted" >&2
+  exit 1
+fi
+if load_replay_recovery_floor; then
+  echo "oversized persisted replay cushion was accepted" >&2
+  exit 1
+fi
+
 # A validated replay-window failure first creates immutable generation evidence,
 # then advances the durable monitoring pointer without rotating or deleting data.
 reset_rotation_fixture
@@ -333,8 +444,9 @@ write_replay_report "$replay_report" 123 123 200
 persist_replay_recovery_from_report "$replay_report"
 load_replay_recovery_floor
 test "$REPLAY_RECOVERY_ANCHOR_SLOT" -eq 123
+test "$REPLAY_PROVIDER_AVAILABLE_SLOT" -eq 200
 test "$REPLAY_MIN_RESUME_SLOT" -eq 200
-test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200.json"
+test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200-200.json"
 test "$(cat "$ACTIVE_GENERATION_DIR/role")" = old
 test -z "$(find "$SEALED_GENERATION_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
 
@@ -351,7 +463,7 @@ persist_replay_recovery_from_report "$replay_report"
 load_replay_recovery_floor
 test "$REPLAY_RECOVERY_ANCHOR_SLOT" -eq 123
 test "$REPLAY_MIN_RESUME_SLOT" -eq 250
-test -f "$REPLAY_GAP_DIR/replay-gap-123-200-250.json"
+test -f "$REPLAY_GAP_DIR/replay-gap-123-200-250-250.json"
 
 # Regressions, mismatched anchors, mid-stream reports, and modified immutable
 # records all fail closed without changing the last accepted floor.
@@ -390,8 +502,8 @@ test -f "$REPLAY_RECOVERY_FILE"
 printf '%s\n' 260 > "$ACTIVE_GENERATION_DIR/slot"
 retire_replay_recovery_floor_if_advanced
 test ! -e "$REPLAY_RECOVERY_FILE"
-test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200.json"
-test -f "$REPLAY_GAP_DIR/replay-gap-123-200-250.json"
+test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200-200.json"
+test -f "$REPLAY_GAP_DIR/replay-gap-123-200-250-250.json"
 write_replay_report "$replay_report" 260 260 300
 persist_replay_recovery_from_report "$replay_report"
 load_replay_recovery_floor
@@ -400,7 +512,7 @@ test "$REPLAY_MIN_RESUME_SLOT" -eq 300
 
 reset_rotation_fixture
 mkdir "$REPLAY_GAP_DIR"
-printf '%s\n' tampered > "$REPLAY_GAP_DIR/replay-gap-123-123-200.json"
+printf '%s\n' tampered > "$REPLAY_GAP_DIR/replay-gap-123-123-200-200.json"
 write_replay_report "$replay_report" 123 123 200
 if persist_replay_recovery_from_report "$replay_report"; then
   echo "modified immutable replay record was accepted" >&2
@@ -439,8 +551,8 @@ load_replay_recovery_floor
 rotate_active_generation
 load_replay_recovery_floor
 test "$REPLAY_MIN_RESUME_SLOT" -eq 200
-test -f "$ACTIVE_GENERATION_DIR/replay-gaps/replay-gap-123-123-200.json"
-test -f "$SEALED_GENERATION_DIR/slot-00000000000000000123/replay-gaps/replay-gap-123-123-200.json"
+test -f "$ACTIVE_GENERATION_DIR/replay-gaps/replay-gap-123-123-200-200.json"
+test -f "$SEALED_GENERATION_DIR/slot-00000000000000000123/replay-gaps/replay-gap-123-123-200-200.json"
 
 # If a floor block is already durable, retire the pointer before rotation. The
 # evidence stays in the old sealed generation and no stale authority is needed
@@ -455,7 +567,7 @@ test ! -e "$REPLAY_RECOVERY_FILE"
 rotate_active_generation
 load_replay_recovery_floor
 test -z "$REPLAY_MIN_RESUME_SLOT"
-test -f "$SEALED_GENERATION_DIR/slot-00000000000000000200/replay-gaps/replay-gap-123-123-200.json"
-test ! -e "$ACTIVE_GENERATION_DIR/replay-gaps/replay-gap-123-123-200.json"
+test -f "$SEALED_GENERATION_DIR/slot-00000000000000000200/replay-gaps/replay-gap-123-123-200-200.json"
+test ! -e "$ACTIVE_GENERATION_DIR/replay-gaps/replay-gap-123-123-200-200.json"
 
 printf '%s\n' "linux raw recorder bounded-cache tests: ok"

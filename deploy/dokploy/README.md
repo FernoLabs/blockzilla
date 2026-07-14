@@ -17,12 +17,20 @@ this lifecycle:
 4. The uploader writes generation files to the versioned Backblaze bucket, then
    `manifest.json`, then `_COMMITTED` last. The manifest pins every file's exact
    Backblaze version ID, and the commit pins the manifest version ID. Each pinned
-   version is checked with a signed `HEAD` and independently re-downloaded with
-   an authenticated full `GET` to recompute its SHA-256.
+   single-PUT version is bound to the signed request SHA-256 and checked against
+   Backblaze's returned MD5 ETag, then checked again with an exact-version signed
+   `HEAD` for its length, SHA-256 metadata, version ID, and ETag.
 5. A synced local receipt pins the exact manifest and commit version IDs and is
    published only after all remote verification succeeds. The supervisor checks
    that receipt and its predecessor chain before removing the sealed local
    generation.
+
+Routine publication intentionally performs no object `GET`. Re-downloading
+every generation during upload consumed about twice the ingest volume and can
+exhaust Backblaze's separate daily download cap even while storage remains
+below 10 GB. Exact-version payloads are fully downloaded and rehashed during a
+restore or future Blockzilla pull; the standalone `upload-file` audit command
+also retains full readback verification.
 
 At the measured 5–6 GiB/hour input rate, 3 GiB is only 30–36 minutes of
 theoretical storage. The 384 MiB emergency floor and rotation headroom make the
@@ -127,6 +135,7 @@ BLOCKZILLA_RAW_MAX_RECORD_BYTES=134217728
 BLOCKZILLA_RAW_MIN_FREE_BYTES=402653184
 BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES=805306368
 BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES=134217728
+BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS=100
 BLOCKZILLA_B2_REMOTE_PREFIX=grpc-raw/v1
 BLOCKZILLA_B2_USAGE_ALERT_ENABLED=true
 BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES=10000000000
@@ -136,6 +145,10 @@ BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES=500000000
 BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS=300
 BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS=21600
 ```
+
+The replay headroom lets a reconnect outrun an upstream replay floor that moves
+during the TLS/gRPC handshake. The immutable schema-2 gap record distinguishes
+the provider-confirmed expired range from these deliberately bypassed 100 slots.
 
 Set `BLOCKZILLA_TELEGRAM_CHAT_ID` and keep Telegram enabled. For a forum topic,
 also set `BLOCKZILLA_TELEGRAM_MESSAGE_THREAD_ID`. Leave
@@ -218,7 +231,7 @@ allowing distinct failures through. Failed deliveries remain pending for retry.
 | Recorder restart / gRPC stale | The stream ended, the process failed, or no durable block arrived for 180 seconds. | Check endpoint reachability and credentials, then audit overlap after recovery. |
 | Resume coverage warning | Yellowstone did not return the inclusively requested durable slot. | Compare against another recorder and repair the uncovered range. |
 | Cache/volume invalid | The exact cache mount, marker, or rotation transaction is missing or inconsistent. Capture is stopped. | Restore the mount and inspect the transaction; never manufacture a marker on the root filesystem. |
-| Backblaze upload failed | Upload, remote `HEAD`, full `GET` hash verification, receipt validation, or chain publication failed. Local data is retained. | Check Backblaze credentials/reachability and logs. Do not manually delete the sealed generation. |
+| Backblaze upload failed | Upload, remote exact-version metadata/ETag verification, receipt validation, or chain publication failed. Local data is retained. | Check Backblaze credentials, caps, reachability, and logs. Do not manually delete the sealed generation. |
 | Backblaze usage warning / critical | Complete account storage, including hidden versions and unfinished parts, reached 8.0 GB / 9.5 GB. Measurement failures are a separate alert. Upload and indefinite retention continue. | Expect billing after the account exceeds its free allowance, or deliberately change retention later. |
 | Generation backlog | Sealed generations reached the configured backlog threshold. | Restore remote throughput before the 3 GiB cache reaches its floor. |
 | Disk warning / critical | Cache free space is below 768 MiB / 384 MiB. At the hard floor capture pauses while uploads continue. | Fix the uploader. Only remotely verified generations may be removed. |
