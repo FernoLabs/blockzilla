@@ -186,6 +186,18 @@ generation, an unchanged ACK is normal rather than stale.
 The existing Yellowstone `grpc_stale` incident remains separate: it reports
 that the Hetzner recorder itself stopped durably receiving blocks.
 
+If the provider has already discarded the requested replay slot, recovery is
+explicit rather than silent. The recorder accepts only a typed gRPC
+`OutOfRange` response whose exact requested slot matches the subscription and
+whose advertised available slot is strictly newer. Before resubscribing, the
+supervisor fsyncs an immutable gap record inside the active generation and a
+validated resume-floor marker under `monitoring/`. It then resumes the same
+generation at that floor, retaining the old durable tail as the coverage anchor.
+The first later block therefore records the exact uncovered interval and raises
+a Telegram incident. A normal ping, restart, or later successful append never
+rewrites that interval as synchronized; the gap record is included when the
+generation is committed to B2.
+
 ## Failure behavior
 
 | Failure | Required result |
@@ -196,6 +208,7 @@ that the Hetzner recorder itself stopped durably receiving blocks.
 | Crash before NAS fsync | No ACK is published. Staging is recovered or removed on restart. |
 | Crash after NAS fsync but before ACK | The local receipt is replayed and the same ACK is republished. |
 | Digest, fork, or tail conflict | Generation is quarantined durably; the normal ACK chain stops and alerts. |
+| Provider replay window expired | Preserve the durable tail, commit an immutable gap record, alert, and resume only from the strictly validated provider floor. Never report the uncovered interval as synchronized. |
 | Hetzner replacement | Resume only from an externally preserved signed chain checkpoint and stable stream identity; never infer continuity from a slot number. |
 
 ## Implementation sequence

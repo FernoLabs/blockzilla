@@ -150,6 +150,10 @@ struct RecordGrpcRawArgs {
     #[arg(long)]
     from_slot: Option<u64>,
 
+    /// Never subscribe below this slot, even when the durable journal tail is older.
+    #[arg(long)]
+    min_resume_slot: Option<u64>,
+
     /// Atomically publish a secret-free JSON event if the provider skips the inclusive resume slot.
     #[arg(long)]
     resume_coverage_warning_file: Option<std::path::PathBuf>,
@@ -579,6 +583,7 @@ impl From<RecordGrpcRawArgs> for GrpcRawRecordConfig {
             timeout_secs: value.timeout_secs,
             idle_timeout_secs: value.idle_timeout_secs,
             from_slot: value.from_slot,
+            min_resume_slot: value.min_resume_slot,
             resume_coverage_warning_file: value.resume_coverage_warning_file,
             slots_per_epoch: value.slots_per_epoch,
             stop_at_epoch_boundary: value.stop_at_epoch_boundary,

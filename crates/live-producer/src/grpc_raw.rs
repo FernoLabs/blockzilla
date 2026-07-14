@@ -23,7 +23,7 @@ use yellowstone_grpc_proto::prelude::{
     CommitmentLevel, SubscribeRequest, SubscribeRequestFilterBlocks, SubscribeRequestPing,
     SubscribeUpdate, SubscribeUpdateBlock, subscribe_update::UpdateOneof,
 };
-use yellowstone_grpc_proto::tonic::metadata::MetadataMap;
+use yellowstone_grpc_proto::tonic::{Code, Status, metadata::MetadataMap};
 
 use crate::{
     epoch::{EpochSlot, OLD_FAITHFUL_SLOTS_PER_EPOCH},
@@ -151,6 +151,9 @@ pub struct GrpcRawRecordConfig {
     pub timeout_secs: u64,
     pub idle_timeout_secs: u64,
     pub from_slot: Option<u64>,
+    /// Never subscribe below this slot, even when the durable journal tail is older.
+    #[serde(default)]
+    pub min_resume_slot: Option<u64>,
     pub resume_coverage_warning_file: Option<PathBuf>,
     pub slots_per_epoch: u64,
     pub stop_at_epoch_boundary: bool,
@@ -176,6 +179,7 @@ impl Default for GrpcRawRecordConfig {
             timeout_secs: 86_400,
             idle_timeout_secs: 180,
             from_slot: None,
+            min_resume_slot: None,
             resume_coverage_warning_file: None,
             slots_per_epoch: OLD_FAITHFUL_SLOTS_PER_EPOCH,
             stop_at_epoch_boundary: false,
@@ -204,6 +208,8 @@ pub struct GrpcRawRecordReport {
     pub frames_skipped_before_resume: u64,
     pub recovered_handoff_record: bool,
     pub requested_from_slot: Option<u64>,
+    #[serde(default)]
+    pub minimum_resume_slot: Option<u64>,
     pub effective_from_slot: Option<u64>,
     pub resume_overlap_slot: Option<u64>,
     pub resume_overlap_observed: Option<bool>,
@@ -226,6 +232,14 @@ pub struct GrpcRawRecordReport {
     pub idle_timed_out: bool,
     pub stream_ended: bool,
     pub stopped_at_epoch_boundary: bool,
+    /// The provider no longer retains the exact requested slot. This is a clean supervisor
+    /// handoff, not proof that source coverage is complete.
+    #[serde(default)]
+    pub replay_unavailable: bool,
+    #[serde(default)]
+    pub replay_unavailable_requested_slot: Option<u64>,
+    #[serde(default)]
+    pub replay_available_slot: Option<u64>,
     #[serde(default)]
     pub stopped_generation_full: bool,
     pub stopped_low_disk: bool,
@@ -293,8 +307,79 @@ struct CompletePohBlockStats {
 fn effective_resume_slot(
     configured_from_slot: Option<u64>,
     last_durable_slot: Option<u64>,
+    minimum_resume_slot: Option<u64>,
 ) -> Option<u64> {
-    last_durable_slot.or(configured_from_slot)
+    last_durable_slot
+        .or(configured_from_slot)
+        .into_iter()
+        .chain(minimum_resume_slot)
+        .max()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplayUnavailable {
+    requested_slot: u64,
+    available_slot: u64,
+}
+
+/// Parse only the provider's complete, known replay-window message. In particular, do not mine
+/// arbitrary status text for numbers: a supervisor may use the result to skip an unavailable
+/// source range deliberately.
+fn parse_replay_unavailable_message(message: &str) -> Option<ReplayUnavailable> {
+    const PREFIX: &str = "broadcast from ";
+    const SEPARATOR: &str = " is not available, last available: ";
+
+    let remainder = message.strip_prefix(PREFIX)?;
+    let (requested, available) = remainder.split_once(SEPARATOR)?;
+    if requested.is_empty()
+        || available.is_empty()
+        || !requested.bytes().all(|byte| byte.is_ascii_digit())
+        || !available.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(ReplayUnavailable {
+        requested_slot: requested.parse().ok()?,
+        available_slot: available.parse().ok()?,
+    })
+}
+
+fn replay_unavailable_from_status(
+    status: &Status,
+    effective_from_slot: Option<u64>,
+    frames_seen: u64,
+    frames_written: u64,
+) -> Option<ReplayUnavailable> {
+    if status.code() != Code::OutOfRange || frames_seen != 0 || frames_written != 0 {
+        return None;
+    }
+    let replay = parse_replay_unavailable_message(status.message())?;
+    if Some(replay.requested_slot) != effective_from_slot
+        || replay.available_slot <= replay.requested_slot
+    {
+        return None;
+    }
+    Some(replay)
+}
+
+fn mark_replay_unavailable(report: &mut GrpcRawRecordReport, status: &Status) -> bool {
+    let Some(replay) = replay_unavailable_from_status(
+        status,
+        report.effective_from_slot,
+        report.frames_seen,
+        report.frames_written,
+    ) else {
+        return false;
+    };
+    report.replay_unavailable = true;
+    report.replay_unavailable_requested_slot = Some(replay.requested_slot);
+    report.replay_available_slot = Some(replay.available_slot);
+    tracing::warn!(
+        requested_slot = replay.requested_slot,
+        available_slot = replay.available_slot,
+        "provider replay window no longer includes requested raw gRPC slot"
+    );
+    true
 }
 
 fn validate_complete_poh_block(block: &SubscribeUpdateBlock) -> Result<CompletePohBlockStats> {
@@ -488,9 +573,12 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         &journal_path,
     )?;
 
+    // Keep the durable tail as the audit anchor even when a recovery floor advances the actual
+    // subscription. The first post-floor block must still publish the explicit coverage warning.
     let resume_anchor = journal_state.last.clone();
     let last_durable_slot = resume_anchor.as_ref().map(|row| row.slot);
-    let effective_from_slot = effective_resume_slot(config.from_slot, last_durable_slot);
+    let effective_from_slot =
+        effective_resume_slot(config.from_slot, last_durable_slot, config.min_resume_slot);
     // A continuous spool may already span many epochs. On restart, an optional boundary stop is
     // relative to the epoch containing the durable tail, not the first epoch ever recorded.
     let mut capture_epoch = journal_state.last.as_ref().map(|row| row.epoch);
@@ -508,6 +596,7 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         frames_skipped_before_resume: 0,
         recovered_handoff_record,
         requested_from_slot: config.from_slot,
+        minimum_resume_slot: config.min_resume_slot,
         effective_from_slot,
         resume_overlap_slot: last_durable_slot,
         resume_overlap_observed: resume_anchor.as_ref().map(|_| false),
@@ -530,6 +619,9 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         idle_timed_out: false,
         stream_ended: false,
         stopped_at_epoch_boundary: false,
+        replay_unavailable: false,
+        replay_unavailable_requested_slot: None,
+        replay_available_slot: None,
         stopped_generation_full: false,
         stopped_low_disk: false,
         available_bytes_at_stop: None,
@@ -614,8 +706,13 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     )
     .await
     {
-        WatchdogOutcome::Completed(result) => {
-            result.context("open raw gRPC bidirectional subscription")?
+        WatchdogOutcome::Completed(Ok(response)) => response,
+        WatchdogOutcome::Completed(Err(status)) => {
+            if mark_replay_unavailable(&mut report, &status) {
+                report.elapsed_ms = started_at.elapsed().as_millis();
+                return Ok(report);
+            }
+            return Err(status).context("open raw gRPC bidirectional subscription");
         }
         WatchdogOutcome::TotalTimeout => {
             report.timed_out = true;
@@ -657,7 +754,15 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             report.stream_ended = true;
             break;
         };
-        let update = update?;
+        let update = match update {
+            Ok(update) => update,
+            Err(status) => {
+                if mark_replay_unavailable(&mut report, &status) {
+                    break;
+                }
+                return Err(status).context("read raw gRPC subscription update");
+            }
+        };
         if matches!(update.update_oneof.as_ref(), Some(UpdateOneof::Ping(_))) {
             match await_with_watchdogs(
                 request_sink.send(subscribe_ping_request()),
@@ -2469,7 +2574,7 @@ mod tests {
         assert_eq!(target_tail.frame_id, 0);
         assert_eq!(target_tail.slot, source_tail.slot);
         assert_eq!(
-            effective_resume_slot(None, Some(target_tail.slot)),
+            effective_resume_slot(None, Some(target_tail.slot), None),
             Some(source_tail.slot)
         );
         let target_payload = read_spool_record(
@@ -2583,12 +2688,101 @@ mod tests {
     }
 
     #[test]
-    fn durable_tail_makes_configured_from_slot_bootstrap_only_and_requests_overlap() {
-        assert_eq!(effective_resume_slot(Some(100), None), Some(100));
-        assert_eq!(effective_resume_slot(None, None), None);
-        assert_eq!(effective_resume_slot(Some(999), Some(123)), Some(123));
-        assert_eq!(effective_resume_slot(Some(1), Some(123)), Some(123));
-        assert_eq!(effective_resume_slot(None, Some(u64::MAX)), Some(u64::MAX));
+    fn minimum_resume_floor_can_advance_an_older_durable_tail() {
+        assert_eq!(effective_resume_slot(Some(100), None, None), Some(100));
+        assert_eq!(effective_resume_slot(None, None, None), None);
+        assert_eq!(effective_resume_slot(Some(999), Some(123), None), Some(123));
+        assert_eq!(
+            effective_resume_slot(Some(1), Some(123), Some(456)),
+            Some(456)
+        );
+        assert_eq!(effective_resume_slot(None, None, Some(456)), Some(456));
+        assert_eq!(
+            effective_resume_slot(Some(999), Some(123), Some(456)),
+            Some(456)
+        );
+        assert_eq!(
+            effective_resume_slot(None, Some(u64::MAX), Some(456)),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn strictly_parses_provider_replay_window_message() {
+        assert_eq!(
+            parse_replay_unavailable_message(
+                "broadcast from 432750943 is not available, last available: 432802559"
+            ),
+            Some(ReplayUnavailable {
+                requested_slot: 432750943,
+                available_slot: 432802559,
+            })
+        );
+        assert_eq!(
+            parse_replay_unavailable_message(&format!(
+                "broadcast from 0 is not available, last available: {}",
+                u64::MAX
+            )),
+            Some(ReplayUnavailable {
+                requested_slot: 0,
+                available_slot: u64::MAX,
+            })
+        );
+
+        for invalid in [
+            " broadcast from 1 is not available, last available: 2",
+            "broadcast from 1 is not available, last available: 2\n",
+            "broadcast from +1 is not available, last available: 2",
+            "broadcast from 1 is not available, last available: -2",
+            "broadcast from 1 is unavailable, last available: 2",
+            "broadcast from 1 is not available, last available: 2 extra",
+            "broadcast from 1 is not available, last available: 18446744073709551616",
+            "broadcast from 1 is not available, last available: ",
+        ] {
+            assert_eq!(parse_replay_unavailable_message(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn only_accepts_advancing_out_of_range_status_for_the_exact_request() {
+        let message = "broadcast from 100 is not available, last available: 120";
+        let expected = ReplayUnavailable {
+            requested_slot: 100,
+            available_slot: 120,
+        };
+        assert_eq!(
+            replay_unavailable_from_status(&Status::out_of_range(message), Some(100), 0, 0),
+            Some(expected)
+        );
+        assert_eq!(
+            replay_unavailable_from_status(&Status::internal(message), Some(100), 0, 0),
+            None
+        );
+        assert_eq!(
+            replay_unavailable_from_status(&Status::out_of_range(message), Some(99), 0, 0),
+            None
+        );
+        assert_eq!(
+            replay_unavailable_from_status(&Status::out_of_range(message), None, 0, 0),
+            None
+        );
+        assert_eq!(
+            replay_unavailable_from_status(&Status::out_of_range(message), Some(100), 1, 0),
+            None
+        );
+        assert_eq!(
+            replay_unavailable_from_status(&Status::out_of_range(message), Some(100), 0, 1),
+            None
+        );
+        assert_eq!(
+            replay_unavailable_from_status(
+                &Status::out_of_range("broadcast from 100 is not available, last available: 100"),
+                Some(100),
+                0,
+                0,
+            ),
+            None
+        );
     }
 
     #[test]
