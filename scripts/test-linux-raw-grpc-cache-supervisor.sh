@@ -104,6 +104,54 @@ assert_rotated() {
   test "$(cat "$(alert_file recorder_restarting journal_size)")" = "$successor_journal_size"
 }
 
+# Interrupted Rust seed creation leaves a hidden sibling of its .next-slot
+# target. Recovery removes only names that exactly match Rust's validated
+# generation-id/PID/nanosecond format.
+reset_rotation_fixture
+seed_generation_id=slot-00000000000000000123
+valid_seed_temp=$CACHE_ROOT/..next-$seed_generation_id.seed-1234-567890.tmp
+ignored_seed_lookalike=$CACHE_ROOT/..next-$seed_generation_id.seed-notrust.tmp
+mkdir -p "$valid_seed_temp/nested" "$ignored_seed_lookalike"
+printf '%s\n' partial > "$valid_seed_temp/nested/frame"
+recover_rotation_transaction
+test ! -e "$valid_seed_temp"
+test -d "$ignored_seed_lookalike"
+
+# A malformed name that reaches the seed-temp glob fails closed and is retained.
+reset_rotation_fixture
+malformed_seed_temp=$CACHE_ROOT/..next-$seed_generation_id.seed-not-a-number-567890.tmp
+mkdir "$malformed_seed_temp"
+if recover_rotation_transaction; then
+  echo "malformed orphan seed temp was accepted" >&2
+  exit 1
+fi
+test -d "$malformed_seed_temp"
+
+# A matching regular file is never recursively removed.
+reset_rotation_fixture
+file_seed_temp=$CACHE_ROOT/..next-$seed_generation_id.seed-1234-567890.tmp
+printf '%s\n' keep > "$file_seed_temp"
+if recover_rotation_transaction; then
+  echo "regular-file orphan seed temp was accepted" >&2
+  exit 1
+fi
+test -f "$file_seed_temp"
+test "$(cat "$file_seed_temp")" = keep
+
+# A matching symlink is rejected without touching its target.
+reset_rotation_fixture
+seed_symlink_target=$fixture_root/seed-symlink-target
+symlink_seed_temp=$CACHE_ROOT/..next-$seed_generation_id.seed-1234-567890.tmp
+mkdir "$seed_symlink_target"
+printf '%s\n' keep > "$seed_symlink_target/frame"
+ln -s "$seed_symlink_target" "$symlink_seed_temp"
+if recover_rotation_transaction; then
+  echo "symlink orphan seed temp was accepted" >&2
+  exit 1
+fi
+test -L "$symlink_seed_temp"
+test "$(cat "$seed_symlink_target/frame")" = keep
+
 # Normal ordering: seed first, publish active successor, expose sealed old last.
 reset_rotation_fixture
 rotate_active_generation
@@ -118,8 +166,11 @@ if rotate_active_generation; then
 fi
 test ! -e "$ACTIVE_GENERATION_DIR"
 test -z "$(find "$SEALED_GENERATION_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
+marker_seed_temp=$CACHE_ROOT/..next-slot-00000000000000000123.seed-4321-987654.tmp
+mkdir "$marker_seed_temp"
 unset BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT
 recover_rotation_transaction
+test ! -e "$marker_seed_temp"
 assert_rotated
 
 # Crash after successor publication: old remains hidden until recovery.

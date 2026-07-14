@@ -1003,7 +1003,58 @@ complete_rotation_transaction() {
   sync_path "$CACHE_ROOT"
 }
 
+cleanup_orphan_generation_seed_temps() {
+  orphan_seed_removed=false
+  for orphan_seed in "$CACHE_ROOT"/..next-slot-*.seed-*-*.tmp; do
+    # A broken symlink does not satisfy -e, so test -L before treating an
+    # unmatched glob as empty. Seed targets are always real directories.
+    if [ ! -e "$orphan_seed" ] && [ ! -L "$orphan_seed" ]; then
+      continue
+    fi
+    orphan_seed_name=${orphan_seed##*/}
+    orphan_seed_body=${orphan_seed_name#..next-}
+    orphan_seed_generation_id=${orphan_seed_body%%.seed-*}
+    orphan_seed_prefix=..next-$orphan_seed_generation_id.seed-
+    orphan_seed_suffix=${orphan_seed_name#"$orphan_seed_prefix"}
+    case "$orphan_seed_suffix" in
+      *.tmp) orphan_seed_numbers=${orphan_seed_suffix%.tmp} ;;
+      *) orphan_seed_numbers= ;;
+    esac
+    orphan_seed_pid=${orphan_seed_numbers%%-*}
+    orphan_seed_unique=${orphan_seed_numbers#*-}
+    if ! valid_generation_id "$orphan_seed_generation_id" \
+      || [ "$orphan_seed_suffix" = "$orphan_seed_name" ] \
+      || [ "$orphan_seed_unique" = "$orphan_seed_numbers" ]
+    then
+      echo "invalid orphan generation seed name: $orphan_seed" >&2
+      return 1
+    fi
+    case "$orphan_seed_pid" in
+      ''|*[!0-9]*)
+        echo "invalid orphan generation seed name: $orphan_seed" >&2
+        return 1
+        ;;
+    esac
+    case "$orphan_seed_unique" in
+      ''|*[!0-9]*)
+        echo "invalid orphan generation seed name: $orphan_seed" >&2
+        return 1
+        ;;
+    esac
+    if [ -L "$orphan_seed" ] || [ ! -d "$orphan_seed" ]; then
+      echo "invalid orphan generation seed directory: $orphan_seed" >&2
+      return 1
+    fi
+    rm -rf "$orphan_seed" || return 1
+    orphan_seed_removed=true
+  done
+  if [ "$orphan_seed_removed" = true ]; then
+    sync_path "$CACHE_ROOT" || return 1
+  fi
+}
+
 recover_rotation_transaction() {
+  cleanup_orphan_generation_seed_temps || return 1
   if [ ! -e "$GENERATION_ROTATION_MARKER" ]; then
     for orphan_next in "$CACHE_ROOT"/.next-slot-*; do
       [ -e "$orphan_next" ] || continue
