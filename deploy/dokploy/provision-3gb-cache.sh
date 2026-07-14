@@ -12,6 +12,7 @@ ROOT_RESERVE_BYTES=${BLOCKZILLA_ROOT_RESERVE_BYTES:-4294967296}
 CACHE_IMAGE=${BLOCKZILLA_CACHE_IMAGE:-/var/lib/blockzilla/raw-cache.ext4}
 MOUNT_PATH=${BLOCKZILLA_CACHE_MOUNT_PATH:-/mnt/blockzilla-raw}
 VOLUME_NAME=${BLOCKZILLA_RAW_VOLUME_NAME:-blockzilla-live-raw-data-external}
+CACHE_LABEL=bz-raw-cache-v1
 MARKER_NAME=.blockzilla-raw-volume
 MARKER_VALUE=blockzilla-raw-cache-v1
 DATA_DIR_NAME=grpc-cache
@@ -85,7 +86,9 @@ if [ ! -e "$CACHE_IMAGE" ]; then
   [ "$(stat -c %s "$image_tmp")" -eq "$CACHE_BYTES" ] || die "cache image has wrong size"
   allocated_bytes=$(( $(stat -c %b "$image_tmp") * 512 ))
   [ "$allocated_bytes" -ge "$CACHE_BYTES" ] || die "cache image is sparse"
-  mkfs.ext4 -F -m 0 -L blockzilla-raw-cache "$image_tmp" >/dev/null
+  # mke2fs discards preallocated regular-file extents by default. Disabling
+  # discard preserves the hard reservation on the host root filesystem.
+  mkfs.ext4 -F -m 0 -E nodiscard -L "$CACHE_LABEL" "$image_tmp" >/dev/null
   sync -f "$image_tmp"
   mv "$image_tmp" "$CACHE_IMAGE"
   trap - EXIT INT TERM HUP
@@ -98,7 +101,7 @@ fi
 allocated_bytes=$(( $(stat -c %b "$CACHE_IMAGE") * 512 ))
 [ "$allocated_bytes" -ge "$CACHE_BYTES" ] || die "cache image is sparse"
 [ "$(blkid -s TYPE -o value "$CACHE_IMAGE")" = ext4 ] || die "cache image is not ext4"
-[ "$(blkid -s LABEL -o value "$CACHE_IMAGE")" = blockzilla-raw-cache ] || \
+[ "$(blkid -s LABEL -o value "$CACHE_IMAGE")" = "$CACHE_LABEL" ] || \
   die "cache image has an unexpected filesystem label"
 
 fstab_line="$CACHE_IMAGE $MOUNT_PATH ext4 loop,nosuid,nodev,noexec,noatime 0 2"
