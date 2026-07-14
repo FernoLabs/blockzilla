@@ -75,6 +75,17 @@ pub struct SpoolLocation {
     pub frame_len: u64,
 }
 
+/// Exact logical-file growth and durable location of a prospective spool append.
+///
+/// The projection applies the same validation, serialization, and segment-rotation decision as
+/// [`SpoolWriter::append_and_sync`]. It does not write anything and remains valid only until the
+/// writer is otherwise mutated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpoolAppendProjection {
+    pub location: SpoolLocation,
+    pub additional_bytes: u64,
+}
+
 /// Proof that one raw event has crossed the local filesystem durability boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableSpoolRecord {
@@ -318,84 +329,59 @@ impl SpoolWriter {
         Ok(loaded)
     }
 
+    /// Project one append without changing the journal.
+    pub fn project_append(
+        &self,
+        metadata: &IngressRecordMeta,
+        payload: &[u8],
+    ) -> Result<SpoolAppendProjection> {
+        let prepared = self.prepare_append(metadata, payload)?;
+        if self.should_rotate(prepared.frame_len) {
+            let segment_id = self
+                .segment_id
+                .checked_add(1)
+                .context("spool segment id overflow")?;
+            let additional_bytes = SEGMENT_HEADER_LEN
+                .checked_add(prepared.frame_len)
+                .context("projected spool append length overflow")?;
+            Ok(SpoolAppendProjection {
+                location: SpoolLocation {
+                    segment_id,
+                    frame_offset: SEGMENT_HEADER_LEN,
+                    frame_len: prepared.frame_len,
+                },
+                additional_bytes,
+            })
+        } else {
+            Ok(SpoolAppendProjection {
+                location: SpoolLocation {
+                    segment_id: self.segment_id,
+                    frame_offset: self.segment_len,
+                    frame_len: prepared.frame_len,
+                },
+                additional_bytes: prepared.frame_len,
+            })
+        }
+    }
+
     /// Append one complete event and sync it before returning a durability token.
     pub fn append_and_sync(
         &mut self,
         metadata: IngressRecordMeta,
         payload: &[u8],
     ) -> Result<DurableSpoolRecord> {
-        ensure!(
-            !self.poisoned,
-            "spool writer is poisoned; reopen it to recover before appending"
-        );
-        ensure!(
-            metadata.cluster_id == self.identity.cluster_id,
-            "metadata cluster id {:?} does not match spool cluster {:?}",
-            metadata.cluster_id,
-            self.identity.cluster_id
-        );
-        ensure!(
-            metadata.observation.origin_node_id == self.identity.origin_node_id,
-            "metadata origin node id {:?} does not match spool origin {:?}",
-            metadata.observation.origin_node_id,
-            self.identity.origin_node_id
-        );
-        ensure!(
-            metadata.source_id == self.identity.source_id,
-            "metadata source id {:?} does not match spool source {:?}",
-            metadata.source_id,
-            self.identity.source_id
-        );
-        ensure!(
-            metadata.observation.journal_id == self.identity.journal_id,
-            "metadata journal id does not match spool journal"
-        );
-        ensure!(
-            metadata.payload_len == payload.len() as u64,
-            "metadata payload length {} does not match actual payload length {}",
-            metadata.payload_len,
-            payload.len()
-        );
-        ensure!(
-            metadata.payload_len <= self.options.max_record_bytes,
-            "ingress record {} bytes exceeds configured maximum {}",
-            metadata.payload_len,
-            self.options.max_record_bytes
-        );
-        ensure!(
-            metadata.content_digest
-                == compute_content_digest(
-                    &metadata.cluster_id,
-                    &metadata.logical_key,
-                    metadata.payload_format_version,
-                    payload,
-                ),
-            "metadata content digest does not match canonical payload digest"
-        );
-        if let Some(previous) = self.last_record.as_ref() {
-            ensure_observation_follows(&previous.metadata, &metadata)?;
-        }
-        let metadata_bytes = serde_json::to_vec(&metadata).context("encode ingress metadata")?;
-        ensure!(
-            metadata_bytes.len() <= MAX_METADATA_BYTES,
-            "ingress metadata exceeds {} bytes",
-            MAX_METADATA_BYTES
-        );
-        let metadata_len =
-            u32::try_from(metadata_bytes.len()).context("ingress metadata length exceeds u32")?;
-        let frame_len = FRAME_FIXED_LEN
-            .checked_add(metadata_bytes.len() as u64)
-            .and_then(|len| len.checked_add(payload.len() as u64))
-            .and_then(|len| len.checked_add(FRAME_TRAILER_LEN))
-            .context("spool frame length overflow")?;
+        let prepared = self.prepare_append(&metadata, payload)?;
+        let PreparedSpoolAppend {
+            metadata_bytes,
+            metadata_len,
+            frame_len,
+        } = prepared;
 
         // From this point any error is ambiguous: bytes may have reached the file or stable
         // storage. Keep the writer fail-stop until the journal is reopened and recovered.
         self.poisoned = true;
 
-        if self.segment_len > SEGMENT_HEADER_LEN
-            && self.segment_len.saturating_add(frame_len) > self.options.segment_target_bytes
-        {
+        if self.should_rotate(frame_len) {
             self.rotate()?;
         }
 
@@ -462,6 +448,87 @@ impl SpoolWriter {
         Ok(durable)
     }
 
+    fn prepare_append(
+        &self,
+        metadata: &IngressRecordMeta,
+        payload: &[u8],
+    ) -> Result<PreparedSpoolAppend> {
+        ensure!(
+            !self.poisoned,
+            "spool writer is poisoned; reopen it to recover before appending"
+        );
+        ensure!(
+            metadata.cluster_id == self.identity.cluster_id,
+            "metadata cluster id {:?} does not match spool cluster {:?}",
+            metadata.cluster_id,
+            self.identity.cluster_id
+        );
+        ensure!(
+            metadata.observation.origin_node_id == self.identity.origin_node_id,
+            "metadata origin node id {:?} does not match spool origin {:?}",
+            metadata.observation.origin_node_id,
+            self.identity.origin_node_id
+        );
+        ensure!(
+            metadata.source_id == self.identity.source_id,
+            "metadata source id {:?} does not match spool source {:?}",
+            metadata.source_id,
+            self.identity.source_id
+        );
+        ensure!(
+            metadata.observation.journal_id == self.identity.journal_id,
+            "metadata journal id does not match spool journal"
+        );
+        ensure!(
+            metadata.payload_len == payload.len() as u64,
+            "metadata payload length {} does not match actual payload length {}",
+            metadata.payload_len,
+            payload.len()
+        );
+        ensure!(
+            metadata.payload_len <= self.options.max_record_bytes,
+            "ingress record {} bytes exceeds configured maximum {}",
+            metadata.payload_len,
+            self.options.max_record_bytes
+        );
+        ensure!(
+            metadata.content_digest
+                == compute_content_digest(
+                    &metadata.cluster_id,
+                    &metadata.logical_key,
+                    metadata.payload_format_version,
+                    payload,
+                ),
+            "metadata content digest does not match canonical payload digest"
+        );
+        if let Some(previous) = self.last_record.as_ref() {
+            ensure_observation_follows(&previous.metadata, &metadata)?;
+        }
+        let metadata_bytes = serde_json::to_vec(&metadata).context("encode ingress metadata")?;
+        ensure!(
+            metadata_bytes.len() <= MAX_METADATA_BYTES,
+            "ingress metadata exceeds {} bytes",
+            MAX_METADATA_BYTES
+        );
+        let metadata_len =
+            u32::try_from(metadata_bytes.len()).context("ingress metadata length exceeds u32")?;
+        let frame_len = FRAME_FIXED_LEN
+            .checked_add(metadata_bytes.len() as u64)
+            .and_then(|len| len.checked_add(payload.len() as u64))
+            .and_then(|len| len.checked_add(FRAME_TRAILER_LEN))
+            .context("spool frame length overflow")?;
+        Ok(PreparedSpoolAppend {
+            metadata_bytes,
+            metadata_len,
+            frame_len,
+        })
+    }
+
+    fn should_rotate(&self, frame_len: u64) -> bool {
+        self.segment_len > SEGMENT_HEADER_LEN
+            && self.segment_len.saturating_add(frame_len) > self.options.segment_target_bytes
+    }
+
     fn rotate(&mut self) -> Result<()> {
         self.writer.flush().context("flush spool before rotation")?;
         self.writer
@@ -487,6 +554,13 @@ impl SpoolWriter {
         }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+struct PreparedSpoolAppend {
+    metadata_bytes: Vec<u8>,
+    metadata_len: u32,
+    frame_len: u64,
 }
 
 fn open_and_recover_segment(
@@ -1210,6 +1284,47 @@ mod tests {
             second_location.frame_offset,
             first_location.frame_offset + first_location.frame_len
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn append_projection_matches_same_segment_and_rotation_growth() {
+        let root = temp_root("append-projection");
+        let options = SpoolOptions {
+            segment_target_bytes: 200,
+            max_record_bytes: 1024,
+        };
+        let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+
+        let first_metadata = metadata(1, &[1; 64]);
+        let first = spool.project_append(&first_metadata, &[1; 64]).unwrap();
+        let segment_zero_before = fs::metadata(segment_path(spool.journal_dir(), 0))
+            .unwrap()
+            .len();
+        let first_durable = spool.append_and_sync(first_metadata, &[1; 64]).unwrap();
+        let segment_zero_after = fs::metadata(segment_path(spool.journal_dir(), 0))
+            .unwrap()
+            .len();
+        assert_eq!(first.location, first_durable.location());
+        assert_eq!(
+            segment_zero_after - segment_zero_before,
+            first.additional_bytes
+        );
+
+        let second_metadata = metadata(2, &[2; 64]);
+        let second = spool.project_append(&second_metadata, &[2; 64]).unwrap();
+        assert_eq!(second.location.segment_id, 1);
+        assert_eq!(second.location.frame_offset, SEGMENT_HEADER_LEN);
+        let second_durable = spool.append_and_sync(second_metadata, &[2; 64]).unwrap();
+        assert_eq!(second.location, second_durable.location());
+        assert_eq!(
+            fs::metadata(segment_path(spool.journal_dir(), 1))
+                .unwrap()
+                .len(),
+            second.additional_bytes
+        );
+
+        drop(spool);
         fs::remove_dir_all(root).unwrap();
     }
 

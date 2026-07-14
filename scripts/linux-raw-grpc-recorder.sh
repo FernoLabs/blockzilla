@@ -26,6 +26,28 @@ CLUSTER_ID=${BLOCKZILLA_RAW_CLUSTER_ID:-solana-mainnet}
 ORIGIN_NODE_ID=${BLOCKZILLA_RAW_ORIGIN_NODE_ID:-hetzner-dokploy-01}
 SOURCE_ID=${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-backup}
 
+# The legacy mode keeps one ever-growing dedicated-volume spool. The bounded
+# cache mode stores one live generation at a stable path and exposes immutable
+# sealed generations only after a seeded successor has become active.
+CACHE_MODE=${BLOCKZILLA_RAW_CACHE_MODE:-legacy}
+CACHE_ROOT=${BLOCKZILLA_RAW_CACHE_ROOT:-/data/grpc-cache}
+MAX_GENERATION_BYTES=${BLOCKZILLA_RAW_MAX_GENERATION_BYTES:-402653184}
+GENERATION_BACKLOG_WARN_COUNT=${BLOCKZILLA_RAW_GENERATION_BACKLOG_WARN_COUNT:-2}
+GENERATION_UPLOAD_RETRY_SECS=${BLOCKZILLA_RAW_GENERATION_UPLOAD_RETRY_SECS:-60}
+GENERATION_UPLOADER_BIN=${BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN:-/usr/local/bin/blockzilla-s3-upload}
+GENERATION_CREDENTIALS_FILE=${BLOCKZILLA_B2_CREDENTIALS_FILE:-/run/secrets/backblaze_credentials}
+GENERATION_REMOTE_PREFIX=${BLOCKZILLA_B2_REMOTE_PREFIX:-grpc-raw/v1}
+GENERATION_PYTHON_BIN=${BLOCKZILLA_RAW_GENERATION_PYTHON_BIN:-python3}
+
+ACTIVE_GENERATION_DIR=$CACHE_ROOT/active
+SEALED_GENERATION_DIR=$CACHE_ROOT/sealed
+GENERATION_RECEIPT_DIR=${BLOCKZILLA_RAW_CACHE_RECEIPT_DIR:-$CACHE_ROOT/receipts}
+GENERATION_MONITORING_DIR=$CACHE_ROOT/monitoring
+GENERATION_ROTATION_MARKER=$CACHE_ROOT/.rotation
+if [ "$CACHE_MODE" = b2-generations ]; then
+  OUTPUT_DIR=$ACTIVE_GENERATION_DIR
+fi
+
 # Telegram is deliberately outbound-only. The token is read from a file and fed
 # to curl through standard input, never through curl's argument vector.
 TELEGRAM_ENABLED=${BLOCKZILLA_TELEGRAM_ENABLED:-false}
@@ -49,12 +71,35 @@ JOURNAL_FILE=$OUTPUT_DIR/raw-blocks.jsonl
 VOLUME_MARKER=${BLOCKZILLA_RAW_VOLUME_MARKER:-/data/.blockzilla-raw-volume}
 ALERT_STATE_DIR=$STATE_DIR/blockzilla-raw-alerts
 CHILD_REPORT_FILE=$STATE_DIR/blockzilla-raw-recorder.child.json
-RESUME_COVERAGE_EVENT_DIR=$OUTPUT_DIR/.monitoring
+if [ "$CACHE_MODE" = b2-generations ]; then
+  RESUME_COVERAGE_EVENT_DIR=$GENERATION_MONITORING_DIR
+else
+  RESUME_COVERAGE_EVENT_DIR=$OUTPUT_DIR/.monitoring
+fi
 RESUME_COVERAGE_EVENT_FILE=$RESUME_COVERAGE_EVENT_DIR/resume-coverage-warning.json
 RESUME_COVERAGE_DELIVERED_FILE=$RESUME_COVERAGE_EVENT_DIR/resume-coverage-warning.delivered
 ACTIVE_RESUME_COVERAGE_EVENT_FILE=$RESUME_COVERAGE_EVENT_FILE
 
 validate_data_paths() {
+  case "$CACHE_MODE" in
+    legacy|b2-generations) ;;
+    *)
+      echo "BLOCKZILLA_RAW_CACHE_MODE must be legacy or b2-generations" >&2
+      return 1
+      ;;
+  esac
+  if [ "$CACHE_MODE" = b2-generations ] \
+    && [ "$CACHE_ROOT" != /data/grpc-cache ]
+  then
+    echo "bounded cache root must be /data/grpc-cache" >&2
+    return 1
+  fi
+  if [ "$CACHE_MODE" = b2-generations ] \
+    && [ "$VOLUME_MARKER" != /data/.blockzilla-raw-volume ]
+  then
+    echo "bounded cache marker must be /data/.blockzilla-raw-volume" >&2
+    return 1
+  fi
   case "$OUTPUT_DIR" in
     /data|/data/*) ;;
     *)
@@ -110,16 +155,23 @@ validate_data_volume() {
     echo "raw recorder volume marker is on a different filesystem from /data" >&2
     return 1
   fi
-  IFS= read -r volume_expected_device < "$VOLUME_MARKER" || return 1
-  case "$volume_expected_device" in
-    ''|*[!0-9]*)
-      echo "raw recorder volume marker does not contain a filesystem device id" >&2
+  IFS= read -r volume_marker_value < "$VOLUME_MARKER" || return 1
+  if [ "$CACHE_MODE" = b2-generations ]; then
+    if [ "$volume_marker_value" != blockzilla-raw-cache-v1 ]; then
+      echo "raw cache marker does not contain the stable cache identity" >&2
       return 1
-      ;;
-  esac
-  if [ "$volume_expected_device" != "$volume_data_device" ]; then
-    echo "raw recorder filesystem device differs from its fail-closed marker" >&2
-    return 1
+    fi
+  else
+    case "$volume_marker_value" in
+      ''|*[!0-9]*)
+        echo "raw recorder volume marker does not contain a filesystem device id" >&2
+        return 1
+        ;;
+    esac
+    if [ "$volume_marker_value" != "$volume_data_device" ]; then
+      echo "raw recorder filesystem device differs from its fail-closed marker" >&2
+      return 1
+    fi
   fi
 
   if [ -e "$OUTPUT_DIR" ]; then
@@ -448,7 +500,10 @@ retry_pending_alerts() {
     disk_check_failed \
     disk_critical \
     disk_warning \
-    primary_sync_stale
+    primary_sync_stale \
+    generation_rotation_failed \
+    generation_upload_failed \
+    generation_backlog
   do
     retry_pending_alert "$retry_key"
   done
@@ -508,6 +563,27 @@ remember_alert_journal_floor() {
     fi
   fi
   return 0
+}
+
+reset_alert_journal_floor() {
+  reset_key=$1
+  reset_active=$(alert_file "$reset_key" active)
+  [ -e "$reset_active" ] || return 0
+  reset_floor_file=$(alert_file "$reset_key" journal_size)
+  reset_floor_size=$(journal_size 2>/dev/null || printf '%s\n' 0)
+  reset_floor_tmp=$reset_floor_file.$$
+  if ! printf '%s\n' "$reset_floor_size" > "$reset_floor_tmp" \
+    || ! mv -f "$reset_floor_tmp" "$reset_floor_file"
+  then
+    echo "$(timestamp) telegram_alert journal_floor_reset_failed key=$reset_key" >&2
+    rm -f "$reset_floor_tmp" 2>/dev/null || true
+  fi
+  return 0
+}
+
+reset_rotated_journal_incident_floors() {
+  reset_alert_journal_floor grpc_stale
+  reset_alert_journal_floor recorder_restarting
 }
 
 clear_alert_after_journal_growth() {
@@ -575,8 +651,13 @@ update_disk_alerts() {
   elif [ "$disk_free_bytes" -lt "$DISK_WARN_FREE_BYTES" ]; then
     clear_alert disk_critical \
       "Free space recovered above the hard floor plus its hysteresis margin."
+    if [ "$CACHE_MODE" = b2-generations ]; then
+      disk_warning_detail="Only sealed generations with a fully verified remote receipt are removed automatically; active or unverified data is retained."
+    else
+      disk_warning_detail="No automatic WAL deletion is enabled."
+    fi
     raise_alert disk_warning WARNING \
-      "Free bytes=$disk_free_bytes, below warning threshold=$DISK_WARN_FREE_BYTES. No automatic WAL deletion is enabled."
+      "Free bytes=$disk_free_bytes, below warning threshold=$DISK_WARN_FREE_BYTES. $disk_warning_detail"
   elif [ -e "$disk_warning_active" ] \
     && [ "$disk_free_bytes" -lt "$DISK_WARNING_RECOVERY_BYTES" ]
   then
@@ -766,6 +847,536 @@ start_child_monitor() {
   monitor_pid=$!
 }
 
+sync_path() {
+  sync -f "$1" 2>/dev/null
+}
+
+cache_real_directory() {
+  cache_path=$1
+  if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
+    echo "cache path is not a real directory: $cache_path" >&2
+    return 1
+  fi
+  cache_real=$(readlink -f "$cache_path") || return 1
+  cache_root_real=$(readlink -f "$CACHE_ROOT") || return 1
+  case "$cache_real" in
+    "$cache_root_real"|"$cache_root_real"/*) ;;
+    *)
+      echo "cache path resolves outside cache root: $cache_path" >&2
+      return 1
+      ;;
+  esac
+  cache_device=$(stat -c %d "$cache_path") || return 1
+  data_device=$(stat -c %d /data) || return 1
+  if [ "$cache_device" != "$data_device" ]; then
+    echo "cache path is not on the recorder filesystem: $cache_path" >&2
+    return 1
+  fi
+}
+
+ensure_cache_child_directory() {
+  cache_child=$1
+  if [ -e "$cache_child" ]; then
+    cache_real_directory "$cache_child"
+    return $?
+  fi
+  mkdir "$cache_child" || return 1
+  sync_path "$CACHE_ROOT" || return 1
+  cache_real_directory "$cache_child"
+}
+
+valid_generation_id() {
+  generation_id_value=$1
+  case "$generation_id_value" in
+    slot-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+generation_id_from_verify_report() {
+  verify_report=$1
+  verified_last_slot=$(sed -n \
+    's/^[[:space:]]*"last_slot":[[:space:]]*\([0-9][0-9]*\),*$/\1/p' \
+    "$verify_report" | tail -n 1)
+  case "$verified_last_slot" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  padded_slot=$(printf '%020d' "$verified_last_slot") || return 1
+  GENERATION_ID=slot-$padded_slot
+  valid_generation_id "$GENERATION_ID"
+}
+
+write_rotation_marker() {
+  marker_generation_id=$1
+  valid_generation_id "$marker_generation_id" || return 1
+  marker_tmp=$GENERATION_ROTATION_MARKER.$$
+  printf '%s\n' "$marker_generation_id" > "$marker_tmp" || return 1
+  sync_path "$marker_tmp" || return 1
+  mv -f "$marker_tmp" "$GENERATION_ROTATION_MARKER" || return 1
+  sync_path "$CACHE_ROOT"
+}
+
+read_rotation_marker() {
+  if [ -L "$GENERATION_ROTATION_MARKER" ] \
+    || [ ! -f "$GENERATION_ROTATION_MARKER" ] \
+    || [ ! -r "$GENERATION_ROTATION_MARKER" ]
+  then
+    return 1
+  fi
+  marker_bytes=$(wc -c < "$GENERATION_ROTATION_MARKER" | tr -d ' ')
+  case "$marker_bytes" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  [ "$marker_bytes" -le 128 ] || return 1
+  IFS= read -r ROTATION_GENERATION_ID < "$GENERATION_ROTATION_MARKER" || return 1
+  valid_generation_id "$ROTATION_GENERATION_ID"
+}
+
+rotation_failpoint() {
+  [ "${BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT:-}" != "$1" ]
+}
+
+complete_rotation_transaction() {
+  rotation_id=$1
+  valid_generation_id "$rotation_id" || return 1
+  rotation_next=$CACHE_ROOT/.next-$rotation_id
+  rotation_old=$CACHE_ROOT/.sealed-$rotation_id
+  rotation_target=$SEALED_GENERATION_DIR/$rotation_id
+
+  if [ -e "$rotation_target" ]; then
+    if [ ! -d "$ACTIVE_GENERATION_DIR" ] \
+      || [ -e "$rotation_next" ] \
+      || [ -e "$rotation_old" ]
+    then
+      echo "inconsistent completed cache rotation for $rotation_id" >&2
+      return 1
+    fi
+  else
+    if [ ! -e "$rotation_old" ]; then
+      if [ ! -d "$ACTIVE_GENERATION_DIR" ] \
+        || [ -L "$ACTIVE_GENERATION_DIR" ] \
+        || [ ! -d "$rotation_next" ] \
+        || [ -L "$rotation_next" ]
+      then
+        echo "cache rotation lacks its old or successor generation for $rotation_id" >&2
+        return 1
+      fi
+      mv "$ACTIVE_GENERATION_DIR" "$rotation_old" || return 1
+      sync_path "$CACHE_ROOT" || return 1
+      rotation_failpoint after_old_hidden || return 1
+    fi
+
+    if [ ! -e "$ACTIVE_GENERATION_DIR" ]; then
+      if [ ! -d "$rotation_old" ] \
+        || [ -L "$rotation_old" ] \
+        || [ ! -d "$rotation_next" ] \
+        || [ -L "$rotation_next" ]
+      then
+        echo "cache rotation cannot publish its successor for $rotation_id" >&2
+        return 1
+      fi
+      mv "$rotation_next" "$ACTIVE_GENERATION_DIR" || return 1
+      sync_path "$CACHE_ROOT" || return 1
+      rotation_failpoint after_successor_active || return 1
+    elif [ -e "$rotation_next" ]; then
+      echo "cache rotation has both active and pending successor for $rotation_id" >&2
+      return 1
+    fi
+
+    if [ ! -d "$rotation_old" ] || [ -L "$rotation_old" ]; then
+      echo "cache rotation old generation is invalid for $rotation_id" >&2
+      return 1
+    fi
+    # This is the first point at which the uploader can discover the sealed
+    # generation. The active successor is already durable and visible.
+    mv "$rotation_old" "$rotation_target" || return 1
+    sync_path "$SEALED_GENERATION_DIR" || return 1
+    sync_path "$CACHE_ROOT" || return 1
+    rotation_failpoint after_sealed_visible || return 1
+  fi
+
+  # The successor starts with one copied durable row, so its journal size is
+  # smaller than the old generation. Reset active incident floors to that new
+  # inode/size so the next append can produce the recovery transition.
+  reset_rotated_journal_incident_floors
+  rm -f "$GENERATION_ROTATION_MARKER" || return 1
+  sync_path "$CACHE_ROOT"
+}
+
+recover_rotation_transaction() {
+  if [ ! -e "$GENERATION_ROTATION_MARKER" ]; then
+    for orphan_next in "$CACHE_ROOT"/.next-slot-*; do
+      [ -e "$orphan_next" ] || continue
+      if [ -L "$orphan_next" ] || [ ! -d "$orphan_next" ]; then
+        echo "invalid orphan cache successor: $orphan_next" >&2
+        return 1
+      fi
+      rm -rf "$orphan_next" || return 1
+    done
+    for orphan_old in "$CACHE_ROOT"/.sealed-slot-*; do
+      [ -e "$orphan_old" ] || continue
+      echo "hidden sealed generation lacks a rotation marker: $orphan_old" >&2
+      return 1
+    done
+    sync_path "$CACHE_ROOT" || return 1
+    return 0
+  fi
+  read_rotation_marker || {
+    echo "cache rotation marker is invalid" >&2
+    return 1
+  }
+  complete_rotation_transaction "$ROTATION_GENERATION_ID"
+}
+
+verify_generation() {
+  generation_dir=$1
+  generation_report=$2
+  "$BIN" verify-grpc-raw-poh \
+    --output-dir "$generation_dir" \
+    --max-record-bytes "$MAX_RECORD_BYTES" \
+    --min-records 1 > "$generation_report"
+}
+
+rotate_active_generation() {
+  verify_report=$CACHE_ROOT/.rotation-verify.$$.json
+  seed_report=$CACHE_ROOT/.rotation-seed.$$.json
+  rm -f "$verify_report" "$seed_report"
+  if ! verify_generation "$ACTIVE_GENERATION_DIR" "$verify_report" \
+    || ! generation_id_from_verify_report "$verify_report"
+  then
+    rm -f "$verify_report" "$seed_report"
+    return 1
+  fi
+  rotation_id=$GENERATION_ID
+  rotation_next=$CACHE_ROOT/.next-$rotation_id
+  rotation_old=$CACHE_ROOT/.sealed-$rotation_id
+  rotation_target=$SEALED_GENERATION_DIR/$rotation_id
+  if [ -e "$rotation_next" ] || [ -e "$rotation_old" ] \
+    || [ -e "$rotation_target" ] \
+    || [ -e "$GENERATION_RECEIPT_DIR/$rotation_id.json" ] \
+    || [ -e "$GENERATION_ROTATION_MARKER" ]
+  then
+    echo "cache generation rotation target already exists for $rotation_id" >&2
+    rm -f "$verify_report" "$seed_report"
+    return 1
+  fi
+  if ! "$BIN" seed-grpc-raw-generation \
+    --source-dir "$ACTIVE_GENERATION_DIR" \
+    --target-dir "$rotation_next" \
+    --max-record-bytes "$MAX_RECORD_BYTES" > "$seed_report"
+  then
+    rm -f "$verify_report" "$seed_report"
+    rm -rf "$rotation_next"
+    return 1
+  fi
+  seeded_slot=$(sed -n \
+    's/^[[:space:]]*"seeded_slot":[[:space:]]*\([0-9][0-9]*\),*$/\1/p' \
+    "$seed_report" | tail -n 1)
+  if [ "$seeded_slot" != "$verified_last_slot" ] \
+    || ! verify_generation "$rotation_next" "$seed_report.verified"
+  then
+    echo "seeded cache generation does not preserve the verified durable tail" >&2
+    rm -f "$verify_report" "$seed_report" "$seed_report.verified"
+    rm -rf "$rotation_next"
+    return 1
+  fi
+  rm -f "$verify_report" "$seed_report" "$seed_report.verified"
+  write_rotation_marker "$rotation_id" || return 1
+  complete_rotation_transaction "$rotation_id"
+}
+
+prepare_cache_layout() {
+  if [ -e "$CACHE_ROOT" ]; then
+    if [ -L "$CACHE_ROOT" ] || [ ! -d "$CACHE_ROOT" ]; then
+      echo "raw cache root is not a real directory" >&2
+      return 1
+    fi
+  else
+    mkdir "$CACHE_ROOT" || return 1
+    sync_path /data || return 1
+  fi
+  cache_real_directory "$CACHE_ROOT" || return 1
+  if [ "$GENERATION_RECEIPT_DIR" != "$CACHE_ROOT/receipts" ]; then
+    echo "BLOCKZILLA_RAW_CACHE_RECEIPT_DIR must be $CACHE_ROOT/receipts" >&2
+    return 1
+  fi
+  ensure_cache_child_directory "$SEALED_GENERATION_DIR" || return 1
+  ensure_cache_child_directory "$GENERATION_RECEIPT_DIR" || return 1
+  ensure_cache_child_directory "$GENERATION_MONITORING_DIR" || return 1
+  recover_rotation_transaction || return 1
+  if [ ! -e "$ACTIVE_GENERATION_DIR" ]; then
+    mkdir "$ACTIVE_GENERATION_DIR" || return 1
+    sync_path "$CACHE_ROOT" || return 1
+  fi
+  cache_real_directory "$ACTIVE_GENERATION_DIR" || return 1
+}
+
+normalized_generation_base_prefix() {
+  normalized_prefix=$GENERATION_REMOTE_PREFIX
+  while [ "${normalized_prefix%/}" != "$normalized_prefix" ]; do
+    normalized_prefix=${normalized_prefix%/}
+  done
+  case "$normalized_prefix" in
+    ''|.|..|/*|*//*|*/../*|../*|*/..|*/.|*'/./'*|./*) return 1 ;;
+  esac
+  printf '%s\n' "$normalized_prefix"
+}
+
+generation_remote_prefix() {
+  prefix_generation_id=$1
+  valid_generation_id "$prefix_generation_id" || return 1
+  prefix_base=$(normalized_generation_base_prefix) || return 1
+  case "$CLUSTER_ID:$ORIGIN_NODE_ID" in
+    *[!A-Za-z0-9._:-]*) return 1 ;;
+  esac
+  printf '%s/%s/%s/%s\n' \
+    "$prefix_base" "$CLUSTER_ID" "$ORIGIN_NODE_ID" "$prefix_generation_id"
+}
+
+load_upload_chain() {
+  UPLOAD_CHAIN_ID=
+  UPLOAD_CHAIN_HASH=
+  chain_file=$GENERATION_RECEIPT_DIR/.chain
+  [ -e "$chain_file" ] || return 0
+  if [ -L "$chain_file" ] || [ ! -f "$chain_file" ] || [ ! -r "$chain_file" ]; then
+    return 1
+  fi
+  IFS=' ' read -r UPLOAD_CHAIN_ID UPLOAD_CHAIN_HASH chain_extra < "$chain_file" || return 1
+  valid_generation_id "$UPLOAD_CHAIN_ID" || return 1
+  case "$UPLOAD_CHAIN_HASH" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 1 ;;
+  esac
+  [ -z "${chain_extra:-}" ]
+}
+
+validate_generation_receipt() {
+  receipt_path=$1
+  receipt_generation_id=$2
+  receipt_remote_prefix=$3
+  receipt_expected_predecessor=$4
+  if [ -L "$receipt_path" ] || [ ! -f "$receipt_path" ] || [ ! -r "$receipt_path" ]; then
+    return 1
+  fi
+  receipt_bytes=$(wc -c < "$receipt_path" | tr -d ' ')
+  case "$receipt_bytes" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  [ "$receipt_bytes" -le 1048576 ] || return 1
+  "$GENERATION_PYTHON_BIN" - "$receipt_path" "$receipt_generation_id" \
+    "$receipt_remote_prefix" "$receipt_expected_predecessor" <<'PY'
+import json
+import re
+import sys
+
+try:
+    path, generation_id, prefix, expected_predecessor = sys.argv[1:]
+    with open(path, "r", encoding="utf-8") as stream:
+        receipt = json.load(stream)
+    hex64 = re.compile(r"[0-9a-f]{64}").fullmatch
+    def version_id(value):
+        return (
+            type(value) is str
+            and 0 < len(value.encode("utf-8")) <= 1024
+            and not any(ord(character) < 0x20 or ord(character) == 0x7f for character in value)
+        )
+    assert type(receipt.get("schema_version")) is int and receipt["schema_version"] == 1
+    assert receipt.get("generation_id") == generation_id
+    assert receipt.get("remote_prefix") == prefix
+    assert receipt.get("manifest_key") == prefix + "/manifest.json"
+    assert receipt.get("commit_key") == prefix + "/_COMMITTED"
+    assert hex64(receipt.get("manifest_sha256", ""))
+    assert hex64(receipt.get("commit_sha256", ""))
+    assert version_id(receipt.get("manifest_version_id"))
+    assert version_id(receipt.get("commit_version_id"))
+    assert type(receipt.get("file_count")) is int and receipt["file_count"] >= 1
+    assert type(receipt.get("total_bytes")) is int and receipt["total_bytes"] > 0
+    assert type(receipt.get("verified_unix_secs")) is int and receipt["verified_unix_secs"] > 0
+    predecessor = receipt.get("predecessor_manifest_sha256")
+    if expected_predecessor == "-":
+        assert predecessor is None
+    elif expected_predecessor != "*":
+        assert predecessor == expected_predecessor
+    if predecessor is not None:
+        assert hex64(predecessor)
+except (AssertionError, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+}
+
+receipt_manifest_hash() {
+  "$GENERATION_PYTHON_BIN" - "$1" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as stream:
+    print(json.load(stream)["manifest_sha256"])
+PY
+}
+
+publish_upload_chain() {
+  chain_generation_id=$1
+  chain_manifest_hash=$2
+  chain_file=$GENERATION_RECEIPT_DIR/.chain
+  chain_tmp=$chain_file.$$
+  printf '%s %s\n' "$chain_generation_id" "$chain_manifest_hash" > "$chain_tmp" || return 1
+  sync_path "$chain_tmp" || return 1
+  mv -f "$chain_tmp" "$chain_file" || return 1
+  sync_path "$GENERATION_RECEIPT_DIR"
+}
+
+finalize_uploaded_generation() {
+  finalized_dir=$1
+  finalized_id=$2
+  finalized_prefix=$3
+  finalized_receipt=$4
+  load_upload_chain || return 1
+  if [ "$UPLOAD_CHAIN_ID" = "$finalized_id" ]; then
+    expected_predecessor=*
+  elif [ -n "$UPLOAD_CHAIN_HASH" ]; then
+    expected_predecessor=$UPLOAD_CHAIN_HASH
+  else
+    expected_predecessor=-
+  fi
+  validate_generation_receipt "$finalized_receipt" "$finalized_id" \
+    "$finalized_prefix" "$expected_predecessor" || return 1
+  finalized_hash=$(receipt_manifest_hash "$finalized_receipt") || return 1
+  if [ "$UPLOAD_CHAIN_ID" = "$finalized_id" ]; then
+    [ "$UPLOAD_CHAIN_HASH" = "$finalized_hash" ] || return 1
+  else
+    publish_upload_chain "$finalized_id" "$finalized_hash" || return 1
+  fi
+  case "$finalized_dir" in
+    "$SEALED_GENERATION_DIR"/slot-*) ;;
+    *) return 1 ;;
+  esac
+  [ -d "$finalized_dir" ] && [ ! -L "$finalized_dir" ] || return 1
+  rm -rf "$finalized_dir" || return 1
+  sync_path "$SEALED_GENERATION_DIR"
+}
+
+first_sealed_generation() {
+  FIRST_SEALED_GENERATION=
+  for sealed_candidate in "$SEALED_GENERATION_DIR"/slot-*; do
+    [ -e "$sealed_candidate" ] || continue
+    sealed_id=${sealed_candidate##*/}
+    valid_generation_id "$sealed_id" || return 1
+    if [ -L "$sealed_candidate" ] || [ ! -d "$sealed_candidate" ]; then
+      return 1
+    fi
+    FIRST_SEALED_GENERATION=$sealed_candidate
+    return 0
+  done
+  return 0
+}
+
+sealed_generation_count() {
+  sealed_count=0
+  for sealed_candidate in "$SEALED_GENERATION_DIR"/slot-*; do
+    [ -e "$sealed_candidate" ] || continue
+    [ -d "$sealed_candidate" ] && [ ! -L "$sealed_candidate" ] || return 1
+    sealed_count=$((sealed_count + 1))
+  done
+  printf '%s\n' "$sealed_count"
+}
+
+upload_one_generation() {
+  # A rotation marker means the old generation may be visible but the rename
+  # transaction is not yet committed. Recovery owns it until the marker clears.
+  [ ! -e "$GENERATION_ROTATION_MARKER" ] || return 75
+  first_sealed_generation || return 1
+  [ -n "$FIRST_SEALED_GENERATION" ] || return 0
+  upload_dir=$FIRST_SEALED_GENERATION
+  upload_id=${upload_dir##*/}
+  upload_prefix=$(generation_remote_prefix "$upload_id") || return 1
+  upload_receipt=$GENERATION_RECEIPT_DIR/$upload_id.json
+  load_upload_chain || return 1
+  if [ "$UPLOAD_CHAIN_ID" = "$upload_id" ]; then
+    existing_expected=*
+  elif [ -n "$UPLOAD_CHAIN_HASH" ]; then
+    existing_expected=$UPLOAD_CHAIN_HASH
+  else
+    existing_expected=-
+  fi
+  if validate_generation_receipt "$upload_receipt" "$upload_id" \
+    "$upload_prefix" "$existing_expected" 2>/dev/null
+  then
+    finalize_uploaded_generation "$upload_dir" "$upload_id" \
+      "$upload_prefix" "$upload_receipt"
+    return $?
+  fi
+  if [ -L "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -f "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -r "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -x "$GENERATION_UPLOADER_BIN" ]
+  then
+    return 1
+  fi
+  set -- upload-generation "$upload_dir" "$upload_prefix" "$upload_receipt" \
+    --generation-id "$upload_id" \
+    --credentials-file "$GENERATION_CREDENTIALS_FILE"
+  if [ -n "$UPLOAD_CHAIN_HASH" ]; then
+    set -- "$@" --predecessor-manifest-sha256 "$UPLOAD_CHAIN_HASH"
+  fi
+  "$GENERATION_UPLOADER_BIN" "$@" &
+  generation_uploader_pid=$!
+  if wait "$generation_uploader_pid"; then
+    generation_uploader_status=0
+  else
+    generation_uploader_status=$?
+  fi
+  generation_uploader_pid=
+  [ "$generation_uploader_status" -eq 0 ] || return 1
+  finalize_uploaded_generation "$upload_dir" "$upload_id" \
+    "$upload_prefix" "$upload_receipt"
+}
+
+terminate_generation_upload_worker() {
+  if [ -n "${generation_uploader_pid:-}" ]; then
+    kill -TERM "$generation_uploader_pid" 2>/dev/null || true
+    wait "$generation_uploader_pid" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+generation_upload_worker() {
+  generation_uploader_pid=
+  trap terminate_generation_upload_worker INT TERM HUP
+  while :; do
+    if validate_data_volume true >/dev/null 2>&1 \
+      && [ -d "$SEALED_GENERATION_DIR" ]
+    then
+      if upload_one_generation; then
+        clear_alert generation_upload_failed \
+          "Generation uploads and local receipt validation are succeeding."
+      else
+        upload_status=$?
+        if [ "$upload_status" -ne 75 ]; then
+          raise_alert generation_upload_failed ERROR \
+            "A sealed generation upload or local receipt validation failed; local data was retained."
+        fi
+      fi
+      if generation_backlog=$(sealed_generation_count); then
+        if [ "$generation_backlog" -ge "$GENERATION_BACKLOG_WARN_COUNT" ]; then
+          raise_alert generation_backlog WARNING \
+            "Sealed generation backlog=$generation_backlog threshold=$GENERATION_BACKLOG_WARN_COUNT."
+        else
+          clear_alert generation_backlog \
+            "Sealed generation backlog recovered below its warning threshold."
+        fi
+      else
+        raise_alert generation_backlog ERROR \
+          "The sealed generation backlog could not be inspected safely."
+      fi
+    fi
+    sleep "$GENERATION_UPLOAD_RETRY_SECS"
+  done
+}
+
+start_generation_upload_worker() {
+  generation_upload_worker &
+  upload_worker_pid=$!
+}
+
 healthcheck() {
   stale_after=${BLOCKZILLA_RAW_STALE_AFTER_SECS:-180}
   startup_grace=${BLOCKZILLA_RAW_STARTUP_GRACE_SECS:-300}
@@ -779,6 +1390,7 @@ healthcheck() {
     IFS=' ' read -r recorder_state _state_time < "$STATE_FILE" || recorder_state=unknown
     if [ "$recorder_state" = low_disk ] \
       || [ "$recorder_state" = disk_check_failed ] \
+      || [ "$recorder_state" = cache_rotation_failed ] \
       || [ "$recorder_state" = stopping ]
     then
       echo "raw recorder state is $recorder_state" >&2
@@ -891,6 +1503,9 @@ for numeric_setting in \
   "BLOCKZILLA_RAW_LOW_DISK_RECHECK_SECS:$LOW_DISK_RECHECK_SECS" \
   "BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES:$SEGMENT_TARGET_BYTES" \
   "BLOCKZILLA_RAW_MAX_RECORD_BYTES:$MAX_RECORD_BYTES" \
+  "BLOCKZILLA_RAW_MAX_GENERATION_BYTES:$MAX_GENERATION_BYTES" \
+  "BLOCKZILLA_RAW_GENERATION_BACKLOG_WARN_COUNT:$GENERATION_BACKLOG_WARN_COUNT" \
+  "BLOCKZILLA_RAW_GENERATION_UPLOAD_RETRY_SECS:$GENERATION_UPLOAD_RETRY_SECS" \
   "BLOCKZILLA_TELEGRAM_ALERT_COOLDOWN_SECS:$TELEGRAM_ALERT_COOLDOWN_SECS" \
   "BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES:$DISK_WARN_FREE_BYTES" \
   "BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES:$DISK_RECOVERY_HYSTERESIS_BYTES" \
@@ -909,6 +1524,36 @@ fi
 if [ "$MONITOR_INTERVAL_SECS" -eq 0 ]; then
   echo "BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS must be non-zero" >&2
   exit 2
+fi
+if [ "$CACHE_MODE" = b2-generations ]; then
+  if [ "$MAX_GENERATION_BYTES" -le "$MAX_RECORD_BYTES" ]; then
+    echo "BLOCKZILLA_RAW_MAX_GENERATION_BYTES must exceed BLOCKZILLA_RAW_MAX_RECORD_BYTES" >&2
+    exit 2
+  fi
+  if [ "$GENERATION_BACKLOG_WARN_COUNT" -eq 0 ] \
+    || [ "$GENERATION_UPLOAD_RETRY_SECS" -eq 0 ]
+  then
+    echo "generation backlog threshold and upload retry must be non-zero" >&2
+    exit 2
+  fi
+  if [ "$GENERATION_RECEIPT_DIR" != /data/grpc-cache/receipts ]; then
+    echo "BLOCKZILLA_RAW_CACHE_RECEIPT_DIR must be /data/grpc-cache/receipts" >&2
+    exit 2
+  fi
+  case "$CLUSTER_ID:$ORIGIN_NODE_ID" in
+    *[!A-Za-z0-9._:-]*)
+      echo "cache upload cluster and origin IDs must use safe path characters" >&2
+      exit 2
+      ;;
+  esac
+  if ! normalized_generation_base_prefix >/dev/null; then
+    echo "BLOCKZILLA_B2_REMOTE_PREFIX is not a safe relative object prefix" >&2
+    exit 2
+  fi
+  if ! command -v "$GENERATION_PYTHON_BIN" >/dev/null 2>&1; then
+    echo "generation receipt validator is missing" >&2
+    exit 2
+  fi
 fi
 if [ "$DISK_WARN_FREE_BYTES" -le "$MIN_FREE_BYTES" ]; then
   echo "BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES must exceed BLOCKZILLA_RAW_MIN_FREE_BYTES" >&2
@@ -982,7 +1627,11 @@ available_bytes() {
 
 child_pid=
 monitor_pid=
+upload_worker_pid=
 terminate() {
+  if [ -n "$upload_worker_pid" ]; then
+    kill -TERM "$upload_worker_pid" 2>/dev/null || true
+  fi
   if [ -n "$monitor_pid" ]; then
     kill -TERM "$monitor_pid" 2>/dev/null || true
   fi
@@ -992,6 +1641,9 @@ terminate() {
   fi
   if [ -n "$monitor_pid" ]; then
     wait "$monitor_pid" 2>/dev/null || true
+  fi
+  if [ -n "$upload_worker_pid" ]; then
+    wait "$upload_worker_pid" 2>/dev/null || true
   fi
   write_state stopping
   exit 0
@@ -1008,7 +1660,34 @@ while :; do
     sleep "$LOW_DISK_RECHECK_SECS"
     continue
   fi
-  if ! mkdir -p "$OUTPUT_DIR" || ! validate_data_volume true; then
+  if [ "$CACHE_MODE" = b2-generations ]; then
+    if ! prepare_cache_layout; then
+      write_state cache_rotation_failed
+      raise_alert generation_rotation_failed CRITICAL \
+        "The bounded cache layout or an interrupted generation rotation could not be recovered; capture is paused."
+      echo "$(timestamp) raw_recorder paused_cache_recovery_failed" >&2
+      sleep "$LOW_DISK_RECHECK_SECS"
+      continue
+    fi
+    clear_alert generation_rotation_failed \
+      "The bounded cache layout and rotation transaction are consistent again."
+    if [ -z "$upload_worker_pid" ] \
+      || ! kill -0 "$upload_worker_pid" 2>/dev/null
+    then
+      if [ -n "$upload_worker_pid" ]; then
+        wait "$upload_worker_pid" 2>/dev/null || true
+      fi
+      start_generation_upload_worker
+    fi
+  elif ! mkdir -p "$OUTPUT_DIR"; then
+    write_state volume_invalid
+    raise_alert volume_invalid CRITICAL \
+      "The recorder output directory could not be created safely on the dedicated volume; capture is paused."
+    echo "$(timestamp) raw_recorder paused_invalid_output output=$OUTPUT_DIR" >&2
+    sleep "$LOW_DISK_RECHECK_SECS"
+    continue
+  fi
+  if ! validate_data_volume true; then
     write_state volume_invalid
     raise_alert volume_invalid CRITICAL \
       "The recorder output directory could not be created safely on the dedicated volume; capture is paused."
@@ -1053,6 +1732,9 @@ while :; do
   if [ "$REQUIRE_COMPLETE_POH" = true ]; then
     set -- "$@" --require-complete-poh
   fi
+  if [ "$CACHE_MODE" = b2-generations ]; then
+    set -- "$@" --max-generation-bytes "$MAX_GENERATION_BYTES"
+  fi
   if [ -n "$INITIAL_FROM_SLOT" ]; then
     set -- "$@" --from-slot "$INITIAL_FROM_SLOT"
   fi
@@ -1081,7 +1763,9 @@ while :; do
 
   exit_reason=process_error
   if [ "$status" -eq 0 ]; then
-    if grep -q '"idle_timed_out": true' "$CHILD_REPORT_FILE"; then
+    if grep -q '"stopped_generation_full": true' "$CHILD_REPORT_FILE"; then
+      exit_reason=generation_byte_limit
+    elif grep -q '"idle_timed_out": true' "$CHILD_REPORT_FILE"; then
       exit_reason=durable_block_idle_timeout
     elif grep -q '"stream_ended": true' "$CHILD_REPORT_FILE"; then
       exit_reason=grpc_stream_ended
@@ -1107,6 +1791,27 @@ while :; do
   then
     raise_alert resume_coverage WARNING \
       "The provider did not deliver the inclusive resume slot; audit slot coverage before relying on this backup."
+  fi
+  if [ "$CACHE_MODE" = b2-generations ] \
+    && [ "$status" -eq 0 ] \
+    && [ "$exit_reason" = generation_byte_limit ]
+  then
+    if [ -s "$CHILD_REPORT_FILE" ]; then
+      sed -n '1,200p' "$CHILD_REPORT_FILE"
+    fi
+    if rotate_active_generation; then
+      clear_alert generation_rotation_failed \
+        "The full generation was verified, sealed, and replaced by an exact-tail successor."
+      write_state running
+      echo "$(timestamp) raw_recorder generation_rotated; resuming capture" >&2
+      continue
+    fi
+    write_state cache_rotation_failed
+    raise_alert generation_rotation_failed CRITICAL \
+      "A byte-limit generation could not be verified, seeded, or rotated; it was retained and capture is paused for retry."
+    echo "$(timestamp) raw_recorder generation_rotation_failed; retrying in ${RESTART_DELAY_SECS}s" >&2
+    sleep "$RESTART_DELAY_SECS"
+    continue
   fi
   if ! validate_data_volume true >/dev/null 2>&1; then
     raise_alert volume_invalid CRITICAL \

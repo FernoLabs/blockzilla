@@ -48,6 +48,9 @@ const MONITORING_DIR: &str = ".monitoring";
 const RESUME_COVERAGE_WARNING_FILE: &str = "resume-coverage-warning.json";
 const SUBSCRIBE_REQUEST_CHANNEL_CAPACITY: usize = 8;
 const SUBSCRIBE_PING_ID: i32 = 1;
+/// Covers two frame metadata envelopes, two handoff rows, and segment headers when sizing a
+/// generation for a max-size seed plus one max-size live append. Identity bytes are added exactly.
+const GENERATION_ROLLOVER_SAFETY_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogOutcome<T> {
@@ -154,6 +157,9 @@ pub struct GrpcRawRecordConfig {
     pub compression_level: i32,
     pub segment_target_bytes: u64,
     pub max_record_bytes: u64,
+    /// Maximum logical bytes occupied by this self-contained generation. Zero disables the cap.
+    #[serde(default)]
+    pub max_generation_bytes: u64,
     pub min_free_bytes: u64,
     pub require_complete_poh: bool,
     pub cluster_id: String,
@@ -176,6 +182,7 @@ impl Default for GrpcRawRecordConfig {
             compression_level: 1,
             segment_target_bytes: 256 * 1024 * 1024,
             max_record_bytes: 128 * 1024 * 1024,
+            max_generation_bytes: 0,
             min_free_bytes: 16 * 1024 * 1024 * 1024,
             require_complete_poh: false,
             cluster_id: "solana-mainnet".to_string(),
@@ -219,8 +226,22 @@ pub struct GrpcRawRecordReport {
     pub idle_timed_out: bool,
     pub stream_ended: bool,
     pub stopped_at_epoch_boundary: bool,
+    #[serde(default)]
+    pub stopped_generation_full: bool,
     pub stopped_low_disk: bool,
     pub available_bytes_at_stop: Option<u64>,
+    #[serde(default)]
+    pub generation_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcRawSeedReport {
+    pub source_dir: PathBuf,
+    pub target_dir: PathBuf,
+    pub source_records_verified: u64,
+    pub seeded_slot: u64,
+    pub seeded_blockhash: String,
+    pub compressed_bytes_copied: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +462,7 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         config.segment_target_bytes > 0,
         "segment target bytes must be non-zero"
     );
+    validate_generation_limit(&config)?;
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("create raw gRPC output {}", config.output_dir.display()))?;
     prepare_resume_coverage_warning_path(&config)?;
@@ -459,6 +481,11 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         &mut journal_state,
         config.slots_per_epoch,
         config.max_record_bytes,
+    )?;
+    let generation_bytes = raw_generation_bytes(
+        &config.output_dir.join(IDENTITY_FILE),
+        &wal_root,
+        &journal_path,
     )?;
 
     let resume_anchor = journal_state.last.clone();
@@ -503,9 +530,16 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         idle_timed_out: false,
         stream_ended: false,
         stopped_at_epoch_boundary: false,
+        stopped_generation_full: false,
         stopped_low_disk: false,
         available_bytes_at_stop: None,
+        generation_bytes,
     };
+    if config.max_generation_bytes > 0 && report.generation_bytes >= config.max_generation_bytes {
+        report.stopped_generation_full = true;
+        report.elapsed_ms = started_at.elapsed().as_millis();
+        return Ok(report);
+    }
     if let Some(available) = low_disk_bytes(&config.output_dir, config.min_free_bytes)? {
         report.stopped_low_disk = true;
         report.available_bytes_at_stop = Some(available);
@@ -715,25 +749,13 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             report.available_bytes_at_stop = Some(available);
             break;
         }
-        if config.require_complete_poh {
-            let stats = validate_complete_poh_block(block)
-                .with_context(|| format!("validate complete PoH for slot {}", block.slot))?;
-            report.poh_blocks_verified = report
-                .poh_blocks_verified
-                .checked_add(1)
-                .context("verified PoH block count overflow")?;
-            report.poh_entries_verified = report
-                .poh_entries_verified
-                .checked_add(stats.entries)
-                .context("verified PoH entry count overflow")?;
-            report.poh_transactions_verified = report
-                .poh_transactions_verified
-                .checked_add(stats.transaction_references)
-                .context("verified PoH transaction count overflow")?;
-            poh_num_hashes_verified = poh_num_hashes_verified
-                .checked_add(stats.num_hashes)
-                .context("verified PoH hash count overflow")?;
-        }
+        let poh_stats = config
+            .require_complete_poh
+            .then(|| {
+                validate_complete_poh_block(block)
+                    .with_context(|| format!("validate complete PoH for slot {}", block.slot))
+            })
+            .transpose()?;
 
         raw.clear();
         update
@@ -775,18 +797,52 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         );
         // `append_and_sync` is the durability boundary. No cursor, journal, or report state may
         // advance before it succeeds.
-        let durable = spool.append_and_sync(metadata, &compressed)?;
+        let projection = spool.project_append(&metadata, &compressed)?;
         let row = handoff_record_from_block(
             block,
             frame_id,
             epoch_slot,
-            durable.location(),
+            projection.location,
             raw.len() as u64,
             compressed.len() as u64,
             sha256_hex(&raw),
         );
+        let projected_generation_bytes = projected_raw_generation_bytes(
+            report.generation_bytes,
+            projection.additional_bytes,
+            &row,
+        )?;
+        if generation_limit_exceeded(config.max_generation_bytes, projected_generation_bytes) {
+            report.stopped_generation_full = true;
+            break;
+        }
+
+        let durable = spool.append_and_sync(metadata, &compressed)?;
+        ensure!(
+            durable.location() == projection.location,
+            "spool append location differed from its preflight projection"
+        );
         append_handoff_record(&journal_path, &row)?;
+        report.generation_bytes = projected_generation_bytes;
         idle_deadline = idle_deadline_after(TokioInstant::now(), config.idle_timeout_secs)?;
+
+        if let Some(stats) = poh_stats {
+            report.poh_blocks_verified = report
+                .poh_blocks_verified
+                .checked_add(1)
+                .context("verified PoH block count overflow")?;
+            report.poh_entries_verified = report
+                .poh_entries_verified
+                .checked_add(stats.entries)
+                .context("verified PoH entry count overflow")?;
+            report.poh_transactions_verified = report
+                .poh_transactions_verified
+                .checked_add(stats.transaction_references)
+                .context("verified PoH transaction count overflow")?;
+            poh_num_hashes_verified = poh_num_hashes_verified
+                .checked_add(stats.num_hashes)
+                .context("verified PoH hash count overflow")?;
+        }
 
         report.first_slot.get_or_insert(block.slot);
         report.last_slot = Some(block.slot);
@@ -832,7 +888,7 @@ struct GrpcRawReplayAudit {
 fn replay_grpc_raw_blocks_audited<F>(
     output_dir: impl AsRef<Path>,
     max_record_bytes: u64,
-    mut visit: F,
+    visit: F,
 ) -> Result<GrpcRawReplayAudit>
 where
     F: FnMut(&GrpcRawHandoffRecord, SubscribeUpdate) -> Result<()>,
@@ -853,6 +909,27 @@ where
         spool_audit.journal_dir() == wal_dir,
         "raw gRPC WAL audit resolved a different journal directory"
     );
+    replay_grpc_raw_blocks_with_audit(
+        output_dir,
+        max_record_bytes,
+        &identity,
+        &wal_dir,
+        &spool_audit,
+        visit,
+    )
+}
+
+fn replay_grpc_raw_blocks_with_audit<F>(
+    output_dir: &Path,
+    max_record_bytes: u64,
+    identity: &GrpcRawIdentityFile,
+    wal_dir: &Path,
+    spool_audit: &LockedSpoolAudit,
+    mut visit: F,
+) -> Result<GrpcRawReplayAudit>
+where
+    F: FnMut(&GrpcRawHandoffRecord, SubscribeUpdate) -> Result<()>,
+{
     let wal_tail = spool_audit.last_record().cloned();
     let journal_path = output_dir.join(HANDOFF_JOURNAL_FILE);
     let journal_state = read_handoff_journal(&journal_path, false)?;
@@ -979,6 +1056,217 @@ where
         records: expected_frame_id,
         wal_incomplete_tail_bytes: spool_audit.incomplete_tail_bytes(),
     })
+}
+
+/// Seed a new, empty generation with the exact durable tail record of a stopped source.
+///
+/// The source remains exclusively locked while it is replay-verified and copied. The target uses
+/// a fresh journal id but preserves the endpoint/source identity and exact compressed protobuf
+/// payload. Publishing is atomic with respect to the target's parent directory.
+pub fn seed_grpc_raw_generation(
+    source_dir: PathBuf,
+    target_dir: PathBuf,
+    max_record_bytes: u64,
+) -> Result<GrpcRawSeedReport> {
+    ensure!(max_record_bytes > 0, "max record bytes must be non-zero");
+    ensure!(
+        source_dir != target_dir,
+        "source and target generation paths must differ"
+    );
+    ensure_empty_generation_target(&target_dir)?;
+    let target_parent = target_dir
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let parent_metadata = fs::symlink_metadata(&target_parent).with_context(|| {
+        format!(
+            "inspect target generation parent {}",
+            target_parent.display()
+        )
+    })?;
+    ensure!(
+        parent_metadata.file_type().is_dir() && !parent_metadata.file_type().is_symlink(),
+        "target generation parent is not a real directory: {}",
+        target_parent.display()
+    );
+    let target_name = target_dir
+        .file_name()
+        .context("target generation path has no file name")?
+        .to_string_lossy();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let temporary_dir = target_parent.join(format!(
+        ".{target_name}.seed-{}-{unique}.tmp",
+        std::process::id()
+    ));
+    fs::create_dir(&temporary_dir).with_context(|| {
+        format!(
+            "create temporary target generation {}",
+            temporary_dir.display()
+        )
+    })?;
+    sync_directory(&target_parent)?;
+
+    let seeded = (|| -> Result<GrpcRawSeedReport> {
+        let source_identity = read_identity(&source_dir.join(IDENTITY_FILE))?;
+        let source_wal_dir = spool_journal_dir(&source_dir, &source_identity);
+        let source_audit = LockedSpoolAudit::open(
+            source_dir.join(WAL_ROOT_DIR),
+            source_identity.spool_identity(),
+            SpoolOptions {
+                max_record_bytes,
+                ..SpoolOptions::default()
+            },
+        )
+        .context("lock and audit source raw gRPC generation")?;
+        ensure!(
+            source_audit.journal_dir() == source_wal_dir,
+            "source raw gRPC WAL audit resolved a different journal directory"
+        );
+
+        let mut source_tail = None;
+        let source_replay = replay_grpc_raw_blocks_with_audit(
+            &source_dir,
+            max_record_bytes,
+            &source_identity,
+            &source_wal_dir,
+            &source_audit,
+            |row, update| {
+                let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
+                    return Err(anyhow!("raw gRPC frame {} is not a block", row.frame_id));
+                };
+                validate_complete_poh_block(block).with_context(|| {
+                    format!("verify source raw gRPC PoH frame {}", row.frame_id)
+                })?;
+                source_tail = Some(row.clone());
+                Ok(())
+            },
+        )?;
+        let source_tail = source_tail.context("source raw gRPC generation is empty")?;
+        ensure!(
+            source_replay.records > 0,
+            "source raw gRPC generation is empty"
+        );
+        let source_record =
+            read_spool_record(&source_wal_dir, source_tail.location(), max_record_bytes)?;
+
+        let target_config = GrpcRawRecordConfig {
+            endpoint: source_identity.endpoint.clone(),
+            output_dir: temporary_dir.clone(),
+            max_record_bytes,
+            cluster_id: source_identity.cluster_id.clone(),
+            origin_node_id: source_identity.origin_node_id.clone(),
+            source_id: source_identity.source_id.clone(),
+            ..GrpcRawRecordConfig::default()
+        };
+        let target_identity = load_or_create_identity(&target_config)?;
+        ensure!(
+            target_identity.endpoint == source_identity.endpoint
+                && target_identity.cluster_id == source_identity.cluster_id
+                && target_identity.origin_node_id == source_identity.origin_node_id
+                && target_identity.source_id == source_identity.source_id,
+            "seed target identity is incompatible with source generation"
+        );
+        ensure!(
+            target_identity.journal_id != source_identity.journal_id,
+            "seed target unexpectedly reused the source journal id"
+        );
+        let mut target_spool = SpoolWriter::open(
+            temporary_dir.join(WAL_ROOT_DIR),
+            target_identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: target_config.segment_target_bytes,
+                max_record_bytes,
+            },
+        )?;
+        let target_journal = temporary_dir.join(HANDOFF_JOURNAL_FILE);
+        let target_state = recover_handoff_journal(&target_journal)?;
+        ensure!(
+            target_state.records == 0 && target_spool.last_record().is_none(),
+            "temporary seed target is not empty"
+        );
+        let target_metadata = IngressRecordMeta::from_payload(
+            target_identity.cluster_id.clone(),
+            ObservationId {
+                origin_node_id: target_identity.origin_node_id.clone(),
+                journal_id: target_identity.journal_id,
+                sequence: 0,
+            },
+            target_identity.source_id.clone(),
+            source_record.metadata.logical_key.clone(),
+            PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+            &source_record.payload,
+        );
+        let target_durable =
+            target_spool.append_and_sync(target_metadata, &source_record.payload)?;
+        let target_row = GrpcRawHandoffRecord {
+            frame_id: 0,
+            segment_id: target_durable.location().segment_id,
+            frame_offset: target_durable.location().frame_offset,
+            frame_len: target_durable.location().frame_len,
+            ..source_tail.clone()
+        };
+        append_handoff_record(&target_journal, &target_row)?;
+        drop(target_spool);
+
+        let target_verification = verify_grpc_raw_poh(temporary_dir.clone(), max_record_bytes, 1)?;
+        ensure!(
+            target_verification.records_verified == 1
+                && target_verification.first_slot == Some(source_tail.slot)
+                && target_verification.last_slot == Some(source_tail.slot),
+            "seed target verification did not reproduce exactly one source tail record"
+        );
+
+        fs::rename(&temporary_dir, &target_dir).with_context(|| {
+            format!(
+                "publish seeded raw gRPC generation {}",
+                target_dir.display()
+            )
+        })?;
+        sync_directory(&target_parent)?;
+
+        Ok(GrpcRawSeedReport {
+            source_dir,
+            target_dir,
+            source_records_verified: source_replay.records,
+            seeded_slot: source_tail.slot,
+            seeded_blockhash: source_tail.blockhash,
+            compressed_bytes_copied: source_tail.compressed_len,
+        })
+    })();
+
+    if seeded.is_err() {
+        let _ = fs::remove_dir_all(&temporary_dir);
+        let _ = sync_directory(&target_parent);
+    }
+    seeded
+}
+
+fn ensure_empty_generation_target(target: &Path) -> Result<()> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+                "seed target is not a real directory: {}",
+                target.display()
+            );
+            ensure!(
+                fs::read_dir(target)
+                    .with_context(|| format!("list seed target {}", target.display()))?
+                    .next()
+                    .is_none(),
+                "seed target directory is not empty: {}",
+                target.display()
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect seed target {}", target.display()))
+        }
+    }
 }
 
 /// Fully replay a raw spool and prove that every retained block contains the ordered entry data
@@ -1438,20 +1726,150 @@ fn append_handoff_record(path: &Path, row: &GrpcRawHandoffRecord) -> Result<()> 
     Ok(())
 }
 
+fn encoded_handoff_record_len(row: &GrpcRawHandoffRecord) -> Result<u64> {
+    let json_len = u64::try_from(serde_json::to_vec(row)?.len())
+        .context("raw gRPC handoff record length exceeds u64")?;
+    json_len
+        .checked_add(1)
+        .context("raw gRPC handoff record length overflow")
+}
+
+fn projected_raw_generation_bytes(
+    current_bytes: u64,
+    wal_append_bytes: u64,
+    row: &GrpcRawHandoffRecord,
+) -> Result<u64> {
+    let journal_append_bytes = encoded_handoff_record_len(row)?;
+    current_bytes
+        .checked_add(wal_append_bytes)
+        .and_then(|bytes| bytes.checked_add(journal_append_bytes))
+        .context("raw gRPC generation length overflow")
+}
+
+fn generation_limit_exceeded(max_generation_bytes: u64, projected_bytes: u64) -> bool {
+    max_generation_bytes > 0 && projected_bytes > max_generation_bytes
+}
+
+fn validate_generation_limit(config: &GrpcRawRecordConfig) -> Result<()> {
+    if config.max_generation_bytes == 0 {
+        return Ok(());
+    }
+    let minimum = minimum_generation_bytes(config)?;
+    ensure!(
+        config.max_generation_bytes >= minimum,
+        "max generation bytes {} is too small for a max-size seed and one max-size append; require at least {}",
+        config.max_generation_bytes,
+        minimum
+    );
+    Ok(())
+}
+
+fn minimum_generation_bytes(config: &GrpcRawRecordConfig) -> Result<u64> {
+    let identity_reserve = GrpcRawIdentityFile {
+        schema_version: IDENTITY_SCHEMA_VERSION,
+        endpoint: config.endpoint.clone(),
+        cluster_id: config.cluster_id.clone(),
+        origin_node_id: config.origin_node_id.clone(),
+        source_id: config.source_id.clone(),
+        journal_id: [u8::MAX; 16],
+        payload_format_version: PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+    };
+    let identity_bytes = u64::try_from(serde_json::to_vec_pretty(&identity_reserve)?.len())
+        .context("raw gRPC identity length exceeds u64")?
+        .checked_add(1)
+        .context("raw gRPC identity length overflow")?;
+    config
+        .max_record_bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(GENERATION_ROLLOVER_SAFETY_BYTES))
+        .and_then(|bytes| bytes.checked_add(identity_bytes))
+        .context("minimum raw gRPC generation size overflow")
+}
+
+/// Logical bytes in the files required to move and replay one self-contained generation.
+fn raw_generation_bytes(identity_path: &Path, wal_root: &Path, journal_path: &Path) -> Result<u64> {
+    let identity_bytes = regular_file_bytes(identity_path)?;
+    let journal_bytes = regular_file_bytes(journal_path)?;
+    let wal_bytes = directory_file_bytes(wal_root)?;
+    identity_bytes
+        .checked_add(journal_bytes)
+        .and_then(|bytes| bytes.checked_add(wal_bytes))
+        .context("raw gRPC generation byte count overflow")
+}
+
+fn regular_file_bytes(path: &Path) -> Result<u64> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect raw gRPC generation file {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "raw gRPC generation path is not a regular file: {}",
+        path.display()
+    );
+    Ok(metadata.len())
+}
+
+fn directory_file_bytes(root: &Path) -> Result<u64> {
+    let metadata = fs::symlink_metadata(root)
+        .with_context(|| format!("inspect raw gRPC generation directory {}", root.display()))?;
+    ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "raw gRPC generation path is not a real directory: {}",
+        root.display()
+    );
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).with_context(|| {
+            format!("list raw gRPC generation directory {}", directory.display())
+        })? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect raw gRPC generation path {}", path.display()))?;
+            let file_type = metadata.file_type();
+            ensure!(
+                !file_type.is_symlink(),
+                "raw gRPC generation contains a symlink: {}",
+                path.display()
+            );
+            if file_type.is_dir() {
+                pending.push(path);
+            } else {
+                ensure!(
+                    file_type.is_file(),
+                    "raw gRPC generation contains a special file: {}",
+                    path.display()
+                );
+                total = total
+                    .checked_add(metadata.len())
+                    .context("raw gRPC generation byte count overflow")?;
+            }
+        }
+    }
+    Ok(total)
+}
+
 fn prepare_resume_coverage_warning_path(config: &GrpcRawRecordConfig) -> Result<()> {
     let Some(path) = config.resume_coverage_warning_file.as_deref() else {
         return Ok(());
     };
-    let expected = config
+    let output_expected = config
         .output_dir
         .join(MONITORING_DIR)
         .join(RESUME_COVERAGE_WARNING_FILE);
+    // Rolling generations replace `output_dir` atomically. Allow the supervisor
+    // to keep an undelivered coverage event in a fixed sibling directory so a
+    // generation rotation cannot discard or hide the alert.
+    let sibling_expected = config
+        .output_dir
+        .parent()
+        .map(|parent| parent.join("monitoring").join(RESUME_COVERAGE_WARNING_FILE));
     ensure!(
-        path == expected,
-        "resume-coverage warning path must be {}",
-        expected.display()
+        path == output_expected || sibling_expected.as_deref() == Some(path),
+        "resume-coverage warning path must be {} or the fixed sibling monitoring path",
+        output_expected.display()
     );
-    let parent = expected
+    let parent = path
         .parent()
         .context("resume-coverage warning path has no parent directory")?;
     match fs::symlink_metadata(parent) {
@@ -1467,7 +1885,10 @@ fn prepare_resume_coverage_warning_path(config: &GrpcRawRecordConfig) -> Result<
                     parent.display()
                 )
             })?;
-            sync_directory(&config.output_dir)?;
+            let parent_directory = parent
+                .parent()
+                .context("resume-coverage warning directory has no parent")?;
+            sync_directory(parent_directory)?;
         }
         Err(error) => {
             return Err(error).with_context(|| {
@@ -1842,6 +2263,263 @@ mod tests {
             compressed.len() as u64,
             sha256_hex(&raw),
         )
+    }
+
+    #[test]
+    fn generation_cap_preflight_stops_before_mutation_and_matches_written_size() {
+        let root = temp_dir("generation-cap-preflight");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let current_bytes = raw_generation_bytes(
+            &root.join(IDENTITY_FILE),
+            &root.join(WAL_ROOT_DIR),
+            &journal,
+        )
+        .unwrap();
+
+        let source = complete_poh_update(1_000);
+        let Some(UpdateOneof::Block(block)) = source.update_oneof.as_ref() else {
+            panic!("fixture update is not a block")
+        };
+        let raw = source.encode_to_vec();
+        let compressed = zstd::bulk::compress(&raw, 1).unwrap();
+        let metadata = IngressRecordMeta::from_payload(
+            identity.cluster_id.clone(),
+            ObservationId {
+                origin_node_id: identity.origin_node_id.clone(),
+                journal_id: identity.journal_id,
+                sequence: 0,
+            },
+            identity.source_id.clone(),
+            LogicalKey::Block {
+                slot: block.slot,
+                blockhash: decode_blockhash(&block.blockhash).unwrap(),
+            },
+            PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+            &compressed,
+        );
+        let projection = spool.project_append(&metadata, &compressed).unwrap();
+        let row = handoff_record_from_block(
+            block,
+            0,
+            EpochSlot::from_slot(block.slot, OLD_FAITHFUL_SLOTS_PER_EPOCH),
+            projection.location,
+            raw.len() as u64,
+            compressed.len() as u64,
+            sha256_hex(&raw),
+        );
+        let projected =
+            projected_raw_generation_bytes(current_bytes, projection.additional_bytes, &row)
+                .unwrap();
+
+        assert!(!generation_limit_exceeded(0, projected));
+        assert!(!generation_limit_exceeded(projected, projected));
+        assert!(generation_limit_exceeded(projected - 1, projected));
+        assert!(spool.last_record().is_none());
+        assert_eq!(recover_handoff_journal(&journal).unwrap().records, 0);
+
+        let durable = spool.append_and_sync(metadata, &compressed).unwrap();
+        assert_eq!(durable.location(), projection.location);
+        append_handoff_record(&journal, &row).unwrap();
+        let written = raw_generation_bytes(
+            &root.join(IDENTITY_FILE),
+            &root.join(WAL_ROOT_DIR),
+            &journal,
+        )
+        .unwrap();
+        assert_eq!(written, projected);
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generation_limit_requires_seed_plus_one_maximum_record() {
+        let root = temp_dir("generation-limit-minimum");
+        let mut config = test_config(root);
+        config.max_generation_bytes = 0;
+        validate_generation_limit(&config).unwrap();
+
+        let minimum = minimum_generation_bytes(&config).unwrap();
+        config.max_generation_bytes = minimum - 1;
+        let error = validate_generation_limit(&config).unwrap_err();
+        assert!(error.to_string().contains("max-size seed"));
+        assert!(error.to_string().contains(&minimum.to_string()));
+
+        config.max_generation_bytes = minimum;
+        validate_generation_limit(&config).unwrap();
+    }
+
+    #[test]
+    fn existing_generation_at_limit_returns_explicit_full_report_without_connecting() {
+        let root = temp_dir("generation-already-full");
+        fs::create_dir_all(&root).unwrap();
+        let mut config = test_config(root.clone());
+        config.max_record_bytes = 1024;
+        config.segment_target_bytes = 1024 * 1024;
+        config.max_generation_bytes = 2 * 1024 * 1024;
+        config.min_free_bytes = 0;
+        validate_generation_limit(&config).unwrap();
+        let identity = load_or_create_identity(&config).unwrap();
+        let spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        recover_handoff_journal(&root.join(HANDOFF_JOURNAL_FILE)).unwrap();
+        fs::write(
+            spool.journal_dir().join("retention-accounting-padding"),
+            vec![0u8; config.max_generation_bytes as usize],
+        )
+        .unwrap();
+        drop(spool);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime.block_on(record_grpc_raw_blocks(config)).unwrap();
+        assert!(report.stopped_generation_full);
+        assert_eq!(report.frames_seen, 0);
+        assert_eq!(report.frames_written, 0);
+        assert!(report.generation_bytes >= 2 * 1024 * 1024);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["stopped_generation_full"], true);
+        assert!(json["generation_bytes"].as_u64().is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn seeds_exact_verified_tail_into_empty_generation_as_frame_zero() {
+        let parent = temp_dir("seed-generation");
+        let source_dir = parent.join("source");
+        let target_dir = parent.join("target");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir(&target_dir).unwrap();
+        let config = test_config(source_dir.clone());
+        let source_identity = load_or_create_identity(&config).unwrap();
+        let mut source_spool = SpoolWriter::open(
+            source_dir.join(WAL_ROOT_DIR),
+            source_identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let source_journal = source_dir.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&source_journal).unwrap();
+        let mut source_tail = None;
+        for frame_id in 0..3 {
+            let row = append_fixture(
+                &mut source_spool,
+                &source_identity,
+                &complete_poh_update(2_000 + frame_id),
+                frame_id,
+            );
+            append_handoff_record(&source_journal, &row).unwrap();
+            source_tail = Some(row);
+        }
+        let source_tail = source_tail.unwrap();
+        let source_payload = source_spool
+            .read_record(source_spool.last_record().unwrap())
+            .unwrap()
+            .payload;
+        drop(source_spool);
+
+        let report = seed_grpc_raw_generation(
+            source_dir.clone(),
+            target_dir.clone(),
+            config.max_record_bytes,
+        )
+        .unwrap();
+        assert_eq!(report.source_records_verified, 3);
+        assert_eq!(report.seeded_slot, source_tail.slot);
+        assert_eq!(report.seeded_blockhash, source_tail.blockhash);
+        assert_eq!(report.compressed_bytes_copied, source_payload.len() as u64);
+
+        let target_identity = read_identity(&target_dir.join(IDENTITY_FILE)).unwrap();
+        assert_eq!(target_identity.endpoint, source_identity.endpoint);
+        assert_eq!(target_identity.cluster_id, source_identity.cluster_id);
+        assert_eq!(
+            target_identity.origin_node_id,
+            source_identity.origin_node_id
+        );
+        assert_eq!(target_identity.source_id, source_identity.source_id);
+        assert_ne!(target_identity.journal_id, source_identity.journal_id);
+        let target_state =
+            read_handoff_journal(&target_dir.join(HANDOFF_JOURNAL_FILE), false).unwrap();
+        assert_eq!(target_state.records, 1);
+        let target_tail = target_state.last.unwrap();
+        assert_eq!(target_tail.frame_id, 0);
+        assert_eq!(target_tail.slot, source_tail.slot);
+        assert_eq!(
+            effective_resume_slot(None, Some(target_tail.slot)),
+            Some(source_tail.slot)
+        );
+        let target_payload = read_spool_record(
+            spool_journal_dir(&target_dir, &target_identity),
+            target_tail.location(),
+            config.max_record_bytes,
+        )
+        .unwrap()
+        .payload;
+        assert_eq!(target_payload, source_payload);
+        let verified = verify_grpc_raw_poh(target_dir.clone(), config.max_record_bytes, 1).unwrap();
+        assert_eq!(verified.records_verified, 1);
+        assert_eq!(verified.first_slot, Some(source_tail.slot));
+        assert_eq!(verified.last_slot, Some(source_tail.slot));
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn seed_refuses_an_active_source_and_cleans_temporary_target() {
+        let parent = temp_dir("seed-active-source");
+        let source_dir = parent.join("source");
+        let target_dir = parent.join("target");
+        fs::create_dir_all(&source_dir).unwrap();
+        let config = test_config(source_dir.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            source_dir.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = source_dir.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let row = append_fixture(&mut spool, &identity, &complete_poh_update(3_000), 0);
+        append_handoff_record(&journal, &row).unwrap();
+
+        let error = seed_grpc_raw_generation(
+            source_dir.clone(),
+            target_dir.clone(),
+            config.max_record_bytes,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("lock and audit source"));
+        assert!(!target_dir.exists());
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+        drop(spool);
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
@@ -2332,7 +3010,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_warning_path_is_fixed_below_the_raw_output() {
+    fn resume_warning_path_accepts_fixed_output_and_sibling_locations() {
         let root = temp_dir("resume-coverage-warning-path");
         fs::create_dir_all(&root).unwrap();
         let mut config = test_config(root.clone());
@@ -2343,11 +3021,40 @@ mod tests {
                 .to_string()
                 .contains("warning path must be")
         );
-        let expected = root.join(MONITORING_DIR).join(RESUME_COVERAGE_WARNING_FILE);
-        config.resume_coverage_warning_file = Some(expected);
+        let output_expected = root.join(MONITORING_DIR).join(RESUME_COVERAGE_WARNING_FILE);
+        config.resume_coverage_warning_file = Some(output_expected);
         prepare_resume_coverage_warning_path(&config).unwrap();
         assert!(root.join(MONITORING_DIR).is_dir());
+
+        let active = root.join("active");
+        fs::create_dir(&active).unwrap();
+        config.output_dir = active;
+        let sibling_expected = root.join("monitoring").join(RESUME_COVERAGE_WARNING_FILE);
+        config.resume_coverage_warning_file = Some(sibling_expected);
+        prepare_resume_coverage_warning_path(&config).unwrap();
+        assert!(root.join("monitoring").is_dir());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resume_warning_sibling_rejects_symlinked_monitoring_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("resume-coverage-warning-sibling-symlink");
+        let active = root.join("active");
+        let outside = temp_dir("resume-coverage-warning-sibling-outside");
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("monitoring")).unwrap();
+        let mut config = test_config(active);
+        config.resume_coverage_warning_file =
+            Some(root.join("monitoring").join(RESUME_COVERAGE_WARNING_FILE));
+        let error = prepare_resume_coverage_warning_path(&config).unwrap_err();
+        assert!(error.to_string().contains("not a real directory"));
+        fs::remove_file(root.join("monitoring")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

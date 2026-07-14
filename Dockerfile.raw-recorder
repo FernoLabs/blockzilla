@@ -25,7 +25,8 @@ ARG TARGETPLATFORM
 
 RUN test "$TARGETPLATFORM" = "linux/amd64" \
     && apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl tini \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates curl python3 python3-requests tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 blockzilla \
     && useradd --uid 10001 --gid 10001 --no-create-home \
@@ -36,6 +37,11 @@ COPY --from=builder --chown=0:0 /src/target/release/blockzilla-live-producer \
     /usr/local/bin/blockzilla-live-producer
 COPY --chown=0:0 --chmod=0755 scripts/linux-raw-grpc-recorder.sh \
     /usr/local/bin/blockzilla-raw-recorder
+COPY --chown=0:0 --chmod=0755 scripts/s3_multipart_upload.py \
+    /usr/local/bin/blockzilla-s3-upload
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 USER 10001:10001
 WORKDIR /data

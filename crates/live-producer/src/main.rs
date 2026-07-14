@@ -15,7 +15,8 @@ use blockzilla_live_producer::{
         inspect_capture, probe_grpc, watch_grpc_epoch_boundaries,
     },
     grpc_raw::{
-        GrpcRawRecordConfig, inspect_grpc_raw_blocks, record_grpc_raw_blocks, verify_grpc_raw_poh,
+        GrpcRawRecordConfig, inspect_grpc_raw_blocks, record_grpc_raw_blocks,
+        seed_grpc_raw_generation, verify_grpc_raw_poh,
     },
     ingest::IngestConfig,
     rpc::{
@@ -48,6 +49,8 @@ enum Command {
     InspectGrpcRaw(InspectGrpcRawArgs),
     /// Replay a raw gRPC spool and require complete, reconstructable PoH entries in every block.
     VerifyGrpcRawPoh(VerifyGrpcRawPohArgs),
+    /// Seed an empty rolling generation with a stopped, verified generation's durable tail.
+    SeedGrpcRawGeneration(SeedGrpcRawGenerationArgs),
     SyncRpcEpoch(SyncRpcEpochArgs),
     WatchEpochsGrpc(WatchEpochsGrpcArgs),
     PlanEpochBackfill(PlanEpochBackfillArgs),
@@ -168,6 +171,10 @@ struct RecordGrpcRawArgs {
     #[arg(long, default_value_t = 128 * 1024 * 1024)]
     max_record_bytes: u64,
 
+    /// Stop before this self-contained generation would exceed the limit. Zero disables.
+    #[arg(long, default_value_t = 0)]
+    max_generation_bytes: u64,
+
     /// Stop cleanly before the filesystem falls below this many free bytes. Zero disables.
     #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
     min_free_bytes: u64,
@@ -210,6 +217,18 @@ struct VerifyGrpcRawPohArgs {
     /// Fail unless at least this many complete records are verified. Zero permits an empty spool.
     #[arg(long, default_value_t = 1)]
     min_records: u64,
+}
+
+#[derive(Debug, Args)]
+struct SeedGrpcRawGenerationArgs {
+    #[arg(long)]
+    source_dir: std::path::PathBuf,
+
+    #[arg(long)]
+    target_dir: std::path::PathBuf,
+
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    max_record_bytes: u64,
 }
 
 #[derive(Debug, Args)]
@@ -566,6 +585,7 @@ impl From<RecordGrpcRawArgs> for GrpcRawRecordConfig {
             compression_level: value.compression_level,
             segment_target_bytes: value.segment_target_bytes,
             max_record_bytes: value.max_record_bytes,
+            max_generation_bytes: value.max_generation_bytes,
             min_free_bytes: value.min_free_bytes,
             require_complete_poh: value.require_complete_poh,
             cluster_id: value.cluster_id,
@@ -771,6 +791,11 @@ async fn main() -> Result<()> {
         Command::VerifyGrpcRawPoh(args) => {
             let report =
                 verify_grpc_raw_poh(args.output_dir, args.max_record_bytes, args.min_records)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::SeedGrpcRawGeneration(args) => {
+            let report =
+                seed_grpc_raw_generation(args.source_dir, args.target_dir, args.max_record_bytes)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::SyncRpcEpoch(args) => {
