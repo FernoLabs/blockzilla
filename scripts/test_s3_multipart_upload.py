@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -218,6 +219,112 @@ class FakeS3Handler(BaseHTTPRequestHandler):
             with self.state.lock:
                 self.state.uploads.pop(upload_ids[0], None)
         self.send_empty(204)
+
+
+class FakeB2State:
+    def __init__(self):
+        self.api_url = None
+        self.allowed = {
+            "bucketId": None,
+            "capabilities": ["listBuckets", "listFiles", "writeFiles"],
+            "namePrefix": None,
+        }
+        self.authorization_statuses = []
+        self.requests = []
+        self.routes = {}
+        self.lock = threading.Lock()
+
+    def enqueue(self, method, operation, payload, status=200, headers=None):
+        path = f"/b2api/v4/{operation}"
+        self.routes.setdefault((method, path), []).append(
+            (status, payload, headers or {})
+        )
+
+
+class FakeB2Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    state = None
+
+    def log_message(self, _format, *_args):
+        return
+
+    def send_json(self, status, payload, headers=None):
+        body = json.dumps(payload, sort_keys=True).encode()
+        self.send_response(status)
+        for name, value in (headers or {}).items():
+            self.send_header(name, str(value))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_request(self, method):
+        parsed = urllib.parse.urlparse(self.path)
+        body = self.rfile.read(int(self.headers.get("content-length", "0")))
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        try:
+            json_body = json.loads(body) if body else None
+        except json.JSONDecodeError:
+            self.send_json(400, {"code": "bad_json"})
+            return
+        headers = {name.lower(): value for name, value in self.headers.items()}
+        with self.state.lock:
+            self.state.requests.append(
+                {
+                    "body": json_body,
+                    "headers": headers,
+                    "method": method,
+                    "path": parsed.path,
+                    "query": query,
+                }
+            )
+
+        if parsed.path.endswith("/b2_authorize_account"):
+            with self.state.lock:
+                status = (
+                    self.state.authorization_statuses.pop(0)
+                    if self.state.authorization_statuses
+                    else 200
+                )
+            if status != 200:
+                self.send_json(
+                    status,
+                    {"code": "service_unavailable", "status": status},
+                )
+                return
+            self.send_json(
+                200,
+                {
+                    "accountId": "fake-account",
+                    "authorizationToken": "fake-native-token",
+                    "apiInfo": {
+                        "storageApi": {
+                            "allowed": self.state.allowed,
+                            "apiUrl": self.state.api_url,
+                        }
+                    },
+                },
+            )
+            return
+
+        if headers.get("authorization") != "fake-native-token":
+            self.send_json(401, {"code": "bad_auth_token", "status": 401})
+            return
+        route = (method, parsed.path)
+        with self.state.lock:
+            queued = self.state.routes.get(route, [])
+            response = queued.pop(0) if queued else None
+        if response is None:
+            self.send_json(500, {"code": "unexpected_test_request", "status": 500})
+            return
+        status, payload, response_headers = response
+        self.send_json(status, payload, response_headers)
+
+    def do_GET(self):
+        self.handle_request("GET")
+
+    def do_POST(self):
+        self.handle_request("POST")
 
 
 class S3UploaderTests(unittest.TestCase):
@@ -627,6 +734,261 @@ class S3UploaderTests(unittest.TestCase):
                 generation / "receipt.json",
             )
         self.assertEqual(self.state.requests, [])
+
+
+class B2AccountUsageTests(unittest.TestCase):
+    def setUp(self):
+        self.state = FakeB2State()
+        handler = type("BoundFakeB2Handler", (FakeB2Handler,), {"state": self.state})
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
+        self.state.api_url = self.endpoint
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.temporary.cleanup()
+
+    def client(self, retries=0):
+        return uploader.B2NativeClient(
+            "fake-application-key-id",
+            "fake-application-key-secret",
+            retries,
+            authorize_url=f"{self.endpoint}/b2api/v4/b2_authorize_account",
+        )
+
+    def enqueue_buckets(self, *bucket_ids):
+        self.state.enqueue(
+            "POST",
+            "b2_list_buckets",
+            {"buckets": [{"bucketId": bucket_id} for bucket_id in bucket_ids]},
+        )
+
+    def enqueue_no_unfinished(self):
+        self.state.enqueue(
+            "GET",
+            "b2_list_unfinished_large_files",
+            {"files": [], "nextFileId": None},
+        )
+
+    def test_account_usage_sums_every_version_and_paginates_all_buckets(self):
+        self.enqueue_buckets("bucket-a", "bucket-b")
+        self.enqueue_no_unfinished()
+        self.enqueue_no_unfinished()
+        self.state.enqueue(
+            "GET",
+            "b2_list_file_versions",
+            {
+                "files": [
+                    {"action": "upload", "contentLength": 10},
+                    {"action": "hide", "contentLength": 0},
+                ],
+                "nextFileId": "version-next",
+                "nextFileName": "same-key",
+            },
+        )
+        self.state.enqueue(
+            "GET",
+            "b2_list_file_versions",
+            {
+                "files": [
+                    {"action": "upload", "contentLength": 20},
+                    {"action": "folder", "contentLength": 0},
+                ],
+                "nextFileId": None,
+                "nextFileName": None,
+            },
+        )
+        self.state.enqueue(
+            "GET",
+            "b2_list_file_versions",
+            {
+                "files": [{"action": "upload", "contentLength": 30}],
+                "nextFileId": None,
+                "nextFileName": None,
+            },
+        )
+
+        result = uploader.b2_account_usage(self.client())
+
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["scope"], "account")
+        self.assertIs(result["scope_complete"], True)
+        self.assertEqual(result["bucket_count"], 2)
+        self.assertEqual(result["upload_version_count"], 3)
+        self.assertEqual(result["hide_marker_count"], 1)
+        self.assertEqual(result["folder_entry_count"], 1)
+        self.assertEqual(result["stored_upload_bytes"], 60)
+        self.assertEqual(result["unfinished_part_bytes"], 0)
+        self.assertEqual(result["total_stored_bytes"], 60)
+        self.assertEqual(result["version_page_count"], 3)
+
+        bucket_request = next(
+            request
+            for request in self.state.requests
+            if request["path"].endswith("/b2_list_buckets")
+        )
+        self.assertEqual(bucket_request["body"]["bucketTypes"], ["all"])
+        version_requests = [
+            request
+            for request in self.state.requests
+            if request["path"].endswith("/b2_list_file_versions")
+        ]
+        self.assertEqual(version_requests[1]["query"]["startFileName"], ["same-key"])
+        self.assertEqual(version_requests[1]["query"]["startFileId"], ["version-next"])
+
+    def test_account_usage_includes_paginated_unfinished_parts(self):
+        self.enqueue_buckets("bucket-a")
+        self.state.enqueue(
+            "GET",
+            "b2_list_unfinished_large_files",
+            {"files": [{"fileId": "unfinished-1"}], "nextFileId": "unfinished-2"},
+        )
+        self.state.enqueue(
+            "GET",
+            "b2_list_unfinished_large_files",
+            {"files": [{"fileId": "unfinished-2"}], "nextFileId": None},
+        )
+        self.state.enqueue(
+            "GET",
+            "b2_list_parts",
+            {
+                "parts": [{"partNumber": 1, "contentLength": 100}],
+                "nextPartNumber": 2,
+            },
+        )
+        self.state.enqueue(
+            "GET",
+            "b2_list_parts",
+            {
+                "parts": [{"partNumber": 2, "contentLength": 200}],
+                "nextPartNumber": None,
+            },
+        )
+        self.state.enqueue(
+            "GET",
+            "b2_list_parts",
+            {
+                "parts": [{"partNumber": 1, "contentLength": 300}],
+                "nextPartNumber": None,
+            },
+        )
+        self.state.enqueue(
+            "GET",
+            "b2_list_file_versions",
+            {
+                "files": [{"action": "upload", "contentLength": 5}],
+                "nextFileId": None,
+                "nextFileName": None,
+            },
+        )
+
+        result = uploader.b2_account_usage(self.client())
+
+        self.assertEqual(result["unfinished_large_file_count"], 2)
+        self.assertEqual(result["unfinished_large_file_page_count"], 2)
+        self.assertEqual(result["unfinished_part_count"], 3)
+        self.assertEqual(result["unfinished_part_page_count"], 3)
+        self.assertEqual(result["unfinished_part_bytes"], 600)
+        self.assertEqual(result["stored_upload_bytes"], 5)
+        self.assertEqual(result["total_stored_bytes"], 605)
+        unfinished_requests = [
+            request
+            for request in self.state.requests
+            if request["path"].endswith("/b2_list_unfinished_large_files")
+        ]
+        self.assertEqual(
+            unfinished_requests[1]["query"]["startFileId"], ["unfinished-2"]
+        )
+        part_requests = [
+            request
+            for request in self.state.requests
+            if request["path"].endswith("/b2_list_parts")
+        ]
+        self.assertEqual(part_requests[1]["query"]["startPartNumber"], ["2"])
+        self.assertEqual(part_requests[2]["query"]["fileId"], ["unfinished-2"])
+
+    def test_repeated_or_malformed_pagination_fails_closed(self):
+        self.enqueue_buckets("bucket-a")
+        self.enqueue_no_unfinished()
+        for _index in range(2):
+            self.state.enqueue(
+                "GET",
+                "b2_list_file_versions",
+                {
+                    "files": [{"action": "upload", "contentLength": 1}],
+                    "nextFileId": "repeated-id",
+                    "nextFileName": "repeated-name",
+                },
+            )
+        with self.assertRaisesRegex(RuntimeError, "pagination did not advance"):
+            uploader.b2_account_usage(self.client())
+
+    def test_retry_logs_are_sanitized_and_cli_output_is_canonical_json(self):
+        self.state.authorization_statuses.append(503)
+        self.enqueue_buckets()
+        error_output = io.StringIO()
+        with mock.patch.object(uploader.time, "sleep"), contextlib.redirect_stderr(
+            error_output
+        ):
+            result = uploader.b2_account_usage(self.client(retries=1))
+        self.assertEqual(result["total_stored_bytes"], 0)
+        self.assertIn("retry 1/1", error_output.getvalue())
+        self.assertNotIn("fake-application-key-secret", error_output.getvalue())
+        self.assertNotIn("fake-native-token", error_output.getvalue())
+
+        credentials = self.root / "backblaze.env"
+        credentials.write_text(
+            "B2_APPLICATION_KEY_ID=fake-application-key-id\n"
+            "B2_APPLICATION_KEY=fake-application-key-secret\n"
+        )
+        self.enqueue_buckets()
+        output = io.StringIO()
+        with mock.patch.object(
+            uploader,
+            "B2_AUTHORIZE_ACCOUNT_URL",
+            f"{self.endpoint}/b2api/v4/b2_authorize_account",
+        ), contextlib.redirect_stdout(output):
+            status = uploader.main(
+                [
+                    "b2-account-usage",
+                    "--credentials-file",
+                    str(credentials),
+                    "--retries",
+                    "0",
+                ]
+            )
+        self.assertEqual(status, 0)
+        decoded = json.loads(output.getvalue())
+        self.assertEqual(decoded["total_stored_bytes"], 0)
+        self.assertEqual(
+            output.getvalue(), uploader.canonical_json_bytes(decoded).decode("utf-8")
+        )
+
+    def test_restricted_key_and_invalid_sizes_never_claim_complete_usage(self):
+        self.state.allowed["bucketId"] = "bucket-a"
+        with self.assertRaisesRegex(RuntimeError, "account usage is incomplete"):
+            uploader.b2_account_usage(self.client())
+
+        self.state.allowed["bucketId"] = None
+        self.enqueue_buckets("bucket-a")
+        self.enqueue_no_unfinished()
+        self.state.enqueue(
+            "GET",
+            "b2_list_file_versions",
+            {
+                "files": [{"action": "upload", "contentLength": -1}],
+                "nextFileId": None,
+                "nextFileName": None,
+            },
+        )
+        with self.assertRaisesRegex(RuntimeError, "non-negative integer"):
+            uploader.b2_account_usage(self.client())
 
 
 if __name__ == "__main__":

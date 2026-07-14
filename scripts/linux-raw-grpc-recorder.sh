@@ -38,12 +38,20 @@ GENERATION_UPLOADER_BIN=${BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN:-/usr/local/bin
 GENERATION_CREDENTIALS_FILE=${BLOCKZILLA_B2_CREDENTIALS_FILE:-/run/secrets/backblaze_credentials}
 GENERATION_REMOTE_PREFIX=${BLOCKZILLA_B2_REMOTE_PREFIX:-grpc-raw/v1}
 GENERATION_PYTHON_BIN=${BLOCKZILLA_RAW_GENERATION_PYTHON_BIN:-python3}
+B2_USAGE_ALERT_ENABLED=${BLOCKZILLA_B2_USAGE_ALERT_ENABLED:-false}
+B2_USAGE_ALLOWANCE_BYTES=${BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:-10000000000}
+B2_USAGE_WARNING_BYTES=${BLOCKZILLA_B2_USAGE_WARNING_BYTES:-8000000000}
+B2_USAGE_CRITICAL_BYTES=${BLOCKZILLA_B2_USAGE_CRITICAL_BYTES:-9500000000}
+B2_USAGE_RECOVERY_HYSTERESIS_BYTES=${BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES:-500000000}
+B2_USAGE_CHECK_INTERVAL_SECS=${BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:-300}
+B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS=${BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS:-21600}
 
 ACTIVE_GENERATION_DIR=$CACHE_ROOT/active
 SEALED_GENERATION_DIR=$CACHE_ROOT/sealed
 GENERATION_RECEIPT_DIR=${BLOCKZILLA_RAW_CACHE_RECEIPT_DIR:-$CACHE_ROOT/receipts}
 GENERATION_MONITORING_DIR=$CACHE_ROOT/monitoring
 GENERATION_ROTATION_MARKER=$CACHE_ROOT/.rotation
+B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 if [ "$CACHE_MODE" = b2-generations ]; then
   OUTPUT_DIR=$ACTIVE_GENERATION_DIR
 fi
@@ -457,6 +465,18 @@ raise_alert() {
   return 0
 }
 
+raise_alert_once() {
+  once_key=$1
+  once_level=$2
+  once_message=$3
+  once_active=$(alert_file "$once_key" active)
+  once_last=$(alert_file "$once_key" last)
+  if [ -e "$once_active" ] && [ -r "$once_last" ]; then
+    return 0
+  fi
+  raise_alert "$once_key" "$once_level" "$once_message"
+}
+
 retry_pending_alert() {
   retry_key=$1
   if [ "$TELEGRAM_ENABLED" != true ]; then
@@ -500,6 +520,9 @@ retry_pending_alerts() {
     disk_check_failed \
     disk_critical \
     disk_warning \
+    b2_usage_check_failed \
+    b2_usage_warning \
+    b2_usage_critical \
     primary_sync_stale \
     generation_rotation_failed \
     generation_upload_failed \
@@ -1428,6 +1451,138 @@ start_generation_upload_worker() {
   upload_worker_pid=$!
 }
 
+b2_usage_report_bytes() {
+  usage_report=$1
+  if [ -L "$usage_report" ] \
+    || [ ! -f "$usage_report" ] \
+    || [ ! -r "$usage_report" ]
+  then
+    return 1
+  fi
+  usage_report_size=$(wc -c < "$usage_report" | tr -d ' ')
+  case "$usage_report_size" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  [ "$usage_report_size" -le 65536 ] || return 1
+  "$GENERATION_PYTHON_BIN" - "$usage_report" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    report = json.load(handle)
+if not isinstance(report, dict):
+    raise SystemExit("usage report must be an object")
+if report.get("schema_version") != 1 or report.get("scope_complete") is not True:
+    raise SystemExit("usage report is incomplete or has an unsupported schema")
+stored_bytes = report.get("total_stored_bytes")
+if isinstance(stored_bytes, bool) or not isinstance(stored_bytes, int) or stored_bytes < 0:
+    raise SystemExit("usage report has invalid total_stored_bytes")
+print(stored_bytes)
+PY
+}
+
+run_b2_usage_scan() {
+  if [ -L "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -f "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -r "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -x "$GENERATION_UPLOADER_BIN" ]
+  then
+    return 1
+  fi
+  usage_tmp=$B2_USAGE_REPORT_FILE.$$.tmp
+  rm -f "$usage_tmp" 2>/dev/null || return 1
+  "$GENERATION_UPLOADER_BIN" b2-account-usage \
+    --credentials-file "$GENERATION_CREDENTIALS_FILE" > "$usage_tmp" &
+  b2_usage_query_pid=$!
+  if wait "$b2_usage_query_pid"; then
+    usage_status=0
+  else
+    usage_status=$?
+  fi
+  b2_usage_query_pid=
+  if [ "$usage_status" -ne 0 ]; then
+    rm -f "$usage_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! B2_USAGE_BYTES=$(b2_usage_report_bytes "$usage_tmp"); then
+    rm -f "$usage_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! chmod 0600 "$usage_tmp" \
+    || ! sync_path "$usage_tmp" \
+    || ! mv -f "$usage_tmp" "$B2_USAGE_REPORT_FILE" \
+    || ! sync_path "$GENERATION_MONITORING_DIR"
+  then
+    rm -f "$usage_tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+update_b2_usage_alerts() {
+  usage_bytes=$1
+  usage_critical_active=$(alert_file b2_usage_critical active)
+  usage_warning_active=$(alert_file b2_usage_warning active)
+
+  if [ "$usage_bytes" -ge "$B2_USAGE_CRITICAL_BYTES" ]; then
+    raise_alert_once b2_usage_critical CRITICAL \
+      "Backblaze account storage=${usage_bytes} bytes reached near-limit threshold=${B2_USAGE_CRITICAL_BYTES} bytes (free allowance=${B2_USAGE_ALLOWANCE_BYTES}). Uploads and indefinite remote retention continue."
+  elif [ -e "$usage_critical_active" ] \
+    && [ "$usage_bytes" -lt "$B2_USAGE_CRITICAL_RECOVERY_BYTES" ]
+  then
+    clear_alert b2_usage_critical \
+      "Backblaze account storage recovered below the critical threshold minus hysteresis; stored bytes=${usage_bytes}."
+  fi
+
+  if [ "$usage_bytes" -ge "$B2_USAGE_WARNING_BYTES" ] \
+    && [ "$usage_bytes" -lt "$B2_USAGE_CRITICAL_BYTES" ]
+  then
+    raise_alert_once b2_usage_warning WARNING \
+      "Backblaze account storage=${usage_bytes} bytes reached warning threshold=${B2_USAGE_WARNING_BYTES} bytes (free allowance=${B2_USAGE_ALLOWANCE_BYTES}). Hidden versions and unfinished large-file parts are included."
+  elif [ -e "$usage_warning_active" ] \
+    && [ "$usage_bytes" -lt "$B2_USAGE_WARNING_RECOVERY_BYTES" ]
+  then
+    clear_alert b2_usage_warning \
+      "Backblaze account storage recovered below the warning threshold minus hysteresis; stored bytes=${usage_bytes}."
+  fi
+}
+
+terminate_b2_usage_worker() {
+  if [ -n "${b2_usage_query_pid:-}" ]; then
+    kill -TERM "$b2_usage_query_pid" 2>/dev/null || true
+    wait "$b2_usage_query_pid" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+b2_usage_worker() {
+  b2_usage_query_pid=
+  trap terminate_b2_usage_worker INT TERM HUP
+  while :; do
+    usage_sleep=$B2_USAGE_CHECK_INTERVAL_SECS
+    if ! validate_data_volume true >/dev/null 2>&1; then
+      : # The dedicated volume incident is reported by the main monitor.
+    elif run_b2_usage_scan; then
+      clear_alert b2_usage_check_failed \
+        "Backblaze account-wide storage measurement is working again."
+      update_b2_usage_alerts "$B2_USAGE_BYTES"
+      echo "$(timestamp) b2_usage stored_bytes=$B2_USAGE_BYTES allowance_bytes=$B2_USAGE_ALLOWANCE_BYTES" >&2
+      if [ "$B2_USAGE_BYTES" -ge "$B2_USAGE_CRITICAL_BYTES" ]; then
+        usage_sleep=$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS
+      fi
+    else
+      raise_alert_once b2_usage_check_failed ERROR \
+        "Unable to measure complete Backblaze account storage; capture and uploads continue."
+    fi
+    sleep "$usage_sleep"
+  done
+}
+
+start_b2_usage_worker() {
+  b2_usage_worker &
+  b2_usage_worker_pid=$!
+}
+
 healthcheck() {
   stale_after=${BLOCKZILLA_RAW_STALE_AFTER_SECS:-180}
   startup_grace=${BLOCKZILLA_RAW_STARTUP_GRACE_SECS:-300}
@@ -1544,6 +1699,17 @@ case "$REQUIRE_COMPLETE_POH" in
     exit 2
     ;;
 esac
+case "$B2_USAGE_ALERT_ENABLED" in
+  true|false) ;;
+  *)
+    echo "BLOCKZILLA_B2_USAGE_ALERT_ENABLED must be true or false" >&2
+    exit 2
+    ;;
+esac
+if [ "$B2_USAGE_ALERT_ENABLED" = true ] && [ "$CACHE_MODE" != b2-generations ]; then
+  echo "Backblaze usage alerts require BLOCKZILLA_RAW_CACHE_MODE=b2-generations" >&2
+  exit 2
+fi
 
 for numeric_setting in \
   "BLOCKZILLA_RAW_MIN_FREE_BYTES:$MIN_FREE_BYTES" \
@@ -1557,6 +1723,12 @@ for numeric_setting in \
   "BLOCKZILLA_RAW_MAX_GENERATION_BYTES:$MAX_GENERATION_BYTES" \
   "BLOCKZILLA_RAW_GENERATION_BACKLOG_WARN_COUNT:$GENERATION_BACKLOG_WARN_COUNT" \
   "BLOCKZILLA_RAW_GENERATION_UPLOAD_RETRY_SECS:$GENERATION_UPLOAD_RETRY_SECS" \
+  "BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:$B2_USAGE_ALLOWANCE_BYTES" \
+  "BLOCKZILLA_B2_USAGE_WARNING_BYTES:$B2_USAGE_WARNING_BYTES" \
+  "BLOCKZILLA_B2_USAGE_CRITICAL_BYTES:$B2_USAGE_CRITICAL_BYTES" \
+  "BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES:$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" \
+  "BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:$B2_USAGE_CHECK_INTERVAL_SECS" \
+  "BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS:$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" \
   "BLOCKZILLA_TELEGRAM_ALERT_COOLDOWN_SECS:$TELEGRAM_ALERT_COOLDOWN_SECS" \
   "BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES:$DISK_WARN_FREE_BYTES" \
   "BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES:$DISK_RECOVERY_HYSTERESIS_BYTES" \
@@ -1576,6 +1748,19 @@ if [ "$MONITOR_INTERVAL_SECS" -eq 0 ]; then
   echo "BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS must be non-zero" >&2
   exit 2
 fi
+if [ "$B2_USAGE_WARNING_BYTES" -eq 0 ] \
+  || [ "$B2_USAGE_WARNING_BYTES" -ge "$B2_USAGE_CRITICAL_BYTES" ] \
+  || [ "$B2_USAGE_CRITICAL_BYTES" -gt "$B2_USAGE_ALLOWANCE_BYTES" ] \
+  || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -eq 0 ] \
+  || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -ge "$B2_USAGE_WARNING_BYTES" ] \
+  || [ "$B2_USAGE_CHECK_INTERVAL_SECS" -eq 0 ] \
+  || [ "$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" -eq 0 ]
+then
+  echo "Backblaze usage thresholds, hysteresis, and intervals are invalid" >&2
+  exit 2
+fi
+B2_USAGE_WARNING_RECOVERY_BYTES=$((B2_USAGE_WARNING_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
+B2_USAGE_CRITICAL_RECOVERY_BYTES=$((B2_USAGE_CRITICAL_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
 if [ "$CACHE_MODE" = b2-generations ]; then
   if [ "$MAX_GENERATION_BYTES" -le "$MAX_RECORD_BYTES" ]; then
     echo "BLOCKZILLA_RAW_MAX_GENERATION_BYTES must exceed BLOCKZILLA_RAW_MAX_RECORD_BYTES" >&2
@@ -1679,7 +1864,11 @@ available_bytes() {
 child_pid=
 monitor_pid=
 upload_worker_pid=
+b2_usage_worker_pid=
 terminate() {
+  if [ -n "$b2_usage_worker_pid" ]; then
+    kill -TERM "$b2_usage_worker_pid" 2>/dev/null || true
+  fi
   if [ -n "$upload_worker_pid" ]; then
     kill -TERM "$upload_worker_pid" 2>/dev/null || true
   fi
@@ -1695,6 +1884,9 @@ terminate() {
   fi
   if [ -n "$upload_worker_pid" ]; then
     wait "$upload_worker_pid" 2>/dev/null || true
+  fi
+  if [ -n "$b2_usage_worker_pid" ]; then
+    wait "$b2_usage_worker_pid" 2>/dev/null || true
   fi
   write_state stopping
   exit 0
@@ -1729,6 +1921,15 @@ while :; do
         wait "$upload_worker_pid" 2>/dev/null || true
       fi
       start_generation_upload_worker
+    fi
+    if [ "$B2_USAGE_ALERT_ENABLED" = true ] \
+      && { [ -z "$b2_usage_worker_pid" ] \
+        || ! kill -0 "$b2_usage_worker_pid" 2>/dev/null; }
+    then
+      if [ -n "$b2_usage_worker_pid" ]; then
+        wait "$b2_usage_worker_pid" 2>/dev/null || true
+      fi
+      start_b2_usage_worker
     fi
   elif ! mkdir -p "$OUTPUT_DIR"; then
     write_state volume_invalid

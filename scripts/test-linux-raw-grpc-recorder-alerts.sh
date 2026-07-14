@@ -87,6 +87,36 @@ test -e "$(alert_file disk_warning active)"
 update_disk_alerts 220
 test ! -e "$(alert_file disk_warning active)"
 
+# Backblaze usage counts the whole account and escalates independently near the
+# decimal 10 GB allowance. Recovery requires the configured hysteresis margin.
+B2_USAGE_ALLOWANCE_BYTES=250
+B2_USAGE_WARNING_BYTES=150
+B2_USAGE_CRITICAL_BYTES=200
+B2_USAGE_WARNING_RECOVERY_BYTES=130
+B2_USAGE_CRITICAL_RECOVERY_BYTES=180
+update_b2_usage_alerts 160
+test -e "$(alert_file b2_usage_warning active)"
+test ! -e "$(alert_file b2_usage_critical active)"
+update_b2_usage_alerts 210
+test -e "$(alert_file b2_usage_warning active)"
+test -e "$(alert_file b2_usage_critical active)"
+update_b2_usage_alerts 185
+test -e "$(alert_file b2_usage_critical active)"
+update_b2_usage_alerts 175
+test ! -e "$(alert_file b2_usage_critical active)"
+test -e "$(alert_file b2_usage_warning active)"
+update_b2_usage_alerts 125
+test ! -e "$(alert_file b2_usage_warning active)"
+
+usage_report=$fixture_root/b2-account-usage.json
+printf '%s\n' '{"schema_version":1,"scope_complete":true,"total_stored_bytes":123}' > "$usage_report"
+test "$(b2_usage_report_bytes "$usage_report")" = 123
+printf '%s\n' '{"schema_version":1,"scope_complete":false,"total_stored_bytes":123}' > "$usage_report"
+if b2_usage_report_bytes "$usage_report" >/dev/null 2>&1; then
+  echo "incomplete Backblaze usage report was accepted" >&2
+  exit 1
+fi
+
 # Disabling Telegram must not disable the runtime fail-closed volume guard.
 TELEGRAM_ENABLED=false
 MONITOR_INTERVAL_SECS=1

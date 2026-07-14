@@ -30,11 +30,13 @@ practical Backblaze-outage window roughly 25–30 minutes. If remote uploads fal
 behind, the recorder alerts and pauses at the hard floor; it never deletes an
 unverified generation.
 
-Backblaze retention is separate from the 3 GiB host limit. Without a bucket
-lifecycle rule, the remote prefix grows by approximately the incoming stream
-volume. Any future lifecycle must preserve the pinned object versions for the
-intended backup window. Choose that policy explicitly; do not confuse cache
-cleanup with remote archive deletion.
+Backblaze retention is separate from the 3 GiB host limit. This deployment has
+no lifecycle deletion: the remote archive, including noncurrent versions, grows
+indefinitely by approximately the incoming stream volume. The account-wide
+usage monitor counts every upload version in every bucket plus unfinished
+large-file parts. It warns at 8,000,000,000 bytes and escalates at
+9,500,000,000 bytes before the decimal 10 GB free allowance. These alerts never
+stop uploads or delete remote data.
 
 ## Current scope
 
@@ -50,7 +52,9 @@ request, transfer, acknowledgement, or delete protocol. Consequently:
 - a Backblaze commit is the only local generation deletion authority today.
 
 The optional primary-sync heartbeat remains disabled until the real sync
-process writes one.
+process writes one. The agreed pull/ACK design is documented in
+[`docs/live-grpc-b2-sync.md`](../../docs/live-grpc-b2-sync.md); a generic ping is
+not treated as synchronization or deletion authority.
 
 ## Host cache
 
@@ -124,6 +128,13 @@ BLOCKZILLA_RAW_MIN_FREE_BYTES=402653184
 BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES=805306368
 BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES=134217728
 BLOCKZILLA_B2_REMOTE_PREFIX=grpc-raw/v1
+BLOCKZILLA_B2_USAGE_ALERT_ENABLED=true
+BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES=10000000000
+BLOCKZILLA_B2_USAGE_WARNING_BYTES=8000000000
+BLOCKZILLA_B2_USAGE_CRITICAL_BYTES=9500000000
+BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES=500000000
+BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS=300
+BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS=21600
 ```
 
 Set `BLOCKZILLA_TELEGRAM_CHAT_ID` and keep Telegram enabled. For a forum topic,
@@ -208,6 +219,7 @@ allowing distinct failures through. Failed deliveries remain pending for retry.
 | Resume coverage warning | Yellowstone did not return the inclusively requested durable slot. | Compare against another recorder and repair the uncovered range. |
 | Cache/volume invalid | The exact cache mount, marker, or rotation transaction is missing or inconsistent. Capture is stopped. | Restore the mount and inspect the transaction; never manufacture a marker on the root filesystem. |
 | Backblaze upload failed | Upload, remote `HEAD`, full `GET` hash verification, receipt validation, or chain publication failed. Local data is retained. | Check Backblaze credentials/reachability and logs. Do not manually delete the sealed generation. |
+| Backblaze usage warning / critical | Complete account storage, including hidden versions and unfinished parts, reached 8.0 GB / 9.5 GB. Measurement failures are a separate alert. Upload and indefinite retention continue. | Expect billing after the account exceeds its free allowance, or deliberately change retention later. |
 | Generation backlog | Sealed generations reached the configured backlog threshold. | Restore remote throughput before the 3 GiB cache reaches its floor. |
 | Disk warning / critical | Cache free space is below 768 MiB / 384 MiB. At the hard floor capture pauses while uploads continue. | Fix the uploader. Only remotely verified generations may be removed. |
 | Primary-sync stale | Active only when a heartbeat path is configured. | Inspect the future authenticated primary/replica sync process. |
@@ -219,4 +231,5 @@ Keep an external Dokploy or host uptime alert for those failures.
 Relevant platform references: [Dokploy Compose persistence](https://docs.dokploy.com/docs/core/docker-compose),
 [Dokploy mounts API](https://docs.dokploy.com/docs/api/mounts),
 [Telegram `sendMessage`](https://core.telegram.org/bots/api#sendmessage), and
-[Backblaze S3-compatible API](https://www.backblaze.com/apidocs/introduction-to-the-s3-compatible-api).
+[Backblaze S3-compatible API](https://www.backblaze.com/apidocs/introduction-to-the-s3-compatible-api),
+plus the [Backblaze Native API](https://www.backblaze.com/apidocs/introduction-to-the-native-api).

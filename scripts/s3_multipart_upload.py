@@ -32,6 +32,11 @@ GENERATION_RECEIPT_SCHEMA_VERSION = 1
 READ_CHUNK_SIZE = 1024 * 1024
 MAX_CREDENTIALS_FILE_BYTES = 64 * 1024
 MAX_VERSION_ID_BYTES = 1024
+B2_AUTHORIZE_ACCOUNT_URL = "https://api.backblazeb2.com/b2api/v4/b2_authorize_account"
+B2_NATIVE_API_VERSION = "v4"
+B2_NATIVE_CONNECT_TIMEOUT_SECS = 10
+B2_NATIVE_READ_TIMEOUT_SECS = 60
+B2_ACCOUNT_USAGE_SCHEMA_VERSION = 1
 ALLOWED_CREDENTIAL_KEYS = {
     "AWS_ACCESS_KEY_ID",
     "AWS_DEFAULT_REGION",
@@ -200,6 +205,29 @@ def storage_settings(credentials_file: Path | None):
     if missing:
         raise ValueError(f"missing required storage settings: {', '.join(missing)}")
     return endpoint, region, bucket, access_key, secret_key
+
+
+def backblaze_native_settings(credentials_file: Path | None):
+    values = (
+        parse_credentials_file(credentials_file) if credentials_file else os.environ
+    )
+    application_key_id = values.get("B2_APPLICATION_KEY_ID") or values.get(
+        "AWS_ACCESS_KEY_ID"
+    )
+    application_key = values.get("B2_APPLICATION_KEY") or values.get(
+        "AWS_SECRET_ACCESS_KEY"
+    )
+    missing = [
+        name
+        for name, value in [
+            ("B2_APPLICATION_KEY_ID", application_key_id),
+            ("B2_APPLICATION_KEY", application_key),
+        ]
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"missing required Backblaze settings: {', '.join(missing)}")
+    return application_key_id, application_key
 
 
 def signing_key(secret: str, date: str, region: str) -> bytes:
@@ -383,6 +411,429 @@ class S3Client:
             timeout=300,
             stream=stream,
         )
+
+
+class B2NativeAPIError(RuntimeError):
+    def __init__(self, operation: str, status_code: int, code: str = ""):
+        detail = f" ({code})" if code else ""
+        super().__init__(f"{operation} failed HTTP {status_code}{detail}")
+        self.status_code = status_code
+        self.code = code
+
+
+class B2NativeClient:
+    """Minimal read-only Backblaze Native API client for account usage scans."""
+
+    def __init__(
+        self,
+        application_key_id: str,
+        application_key: str,
+        retries: int,
+        *,
+        authorize_url: str = B2_AUTHORIZE_ACCOUNT_URL,
+    ):
+        if not application_key_id or not application_key:
+            raise ValueError("Backblaze application credentials must be non-empty")
+        if retries < 0:
+            raise ValueError("retry count must be non-negative")
+        self.application_key_id = application_key_id
+        self.application_key = application_key
+        self.retries = retries
+        self.authorize_url = self._validate_api_url(
+            authorize_url, "Backblaze authorization URL"
+        )
+        self.session = requests.Session()
+        self.account_id = None
+        self.authorization_token = None
+        self.api_url = None
+        self.allowed = None
+
+    @staticmethod
+    def _validate_api_url(url: str, label: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(f"{label} must be an absolute HTTP(S) URL")
+        if parsed.scheme != "https" and parsed.hostname not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise ValueError(f"{label} must use HTTPS")
+        return url.rstrip("/")
+
+    @staticmethod
+    def _error_code(response) -> str:
+        try:
+            payload = response.json()
+        except (ValueError, requests.RequestException):
+            return ""
+        if not isinstance(payload, dict) or not isinstance(payload.get("code"), str):
+            return ""
+        return payload["code"]
+
+    @staticmethod
+    def _retry_delay(response, attempt: int) -> int:
+        delay = min(60, 2 ** (attempt - 1))
+        if response is not None:
+            retry_after = response.headers.get("retry-after", "")
+            if retry_after.isdigit():
+                delay = min(60, max(delay, int(retry_after)))
+        return delay
+
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        operation: str,
+        *,
+        headers=None,
+        params=None,
+        json_body=None,
+        auth=None,
+    ):
+        last_error = None
+        for attempt in range(1, self.retries + 2):
+            response = None
+            try:
+                response = self.session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    json=json_body,
+                    auth=auth,
+                    timeout=(
+                        B2_NATIVE_CONNECT_TIMEOUT_SECS,
+                        B2_NATIVE_READ_TIMEOUT_SECS,
+                    ),
+                )
+                if response.status_code < 300:
+                    try:
+                        payload = response.json()
+                    except (ValueError, requests.RequestException) as error:
+                        raise RuntimeError(
+                            f"{operation} returned invalid JSON"
+                        ) from error
+                    finally:
+                        response.close()
+                    if not isinstance(payload, dict):
+                        raise RuntimeError(
+                            f"{operation} returned a non-object response"
+                        )
+                    return payload
+                code = self._error_code(response)
+                if response.status_code not in RETRYABLE_STATUS_CODES:
+                    status_code = response.status_code
+                    response.close()
+                    raise B2NativeAPIError(operation, status_code, code)
+                last_error = B2NativeAPIError(operation, response.status_code, code)
+                response.close()
+            except B2NativeAPIError:
+                raise
+            except requests.RequestException as error:
+                last_error = error
+
+            if attempt > self.retries:
+                break
+            delay = self._retry_delay(response, attempt)
+            detail = (
+                f"HTTP {response.status_code}"
+                if response is not None
+                else last_error.__class__.__name__
+            )
+            print(
+                f"retry {attempt}/{self.retries} after {detail} for {operation}; "
+                f"sleep={delay}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
+        raise RuntimeError(f"{operation} failed after retries: {last_error}")
+
+    def authorize(self):
+        payload = self._request_json(
+            "GET",
+            self.authorize_url,
+            "b2_authorize_account",
+            auth=(self.application_key_id, self.application_key),
+        )
+        account_id = payload.get("accountId")
+        authorization_token = payload.get("authorizationToken")
+        storage_api = payload.get("apiInfo", {}).get("storageApi", {})
+        api_url = storage_api.get("apiUrl")
+        allowed = storage_api.get("allowed")
+        if not isinstance(account_id, str) or not account_id:
+            raise RuntimeError("b2_authorize_account omitted accountId")
+        if not isinstance(authorization_token, str) or not authorization_token:
+            raise RuntimeError("b2_authorize_account omitted authorizationToken")
+        if not isinstance(api_url, str) or not api_url:
+            raise RuntimeError("b2_authorize_account omitted storage API URL")
+        if not isinstance(allowed, dict):
+            raise RuntimeError("b2_authorize_account omitted allowed capabilities")
+        self.account_id = account_id
+        self.authorization_token = authorization_token
+        self.api_url = self._validate_api_url(api_url, "Backblaze storage API URL")
+        self.allowed = allowed
+        return payload
+
+    def require_account_wide_list_access(self):
+        if self.allowed is None:
+            self.authorize()
+        capabilities = self.allowed.get("capabilities")
+        if not isinstance(capabilities, list) or not all(
+            isinstance(capability, str) for capability in capabilities
+        ):
+            raise RuntimeError("Backblaze capability list is malformed")
+        missing = {"listBuckets", "listFiles"} - set(capabilities)
+        if missing:
+            raise RuntimeError(
+                "Backblaze key lacks account usage capabilities: "
+                + ", ".join(sorted(missing))
+            )
+        if (
+            self.allowed.get("bucketId") is not None
+            or self.allowed.get("bucketIds") is not None
+            or self.allowed.get("namePrefix") is not None
+        ):
+            raise RuntimeError(
+                "Backblaze key is bucket- or prefix-restricted; account usage is incomplete"
+            )
+
+    def api_request(self, operation: str, *, method="GET", params=None, json_body=None):
+        if self.authorization_token is None or self.api_url is None:
+            self.authorize()
+        url = f"{self.api_url}/b2api/{B2_NATIVE_API_VERSION}/{operation}"
+        for authorization_attempt in range(2):
+            try:
+                return self._request_json(
+                    method,
+                    url,
+                    operation,
+                    headers={"Authorization": self.authorization_token},
+                    params=params,
+                    json_body=json_body,
+                )
+            except B2NativeAPIError as error:
+                if error.code != "expired_auth_token" or authorization_attempt > 0:
+                    raise
+                self.authorize()
+                url = f"{self.api_url}/b2api/{B2_NATIVE_API_VERSION}/{operation}"
+        raise RuntimeError(f"{operation} authorization retry failed")
+
+
+def _nonnegative_integer(value, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"{label} must be a non-negative integer")
+    return value
+
+
+def _response_list(payload: dict, key: str, operation: str) -> list:
+    items = payload.get(key)
+    if not isinstance(items, list):
+        raise RuntimeError(f"{operation} returned a malformed {key} list")
+    if not all(isinstance(item, dict) for item in items):
+        raise RuntimeError(f"{operation} returned a malformed {key} entry")
+    return items
+
+
+def _list_unfinished_part_usage(client: B2NativeClient, bucket_id: str) -> dict:
+    totals = {
+        "unfinished_large_file_count": 0,
+        "unfinished_large_file_page_count": 0,
+        "unfinished_part_bytes": 0,
+        "unfinished_part_count": 0,
+        "unfinished_part_page_count": 0,
+    }
+    next_file_id = None
+    seen_file_markers = set()
+    seen_unfinished_file_ids = set()
+    while True:
+        params = {"bucketId": bucket_id, "maxFileCount": 100}
+        if next_file_id is not None:
+            params["startFileId"] = next_file_id
+        payload = client.api_request("b2_list_unfinished_large_files", params=params)
+        totals["unfinished_large_file_page_count"] += 1
+        for unfinished in _response_list(
+            payload, "files", "b2_list_unfinished_large_files"
+        ):
+            file_id = unfinished.get("fileId")
+            if not isinstance(file_id, str) or not file_id:
+                raise RuntimeError(
+                    "b2_list_unfinished_large_files returned an invalid fileId"
+                )
+            if file_id in seen_unfinished_file_ids:
+                raise RuntimeError(
+                    "b2_list_unfinished_large_files returned a duplicate fileId"
+                )
+            seen_unfinished_file_ids.add(file_id)
+            totals["unfinished_large_file_count"] += 1
+
+            next_part_number = None
+            seen_part_markers = set()
+            seen_part_numbers = set()
+            while True:
+                part_params = {"fileId": file_id, "maxPartCount": 1000}
+                if next_part_number is not None:
+                    part_params["startPartNumber"] = next_part_number
+                part_payload = client.api_request("b2_list_parts", params=part_params)
+                totals["unfinished_part_page_count"] += 1
+                for part in _response_list(part_payload, "parts", "b2_list_parts"):
+                    part_number = _nonnegative_integer(
+                        part.get("partNumber"), "Backblaze part number"
+                    )
+                    if part_number < 1 or part_number in seen_part_numbers:
+                        raise RuntimeError(
+                            "b2_list_parts returned an invalid or duplicate part number"
+                        )
+                    seen_part_numbers.add(part_number)
+                    totals["unfinished_part_count"] += 1
+                    totals["unfinished_part_bytes"] += _nonnegative_integer(
+                        part.get("contentLength"), "Backblaze part contentLength"
+                    )
+                marker = part_payload.get("nextPartNumber")
+                if marker is None:
+                    break
+                marker = _nonnegative_integer(marker, "Backblaze nextPartNumber")
+                if marker < 1 or marker in seen_part_markers:
+                    raise RuntimeError("b2_list_parts pagination did not advance")
+                seen_part_markers.add(marker)
+                next_part_number = marker
+
+        marker = payload.get("nextFileId")
+        if marker is None:
+            break
+        if not isinstance(marker, str) or not marker or marker in seen_file_markers:
+            raise RuntimeError(
+                "b2_list_unfinished_large_files pagination did not advance"
+            )
+        seen_file_markers.add(marker)
+        next_file_id = marker
+    return totals
+
+
+def _list_file_version_usage(client: B2NativeClient, bucket_id: str) -> dict:
+    totals = {
+        "folder_entry_count": 0,
+        "hide_marker_count": 0,
+        "start_marker_count": 0,
+        "stored_upload_bytes": 0,
+        "upload_version_count": 0,
+        "version_page_count": 0,
+    }
+    next_file_name = None
+    next_file_id = None
+    seen_markers = set()
+    while True:
+        params = {"bucketId": bucket_id, "maxFileCount": 1000}
+        if next_file_name is not None:
+            params["startFileName"] = next_file_name
+            params["startFileId"] = next_file_id
+        payload = client.api_request("b2_list_file_versions", params=params)
+        totals["version_page_count"] += 1
+        for version in _response_list(payload, "files", "b2_list_file_versions"):
+            action = version.get("action")
+            content_length = _nonnegative_integer(
+                version.get("contentLength"), "Backblaze version contentLength"
+            )
+            if action == "upload":
+                totals["upload_version_count"] += 1
+                totals["stored_upload_bytes"] += content_length
+            elif action == "hide":
+                if content_length != 0:
+                    raise RuntimeError(
+                        "Backblaze hide marker has non-zero contentLength"
+                    )
+                totals["hide_marker_count"] += 1
+            elif action == "start":
+                if content_length != 0:
+                    raise RuntimeError(
+                        "Backblaze start marker has non-zero contentLength"
+                    )
+                totals["start_marker_count"] += 1
+            elif action == "folder":
+                if content_length != 0:
+                    raise RuntimeError(
+                        "Backblaze folder entry has non-zero contentLength"
+                    )
+                totals["folder_entry_count"] += 1
+            else:
+                raise RuntimeError(
+                    f"b2_list_file_versions returned unsupported action {action!r}"
+                )
+
+        marker = (payload.get("nextFileName"), payload.get("nextFileId"))
+        if marker == (None, None):
+            break
+        if (
+            not isinstance(marker[0], str)
+            or not isinstance(marker[1], str)
+            or not marker[1]
+            or marker in seen_markers
+        ):
+            raise RuntimeError("b2_list_file_versions pagination did not advance")
+        seen_markers.add(marker)
+        next_file_name, next_file_id = marker
+    return totals
+
+
+def b2_account_usage(client: B2NativeClient) -> dict:
+    client.authorize()
+    client.require_account_wide_list_access()
+    payload = client.api_request(
+        "b2_list_buckets",
+        method="POST",
+        json_body={"accountId": client.account_id, "bucketTypes": ["all"]},
+    )
+    buckets = _response_list(payload, "buckets", "b2_list_buckets")
+    bucket_ids = []
+    for bucket in buckets:
+        bucket_id = bucket.get("bucketId")
+        if not isinstance(bucket_id, str) or not bucket_id or bucket_id in bucket_ids:
+            raise RuntimeError(
+                "b2_list_buckets returned an invalid or duplicate bucketId"
+            )
+        bucket_ids.append(bucket_id)
+
+    result = {
+        "bucket_count": len(bucket_ids),
+        "folder_entry_count": 0,
+        "hide_marker_count": 0,
+        "schema_version": B2_ACCOUNT_USAGE_SCHEMA_VERSION,
+        "scope": "account",
+        "scope_complete": True,
+        "scanned_unix_secs": int(time.time()),
+        "start_marker_count": 0,
+        "stored_upload_bytes": 0,
+        "total_stored_bytes": 0,
+        "unfinished_large_file_count": 0,
+        "unfinished_large_file_page_count": 0,
+        "unfinished_part_bytes": 0,
+        "unfinished_part_count": 0,
+        "unfinished_part_page_count": 0,
+        "upload_version_count": 0,
+        "version_page_count": 0,
+    }
+    for bucket_id in bucket_ids:
+        # Scan unfinished uploads before completed versions. If a multipart upload
+        # completes between the two reads, it is conservatively counted twice
+        # instead of being omitted from this non-transactional snapshot.
+        unfinished = _list_unfinished_part_usage(client, bucket_id)
+        versions = _list_file_version_usage(client, bucket_id)
+        for key, value in unfinished.items():
+            result[key] += value
+        for key, value in versions.items():
+            result[key] += value
+    result["total_stored_bytes"] = (
+        result["stored_upload_bytes"] + result["unfinished_part_bytes"]
+    )
+    return result
 
 
 def xml_text(root, tag):
@@ -1118,6 +1569,15 @@ def argument_parser():
     generation.add_argument("--generation-id", required=True)
     generation.add_argument("--predecessor-manifest-sha256")
     add_storage_arguments(generation)
+
+    account_usage = commands.add_parser(
+        "b2-account-usage",
+        help=(
+            "read every Backblaze bucket, object version, and unfinished upload "
+            "and report account-wide stored bytes"
+        ),
+    )
+    add_storage_arguments(account_usage)
     return parser
 
 
@@ -1128,7 +1588,24 @@ def make_client(args):
     return S3Client(endpoint, region, bucket, access_key, secret_key, args.retries)
 
 
+def make_b2_native_client(args):
+    application_key_id, application_key = backblaze_native_settings(
+        args.credentials_file
+    )
+    return B2NativeClient(
+        application_key_id,
+        application_key,
+        args.retries,
+        authorize_url=B2_AUTHORIZE_ACCOUNT_URL,
+    )
+
+
 def run(args):
+    if args.command == "b2-account-usage":
+        result = b2_account_usage(make_b2_native_client(args))
+        print(canonical_json_bytes(result).decode("utf-8"), end="")
+        return 0
+
     client = make_client(args)
     if args.command == "upload-file":
         result = upload_verified_file(
@@ -1187,6 +1664,7 @@ def main(argv=None):
         "upload-file",
         "commit-marker",
         "upload-generation",
+        "b2-account-usage",
         "-h",
         "--help",
     }:
