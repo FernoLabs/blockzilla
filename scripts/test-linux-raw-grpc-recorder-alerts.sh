@@ -70,6 +70,20 @@ clear_alert recorder_restarting "fixture recovered"
 test ! -e "$(alert_file recorder_restarting active)"
 test ! -e "$(alert_file recorder_restarting last)"
 
+# A failed replay-floor persistence attempt must remain one open incident while
+# retries run without an authoritative marker. It recovers only after a trusted
+# floor existed and passed the next loop's checks.
+raise_alert replay_recovery_failed CRITICAL "fixture replay failure"
+REPLAY_MIN_RESUME_SLOT=
+clear_replay_recovery_alert_if_floor_was_authoritative false
+test -e "$(alert_file replay_recovery_failed active)"
+test -e "$(alert_file replay_recovery_failed last)"
+REPLAY_MIN_RESUME_SLOT=200
+clear_replay_recovery_alert_if_floor_was_authoritative true
+test ! -e "$(alert_file replay_recovery_failed active)"
+test ! -e "$(alert_file replay_recovery_failed last)"
+test "$(alert_title replay_recovery_failed)" = "Provider-gap recovery paused"
+
 # Disk incidents recover only after their configured hysteresis margin.
 MIN_FREE_BYTES=100
 DISK_WARN_FREE_BYTES=200

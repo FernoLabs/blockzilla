@@ -143,6 +143,44 @@ fn subscribe_ping_request() -> SubscribeRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscribePingReplyOutcome {
+    Sent,
+    RequestSideClosed,
+    AlreadyClosed,
+    TotalTimeout,
+    IdleTimeout,
+}
+
+async fn reply_to_subscription_ping(
+    request_side_open: &mut bool,
+    request_sink: &mut mpsc::Sender<SubscribeRequest>,
+    total_deadline: TokioInstant,
+    idle_deadline: Option<TokioInstant>,
+) -> SubscribePingReplyOutcome {
+    if !*request_side_open {
+        return SubscribePingReplyOutcome::AlreadyClosed;
+    }
+    match await_with_watchdogs(
+        request_sink.send(subscribe_ping_request()),
+        total_deadline,
+        idle_deadline,
+    )
+    .await
+    {
+        WatchdogOutcome::Completed(Ok(())) => SubscribePingReplyOutcome::Sent,
+        // A futures bounded mpsc SendError has no recoverable variants: it means the receiver was
+        // dropped. Yellowstone may still have a terminal Status queued on the response stream, so
+        // make the closure sticky and let the caller continue draining that stream.
+        WatchdogOutcome::Completed(Err(_)) => {
+            *request_side_open = false;
+            SubscribePingReplyOutcome::RequestSideClosed
+        }
+        WatchdogOutcome::TotalTimeout => SubscribePingReplyOutcome::TotalTimeout,
+        WatchdogOutcome::IdleTimeout => SubscribePingReplyOutcome::IdleTimeout,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpcRawRecordConfig {
     pub endpoint: String,
@@ -737,6 +775,7 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     let mut compressor = zstd::bulk::Compressor::new(config.compression_level)
         .context("create raw gRPC zstd compressor")?;
     let mut poh_num_hashes_verified = 0u128;
+    let mut request_side_open = true;
 
     while report.frames_written < max_blocks {
         let update = match await_with_watchdogs(stream.next(), deadline, idle_deadline).await {
@@ -764,21 +803,25 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             }
         };
         if matches!(update.update_oneof.as_ref(), Some(UpdateOneof::Ping(_))) {
-            match await_with_watchdogs(
-                request_sink.send(subscribe_ping_request()),
+            match reply_to_subscription_ping(
+                &mut request_side_open,
+                &mut request_sink,
                 deadline,
                 idle_deadline,
             )
             .await
             {
-                WatchdogOutcome::Completed(result) => {
-                    result.context("reply to raw gRPC subscription ping")?
+                SubscribePingReplyOutcome::Sent | SubscribePingReplyOutcome::AlreadyClosed => {}
+                SubscribePingReplyOutcome::RequestSideClosed => {
+                    tracing::warn!(
+                        "raw gRPC request side closed while response stream remains readable; draining response"
+                    );
                 }
-                WatchdogOutcome::TotalTimeout => {
+                SubscribePingReplyOutcome::TotalTimeout => {
                     report.timed_out = true;
                     break;
                 }
-                WatchdogOutcome::IdleTimeout => {
+                SubscribePingReplyOutcome::IdleTimeout => {
                     report.idle_timed_out = true;
                     break;
                 }
@@ -2638,6 +2681,67 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn ping_reply_receiver_closure_is_sticky_and_response_drain_can_continue() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut disconnected_sink, disconnected_receiver) =
+                mpsc::channel::<SubscribeRequest>(1);
+            drop(disconnected_receiver);
+            let mut request_side_open = true;
+            let outcome = reply_to_subscription_ping(
+                &mut request_side_open,
+                &mut disconnected_sink,
+                deadline_after(TokioInstant::now(), 1, "test total timeout").unwrap(),
+                None,
+            )
+            .await;
+            assert_eq!(outcome, SubscribePingReplyOutcome::RequestSideClosed);
+            assert!(!request_side_open);
+
+            // A later Ping must not attempt a send after the closure. Use a fresh, healthy channel
+            // so an accidental retry would be observable rather than merely failing again.
+            let (mut healthy_sink, mut healthy_receiver) = mpsc::channel::<SubscribeRequest>(1);
+            let outcome = reply_to_subscription_ping(
+                &mut request_side_open,
+                &mut healthy_sink,
+                deadline_after(TokioInstant::now(), 1, "test total timeout").unwrap(),
+                None,
+            )
+            .await;
+            assert_eq!(outcome, SubscribePingReplyOutcome::AlreadyClosed);
+            assert!(healthy_receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn healthy_ping_reply_is_still_sent() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut request_sink, mut request_receiver) = mpsc::channel::<SubscribeRequest>(1);
+            let mut request_side_open = true;
+            let outcome = reply_to_subscription_ping(
+                &mut request_side_open,
+                &mut request_sink,
+                deadline_after(TokioInstant::now(), 1, "test total timeout").unwrap(),
+                None,
+            )
+            .await;
+            assert_eq!(outcome, SubscribePingReplyOutcome::Sent);
+            assert!(request_side_open);
+            assert_eq!(
+                request_receiver.try_recv().unwrap(),
+                subscribe_ping_request()
+            );
+        });
     }
 
     #[test]

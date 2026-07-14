@@ -407,6 +407,28 @@ alert_file() {
   printf '%s/%s.%s\n' "$ALERT_STATE_DIR" "$1" "$2"
 }
 
+alert_title() {
+  case "$1" in
+    recorder_restarting) printf '%s\n' 'Recorder stopped unexpectedly' ;;
+    grpc_stale) printf '%s\n' 'No new gRPC data' ;;
+    volume_invalid) printf '%s\n' 'Backup volume unavailable' ;;
+    disk_check_failed) printf '%s\n' 'Disk-space check failed' ;;
+    disk_critical) printf '%s\n' 'Backup disk critically low' ;;
+    disk_warning) printf '%s\n' 'Backup disk running low' ;;
+    b2_usage_check_failed) printf '%s\n' 'Backblaze usage check failed' ;;
+    b2_usage_warning) printf '%s\n' 'Backblaze archive near 10 GB' ;;
+    b2_usage_critical) printf '%s\n' 'Backblaze archive almost full' ;;
+    primary_sync_stale) printf '%s\n' 'Blockzilla acknowledgement missing' ;;
+    generation_rotation_failed) printf '%s\n' 'Local backup rotation paused' ;;
+    replay_recovery_failed) printf '%s\n' 'Provider-gap recovery paused' ;;
+    provider_replay_gap) printf '%s\n' 'Provider history gap detected' ;;
+    resume_coverage) printf '%s\n' 'Provider resumed after a missing slot' ;;
+    generation_upload_failed) printf '%s\n' 'Backblaze upload failed' ;;
+    generation_backlog) printf '%s\n' 'Backblaze upload backlog growing' ;;
+    *) printf '%s\n' "$1" | tr '_' ' ' ;;
+  esac
+}
+
 write_alert_delivery_time() {
   delivery_key=$1
   delivery_last=$2
@@ -436,8 +458,9 @@ raise_alert() {
   mkdir -p "$ALERT_STATE_DIR" 2>/dev/null || return 0
   alert_active=$(alert_file "$alert_key" active)
   alert_last=$(alert_file "$alert_key" last)
-  alert_text=$(printf '%s BLOCKZILLA %s\nnode=%s source=%s utc=%s\n%s' \
-    "$alert_level" "$alert_key" "$ORIGIN_NODE_ID" "$SOURCE_ID" "$(timestamp)" "$alert_message")
+  alert_heading=$(alert_title "$alert_key")
+  alert_text=$(printf 'BLOCKZILLA BACKUP ALERT\nProblem: %s\nSeverity: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
+    "$alert_heading" "$alert_level" "$ORIGIN_NODE_ID" "$(timestamp)" "$alert_message")
   if ! printf '%s\n' "$alert_text" > "$alert_active"; then
     ALERT_DELIVERY_RESULT=failed
     echo "$(timestamp) telegram_alert state_write_failed key=$alert_key" >&2
@@ -552,8 +575,9 @@ clear_alert() {
   if [ ! -r "$alert_last" ]; then
     return 0
   fi
-  alert_text=$(printf 'RECOVERED BLOCKZILLA %s\nnode=%s source=%s utc=%s\n%s' \
-    "$alert_key" "$ORIGIN_NODE_ID" "$SOURCE_ID" "$(timestamp)" "$alert_message")
+  alert_heading=$(alert_title "$alert_key")
+  alert_text=$(printf 'BLOCKZILLA BACKUP RECOVERED\nResolved: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
+    "$alert_heading" "$ORIGIN_NODE_ID" "$(timestamp)" "$alert_message")
   if ! telegram_send "$alert_text"; then
     echo "$(timestamp) telegram_recovery delivery_failed key=$alert_key" >&2
     return 0
@@ -636,6 +660,14 @@ clear_alert_after_journal_growth() {
       rm -f "$growth_floor_file" 2>/dev/null || \
         echo "$(timestamp) telegram_recovery journal_floor_remove_failed key=$growth_key" >&2
     fi
+  fi
+}
+
+clear_replay_recovery_alert_if_floor_was_authoritative() {
+  replay_floor_was_authoritative=$1
+  if [ "$replay_floor_was_authoritative" = true ]; then
+    clear_alert replay_recovery_failed \
+      "The trusted resume marker is durable. Capture can retry from the recorded provider floor; existing backup data was not deleted."
   fi
 }
 
@@ -1081,22 +1113,30 @@ publish_replay_gap_record_to_generation() {
   replay_gap_anchor=$2
   replay_gap_requested=$3
   replay_gap_available=$4
+  REPLAY_PERSIST_FAILURE_STAGE=gap_generation_validate
   cache_real_directory "$replay_gap_generation" || return 1
   replay_target_gap_dir=$replay_gap_generation/replay-gaps
   if [ -e "$replay_target_gap_dir" ]; then
+    REPLAY_PERSIST_FAILURE_STAGE=gap_directory_validate
     cache_real_directory "$replay_target_gap_dir" || return 1
   else
+    REPLAY_PERSIST_FAILURE_STAGE=gap_directory_create
     mkdir "$replay_target_gap_dir" || return 1
+    REPLAY_PERSIST_FAILURE_STAGE=gap_generation_sync
     sync_path "$replay_gap_generation" || return 1
+    REPLAY_PERSIST_FAILURE_STAGE=gap_directory_validate
     cache_real_directory "$replay_target_gap_dir" || return 1
   fi
   replay_gap_path=$replay_target_gap_dir/replay-gap-$replay_gap_anchor-$replay_gap_requested-$replay_gap_available.json
+  REPLAY_PERSIST_FAILURE_STAGE=gap_payload
   replay_gap_payload_value=$(replay_gap_payload "$replay_gap_anchor" \
     "$replay_gap_requested" "$replay_gap_available") || return 1
   if [ -e "$replay_gap_path" ] || [ -L "$replay_gap_path" ]; then
+    REPLAY_PERSIST_FAILURE_STAGE=gap_existing_validate
     validate_replay_gap_record_in_generation "$replay_gap_generation" \
       "$replay_gap_anchor" "$replay_gap_requested" \
       "$replay_gap_available" || return 1
+    REPLAY_PERSIST_FAILURE_STAGE=gap_directory_sync
     sync_path "$replay_target_gap_dir" || return 1
     return 0
   fi
@@ -1104,14 +1144,23 @@ publish_replay_gap_record_to_generation() {
   # unrelated later rotation can never manifest a half-written audit file.
   replay_gap_tmp=$GENERATION_MONITORING_DIR/.replay-gap.$$.tmp
   rm -f "$replay_gap_tmp"
-  if ! printf '%s\n' "$replay_gap_payload_value" > "$replay_gap_tmp" \
-    || ! sync_path "$replay_gap_tmp" \
-    || ! mv "$replay_gap_tmp" "$replay_gap_path" \
-    || ! sync_path "$replay_target_gap_dir"
-  then
+  REPLAY_PERSIST_FAILURE_STAGE=gap_temp_write
+  if ! printf '%s\n' "$replay_gap_payload_value" > "$replay_gap_tmp"; then
     rm -f "$replay_gap_tmp" 2>/dev/null || true
     return 1
   fi
+  REPLAY_PERSIST_FAILURE_STAGE=gap_temp_sync
+  if ! sync_path "$replay_gap_tmp"; then
+    rm -f "$replay_gap_tmp" 2>/dev/null || true
+    return 1
+  fi
+  REPLAY_PERSIST_FAILURE_STAGE=gap_publish
+  if ! mv "$replay_gap_tmp" "$replay_gap_path"; then
+    rm -f "$replay_gap_tmp" 2>/dev/null || true
+    return 1
+  fi
+  REPLAY_PERSIST_FAILURE_STAGE=gap_directory_sync
+  sync_path "$replay_target_gap_dir"
 }
 
 publish_replay_gap_record() {
@@ -1122,28 +1171,40 @@ publish_replay_recovery_floor() {
   replay_floor_anchor=$1
   replay_floor_requested=$2
   replay_floor_value=$3
+  REPLAY_PERSIST_FAILURE_STAGE=floor_evidence_validate
   validate_replay_gap_record "$replay_floor_anchor" \
     "$replay_floor_requested" "$replay_floor_value" || return 1
+  REPLAY_PERSIST_FAILURE_STAGE=floor_payload
   replay_floor_payload=$(printf \
     '{"anchor_slot":%s,"cluster_id":"%s","minimum_resume_slot":%s,"origin_node_id":"%s","requested_slot":%s,"schema_version":1,"source_id":"%s"}' \
     "$replay_floor_anchor" "$CLUSTER_ID" "$replay_floor_value" \
     "$ORIGIN_NODE_ID" "$replay_floor_requested" "$SOURCE_ID")
   replay_floor_tmp=$REPLAY_RECOVERY_FILE.$$
   rm -f "$replay_floor_tmp"
-  if ! printf '%s\n' "$replay_floor_payload" > "$replay_floor_tmp" \
-    || ! sync_path "$replay_floor_tmp" \
-    || ! mv -f "$replay_floor_tmp" "$REPLAY_RECOVERY_FILE" \
-    || ! sync_path "$GENERATION_MONITORING_DIR"
-  then
+  REPLAY_PERSIST_FAILURE_STAGE=floor_temp_write
+  if ! printf '%s\n' "$replay_floor_payload" > "$replay_floor_tmp"; then
     rm -f "$replay_floor_tmp" 2>/dev/null || true
     return 1
   fi
+  REPLAY_PERSIST_FAILURE_STAGE=floor_temp_sync
+  if ! sync_path "$replay_floor_tmp"; then
+    rm -f "$replay_floor_tmp" 2>/dev/null || true
+    return 1
+  fi
+  REPLAY_PERSIST_FAILURE_STAGE=floor_publish
+  if ! mv -f "$replay_floor_tmp" "$REPLAY_RECOVERY_FILE"; then
+    rm -f "$replay_floor_tmp" 2>/dev/null || true
+    return 1
+  fi
+  REPLAY_PERSIST_FAILURE_STAGE=floor_directory_sync
+  sync_path "$GENERATION_MONITORING_DIR"
 }
 
 verified_active_generation_last_slot() {
   replay_verify_report=$CACHE_ROOT/.replay-verify.$$.json
   rm -f "$replay_verify_report"
   if ! verify_generation "$ACTIVE_GENERATION_DIR" "$replay_verify_report"; then
+    echo "$(timestamp) raw_recorder replay_active_verify_failed reason=verify_command" >&2
     rm -f "$replay_verify_report"
     return 1
   fi
@@ -1151,7 +1212,10 @@ verified_active_generation_last_slot() {
     's/^[[:space:]]*"last_slot":[[:space:]]*\([0-9][0-9]*\),*$/\1/p' \
     "$replay_verify_report")
   rm -f "$replay_verify_report"
-  valid_replay_shell_uint "$replay_verified_slot" || return 1
+  if ! valid_replay_shell_uint "$replay_verified_slot"; then
+    echo "$(timestamp) raw_recorder replay_active_verify_failed reason=last_slot_parse" >&2
+    return 1
+  fi
   printf '%s\n' "$replay_verified_slot"
 }
 
@@ -1195,6 +1259,7 @@ retire_replay_recovery_floor_if_advanced() {
 
 persist_replay_recovery_from_report() {
   replay_report=$1
+  REPLAY_PERSIST_FAILURE_STAGE=report_preconditions
   if [ "$CACHE_MODE" != b2-generations ] \
     || [ -L "$replay_report" ] \
     || [ ! -f "$replay_report" ] \
@@ -1202,12 +1267,15 @@ persist_replay_recovery_from_report() {
   then
     return 1
   fi
+  REPLAY_PERSIST_FAILURE_STAGE=report_size
   replay_report_bytes=$(wc -c < "$replay_report" | tr -d ' ')
   valid_replay_shell_uint "$replay_report_bytes" || return 1
   [ "$replay_report_bytes" -gt 0 ] || return 1
   [ "$replay_report_bytes" -le 65536 ] || return 1
+  REPLAY_PERSIST_FAILURE_STAGE=report_json
   replay_fields=$(strict_replay_report_fields "$replay_report") || return 1
   # The strict parser emits exactly six bounded decimal fields.
+  REPLAY_PERSIST_FAILURE_STAGE=report_fields
   set -- $replay_fields
   [ "$#" -eq 6 ] || return 1
   replay_anchor=$1
@@ -1225,7 +1293,9 @@ persist_replay_recovery_from_report() {
     && [ "$replay_available" -gt "$replay_requested" ] \
     && [ "$replay_requested" -ge "$replay_anchor" ] || return 1
 
+  REPLAY_PERSIST_FAILURE_STAGE=existing_floor
   load_replay_recovery_floor || return 1
+  REPLAY_PERSIST_FAILURE_STAGE=floor_relation
   if [ -n "$REPLAY_MIN_RESUME_SLOT" ]; then
     [ "$REPLAY_RECOVERY_ANCHOR_SLOT" -eq "$replay_anchor" ] \
       && [ "$REPLAY_MIN_RESUME_SLOT" -eq "$replay_requested" ] || return 1
@@ -1233,21 +1303,26 @@ persist_replay_recovery_from_report() {
     [ "$replay_anchor" -eq "$replay_requested" ] || return 1
   fi
   if [ "${REPLAY_VERIFIED_ANCHOR_SLOT:-}" != "$replay_anchor" ]; then
+    REPLAY_PERSIST_FAILURE_STAGE=active_verify
     replay_verified_last_slot=$(verified_active_generation_last_slot) || return 1
+    REPLAY_PERSIST_FAILURE_STAGE=anchor_relation
     [ "$replay_verified_last_slot" -eq "$replay_anchor" ] || return 1
     REPLAY_VERIFIED_ANCHOR_SLOT=$replay_anchor
   fi
 
   # The immutable generation record is durable before the mutable resume pointer.
   # A crash between them merely causes this exact idempotent record to be reused.
+  REPLAY_PERSIST_FAILURE_STAGE=gap_record
   publish_replay_gap_record \
     "$replay_anchor" "$replay_requested" "$replay_available" || return 1
+  REPLAY_PERSIST_FAILURE_STAGE=floor_pointer
   publish_replay_recovery_floor \
     "$replay_anchor" "$replay_requested" "$replay_available" || return 1
   REPLAY_GAP_ANCHOR_SLOT=$replay_anchor
   REPLAY_GAP_REQUESTED_SLOT=$replay_requested
   REPLAY_GAP_AVAILABLE_SLOT=$replay_available
   REPLAY_SKIP_RETIRE_VERIFY_ONCE=true
+  REPLAY_PERSIST_FAILURE_STAGE=
 }
 
 valid_generation_id() {
@@ -2225,6 +2300,7 @@ upload_worker_pid=
 b2_usage_worker_pid=
 REPLAY_VERIFIED_ANCHOR_SLOT=
 REPLAY_SKIP_RETIRE_VERIFY_ONCE=false
+REPLAY_PERSIST_FAILURE_STAGE=not_attempted
 terminate() {
   if [ -n "$b2_usage_worker_pid" ]; then
     kill -TERM "$b2_usage_worker_pid" 2>/dev/null || true
@@ -2278,10 +2354,15 @@ while :; do
     if ! load_replay_recovery_floor; then
       write_state replay_recovery_failed
       raise_alert replay_recovery_failed CRITICAL \
-        "The durable provider replay-floor marker is malformed, mismatched, or unsafe; capture is paused without advancing its cursor."
+        "Impact: New gRPC capture is paused; existing local and Backblaze data is untouched.
+Action: The safety check will retry automatically and will not advance or delete the old cursor."
       echo "$(timestamp) raw_recorder paused_replay_recovery_marker_invalid" >&2
       sleep "$LOW_DISK_RECHECK_SECS"
       continue
+    fi
+    replay_floor_was_authoritative=false
+    if [ -n "$REPLAY_MIN_RESUME_SLOT" ]; then
+      replay_floor_was_authoritative=true
     fi
     replay_floor_ready=true
     if [ "$REPLAY_SKIP_RETIRE_VERIFY_ONCE" = true ]; then
@@ -2297,18 +2378,23 @@ while :; do
     if [ "$replay_floor_ready" != true ]; then
       write_state replay_recovery_failed
       raise_alert replay_recovery_failed CRITICAL \
-        "The active generation could not be verified while retiring a provider replay floor; capture is paused without changing its durable cursor."
+        "Impact: New gRPC capture is paused because the local generation could not be verified; existing data is untouched.
+Action: Verification will retry automatically without changing the durable cursor."
       echo "$(timestamp) raw_recorder paused_replay_floor_retirement_failed" >&2
       sleep "$LOW_DISK_RECHECK_SECS"
       continue
     fi
+    # Do not announce recovery merely because a retry starts. The incident is
+    # resolved only after its trusted floor marker exists durably.
+    clear_replay_recovery_alert_if_floor_was_authoritative \
+      "$replay_floor_was_authoritative"
     if [ -n "$REPLAY_MIN_RESUME_SLOT" ]; then
       remember_alert_journal_floor provider_replay_gap
       raise_alert provider_replay_gap WARNING \
-        "A durable Yellowstone replay gap remains pending: anchor=$REPLAY_RECOVERY_ANCHOR_SLOT requested=$REPLAY_RECOVERY_REQUESTED_SLOT provider_floor=$REPLAY_MIN_RESUME_SLOT. Capture will resume only from this validated floor; the uncovered interval is not synchronized."
+        "Missing range: slots $REPLAY_RECOVERY_REQUESTED_SLOT through $((REPLAY_MIN_RESUME_SLOT - 1)) are no longer available from the provider.
+Impact: That range is not in this backup; all previously recorded data remains safe.
+Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit record of the gap."
     fi
-    clear_alert replay_recovery_failed \
-      "The durable provider replay-floor marker is valid again."
     if [ -z "$upload_worker_pid" ] \
       || ! kill -0 "$upload_worker_pid" 2>/dev/null
     then
@@ -2452,19 +2538,22 @@ while :; do
       sed -n '1,200p' "$CHILD_REPORT_FILE"
     fi
     if persist_replay_recovery_from_report "$CHILD_REPORT_FILE"; then
+      clear_alert replay_recovery_failed \
+        "The trusted resume marker and immutable gap record are now durable. Capture will restart automatically at slot $REPLAY_GAP_AVAILABLE_SLOT; existing backup data was not deleted."
       remember_alert_journal_floor provider_replay_gap
       raise_alert provider_replay_gap WARNING \
-        "Yellowstone no longer retains requested slot=$REPLAY_GAP_REQUESTED_SLOT. The durable anchor=$REPLAY_GAP_ANCHOR_SLOT was preserved, an immutable gap record was written, and capture will resume at provider floor=$REPLAY_GAP_AVAILABLE_SLOT; the uncovered range is not synchronized."
-      clear_alert replay_recovery_failed \
-        "The validated provider replay floor and immutable gap evidence were stored durably."
+        "Missing range: slots $REPLAY_GAP_REQUESTED_SLOT through $((REPLAY_GAP_AVAILABLE_SLOT - 1)) are no longer available from the provider.
+Impact: That range is not in this backup; all previously recorded data remains safe.
+Action: Hetzner saved an immutable audit record and will resume at slot $REPLAY_GAP_AVAILABLE_SLOT."
       write_state running
       echo "$(timestamp) raw_recorder replay_gap_recorded anchor_slot=$REPLAY_GAP_ANCHOR_SLOT requested_slot=$REPLAY_GAP_REQUESTED_SLOT resume_floor=$REPLAY_GAP_AVAILABLE_SLOT; resuming capture" >&2
       continue
     fi
     write_state replay_recovery_failed
     raise_alert replay_recovery_failed CRITICAL \
-      "A provider replay-window response could not be validated or persisted durably; the old cursor and active generation were retained and capture is paused for retry."
-    echo "$(timestamp) raw_recorder replay_recovery_persist_failed; retrying in ${RESTART_DELAY_SECS}s" >&2
+      "Impact: New gRPC capture is paused because the provider deleted old history before Hetzner could resume. Existing local and Backblaze data is safe.
+Action: Retrying every ${RESTART_DELAY_SECS}s; Hetzner will not skip forward until a trusted gap record is durable."
+    echo "$(timestamp) raw_recorder replay_recovery_persist_failed stage=${REPLAY_PERSIST_FAILURE_STAGE:-unknown}; retrying in ${RESTART_DELAY_SECS}s" >&2
     sleep "$RESTART_DELAY_SECS"
     continue
   fi
