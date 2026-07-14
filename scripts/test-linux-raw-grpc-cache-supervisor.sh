@@ -18,6 +18,7 @@ SEALED_GENERATION_DIR=$CACHE_ROOT/sealed
 GENERATION_RECEIPT_DIR=$CACHE_ROOT/receipts
 GENERATION_MONITORING_DIR=$CACHE_ROOT/monitoring
 GENERATION_ROTATION_MARKER=$CACHE_ROOT/.rotation
+B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 REPLAY_RECOVERY_FILE=$GENERATION_MONITORING_DIR/replay-recovery-floor.json
 REPLAY_GAP_DIR=$ACTIVE_GENERATION_DIR/replay-gaps
 ALERT_STATE_DIR=$CACHE_ROOT/alert-state
@@ -29,6 +30,7 @@ SOURCE_ID=grpc-raw-test
 GENERATION_REMOTE_PREFIX=grpc-raw/v1
 GENERATION_PYTHON_BIN=${PYTHON_BIN:-python3}
 REPLAY_RESUME_HEADROOM_SLOTS=0
+B2_CAP_RETRY_SECS=3600
 
 # Tests run on macOS and Linux; durability ordering is tested independently from
 # the platform-specific sync(1) spelling used in production.
@@ -43,6 +45,14 @@ journal_size() {
     printf '%s\n' 0
   fi
 }
+
+# Known provider caps must move both background workers off their hot retry
+# loops. Unknown failures retain each worker's ordinary interval.
+for capacity_status in 20 21 22; do
+  test "$(backblaze_retry_seconds "$capacity_status" 60)" -eq 3600
+done
+test "$(backblaze_retry_seconds 1 60)" -eq 60
+test "$(backblaze_retry_seconds 75 3600)" -eq 3600
 
 fake_bin=$fixture_root/fake-producer
 cat > "$fake_bin" <<'SH'
@@ -272,7 +282,21 @@ mock_uploader=$fixture_root/mock-uploader
 cat > "$mock_uploader" <<'SH'
 #!/bin/sh
 set -eu
+command_name=$1
 shift
+if [ "$command_name" = b2-account-usage ]; then
+  case "${MOCK_USAGE_RESULT:-failure}" in
+    failure) exit 1 ;;
+    status-*) exit "${MOCK_USAGE_RESULT#status-}" ;;
+    valid)
+      printf '%s\n' \
+        '{"schema_version":1,"scope":"account","scope_complete":true,"total_stored_bytes":42}'
+      exit 0
+      ;;
+    *) exit 64 ;;
+  esac
+fi
+[ "$command_name" = upload-generation ] || exit 64
 generation_dir=$1
 remote_prefix=$2
 receipt=$3
@@ -313,6 +337,31 @@ esac
 SH
 chmod +x "$mock_uploader"
 GENERATION_UPLOADER_BIN=$mock_uploader
+
+# The account-usage worker must retain the uploader's typed capacity status so
+# it selects the same slow backoff as the generation worker.
+for expected_usage_status in 20 21 22; do
+  MOCK_USAGE_RESULT=status-$expected_usage_status
+  export MOCK_USAGE_RESULT
+  set +e
+  run_b2_usage_scan
+  observed_usage_status=$?
+  set -e
+  test "$observed_usage_status" -eq "$expected_usage_status"
+done
+MOCK_USAGE_RESULT=failure
+export MOCK_USAGE_RESULT
+set +e
+run_b2_usage_scan
+observed_usage_status=$?
+set -e
+test "$observed_usage_status" -eq 1
+MOCK_USAGE_RESULT=valid
+export MOCK_USAGE_RESULT
+run_b2_usage_scan
+test "$B2_USAGE_BYTES" -eq 42
+test -s "$B2_USAGE_REPORT_FILE"
+unset MOCK_USAGE_RESULT
 
 MOCK_UPLOAD_RESULT=failure
 export MOCK_UPLOAD_RESULT

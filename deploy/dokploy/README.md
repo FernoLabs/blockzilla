@@ -165,9 +165,15 @@ BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES=10000000000
 BLOCKZILLA_B2_USAGE_WARNING_BYTES=8000000000
 BLOCKZILLA_B2_USAGE_CRITICAL_BYTES=9500000000
 BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES=500000000
-BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS=300
+BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS=3600
 BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS=21600
+BLOCKZILLA_B2_CAP_RETRY_SECS=3600
 ```
+
+The account-wide usage scan is deliberately hourly because it lists every
+stored object version and therefore consumes Class C transactions as the
+archive grows. A typed Backblaze cap failure also switches upload retries to
+the hourly interval instead of the ordinary one-minute retry loop.
 
 The replay headroom lets a reconnect outrun an upstream replay floor that moves
 during the TLS/gRPC handshake. The immutable schema-2 gap record distinguishes

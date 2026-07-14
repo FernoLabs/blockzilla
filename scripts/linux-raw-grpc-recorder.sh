@@ -47,8 +47,9 @@ B2_USAGE_ALLOWANCE_BYTES=${BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:-10000000000}
 B2_USAGE_WARNING_BYTES=${BLOCKZILLA_B2_USAGE_WARNING_BYTES:-8000000000}
 B2_USAGE_CRITICAL_BYTES=${BLOCKZILLA_B2_USAGE_CRITICAL_BYTES:-9500000000}
 B2_USAGE_RECOVERY_HYSTERESIS_BYTES=${BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES:-500000000}
-B2_USAGE_CHECK_INTERVAL_SECS=${BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:-300}
+B2_USAGE_CHECK_INTERVAL_SECS=${BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:-3600}
 B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS=${BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS:-21600}
+B2_CAP_RETRY_SECS=${BLOCKZILLA_B2_CAP_RETRY_SECS:-3600}
 
 ACTIVE_GENERATION_DIR=$CACHE_ROOT/active
 SEALED_GENERATION_DIR=$CACHE_ROOT/sealed
@@ -2647,6 +2648,13 @@ generation_upload_failure_details() {
   esac
 }
 
+backblaze_retry_seconds() {
+  case "$1" in
+    20|21|22) printf '%s\n' "$B2_CAP_RETRY_SECS" ;;
+    *) printf '%s\n' "$2" ;;
+  esac
+}
+
 upload_one_generation() {
   # A rotation marker means the old generation may be visible but the rename
   # transaction is not yet committed. Recovery owns it until the marker clears.
@@ -2809,6 +2817,7 @@ generation_upload_worker() {
   generation_spill_active=false
   trap terminate_generation_upload_worker INT TERM HUP
   while :; do
+    generation_sleep=$GENERATION_UPLOAD_RETRY_SECS
     if validate_data_volume true >/dev/null 2>&1 \
       && [ -d "$SEALED_GENERATION_DIR" ]
     then
@@ -2852,6 +2861,8 @@ generation_upload_worker() {
             if [ "$upload_status" -ne 75 ]; then
               generation_upload_failed=true
               generation_upload_failure_details "$upload_status"
+              generation_sleep=$(backblaze_retry_seconds "$upload_status" \
+                "$GENERATION_UPLOAD_RETRY_SECS")
             fi
           fi
         fi
@@ -2963,7 +2974,7 @@ Action: Check the recorder logs. Automatic retry is on."
         continue
       fi
     fi
-    sleep "$GENERATION_UPLOAD_RETRY_SECS"
+    sleep "$generation_sleep"
   done
 }
 
@@ -3024,7 +3035,10 @@ run_b2_usage_scan() {
   b2_usage_query_pid=
   if [ "$usage_status" -ne 0 ]; then
     rm -f "$usage_tmp" 2>/dev/null || true
-    return 1
+    case "$usage_status" in
+      20|21|22) return "$usage_status" ;;
+      *) return 1 ;;
+    esac
   fi
   if ! B2_USAGE_BYTES=$(b2_usage_report_bytes "$usage_tmp"); then
     rm -f "$usage_tmp" 2>/dev/null || true
@@ -3123,6 +3137,9 @@ b2_usage_worker() {
         usage_sleep=$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS
       fi
     else
+      usage_status=$?
+      usage_sleep=$(backblaze_retry_seconds "$usage_status" \
+        "$B2_USAGE_CHECK_INTERVAL_SECS")
       b2_usage_scan_failed_alert
     fi
     sleep "$usage_sleep"
@@ -3283,6 +3300,7 @@ for numeric_setting in \
   "BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES:$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" \
   "BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:$B2_USAGE_CHECK_INTERVAL_SECS" \
   "BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS:$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" \
+  "BLOCKZILLA_B2_CAP_RETRY_SECS:$B2_CAP_RETRY_SECS" \
   "BLOCKZILLA_TELEGRAM_ALERT_COOLDOWN_SECS:$TELEGRAM_ALERT_COOLDOWN_SECS" \
   "BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES:$DISK_WARN_FREE_BYTES" \
   "BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES:$DISK_RECOVERY_HYSTERESIS_BYTES" \
@@ -3308,7 +3326,8 @@ if [ "$B2_USAGE_WARNING_BYTES" -eq 0 ] \
   || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -eq 0 ] \
   || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -ge "$B2_USAGE_WARNING_BYTES" ] \
   || [ "$B2_USAGE_CHECK_INTERVAL_SECS" -eq 0 ] \
-  || [ "$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" -eq 0 ]
+  || [ "$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" -eq 0 ] \
+  || [ "$B2_CAP_RETRY_SECS" -eq 0 ]
 then
   echo "Backblaze usage thresholds, hysteresis, and intervals are invalid" >&2
   exit 2
