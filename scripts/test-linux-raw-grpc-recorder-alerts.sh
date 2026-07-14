@@ -20,40 +20,131 @@ eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
 mkdir -p "$ALERT_STATE_DIR" "$RESUME_COVERAGE_EVENT_DIR"
 
 make_event() {
-  event_id=$1
-  printf '{"event_id":"%s","schema_version":1,"requested_overlap_slot":100,"first_delivered_slot":104,"observed_later_slot":104,"written_unix_secs":123}\n' \
-    "$event_id" > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+  requested_slot=$1
+  first_slot=$2
+  observed_slot=$3
+  event_id=$("$GENERATION_PYTHON_BIN" - \
+    "$requested_slot" "$first_slot" "$observed_slot" <<'PY'
+import hashlib
+import struct
+import sys
+
+slots = tuple(int(value) for value in sys.argv[1:])
+print(hashlib.sha256(
+    b"blockzilla-grpc-resume-coverage-warning-v1" + struct.pack("<QQQ", *slots)
+).hexdigest())
+PY
+  )
+  printf '{"event_id":"%s","schema_version":1,"requested_overlap_slot":%s,"first_delivered_slot":%s,"observed_later_slot":%s,"written_unix_secs":123}\n' \
+    "$event_id" "$requested_slot" "$first_slot" "$observed_slot" \
+    > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 }
 
-event_a=$(printf 'a%.0s' {1..64})
-event_b=$(printf 'b%.0s' {1..64})
-event_c=$(printf 'c%.0s' {1..64})
-
 # A delivered durable event gets an event-specific marker before it is removed.
-make_event "$event_a"
+make_event 100 104 104
+event_a=$event_id
+monitor_resume_coverage_alert
+test "$ALERT_DELIVERY_RESULT" = sent
+test ! -e "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_a"
+grep -q '^Problem: Upstream gRPC data gap detected$' \
+  "$(alert_file resume_coverage active)"
+grep -q 'Impact: Hetzner already had slot 100. The provider resumed at slot 104' \
+  "$(alert_file resume_coverage active)"
+grep -q '^Action:' "$(alert_file resume_coverage active)"
+
+# A crash-replayed copy of the same delivered event is removed without another send.
+make_event 100 104 104
 monitor_resume_coverage_alert
 test ! -e "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_a"
 
-# A different event inside the global cooldown must remain pending, not be mistaken for A.
-make_event "$event_b"
+# A non-canonical delivery marker cannot bypass the pending event.
+make_event 104 108 108
+printf '%s\ngarbage\n' "$event_a" > "$RESUME_COVERAGE_DELIVERED_FILE"
 monitor_resume_coverage_alert
 test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+printf '%s\n' "$event_a" > "$RESUME_COVERAGE_DELIVERED_FILE"
+rm -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+# A different event inside the global cooldown is coalesced into the already-sent
+# incident and removed so it cannot block durable recording.
+make_event 104 108 108
+event_b=$event_id
+monitor_resume_coverage_alert
+test "$ALERT_DELIVERY_RESULT" = suppressed
+test ! -e "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_a"
 
-# Once the cooldown expires, B is marked and removed.
-printf '0\n' > "$(alert_file resume_coverage last)"
+# Corrupt, forged, duplicate-key, symlinked, and oversized events remain in place.
+printf '{\n' > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 monitor_resume_coverage_alert
-test ! -e "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
-test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_b"
+test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+forged_id=$(printf 'f%.0s' {1..64})
+printf '{"event_id":"%s","schema_version":1,"requested_overlap_slot":108,"first_delivered_slot":112,"observed_later_slot":112,"written_unix_secs":123}\n' \
+  "$forged_id" > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+monitor_resume_coverage_alert
+test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+make_event 108 112 112
+duplicate_event_id=$event_id
+printf '{"event_id":"%s","schema_version":1,"schema_version":1,"requested_overlap_slot":108,"first_delivered_slot":112,"observed_later_slot":112,"written_unix_secs":123}\n' \
+  "$duplicate_event_id" > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+monitor_resume_coverage_alert
+test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+printf '{"event_id":"%s","schema_version":1,"requested_overlap_slot":108,"first_delivered_slot":112,"observed_later_slot":112,"written_unix_secs":123,"extra":NaN}\n' \
+  "$duplicate_event_id" > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+monitor_resume_coverage_alert
+test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+printf '\357\273\277{"event_id":"%s","schema_version":1,"requested_overlap_slot":108,"first_delivered_slot":112,"observed_later_slot":112,"written_unix_secs":123}\n' \
+  "$duplicate_event_id" > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+monitor_resume_coverage_alert
+test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+printf '{"event_id":"%s","schema_version":1,"requested_overlap_slot":108,"first_delivered_slot":112,"observed_later_slot":112,"written_unix_secs":123,"extra":0}\n' \
+  "$duplicate_event_id" > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+monitor_resume_coverage_alert
+test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+rm -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+printf 'target\n' > "$fixture_root/symlink-target"
+ln -s "$fixture_root/symlink-target" "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+monitor_resume_coverage_alert
+test -L "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+rm -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+dd if=/dev/zero of="$ACTIVE_RESUME_COVERAGE_EVENT_FILE" bs=4097 count=1 \
+  >/dev/null 2>&1
+monitor_resume_coverage_alert
+test "$(wc -c < "$ACTIVE_RESUME_COVERAGE_EVENT_FILE" | tr -d ' ')" = 4097
+rm -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+
+# A successful send whose durable delivery marker cannot be written stays pending.
+make_event 112 116 116
+event_marker_failure=$event_id
+printf '0\n' > "$(alert_file resume_coverage last)"
+saved_delivery_file=$RESUME_COVERAGE_DELIVERED_FILE
+RESUME_COVERAGE_DELIVERED_FILE=$fixture_root/blocked-delivery-marker
+mkdir "$RESUME_COVERAGE_DELIVERED_FILE.$$"
+monitor_resume_coverage_alert
+test "$ALERT_DELIVERY_RESULT" = sent
+test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
+test ! -e "$RESUME_COVERAGE_DELIVERED_FILE"
+rm -rf "$RESUME_COVERAGE_DELIVERED_FILE.$$"
+RESUME_COVERAGE_DELIVERED_FILE=$saved_delivery_file
+rm -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 
 # Failed delivery leaves the exact durable event pending for a later pass.
-make_event "$event_c"
+make_event 116 120 120
+event_c=$event_id
 printf '0\n' > "$(alert_file resume_coverage last)"
 TELEGRAM_CURL_BIN=/usr/bin/false
 monitor_resume_coverage_alert
 test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
-test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_b"
+test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_a"
 
 # A one-shot incident that failed to send is retried on a later monitor pass.
 rm -f "$(alert_file recorder_restarting active)" "$(alert_file recorder_restarting last)"

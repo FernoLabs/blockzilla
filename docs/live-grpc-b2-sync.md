@@ -186,6 +186,13 @@ generation, an unchanged ACK is normal rather than stale.
 The existing Yellowstone `grpc_stale` incident remains separate: it reports
 that the Hetzner recorder itself stopped durably receiving blocks.
 
+Telegram keeps one active incident per problem and a 15-minute delivery
+cooldown. Messages lead with the problem, impact, and operator action. A second
+strictly validated resume-gap event inside that cooldown is coalesced into the
+already-delivered incident instead of generating another message or blocking
+capture. A malformed event or a failed send remains pending and is never
+silently marked delivered.
+
 If the provider has already discarded the requested replay slot, recovery is
 explicit rather than silent. The recorder accepts only a typed gRPC
 `OutOfRange` response whose exact requested slot matches the subscription and

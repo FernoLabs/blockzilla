@@ -253,6 +253,8 @@ pub struct GrpcRawRecordReport {
     pub resume_overlap_observed: Option<bool>,
     pub first_delivered_slot: Option<u64>,
     pub resume_coverage_warning: bool,
+    #[serde(default)]
+    pub resume_coverage_warning_publication_failed: bool,
     pub first_slot: Option<u64>,
     pub last_slot: Option<u64>,
     pub first_epoch: Option<u64>,
@@ -297,6 +299,7 @@ pub struct GrpcRawSeedReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GrpcRawResumeCoverageWarning {
     event_id: String,
     schema_version: u32,
@@ -304,6 +307,13 @@ struct GrpcRawResumeCoverageWarning {
     first_delivered_slot: u64,
     observed_later_slot: u64,
     written_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeCoverageWarningPublishOutcome {
+    Published,
+    AlreadyPresent,
+    DifferentPending,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +650,7 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         resume_overlap_observed: resume_anchor.as_ref().map(|_| false),
         first_delivered_slot: None,
         resume_coverage_warning: false,
+        resume_coverage_warning_publication_failed: false,
         first_slot: None,
         last_slot: None,
         first_epoch: None,
@@ -865,13 +876,26 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                             .duration_since(UNIX_EPOCH)
                             .map_or(0, |duration| duration.as_secs()),
                     };
-                    if let Err(error) = publish_resume_coverage_warning(path, &event) {
-                        tracing::error!(
-                            warning_file = %path.display(),
-                            error = %error,
-                            "failed to publish raw gRPC resume-coverage warning event"
-                        );
-                        break;
+                    match publish_resume_coverage_warning(path, &event) {
+                        Ok(ResumeCoverageWarningPublishOutcome::DifferentPending) => {
+                            tracing::warn!(
+                                warning_file = %path.display(),
+                                "coalesced raw gRPC resume-coverage warning into the pending incident"
+                            );
+                        }
+                        Ok(
+                            ResumeCoverageWarningPublishOutcome::Published
+                            | ResumeCoverageWarningPublishOutcome::AlreadyPresent,
+                        ) => {}
+                        Err(error) => {
+                            report.resume_coverage_warning_publication_failed = true;
+                            tracing::error!(
+                                warning_file = %path.display(),
+                                error = %error,
+                                "failed to publish raw gRPC resume-coverage warning event"
+                            );
+                            break;
+                        }
                     }
                 }
                 tracing::warn!(
@@ -2112,18 +2136,18 @@ fn read_resume_coverage_warning(path: &Path) -> Result<Option<GrpcRawResumeCover
 fn publish_resume_coverage_warning(
     path: &Path,
     event: &GrpcRawResumeCoverageWarning,
-) -> Result<()> {
+) -> Result<ResumeCoverageWarningPublishOutcome> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .context("resume-coverage warning path has no parent directory")?;
     if let Some(existing) = read_resume_coverage_warning(path)? {
-        ensure!(
-            existing.event_id == event.event_id,
-            "a different undelivered resume-coverage warning already exists"
-        );
         sync_directory(parent)?;
-        return Ok(());
+        return Ok(if existing.event_id == event.event_id {
+            ResumeCoverageWarningPublishOutcome::AlreadyPresent
+        } else {
+            ResumeCoverageWarningPublishOutcome::DifferentPending
+        });
     }
     let name = path
         .file_name()
@@ -2133,7 +2157,7 @@ fn publish_resume_coverage_warning(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let temp_path = path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), nonce));
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<ResumeCoverageWarningPublishOutcome> {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -2149,15 +2173,16 @@ fn publish_resume_coverage_warning(
         writer.write_all(b"\n")?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
-        match fs::hard_link(&temp_path, path) {
-            Ok(()) => {}
+        let outcome = match fs::hard_link(&temp_path, path) {
+            Ok(()) => ResumeCoverageWarningPublishOutcome::Published,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 let existing = read_resume_coverage_warning(path)?
                     .context("resume-coverage warning disappeared during publication")?;
-                ensure!(
-                    existing.event_id == event.event_id,
-                    "a different undelivered resume-coverage warning won publication"
-                );
+                if existing.event_id == event.event_id {
+                    ResumeCoverageWarningPublishOutcome::AlreadyPresent
+                } else {
+                    ResumeCoverageWarningPublishOutcome::DifferentPending
+                }
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -2168,7 +2193,7 @@ fn publish_resume_coverage_warning(
                     )
                 });
             }
-        }
+        };
         fs::remove_file(&temp_path).with_context(|| {
             format!(
                 "remove resume-coverage warning temp {}",
@@ -2176,7 +2201,7 @@ fn publish_resume_coverage_warning(
             )
         })?;
         sync_directory(parent)?;
-        Ok(())
+        Ok(outcome)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);
@@ -3271,7 +3296,14 @@ mod tests {
             observed_later_slot: 104,
             written_unix_secs: 123,
         };
-        publish_resume_coverage_warning(&path, &event).unwrap();
+        assert_eq!(
+            publish_resume_coverage_warning(&path, &event).unwrap(),
+            ResumeCoverageWarningPublishOutcome::Published
+        );
+        assert_eq!(
+            publish_resume_coverage_warning(&path, &event).unwrap(),
+            ResumeCoverageWarningPublishOutcome::AlreadyPresent
+        );
         let decoded: GrpcRawResumeCoverageWarning =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(decoded, event);
@@ -3280,7 +3312,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_replace_a_different_pending_resume_warning() {
+    fn coalesces_but_does_not_replace_a_different_pending_resume_warning() {
         let root = temp_dir("resume-coverage-warning-pending");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("warning.json");
@@ -3300,10 +3332,60 @@ mod tests {
             observed_later_slot: 108,
             written_unix_secs: 124,
         };
-        publish_resume_coverage_warning(&path, &first).unwrap();
-        let error = publish_resume_coverage_warning(&path, &second).unwrap_err();
-        assert!(error.to_string().contains("different undelivered"));
+        assert_eq!(
+            publish_resume_coverage_warning(&path, &first).unwrap(),
+            ResumeCoverageWarningPublishOutcome::Published
+        );
+        assert_eq!(
+            publish_resume_coverage_warning(&path, &second).unwrap(),
+            ResumeCoverageWarningPublishOutcome::DifferentPending
+        );
         assert_eq!(read_resume_coverage_warning(&path).unwrap(), Some(first));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_existing_resume_warning_is_fail_closed() {
+        let root = temp_dir("resume-coverage-warning-corrupt");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("warning.json");
+        let event = GrpcRawResumeCoverageWarning {
+            event_id: resume_coverage_warning_event_id(104, 108, 108),
+            schema_version: RESUME_COVERAGE_WARNING_SCHEMA_VERSION,
+            requested_overlap_slot: 104,
+            first_delivered_slot: 108,
+            observed_later_slot: 108,
+            written_unix_secs: 124,
+        };
+        let mut bom_prefixed = b"\xef\xbb\xbf".to_vec();
+        bom_prefixed.extend(serde_json::to_vec(&event).unwrap());
+        let non_finite_extra = format!(
+            "{{\"event_id\":\"{}\",\"schema_version\":1,\"requested_overlap_slot\":104,\"first_delivered_slot\":108,\"observed_later_slot\":108,\"written_unix_secs\":124,\"extra\":NaN}}",
+            event.event_id
+        )
+        .into_bytes();
+        let unknown_extra = format!(
+            "{{\"event_id\":\"{}\",\"schema_version\":1,\"requested_overlap_slot\":104,\"first_delivered_slot\":108,\"observed_later_slot\":108,\"written_unix_secs\":124,\"extra\":0}}",
+            event.event_id
+        )
+        .into_bytes();
+
+        for corrupt in [
+            b"{".to_vec(),
+            serde_json::to_vec(&GrpcRawResumeCoverageWarning {
+                event_id: "f".repeat(64),
+                ..event.clone()
+            })
+            .unwrap(),
+            bom_prefixed,
+            non_finite_extra,
+            unknown_extra,
+        ] {
+            fs::write(&path, &corrupt).unwrap();
+            assert!(publish_resume_coverage_warning(&path, &event).is_err());
+            assert_eq!(fs::read(&path).unwrap(), corrupt);
+        }
+
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -422,7 +422,7 @@ alert_title() {
     generation_rotation_failed) printf '%s\n' 'Local backup rotation paused' ;;
     replay_recovery_failed) printf '%s\n' 'Provider-gap recovery paused' ;;
     provider_replay_gap) printf '%s\n' 'Provider history gap detected' ;;
-    resume_coverage) printf '%s\n' 'Provider resumed after a missing slot' ;;
+    resume_coverage) printf '%s\n' 'Upstream gRPC data gap detected' ;;
     generation_upload_failed) printf '%s\n' 'Backblaze upload failed' ;;
     generation_backlog) printf '%s\n' 'Backblaze upload backlog growing' ;;
     *) printf '%s\n' "$1" | tr '_' ' ' ;;
@@ -763,29 +763,48 @@ monitor_resume_coverage_alert() {
   then
     return 0
   fi
-  if ! resume_event_id=$(resume_coverage_event_id); then
+  if ! load_resume_coverage_event; then
     return 0
   fi
   delivered_event_id=
-  if [ -r "$RESUME_COVERAGE_DELIVERED_FILE" ] \
-    && [ ! -L "$RESUME_COVERAGE_DELIVERED_FILE" ]
+  if [ -e "$RESUME_COVERAGE_DELIVERED_FILE" ] \
+    || [ -L "$RESUME_COVERAGE_DELIVERED_FILE" ]
   then
-    IFS= read -r delivered_event_id < "$RESUME_COVERAGE_DELIVERED_FILE" || delivered_event_id=
+    if ! load_resume_coverage_delivery; then
+      return 0
+    fi
   fi
-  if [ "$delivered_event_id" = "$resume_event_id" ]; then
+  if [ "${delivered_event_id:-}" = "$resume_event_id" ]; then
     remove_resume_coverage_event
     return 0
   fi
-  raise_alert resume_coverage WARNING \
-    "Yellowstone skipped the inclusively requested durable resume slot; audit and repair the uncovered range."
-  if [ "${ALERT_DELIVERY_RESULT:-}" = sent ]; then
-    if write_resume_coverage_delivery "$resume_event_id"; then
-      remove_resume_coverage_event
-    fi
+  if [ -n "$resume_requested_slot" ] && [ -n "$resume_first_slot" ]; then
+    resume_gap_detail="Impact: Hetzner already had slot $resume_requested_slot. The provider resumed at slot $resume_first_slot without replaying it, so continuity across the reconnect could not be verified. The recorder keeps the gap explicit and continues attempting newer blocks.
+Action: Check the upstream Yellowstone provider or repair this range from another source. Repeated events are grouped during the alert cooldown."
+  else
+    resume_gap_detail="Impact: The provider skipped the requested durable resume slot, so continuity across the reconnect could not be verified. The recorder keeps the gap explicit and continues attempting newer blocks.
+Action: Check the upstream Yellowstone provider or repair the uncovered range from another source. Repeated events are grouped during the alert cooldown."
   fi
+  raise_alert resume_coverage WARNING \
+    "$resume_gap_detail"
+  # Suppression means this alert key was delivered successfully within the
+  # cooldown. Coalesce the durable event into that active incident without
+  # claiming that this exact event was sent; failed sends stay pending.
+  case "${ALERT_DELIVERY_RESULT:-}" in
+    sent)
+      if write_resume_coverage_delivery "$resume_event_id"; then
+        remove_resume_coverage_event
+      fi
+      ;;
+    suppressed) remove_resume_coverage_event ;;
+  esac
 }
 
-resume_coverage_event_id() {
+load_resume_coverage_event() {
+  resume_event_id=
+  resume_requested_slot=
+  resume_first_slot=
+  resume_observed_slot=
   if [ -L "$ACTIVE_RESUME_COVERAGE_EVENT_FILE" ] \
     || [ ! -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE" ] \
     || [ ! -r "$ACTIVE_RESUME_COVERAGE_EVENT_FILE" ] \
@@ -800,20 +819,146 @@ resume_coverage_event_id() {
   if [ "$resume_event_bytes" -gt 4096 ]; then
     return 1
   fi
-  parsed_event_id=$(sed -n \
-    's/.*"event_id":"\([0-9a-f][0-9a-f]*\)".*/\1/p' \
-    "$ACTIVE_RESUME_COVERAGE_EVENT_FILE")
-  if [ "${#parsed_event_id}" -ne 64 ]; then
+  if ! resume_event_fields=$("$GENERATION_PYTHON_BIN" - \
+    "$ACTIVE_RESUME_COVERAGE_EVENT_FILE" 2>/dev/null <<'PY'
+import hashlib
+import json
+import os
+import stat
+import struct
+import sys
+
+path = sys.argv[1]
+if not hasattr(os, "O_NOFOLLOW"):
+    raise SystemExit(1)
+flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+fd = os.open(path, flags)
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 4096:
+        raise ValueError("invalid event file")
+    payload = bytearray()
+    while len(payload) <= before.st_size:
+        chunk = os.read(fd, before.st_size + 1 - len(payload))
+        if not chunk:
+            break
+        payload.extend(chunk)
+    after = os.fstat(fd)
+finally:
+    os.close(fd)
+if (
+    len(payload) != before.st_size
+    or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+):
+    raise ValueError("event changed while reading")
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+def invalid_constant(value):
+    raise ValueError(f"invalid JSON constant: {value}")
+
+event = json.loads(
+    payload.decode("utf-8"),
+    object_pairs_hook=unique_object,
+    parse_constant=invalid_constant,
+)
+if (
+    not isinstance(event, dict)
+    or type(event.get("schema_version")) is not int
+    or event["schema_version"] != 1
+):
+    raise ValueError("invalid event schema")
+expected_fields = {
+    "event_id",
+    "schema_version",
+    "requested_overlap_slot",
+    "first_delivered_slot",
+    "observed_later_slot",
+    "written_unix_secs",
+}
+if set(event) != expected_fields:
+    raise ValueError("unexpected event fields")
+numeric_fields = (
+    "requested_overlap_slot",
+    "first_delivered_slot",
+    "observed_later_slot",
+    "written_unix_secs",
+)
+for field in numeric_fields:
+    value = event.get(field)
+    if type(value) is not int or not 0 <= value <= (1 << 64) - 1:
+        raise ValueError("invalid numeric field")
+requested = event["requested_overlap_slot"]
+first = event["first_delivered_slot"]
+observed = event["observed_later_slot"]
+if requested >= observed:
+    raise ValueError("event does not advance")
+event_id = event.get("event_id")
+if (
+    not isinstance(event_id, str)
+    or len(event_id) != 64
+    or any(character not in "0123456789abcdef" for character in event_id)
+):
+    raise ValueError("invalid event ID")
+expected = hashlib.sha256(
+    b"blockzilla-grpc-resume-coverage-warning-v1"
+    + struct.pack("<QQQ", requested, first, observed)
+).hexdigest()
+if event_id != expected:
+    raise ValueError("event ID mismatch")
+print(f"{event_id}:{requested}:{first}:{observed}")
+PY
+  ); then
     return 1
   fi
-  case "$parsed_event_id" in
-    *[!0-9a-f]*) return 1 ;;
+  resume_event_id=${resume_event_fields%%:*}
+  resume_event_remainder=${resume_event_fields#*:}
+  resume_requested_slot=${resume_event_remainder%%:*}
+  resume_event_remainder=${resume_event_remainder#*:}
+  resume_first_slot=${resume_event_remainder%%:*}
+  resume_observed_slot=${resume_event_remainder#*:}
+  case "$resume_event_id:$resume_requested_slot:$resume_first_slot:$resume_observed_slot" in
+    *[!0-9a-f:]*) return 1 ;;
   esac
-  printf '%s\n' "$parsed_event_id"
+  [ "${#resume_event_id}" -eq 64 ] \
+    && [ -n "$resume_requested_slot" ] \
+    && [ -n "$resume_first_slot" ] \
+    && [ -n "$resume_observed_slot" ]
 }
 
 resume_coverage_event_valid() {
-  resume_coverage_event_id >/dev/null 2>&1
+  load_resume_coverage_event >/dev/null 2>&1
+}
+
+load_resume_coverage_delivery() {
+  delivered_event_id=
+  if [ -L "$RESUME_COVERAGE_DELIVERED_FILE" ] \
+    || [ ! -f "$RESUME_COVERAGE_DELIVERED_FILE" ] \
+    || [ ! -r "$RESUME_COVERAGE_DELIVERED_FILE" ]
+  then
+    return 1
+  fi
+  delivered_event_bytes=$(wc -c < "$RESUME_COVERAGE_DELIVERED_FILE" | tr -d ' ')
+  if [ "$delivered_event_bytes" != 65 ]; then
+    return 1
+  fi
+  IFS= read -r delivered_event_id < "$RESUME_COVERAGE_DELIVERED_FILE" \
+    || delivered_event_id=
+  if [ "${#delivered_event_id}" -ne 64 ]; then
+    delivered_event_id=
+    return 1
+  fi
+  case "$delivered_event_id" in
+    *[!0-9a-f]*) delivered_event_id=; return 1 ;;
+  esac
+  return 0
 }
 
 write_resume_coverage_delivery() {
@@ -2544,11 +2689,12 @@ Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit 
   else
     journal_age=unknown
   fi
-  if grep -q '"resume_coverage_warning": true' "$CHILD_REPORT_FILE" \
-    && ! resume_coverage_event_valid
+  if grep -q '"resume_coverage_warning_publication_failed": true' \
+    "$CHILD_REPORT_FILE"
   then
     raise_alert resume_coverage WARNING \
-      "The provider did not deliver the inclusive resume slot; audit slot coverage before relying on this backup."
+      "Impact: The provider skipped the requested resume slot and Hetzner could not publish the durable alert event. Capture stopped before accepting that first later block.
+Action: Inspect the recorder monitoring volume; automatic retries will not overwrite an unreadable or uncommitted event."
   fi
   if [ "$CACHE_MODE" = b2-generations ] \
     && [ "$status" -eq 0 ] \
