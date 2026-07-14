@@ -754,6 +754,7 @@ impl std::str::FromStr for SlotRangeArg {
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     init_tracing();
+    tracing::debug!("live producer CLI started");
 
     let cli = Cli::parse();
     match cli.command {
@@ -855,5 +856,10 @@ async fn main() -> Result<()> {
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).init();
+    // Every report-producing command reserves stdout for its JSON contract.
+    // Operational diagnostics must never contaminate supervisor-parsed output.
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
