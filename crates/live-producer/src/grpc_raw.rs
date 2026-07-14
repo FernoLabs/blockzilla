@@ -59,6 +59,12 @@ enum WatchdogOutcome<T> {
     IdleTimeout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskAdmittedOutcome<T> {
+    Admitted(WatchdogOutcome<T>),
+    LowDisk(u64),
+}
+
 async fn await_with_watchdogs<F>(
     future: F,
     total_deadline: TokioInstant,
@@ -79,6 +85,24 @@ where
         _ = sleep_until(total_deadline) => WatchdogOutcome::TotalTimeout,
         _ = idle_wait => WatchdogOutcome::IdleTimeout,
     }
+}
+
+async fn next_with_disk_admission<S, C>(
+    stream: &mut S,
+    check_disk: C,
+    total_deadline: TokioInstant,
+    idle_deadline: Option<TokioInstant>,
+) -> Result<DiskAdmittedOutcome<Option<S::Item>>>
+where
+    S: futures::Stream + Unpin,
+    C: FnOnce() -> Result<Option<u64>>,
+{
+    if let Some(available) = check_disk()? {
+        return Ok(DiskAdmittedOutcome::LowDisk(available));
+    }
+    Ok(DiskAdmittedOutcome::Admitted(
+        await_with_watchdogs(stream.next(), total_deadline, idle_deadline).await,
+    ))
 }
 
 fn deadline_after(
@@ -201,6 +225,11 @@ pub struct GrpcRawRecordConfig {
     /// Maximum logical bytes occupied by this self-contained generation. Zero disables the cap.
     #[serde(default)]
     pub max_generation_bytes: u64,
+    /// Optional supervisor-owned cache root for in-process generation rollover. When set, the
+    /// recorder keeps the Yellowstone subscription open while atomically replacing
+    /// `<root>/active` and publishing the stopped generation below `<root>/sealed`.
+    #[serde(default)]
+    pub hot_generation_root: Option<PathBuf>,
     pub min_free_bytes: u64,
     pub require_complete_poh: bool,
     pub cluster_id: String,
@@ -225,6 +254,7 @@ impl Default for GrpcRawRecordConfig {
             segment_target_bytes: 256 * 1024 * 1024,
             max_record_bytes: 128 * 1024 * 1024,
             max_generation_bytes: 0,
+            hot_generation_root: None,
             min_free_bytes: 16 * 1024 * 1024 * 1024,
             require_complete_poh: false,
             cluster_id: "solana-mainnet".to_string(),
@@ -282,6 +312,9 @@ pub struct GrpcRawRecordReport {
     pub replay_available_slot: Option<u64>,
     #[serde(default)]
     pub stopped_generation_full: bool,
+    /// Generations published without dropping the current Yellowstone subscription.
+    #[serde(default)]
+    pub generations_rotated: u64,
     pub stopped_low_disk: bool,
     pub available_bytes_at_stop: Option<u64>,
     #[serde(default)]
@@ -598,8 +631,9 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     validate_generation_limit(&config)?;
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("create raw gRPC output {}", config.output_dir.display()))?;
+    validate_hot_generation_config(&config)?;
     prepare_resume_coverage_warning_path(&config)?;
-    let identity = load_or_create_identity(&config)?;
+    let mut identity = load_or_create_identity(&config)?;
     let spool_options = SpoolOptions {
         segment_target_bytes: config.segment_target_bytes,
         max_record_bytes: config.max_record_bytes,
@@ -630,7 +664,8 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     // A continuous spool may already span many epochs. On restart, an optional boundary stop is
     // relative to the epoch containing the durable tail, not the first epoch ever recorded.
     let mut capture_epoch = journal_state.last.as_ref().map(|row| row.epoch);
-    let next_frame_id = journal_state.records;
+    let mut next_frame_id = journal_state.records;
+    let mut durable_tail_row = journal_state.last.clone();
 
     let started_at = Instant::now();
     let mut report = GrpcRawRecordReport {
@@ -672,14 +707,28 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         replay_unavailable_requested_slot: None,
         replay_available_slot: None,
         stopped_generation_full: false,
+        generations_rotated: 0,
         stopped_low_disk: false,
         available_bytes_at_stop: None,
         generation_bytes,
     };
     if config.max_generation_bytes > 0 && report.generation_bytes >= config.max_generation_bytes {
-        report.stopped_generation_full = true;
-        report.elapsed_ms = started_at.elapsed().as_millis();
-        return Ok(report);
+        if let (Some(cache_root), Some(source_tail)) = (
+            config.hot_generation_root.as_deref(),
+            durable_tail_row.as_ref(),
+        ) {
+            let rotated =
+                hot_rotate_generation(&config, cache_root, &mut identity, &mut spool, source_tail)?;
+            report.generation_bytes = rotated.generation_bytes;
+            report.generations_rotated = 1;
+            report.wal_dir = spool.journal_dir().to_path_buf();
+            next_frame_id = rotated.next_frame_id;
+            durable_tail_row = Some(rotated.seeded_tail);
+        } else {
+            report.stopped_generation_full = true;
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
     }
     if let Some(available) = low_disk_bytes(&config.output_dir, config.min_free_bytes)? {
         report.stopped_low_disk = true;
@@ -788,14 +837,28 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     let mut poh_num_hashes_verified = 0u128;
     let mut request_side_open = true;
 
-    while report.frames_written < max_blocks {
-        let update = match await_with_watchdogs(stream.next(), deadline, idle_deadline).await {
-            WatchdogOutcome::Completed(update) => update,
-            WatchdogOutcome::TotalTimeout => {
+    'capture: while report.frames_written < max_blocks {
+        let update = match next_with_disk_admission(
+            &mut stream,
+            || low_disk_bytes(&config.output_dir, config.min_free_bytes),
+            deadline,
+            idle_deadline,
+        )
+        .await?
+        {
+            DiskAdmittedOutcome::LowDisk(available) => {
+                // This branch is reached before polling: once the stream delivers a block, this
+                // process must either durably append it or retain it across a rollover.
+                report.stopped_low_disk = true;
+                report.available_bytes_at_stop = Some(available);
+                break;
+            }
+            DiskAdmittedOutcome::Admitted(WatchdogOutcome::Completed(update)) => update,
+            DiskAdmittedOutcome::Admitted(WatchdogOutcome::TotalTimeout) => {
                 report.timed_out = true;
                 break;
             }
-            WatchdogOutcome::IdleTimeout => {
+            DiskAdmittedOutcome::Admitted(WatchdogOutcome::IdleTimeout) => {
                 report.idle_timed_out = true;
                 break;
             }
@@ -914,13 +977,6 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             break;
         }
         capture_epoch.get_or_insert(epoch_slot.epoch);
-        if let Some(available) = low_disk_bytes(&config.output_dir, config.min_free_bytes)? {
-            // The durable cursor remains at the preceding journal row, so this slot is requested
-            // again on restart rather than being acknowledged and lost.
-            report.stopped_low_disk = true;
-            report.available_bytes_at_stop = Some(available);
-            break;
-        }
         let poh_stats = config
             .require_complete_poh
             .then(|| {
@@ -948,54 +1004,83 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             config.max_record_bytes,
         )
         .with_context(|| format!("compress raw gRPC protobuf block at slot {}", block.slot))?;
-        let frame_id = next_frame_id
-            .checked_add(report.frames_written)
-            .context("raw gRPC frame id overflow")?;
         let blockhash_bytes = decode_blockhash(&block.blockhash)?;
-        let metadata = IngressRecordMeta::from_payload(
-            identity.cluster_id.clone(),
-            ObservationId {
-                origin_node_id: identity.origin_node_id.clone(),
-                journal_id: identity.journal_id,
-                sequence: frame_id,
-            },
-            identity.source_id.clone(),
-            LogicalKey::Block {
-                slot: block.slot,
-                blockhash: blockhash_bytes,
-            },
-            PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
-            &compressed,
-        );
-        // `append_and_sync` is the durability boundary. No cursor, journal, or report state may
-        // advance before it succeeds.
-        let projection = spool.project_append(&metadata, &compressed)?;
-        let row = handoff_record_from_block(
-            block,
-            frame_id,
-            epoch_slot,
-            projection.location,
-            raw.len() as u64,
-            compressed.len() as u64,
-            sha256_hex(&raw),
-        );
-        let projected_generation_bytes = projected_raw_generation_bytes(
-            report.generation_bytes,
-            projection.additional_bytes,
-            &row,
-        )?;
-        if generation_limit_exceeded(config.max_generation_bytes, projected_generation_bytes) {
-            report.stopped_generation_full = true;
+        let protobuf_sha256 = sha256_hex(&raw);
+        loop {
+            let frame_id = next_frame_id;
+            let metadata = IngressRecordMeta::from_payload(
+                identity.cluster_id.clone(),
+                ObservationId {
+                    origin_node_id: identity.origin_node_id.clone(),
+                    journal_id: identity.journal_id,
+                    sequence: frame_id,
+                },
+                identity.source_id.clone(),
+                LogicalKey::Block {
+                    slot: block.slot,
+                    blockhash: blockhash_bytes,
+                },
+                PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+                &compressed,
+            );
+            // `append_and_sync` is the durability boundary. No cursor, journal, or report state
+            // may advance before it succeeds.
+            let projection = spool.project_append(&metadata, &compressed)?;
+            let row = handoff_record_from_block(
+                block,
+                frame_id,
+                epoch_slot,
+                projection.location,
+                raw.len() as u64,
+                compressed.len() as u64,
+                protobuf_sha256.clone(),
+            );
+            let projected_generation_bytes = projected_raw_generation_bytes(
+                report.generation_bytes,
+                projection.additional_bytes,
+                &row,
+            )?;
+            if generation_limit_exceeded(config.max_generation_bytes, projected_generation_bytes) {
+                let (Some(cache_root), Some(source_tail)) = (
+                    config.hot_generation_root.as_deref(),
+                    durable_tail_row.as_ref(),
+                ) else {
+                    report.stopped_generation_full = true;
+                    break 'capture;
+                };
+                let rotated = hot_rotate_generation(
+                    &config,
+                    cache_root,
+                    &mut identity,
+                    &mut spool,
+                    source_tail,
+                )?;
+                report.generation_bytes = rotated.generation_bytes;
+                report.generations_rotated = report
+                    .generations_rotated
+                    .checked_add(1)
+                    .context("raw gRPC hot generation rotation count overflow")?;
+                report.wal_dir = spool.journal_dir().to_path_buf();
+                next_frame_id = rotated.next_frame_id;
+                durable_tail_row = Some(rotated.seeded_tail);
+                // Rebuild metadata with the successor journal identity and append this already
+                // decoded block without reading another item from the Yellowstone stream.
+                continue;
+            }
+
+            let durable = spool.append_and_sync(metadata, &compressed)?;
+            ensure!(
+                durable.location() == projection.location,
+                "spool append location differed from its preflight projection"
+            );
+            append_handoff_record(&journal_path, &row)?;
+            report.generation_bytes = projected_generation_bytes;
+            next_frame_id = next_frame_id
+                .checked_add(1)
+                .context("raw gRPC frame id overflow")?;
+            durable_tail_row = Some(row);
             break;
         }
-
-        let durable = spool.append_and_sync(metadata, &compressed)?;
-        ensure!(
-            durable.location() == projection.location,
-            "spool append location differed from its preflight projection"
-        );
-        append_handoff_record(&journal_path, &row)?;
-        report.generation_bytes = projected_generation_bytes;
         idle_deadline = idle_deadline_after(TokioInstant::now(), config.idle_timeout_secs)?;
 
         if let Some(stats) = poh_stats {
@@ -1029,6 +1114,13 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             .compressed_bytes_written
             .checked_add(compressed.len() as u64)
             .context("compressed byte counter overflow")?;
+        if let Some(available) = low_disk_bytes(&config.output_dir, config.min_free_bytes)? {
+            // Any cap-triggering block is now durable in the successor. Stop before polling the
+            // next update so disk pressure cannot create an acknowledged coverage hole.
+            report.stopped_low_disk = true;
+            report.available_bytes_at_stop = Some(available);
+            break;
+        }
     }
 
     report.elapsed_ms = started_at.elapsed().as_millis();
@@ -1414,6 +1506,400 @@ pub fn seed_grpc_raw_generation(
         let _ = sync_directory(&target_parent);
     }
     seeded
+}
+
+const HOT_ACTIVE_DIR: &str = "active";
+const HOT_SEALED_DIR: &str = "sealed";
+const HOT_RECEIPTS_DIR: &str = "receipts";
+const HOT_ROTATION_MARKER: &str = ".rotation";
+const REPLAY_GAPS_DIR: &str = "replay-gaps";
+const MAX_HOT_AUXILIARY_FILES: usize = 128;
+const MAX_HOT_AUXILIARY_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug)]
+struct HotRotationResult {
+    generation_bytes: u64,
+    next_frame_id: u64,
+    seeded_tail: GrpcRawHandoffRecord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotRotationStep {
+    MarkerPublished,
+    OldGenerationHidden,
+    SuccessorActive,
+    SealedGenerationVisible,
+}
+
+#[derive(Debug)]
+struct HotRotationLayout {
+    root: PathBuf,
+    active: PathBuf,
+    next: PathBuf,
+    hidden_old: PathBuf,
+    sealed: PathBuf,
+    marker: PathBuf,
+    receipt: PathBuf,
+}
+
+fn validate_hot_generation_config(config: &GrpcRawRecordConfig) -> Result<()> {
+    let Some(root) = config.hot_generation_root.as_deref() else {
+        return Ok(());
+    };
+    ensure!(
+        config.max_generation_bytes > 0,
+        "hot generation rotation requires a non-zero generation byte limit"
+    );
+    ensure!(root.is_absolute(), "hot generation root must be absolute");
+    ensure!(
+        config.output_dir == root.join(HOT_ACTIVE_DIR),
+        "hot generation output must be <root>/active"
+    );
+    ensure_real_directory(root, "hot generation root")?;
+    ensure_real_directory(&config.output_dir, "hot active generation")?;
+    ensure_real_directory(
+        &root.join(HOT_SEALED_DIR),
+        "hot sealed generation directory",
+    )?;
+    ensure_real_directory(
+        &root.join(HOT_RECEIPTS_DIR),
+        "hot generation receipt directory",
+    )?;
+    ensure!(
+        !path_entry_exists(&root.join(HOT_ROTATION_MARKER))?,
+        "hot generation rotation marker must be recovered by the supervisor before startup"
+    );
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("list hot generation root {}", root.display()))?
+    {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        ensure!(
+            !name.starts_with(".next-slot-") && !name.starts_with(".sealed-slot-"),
+            "hot generation transaction must be recovered by the supervisor before startup"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_real_directory(path: &Path, description: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {description} {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "{description} is not a real directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect path entry {}", path.display())),
+    }
+}
+
+fn hot_rotation_layout(cache_root: &Path, slot: u64) -> HotRotationLayout {
+    let generation_id = format!("slot-{slot:020}");
+    HotRotationLayout {
+        root: cache_root.to_path_buf(),
+        active: cache_root.join(HOT_ACTIVE_DIR),
+        next: cache_root.join(format!(".next-{generation_id}")),
+        hidden_old: cache_root.join(format!(".sealed-{generation_id}")),
+        sealed: cache_root.join(HOT_SEALED_DIR).join(&generation_id),
+        marker: cache_root.join(HOT_ROTATION_MARKER),
+        receipt: cache_root
+            .join(HOT_RECEIPTS_DIR)
+            .join(format!("{generation_id}.json")),
+    }
+}
+
+fn hot_rotate_generation(
+    config: &GrpcRawRecordConfig,
+    cache_root: &Path,
+    identity: &mut GrpcRawIdentityFile,
+    spool: &mut SpoolWriter,
+    source_tail: &GrpcRawHandoffRecord,
+) -> Result<HotRotationResult> {
+    ensure!(
+        spool
+            .last_record()
+            .is_some_and(|record| record.location() == source_tail.location()),
+        "hot generation journal tail differs from its durable WAL tail"
+    );
+    let source_record = spool
+        .read_record(
+            spool
+                .last_record()
+                .context("hot generation source has no durable WAL tail")?,
+        )
+        .context("read hot generation durable tail")?;
+    ensure!(
+        source_record.metadata.observation.sequence == source_tail.frame_id,
+        "hot generation durable tail sequence differs from its handoff row"
+    );
+
+    let layout = hot_rotation_layout(cache_root, source_tail.slot);
+    for path in [
+        &layout.next,
+        &layout.hidden_old,
+        &layout.sealed,
+        &layout.marker,
+        &layout.receipt,
+    ] {
+        ensure!(
+            !path_entry_exists(path)?,
+            "hot generation rotation target already exists: {}",
+            path.display()
+        );
+    }
+    let (successor_identity, seeded_tail) =
+        seed_hot_generation_from_tail(config, identity, source_tail, &source_record, &layout.next)?;
+
+    publish_hot_rotation_layout(&layout, |_| Ok(()))?;
+    let successor_spool = SpoolWriter::open(
+        layout.active.join(WAL_ROOT_DIR),
+        successor_identity.spool_identity(),
+        SpoolOptions {
+            segment_target_bytes: config.segment_target_bytes,
+            max_record_bytes: config.max_record_bytes,
+        },
+    )
+    .context("open hot generation successor after publication")?;
+    let generation_bytes = raw_generation_bytes(
+        &layout.active.join(IDENTITY_FILE),
+        &layout.active.join(WAL_ROOT_DIR),
+        &layout.active.join(HANDOFF_JOURNAL_FILE),
+    )?;
+
+    // Replacing the writer drops the predecessor lock before its full audit. The predecessor is
+    // still hidden and the durable marker keeps upload discovery blocked throughout that audit.
+    *spool = successor_spool;
+    *identity = successor_identity;
+    let predecessor_verification =
+        verify_grpc_raw_poh(layout.hidden_old.clone(), config.max_record_bytes, 1)
+            .context("fully audit hot-rotated predecessor before publishing it")?;
+    ensure!(
+        predecessor_verification.last_slot == Some(source_tail.slot),
+        "hot-rotated predecessor audit returned the wrong durable tail"
+    );
+    publish_hot_sealed_generation(&layout, |_| Ok(()))?;
+    finish_hot_rotation_layout(&layout)?;
+    tracing::info!(
+        generation_id = %layout.sealed.file_name().unwrap_or_default().to_string_lossy(),
+        sealed_slot = source_tail.slot,
+        "raw gRPC generation hot-rotated without reconnecting"
+    );
+    Ok(HotRotationResult {
+        generation_bytes,
+        next_frame_id: 1,
+        seeded_tail,
+    })
+}
+
+fn seed_hot_generation_from_tail(
+    config: &GrpcRawRecordConfig,
+    source_identity: &GrpcRawIdentityFile,
+    source_tail: &GrpcRawHandoffRecord,
+    source_record: &crate::ingest::SpoolRecord,
+    target_dir: &Path,
+) -> Result<(GrpcRawIdentityFile, GrpcRawHandoffRecord)> {
+    ensure_empty_generation_target(target_dir)?;
+    let target_parent = target_dir
+        .parent()
+        .context("hot generation successor has no parent")?;
+    let target_name = target_dir
+        .file_name()
+        .context("hot generation successor has no file name")?
+        .to_string_lossy();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let temporary_dir = target_parent.join(format!(
+        ".{target_name}.seed-{}-{unique}.tmp",
+        std::process::id()
+    ));
+    fs::create_dir(&temporary_dir).with_context(|| {
+        format!(
+            "create hot generation successor temporary directory {}",
+            temporary_dir.display()
+        )
+    })?;
+    sync_directory(target_parent)?;
+
+    let result = (|| -> Result<(GrpcRawIdentityFile, GrpcRawHandoffRecord)> {
+        let target_config = GrpcRawRecordConfig {
+            endpoint: source_identity.endpoint.clone(),
+            output_dir: temporary_dir.clone(),
+            segment_target_bytes: config.segment_target_bytes,
+            max_record_bytes: config.max_record_bytes,
+            cluster_id: source_identity.cluster_id.clone(),
+            origin_node_id: source_identity.origin_node_id.clone(),
+            source_id: source_identity.source_id.clone(),
+            ..GrpcRawRecordConfig::default()
+        };
+        let target_identity = load_or_create_identity(&target_config)?;
+        ensure!(
+            target_identity.journal_id != source_identity.journal_id,
+            "hot generation successor reused the source journal id"
+        );
+        let mut target_spool = SpoolWriter::open(
+            temporary_dir.join(WAL_ROOT_DIR),
+            target_identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )?;
+        let target_journal = temporary_dir.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&target_journal)?;
+        let target_metadata = IngressRecordMeta::from_payload(
+            target_identity.cluster_id.clone(),
+            ObservationId {
+                origin_node_id: target_identity.origin_node_id.clone(),
+                journal_id: target_identity.journal_id,
+                sequence: 0,
+            },
+            target_identity.source_id.clone(),
+            source_record.metadata.logical_key.clone(),
+            PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+            &source_record.payload,
+        );
+        let durable = target_spool.append_and_sync(target_metadata, &source_record.payload)?;
+        let target_tail = GrpcRawHandoffRecord {
+            frame_id: 0,
+            segment_id: durable.location().segment_id,
+            frame_offset: durable.location().frame_offset,
+            frame_len: durable.location().frame_len,
+            ..source_tail.clone()
+        };
+        append_handoff_record(&target_journal, &target_tail)?;
+        drop(target_spool);
+        let verification = verify_grpc_raw_poh(temporary_dir.clone(), config.max_record_bytes, 1)?;
+        ensure!(
+            verification.records_verified == 1
+                && verification.first_slot == Some(source_tail.slot)
+                && verification.last_slot == Some(source_tail.slot),
+            "hot generation successor did not reproduce exactly its source tail"
+        );
+        copy_hot_generation_auxiliary_files(&config.output_dir, &temporary_dir)?;
+        fs::rename(&temporary_dir, target_dir).with_context(|| {
+            format!("publish hot generation successor {}", target_dir.display())
+        })?;
+        sync_directory(target_parent)?;
+        Ok((target_identity, target_tail))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary_dir);
+        let _ = sync_directory(target_parent);
+    }
+    result
+}
+
+fn copy_hot_generation_auxiliary_files(source: &Path, target: &Path) -> Result<()> {
+    let source_dir = source.join(REPLAY_GAPS_DIR);
+    let metadata = match fs::symlink_metadata(&source_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect hot generation replay-gap directory"),
+    };
+    ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "hot generation replay-gap path is not a real directory"
+    );
+    let target_dir = target.join(REPLAY_GAPS_DIR);
+    fs::create_dir(&target_dir)?;
+    sync_directory(target)?;
+    let mut count = 0usize;
+    let mut total = 0u64;
+    for entry in fs::read_dir(&source_dir)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "hot generation replay-gap directory contains a non-regular file"
+        );
+        count = count
+            .checked_add(1)
+            .context("replay-gap file count overflow")?;
+        total = total
+            .checked_add(metadata.len())
+            .context("replay-gap byte count overflow")?;
+        ensure!(
+            count <= MAX_HOT_AUXILIARY_FILES && total <= MAX_HOT_AUXILIARY_BYTES,
+            "hot generation replay-gap evidence exceeds its bounded copy limit"
+        );
+        let target_path = target_dir.join(entry.file_name());
+        fs::copy(entry.path(), &target_path)?;
+        File::open(&target_path)?.sync_all()?;
+    }
+    sync_directory(&target_dir)?;
+    Ok(())
+}
+
+fn publish_hot_rotation_layout<F>(layout: &HotRotationLayout, mut after_step: F) -> Result<()>
+where
+    F: FnMut(HotRotationStep) -> Result<()>,
+{
+    let generation_id = layout
+        .sealed
+        .file_name()
+        .context("sealed hot generation has no file name")?
+        .to_string_lossy();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let marker_temp = layout
+        .root
+        .join(format!(".rotation.{}.{unique}.tmp", std::process::id()));
+    let marker_result = (|| -> Result<()> {
+        let mut marker = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker_temp)?;
+        writeln!(marker, "{generation_id}")?;
+        marker.sync_all()?;
+        fs::hard_link(&marker_temp, &layout.marker)?;
+        fs::remove_file(&marker_temp)?;
+        sync_directory(&layout.root)?;
+        Ok(())
+    })();
+    if marker_result.is_err() {
+        let _ = fs::remove_file(&marker_temp);
+        return marker_result;
+    }
+    after_step(HotRotationStep::MarkerPublished)?;
+
+    fs::rename(&layout.active, &layout.hidden_old)?;
+    sync_directory(&layout.root)?;
+    after_step(HotRotationStep::OldGenerationHidden)?;
+    fs::rename(&layout.next, &layout.active)?;
+    sync_directory(&layout.root)?;
+    after_step(HotRotationStep::SuccessorActive)?;
+    Ok(())
+}
+
+fn publish_hot_sealed_generation<F>(layout: &HotRotationLayout, mut after_step: F) -> Result<()>
+where
+    F: FnMut(HotRotationStep) -> Result<()>,
+{
+    fs::rename(&layout.hidden_old, &layout.sealed)?;
+    sync_directory(
+        layout
+            .sealed
+            .parent()
+            .context("sealed hot generation has no parent")?,
+    )?;
+    sync_directory(&layout.root)?;
+    after_step(HotRotationStep::SealedGenerationVisible)?;
+    Ok(())
+}
+
+fn finish_hot_rotation_layout(layout: &HotRotationLayout) -> Result<()> {
+    fs::remove_file(&layout.marker)?;
+    sync_directory(&layout.root)
 }
 
 fn ensure_empty_generation_target(target: &Path) -> Result<()> {
@@ -2281,7 +2767,11 @@ fn low_disk_bytes(path: &Path, minimum: u64) -> Result<Option<u64>> {
         return Ok(None);
     }
     let available = filesystem_available_bytes(path)?;
-    Ok((available < minimum).then_some(available))
+    Ok(disk_floor_reached(available, minimum).then_some(available))
+}
+
+fn disk_floor_reached(available: u64, minimum: u64) -> bool {
+    minimum > 0 && available < minimum
 }
 
 #[cfg(unix)]
@@ -2661,6 +3151,150 @@ mod tests {
     }
 
     #[test]
+    fn hot_rotation_durably_appends_trigger_before_honoring_the_new_disk_floor() {
+        let cache_root = temp_dir("hot-generation");
+        let active = cache_root.join(HOT_ACTIVE_DIR);
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir(cache_root.join(HOT_SEALED_DIR)).unwrap();
+        fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+        let mut config = test_config(active.clone());
+        config.hot_generation_root = Some(cache_root.clone());
+        config.max_generation_bytes = minimum_generation_bytes(&config).unwrap();
+        validate_hot_generation_config(&config).unwrap();
+
+        let mut identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            active.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = active.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let mut source_tail = None;
+        for frame_id in 0..3 {
+            let row = append_fixture(
+                &mut spool,
+                &identity,
+                &complete_poh_update(7_000 + frame_id),
+                frame_id,
+            );
+            append_handoff_record(&journal, &row).unwrap();
+            source_tail = Some(row);
+        }
+        let source_tail = source_tail.unwrap();
+        let gap_dir = active.join(REPLAY_GAPS_DIR);
+        fs::create_dir(&gap_dir).unwrap();
+        fs::write(gap_dir.join("fixture.json"), b"{}\n").unwrap();
+
+        let source_journal_id = identity.journal_id;
+        let rotated = hot_rotate_generation(
+            &config,
+            &cache_root,
+            &mut identity,
+            &mut spool,
+            &source_tail,
+        )
+        .unwrap();
+        assert_eq!(rotated.next_frame_id, 1);
+        assert_eq!(rotated.seeded_tail.frame_id, 0);
+        assert_eq!(rotated.seeded_tail.slot, source_tail.slot);
+        assert_ne!(identity.journal_id, source_journal_id);
+        assert!(!cache_root.join(HOT_ROTATION_MARKER).exists());
+        assert!(
+            cache_root
+                .join(HOT_SEALED_DIR)
+                .join(format!("slot-{:020}", source_tail.slot))
+                .is_dir()
+        );
+        assert_eq!(
+            fs::read(active.join(REPLAY_GAPS_DIR).join("fixture.json")).unwrap(),
+            b"{}\n"
+        );
+
+        // This is the already-decoded block that crossed the predecessor's cap. It becomes frame
+        // one in the successor without another subscription or a resume overlap.
+        let trigger = complete_poh_update(source_tail.slot + 1);
+        let trigger_row = append_fixture(&mut spool, &identity, &trigger, rotated.next_frame_id);
+        append_handoff_record(&journal, &trigger_row).unwrap();
+        assert_eq!(read_handoff_journal(&journal, false).unwrap().records, 2);
+        assert!(disk_floor_reached(9, 10));
+        drop(spool);
+        let active_verification =
+            verify_grpc_raw_poh(active.clone(), config.max_record_bytes, 2).unwrap();
+        assert_eq!(active_verification.records_verified, 2);
+        assert_eq!(active_verification.first_slot, Some(source_tail.slot));
+        assert_eq!(active_verification.last_slot, Some(source_tail.slot + 1));
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn hot_rotation_crash_states_remain_recoverable_by_the_supervisor_marker() {
+        for fail_at in [
+            HotRotationStep::MarkerPublished,
+            HotRotationStep::OldGenerationHidden,
+            HotRotationStep::SuccessorActive,
+            HotRotationStep::SealedGenerationVisible,
+        ] {
+            let cache_root = temp_dir("hot-generation-crash");
+            fs::create_dir_all(cache_root.join(HOT_ACTIVE_DIR)).unwrap();
+            fs::create_dir(cache_root.join(HOT_SEALED_DIR)).unwrap();
+            fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+            let layout = hot_rotation_layout(&cache_root, 42);
+            fs::create_dir(&layout.next).unwrap();
+            let error = publish_hot_rotation_layout(&layout, |step| {
+                if step == fail_at {
+                    Err(anyhow!("fixture crash after {step:?}"))
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| {
+                publish_hot_sealed_generation(&layout, |step| {
+                    if step == fail_at {
+                        Err(anyhow!("fixture crash after {step:?}"))
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("fixture crash"));
+            assert!(layout.marker.is_file());
+            match fail_at {
+                HotRotationStep::MarkerPublished => {
+                    assert!(layout.active.is_dir());
+                    assert!(layout.next.is_dir());
+                    assert!(!layout.hidden_old.exists());
+                    assert!(!layout.sealed.exists());
+                }
+                HotRotationStep::OldGenerationHidden => {
+                    assert!(!layout.active.exists());
+                    assert!(layout.next.is_dir());
+                    assert!(layout.hidden_old.is_dir());
+                    assert!(!layout.sealed.exists());
+                }
+                HotRotationStep::SuccessorActive => {
+                    assert!(layout.active.is_dir());
+                    assert!(!layout.next.exists());
+                    assert!(layout.hidden_old.is_dir());
+                    assert!(!layout.sealed.exists());
+                }
+                HotRotationStep::SealedGenerationVisible => {
+                    assert!(layout.active.is_dir());
+                    assert!(!layout.next.exists());
+                    assert!(!layout.hidden_old.exists());
+                    assert!(layout.sealed.is_dir());
+                }
+            }
+            fs::remove_dir_all(cache_root).unwrap();
+        }
+    }
+
+    #[test]
     fn seed_refuses_an_active_source_and_cleans_temporary_target() {
         let parent = temp_dir("seed-active-source");
         let source_dir = parent.join("source");
@@ -2814,6 +3448,28 @@ mod tests {
             Some(now),
         ));
         assert_eq!(outcome, WatchdogOutcome::IdleTimeout);
+    }
+
+    #[test]
+    fn low_disk_admission_does_not_poll_the_next_stream_update() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut stream = futures::stream::iter([7u64]);
+            let now = TokioInstant::now();
+            let outcome = next_with_disk_admission(
+                &mut stream,
+                || Ok(Some(123)),
+                deadline_after(now, 1, "test timeout").unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome, DiskAdmittedOutcome::LowDisk(123));
+            assert_eq!(stream.next().await, Some(7));
+        });
     }
 
     #[test]

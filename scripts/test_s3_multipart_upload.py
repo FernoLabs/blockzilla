@@ -711,11 +711,183 @@ class S3UploaderTests(unittest.TestCase):
         )
         self.assertTrue(native_client.calls)
         self.assertTrue(
-            all(call["prefix"] == call["startFileName"] for call in native_client.calls)
+            all(
+                call["prefix"] == "grpc-raw/v1/generation-native/"
+                for call in native_client.calls
+            )
         )
         exact_seeks = [call for call in native_client.calls if "startFileId" in call]
-        self.assertTrue(exact_seeks)
-        self.assertTrue(all(call["maxFileCount"] == 1 for call in exact_seeks))
+        self.assertFalse(exact_seeks)
+        self.assertEqual(len(native_client.calls), 4)
+        self.assertTrue(
+            all(
+                call["maxFileCount"] == uploader.B2_GENERATION_VERSION_PAGE_SIZE
+                for call in native_client.calls
+            )
+        )
+
+    def test_native_generation_verification_batches_502_files_and_retry(self):
+        generation, _writer_lock = self.create_generation()
+        chunks = generation / "chunks"
+        chunks.mkdir()
+        for index in range(498):
+            (chunks / f"chunk-{index:04d}.bin").write_bytes(
+                f"chunk {index}\n".encode()
+            )
+        self.assertEqual(len(uploader.walk_generation(generation)), 502)
+
+        prefix = "grpc-raw/v1/generation-native-502"
+        native_client, verifier = self.native_verifier()
+        upload_counts = {"files": 0, "bytes": 0}
+
+        def fake_single_put(_client, path, key, _content_type, sha256):
+            data = path.read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), sha256)
+            stored = self.state.add_version(key, data, sha256)
+            upload_counts["files"] += 1
+            return stored["version_id"], stored["etag"]
+
+        def fake_single_put_bytes(_client, data, key, _content_type, sha256):
+            self.assertEqual(hashlib.sha256(data).hexdigest(), sha256)
+            stored = self.state.add_version(key, data, sha256)
+            upload_counts["bytes"] += 1
+            return stored["version_id"], stored["etag"]
+
+        with mock.patch.object(
+            uploader, "single_put", side_effect=fake_single_put
+        ), mock.patch.object(
+            uploader, "single_put_bytes", side_effect=fake_single_put_bytes
+        ):
+            receipt = uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-502",
+                prefix,
+                self.root / "native-502-receipt.json",
+                metadata_verifier=verifier,
+            )
+            calls_after_publish = len(native_client.calls)
+            puts_after_publish = dict(upload_counts)
+            retried = uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-502",
+                prefix,
+                self.root / "native-502-receipt.json",
+                metadata_verifier=verifier,
+            )
+
+        self.assertEqual(receipt["file_count"], 502)
+        self.assertEqual(retried["commit_version_id"], receipt["commit_version_id"])
+        self.assertEqual(calls_after_publish, 4)
+        self.assertEqual(len(native_client.calls), 5)
+        self.assertEqual(upload_counts, puts_after_publish)
+        self.assertEqual(upload_counts, {"files": 502, "bytes": 2})
+        self.assertTrue(
+            all(
+                call["prefix"] == f"{prefix}/"
+                and call["maxFileCount"]
+                == uploader.B2_GENERATION_VERSION_PAGE_SIZE
+                for call in native_client.calls
+            )
+        )
+
+    def test_native_generation_snapshot_rejects_unexpected_remote_key(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "grpc-raw/v1/generation-native-unexpected"
+        unexpected_key = f"{prefix}/files/not-local-anymore.wal"
+        data = b"unexpected immutable object"
+        self.state.add_version(
+            unexpected_key, data, hashlib.sha256(data).hexdigest()
+        )
+        _native_client, verifier = self.native_verifier()
+        with self.assertRaisesRegex(RuntimeError, "unexpected key"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-unexpected",
+                prefix,
+                self.root / "native-unexpected-receipt.json",
+                metadata_verifier=verifier,
+            )
+        self.assertFalse(
+            any(method == "PUT" for method, _key, _headers, _query in self.state.requests)
+        )
+
+    def test_native_generation_snapshot_paginates_by_prefix(self):
+        prefix = "grpc-raw/v1/generation-native-pages"
+        allowed_keys = set()
+        expected_ids = set()
+        for index in range(5):
+            key = f"{prefix}/files/file-{index}.wal"
+            data = f"file {index}\n".encode()
+            stored = self.state.add_version(
+                key, data, hashlib.sha256(data).hexdigest()
+            )
+            allowed_keys.add(key)
+            expected_ids.add(stored["version_id"])
+        native_client, verifier = self.native_verifier()
+
+        with mock.patch.object(uploader, "B2_GENERATION_VERSION_PAGE_SIZE", 2):
+            snapshot = verifier.list_generation_versions(prefix, allowed_keys)
+
+        self.assertEqual(len(native_client.calls), 3)
+        self.assertNotIn("startFileId", native_client.calls[0])
+        self.assertIn("startFileId", native_client.calls[1])
+        self.assertIn("startFileId", native_client.calls[2])
+        returned_ids = {
+            version["fileId"]
+            for versions in snapshot.values()
+            for version in versions
+        }
+        self.assertEqual(returned_ids, expected_ids)
+
+    def test_native_manifest_version_is_pinned_before_commit_publication(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "grpc-raw/v1/generation-native-manifest-pin"
+        manifest_key = f"{prefix}/manifest.json"
+        commit_key = f"{prefix}/_COMMITTED"
+        self.state.override_put_version_ids[manifest_key] = "missing-version"
+        _native_client, verifier = self.native_verifier()
+        with self.assertRaisesRegex(RuntimeError, "different pinned version"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-manifest-pin",
+                prefix,
+                self.root / "native-manifest-pin-receipt.json",
+                metadata_verifier=verifier,
+            )
+        self.assertFalse(
+            any(
+                method == "PUT" and key == commit_key
+                for method, key, _headers, _query in self.state.requests
+            )
+        )
+
+    def test_native_final_snapshot_blocks_receipt_on_commit_race(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "grpc-raw/v1/generation-native-commit-race"
+        commit_key = f"{prefix}/_COMMITTED"
+        conflict = b"concurrent conflicting commit"
+        self.state.inject_after_put[commit_key] = {
+            "data": conflict,
+            "sha256": hashlib.sha256(conflict).hexdigest(),
+        }
+        receipt_path = self.root / "native-commit-race-receipt.json"
+        _native_client, verifier = self.native_verifier()
+
+        with self.assertRaisesRegex(RuntimeError, "conflicting"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-commit-race",
+                prefix,
+                receipt_path,
+                metadata_verifier=verifier,
+            )
+
+        self.assertFalse(receipt_path.exists())
 
     def test_native_retry_pins_existing_versions_without_new_puts(self):
         generation, _writer_lock = self.create_generation()
@@ -1065,6 +1237,114 @@ class S3UploaderTests(unittest.TestCase):
         self.assertEqual(self.state.requests, [])
 
 
+class BackblazeCapacityExitStatusTests(unittest.TestCase):
+    @staticmethod
+    def response(body, status=403):
+        response = uploader.requests.Response()
+        response.status_code = status
+        response.headers["Content-Length"] = str(len(body))
+        response._content = body
+        response.raw = io.BytesIO(body)
+        return response
+
+    def test_bounded_error_parser_accepts_exact_native_json_and_s3_xml_codes(self):
+        secret = "must-not-appear-in-errors"
+        native = self.response(
+            json.dumps(
+                {
+                    "code": "transaction_cap_exceeded",
+                    "message": secret,
+                    "status": 403,
+                }
+            ).encode()
+        )
+        s3 = self.response(
+            (
+                "<Error><Code>cap_exceeded</Code>"
+                f"<Message>{secret}</Message></Error>"
+            ).encode()
+        )
+
+        self.assertEqual(
+            uploader.api_error_code(native), "transaction_cap_exceeded"
+        )
+        self.assertEqual(uploader.api_error_code(s3), "cap_exceeded")
+
+        client = uploader.S3Client(
+            "http://127.0.0.1:1",
+            "test-region",
+            "test-bucket",
+            "test-access-key",
+            "test-secret-key",
+            0,
+        )
+        with mock.patch.object(client, "_request_once", return_value=s3):
+            with self.assertRaises(uploader.S3APIError) as caught:
+                client.request("PUT", "generation/data", body=b"data")
+        self.assertEqual(caught.exception.code, "cap_exceeded")
+        self.assertEqual(
+            uploader.backblaze_capacity_exit_status(caught.exception), 22
+        )
+        self.assertNotIn(secret, str(caught.exception))
+
+    def test_error_parser_rejects_oversized_malformed_and_ambiguous_bodies(self):
+        oversized = self.response(
+            json.dumps(
+                {
+                    "code": "transaction_cap_exceeded",
+                    "message": "x" * uploader.MAX_API_ERROR_BODY_BYTES,
+                }
+            ).encode()
+        )
+        malformed = self.response(b'{"code":"transaction_cap_exceeded"')
+        ambiguous = self.response(
+            b"<Error><Code>cap_exceeded</Code>"
+            b"<Code>transaction_cap_exceeded</Code></Error>"
+        )
+
+        self.assertEqual(uploader.api_error_code(oversized), "")
+        self.assertEqual(uploader.api_error_code(malformed), "")
+        self.assertEqual(uploader.api_error_code(ambiguous), "")
+
+    def test_main_returns_stable_status_for_each_exact_capacity_code(self):
+        cases = {
+            "download_cap_exceeded": 20,
+            "transaction_cap_exceeded": 21,
+            "storage_cap_exceeded": 22,
+            "cap_exceeded": 22,
+        }
+        for code, expected_status in cases.items():
+            with self.subTest(code=code):
+                error_output = io.StringIO()
+                error = uploader.B2NativeAPIError("b2_test", 403, code)
+                with mock.patch.object(
+                    uploader, "run", side_effect=error
+                ), contextlib.redirect_stderr(error_output):
+                    status = uploader.main(["b2-account-usage"])
+                self.assertEqual(status, expected_status)
+                self.assertIn(code, error_output.getvalue())
+
+    def test_unknown_or_untyped_403_is_generic_and_never_matched_by_text(self):
+        cases = [
+            uploader.B2NativeAPIError("b2_test", 403, ""),
+            uploader.B2NativeAPIError(
+                "b2_test", 403, "transaction_cap_exceeded_extra"
+            ),
+            uploader.B2NativeAPIError(
+                "b2_test", 403, "TRANSACTION_CAP_EXCEEDED"
+            ),
+            RuntimeError("HTTP 403 transaction_cap_exceeded"),
+        ]
+        for error in cases:
+            with self.subTest(error=repr(error)):
+                error_output = io.StringIO()
+                with mock.patch.object(
+                    uploader, "run", side_effect=error
+                ), contextlib.redirect_stderr(error_output):
+                    status = uploader.main(["b2-account-usage"])
+                self.assertEqual(status, 1)
+
+
 class B2AccountUsageTests(unittest.TestCase):
     def setUp(self):
         self.state = FakeB2State()
@@ -1298,6 +1578,45 @@ class B2AccountUsageTests(unittest.TestCase):
         self.assertEqual(
             output.getvalue(), uploader.canonical_json_bytes(decoded).decode("utf-8")
         )
+
+    def test_native_transaction_cap_returns_21_without_retry_or_message_leak(self):
+        secret = "server-message-must-stay-private"
+        self.state.enqueue(
+            "POST",
+            "b2_list_buckets",
+            {
+                "code": "transaction_cap_exceeded",
+                "message": secret,
+                "status": 403,
+            },
+            status=403,
+        )
+        credentials = self.root / "backblaze-cap.env"
+        credentials.write_text(
+            "B2_APPLICATION_KEY_ID=fake-application-key-id\n"
+            "B2_APPLICATION_KEY=fake-application-key-secret\n"
+        )
+        error_output = io.StringIO()
+        with mock.patch.object(
+            uploader,
+            "B2_AUTHORIZE_ACCOUNT_URL",
+            f"{self.endpoint}/b2api/v4/b2_authorize_account",
+        ), contextlib.redirect_stderr(error_output):
+            status = uploader.main(
+                [
+                    "b2-account-usage",
+                    "--credentials-file",
+                    str(credentials),
+                    "--retries",
+                    "8",
+                ]
+            )
+
+        self.assertEqual(status, 21)
+        self.assertEqual(len(self.state.requests), 2)
+        self.assertIn("transaction_cap_exceeded", error_output.getvalue())
+        self.assertNotIn(secret, error_output.getvalue())
+        self.assertNotIn("fake-application-key-secret", error_output.getvalue())
 
     def test_restricted_key_and_invalid_sizes_never_claim_complete_usage(self):
         self.state.allowed["bucketId"] = "bucket-a"

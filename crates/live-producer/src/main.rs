@@ -179,6 +179,11 @@ struct RecordGrpcRawArgs {
     #[arg(long, default_value_t = 0)]
     max_generation_bytes: u64,
 
+    /// Keep the subscription open and atomically roll `<root>/active` into `<root>/sealed`.
+    /// The supervisor must recover any pre-existing `.rotation` transaction before startup.
+    #[arg(long)]
+    hot_generation_root: Option<std::path::PathBuf>,
+
     /// Stop cleanly before the filesystem falls below this many free bytes. Zero disables.
     #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
     min_free_bytes: u64,
@@ -591,6 +596,7 @@ impl From<RecordGrpcRawArgs> for GrpcRawRecordConfig {
             segment_target_bytes: value.segment_target_bytes,
             max_record_bytes: value.max_record_bytes,
             max_generation_bytes: value.max_generation_bytes,
+            hot_generation_root: value.hot_generation_root,
             min_free_bytes: value.min_free_bytes,
             require_complete_poh: value.require_complete_poh,
             cluster_id: value.cluster_id,

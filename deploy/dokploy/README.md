@@ -4,43 +4,56 @@ This deployment keeps a live, PoH-capable shadow capture of confirmed
 Yellowstone block envelopes. It has no inbound port and does not build the
 Blockzilla archive or indexes in the recorder container.
 
-The Hetzner host uses an exact, preallocated **3 GiB local cache**. The cache is
-not long-term retention. A normal generation is capped at 384 MiB and follows
-this lifecycle:
+The Hetzner host uses an exact, preallocated **3 GiB disk-first cache**. This is
+the deployed interim tier: every accepted block is fsynced locally, and sealed
+generations remain on Hetzner while there is comfortable headroom. A normal
+generation is capped at 384 MiB and follows this lifecycle:
 
 1. The Rust recorder durably appends to `/data/grpc-cache/active`.
-2. At the generation byte limit, the supervisor stops the writer and fully
-   verifies the WAL, journal, protobuf payloads, and required PoH structure.
-3. It seeds a fresh generation with the exact last durable compressed block as
-   frame zero, publishes that successor as `active`, and only then exposes the
-   old generation under `sealed/`.
-4. The uploader writes generation files to the versioned Backblaze bucket, then
+2. At the generation byte limit, the Rust recorder keeps the same Yellowstone
+   subscription open, seeds a fresh generation with the exact last durable
+   compressed block as frame zero, and atomically publishes it as `active`
+   under a synced rotation marker.
+3. The stopped predecessor remains hidden from the uploader until a complete
+   WAL, journal, protobuf, and required-PoH audit succeeds. The already-received
+   cap-crossing block is then fsynced as successor frame one before polling the
+   stream again, and only the audited predecessor becomes visible under
+   `sealed/`.
+4. With healthy headroom, nothing is uploaded and the sealed generations remain
+   local. When free space falls below the larger of 25% of the filesystem or
+   `MIN_FREE + MAX_GENERATION`, the uploader drains the oldest generation first.
+5. The uploader writes generation files to the versioned Backblaze bucket, then
    `manifest.json`, then `_COMMITTED` last. The manifest pins every file's exact
-   Backblaze version ID, and the commit pins the manifest version ID. Each pinned
-   single-PUT version is bound to the signed request SHA-256 and checked against
-   Backblaze's returned MD5 ETag, then checked again with an exact-version signed
-   `HEAD` for its length, SHA-256 metadata, version ID, and ETag.
-5. A synced local receipt pins the exact manifest and commit version IDs and is
+   Backblaze version ID, and the commit pins the manifest version ID. A bounded
+   Native-API version listing checks the pinned IDs, lengths, hashes, account,
+   and bucket without downloading payloads.
+6. A synced local receipt pins the exact manifest and commit version IDs and is
    published only after all remote verification succeeds. The supervisor checks
    that receipt and its predecessor chain before removing the sealed local
-   generation.
+   generation. FIFO draining continues until free space reaches the larger of
+   35% or `MIN_FREE + 2*MAX_GENERATION`, then B2 uploads stop again.
 
-Routine publication intentionally performs no object `GET`. Re-downloading
-every generation during upload consumed about twice the ingest volume and can
-exhaust Backblaze's separate daily download cap even while storage remains
-below 10 GB. Exact-version payloads are fully downloaded and rehashed during a
-restore or future Blockzilla pull; the standalone `upload-file` audit command
-also retains full readback verification.
+Routine publication intentionally performs no object `HEAD` or `GET`.
+Re-downloading every generation during upload consumed about twice the ingest
+volume and can exhaust Backblaze's separate daily download cap even while
+storage remains below 10 GB. Exact-version payloads are fully downloaded and
+rehashed during a restore or future Blockzilla pull; the standalone
+`upload-file` audit command also retains full readback verification.
 
 At the measured 5–6 GiB/hour input rate, 3 GiB is only 30–36 minutes of
-theoretical storage. The 384 MiB emergency floor and rotation headroom make the
-practical Backblaze-outage window roughly 25–30 minutes. If remote uploads fall
-behind, the recorder alerts and pauses at the hard floor; it never deletes an
-unverified generation.
+theoretical storage. On the exact 3 GiB filesystem, spill starts below 768 MiB
+free and drains until at least 1.125 GiB is free. Once spill is required, a B2
+outage leaves only the space between that trigger and the 384 MiB hard floor,
+so intervention time is measured in minutes. If remote uploads fail, the
+recorder retains every unverified generation, alerts once, and pauses at the
+hard floor.
 
 Backblaze retention is separate from the 3 GiB host limit. This deployment has
-no lifecycle deletion: the remote archive, including noncurrent versions, grows
-indefinitely by approximately the incoming stream volume. The account-wide
+no lifecycle deletion: once disk pressure begins spilling, the remote archive,
+including noncurrent versions, grows by approximately the incoming stream
+volume. A 10 GB cap is therefore an emergency tier, not indefinite retention;
+when it is exhausted, verified remote objects remain but new spill commits fail
+closed and local capture eventually pauses. The account-wide
 usage monitor counts every upload version in every bucket plus unfinished
 large-file parts. It warns at 8,000,000,000 bytes and escalates at
 9,500,000,000 bytes before the decimal 10 GB free allowance. These alerts never
@@ -54,10 +67,18 @@ It does **not** yet implement the authenticated Blockzilla primary/replica
 request, transfer, acknowledgement, or delete protocol. Consequently:
 
 - it can alert when the Yellowstone feed stalls, the recorder restarts, the
-  cache is invalid, Backblaze upload fails, or the cache backlog grows;
+  cache is invalid, a pressure-triggered Backblaze spill fails, or the hard
+  local floor is reached;
 - it cannot yet know that the primary Blockzilla node disconnected or request a
   slot range on behalf of that primary;
 - a Backblaze commit is the only local generation deletion authority today.
+
+The proposed **500 MB memory-first + Blockzilla sync-event** tier is not
+implemented. There is no signed Blockzilla durable ACK to authorize dropping an
+in-memory window, and waiting for a missed ping before the first disk write
+would lose that window on a recorder crash. Until that protocol exists, every
+block is written to local disk first; the 768 MiB container limit is a runtime
+limit, not a 500 MB retention buffer.
 
 The optional primary-sync heartbeat remains disabled until the real sync
 process writes one. The agreed pull/ACK design is documented in
@@ -133,6 +154,8 @@ BLOCKZILLA_RAW_MAX_GENERATION_BYTES=402653184
 BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES=67108864
 BLOCKZILLA_RAW_MAX_RECORD_BYTES=134217728
 BLOCKZILLA_RAW_MIN_FREE_BYTES=402653184
+BLOCKZILLA_RAW_B2_SPILL_START_PERCENT=25
+BLOCKZILLA_RAW_B2_SPILL_RECOVERY_PERCENT=35
 BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES=805306368
 BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES=134217728
 BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS=100
@@ -178,16 +201,19 @@ find /data/grpc-cache/sealed -mindepth 1 -maxdepth 1 -type d -print
 find /data/grpc-cache/receipts -maxdepth 1 -name 'slot-*.json' -print
 ```
 
-Wait for at least one complete rotation. A successful end-to-end check requires:
+Wait for at least one complete rotation. A healthy local-only check requires:
 
 - the active journal continues growing after rotation from its seeded overlap;
-- a generation receipt containing manifest and commit version IDs appears only
-  after the Backblaze manifest and commit;
-- the corresponding sealed directory disappears only after receipt validation;
+- sealed generations remain local and no B2 generation receipt appears while
+  free space is at or above the spill-start watermark;
+- after pressure crosses the watermark, a generation receipt containing
+  manifest and commit version IDs appears only after the Backblaze commit;
+- the corresponding oldest sealed directory disappears only after receipt
+  validation, and draining stops at the recovery watermark;
 - the remote prefix is
   `grpc-raw/v1/<cluster>/<origin>/slot-<20-digit-slot>/`;
-- free space returns after the upload and remains bounded by the 3 GiB
-  filesystem;
+- free space returns above the spill recovery watermark and remains bounded by
+  the 3 GiB filesystem;
 - the container remains healthy and no upload/backlog incident is active.
 
 Do not retire another recorder based only on a healthy badge. Compare at least
@@ -234,9 +260,9 @@ deliveries remain pending for retry.
 | Recorder restart / gRPC stale | The stream ended, the process failed, or no durable block arrived for 180 seconds. | Check endpoint reachability and credentials, then audit overlap after recovery. |
 | Resume coverage warning | Yellowstone did not return the inclusively requested durable slot. | Compare against another recorder and repair the uncovered range. |
 | Cache/volume invalid | The exact cache mount, marker, or rotation transaction is missing or inconsistent. Capture is stopped. | Restore the mount and inspect the transaction; never manufacture a marker on the root filesystem. |
-| Backup pipeline blocked | Backblaze upload or immutable-version verification failed, sealed generations are backing up, or that backlog reached the local safety floor. These derivative symptoms are one incident, not three. | Check Backblaze credentials, Caps & Alerts, reachability, and logs. Do not manually delete a sealed generation. |
+| Backup pipeline blocked | A disk-pressure spill failed, Backblaze reported download/Class-C/storage cap exhaustion, or the local cache reached its hard floor. Healthy sealed local retention is silent. These derivative symptoms are one incident, not several. | Follow the cap-specific action in the alert, or check credentials, reachability, and logs. Do not manually delete a sealed generation. |
 | Backblaze free-storage allowance | Complete account storage, including hidden versions and unfinished parts, reached 8.0 GB and escalated at 9.5 GB. Measurement failures are a separate alert. | If indefinite retention is intended, enable paid storage or raise the Backblaze storage cap before 10 GB; otherwise choose a retention plan. |
-| Disk warning / critical | Cache free space is below 768 MiB / 384 MiB for a cause other than the already-reported upload backlog. At the hard floor capture pauses. | Restore safe capacity. Only remotely verified generations may be removed. |
+| Disk critical | The disk-first cache fell below the 384 MiB hard floor before spill cleanup recovered space. Capture pauses and retains all remaining data. | Restore Backblaze spill capacity or add local capacity. Only exactly verified generations may be removed automatically. |
 | Primary-sync stale | Active only when a heartbeat path is configured. | Inspect the future authenticated primary/replica sync process. |
 
 Because the notifier runs inside this container, it cannot report total host

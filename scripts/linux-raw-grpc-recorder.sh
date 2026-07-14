@@ -34,6 +34,8 @@ CACHE_ROOT=${BLOCKZILLA_RAW_CACHE_ROOT:-/data/grpc-cache}
 MAX_GENERATION_BYTES=${BLOCKZILLA_RAW_MAX_GENERATION_BYTES:-402653184}
 GENERATION_BACKLOG_WARN_COUNT=${BLOCKZILLA_RAW_GENERATION_BACKLOG_WARN_COUNT:-2}
 GENERATION_UPLOAD_RETRY_SECS=${BLOCKZILLA_RAW_GENERATION_UPLOAD_RETRY_SECS:-60}
+GENERATION_SPILL_START_PERCENT=${BLOCKZILLA_RAW_B2_SPILL_START_PERCENT:-25}
+GENERATION_SPILL_RECOVERY_PERCENT=${BLOCKZILLA_RAW_B2_SPILL_RECOVERY_PERCENT:-35}
 REPLAY_RESUME_HEADROOM_SLOTS=${BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS:-100}
 MAX_REPLAY_RESUME_HEADROOM_SLOTS=10000
 GENERATION_UPLOADER_BIN=${BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN:-/usr/local/bin/blockzilla-s3-upload}
@@ -484,6 +486,7 @@ discard_alert() {
     "$(alert_file "$discard_key" level)" \
     "$(alert_file "$discard_key" silent)" \
     "$(alert_file "$discard_key" closed)" \
+    "$(alert_file "$discard_key" handoff)" \
     "$(alert_file "$discard_key" journal_size)" \
     2>/dev/null || true
 }
@@ -859,7 +862,8 @@ clear_alert_locked() {
       "$alert_closed_now" || true
     rm -f "$alert_active" "$alert_delivery_file" "$alert_silent_file" \
       "$(alert_file "$alert_key" last)" \
-      "$(alert_file "$alert_key" level)" 2>/dev/null || true
+      "$(alert_file "$alert_key" level)" \
+      "$(alert_file "$alert_key" handoff)" 2>/dev/null || true
     return 0
   fi
   retry_pending_alert_locked "$alert_key"
@@ -878,7 +882,8 @@ clear_alert_locked() {
     "$alert_closed_now" || true
   if ! rm -f "$alert_active" "$alert_delivery_file" "$alert_silent_file" \
     "$(alert_file "$alert_key" last)" \
-    "$(alert_file "$alert_key" level)"
+    "$(alert_file "$alert_key" level)" \
+    "$(alert_file "$alert_key" handoff)"
   then
     echo "$(timestamp) telegram_recovery state_remove_failed key=$alert_key" >&2
   fi
@@ -1019,34 +1024,46 @@ update_disk_alerts() {
       pipeline_disk_context="The sealed-generation count could not be measured."
     fi
     if [ "$disk_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
+      pipeline_worker_running=false
+      if [ -n "${upload_worker_pid:-}" ] \
+        && kill -0 "$upload_worker_pid" 2>/dev/null
+      then
+        pipeline_worker_running=true
+      fi
+      pipeline_handoff=$(alert_file generation_backlog handoff)
+      if [ "$pipeline_worker_running" = true ] \
+        && [ -e "$pipeline_active" ]
+      then
+        # A live worker already owns a typed or gate-specific incident and will
+        # escalate it after observing this floor. Preserve that exact cause.
+        rm -f "$pipeline_handoff" 2>/dev/null || true
+        return 0
+      fi
+      if [ "$pipeline_worker_running" = true ] \
+        && [ ! -e "$pipeline_handoff" ]
+      then
+        # On the first floor observation, give the live worker one monitor pass
+        # to report an exact provider status. If it hangs, the durable handoff
+        # marker makes the next pass fall through to the generic fail-safe.
+        : > "$pipeline_handoff" 2>/dev/null || true
+        return 0
+      fi
+      # This is the fail-safe path when the independent spill worker is dead,
+      # stuck past one handoff pass, or has not opened its own incident.
       raise_alert generation_backlog CRITICAL \
-        "Cause: The bounded Hetzner cache reached its safety floor while remote cleanup is incomplete.
+        "Cause: The disk-first Hetzner cache reached its safety floor before Backblaze spill cleanup recovered headroom.
 Impact: $pipeline_disk_context Only $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$MIN_FREE_BYTES") floor. Durable capture is paused; existing data is retained.
 Action: Check Backblaze Caps & Alerts, API access, and the recorder volume. Automatic retries continue."
       return 0
-    elif [ "$disk_free_bytes" -lt "$DISK_WARN_FREE_BYTES" ]; then
-      raise_alert generation_backlog WARNING \
-        "Cause: The bounded Hetzner cache is approaching its safety floor while remote cleanup is incomplete.
-Impact: $pipeline_disk_context $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$DISK_WARN_FREE_BYTES") warning threshold. Active and unverified data is retained.
-Action: Restore remote upload throughput before capture must pause."
-      return 0
     fi
-    case "$pipeline_backlog" in
-      ''|*[!0-9]*) ;;
-      *)
-        if [ "$pipeline_backlog" -ge "$GENERATION_BACKLOG_WARN_COUNT" ]; then
-          # The upload worker owns one correlated incident for remote failure,
-          # backlog, and the resulting local pressure. Do not fan that single
-          # cause out into separate disk alerts.
-          return 0
-        fi
-        ;;
-    esac
+    rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
+    # Sealed generations are intentional local retention above the floor. The
+    # spill worker owns remote-cap/API failures and closes that same incident at
+    # its high-water mark; the disk monitor must not turn a healthy backlog into
+    # periodic warning/recovery noise.
     if [ -e "$pipeline_active" ]; then
       return 0
     fi
-    # The upload worker closes this correlated incident only after the queue is
-    # below threshold and free space passes the warning recovery margin.
     return 0
   fi
 
@@ -1370,6 +1387,10 @@ monitor_primary_sync_alert() {
 monitor_child() {
   monitored_pid=$1
   monitor_sleep_pid=
+  monitor_journal_identity=
+  if [ -e "$JOURNAL_FILE" ]; then
+    monitor_journal_identity=$(stat -c '%d:%i' "$JOURNAL_FILE" 2>/dev/null || true)
+  fi
   trap '
     if [ -n "$monitor_sleep_pid" ]; then
       kill -TERM "$monitor_sleep_pid" 2>/dev/null || true
@@ -1391,6 +1412,22 @@ monitor_child() {
       break
     fi
     if validate_data_volume true >/dev/null 2>&1; then
+      current_journal_identity=
+      if [ -e "$JOURNAL_FILE" ]; then
+        current_journal_identity=$(stat -c '%d:%i' "$JOURNAL_FILE" 2>/dev/null || true)
+      fi
+      if [ -n "$current_journal_identity" ] \
+        && [ -n "$monitor_journal_identity" ] \
+        && [ "$current_journal_identity" != "$monitor_journal_identity" ]
+      then
+        # In-process rollover replaces active/raw-blocks.jsonl while the child
+        # and Yellowstone stream stay alive. Incident progress floors belong to
+        # the old inode and must restart at the seeded successor's size.
+        reset_rotated_journal_incident_floors
+      fi
+      if [ -n "$current_journal_identity" ]; then
+        monitor_journal_identity=$current_journal_identity
+      fi
       retry_pending_alerts
       clear_alert volume_invalid "The dedicated recorder volume is valid again."
       monitor_disk_alerts
@@ -2009,6 +2046,22 @@ complete_rotation_transaction() {
       echo "cache rotation old generation is invalid for $rotation_id" >&2
       return 1
     fi
+    # Hot rotation publishes the successor before auditing the stopped
+    # predecessor, so the Yellowstone stream can remain open. Keep the old
+    # directory hidden from the uploader until a complete WAL/protobuf/PoH
+    # replay proves the exact generation ID. Repeating this audit during crash
+    # recovery is intentional and fail-closed.
+    rotation_verify_report=$CACHE_ROOT/.rotation-recovery-verify.$$.json
+    rm -f "$rotation_verify_report"
+    if ! verify_generation "$rotation_old" "$rotation_verify_report" \
+      || ! generation_id_from_verify_report "$rotation_verify_report" \
+      || [ "$GENERATION_ID" != "$rotation_id" ]
+    then
+      rm -f "$rotation_verify_report"
+      echo "cache rotation predecessor failed its publication audit for $rotation_id" >&2
+      return 1
+    fi
+    rm -f "$rotation_verify_report"
     # This is the first point at which the uploader can discover the sealed
     # generation. The active successor is already durable and visible.
     mv "$rotation_old" "$rotation_target" || return 1
@@ -2375,6 +2428,83 @@ sealed_generation_count() {
   printf '%s\n' "$sealed_count"
 }
 
+percentage_bytes() {
+  percentage_total=$1
+  percentage_value=$2
+  case "$percentage_total" in ''|*[!0-9]*) return 1 ;; esac
+  case "$percentage_value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$percentage_total" -gt 0 ] || return 1
+  [ "$percentage_value" -le 100 ] || return 1
+  # Divide before multiplying so a large filesystem cannot overflow merely
+  # while calculating a percentage.
+  printf '%s\n' "$((
+    (percentage_total / 100) * percentage_value
+    + ((percentage_total % 100) * percentage_value / 100)
+  ))"
+}
+
+generation_spill_thresholds() {
+  spill_total_bytes=$1
+  spill_start_ratio=$(percentage_bytes "$spill_total_bytes" \
+    "$GENERATION_SPILL_START_PERCENT") || return 1
+  spill_recovery_ratio=$(percentage_bytes "$spill_total_bytes" \
+    "$GENERATION_SPILL_RECOVERY_PERCENT") || return 1
+  spill_start_reserve=$((MIN_FREE_BYTES + MAX_GENERATION_BYTES))
+  spill_recovery_reserve=$((MIN_FREE_BYTES + (2 * MAX_GENERATION_BYTES)))
+  if [ "$spill_start_reserve" -le "$MIN_FREE_BYTES" ] \
+    || [ "$spill_recovery_reserve" -le "$spill_start_reserve" ]
+  then
+    return 1
+  fi
+  GENERATION_SPILL_START_BYTES=$spill_start_ratio
+  if [ "$spill_start_reserve" -gt "$GENERATION_SPILL_START_BYTES" ]; then
+    GENERATION_SPILL_START_BYTES=$spill_start_reserve
+  fi
+  GENERATION_SPILL_RECOVERY_BYTES=$spill_recovery_ratio
+  if [ "$spill_recovery_reserve" -gt "$GENERATION_SPILL_RECOVERY_BYTES" ]; then
+    GENERATION_SPILL_RECOVERY_BYTES=$spill_recovery_reserve
+  fi
+  [ "$GENERATION_SPILL_RECOVERY_BYTES" \
+    -gt "$GENERATION_SPILL_START_BYTES" ] || return 1
+}
+
+update_generation_spill_state() {
+  spill_free_bytes=$1
+  spill_total_bytes=$2
+  case "$spill_free_bytes" in ''|*[!0-9]*) return 1 ;; esac
+  case "$spill_total_bytes" in ''|*[!0-9]*) return 1 ;; esac
+  generation_spill_thresholds "$spill_total_bytes" || return 1
+  if [ "$generation_spill_active" = true ]; then
+    if [ "$spill_free_bytes" -ge "$GENERATION_SPILL_RECOVERY_BYTES" ]; then
+      generation_spill_active=false
+    fi
+  elif [ "$spill_free_bytes" -lt "$GENERATION_SPILL_START_BYTES" ]; then
+    generation_spill_active=true
+  fi
+}
+
+generation_upload_failure_details() {
+  failure_status=$1
+  case "$failure_status" in
+    20)
+      pipeline_cause="Cause: Backblaze rejected verification because the daily download-bandwidth cap was reached."
+      pipeline_action="Action: Raise or remove the Backblaze Download Bandwidth cap, or wait for its daily reset. Hetzner keeps every unverified local generation."
+      ;;
+    21)
+      pipeline_cause="Cause: Backblaze rejected the commit because the daily Class C transaction cap was reached."
+      pipeline_action="Action: Raise or remove the Backblaze Class C transaction cap, or wait for its daily reset. Hetzner keeps every unverified local generation."
+      ;;
+    22)
+      pipeline_cause="Cause: Backblaze rejected the upload because the storage or spending cap was reached."
+      pipeline_action="Action: Add Backblaze capacity or raise the storage spending cap. Do not manually delete the retained Hetzner generations."
+      ;;
+    *)
+      pipeline_cause="Cause: Backblaze could not commit and exactly verify the oldest sealed generation."
+      pipeline_action="Action: Check Backblaze credentials, Caps & Alerts, reachability, and recorder logs. Hetzner retries automatically every ${GENERATION_UPLOAD_RETRY_SECS}s."
+      ;;
+  esac
+}
+
 upload_one_generation() {
   # A rotation marker means the old generation may be visible but the rename
   # transaction is not yet committed. Recovery owns it until the marker clears.
@@ -2421,7 +2551,15 @@ upload_one_generation() {
     generation_uploader_status=$?
   fi
   generation_uploader_pid=
-  [ "$generation_uploader_status" -eq 0 ] || return 1
+  if [ "$generation_uploader_status" -ne 0 ]; then
+    # Preserve the uploader's small, allowlisted capacity statuses so the one
+    # correlated pipeline incident can name the exact operator action. Unknown
+    # failures remain generic and are never inferred from an untyped HTTP 403.
+    case "$generation_uploader_status" in
+      20|21|22) return "$generation_uploader_status" ;;
+      *) return 1 ;;
+    esac
+  fi
   finalize_uploaded_generation "$upload_dir" "$upload_id" \
     "$upload_prefix" "$upload_receipt"
 }
@@ -2434,83 +2572,239 @@ terminate_generation_upload_worker() {
   exit 0
 }
 
+raise_generation_spill_gate_alert() {
+  spill_gate_failure=$1
+  spill_gate_backlog=$2
+  spill_gate_free=$3
+  spill_gate_level=ERROR
+  case "$spill_gate_failure" in
+    queue)
+      spill_gate_cause="Hetzner could not inspect the sealed-generation queue safely."
+      ;;
+    free_space)
+      spill_gate_cause="Hetzner could not measure free space on the recorder filesystem."
+      ;;
+    capacity)
+      spill_gate_cause="Hetzner could not measure the recorder filesystem capacity."
+      ;;
+    policy)
+      spill_gate_cause="Hetzner could not validate the disk spill watermarks from the measured filesystem values."
+      ;;
+    *)
+      spill_gate_cause="Hetzner could not validate a required disk spill policy input."
+      ;;
+  esac
+  case "$spill_gate_backlog" in
+    ''|*[!0-9]*)
+      spill_gate_backlog_detail="The sealed-generation count is unavailable."
+      ;;
+    *)
+      spill_gate_backlog_detail="$spill_gate_backlog sealed generation(s) remain local."
+      ;;
+  esac
+  case "$spill_gate_free" in
+    ''|*[!0-9]*)
+      spill_gate_space_detail="Free space is unavailable, so capture headroom cannot be proven."
+      ;;
+    *)
+      spill_gate_space_detail="$(human_bytes "$spill_gate_free") is free."
+      if [ "$spill_gate_free" -lt "$MIN_FREE_BYTES" ]; then
+        spill_gate_level=CRITICAL
+        spill_gate_space_detail="$spill_gate_space_detail Capture is paused at its $(human_bytes "$MIN_FREE_BYTES") safety floor."
+      else
+        spill_gate_space_detail="$spill_gate_space_detail Capture can continue only while local headroom lasts."
+      fi
+      ;;
+  esac
+  rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
+  raise_alert generation_backlog "$spill_gate_level" \
+    "Cause: $spill_gate_cause
+Impact: Backblaze spill cleanup is paused. $spill_gate_backlog_detail $spill_gate_space_detail No unverified local data was deleted.
+Action: Inspect the recorder filesystem and service logs. Automatic checks continue every ${GENERATION_UPLOAD_RETRY_SECS}s."
+}
+
+generation_backlog_local_incident_active() {
+  gate_incident_file=$(alert_file generation_backlog active)
+  if [ -L "$gate_incident_file" ] \
+    || [ ! -f "$gate_incident_file" ] \
+    || [ ! -r "$gate_incident_file" ]
+  then
+    return 1
+  fi
+  gate_incident_bytes=$(wc -c < "$gate_incident_file" | tr -d ' ')
+  case "$gate_incident_bytes" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  [ "$gate_incident_bytes" -le 4096 ] || return 1
+  gate_incident_cause=$(sed -n '7p' "$gate_incident_file")
+  case "$gate_incident_cause" in
+    'Cause: Hetzner could not inspect the sealed-generation queue safely.'|\
+    'Cause: Hetzner could not measure free space on the recorder filesystem.'|\
+    'Cause: Hetzner could not measure the recorder filesystem capacity.'|\
+    'Cause: Hetzner could not validate the disk spill watermarks from the measured filesystem values.'|\
+    'Cause: The disk-first Hetzner cache reached its safety floor before Backblaze spill cleanup recovered headroom.')
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 generation_upload_worker() {
   generation_uploader_pid=
-  generation_previous_backlog=
+  generation_spill_active=false
   trap terminate_generation_upload_worker INT TERM HUP
   while :; do
     if validate_data_volume true >/dev/null 2>&1 \
       && [ -d "$SEALED_GENERATION_DIR" ]
     then
       generation_upload_failed=false
-      if upload_one_generation; then
-        :
+      generation_retry_immediately=false
+      generation_space_valid=false
+      generation_free_bytes=
+      generation_total_bytes=
+      generation_backlog=
+      generation_gate_failure=
+      generation_policy_ready=false
+      if ! generation_backlog=$(sealed_generation_count 2>/dev/null); then
+        generation_gate_failure=queue
+      elif ! generation_free_bytes=$(available_bytes 2>/dev/null); then
+        generation_gate_failure=free_space
+      elif ! generation_total_bytes=$(filesystem_capacity_bytes 2>/dev/null); then
+        generation_gate_failure=capacity
+      elif ! update_generation_spill_state "$generation_free_bytes" \
+        "$generation_total_bytes"
+      then
+        generation_gate_failure=policy
       else
-        upload_status=$?
-        if [ "$upload_status" -ne 75 ]; then
-          generation_upload_failed=true
-        fi
+        generation_policy_ready=true
       fi
-      if generation_backlog=$(sealed_generation_count); then
-        generation_free_valid=false
-        generation_free_bytes=
-        if generation_free_bytes=$(available_bytes 2>/dev/null); then
-          generation_free_valid=true
-          generation_free_detail="$(human_bytes "$generation_free_bytes") is free."
-        else
-          generation_free_detail="Free space could not be measured."
-        fi
-        pipeline_should_alert=false
-        if [ "$generation_upload_failed" = true ]; then
-          pipeline_should_alert=true
-          pipeline_cause="Cause: Backblaze could not commit or verify the oldest sealed generation."
-          pipeline_level=ERROR
-        elif [ "$generation_backlog" -ge "$GENERATION_BACKLOG_WARN_COUNT" ] \
-          && [ -n "$generation_previous_backlog" ] \
-          && [ "$generation_backlog" -ge "$generation_previous_backlog" ]
+      if [ "$generation_policy_ready" = true ]; then
+        generation_space_valid=true
+        generation_backlog_before=$generation_backlog
+        generation_free_before=$generation_free_bytes
+        generation_upload_attempted=false
+        generation_upload_succeeded=false
+        upload_status=
+        if [ "$generation_spill_active" = true ] \
+          && [ "$generation_backlog" -gt 0 ]
         then
-          pipeline_should_alert=true
-          pipeline_cause="Cause: Backblaze uploads are succeeding, but the sealed queue is not shrinking."
-          pipeline_level=WARNING
+          generation_upload_attempted=true
+          if upload_one_generation; then
+            upload_status=0
+            generation_upload_succeeded=true
+          else
+            upload_status=$?
+            if [ "$upload_status" -ne 75 ]; then
+              generation_upload_failed=true
+              generation_upload_failure_details "$upload_status"
+            fi
+          fi
         fi
-        if [ "$pipeline_should_alert" = true ]; then
-          if [ "$generation_free_valid" = true ] \
-            && [ "$generation_free_bytes" -lt "$MIN_FREE_BYTES" ]
+
+        # Refresh both values after a verified upload and local removal. The
+        # worker drains FIFO without an artificial retry delay until the high
+        # watermark is restored; normal local retention does not touch B2.
+        generation_refresh_failure=
+        if ! generation_backlog=$(sealed_generation_count 2>/dev/null); then
+          generation_refresh_failure=queue
+        elif ! generation_free_bytes=$(available_bytes 2>/dev/null); then
+          generation_refresh_failure=free_space
+        elif ! generation_total_bytes=$(filesystem_capacity_bytes 2>/dev/null); then
+          generation_refresh_failure=capacity
+        elif ! update_generation_spill_state "$generation_free_bytes" \
+          "$generation_total_bytes"
+        then
+          generation_refresh_failure=policy
+        else
+          generation_space_valid=true
+        fi
+        if [ -n "$generation_refresh_failure" ]; then
+          generation_space_valid=false
+        fi
+
+        if [ "$generation_upload_failed" = true ]; then
+          pipeline_level=ERROR
+          if [ "$generation_space_valid" != true ] \
+            || [ "$generation_free_bytes" -lt "$MIN_FREE_BYTES" ]
           then
             pipeline_level=CRITICAL
-            pipeline_capture="Capture is paused at its $(human_bytes "$MIN_FREE_BYTES") safety floor."
+            pipeline_capture="Capture is paused or cannot be admitted safely at its $(human_bytes "$MIN_FREE_BYTES") floor."
           else
-            pipeline_capture="Capture can continue for now."
+            pipeline_capture="Capture can continue only while the remaining local headroom lasts."
           fi
+          if [ "$generation_space_valid" = true ]; then
+            generation_free_detail="$(human_bytes "$generation_free_bytes") is free; spill recovery requires $(human_bytes "$GENERATION_SPILL_RECOVERY_BYTES")."
+          else
+            generation_free_detail="Free space could not be measured safely."
+          fi
+          rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
           raise_alert generation_backlog "$pipeline_level" \
             "$pipeline_cause
-Impact: $generation_backlog sealed generation(s) are waiting. $generation_free_detail $pipeline_capture No local backup data was deleted.
-Action: Check Backblaze Caps & Alerts and API access. Hetzner retries automatically every ${GENERATION_UPLOAD_RETRY_SECS}s."
-        elif [ "$generation_backlog" -lt "$GENERATION_BACKLOG_WARN_COUNT" ] \
-          && [ "$generation_free_valid" = true ] \
-          && [ "$generation_free_bytes" -ge "$DISK_WARNING_RECOVERY_BYTES" ]
+Impact: $generation_backlog sealed generation(s) remain local. $generation_free_detail $pipeline_capture No unverified local data was deleted.
+$pipeline_action"
+        elif [ -n "$generation_refresh_failure" ]; then
+          raise_generation_spill_gate_alert "$generation_refresh_failure" \
+            "$generation_backlog" "$generation_free_bytes"
+        elif [ "$generation_space_valid" = true ] \
+          && [ "$generation_spill_active" = false ] \
+          && [ "$generation_free_bytes" -ge "$GENERATION_SPILL_RECOVERY_BYTES" ] \
+          && generation_backlog_local_incident_active
         then
           clear_alert generation_backlog \
-            "Backblaze verification is working, the sealed queue is below $GENERATION_BACKLOG_WARN_COUNT generation(s), and local capture has safe headroom again."
+            "The sealed queue, free-space, filesystem-capacity, and spill-watermark checks are healthy again with $(human_bytes "$generation_free_bytes") free above the recovery watermark. Local retention remains intact."
+        elif [ "$generation_space_valid" = true ] \
+          && [ "$generation_spill_active" = false ] \
+          && [ "$generation_free_bytes" -ge "$GENERATION_SPILL_RECOVERY_BYTES" ] \
+          && { [ "$generation_upload_succeeded" = true ] \
+            || [ "$generation_backlog" -eq 0 ]; }
+        then
+          clear_alert generation_backlog \
+            "The disk-first cache recovered to $(human_bytes "$generation_free_bytes") free, above its $(human_bytes "$GENERATION_SPILL_RECOVERY_BYTES") spill recovery watermark. Local capture can continue safely."
+        elif [ "$generation_space_valid" = true ] \
+          && [ "$generation_spill_active" = true ] \
+          && [ "$generation_backlog" -gt 0 ] \
+          && [ "$generation_upload_attempted" = true ] \
+          && [ "$upload_status" -eq 0 ] \
+          && { [ "$generation_backlog" -lt "$generation_backlog_before" ] \
+            || [ "$generation_free_bytes" -gt "$generation_free_before" ]; }
+        then
+          generation_retry_immediately=true
+        elif [ "$generation_space_valid" = true ] \
+          && [ "$generation_spill_active" = true ] \
+          && [ "$generation_backlog" -gt 0 ] \
+          && [ "$generation_upload_attempted" = true ] \
+          && [ "$upload_status" -eq 0 ]
+        then
+          pipeline_level=ERROR
+          pipeline_capture="Capture can continue only while the remaining local headroom lasts."
+          if [ "$generation_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
+            pipeline_level=CRITICAL
+            pipeline_capture="Capture is paused at its $(human_bytes "$MIN_FREE_BYTES") safety floor."
+          fi
+          rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
+          raise_alert generation_backlog "$pipeline_level" \
+            "Cause: A Backblaze spill reported success, but the sealed queue and free disk space made no observable local progress.
+Impact: $generation_backlog sealed generation(s) remain and $(human_bytes "$generation_free_bytes") is free. $pipeline_capture No unverified local data was deleted.
+Action: Inspect the exact B2 receipt, upload-chain state, recorder volume, and concurrent rotations. Automatic retries continue every ${GENERATION_UPLOAD_RETRY_SECS}s."
         fi
-        generation_previous_backlog=$generation_backlog
       else
-        generation_previous_backlog=
-        raise_alert generation_backlog ERROR \
-          "Cause: Hetzner could not inspect the sealed-generation queue safely.
-Impact: Upload cleanup is paused and local data is retained.
-Action: Inspect the recorder volume; automatic checks continue every ${GENERATION_UPLOAD_RETRY_SECS}s."
+        raise_generation_spill_gate_alert "$generation_gate_failure" \
+          "$generation_backlog" "$generation_free_bytes"
       fi
       # This older derivative incident was replaced by generation_backlog so a
       # single remote failure cannot fan out into upload, backlog, and disk
       # notifications.
       discard_alert generation_upload_failed
+      if [ "$generation_retry_immediately" = true ]; then
+        continue
+      fi
     fi
     sleep "$GENERATION_UPLOAD_RETRY_SECS"
   done
 }
 
 start_generation_upload_worker() {
+  rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
   generation_upload_worker &
   upload_worker_pid=$!
 }
@@ -2618,6 +2912,27 @@ terminate_b2_usage_worker() {
   exit 0
 }
 
+b2_usage_scan_failed_alert() {
+  if [ -e "$(alert_file generation_backlog active)" ]; then
+    # A provider/API failure already belongs to the correlated backup-pipeline
+    # incident. Do not fan the same cap or outage out into a second storage-
+    # measurement opening (and later a second recovery).
+    discard_alert b2_usage_check_failed
+    return 0
+  fi
+  raise_alert_once b2_usage_check_failed ERROR \
+    "Unable to measure complete Backblaze account storage; capture and uploads continue."
+}
+
+b2_usage_scan_recovered_alert() {
+  if [ -e "$(alert_file generation_backlog active)" ]; then
+    discard_alert b2_usage_check_failed
+    return 0
+  fi
+  clear_alert b2_usage_check_failed \
+    "Backblaze account-wide storage measurement is working again."
+}
+
 b2_usage_worker() {
   b2_usage_query_pid=
   trap terminate_b2_usage_worker INT TERM HUP
@@ -2626,16 +2941,14 @@ b2_usage_worker() {
     if ! validate_data_volume true >/dev/null 2>&1; then
       : # The dedicated volume incident is reported by the main monitor.
     elif run_b2_usage_scan; then
-      clear_alert b2_usage_check_failed \
-        "Backblaze account-wide storage measurement is working again."
+      b2_usage_scan_recovered_alert
       update_b2_usage_alerts "$B2_USAGE_BYTES"
       echo "$(timestamp) b2_usage stored_bytes=$B2_USAGE_BYTES allowance_bytes=$B2_USAGE_ALLOWANCE_BYTES" >&2
       if [ "$B2_USAGE_BYTES" -ge "$B2_USAGE_CRITICAL_BYTES" ]; then
         usage_sleep=$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS
       fi
     else
-      raise_alert_once b2_usage_check_failed ERROR \
-        "Unable to measure complete Backblaze account storage; capture and uploads continue."
+      b2_usage_scan_failed_alert
     fi
     sleep "$usage_sleep"
   done
@@ -2787,6 +3100,8 @@ for numeric_setting in \
   "BLOCKZILLA_RAW_MAX_GENERATION_BYTES:$MAX_GENERATION_BYTES" \
   "BLOCKZILLA_RAW_GENERATION_BACKLOG_WARN_COUNT:$GENERATION_BACKLOG_WARN_COUNT" \
   "BLOCKZILLA_RAW_GENERATION_UPLOAD_RETRY_SECS:$GENERATION_UPLOAD_RETRY_SECS" \
+  "BLOCKZILLA_RAW_B2_SPILL_START_PERCENT:$GENERATION_SPILL_START_PERCENT" \
+  "BLOCKZILLA_RAW_B2_SPILL_RECOVERY_PERCENT:$GENERATION_SPILL_RECOVERY_PERCENT" \
   "BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS:$REPLAY_RESUME_HEADROOM_SLOTS" \
   "BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:$B2_USAGE_ALLOWANCE_BYTES" \
   "BLOCKZILLA_B2_USAGE_WARNING_BYTES:$B2_USAGE_WARNING_BYTES" \
@@ -2841,6 +3156,19 @@ if [ "$CACHE_MODE" = b2-generations ]; then
     || [ "$GENERATION_UPLOAD_RETRY_SECS" -eq 0 ]
   then
     echo "generation backlog threshold and upload retry must be non-zero" >&2
+    exit 2
+  fi
+  if [ "$GENERATION_SPILL_START_PERCENT" -eq 0 ] \
+    || [ "$GENERATION_SPILL_START_PERCENT" -ge 100 ] \
+    || [ "$GENERATION_SPILL_RECOVERY_PERCENT" \
+      -le "$GENERATION_SPILL_START_PERCENT" ] \
+    || [ "$GENERATION_SPILL_RECOVERY_PERCENT" -gt 100 ]
+  then
+    echo "Backblaze disk-spill percentages are invalid" >&2
+    exit 2
+  fi
+  if ! generation_spill_thresholds 107374182400; then
+    echo "Backblaze disk-spill reserve arithmetic is invalid" >&2
     exit 2
   fi
   if [ "$GENERATION_RECEIPT_DIR" != /data/grpc-cache/receipts ]; then
@@ -2928,6 +3256,16 @@ available_bytes() {
     ''|*[!0-9]*) return 1 ;;
   esac
   printf '%s\n' "$((available_kib * 1024))"
+}
+
+filesystem_capacity_bytes() {
+  capacity_kib=$(df -Pk "$OUTPUT_DIR" | awk 'NR == 2 { print $2 }')
+  case "$capacity_kib" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  capacity_bytes=$((capacity_kib * 1024))
+  [ "$capacity_bytes" -gt "$capacity_kib" ] || return 1
+  printf '%s\n' "$capacity_bytes"
 }
 
 child_pid=
@@ -3114,7 +3452,9 @@ Action: Hetzner will resume at slot $REPLAY_MIN_RESUME_SLOT and retain an audit 
     set -- "$@" --require-complete-poh
   fi
   if [ "$CACHE_MODE" = b2-generations ]; then
-    set -- "$@" --max-generation-bytes "$MAX_GENERATION_BYTES"
+    set -- "$@" \
+      --max-generation-bytes "$MAX_GENERATION_BYTES" \
+      --hot-generation-root "$CACHE_ROOT"
   fi
   if [ -n "$INITIAL_FROM_SLOT" ]; then
     set -- "$@" --from-slot "$INITIAL_FROM_SLOT"

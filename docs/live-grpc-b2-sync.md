@@ -5,20 +5,24 @@ Date: 2026-07-14
 ## Decision
 
 Use Backblaze B2 as an outbound-only durable mailbox between the Hetzner
-recorder and the Blockzilla NAS. Hetzner always records first; Blockzilla pulls
-only immutable committed generations and publishes a signed durable receipt for
-the exact generation it accepted.
+recorder and the Blockzilla NAS. Hetzner always records to local disk first. In
+the current interim deployment it retains sealed generations locally and uses
+B2 only as a pressure spill; a future Blockzilla puller will accept only
+immutable committed generations and publish a signed durable receipt for the
+exact generation it accepted.
 
-Do not keep the authoritative 100-slot window only in memory. Memory may cache
-recent metadata and payloads, but every block remains protected by the existing
-per-record WAL sync before any cursor advances. Waiting for a missed ping before
-writing would lose the critical pre-failure window if the recorder itself
-crashed.
+The proposed 500 MB memory-first window is **not implemented**. Memory may later
+cache recent metadata and payloads, but today every block remains protected by
+the existing per-record WAL sync before any cursor advances. There is not yet a
+signed Blockzilla durable ACK that can authorize forgetting a memory-only slot;
+waiting for a missed ping before the first disk write would lose the critical
+pre-failure window if the recorder itself crashed.
 
 ```mermaid
 flowchart LR
     Y["Yellowstone gRPC"] --> H["Hetzner durable WAL"]
-    H --> C["immutable B2 generation + commit"]
+    H --> S["sealed local generations"]
+    S -->|"disk pressure"| C["immutable B2 generation + commit"]
     C --> P["Blockzilla pull and exact verification"]
     P --> L["NAS durable raw landing WAL"]
     L --> A["signed generation ACK"]
@@ -27,22 +31,32 @@ flowchart LR
 ```
 
 This topology needs no public listener on Hetzner or the NAS. Both sides make
-outbound HTTPS requests to B2. A later direct mTLS link may reduce latency, but
-B2 remains the catch-up path and source of truth during either host's outage.
+outbound HTTPS requests to B2. A later direct mTLS link may reduce latency. B2
+is the catch-up source for generations that have actually been committed there;
+newer local-only generations remain authoritative on Hetzner until pressure
+spills them or a future signed handoff acknowledges them.
 
 ## Current behavior
 
-The deployed recorder already fsyncs each raw gRPC block, seals a bounded local
-generation, uploads exact version-pinned objects, publishes `manifest.json` and
-`_COMMITTED`, and writes a chained local receipt. Routine publication verifies
-each single-PUT object using the signed request SHA-256, Backblaze's returned
-version ID and content ETag, then prefix-scoped Native `b2_list_file_versions`
-metadata for the exact account, bucket, key, file ID, length, MD5, SHA-1, and
-SHA-256. It deliberately issues no S3 HEAD or GET for a new generation, so a
-Backblaze download/Class-B cap cannot block publication. Full payload hashing
-still happens when Blockzilla or an operator restores the exact versions. The
-recorder then removes only the sealed local cache copy. The B2 generation is
-retained indefinitely.
+The deployed recorder fsyncs each raw gRPC block and seals bounded local
+generations without closing the Yellowstone subscription at a routine byte
+rotation. The cap-crossing block is retained across the in-process cutover and
+written into the successor before another stream update is polled. With healthy
+disk headroom, sealed generations remain local and B2 is not in the publication
+path. When free space falls below the larger of 25%
+of filesystem capacity or `MIN_FREE + MAX_GENERATION`, it uploads the oldest
+sealed generation first, publishes `manifest.json` and `_COMMITTED`, and writes
+a chained local receipt. It drains without an artificial retry delay until free
+space reaches the larger of 35% or `MIN_FREE + 2*MAX_GENERATION`.
+
+Pressure publication verifies each single-PUT object using the signed request
+SHA-256, Backblaze's returned version ID and content ETag, then prefix-scoped
+Native `b2_list_file_versions` metadata for the exact account, bucket, key,
+file ID, length, MD5, SHA-1, and SHA-256. It deliberately issues no S3 HEAD or
+GET for a new generation. Full payload hashing still happens when Blockzilla or
+an operator restores the exact versions. Only after the exact remote commit and
+local receipt verify does the recorder remove that sealed local copy. B2 has no
+automatic lifecycle deletion.
 
 Blockzilla does not currently pull or acknowledge those generations. Therefore
 today's local removal means only “B2 accepted an exact version-pinned copy whose
@@ -153,25 +167,30 @@ that binds that evidence to the immutable manifest.
 
 ## Local and remote retention
 
-Backblaze remains indefinite under the current policy. Neither a Blockzilla ACK
-nor a cache cleanup deletes B2 objects or hidden versions.
+Backblaze objects remain indefinite under the current policy. Neither a
+Blockzilla ACK nor cache cleanup deletes B2 objects or hidden versions. A 10 GB
+account cap therefore limits how much pressure spill can be accepted; it is not
+indefinite capacity.
 
 The exact 3 GiB Hetzner cache cannot require a Blockzilla ACK for every local
 eviction while also promising continuous capture: at the current rate it fills
-in roughly 25–30 minutes during a primary outage. Use this two-tier policy:
+in roughly 25–30 minutes. The deployed interim policy is:
 
-- normally retain the newest 100 slots (or two complete generations, whichever
-  is larger) locally until Blockzilla ACKs them;
-- under cache pressure, evict only whole generations that have a fully verified
-  B2 commit and durable local B2 receipt, even if Blockzilla is behind;
-- Blockzilla later catches up from the indefinite B2 copy;
+- normally retain all sealed generations locally while free space remains at or
+  above the spill-start watermark;
+- under cache pressure, upload and evict only the oldest whole generation after
+  a fully verified B2 commit and durable local B2 receipt;
+- stop spilling once the recovery watermark is restored;
+- Blockzilla can later catch up from each committed B2 copy once its puller is
+  implemented;
 - if B2 itself is unavailable, never evict the unverified local generation and
   pause capture at the hard disk floor.
 
-This preserves the user's desired fast handoff without allowing a Blockzilla
-outage to destroy the independent backup. If strict “local delete only after
-Blockzilla ACK” is selected later, the documented consequence is that capture
-must pause when the 3 GiB cache fills.
+The later 500 MB memory window, sync-event promotion to disk, and signed
+Blockzilla ACK deletion watermark still require an authenticated protocol and
+crash-safety design. They are not active configuration knobs in this recorder.
+If strict “local delete only after Blockzilla ACK” is selected later, the
+documented consequence is that capture must pause when all durable tiers fill.
 
 ## Monitoring and Telegram incidents
 
@@ -198,9 +217,10 @@ escalates, and one recovery. It does not send periodic reminders. Incident
 state lives on the recorder volume, so a container rebuild cannot resend every
 open problem. The 15-minute setting is a reopen debounce: a quick
 fail/recover/fail flap stays silent unless it remains open beyond the debounce.
-Upload failure, sealed backlog, and the resulting cache pressure are reported
-as one `Backup pipeline blocked` incident with human-readable capacity,
-current capture state, impact, and action. A second strictly validated
+Only a pressure-triggered upload failure and the resulting hard-floor pressure
+are reported as one `Backup pipeline blocked` incident with human-readable
+capacity, current capture state, impact, and cap-specific action. A healthy
+sealed local backlog is intentional and silent. A second strictly validated
 resume-gap event is coalesced into its already-delivered incident instead of
 generating another message or blocking capture. A malformed event or a failed
 send remains pending and is never silently marked delivered.
@@ -227,7 +247,7 @@ generation is committed to B2.
 
 | Failure | Required result |
 | --- | --- |
-| Blockzilla offline | Hetzner continues to B2, alerts on signed ACK lag, evicts only B2-verified local generations under pressure, and Blockzilla catches up later. |
+| Blockzilla offline | Today the independent Hetzner recorder continues locally and spills only under disk pressure. Signed ACK lag detection and Blockzilla catch-up are not implemented yet. |
 | B2 offline | No unverified local deletion; the 3 GiB recorder pauses safely at its floor and alerts. |
 | Lost ACK response | Blockzilla republishes the same idempotent signed receipt; no cursor jumps. |
 | Crash before NAS fsync | No ACK is published. Staging is recovered or removed on restart. |
@@ -238,8 +258,9 @@ generation is committed to B2.
 
 ## Implementation sequence
 
-1. Keep the deployed B2-only local deletion gate and add account-wide capacity
-   alerts. This preserves today's live backup.
+1. Keep the deployed disk-first pressure spill, exact B2 verification, and
+   account-wide capacity alerts. This preserves today's live backup without
+   treating a healthy sealed backlog as an incident.
 2. Add generation sequence/coverage metadata plus 100-record/60-second rotation.
 3. Add exact-version B2 download, staging, verification, and durable raw landing
    on the NAS. Do not emit canonical-archive ACKs yet.
@@ -249,3 +270,7 @@ generation is committed to B2.
    expose the separate archive-committed watermark in Hivezilla.
 6. Run disconnect, lost-ACK, expired-key, fork, corrupted-object, disk-full,
    `kill -9`, and power-loss tests before any ACK affects retention policy.
+
+Only after those ACK and crash tests should a bounded 500 MB memory cache be
+considered as a latency optimization; it must never be presented as durable
+backup before a signed Blockzilla receipt or local WAL fsync exists.

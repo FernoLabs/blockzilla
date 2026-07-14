@@ -27,6 +27,7 @@ RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 SINGLE_PUT_ETAG_RE = re.compile(r"^[0-9a-f]{32}$")
+API_ERROR_CODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 GENERATION_MANIFEST_SCHEMA_VERSION = 1
 GENERATION_COMMIT_SCHEMA_VERSION = 1
@@ -35,13 +36,24 @@ READ_CHUNK_SIZE = 1024 * 1024
 MAX_CREDENTIALS_FILE_BYTES = 64 * 1024
 MAX_VERSION_ID_BYTES = 1024
 MAX_B2_BUCKET_ID_BYTES = 1024
+MAX_API_ERROR_BODY_BYTES = 16 * 1024
 MAX_EXACT_KEY_VERSION_PAGES = 8
 B2_EXACT_KEY_PAGE_SIZE = 100
+MAX_GENERATION_VERSION_PAGES = 64
+B2_GENERATION_VERSION_PAGE_SIZE = 1000
 B2_AUTHORIZE_ACCOUNT_URL = "https://api.backblazeb2.com/b2api/v4/b2_authorize_account"
 B2_NATIVE_API_VERSION = "v4"
 B2_NATIVE_CONNECT_TIMEOUT_SECS = 10
 B2_NATIVE_READ_TIMEOUT_SECS = 60
 B2_ACCOUNT_USAGE_SCHEMA_VERSION = 1
+BACKBLAZE_CAPACITY_EXIT_STATUSES = {
+    "download_cap_exceeded": 20,
+    "transaction_cap_exceeded": 21,
+    # Backblaze documents storage_cap_exceeded for v4 upload-URL requests and
+    # cap_exceeded for upload requests. Both mean the configured storage cap.
+    "storage_cap_exceeded": 22,
+    "cap_exceeded": 22,
+}
 ALLOWED_CREDENTIAL_KEYS = {
     "AWS_ACCESS_KEY_ID",
     "AWS_DEFAULT_REGION",
@@ -272,6 +284,97 @@ def signing_key(secret: str, date: str, region: str) -> bytes:
     return hmac.new(key, b"aws4_request", hashlib.sha256).digest()
 
 
+def _bounded_api_error_body(response) -> bytes:
+    """Read at most one small API error document, never an arbitrary response."""
+    content_length = response.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > MAX_API_ERROR_BODY_BYTES:
+        return b""
+    try:
+        cached = getattr(response, "_content", False)
+        if cached is False:
+            body = response.raw.read(
+                MAX_API_ERROR_BODY_BYTES + 1, decode_content=True
+            )
+        else:
+            body = cached
+    except Exception:
+        return b""
+    if not isinstance(body, bytes) or len(body) > MAX_API_ERROR_BODY_BYTES:
+        return b""
+    return body
+
+
+def _validated_api_error_code(value) -> str:
+    if not isinstance(value, str) or not API_ERROR_CODE_RE.fullmatch(value):
+        return ""
+    return value
+
+
+def api_error_code(response) -> str:
+    """Extract only a bounded JSON/XML error code; ignore messages and bodies."""
+    body = _bounded_api_error_body(response)
+    if not body:
+        return ""
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        code = _validated_api_error_code(payload.get("code"))
+        if code:
+            return code
+        code = _validated_api_error_code(payload.get("Code"))
+        if code:
+            return code
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return ""
+    codes = []
+    for item in list(root):
+        local_name = item.tag.rsplit("}", 1)[-1] if isinstance(item.tag, str) else ""
+        if local_name in {"Code", "code"}:
+            code = _validated_api_error_code(item.text)
+            if code:
+                codes.append(code)
+    if len(codes) != 1:
+        return ""
+    return codes[0]
+
+
+class APIResponseError(RuntimeError):
+    def __init__(self, operation: str, status_code: int, code: str = ""):
+        self.status_code = status_code
+        self.code = _validated_api_error_code(code)
+        # Error bodies and human-readable messages are deliberately never copied
+        # into logs. Capacity codes are fixed public identifiers and are useful
+        # for incident diagnosis; unknown response-controlled strings are hidden.
+        detail = (
+            f" ({self.code})"
+            if self.code in BACKBLAZE_CAPACITY_EXIT_STATUSES
+            else ""
+        )
+        super().__init__(f"{operation} failed HTTP {status_code}{detail}")
+
+
+class S3APIError(APIResponseError):
+    pass
+
+
+def backblaze_capacity_exit_status(error: BaseException) -> int:
+    """Return a stable cap status only for exact typed API error codes."""
+    seen = set()
+    current = error
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, APIResponseError):
+            status = BACKBLAZE_CAPACITY_EXIT_STATUSES.get(current.code)
+            if status is not None:
+                return status
+        current = current.__cause__ or current.__context__
+    return 1
+
+
 class S3Client:
     def __init__(
         self,
@@ -345,15 +448,27 @@ class S3Client:
                     response.status_code < 300
                     or response.status_code in allowed_statuses
                 ):
+                    if not stream:
+                        # Preserve the historical non-streaming success behavior.
+                        # Errors stay unread until the bounded parser below.
+                        try:
+                            _ = response.content
+                        except requests.RequestException:
+                            response.close()
+                            raise
                     return response
-                if response.status_code not in RETRYABLE_STATUS_CODES:
-                    response.close()
-                    raise RuntimeError(
-                        f"{method} {key} failed HTTP {response.status_code}"
-                    )
-                last_error = RuntimeError(
-                    f"{method} {key} failed HTTP {response.status_code}"
+                response_error = S3APIError(
+                    f"{method} {key}",
+                    response.status_code,
+                    api_error_code(response),
                 )
+                if (
+                    response_error.code in BACKBLAZE_CAPACITY_EXIT_STATUSES
+                    or response.status_code not in RETRYABLE_STATUS_CODES
+                ):
+                    response.close()
+                    raise response_error
+                last_error = response_error
                 response.close()
             except requests.RequestException as error:
                 last_error = error
@@ -372,6 +487,8 @@ class S3Client:
                 flush=True,
             )
             time.sleep(delay)
+        if isinstance(last_error, S3APIError):
+            raise last_error
         raise RuntimeError(f"{method} {key} failed after retries: {last_error}")
 
     def _request_once(
@@ -444,16 +561,14 @@ class S3Client:
             headers=request_headers,
             data=body,
             timeout=300,
-            stream=stream,
+            # Successful callers can still consume response.content/response.text,
+            # while failures remain bounded by _bounded_api_error_body.
+            stream=True,
         )
 
 
-class B2NativeAPIError(RuntimeError):
-    def __init__(self, operation: str, status_code: int, code: str = ""):
-        detail = f" ({code})" if code else ""
-        super().__init__(f"{operation} failed HTTP {status_code}{detail}")
-        self.status_code = status_code
-        self.code = code
+class B2NativeAPIError(APIResponseError):
+    pass
 
 
 class B2NativeClient:
@@ -505,13 +620,7 @@ class B2NativeClient:
 
     @staticmethod
     def _error_code(response) -> str:
-        try:
-            payload = response.json()
-        except (ValueError, requests.RequestException):
-            return ""
-        if not isinstance(payload, dict) or not isinstance(payload.get("code"), str):
-            return ""
-        return payload["code"]
+        return api_error_code(response)
 
     @staticmethod
     def _retry_delay(response, attempt: int) -> int:
@@ -548,6 +657,7 @@ class B2NativeClient:
                         B2_NATIVE_CONNECT_TIMEOUT_SECS,
                         B2_NATIVE_READ_TIMEOUT_SECS,
                     ),
+                    stream=True,
                 )
                 if response.status_code < 300:
                     try:
@@ -564,7 +674,10 @@ class B2NativeClient:
                         )
                     return payload
                 code = self._error_code(response)
-                if response.status_code not in RETRYABLE_STATUS_CODES:
+                if (
+                    code in BACKBLAZE_CAPACITY_EXIT_STATUSES
+                    or response.status_code not in RETRYABLE_STATUS_CODES
+                ):
                     status_code = response.status_code
                     response.close()
                     raise B2NativeAPIError(operation, status_code, code)
@@ -590,6 +703,8 @@ class B2NativeClient:
                 flush=True,
             )
             time.sleep(delay)
+        if isinstance(last_error, B2NativeAPIError):
+            raise last_error
         raise RuntimeError(f"{operation} failed after retries: {last_error}")
 
     def authorize(self):
@@ -1055,6 +1170,152 @@ class B2NativeObjectVerifier:
             expected_sha1,
             expected_etag,
         )
+
+    def list_generation_versions(
+        self, remote_prefix: str, allowed_keys: set[str]
+    ) -> dict[str, list[dict]]:
+        """Return one authoritative, prefix-wide snapshot of generation versions."""
+        generation_prefix = normalize_remote_prefix(remote_prefix) + "/"
+        if not isinstance(allowed_keys, set) or not allowed_keys:
+            raise ValueError("generation snapshot requires a non-empty key set")
+        for key in allowed_keys:
+            validate_object_key(key)
+            if not key.startswith(generation_prefix):
+                raise ValueError("generation snapshot key is outside the remote prefix")
+
+        self._ensure_access(generation_prefix)
+        versions_by_key = {key: [] for key in allowed_keys}
+        next_file_name = generation_prefix
+        next_file_id = None
+        expected_first_marker = None
+        previous_name = None
+        seen_file_ids = set()
+        seen_markers = set()
+
+        for _page_number in range(1, MAX_GENERATION_VERSION_PAGES + 1):
+            params = {
+                "bucketId": self.bucket_id,
+                "prefix": generation_prefix,
+                "startFileName": next_file_name,
+                "maxFileCount": B2_GENERATION_VERSION_PAGE_SIZE,
+            }
+            if next_file_id is not None:
+                params["startFileId"] = next_file_id
+            payload = self.client.api_request(
+                "b2_list_file_versions", params=params
+            )
+            versions = _response_list(payload, "files", "b2_list_file_versions")
+            if expected_first_marker is not None:
+                if not versions:
+                    raise RuntimeError(
+                        "b2_list_file_versions pagination omitted its next entry"
+                    )
+                first_marker = (
+                    versions[0].get("fileName"),
+                    versions[0].get("fileId"),
+                )
+                if first_marker != expected_first_marker:
+                    raise RuntimeError(
+                        "b2_list_file_versions pagination did not resume at its marker"
+                    )
+
+            for version in versions:
+                file_name = version.get("fileName")
+                if not isinstance(file_name, str) or not file_name:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned an invalid fileName"
+                    )
+                if not file_name.startswith(generation_prefix):
+                    raise RuntimeError(
+                        "b2_list_file_versions returned a key outside the generation prefix"
+                    )
+                if previous_name is not None and file_name < previous_name:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned out-of-order file names"
+                    )
+                previous_name = file_name
+                if file_name not in allowed_keys:
+                    raise RuntimeError(
+                        f"immutable B2 generation contains unexpected key {file_name}"
+                    )
+                file_id = self._validate_version_identity(version, file_name)
+                if file_id in seen_file_ids:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned a duplicate fileId"
+                    )
+                seen_file_ids.add(file_id)
+                action = version.get("action")
+                if action != "upload":
+                    raise RuntimeError(
+                        f"immutable B2 key {file_name} contains unsupported action {action!r}"
+                    )
+                versions_by_key[file_name].append(version)
+
+            following_name = payload.get("nextFileName")
+            following_id = payload.get("nextFileId")
+            if following_name is None and following_id is None:
+                return versions_by_key
+            if (
+                not isinstance(following_name, str)
+                or not following_name.startswith(generation_prefix)
+                or following_name not in allowed_keys
+                or not isinstance(following_id, str)
+            ):
+                raise RuntimeError(
+                    "b2_list_file_versions returned malformed generation pagination markers"
+                )
+            try:
+                following_id = validate_version_id(
+                    following_id, "B2 generation pagination file ID"
+                )
+            except ValueError as error:
+                raise RuntimeError(str(error)) from error
+            marker = (following_name, following_id)
+            if marker in seen_markers or following_id in seen_file_ids:
+                raise RuntimeError(
+                    "b2_list_file_versions pagination did not advance"
+                )
+            seen_markers.add(marker)
+            next_file_name, next_file_id = marker
+            expected_first_marker = marker
+
+        raise RuntimeError(
+            "b2_list_file_versions exceeded the generation-prefix page limit"
+        )
+
+    def snapshot_exact_version(
+        self,
+        versions_by_key: dict[str, list[dict]],
+        key: str,
+        expected_size: int,
+        expected_sha256: str,
+        expected_sha1: str,
+        expected_etag: str,
+        pinned_version_id: str | None = None,
+    ) -> str | None:
+        """Validate every snapshotted version and optionally require a pinned PUT."""
+        if key not in versions_by_key:
+            raise ValueError("object key is outside the generation snapshot")
+        validated_ids = self._validate_versions(
+            versions_by_key[key],
+            key,
+            expected_size,
+            expected_sha256,
+            expected_sha1,
+            expected_etag,
+        )
+        if pinned_version_id is not None:
+            pinned_version_id = validate_version_id(
+                pinned_version_id, "pinned B2 file ID"
+            )
+            if not any(
+                hmac.compare_digest(file_id, pinned_version_id)
+                for file_id in validated_ids
+            ):
+                raise RuntimeError(
+                    f"b2_list_file_versions {key} returned a different pinned version"
+                )
+        return validated_ids[0] if validated_ids else None
 
 
 def _nonnegative_integer(value, label: str) -> int:
@@ -2074,6 +2335,250 @@ def write_receipt_atomic(path: Path, receipt: dict, generation_dir: Path):
             pass
 
 
+def _file_stat_identity(metadata) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _bytes_metadata_spec(data: bytes) -> dict:
+    return {
+        "etag": hashlib.md5(data, usedforsecurity=False).hexdigest(),
+        "sha1": hashlib.sha1(data, usedforsecurity=False).hexdigest(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+    }
+
+
+def _generation_file_metadata_specs(
+    local_files: list[dict], file_by_relative: dict[str, Path]
+) -> tuple[dict[str, dict], dict[str, tuple[int, int, int, int]]]:
+    specs = {}
+    stat_identities = {}
+    for record in local_files:
+        path = file_by_relative[record["path"]]
+        before = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"upload source must be a regular file: {path}")
+        size, sha256, sha1, etag = file_digests(path)
+        after = path.stat(follow_symlinks=False)
+        if _file_stat_identity(before) != _file_stat_identity(after):
+            raise RuntimeError(f"local file changed while hashing: {path}")
+        if size != record["size"] or not hmac.compare_digest(
+            sha256, record["sha256"]
+        ):
+            raise RuntimeError(f"generation changed while hashing: {path}")
+        specs[record["object_key"]] = {
+            "etag": etag,
+            "sha1": sha1,
+            "sha256": sha256,
+            "size": size,
+        }
+        stat_identities[record["path"]] = _file_stat_identity(after)
+    return specs, stat_identities
+
+
+def _snapshot_object_version(
+    metadata_verifier: B2NativeObjectVerifier,
+    snapshot: dict[str, list[dict]],
+    key: str,
+    spec: dict,
+    pinned_version_id: str | None = None,
+) -> str | None:
+    return metadata_verifier.snapshot_exact_version(
+        snapshot,
+        key,
+        spec["size"],
+        spec["sha256"],
+        spec["sha1"],
+        spec["etag"],
+        pinned_version_id,
+    )
+
+
+def _validate_pinned_snapshot_objects(
+    metadata_verifier: B2NativeObjectVerifier,
+    snapshot: dict[str, list[dict]],
+    specs: dict[str, dict],
+    pinned_version_ids: dict[str, str],
+):
+    if set(specs) != set(pinned_version_ids):
+        raise ValueError("snapshot object-version map does not match expected objects")
+    for key, spec in specs.items():
+        _snapshot_object_version(
+            metadata_verifier,
+            snapshot,
+            key,
+            spec,
+            pinned_version_ids[key],
+        )
+
+
+def _upload_generation_with_native_snapshot_verification(
+    client: S3Client,
+    generation_id: str,
+    remote_prefix: str,
+    local_files: list[dict],
+    total_bytes: int,
+    file_by_relative: dict[str, Path],
+    predecessor_manifest_sha256: str | None,
+    metadata_verifier: B2NativeObjectVerifier,
+) -> dict:
+    """Publish a generation with O(prefix pages), not O(objects), Native reads."""
+    file_specs, stat_identities = _generation_file_metadata_specs(
+        local_files, file_by_relative
+    )
+    manifest_key = f"{remote_prefix}/manifest.json"
+    commit_key = f"{remote_prefix}/_COMMITTED"
+    allowed_keys = set(file_specs) | {manifest_key, commit_key}
+
+    snapshot = metadata_verifier.list_generation_versions(
+        remote_prefix, allowed_keys
+    )
+    file_version_ids = {}
+    missing_records = []
+    for record in local_files:
+        key = record["object_key"]
+        version_id = _snapshot_object_version(
+            metadata_verifier, snapshot, key, file_specs[key]
+        )
+        if version_id is None:
+            missing_records.append(record)
+        else:
+            file_version_ids[record["path"]] = version_id
+
+    if missing_records and (snapshot[manifest_key] or snapshot[commit_key]):
+        raise RuntimeError(
+            "immutable B2 generation has a manifest or commit before all files"
+        )
+
+    for record in missing_records:
+        path = file_by_relative[record["path"]]
+        key = record["object_key"]
+        version_id, returned_etag = single_put(
+            client,
+            path,
+            key,
+            "application/octet-stream",
+            file_specs[key]["sha256"],
+        )
+        if not hmac.compare_digest(returned_etag, file_specs[key]["etag"]):
+            raise RuntimeError(f"PUT {key} ETag mismatch")
+        after = path.stat(follow_symlinks=False)
+        if _file_stat_identity(after) != stat_identities[record["path"]]:
+            raise RuntimeError(f"local file changed during upload: {path}")
+        file_version_ids[record["path"]] = version_id
+
+    file_pins = {
+        record["object_key"]: file_version_ids[record["path"]]
+        for record in local_files
+    }
+    if missing_records:
+        snapshot = metadata_verifier.list_generation_versions(
+            remote_prefix, allowed_keys
+        )
+        _validate_pinned_snapshot_objects(
+            metadata_verifier, snapshot, file_specs, file_pins
+        )
+
+    manifest = build_generation_manifest(
+        generation_id,
+        local_files,
+        file_version_ids,
+        total_bytes,
+        predecessor_manifest_sha256,
+    )
+    manifest_bytes = canonical_json_bytes(manifest)
+    manifest_spec = _bytes_metadata_spec(manifest_bytes)
+    manifest_version_id = _snapshot_object_version(
+        metadata_verifier, snapshot, manifest_key, manifest_spec
+    )
+    if manifest_version_id is None:
+        if snapshot[commit_key]:
+            raise RuntimeError(
+                "immutable B2 generation has a commit without its manifest"
+            )
+        manifest_version_id, returned_etag = single_put_bytes(
+            client,
+            manifest_bytes,
+            manifest_key,
+            "application/json",
+            manifest_spec["sha256"],
+        )
+        if not hmac.compare_digest(returned_etag, manifest_spec["etag"]):
+            raise RuntimeError(f"PUT {manifest_key} ETag mismatch")
+        snapshot = metadata_verifier.list_generation_versions(
+            remote_prefix, allowed_keys
+        )
+        _validate_pinned_snapshot_objects(
+            metadata_verifier, snapshot, file_specs, file_pins
+        )
+        _snapshot_object_version(
+            metadata_verifier,
+            snapshot,
+            manifest_key,
+            manifest_spec,
+            manifest_version_id,
+        )
+
+    commit_bytes = generation_commit_payload(
+        generation_id,
+        manifest_key,
+        manifest_spec["sha256"],
+        manifest_version_id,
+        len(local_files),
+        total_bytes,
+        predecessor_manifest_sha256,
+    )
+    commit_spec = _bytes_metadata_spec(commit_bytes)
+    commit_version_id = _snapshot_object_version(
+        metadata_verifier, snapshot, commit_key, commit_spec
+    )
+    if commit_version_id is None:
+        commit_version_id, returned_etag = single_put_bytes(
+            client,
+            commit_bytes,
+            commit_key,
+            "application/json",
+            commit_spec["sha256"],
+        )
+        if not hmac.compare_digest(returned_etag, commit_spec["etag"]):
+            raise RuntimeError(f"PUT {commit_key} ETag mismatch")
+        snapshot = metadata_verifier.list_generation_versions(
+            remote_prefix, allowed_keys
+        )
+        _validate_pinned_snapshot_objects(
+            metadata_verifier, snapshot, file_specs, file_pins
+        )
+        _snapshot_object_version(
+            metadata_verifier,
+            snapshot,
+            manifest_key,
+            manifest_spec,
+            manifest_version_id,
+        )
+        _snapshot_object_version(
+            metadata_verifier,
+            snapshot,
+            commit_key,
+            commit_spec,
+            commit_version_id,
+        )
+
+    return {
+        "commit_key": commit_key,
+        "commit_sha256": commit_spec["sha256"],
+        "commit_version_id": commit_version_id,
+        "file_version_ids": file_version_ids,
+        "manifest_key": manifest_key,
+        "manifest_sha256": manifest_spec["sha256"],
+        "manifest_version_id": manifest_version_id,
+    }
+
+
 def upload_generation(
     client: S3Client,
     generation_dir: Path,
@@ -2109,19 +2614,31 @@ def upload_generation(
                 + ", ".join(oversized_files)
             )
         file_by_relative = dict(walk_generation(generation_dir))
-        file_version_ids = {}
-        for record in local_files:
-            uploaded = upload_verified_file(
+        if metadata_verifier is not None:
+            publication = _upload_generation_with_native_snapshot_verification(
                 client,
-                file_by_relative[record["path"]],
-                record["object_key"],
-                multipart_threshold=IMMUTABLE_GENERATION_SINGLE_PUT_LIMIT + 1,
-                expected_size=record["size"],
-                expected_sha256=record["sha256"],
-                full_readback=False,
-                metadata_verifier=metadata_verifier,
+                generation_id,
+                remote_prefix,
+                local_files,
+                total_bytes,
+                file_by_relative,
+                predecessor_manifest_sha256,
+                metadata_verifier,
             )
-            file_version_ids[record["path"]] = uploaded["version_id"]
+            file_version_ids = publication["file_version_ids"]
+        else:
+            file_version_ids = {}
+            for record in local_files:
+                uploaded = upload_verified_file(
+                    client,
+                    file_by_relative[record["path"]],
+                    record["object_key"],
+                    multipart_threshold=IMMUTABLE_GENERATION_SINGLE_PUT_LIMIT + 1,
+                    expected_size=record["size"],
+                    expected_sha256=record["sha256"],
+                    full_readback=False,
+                )
+                file_version_ids[record["path"]] = uploaded["version_id"]
 
         final_files, final_total_bytes = build_generation_file_records(
             generation_dir,
@@ -2130,44 +2647,50 @@ def upload_generation(
         if final_files != local_files or final_total_bytes != total_bytes:
             raise RuntimeError("generation changed while it was being uploaded")
 
-        manifest = build_generation_manifest(
-            generation_id,
-            local_files,
-            file_version_ids,
-            total_bytes,
-            predecessor_manifest_sha256,
-        )
-        manifest_bytes = canonical_json_bytes(manifest)
-        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-        manifest_key = f"{remote_prefix}/manifest.json"
-        uploaded_manifest = upload_verified_bytes(
-            client,
-            manifest_bytes,
-            manifest_key,
-            full_readback=False,
-            metadata_verifier=metadata_verifier,
-        )
-        manifest_version_id = uploaded_manifest["version_id"]
+        if metadata_verifier is not None:
+            manifest_key = publication["manifest_key"]
+            manifest_sha256 = publication["manifest_sha256"]
+            manifest_version_id = publication["manifest_version_id"]
+            commit_key = publication["commit_key"]
+            commit_sha256 = publication["commit_sha256"]
+            commit_version_id = publication["commit_version_id"]
+        else:
+            manifest = build_generation_manifest(
+                generation_id,
+                local_files,
+                file_version_ids,
+                total_bytes,
+                predecessor_manifest_sha256,
+            )
+            manifest_bytes = canonical_json_bytes(manifest)
+            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            manifest_key = f"{remote_prefix}/manifest.json"
+            uploaded_manifest = upload_verified_bytes(
+                client,
+                manifest_bytes,
+                manifest_key,
+                full_readback=False,
+            )
+            manifest_version_id = uploaded_manifest["version_id"]
 
-        commit_key = f"{remote_prefix}/_COMMITTED"
-        commit_bytes = generation_commit_payload(
-            generation_id,
-            manifest_key,
-            manifest_sha256,
-            manifest_version_id,
-            len(local_files),
-            total_bytes,
-            predecessor_manifest_sha256,
-        )
-        commit_sha256 = hashlib.sha256(commit_bytes).hexdigest()
-        uploaded_commit = upload_verified_bytes(
-            client,
-            commit_bytes,
-            commit_key,
-            full_readback=False,
-            metadata_verifier=metadata_verifier,
-        )
-        commit_version_id = uploaded_commit["version_id"]
+            commit_key = f"{remote_prefix}/_COMMITTED"
+            commit_bytes = generation_commit_payload(
+                generation_id,
+                manifest_key,
+                manifest_sha256,
+                manifest_version_id,
+                len(local_files),
+                total_bytes,
+                predecessor_manifest_sha256,
+            )
+            commit_sha256 = hashlib.sha256(commit_bytes).hexdigest()
+            uploaded_commit = upload_verified_bytes(
+                client,
+                commit_bytes,
+                commit_key,
+                full_readback=False,
+            )
+            commit_version_id = uploaded_commit["version_id"]
 
         receipt = {
             "commit_key": commit_key,
@@ -2371,7 +2894,7 @@ def main(argv=None):
         return run(parser.parse_args(argv))
     except (OSError, ValueError, RuntimeError, requests.RequestException) as error:
         print(f"upload failed: {error}", file=sys.stderr)
-        return 1
+        return backblaze_capacity_exit_status(error)
 
 
 if __name__ == "__main__":

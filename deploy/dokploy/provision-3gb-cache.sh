@@ -2,7 +2,8 @@
 set -eu
 
 # Provision a hard-capped, preallocated ext4 cache on the Dokploy host. This is
-# deliberately a cache: remotely committed generations are the durable archive.
+# deliberately a bounded disk-first tier: sealed generations remain local until
+# pressure requires an exactly verified Backblaze spill.
 
 umask 077
 export LC_ALL=C

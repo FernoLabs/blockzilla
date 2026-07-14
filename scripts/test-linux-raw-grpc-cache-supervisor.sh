@@ -216,6 +216,27 @@ unset BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT
 recover_rotation_transaction
 assert_rotated
 
+# Crash recovery must not expose a hidden predecessor until its full audit
+# proves the generation ID recorded in the durable transaction marker.
+reset_rotation_fixture
+BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT=after_successor_active
+if rotate_active_generation; then
+  echo "rotation audit-gate fixture did not stop after successor publication" >&2
+  exit 1
+fi
+hidden_old=$CACHE_ROOT/.sealed-slot-00000000000000000123
+printf '%s\n' 124 > "$hidden_old/slot"
+unset BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT
+if recover_rotation_transaction; then
+  echo "rotation recovery published a predecessor with the wrong audited tail" >&2
+  exit 1
+fi
+test -d "$hidden_old"
+test -z "$(find "$SEALED_GENERATION_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
+printf '%s\n' 123 > "$hidden_old/slot"
+recover_rotation_transaction
+assert_rotated
+
 # Crash after sealed publication: marker recovery completes without data loss.
 reset_rotation_fixture
 BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT=after_sealed_visible
@@ -267,6 +288,11 @@ while [ "$#" -gt 0 ]; do
 done
 case "${MOCK_UPLOAD_RESULT:-failure}" in
   failure) exit 1 ;;
+  status-*)
+    status=${MOCK_UPLOAD_RESULT#status-}
+    case "$status" in ''|*[!0-9]*) exit 64 ;; esac
+    exit "$status"
+    ;;
   invalid)
     printf '%s\n' '{}' > "$receipt"
     exit 0
@@ -304,6 +330,28 @@ if upload_one_generation; then
 fi
 test -d "$upload_dir"
 
+# Typed Backblaze capacity failures survive the shell boundary exactly. An
+# unknown uploader failure remains the generic status and never inherits a cap
+# explanation merely because it may also have originated from HTTP 403.
+for expected_upload_status in 20 21 22; do
+  MOCK_UPLOAD_RESULT=status-$expected_upload_status
+  export MOCK_UPLOAD_RESULT
+  set +e
+  upload_one_generation
+  observed_upload_status=$?
+  set -e
+  test "$observed_upload_status" -eq "$expected_upload_status"
+  test -d "$upload_dir"
+done
+MOCK_UPLOAD_RESULT=status-37
+export MOCK_UPLOAD_RESULT
+set +e
+upload_one_generation
+observed_upload_status=$?
+set -e
+test "$observed_upload_status" -eq 1
+test -d "$upload_dir"
+
 MOCK_UPLOAD_RESULT=valid
 export MOCK_UPLOAD_RESULT
 upload_one_generation
@@ -329,6 +377,18 @@ test "$UPLOAD_CHAIN_ID" = "$second_upload_id"
 test "$UPLOAD_CHAIN_HASH" = "$(printf 'a%.0s' $(seq 1 64))"
 test "$("$GENERATION_PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["predecessor_manifest_sha256"])' \
   "$GENERATION_RECEIPT_DIR/$second_upload_id.json")" = "$(printf 'a%.0s' $(seq 1 64))"
+
+# Pressure draining is strictly FIFO even if directories were created in the
+# opposite order. Fixed-width generation IDs make lexical and slot order equal.
+fifo_newer_id=slot-00000000000000000300
+fifo_older_id=slot-00000000000000000250
+mkdir "$SEALED_GENERATION_DIR/$fifo_newer_id"
+printf '%s\n' newer > "$SEALED_GENERATION_DIR/$fifo_newer_id/payload"
+mkdir "$SEALED_GENERATION_DIR/$fifo_older_id"
+printf '%s\n' older > "$SEALED_GENERATION_DIR/$fifo_older_id/payload"
+upload_one_generation
+test ! -e "$SEALED_GENERATION_DIR/$fifo_older_id"
+test -d "$SEALED_GENERATION_DIR/$fifo_newer_id"
 
 # Legacy replay evidence remains readable during the schema-2 rollout.
 reset_rotation_fixture
