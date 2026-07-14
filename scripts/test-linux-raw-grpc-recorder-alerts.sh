@@ -125,7 +125,7 @@ rm -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 # A successful send whose durable delivery marker cannot be written stays pending.
 make_event 112 116 116
 event_marker_failure=$event_id
-printf '0\n' > "$(alert_file resume_coverage last)"
+discard_alert resume_coverage
 saved_delivery_file=$RESUME_COVERAGE_DELIVERED_FILE
 RESUME_COVERAGE_DELIVERED_FILE=$fixture_root/blocked-delivery-marker
 mkdir "$RESUME_COVERAGE_DELIVERED_FILE.$$"
@@ -140,26 +140,26 @@ rm -f "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 # Failed delivery leaves the exact durable event pending for a later pass.
 make_event 116 120 120
 event_c=$event_id
-printf '0\n' > "$(alert_file resume_coverage last)"
+discard_alert resume_coverage
 TELEGRAM_CURL_BIN=/usr/bin/false
 monitor_resume_coverage_alert
 test -s "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 test "$(cat "$RESUME_COVERAGE_DELIVERED_FILE")" = "$event_a"
 
 # A one-shot incident that failed to send is retried on a later monitor pass.
-rm -f "$(alert_file recorder_restarting active)" "$(alert_file recorder_restarting last)"
+discard_alert recorder_restarting
 raise_alert recorder_restarting ERROR "fixture restart"
 test -s "$(alert_file recorder_restarting active)"
-test ! -e "$(alert_file recorder_restarting last)"
+test ! -e "$(alert_file recorder_restarting delivered)"
 TELEGRAM_CURL_BIN=/usr/bin/true
 retry_pending_alerts
 test -s "$(alert_file recorder_restarting active)"
-test -s "$(alert_file recorder_restarting last)"
+test -s "$(alert_file recorder_restarting delivered)"
 
 # The incident remains active until recovery, which is sent after the incident.
 clear_alert recorder_restarting "fixture recovered"
 test ! -e "$(alert_file recorder_restarting active)"
-test ! -e "$(alert_file recorder_restarting last)"
+test ! -e "$(alert_file recorder_restarting delivered)"
 
 # A failed replay-floor persistence attempt must remain one open incident while
 # retries run without an authoritative marker. It recovers only after a trusted
@@ -168,11 +168,11 @@ raise_alert replay_recovery_failed CRITICAL "fixture replay failure"
 REPLAY_MIN_RESUME_SLOT=
 clear_replay_recovery_alert_if_floor_was_authoritative false
 test -e "$(alert_file replay_recovery_failed active)"
-test -e "$(alert_file replay_recovery_failed last)"
+test -e "$(alert_file replay_recovery_failed delivered)"
 REPLAY_MIN_RESUME_SLOT=200
 clear_replay_recovery_alert_if_floor_was_authoritative true
 test ! -e "$(alert_file replay_recovery_failed active)"
-test ! -e "$(alert_file replay_recovery_failed last)"
+test ! -e "$(alert_file replay_recovery_failed delivered)"
 test "$(alert_title replay_recovery_failed)" = "Provider-gap recovery paused"
 
 # Stopping the monitor must interrupt its interval immediately. Otherwise an
@@ -197,16 +197,15 @@ DISK_WARN_FREE_BYTES=200
 DISK_CRITICAL_RECOVERY_BYTES=110
 DISK_WARNING_RECOVERY_BYTES=210
 update_disk_alerts 50
-test -e "$(alert_file disk_critical active)"
+test -e "$(alert_file disk_space active)"
 update_disk_alerts 105
-test -e "$(alert_file disk_critical active)"
+test -e "$(alert_file disk_space active)"
 update_disk_alerts 150
-test ! -e "$(alert_file disk_critical active)"
-test -e "$(alert_file disk_warning active)"
+test -e "$(alert_file disk_space active)"
 update_disk_alerts 205
-test -e "$(alert_file disk_warning active)"
+test -e "$(alert_file disk_space active)"
 update_disk_alerts 220
-test ! -e "$(alert_file disk_warning active)"
+test ! -e "$(alert_file disk_space active)"
 
 # Backblaze usage counts the whole account and escalates independently near the
 # decimal 10 GB allowance. Recovery requires the configured hysteresis margin.
@@ -214,20 +213,30 @@ B2_USAGE_ALLOWANCE_BYTES=250
 B2_USAGE_WARNING_BYTES=150
 B2_USAGE_CRITICAL_BYTES=200
 B2_USAGE_WARNING_RECOVERY_BYTES=130
-B2_USAGE_CRITICAL_RECOVERY_BYTES=180
+b2_usage_send_count=0
+telegram_send() {
+  b2_usage_send_count=$((b2_usage_send_count + 1))
+  return 0
+}
 update_b2_usage_alerts 160
-test -e "$(alert_file b2_usage_warning active)"
-test ! -e "$(alert_file b2_usage_critical active)"
+test "$b2_usage_send_count" -eq 1
+test -e "$(alert_file b2_usage active)"
+load_alert_delivery_state "$(alert_file b2_usage delivered)"
+test "$ALERT_DELIVERED_LEVEL" = WARNING
 update_b2_usage_alerts 210
-test -e "$(alert_file b2_usage_warning active)"
-test -e "$(alert_file b2_usage_critical active)"
+test "$b2_usage_send_count" -eq 2
+test -e "$(alert_file b2_usage active)"
+load_alert_delivery_state "$(alert_file b2_usage delivered)"
+test "$ALERT_DELIVERED_LEVEL" = CRITICAL
 update_b2_usage_alerts 185
-test -e "$(alert_file b2_usage_critical active)"
+test "$b2_usage_send_count" -eq 2
+test -e "$(alert_file b2_usage active)"
 update_b2_usage_alerts 175
-test ! -e "$(alert_file b2_usage_critical active)"
-test -e "$(alert_file b2_usage_warning active)"
+test "$b2_usage_send_count" -eq 2
+test -e "$(alert_file b2_usage active)"
 update_b2_usage_alerts 125
-test ! -e "$(alert_file b2_usage_warning active)"
+test "$b2_usage_send_count" -eq 3
+test ! -e "$(alert_file b2_usage active)"
 
 usage_report=$fixture_root/b2-account-usage.json
 printf '%s\n' '{"schema_version":1,"scope_complete":true,"total_stored_bytes":123}' > "$usage_report"
@@ -237,6 +246,193 @@ if b2_usage_report_bytes "$usage_report" >/dev/null 2>&1; then
   echo "incomplete Backblaze usage report was accepted" >&2
   exit 1
 fi
+
+# A steady incident sends exactly one opening even after the old reminder
+# interval. A severity escalation and the eventual recovery each send once.
+telegram_send_count=0
+telegram_send() {
+  telegram_send_count=$((telegram_send_count + 1))
+  return 0
+}
+test "$(human_bytes 402268160)" = "383.6 MiB"
+test "$(human_decimal_bytes 1206880746)" = "1.2 GB"
+discard_alert generation_backlog
+raise_alert generation_backlog WARNING \
+  "Cause: fixture backlog\nImpact: fixture impact\nAction: fixture action"
+test "$telegram_send_count" -eq 1
+printf '0 WARNING\n' > "$(alert_file generation_backlog delivered)"
+raise_alert generation_backlog WARNING \
+  "Cause: same fixture backlog\nImpact: still active\nAction: fixture action"
+test "$telegram_send_count" -eq 1
+raise_alert generation_backlog ERROR \
+  "Cause: fixture upload failure\nImpact: still active\nAction: fixture action"
+test "$telegram_send_count" -eq 2
+raise_alert generation_backlog ERROR \
+  "Cause: same fixture upload failure\nImpact: still active\nAction: fixture action"
+test "$telegram_send_count" -eq 2
+clear_alert generation_backlog "Fixture pipeline recovered."
+test "$telegram_send_count" -eq 3
+
+# A quick fail/recover/fail flap is silent, but a CRITICAL escalation bypasses
+# the reopen debounce immediately.
+raise_alert generation_backlog WARNING \
+  "Cause: fixture flap\nImpact: fixture impact\nAction: fixture action"
+test "$telegram_send_count" -eq 3
+test -e "$(alert_file generation_backlog silent)"
+raise_alert generation_backlog CRITICAL \
+  "Cause: fixture critical flap\nImpact: capture paused\nAction: fixture action"
+test "$telegram_send_count" -eq 4
+test ! -e "$(alert_file generation_backlog silent)"
+clear_alert generation_backlog "Fixture critical flap recovered."
+test "$telegram_send_count" -eq 5
+
+# A non-escalating quick flap is silent in both directions. If the reopened
+# incident remains active past the debounce, it is promoted to one new opening.
+raise_alert generation_backlog ERROR \
+  "Cause: fixture quiet flap\nImpact: fixture impact\nAction: fixture action"
+test "$telegram_send_count" -eq 5
+test -e "$(alert_file generation_backlog silent)"
+clear_alert generation_backlog "Fixture flap recovered."
+test "$telegram_send_count" -eq 5
+raise_alert generation_backlog ERROR \
+  "Cause: persistent fixture flap\nImpact: fixture impact\nAction: fixture action"
+test "$telegram_send_count" -eq 5
+printf '0\n' > "$(alert_file generation_backlog closed)"
+raise_alert generation_backlog ERROR \
+  "Cause: persistent fixture flap\nImpact: fixture impact\nAction: fixture action"
+test "$telegram_send_count" -eq 6
+
+# Corrupt or partially persisted delivery state cannot suppress escalation.
+printf '%s\n' 'corrupt-state' > "$(alert_file generation_backlog delivered)"
+raise_alert generation_backlog CRITICAL \
+  "Cause: fixture state repair\nImpact: capture paused\nAction: fixture action"
+test "$telegram_send_count" -eq 7
+discard_alert generation_backlog
+
+# The uploader and disk monitor can report the same pipeline incident at the
+# same instant. Per-key serialization must produce one opening and, later, one
+# escalation without corrupting the atomic delivery marker. The deliberately
+# slow sender makes the duplicate-send race deterministic without the lock.
+concurrent_send_log=$fixture_root/concurrent-telegram-sends
+concurrent_start_file=$fixture_root/concurrent-telegram-start
+: > "$concurrent_send_log"
+telegram_send() {
+  sleep 1
+  printf '%s\n' sent >> "$concurrent_send_log"
+  return 0
+}
+
+# A worker crash cannot strand the incident lock. The kernel releases its
+# descriptor and the next monitor pass can deliver normally.
+concurrent_crash_ready=$fixture_root/concurrent-lock-crash-ready
+(
+  acquire_alert_lock generation_backlog
+  : > "$concurrent_crash_ready"
+  while :; do :; done
+) &
+concurrent_crash_pid=$!
+while [ ! -e "$concurrent_crash_ready" ]; do
+  sleep 0.01
+done
+kill -KILL "$concurrent_crash_pid"
+wait "$concurrent_crash_pid" 2>/dev/null || true
+raise_alert generation_backlog WARNING \
+  "Cause: fixture after lock-owner crash\nImpact: fixture impact\nAction: fixture action"
+test "$(wc -l < "$concurrent_send_log" | tr -d ' ')" -eq 1
+test -f "$ALERT_STATE_DIR/.generation_backlog.lock"
+test ! -L "$ALERT_STATE_DIR/.generation_backlog.lock"
+discard_alert generation_backlog
+: > "$concurrent_send_log"
+
+for concurrent_worker in 1 2; do
+  (
+    while [ ! -e "$concurrent_start_file" ]; do
+      sleep 0.01
+    done
+    raise_alert generation_backlog ERROR \
+      "Cause: concurrent fixture failure\nImpact: fixture impact\nAction: fixture action"
+  ) &
+  eval "concurrent_pid_$concurrent_worker=$!"
+done
+: > "$concurrent_start_file"
+wait "$concurrent_pid_1"
+wait "$concurrent_pid_2"
+test "$(wc -l < "$concurrent_send_log" | tr -d ' ')" -eq 1
+load_alert_delivery_state "$(alert_file generation_backlog delivered)"
+test "$ALERT_DELIVERED_LEVEL" = ERROR
+test -f "$ALERT_STATE_DIR/.generation_backlog.lock"
+
+rm -f "$concurrent_start_file"
+for concurrent_worker in 1 2; do
+  (
+    while [ ! -e "$concurrent_start_file" ]; do
+      sleep 0.01
+    done
+    raise_alert generation_backlog CRITICAL \
+      "Cause: concurrent fixture escalation\nImpact: capture paused\nAction: fixture action"
+  ) &
+  eval "concurrent_pid_$concurrent_worker=$!"
+done
+: > "$concurrent_start_file"
+wait "$concurrent_pid_1"
+wait "$concurrent_pid_2"
+test "$(wc -l < "$concurrent_send_log" | tr -d ' ')" -eq 2
+load_alert_delivery_state "$(alert_file generation_backlog delivered)"
+test "$ALERT_DELIVERED_LEVEL" = CRITICAL
+test -f "$ALERT_STATE_DIR/.generation_backlog.lock"
+discard_alert generation_backlog
+
+telegram_send() {
+  telegram_send_count=$((telegram_send_count + 1))
+  return 0
+}
+
+# In bounded-cache mode the upload worker owns one correlated pipeline
+# incident. A known sealed backlog suppresses derivative disk alerts.
+saved_cache_mode=$CACHE_MODE
+saved_sealed_generation_dir=$SEALED_GENERATION_DIR
+saved_generation_backlog_warn_count=$GENERATION_BACKLOG_WARN_COUNT
+CACHE_MODE=b2-generations
+SEALED_GENERATION_DIR=$fixture_root/correlation-sealed
+GENERATION_BACKLOG_WARN_COUNT=2
+mkdir -p \
+  "$SEALED_GENERATION_DIR/slot-00000000000000000001" \
+  "$SEALED_GENERATION_DIR/slot-00000000000000000002"
+discard_alert disk_space
+correlation_send_count=$telegram_send_count
+update_disk_alerts 50
+test "$telegram_send_count" -eq $((correlation_send_count + 1))
+test ! -e "$(alert_file disk_space active)"
+test -e "$(alert_file generation_backlog active)"
+grep -q ' CRITICAL$' "$(alert_file generation_backlog delivered)"
+
+# A recovered uploader cannot close the correlated incident until both the
+# backlog and the warning-level headroom (including hysteresis) are healthy.
+discard_alert generation_backlog
+raise_alert generation_backlog ERROR \
+  "Cause: fixture upload block\nImpact: fixture impact\nAction: fixture action"
+test -e "$(alert_file generation_backlog active)"
+(
+  validate_data_volume() { return 0; }
+  upload_one_generation() { return 0; }
+  sealed_generation_count() { printf '%s\n' 1; }
+  available_bytes() { printf '%s\n' 205; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+test -e "$(alert_file generation_backlog active)"
+(
+  validate_data_volume() { return 0; }
+  upload_one_generation() { return 0; }
+  sealed_generation_count() { printf '%s\n' 1; }
+  available_bytes() { printf '%s\n' 220; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+test ! -e "$(alert_file generation_backlog active)"
+CACHE_MODE=$saved_cache_mode
+SEALED_GENERATION_DIR=$saved_sealed_generation_dir
+GENERATION_BACKLOG_WARN_COUNT=$saved_generation_backlog_warn_count
 
 # Disabling Telegram must not disable the runtime fail-closed volume guard.
 TELEGRAM_ENABLED=false

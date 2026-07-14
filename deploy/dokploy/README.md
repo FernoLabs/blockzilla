@@ -222,19 +222,21 @@ seeded successor is already active.
 
 ## Telegram alerts
 
-The notifier is outbound-only and uses the Telegram Bot API over HTTPS. The
-default 900-second cooldown suppresses repeated copies of one incident while
-allowing distinct failures through. Failed deliveries remain pending for retry.
+The notifier is outbound-only and uses the Telegram Bot API over HTTPS. It sends
+one opening per incident, one severity escalation, and one recovery; steady
+incidents do not generate reminders. Incident state is durable across container
+rebuilds. The default 900-second setting debounces a quick reopen after recovery,
+while a failure that stays open beyond that window is announced. Failed
+deliveries remain pending for retry.
 
 | Alert | Meaning | Response |
 | --- | --- | --- |
 | Recorder restart / gRPC stale | The stream ended, the process failed, or no durable block arrived for 180 seconds. | Check endpoint reachability and credentials, then audit overlap after recovery. |
 | Resume coverage warning | Yellowstone did not return the inclusively requested durable slot. | Compare against another recorder and repair the uncovered range. |
 | Cache/volume invalid | The exact cache mount, marker, or rotation transaction is missing or inconsistent. Capture is stopped. | Restore the mount and inspect the transaction; never manufacture a marker on the root filesystem. |
-| Backblaze upload failed | Upload, remote exact-version metadata/ETag verification, receipt validation, or chain publication failed. Local data is retained. | Check Backblaze credentials, caps, reachability, and logs. Do not manually delete the sealed generation. |
-| Backblaze usage warning / critical | Complete account storage, including hidden versions and unfinished parts, reached 8.0 GB / 9.5 GB. Measurement failures are a separate alert. Upload and indefinite retention continue. | Expect billing after the account exceeds its free allowance, or deliberately change retention later. |
-| Generation backlog | Sealed generations reached the configured backlog threshold. | Restore remote throughput before the 3 GiB cache reaches its floor. |
-| Disk warning / critical | Cache free space is below 768 MiB / 384 MiB. At the hard floor capture pauses while uploads continue. | Fix the uploader. Only remotely verified generations may be removed. |
+| Backup pipeline blocked | Backblaze upload or immutable-version verification failed, sealed generations are backing up, or that backlog reached the local safety floor. These derivative symptoms are one incident, not three. | Check Backblaze credentials, Caps & Alerts, reachability, and logs. Do not manually delete a sealed generation. |
+| Backblaze free-storage allowance | Complete account storage, including hidden versions and unfinished parts, reached 8.0 GB and escalated at 9.5 GB. Measurement failures are a separate alert. | If indefinite retention is intended, enable paid storage or raise the Backblaze storage cap before 10 GB; otherwise choose a retention plan. |
+| Disk warning / critical | Cache free space is below 768 MiB / 384 MiB for a cause other than the already-reported upload backlog. At the hard floor capture pauses. | Restore safe capacity. Only remotely verified generations may be removed. |
 | Primary-sync stale | Active only when a heartbeat path is configured. | Inspect the future authenticated primary/replica sync process. |
 
 Because the notifier runs inside this container, it cannot report total host

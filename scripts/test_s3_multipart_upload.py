@@ -28,6 +28,8 @@ class FakeS3State:
         self.corrupt_get_keys = set()
         self.corrupt_etag_keys = set()
         self.inject_after_put = {}
+        self.head_status = None
+        self.override_put_version_ids = {}
         self.lock = threading.Lock()
 
     def add_version(self, key, data, sha256):
@@ -99,6 +101,9 @@ class FakeS3Handler(BaseHTTPRequestHandler):
         if key is None:
             return
         self.record("HEAD", key, query)
+        if self.state.head_status is not None:
+            self.send_empty(self.state.head_status)
+            return
         requested_version = query.get("versionId", [None])[0]
         with self.state.lock:
             stored = self.state.object_version(key, requested_version)
@@ -186,7 +191,9 @@ class FakeS3Handler(BaseHTTPRequestHandler):
                 "ETag": '"00000000000000000000000000000000"'
                 if corrupt_etag
                 else f'"{stored["etag"]}"',
-                "x-amz-version-id": stored["version_id"],
+                "x-amz-version-id": self.state.override_put_version_ids.get(
+                    key, stored["version_id"]
+                ),
             },
         )
 
@@ -245,6 +252,95 @@ class FakeS3Handler(BaseHTTPRequestHandler):
             with self.state.lock:
                 self.state.uploads.pop(upload_ids[0], None)
         self.send_empty(204)
+
+
+class FakeNativeVersionClient:
+    def __init__(self, s3_state):
+        self.s3_state = s3_state
+        self.account_id = "fake-account"
+        self.allowed = {
+            "bucketId": "fake-bucket-id",
+            "bucketName": "test-bucket",
+            "capabilities": ["listFiles"],
+            "namePrefix": None,
+        }
+        self.calls = []
+        self.action_overrides = {}
+        self.account_id_overrides = {}
+        self.bucket_id_overrides = {}
+        self.content_sha1_overrides = {}
+        self.sha256_overrides = {}
+
+    def authorize(self):
+        return {}
+
+    def require_file_version_list_access(self, bucket_id, key):
+        if bucket_id != "fake-bucket-id":
+            raise RuntimeError("unexpected fake bucket")
+        prefix = self.allowed.get("namePrefix")
+        if prefix is not None and not key.startswith(prefix):
+            raise RuntimeError("key outside fake prefix")
+
+    def _entry(self, key, stored):
+        version_id = stored["version_id"]
+        data = stored["data"]
+        return {
+            "accountId": self.account_id_overrides.get(
+                version_id, self.account_id
+            ),
+            "action": self.action_overrides.get(version_id, "upload"),
+            "bucketId": self.bucket_id_overrides.get(
+                version_id, "fake-bucket-id"
+            ),
+            "contentLength": len(data),
+            "contentMd5": stored["etag"],
+            "contentSha1": self.content_sha1_overrides.get(
+                version_id,
+                hashlib.sha1(data, usedforsecurity=False).hexdigest(),
+            ),
+            "fileId": version_id,
+            "fileInfo": {
+                "sha256": self.sha256_overrides.get(
+                    version_id, stored["sha256"]
+                )
+            },
+            "fileName": key,
+        }
+
+    def api_request(self, operation, *, method="GET", params=None, json_body=None):
+        if operation != "b2_list_file_versions" or method != "GET":
+            raise RuntimeError(f"unexpected fake native operation {operation}")
+        self.calls.append(dict(params or {}))
+        start_name = params["startFileName"]
+        start_id = params.get("startFileId")
+        prefix = params.get("prefix", "")
+        maximum = params["maxFileCount"]
+        with self.s3_state.lock:
+            ordered = [
+                self._entry(key, stored)
+                for key in sorted(self.s3_state.objects)
+                if key >= start_name and key.startswith(prefix)
+                for stored in reversed(self.s3_state.objects[key])
+            ]
+        if start_id is not None:
+            exact_index = next(
+                (
+                    index
+                    for index, entry in enumerate(ordered)
+                    if entry["fileName"] == start_name
+                    and entry["fileId"] == start_id
+                ),
+                None,
+            )
+            if exact_index is not None:
+                ordered = ordered[exact_index:]
+        page = ordered[:maximum]
+        following = ordered[maximum] if len(ordered) > maximum else None
+        return {
+            "files": page,
+            "nextFileId": following["fileId"] if following else None,
+            "nextFileName": following["fileName"] if following else None,
+        }
 
 
 class FakeB2State:
@@ -400,6 +496,12 @@ class S3UploaderTests(unittest.TestCase):
             )
         )
         return credentials
+
+    def native_verifier(self):
+        native_client = FakeNativeVersionClient(self.state)
+        return native_client, uploader.B2NativeObjectVerifier(
+            native_client, "fake-bucket-id", "test-bucket"
+        )
 
     def test_credentials_file_is_literal_and_never_executes_shell(self):
         marker = self.root / "must-not-exist"
@@ -586,6 +688,154 @@ class S3UploaderTests(unittest.TestCase):
                 if method == "PUT"
             )
         )
+
+    def test_native_generation_verification_works_while_s3_head_is_capped(self):
+        generation, _writer_lock = self.create_generation()
+        self.state.head_status = 403
+        native_client, verifier = self.native_verifier()
+        native_client.allowed["namePrefix"] = "grpc-raw/v1/generation-native"
+        receipt = uploader.upload_generation(
+            self.client,
+            generation,
+            "generation-native",
+            "grpc-raw/v1/generation-native",
+            self.root / "native-receipt.json",
+            metadata_verifier=verifier,
+        )
+        self.assertTrue(receipt["commit_version_id"])
+        self.assertFalse(
+            any(
+                method in {"HEAD", "GET"}
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+        self.assertTrue(native_client.calls)
+        self.assertTrue(
+            all(call["prefix"] == call["startFileName"] for call in native_client.calls)
+        )
+        exact_seeks = [call for call in native_client.calls if "startFileId" in call]
+        self.assertTrue(exact_seeks)
+        self.assertTrue(all(call["maxFileCount"] == 1 for call in exact_seeks))
+
+    def test_native_retry_pins_existing_versions_without_new_puts(self):
+        generation, _writer_lock = self.create_generation()
+        self.state.head_status = 403
+        _native_client, verifier = self.native_verifier()
+        receipt_path = self.root / "native-retry-receipt.json"
+        first = uploader.upload_generation(
+            self.client,
+            generation,
+            "generation-native-retry",
+            "grpc-raw/v1/generation-native-retry",
+            receipt_path,
+            metadata_verifier=verifier,
+        )
+        puts_before = sum(
+            method == "PUT" for method, _key, _headers, _query in self.state.requests
+        )
+        second = uploader.upload_generation(
+            self.client,
+            generation,
+            "generation-native-retry",
+            "grpc-raw/v1/generation-native-retry",
+            receipt_path,
+            metadata_verifier=verifier,
+        )
+        puts_after = sum(
+            method == "PUT" for method, _key, _headers, _query in self.state.requests
+        )
+        self.assertEqual(puts_after, puts_before)
+        self.assertEqual(second["manifest_version_id"], first["manifest_version_id"])
+        self.assertEqual(second["commit_version_id"], first["commit_version_id"])
+
+    def test_native_verification_rejects_conflict_before_overwrite(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "grpc-raw/v1/generation-native-conflict"
+        files, _total_bytes = uploader.build_generation_file_records(generation, prefix)
+        first_key = files[0]["object_key"]
+        conflict = b"conflicting immutable payload"
+        self.state.add_version(
+            first_key, conflict, hashlib.sha256(conflict).hexdigest()
+        )
+        _native_client, verifier = self.native_verifier()
+        with self.assertRaisesRegex(RuntimeError, "conflicting"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-conflict",
+                prefix,
+                self.root / "native-conflict-receipt.json",
+                metadata_verifier=verifier,
+            )
+        self.assertFalse(
+            any(method == "PUT" for method, _key, _headers, _query in self.state.requests)
+        )
+
+    def test_native_verification_rejects_wrong_put_version_and_raced_conflict(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "grpc-raw/v1/generation-native-wrong-version"
+        files, _total_bytes = uploader.build_generation_file_records(generation, prefix)
+        first = files[0]
+        self.state.override_put_version_ids[first["object_key"]] = "missing-version"
+        _native_client, verifier = self.native_verifier()
+        with self.assertRaisesRegex(RuntimeError, "different pinned version"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-wrong-version",
+                prefix,
+                self.root / "native-wrong-version-receipt.json",
+                metadata_verifier=verifier,
+            )
+
+        self.state.objects.clear()
+        self.state.override_put_version_ids.clear()
+        raced_data = b"raced conflicting payload"
+        self.state.inject_after_put[first["object_key"]] = {
+            "data": raced_data,
+            "sha256": hashlib.sha256(raced_data).hexdigest(),
+        }
+        with self.assertRaisesRegex(RuntimeError, "conflicting"):
+            uploader.upload_generation(
+                self.client,
+                generation,
+                "generation-native-wrong-version",
+                prefix,
+                self.root / "native-race-receipt.json",
+                metadata_verifier=verifier,
+            )
+
+    def test_native_verification_rejects_identity_action_and_sha1_tampering(self):
+        data = b"native metadata payload"
+        key = "grpc-raw/v1/native-tamper"
+        stored = self.state.add_version(key, data, hashlib.sha256(data).hexdigest())
+        native_client, verifier = self.native_verifier()
+        expected_sha1 = hashlib.sha1(data, usedforsecurity=False).hexdigest()
+        native_client.account_id_overrides[stored["version_id"]] = "other-account"
+        with self.assertRaisesRegex(RuntimeError, "different accountId"):
+            verifier.latest_exact_version(
+                key, len(data), stored["sha256"], expected_sha1, stored["etag"]
+            )
+        native_client.account_id_overrides.clear()
+        native_client.bucket_id_overrides[stored["version_id"]] = "other-bucket"
+        with self.assertRaisesRegex(RuntimeError, "different bucketId"):
+            verifier.latest_exact_version(
+                key, len(data), stored["sha256"], expected_sha1, stored["etag"]
+            )
+        native_client.bucket_id_overrides.clear()
+        native_client.action_overrides[stored["version_id"]] = "hide"
+        with self.assertRaisesRegex(RuntimeError, "unsupported action"):
+            verifier.latest_exact_version(
+                key, len(data), stored["sha256"], expected_sha1, stored["etag"]
+            )
+        native_client.action_overrides.clear()
+        native_client.content_sha1_overrides[stored["version_id"]] = (
+            "unverified:" + "0" * 40
+        )
+        with self.assertRaisesRegex(RuntimeError, "conflicting SHA-1"):
+            verifier.latest_exact_version(
+                key, len(data), stored["sha256"], expected_sha1, stored["etag"]
+            )
 
     def test_generation_upload_rejects_a_wrong_single_put_etag(self):
         generation, _writer_lock = self.create_generation()

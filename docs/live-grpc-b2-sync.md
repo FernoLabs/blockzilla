@@ -36,12 +36,13 @@ The deployed recorder already fsyncs each raw gRPC block, seals a bounded local
 generation, uploads exact version-pinned objects, publishes `manifest.json` and
 `_COMMITTED`, and writes a chained local receipt. Routine publication verifies
 each single-PUT object using the signed request SHA-256, Backblaze's returned
-version ID and content ETag, then an exact-version `HEAD` of the length,
-SHA-256 metadata, version ID, and ETag. It deliberately does not download each
-new generation again: that previously consumed roughly twice the ingest volume
-from B2's separate daily download cap. Full payload hashing still happens when
-Blockzilla or an operator restores the exact versions. The recorder then removes
-only the sealed local cache copy. The B2 generation is retained indefinitely.
+version ID and content ETag, then prefix-scoped Native `b2_list_file_versions`
+metadata for the exact account, bucket, key, file ID, length, MD5, SHA-1, and
+SHA-256. It deliberately issues no S3 HEAD or GET for a new generation, so a
+Backblaze download/Class-B cap cannot block publication. Full payload hashing
+still happens when Blockzilla or an operator restores the exact versions. The
+recorder then removes only the sealed local cache copy. The B2 generation is
+retained indefinitely.
 
 Blockzilla does not currently pull or acknowledge those generations. Therefore
 today's local removal means only “B2 accepted an exact version-pinned copy whose
@@ -192,12 +193,17 @@ generation, an unchanged ACK is normal rather than stale.
 The existing Yellowstone `grpc_stale` incident remains separate: it reports
 that the Hetzner recorder itself stopped durably receiving blocks.
 
-Telegram keeps one active incident per problem and a 15-minute delivery
-cooldown. Messages lead with the problem, impact, and operator action. A second
-strictly validated resume-gap event inside that cooldown is coalesced into the
-already-delivered incident instead of generating another message or blocking
-capture. A malformed event or a failed send remains pending and is never
-silently marked delivered.
+Telegram sends one opening per active incident, one message if its severity
+escalates, and one recovery. It does not send periodic reminders. Incident
+state lives on the recorder volume, so a container rebuild cannot resend every
+open problem. The 15-minute setting is a reopen debounce: a quick
+fail/recover/fail flap stays silent unless it remains open beyond the debounce.
+Upload failure, sealed backlog, and the resulting cache pressure are reported
+as one `Backup pipeline blocked` incident with human-readable capacity,
+current capture state, impact, and action. A second strictly validated
+resume-gap event is coalesced into its already-delivered incident instead of
+generating another message or blocking capture. A malformed event or a failed
+send remains pending and is never silently marked delivered.
 
 If the provider has already discarded the requested replay slot, recovery is
 explicit rather than silent. The recorder accepts only a typed gRPC

@@ -25,6 +25,7 @@ IMMUTABLE_GENERATION_SINGLE_PUT_LIMIT = 512 * 1024 * 1024
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 SINGLE_PUT_ETAG_RE = re.compile(r"^[0-9a-f]{32}$")
 GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 GENERATION_MANIFEST_SCHEMA_VERSION = 1
@@ -33,6 +34,9 @@ GENERATION_RECEIPT_SCHEMA_VERSION = 1
 READ_CHUNK_SIZE = 1024 * 1024
 MAX_CREDENTIALS_FILE_BYTES = 64 * 1024
 MAX_VERSION_ID_BYTES = 1024
+MAX_B2_BUCKET_ID_BYTES = 1024
+MAX_EXACT_KEY_VERSION_PAGES = 8
+B2_EXACT_KEY_PAGE_SIZE = 100
 B2_AUTHORIZE_ACCOUNT_URL = "https://api.backblazeb2.com/b2api/v4/b2_authorize_account"
 B2_NATIVE_API_VERSION = "v4"
 B2_NATIVE_CONNECT_TIMEOUT_SECS = 10
@@ -231,6 +235,36 @@ def backblaze_native_settings(credentials_file: Path | None):
     return application_key_id, application_key
 
 
+def optional_backblaze_native_object_settings(credentials_file: Path | None):
+    values = (
+        parse_credentials_file(credentials_file) if credentials_file else os.environ
+    )
+    bucket_id = values.get("B2_BUCKET_ID")
+    if not bucket_id:
+        return None
+    application_key_id = values.get("B2_APPLICATION_KEY_ID") or values.get(
+        "AWS_ACCESS_KEY_ID"
+    )
+    application_key = values.get("B2_APPLICATION_KEY") or values.get(
+        "AWS_SECRET_ACCESS_KEY"
+    )
+    missing = [
+        name
+        for name, value in [
+            ("B2_APPLICATION_KEY_ID", application_key_id),
+            ("B2_APPLICATION_KEY", application_key),
+        ]
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"missing required Backblaze settings: {', '.join(missing)}")
+    if len(bucket_id.encode("utf-8")) > MAX_B2_BUCKET_ID_BYTES or any(
+        ord(char) < 0x20 or ord(char) == 0x7F for char in bucket_id
+    ):
+        raise ValueError("B2_BUCKET_ID is invalid")
+    return application_key_id, application_key, bucket_id
+
+
 def signing_key(secret: str, date: str, region: str) -> bytes:
     key = hmac.new(("AWS4" + secret).encode(), date.encode(), hashlib.sha256).digest()
     key = hmac.new(key, region.encode(), hashlib.sha256).digest()
@@ -423,7 +457,7 @@ class B2NativeAPIError(RuntimeError):
 
 
 class B2NativeClient:
-    """Minimal read-only Backblaze Native API client for account usage scans."""
+    """Minimal read-only Backblaze Native API client."""
 
     def __init__(
         self,
@@ -607,6 +641,40 @@ class B2NativeClient:
                 "Backblaze key is bucket- or prefix-restricted; account usage is incomplete"
             )
 
+    def require_file_version_list_access(self, bucket_id: str, key: str):
+        if self.allowed is None:
+            self.authorize()
+        capabilities = self.allowed.get("capabilities")
+        if not isinstance(capabilities, list) or not all(
+            isinstance(capability, str) for capability in capabilities
+        ):
+            raise RuntimeError("Backblaze capability list is malformed")
+        if "listFiles" not in capabilities:
+            raise RuntimeError("Backblaze key lacks the listFiles capability")
+
+        allowed_bucket_id = self.allowed.get("bucketId")
+        if allowed_bucket_id is not None and (
+            not isinstance(allowed_bucket_id, str)
+            or not hmac.compare_digest(allowed_bucket_id, bucket_id)
+        ):
+            raise RuntimeError("Backblaze key does not allow the configured bucket")
+        allowed_bucket_ids = self.allowed.get("bucketIds")
+        if allowed_bucket_ids is not None:
+            if not isinstance(allowed_bucket_ids, list) or not all(
+                isinstance(item, str) for item in allowed_bucket_ids
+            ):
+                raise RuntimeError("Backblaze bucket restriction is malformed")
+            if not any(
+                hmac.compare_digest(item, bucket_id) for item in allowed_bucket_ids
+            ):
+                raise RuntimeError("Backblaze key does not allow the configured bucket")
+
+        name_prefix = self.allowed.get("namePrefix")
+        if name_prefix is not None and (
+            not isinstance(name_prefix, str) or not key.startswith(name_prefix)
+        ):
+            raise RuntimeError("Backblaze key does not allow the requested object key")
+
     def api_request(self, operation: str, *, method="GET", params=None, json_body=None):
         if self.authorization_token is None or self.api_url is None:
             self.authorize()
@@ -627,6 +695,366 @@ class B2NativeClient:
                 self.authorize()
                 url = f"{self.api_url}/b2api/{B2_NATIVE_API_VERSION}/{operation}"
         raise RuntimeError(f"{operation} authorization retry failed")
+
+
+class B2NativeObjectVerifier:
+    """Verify immutable S3 PUTs through Class-C Native version listings."""
+
+    def __init__(
+        self, client: B2NativeClient, bucket_id: str, bucket_name: str
+    ):
+        if not isinstance(bucket_id, str) or not bucket_id:
+            raise ValueError("B2 bucket ID must be non-empty")
+        if len(bucket_id.encode("utf-8")) > MAX_B2_BUCKET_ID_BYTES or any(
+            ord(char) < 0x20 or ord(char) == 0x7F for char in bucket_id
+        ):
+            raise ValueError("B2 bucket ID is invalid")
+        if not isinstance(bucket_name, str) or not bucket_name:
+            raise ValueError("B2 bucket name must be non-empty")
+        self.client = client
+        self.bucket_id = bucket_id
+        self.bucket_name = bucket_name
+        self._bucket_identity_verified = False
+
+    def _ensure_bucket_identity(self):
+        if self._bucket_identity_verified:
+            return
+        if self.client.allowed is None:
+            self.client.authorize()
+        if not isinstance(self.client.account_id, str) or not self.client.account_id:
+            raise RuntimeError("b2_authorize_account omitted accountId")
+        allowed_bucket_id = self.client.allowed.get("bucketId")
+        allowed_bucket_name = self.client.allowed.get("bucketName")
+        if allowed_bucket_id is not None:
+            if not isinstance(allowed_bucket_id, str) or not hmac.compare_digest(
+                allowed_bucket_id, self.bucket_id
+            ):
+                raise RuntimeError("Backblaze key does not allow the configured bucket")
+            if allowed_bucket_name is not None:
+                if not isinstance(allowed_bucket_name, str) or not hmac.compare_digest(
+                    allowed_bucket_name, self.bucket_name
+                ):
+                    raise RuntimeError(
+                        "Backblaze bucket ID does not match the configured bucket name"
+                    )
+                self._bucket_identity_verified = True
+                return
+
+        capabilities = self.client.allowed.get("capabilities")
+        if not isinstance(capabilities, list) or "listBuckets" not in capabilities:
+            raise RuntimeError(
+                "Backblaze key cannot prove the configured bucket ID/name mapping"
+            )
+        payload = self.client.api_request(
+            "b2_list_buckets",
+            method="POST",
+            json_body={
+                "accountId": self.client.account_id,
+                "bucketId": self.bucket_id,
+                "bucketTypes": ["all"],
+            },
+        )
+        buckets = _response_list(payload, "buckets", "b2_list_buckets")
+        if len(buckets) != 1:
+            raise RuntimeError(
+                "b2_list_buckets did not return exactly the configured bucket"
+            )
+        bucket = buckets[0]
+        if (
+            not isinstance(bucket.get("accountId"), str)
+            or not hmac.compare_digest(bucket["accountId"], self.client.account_id)
+            or not isinstance(bucket.get("bucketId"), str)
+            or not hmac.compare_digest(bucket["bucketId"], self.bucket_id)
+            or not isinstance(bucket.get("bucketName"), str)
+            or not hmac.compare_digest(bucket["bucketName"], self.bucket_name)
+        ):
+            raise RuntimeError(
+                "Backblaze bucket ID does not match the configured bucket name/account"
+            )
+        self._bucket_identity_verified = True
+
+    def _ensure_access(self, key: str):
+        self.client.require_file_version_list_access(self.bucket_id, key)
+        self._ensure_bucket_identity()
+
+    def _validate_version_identity(self, version: dict, key: str) -> str:
+        file_name = version.get("fileName")
+        file_id = version.get("fileId")
+        account_id = version.get("accountId")
+        bucket_id = version.get("bucketId")
+        if not isinstance(file_name, str) or not hmac.compare_digest(file_name, key):
+            raise RuntimeError(
+                "b2_list_file_versions returned a different object key"
+            )
+        if not isinstance(file_id, str):
+            raise RuntimeError("b2_list_file_versions returned an invalid fileId")
+        try:
+            file_id = validate_version_id(file_id, "B2 file ID")
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        if not isinstance(account_id, str) or not hmac.compare_digest(
+            account_id, self.client.account_id
+        ):
+            raise RuntimeError(
+                "b2_list_file_versions returned a different accountId"
+            )
+        if not isinstance(bucket_id, str) or not hmac.compare_digest(
+            bucket_id, self.bucket_id
+        ):
+            raise RuntimeError(
+                "b2_list_file_versions returned a different bucketId"
+            )
+        return file_id
+
+    def _list_exact_key_versions(self, key: str) -> list[dict]:
+        key = validate_object_key(key)
+        self._ensure_access(key)
+        next_file_name = None
+        next_file_id = None
+        seen_markers = set()
+        seen_file_ids = set()
+        exact_versions = []
+
+        for _page_number in range(1, MAX_EXACT_KEY_VERSION_PAGES + 1):
+            params = {
+                "bucketId": self.bucket_id,
+                "prefix": key,
+                "startFileName": key if next_file_name is None else next_file_name,
+                "maxFileCount": B2_EXACT_KEY_PAGE_SIZE,
+            }
+            if next_file_id is not None:
+                params["startFileId"] = next_file_id
+            payload = self.client.api_request(
+                "b2_list_file_versions", params=params
+            )
+            passed_exact_key = False
+            previous_name = None
+            for version in _response_list(
+                payload, "files", "b2_list_file_versions"
+            ):
+                file_name = version.get("fileName")
+                if not isinstance(file_name, str) or not file_name:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned an invalid fileName"
+                    )
+                if previous_name is not None and file_name < previous_name:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned out-of-order file names"
+                    )
+                previous_name = file_name
+                if file_name < key:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned a file before the requested key"
+                    )
+                if file_name != key:
+                    passed_exact_key = True
+                    continue
+                if passed_exact_key:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned a discontiguous exact key"
+                    )
+                file_id = self._validate_version_identity(version, key)
+                if file_id in seen_file_ids:
+                    raise RuntimeError(
+                        "b2_list_file_versions returned a duplicate fileId"
+                    )
+                seen_file_ids.add(file_id)
+                exact_versions.append(version)
+
+            following_name = payload.get("nextFileName")
+            following_id = payload.get("nextFileId")
+            if following_name is None and following_id is None:
+                return exact_versions
+            if (
+                not isinstance(following_name, str)
+                or not following_name
+                or not isinstance(following_id, str)
+                or not following_id
+            ):
+                raise RuntimeError(
+                    "b2_list_file_versions returned malformed pagination markers"
+                )
+            if following_name < key:
+                raise RuntimeError(
+                    "b2_list_file_versions pagination moved before the requested key"
+                )
+            if passed_exact_key:
+                if following_name <= key:
+                    raise RuntimeError(
+                        "b2_list_file_versions pagination contradicted key ordering"
+                    )
+                return exact_versions
+            if following_name > key:
+                return exact_versions
+            marker = (following_name, following_id)
+            if marker in seen_markers:
+                raise RuntimeError(
+                    "b2_list_file_versions pagination did not advance"
+                )
+            seen_markers.add(marker)
+            next_file_name, next_file_id = marker
+
+        raise RuntimeError("b2_list_file_versions exceeded the exact-key page limit")
+
+    def _seek_exact_version(self, key: str, version_id: str) -> dict:
+        key = validate_object_key(key)
+        version_id = validate_version_id(version_id)
+        self._ensure_access(key)
+        payload = self.client.api_request(
+            "b2_list_file_versions",
+            params={
+                "bucketId": self.bucket_id,
+                "prefix": key,
+                "startFileName": key,
+                "startFileId": version_id,
+                "maxFileCount": 1,
+            },
+        )
+        versions = _response_list(payload, "files", "b2_list_file_versions")
+        if len(versions) != 1:
+            raise RuntimeError(
+                f"b2_list_file_versions {key} did not return the pinned object version"
+            )
+        returned_id = self._validate_version_identity(versions[0], key)
+        if not hmac.compare_digest(returned_id, version_id):
+            raise RuntimeError(
+                f"b2_list_file_versions {key} returned a different pinned version"
+            )
+        return versions[0]
+
+    def _validate_versions(
+        self,
+        versions: list[dict],
+        key: str,
+        expected_size: int,
+        expected_sha256: str,
+        expected_sha1: str,
+        expected_etag: str,
+    ) -> list[str]:
+        expected_sha256 = validate_sha256(expected_sha256, "expected SHA-256")
+        expected_sha1 = expected_sha1.lower()
+        if not SHA1_RE.fullmatch(expected_sha1):
+            raise ValueError("expected SHA-1 must be exactly 40 hexadecimal characters")
+        expected_etag = normalize_single_put_etag(expected_etag, "expected ETag")
+        validated_ids = []
+        for version in versions:
+            file_id = self._validate_version_identity(version, key)
+            action = version.get("action")
+            if action != "upload":
+                raise RuntimeError(
+                    f"immutable B2 key {key} contains unsupported action {action!r}"
+                )
+            remote_size = _nonnegative_integer(
+                version.get("contentLength"),
+                f"b2_list_file_versions {key} contentLength",
+            )
+            try:
+                remote_md5 = normalize_single_put_etag(
+                    version.get("contentMd5", ""),
+                    f"b2_list_file_versions {key} contentMd5",
+                )
+            except ValueError as error:
+                raise RuntimeError(str(error)) from error
+            remote_sha1 = version.get("contentSha1")
+            if not isinstance(remote_sha1, str):
+                raise RuntimeError(
+                    f"b2_list_file_versions {key} omitted contentSha1"
+                )
+            remote_sha1 = remote_sha1.lower()
+            if SHA1_RE.fullmatch(remote_sha1):
+                if not hmac.compare_digest(remote_sha1, expected_sha1):
+                    raise RuntimeError(
+                        f"immutable B2 key {key} has conflicting SHA-1 metadata"
+                    )
+            elif remote_sha1.startswith("unverified:") and SHA1_RE.fullmatch(
+                remote_sha1[len("unverified:") :]
+            ):
+                if not hmac.compare_digest(
+                    remote_sha1[len("unverified:") :], expected_sha1
+                ):
+                    raise RuntimeError(
+                        f"immutable B2 key {key} has conflicting SHA-1 metadata"
+                    )
+            elif remote_sha1 != "none":
+                raise RuntimeError(
+                    f"b2_list_file_versions {key} returned malformed contentSha1"
+                )
+            file_info = version.get("fileInfo")
+            if not isinstance(file_info, dict):
+                raise RuntimeError(
+                    f"b2_list_file_versions {key} returned malformed fileInfo"
+                )
+            remote_sha256 = file_info.get("sha256")
+            if not isinstance(remote_sha256, str):
+                raise RuntimeError(
+                    f"b2_list_file_versions {key} omitted SHA-256 metadata"
+                )
+            try:
+                remote_sha256 = validate_sha256(
+                    remote_sha256, f"b2_list_file_versions {key} SHA-256"
+                )
+            except ValueError as error:
+                raise RuntimeError(str(error)) from error
+            if (
+                remote_size != expected_size
+                or not hmac.compare_digest(remote_sha256, expected_sha256)
+                or not hmac.compare_digest(remote_md5, expected_etag)
+            ):
+                raise RuntimeError(
+                    f"immutable B2 key {key} has conflicting object metadata"
+                )
+            validated_ids.append(file_id)
+        return validated_ids
+
+    def latest_exact_version(
+        self,
+        key: str,
+        expected_size: int,
+        expected_sha256: str,
+        expected_sha1: str,
+        expected_etag: str,
+    ) -> str | None:
+        versions = self._list_exact_key_versions(key)
+        validated_ids = self._validate_versions(
+            versions,
+            key,
+            expected_size,
+            expected_sha256,
+            expected_sha1,
+            expected_etag,
+        )
+        if not validated_ids:
+            return None
+        selected_id = validated_ids[0]
+        selected_version = self._seek_exact_version(key, selected_id)
+        self._validate_versions(
+            [selected_version],
+            key,
+            expected_size,
+            expected_sha256,
+            expected_sha1,
+            expected_etag,
+        )
+        return selected_id
+
+    def verify_exact_version(
+        self,
+        key: str,
+        expected_size: int,
+        expected_sha256: str,
+        expected_sha1: str,
+        version_id: str,
+        expected_etag: str,
+    ):
+        version = self._seek_exact_version(key, version_id)
+        self._validate_versions(
+            [version],
+            key,
+            expected_size,
+            expected_sha256,
+            expected_sha1,
+            expected_etag,
+        )
 
 
 def _nonnegative_integer(value, label: str) -> int:
@@ -1006,8 +1434,9 @@ def multipart_put(
         raise
 
 
-def file_digests(path: Path) -> tuple[int, str, str]:
+def file_digests(path: Path) -> tuple[int, str, str, str]:
     sha256_digest = hashlib.sha256()
+    sha1_digest = hashlib.sha1(usedforsecurity=False)
     md5_digest = hashlib.md5(usedforsecurity=False)
     size = 0
     with path.open("rb") as handle:
@@ -1017,12 +1446,18 @@ def file_digests(path: Path) -> tuple[int, str, str]:
                 break
             size += len(chunk)
             sha256_digest.update(chunk)
+            sha1_digest.update(chunk)
             md5_digest.update(chunk)
-    return size, sha256_digest.hexdigest(), md5_digest.hexdigest()
+    return (
+        size,
+        sha256_digest.hexdigest(),
+        sha1_digest.hexdigest(),
+        md5_digest.hexdigest(),
+    )
 
 
 def sha256_file(path: Path) -> tuple[int, str]:
-    size, sha256, _md5 = file_digests(path)
+    size, sha256, _sha1, _md5 = file_digests(path)
     return size, sha256
 
 
@@ -1068,9 +1503,25 @@ def verify_remote_metadata(
     expected_sha256: str,
     version_id: str,
     expected_etag: str | None = None,
+    metadata_verifier: B2NativeObjectVerifier | None = None,
+    expected_sha1: str | None = None,
 ):
     expected_sha256 = validate_sha256(expected_sha256, "expected SHA-256")
     version_id = validate_version_id(version_id)
+    if metadata_verifier is not None:
+        if expected_etag is None or expected_sha1 is None:
+            raise ValueError(
+                "native metadata verification requires single-PUT MD5 and SHA-1 digests"
+            )
+        metadata_verifier.verify_exact_version(
+            key,
+            expected_size,
+            expected_sha256,
+            expected_sha1,
+            version_id,
+            expected_etag,
+        )
+        return
     head = client.request("HEAD", key, params={"versionId": version_id})
     try:
         _head_matches(
@@ -1181,8 +1632,22 @@ def latest_exact_object_version(
     *,
     full_readback: bool = True,
     expected_etag: str | None = None,
+    metadata_verifier: B2NativeObjectVerifier | None = None,
+    expected_sha1: str | None = None,
 ) -> str | None:
     expected_sha256 = validate_sha256(expected_sha256, "expected SHA-256")
+    if metadata_verifier is not None:
+        if full_readback:
+            raise ValueError(
+                "native metadata verification is only valid without full readback"
+            )
+        if expected_etag is None or expected_sha1 is None:
+            raise ValueError(
+                "native metadata verification requires single-PUT MD5 and SHA-1 digests"
+            )
+        return metadata_verifier.latest_exact_version(
+            key, expected_size, expected_sha256, expected_sha1, expected_etag
+        )
     response = client.request("HEAD", key, allowed_statuses=(404,))
     try:
         if response.status_code == 404:
@@ -1228,12 +1693,13 @@ def upload_verified_file(
     expected_size: int | None = None,
     expected_sha256: str | None = None,
     full_readback: bool = True,
+    metadata_verifier: B2NativeObjectVerifier | None = None,
 ):
     path = Path(path)
     before = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode):
         raise ValueError(f"upload source must be a regular file: {path}")
-    measured_size, measured_sha256, measured_md5 = file_digests(path)
+    measured_size, measured_sha256, measured_sha1, measured_md5 = file_digests(path)
     if expected_size is not None and measured_size != expected_size:
         raise RuntimeError(f"local file size changed before upload: {path}")
     if expected_sha256 is not None and not hmac.compare_digest(
@@ -1256,6 +1722,8 @@ def upload_verified_file(
         sha256,
         full_readback=full_readback,
         expected_etag=expected_etag,
+        metadata_verifier=metadata_verifier,
+        expected_sha1=measured_sha1,
     )
     if existing_version_id is not None:
         return {
@@ -1292,7 +1760,14 @@ def upload_verified_file(
         )
     else:
         verify_remote_metadata(
-            client, key, size, sha256, version_id, expected_etag
+            client,
+            key,
+            size,
+            sha256,
+            version_id,
+            expected_etag,
+            metadata_verifier,
+            measured_sha1,
         )
     if latest_exact_object_version(
         client,
@@ -1301,6 +1776,8 @@ def upload_verified_file(
         sha256,
         full_readback=full_readback,
         expected_etag=expected_etag,
+        metadata_verifier=metadata_verifier,
+        expected_sha1=measured_sha1,
     ) is None:
         raise RuntimeError(f"uploaded object disappeared before publication: {key}")
     return {
@@ -1319,8 +1796,10 @@ def upload_verified_bytes(
     content_type: str = "application/json",
     *,
     full_readback: bool = True,
+    metadata_verifier: B2NativeObjectVerifier | None = None,
 ):
     sha256 = hashlib.sha256(data).hexdigest()
+    sha1 = hashlib.sha1(data, usedforsecurity=False).hexdigest()
     expected_etag = hashlib.md5(data, usedforsecurity=False).hexdigest()
     size = len(data)
     existing_version_id = latest_exact_object_version(
@@ -1330,6 +1809,8 @@ def upload_verified_bytes(
         sha256,
         full_readback=full_readback,
         expected_etag=expected_etag,
+        metadata_verifier=metadata_verifier,
+        expected_sha1=sha1,
     )
     if existing_version_id is not None:
         return {
@@ -1350,7 +1831,14 @@ def upload_verified_bytes(
         )
     else:
         verify_remote_metadata(
-            client, key, size, sha256, version_id, expected_etag
+            client,
+            key,
+            size,
+            sha256,
+            version_id,
+            expected_etag,
+            metadata_verifier,
+            sha1,
         )
     if latest_exact_object_version(
         client,
@@ -1359,6 +1847,8 @@ def upload_verified_bytes(
         sha256,
         full_readback=full_readback,
         expected_etag=expected_etag,
+        metadata_verifier=metadata_verifier,
+        expected_sha1=sha1,
     ) is None:
         raise RuntimeError(f"uploaded object disappeared before publication: {key}")
     return {
@@ -1591,6 +2081,7 @@ def upload_generation(
     remote_prefix: str,
     receipt_path: Path,
     predecessor_manifest_sha256: str | None = None,
+    metadata_verifier: B2NativeObjectVerifier | None = None,
 ):
     generation_dir = Path(generation_dir).absolute()
     generation_id = validate_generation_id(generation_id)
@@ -1628,6 +2119,7 @@ def upload_generation(
                 expected_size=record["size"],
                 expected_sha256=record["sha256"],
                 full_readback=False,
+                metadata_verifier=metadata_verifier,
             )
             file_version_ids[record["path"]] = uploaded["version_id"]
 
@@ -1649,7 +2141,11 @@ def upload_generation(
         manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         manifest_key = f"{remote_prefix}/manifest.json"
         uploaded_manifest = upload_verified_bytes(
-            client, manifest_bytes, manifest_key, full_readback=False
+            client,
+            manifest_bytes,
+            manifest_key,
+            full_readback=False,
+            metadata_verifier=metadata_verifier,
         )
         manifest_version_id = uploaded_manifest["version_id"]
 
@@ -1665,7 +2161,11 @@ def upload_generation(
         )
         commit_sha256 = hashlib.sha256(commit_bytes).hexdigest()
         uploaded_commit = upload_verified_bytes(
-            client, commit_bytes, commit_key, full_readback=False
+            client,
+            commit_bytes,
+            commit_key,
+            full_readback=False,
+            metadata_verifier=metadata_verifier,
         )
         commit_version_id = uploaded_commit["version_id"]
 
@@ -1771,6 +2271,30 @@ def make_b2_native_client(args):
     )
 
 
+def make_optional_b2_native_object_verifier(args, s3_client: S3Client):
+    settings = optional_backblaze_native_object_settings(args.credentials_file)
+    if settings is None:
+        endpoint_host = urllib.parse.urlparse(s3_client.endpoint).hostname or ""
+        if endpoint_host == "backblazeb2.com" or endpoint_host.endswith(
+            ".backblazeb2.com"
+        ):
+            raise ValueError(
+                "B2_BUCKET_ID is required for cap-safe Backblaze generation verification"
+            )
+        return None
+    application_key_id, application_key, bucket_id = settings
+    return B2NativeObjectVerifier(
+        B2NativeClient(
+            application_key_id,
+            application_key,
+            args.retries,
+            authorize_url=B2_AUTHORIZE_ACCOUNT_URL,
+        ),
+        bucket_id,
+        s3_client.bucket,
+    )
+
+
 def run(args):
     if args.command == "b2-account-usage":
         result = b2_account_usage(make_b2_native_client(args))
@@ -1815,6 +2339,7 @@ def run(args):
         print(canonical_json_bytes(result).decode("utf-8"), end="")
         return 0
     if args.command == "upload-generation":
+        metadata_verifier = make_optional_b2_native_object_verifier(args, client)
         receipt = upload_generation(
             client,
             args.generation_dir,
@@ -1822,6 +2347,7 @@ def run(args):
             args.remote_prefix,
             args.receipt,
             args.predecessor_manifest_sha256,
+            metadata_verifier,
         )
         print(canonical_json_bytes(receipt).decode("utf-8"), end="")
         return 0

@@ -81,7 +81,14 @@ STATE_FILE=$STATE_DIR/blockzilla-raw-recorder.state
 STARTED_FILE=$STATE_DIR/blockzilla-raw-recorder.started
 JOURNAL_FILE=$OUTPUT_DIR/raw-blocks.jsonl
 VOLUME_MARKER=${BLOCKZILLA_RAW_VOLUME_MARKER:-/data/.blockzilla-raw-volume}
-ALERT_STATE_DIR=$STATE_DIR/blockzilla-raw-alerts
+if [ "$CACHE_MODE" = b2-generations ]; then
+  # Incident state must survive container rebuilds. Otherwise every deploy or
+  # crash forgets which incidents were already delivered and Telegram receives
+  # the same opening alerts again.
+  ALERT_STATE_DIR=$GENERATION_MONITORING_DIR/telegram-alerts
+else
+  ALERT_STATE_DIR=$STATE_DIR/blockzilla-raw-alerts
+fi
 CHILD_REPORT_FILE=$STATE_DIR/blockzilla-raw-recorder.child.json
 if [ "$CACHE_MODE" = b2-generations ]; then
   RESUME_COVERAGE_EVENT_DIR=$GENERATION_MONITORING_DIR
@@ -415,9 +422,11 @@ alert_title() {
     grpc_stale) printf '%s\n' 'No new gRPC data' ;;
     volume_invalid) printf '%s\n' 'Backup volume unavailable' ;;
     disk_check_failed) printf '%s\n' 'Disk-space check failed' ;;
+    disk_space) printf '%s\n' 'Backup disk space low' ;;
     disk_critical) printf '%s\n' 'Backup disk critically low' ;;
     disk_warning) printf '%s\n' 'Backup disk running low' ;;
     b2_usage_check_failed) printf '%s\n' 'Backblaze usage check failed' ;;
+    b2_usage) printf '%s\n' 'Backblaze free storage allowance' ;;
     b2_usage_warning) printf '%s\n' 'Backblaze archive near 10 GB' ;;
     b2_usage_critical) printf '%s\n' 'Backblaze archive almost full' ;;
     primary_sync_stale) printf '%s\n' 'Blockzilla acknowledgement missing' ;;
@@ -426,8 +435,65 @@ alert_title() {
     provider_replay_gap) printf '%s\n' 'Provider history gap detected' ;;
     resume_coverage) printf '%s\n' 'Upstream gRPC data gap detected' ;;
     generation_upload_failed) printf '%s\n' 'Backblaze upload failed' ;;
-    generation_backlog) printf '%s\n' 'Backblaze upload backlog growing' ;;
+    generation_backlog) printf '%s\n' 'Backup pipeline blocked' ;;
     *) printf '%s\n' "$1" | tr '_' ' ' ;;
+  esac
+}
+
+human_bytes() {
+  human_value=$1
+  case "$human_value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ "$human_value" -ge 1073741824 ]; then
+    human_tenths=$((human_value * 10 / 1073741824))
+    printf '%s.%s GiB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+  elif [ "$human_value" -ge 1048576 ]; then
+    human_tenths=$((human_value * 10 / 1048576))
+    printf '%s.%s MiB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+  elif [ "$human_value" -ge 1024 ]; then
+    human_tenths=$((human_value * 10 / 1024))
+    printf '%s.%s KiB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+  else
+    printf '%s bytes' "$human_value"
+  fi
+}
+
+human_decimal_bytes() {
+  human_value=$1
+  case "$human_value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ "$human_value" -ge 1000000000 ]; then
+    human_tenths=$((human_value * 10 / 1000000000))
+    printf '%s.%s GB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+  elif [ "$human_value" -ge 1000000 ]; then
+    human_tenths=$((human_value * 10 / 1000000))
+    printf '%s.%s MB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+  else
+    printf '%s bytes' "$human_value"
+  fi
+}
+
+discard_alert() {
+  discard_key=$1
+  rm -f \
+    "$(alert_file "$discard_key" active)" \
+    "$(alert_file "$discard_key" delivered)" \
+    "$(alert_file "$discard_key" last)" \
+    "$(alert_file "$discard_key" level)" \
+    "$(alert_file "$discard_key" silent)" \
+    "$(alert_file "$discard_key" closed)" \
+    "$(alert_file "$discard_key" journal_size)" \
+    2>/dev/null || true
+}
+
+alert_level_rank() {
+  case "$1" in
+    WARNING) printf '%s\n' 1 ;;
+    ERROR) printf '%s\n' 2 ;;
+    CRITICAL) printf '%s\n' 3 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -449,7 +515,127 @@ write_alert_delivery_time() {
   return 0
 }
 
-raise_alert() {
+load_alert_delivery_state() {
+  delivery_state_file=$1
+  ALERT_DELIVERED_AT=
+  ALERT_DELIVERED_LEVEL=
+  if [ -L "$delivery_state_file" ] \
+    || [ ! -f "$delivery_state_file" ] \
+    || [ ! -r "$delivery_state_file" ]
+  then
+    return 1
+  fi
+  delivery_state_bytes=$(wc -c < "$delivery_state_file" | tr -d ' ')
+  delivery_state_lines=$(wc -l < "$delivery_state_file" | tr -d ' ')
+  case "$delivery_state_bytes" in ''|*[!0-9]*) return 1 ;; esac
+  case "$delivery_state_lines" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$delivery_state_bytes" -gt 64 ] || [ "$delivery_state_lines" -ne 1 ]; then
+    return 1
+  fi
+  IFS=' ' read -r ALERT_DELIVERED_AT ALERT_DELIVERED_LEVEL delivery_state_extra \
+    < "$delivery_state_file" || return 1
+  case "$ALERT_DELIVERED_AT" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -z "$delivery_state_extra" ] || return 1
+  alert_level_rank "$ALERT_DELIVERED_LEVEL" >/dev/null 2>&1 || return 1
+}
+
+write_alert_delivery_state() {
+  delivery_key=$1
+  delivery_state_file=$2
+  delivery_now=$3
+  delivery_level=$4
+  case "$delivery_now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  alert_level_rank "$delivery_level" >/dev/null || return 1
+  delivery_state_tmp=$delivery_state_file.$$
+  if ! printf '%s %s\n' "$delivery_now" "$delivery_level" \
+    > "$delivery_state_tmp"
+  then
+    echo "$(timestamp) telegram_alert delivery_state_write_failed key=$delivery_key" >&2
+    rm -f "$delivery_state_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$delivery_state_tmp" "$delivery_state_file"; then
+    echo "$(timestamp) telegram_alert delivery_state_publish_failed key=$delivery_key" >&2
+    rm -f "$delivery_state_tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
+alert_flock_lock_fd() {
+  if command -v flock >/dev/null 2>&1; then
+    flock -w 20 9
+    return $?
+  fi
+  # macOS does not ship the flock CLI, but Python exposes the same
+  # kernel-released advisory lock. The inherited descriptor keeps the lock
+  # owned by this shell after the helper exits.
+  "$GENERATION_PYTHON_BIN" - 9 20 <<'PY'
+import fcntl
+import sys
+import time
+
+fd = int(sys.argv[1])
+deadline = time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SystemExit(1)
+        time.sleep(min(0.05, remaining))
+PY
+}
+
+alert_flock_unlock_fd() {
+  if command -v flock >/dev/null 2>&1; then
+    flock -u 9
+    return $?
+  fi
+  "$GENERATION_PYTHON_BIN" - 9 <<'PY'
+import fcntl
+import sys
+
+fcntl.flock(int(sys.argv[1]), fcntl.LOCK_UN)
+PY
+}
+
+acquire_alert_lock() {
+  lock_key=$1
+  case "$lock_key" in
+    ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+  esac
+  ALERT_LOCK_FILE=$ALERT_STATE_DIR/.$lock_key.lock
+  if [ -L "$ALERT_LOCK_FILE" ] \
+    || { [ -e "$ALERT_LOCK_FILE" ] && [ ! -f "$ALERT_LOCK_FILE" ]; }
+  then
+    return 1
+  fi
+  if ! exec 9>> "$ALERT_LOCK_FILE"; then
+    ALERT_LOCK_FILE=
+    return 1
+  fi
+  if ! alert_flock_lock_fd; then
+    exec 9>&-
+    ALERT_LOCK_FILE=
+    return 1
+  fi
+  return 0
+}
+
+release_alert_lock() {
+  [ -n "${ALERT_LOCK_FILE:-}" ] || return 0
+  alert_flock_unlock_fd 2>/dev/null || true
+  exec 9>&-
+  ALERT_LOCK_FILE=
+}
+
+raise_alert_locked() {
   alert_key=$1
   alert_level=$2
   alert_message=$3
@@ -459,9 +645,11 @@ raise_alert() {
   fi
   mkdir -p "$ALERT_STATE_DIR" 2>/dev/null || return 0
   alert_active=$(alert_file "$alert_key" active)
-  alert_last=$(alert_file "$alert_key" last)
+  alert_delivery_file=$(alert_file "$alert_key" delivered)
+  alert_silent_file=$(alert_file "$alert_key" silent)
+  alert_closed_file=$(alert_file "$alert_key" closed)
   alert_heading=$(alert_title "$alert_key")
-  alert_text=$(printf 'BLOCKZILLA BACKUP ALERT\nProblem: %s\nSeverity: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
+  alert_text=$(printf 'Blockzilla backup alert\nProblem: %s\nSeverity: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
     "$alert_heading" "$alert_level" "$ORIGIN_NODE_ID" "$(timestamp)" "$alert_message")
   if ! printf '%s\n' "$alert_text" > "$alert_active"; then
     ALERT_DELIVERY_RESULT=failed
@@ -469,18 +657,74 @@ raise_alert() {
     return 0
   fi
   alert_now=$(date +%s)
-  alert_previous=0
-  if [ -r "$alert_last" ]; then
-    IFS= read -r alert_previous < "$alert_last" || alert_previous=0
-    case "$alert_previous" in
-      ''|*[!0-9]*) alert_previous=0 ;;
+  alert_previous=
+  alert_previous_level=
+  if load_alert_delivery_state "$alert_delivery_file"; then
+    alert_previous=$ALERT_DELIVERED_AT
+    alert_previous_level=$ALERT_DELIVERED_LEVEL
+  elif [ -e "$alert_delivery_file" ] || [ -L "$alert_delivery_file" ]; then
+    # Corrupt state must not suppress a real incident forever.
+    rm -f "$alert_delivery_file" 2>/dev/null || true
+  fi
+  alert_closed=
+  if [ -r "$alert_closed_file" ]; then
+    IFS= read -r alert_closed < "$alert_closed_file" || alert_closed=
+    case "$alert_closed" in
+      ''|*[!0-9]*) alert_closed= ;;
     esac
   fi
-  if [ "$alert_now" -ge "$alert_previous" ] \
-    && [ $((alert_now - alert_previous)) -lt "$TELEGRAM_ALERT_COOLDOWN_SECS" ]
+  if [ -e "$alert_silent_file" ]; then
+    if [ -n "$alert_closed" ] \
+      && [ "$alert_now" -ge "$alert_closed" ] \
+      && [ $((alert_now - alert_closed)) -lt "$TELEGRAM_ALERT_COOLDOWN_SECS" ]
+    then
+      alert_previous_rank=$(alert_level_rank "$alert_previous_level" 2>/dev/null \
+        || printf '%s\n' 0)
+      alert_current_rank=$(alert_level_rank "$alert_level" 2>/dev/null \
+        || printf '%s\n' 0)
+      if [ "$alert_current_rank" -le "$alert_previous_rank" ]; then
+        ALERT_DELIVERY_RESULT=suppressed
+        return 0
+      fi
+      # A silent reopen that becomes more severe is announced immediately.
+      rm -f "$alert_silent_file" "$alert_closed_file" 2>/dev/null || true
+      alert_closed=
+    else
+      rm -f "$alert_silent_file" "$alert_delivery_file" \
+        "$alert_closed_file" 2>/dev/null || true
+      alert_previous=
+      alert_previous_level=
+      alert_closed=
+    fi
+  fi
+  if [ -z "$alert_previous" ] \
+    && [ -n "$alert_closed" ] \
+    && [ "$alert_now" -ge "$alert_closed" ] \
+    && [ $((alert_now - alert_closed)) -lt "$TELEGRAM_ALERT_COOLDOWN_SECS" ]
   then
+    # A just-recovered incident that flaps open again is tracked but stays
+    # silent. If it remains open beyond the debounce, a later monitor pass
+    # promotes it to a normal opening alert.
+    printf '%s\n' "$alert_closed" > "$alert_silent_file" 2>/dev/null || true
+    write_alert_delivery_state "$alert_key" "$alert_delivery_file" \
+      "$alert_now" "$alert_level" || true
     ALERT_DELIVERY_RESULT=suppressed
     return 0
+  elif [ -n "$alert_closed" ]; then
+    rm -f "$alert_closed_file" 2>/dev/null || true
+  fi
+  # Normal monitor passes refresh the on-disk incident details but never send
+  # reminders. One opening plus one recovery is enough; failed opening sends
+  # remain pending and are retried by retry_pending_alerts().
+  if [ -n "$alert_previous" ]; then
+    alert_previous_rank=$(alert_level_rank "$alert_previous_level" 2>/dev/null \
+      || printf '%s\n' 0)
+    alert_current_rank=$(alert_level_rank "$alert_level" 2>/dev/null \
+      || printf '%s\n' 0)
+    if [ "$alert_current_rank" -le "$alert_previous_rank" ]; then
+      ALERT_DELIVERY_RESULT=suppressed
+      return 0
+    fi
   fi
   if ! telegram_send "$alert_text"; then
     ALERT_DELIVERY_RESULT=failed
@@ -488,31 +732,52 @@ raise_alert() {
     return 0
   fi
   ALERT_DELIVERY_RESULT=sent
-  write_alert_delivery_time "$alert_key" "$alert_last" "$alert_now" || true
+  write_alert_delivery_state "$alert_key" "$alert_delivery_file" \
+    "$alert_now" "$alert_level" || true
+  rm -f "$(alert_file "$alert_key" last)" \
+    "$(alert_file "$alert_key" level)" 2>/dev/null || true
+  rm -f "$alert_silent_file" "$alert_closed_file" 2>/dev/null || true
   return 0
+}
+
+raise_alert() {
+  lock_raise_key=$1
+  ALERT_DELIVERY_RESULT=failed
+  mkdir -p "$ALERT_STATE_DIR" 2>/dev/null || return 0
+  if ! acquire_alert_lock "$lock_raise_key"; then
+    echo "$(timestamp) telegram_alert state_lock_unavailable key=$lock_raise_key" >&2
+    return 0
+  fi
+  raise_alert_locked "$@"
+  lock_raise_status=$?
+  release_alert_lock
+  return "$lock_raise_status"
 }
 
 raise_alert_once() {
   once_key=$1
   once_level=$2
   once_message=$3
-  once_active=$(alert_file "$once_key" active)
-  once_last=$(alert_file "$once_key" last)
-  if [ -e "$once_active" ] && [ -r "$once_last" ]; then
-    return 0
-  fi
   raise_alert "$once_key" "$once_level" "$once_message"
 }
 
-retry_pending_alert() {
+retry_pending_alert_locked() {
   retry_key=$1
   if [ "$TELEGRAM_ENABLED" != true ]; then
     return 0
   fi
   retry_active=$(alert_file "$retry_key" active)
-  retry_last=$(alert_file "$retry_key" last)
-  if [ ! -e "$retry_active" ] || [ -r "$retry_last" ]; then
+  retry_delivery_file=$(alert_file "$retry_key" delivered)
+  retry_silent_file=$(alert_file "$retry_key" silent)
+  if [ ! -e "$retry_active" ] || [ -e "$retry_silent_file" ]
+  then
     return 0
+  fi
+  if load_alert_delivery_state "$retry_delivery_file"; then
+    return 0
+  fi
+  if [ -e "$retry_delivery_file" ] || [ -L "$retry_delivery_file" ]; then
+    rm -f "$retry_delivery_file" 2>/dev/null || true
   fi
   if [ -L "$retry_active" ] || [ ! -f "$retry_active" ] || [ ! -r "$retry_active" ]; then
     echo "$(timestamp) telegram_alert pending_incident_unreadable key=$retry_key" >&2
@@ -530,13 +795,29 @@ retry_pending_alert() {
     return 0
   fi
   retry_text=$(sed -n '1,100p' "$retry_active")
+  retry_level=$(sed -n 's/^Severity: //p' "$retry_active" | head -n 1)
+  alert_level_rank "$retry_level" >/dev/null 2>&1 || return 0
   if ! telegram_send "$retry_text"; then
     echo "$(timestamp) telegram_alert delivery_failed key=$retry_key" >&2
     return 0
   fi
   retry_now=$(date +%s)
-  write_alert_delivery_time "$retry_key" "$retry_last" "$retry_now" || true
+  write_alert_delivery_state "$retry_key" "$retry_delivery_file" \
+    "$retry_now" "$retry_level" || true
   return 0
+}
+
+retry_pending_alert() {
+  lock_retry_key=$1
+  mkdir -p "$ALERT_STATE_DIR" 2>/dev/null || return 0
+  if ! acquire_alert_lock "$lock_retry_key"; then
+    echo "$(timestamp) telegram_alert state_lock_unavailable key=$lock_retry_key" >&2
+    return 0
+  fi
+  retry_pending_alert_locked "$@"
+  lock_retry_status=$?
+  release_alert_lock
+  return "$lock_retry_status"
 }
 
 retry_pending_alerts() {
@@ -545,16 +826,13 @@ retry_pending_alerts() {
     grpc_stale \
     volume_invalid \
     disk_check_failed \
-    disk_critical \
-    disk_warning \
+    disk_space \
     b2_usage_check_failed \
-    b2_usage_warning \
-    b2_usage_critical \
+    b2_usage \
     primary_sync_stale \
     generation_rotation_failed \
     replay_recovery_failed \
     provider_replay_gap \
-    generation_upload_failed \
     generation_backlog
   do
     retry_pending_alert "$retry_key"
@@ -562,32 +840,62 @@ retry_pending_alerts() {
   return 0
 }
 
-clear_alert() {
+clear_alert_locked() {
   alert_key=$1
   alert_message=$2
   if [ "$TELEGRAM_ENABLED" != true ]; then
     return 0
   fi
   alert_active=$(alert_file "$alert_key" active)
-  alert_last=$(alert_file "$alert_key" last)
+  alert_delivery_file=$(alert_file "$alert_key" delivered)
+  alert_silent_file=$(alert_file "$alert_key" silent)
+  alert_closed_file=$(alert_file "$alert_key" closed)
   if [ ! -e "$alert_active" ]; then
     return 0
   fi
-  retry_pending_alert "$alert_key"
-  if [ ! -r "$alert_last" ]; then
+  if [ -e "$alert_silent_file" ]; then
+    alert_closed_now=$(date +%s)
+    write_alert_delivery_time "$alert_key" "$alert_closed_file" \
+      "$alert_closed_now" || true
+    rm -f "$alert_active" "$alert_delivery_file" "$alert_silent_file" \
+      "$(alert_file "$alert_key" last)" \
+      "$(alert_file "$alert_key" level)" 2>/dev/null || true
+    return 0
+  fi
+  retry_pending_alert_locked "$alert_key"
+  if ! load_alert_delivery_state "$alert_delivery_file"; then
     return 0
   fi
   alert_heading=$(alert_title "$alert_key")
-  alert_text=$(printf 'BLOCKZILLA BACKUP RECOVERED\nResolved: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
+  alert_text=$(printf 'Blockzilla backup recovered\nResolved: %s\nNode: %s\nTime (UTC): %s\n\n%s' \
     "$alert_heading" "$ORIGIN_NODE_ID" "$(timestamp)" "$alert_message")
   if ! telegram_send "$alert_text"; then
     echo "$(timestamp) telegram_recovery delivery_failed key=$alert_key" >&2
     return 0
   fi
-  if ! rm -f "$alert_active" "$alert_last"; then
+  alert_closed_now=$(date +%s)
+  write_alert_delivery_time "$alert_key" "$alert_closed_file" \
+    "$alert_closed_now" || true
+  if ! rm -f "$alert_active" "$alert_delivery_file" "$alert_silent_file" \
+    "$(alert_file "$alert_key" last)" \
+    "$(alert_file "$alert_key" level)"
+  then
     echo "$(timestamp) telegram_recovery state_remove_failed key=$alert_key" >&2
   fi
   return 0
+}
+
+clear_alert() {
+  lock_clear_key=$1
+  mkdir -p "$ALERT_STATE_DIR" 2>/dev/null || return 0
+  if ! acquire_alert_lock "$lock_clear_key"; then
+    echo "$(timestamp) telegram_recovery state_lock_unavailable key=$lock_clear_key" >&2
+    return 0
+  fi
+  clear_alert_locked "$@"
+  lock_clear_status=$?
+  release_alert_lock
+  return "$lock_clear_status"
 }
 
 journal_size() {
@@ -701,32 +1009,62 @@ monitor_disk_alerts() {
 
 update_disk_alerts() {
   disk_free_bytes=$1
-  disk_critical_active=$(alert_file disk_critical active)
-  disk_warning_active=$(alert_file disk_warning active)
-  if [ "$disk_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
-    raise_alert disk_critical CRITICAL \
-      "Free bytes=$disk_free_bytes, below hard floor=$MIN_FREE_BYTES; durable capture will pause."
-  elif [ -e "$disk_critical_active" ] \
-    && [ "$disk_free_bytes" -lt "$DISK_CRITICAL_RECOVERY_BYTES" ]
-  then
-    : # Keep the critical incident active until the recovery margin is reached.
-  elif [ "$disk_free_bytes" -lt "$DISK_WARN_FREE_BYTES" ]; then
-    clear_alert disk_critical \
-      "Free space recovered above the hard floor plus its hysteresis margin."
-    if [ "$CACHE_MODE" = b2-generations ]; then
-      disk_warning_detail="Only sealed generations with a fully verified remote receipt are removed automatically; active or unverified data is retained."
+  if [ "$CACHE_MODE" = b2-generations ]; then
+    pipeline_active=$(alert_file generation_backlog active)
+    pipeline_backlog=
+    pipeline_backlog=$(sealed_generation_count 2>/dev/null) || pipeline_backlog=
+    if [ -n "$pipeline_backlog" ]; then
+      pipeline_disk_context="$pipeline_backlog sealed generation(s) are waiting."
     else
-      disk_warning_detail="No automatic WAL deletion is enabled."
+      pipeline_disk_context="The sealed-generation count could not be measured."
     fi
-    raise_alert disk_warning WARNING \
-      "Free bytes=$disk_free_bytes, below warning threshold=$DISK_WARN_FREE_BYTES. $disk_warning_detail"
-  elif [ -e "$disk_warning_active" ] \
+    if [ "$disk_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
+      raise_alert generation_backlog CRITICAL \
+        "Cause: The bounded Hetzner cache reached its safety floor while remote cleanup is incomplete.
+Impact: $pipeline_disk_context Only $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$MIN_FREE_BYTES") floor. Durable capture is paused; existing data is retained.
+Action: Check Backblaze Caps & Alerts, API access, and the recorder volume. Automatic retries continue."
+      return 0
+    elif [ "$disk_free_bytes" -lt "$DISK_WARN_FREE_BYTES" ]; then
+      raise_alert generation_backlog WARNING \
+        "Cause: The bounded Hetzner cache is approaching its safety floor while remote cleanup is incomplete.
+Impact: $pipeline_disk_context $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$DISK_WARN_FREE_BYTES") warning threshold. Active and unverified data is retained.
+Action: Restore remote upload throughput before capture must pause."
+      return 0
+    fi
+    case "$pipeline_backlog" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$pipeline_backlog" -ge "$GENERATION_BACKLOG_WARN_COUNT" ]; then
+          # The upload worker owns one correlated incident for remote failure,
+          # backlog, and the resulting local pressure. Do not fan that single
+          # cause out into separate disk alerts.
+          return 0
+        fi
+        ;;
+    esac
+    if [ -e "$pipeline_active" ]; then
+      return 0
+    fi
+    # The upload worker closes this correlated incident only after the queue is
+    # below threshold and free space passes the warning recovery margin.
+    return 0
+  fi
+
+  disk_space_active=$(alert_file disk_space active)
+  if [ "$disk_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
+    raise_alert disk_space CRITICAL \
+      "Impact: Only $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$MIN_FREE_BYTES") safety floor. Durable capture is paused; existing data is retained.
+Action: Free space on the recorder volume or restore remote upload throughput. The recorder retries automatically."
+  elif [ "$disk_free_bytes" -lt "$DISK_WARN_FREE_BYTES" ]; then
+    raise_alert disk_space WARNING \
+      "Impact: $(human_bytes "$disk_free_bytes") is free, below the $(human_bytes "$DISK_WARN_FREE_BYTES") warning threshold. No automatic WAL deletion is enabled.
+Action: Restore remote upload throughput before the safety floor is reached."
+  elif [ -e "$disk_space_active" ] \
     && [ "$disk_free_bytes" -lt "$DISK_WARNING_RECOVERY_BYTES" ]
   then
-    clear_alert disk_critical "Free space recovered above the critical threshold."
+    : # Keep one incident active until the full warning hysteresis is reached.
   else
-    clear_alert disk_critical "Free space recovered above the critical threshold."
-    clear_alert disk_warning \
+    clear_alert disk_space \
       "Free space recovered above the warning threshold plus its hysteresis margin."
   fi
 }
@@ -782,16 +1120,16 @@ monitor_resume_coverage_alert() {
   fi
   if [ -n "$resume_requested_slot" ] && [ -n "$resume_first_slot" ]; then
     resume_gap_detail="Impact: Hetzner already had slot $resume_requested_slot. The provider resumed at slot $resume_first_slot without replaying it, so continuity across the reconnect could not be verified. The recorder keeps the gap explicit and continues attempting newer blocks.
-Action: Check the upstream Yellowstone provider or repair this range from another source. Repeated events are grouped during the alert cooldown."
+Action: Check the upstream Yellowstone provider or repair this range from another source. Repeated reconnect gaps are grouped into this active incident until recovery."
   else
     resume_gap_detail="Impact: The provider skipped the requested durable resume slot, so continuity across the reconnect could not be verified. The recorder keeps the gap explicit and continues attempting newer blocks.
-Action: Check the upstream Yellowstone provider or repair the uncovered range from another source. Repeated events are grouped during the alert cooldown."
+Action: Check the upstream Yellowstone provider or repair the uncovered range from another source. Repeated reconnect gaps are grouped into this active incident until recovery."
   fi
   raise_alert resume_coverage WARNING \
     "$resume_gap_detail"
-  # Suppression means this alert key was delivered successfully within the
-  # cooldown. Coalesce the durable event into that active incident without
-  # claiming that this exact event was sent; failed sends stay pending.
+  # Suppression means this alert key already belongs to a delivered active
+  # incident. Coalesce the durable event without claiming that this exact event
+  # was sent; failed sends stay pending.
   case "${ALERT_DELIVERY_RESULT:-}" in
     sent)
       if write_resume_coverage_delivery "$resume_event_id"; then
@@ -1855,6 +2193,7 @@ prepare_cache_layout() {
   ensure_cache_child_directory "$SEALED_GENERATION_DIR" || return 1
   ensure_cache_child_directory "$GENERATION_RECEIPT_DIR" || return 1
   ensure_cache_child_directory "$GENERATION_MONITORING_DIR" || return 1
+  ensure_cache_child_directory "$ALERT_STATE_DIR" || return 1
   recover_rotation_transaction || return 1
   if [ ! -e "$ACTIVE_GENERATION_DIR" ]; then
     mkdir "$ACTIVE_GENERATION_DIR" || return 1
@@ -2097,33 +2436,75 @@ terminate_generation_upload_worker() {
 
 generation_upload_worker() {
   generation_uploader_pid=
+  generation_previous_backlog=
   trap terminate_generation_upload_worker INT TERM HUP
   while :; do
     if validate_data_volume true >/dev/null 2>&1 \
       && [ -d "$SEALED_GENERATION_DIR" ]
     then
+      generation_upload_failed=false
       if upload_one_generation; then
-        clear_alert generation_upload_failed \
-          "Generation uploads and local receipt validation are succeeding."
+        :
       else
         upload_status=$?
         if [ "$upload_status" -ne 75 ]; then
-          raise_alert generation_upload_failed ERROR \
-            "A sealed generation upload or local receipt validation failed; local data was retained."
+          generation_upload_failed=true
         fi
       fi
       if generation_backlog=$(sealed_generation_count); then
-        if [ "$generation_backlog" -ge "$GENERATION_BACKLOG_WARN_COUNT" ]; then
-          raise_alert generation_backlog WARNING \
-            "Sealed generation backlog=$generation_backlog threshold=$GENERATION_BACKLOG_WARN_COUNT."
+        generation_free_valid=false
+        generation_free_bytes=
+        if generation_free_bytes=$(available_bytes 2>/dev/null); then
+          generation_free_valid=true
+          generation_free_detail="$(human_bytes "$generation_free_bytes") is free."
         else
-          clear_alert generation_backlog \
-            "Sealed generation backlog recovered below its warning threshold."
+          generation_free_detail="Free space could not be measured."
         fi
+        pipeline_should_alert=false
+        if [ "$generation_upload_failed" = true ]; then
+          pipeline_should_alert=true
+          pipeline_cause="Cause: Backblaze could not commit or verify the oldest sealed generation."
+          pipeline_level=ERROR
+        elif [ "$generation_backlog" -ge "$GENERATION_BACKLOG_WARN_COUNT" ] \
+          && [ -n "$generation_previous_backlog" ] \
+          && [ "$generation_backlog" -ge "$generation_previous_backlog" ]
+        then
+          pipeline_should_alert=true
+          pipeline_cause="Cause: Backblaze uploads are succeeding, but the sealed queue is not shrinking."
+          pipeline_level=WARNING
+        fi
+        if [ "$pipeline_should_alert" = true ]; then
+          if [ "$generation_free_valid" = true ] \
+            && [ "$generation_free_bytes" -lt "$MIN_FREE_BYTES" ]
+          then
+            pipeline_level=CRITICAL
+            pipeline_capture="Capture is paused at its $(human_bytes "$MIN_FREE_BYTES") safety floor."
+          else
+            pipeline_capture="Capture can continue for now."
+          fi
+          raise_alert generation_backlog "$pipeline_level" \
+            "$pipeline_cause
+Impact: $generation_backlog sealed generation(s) are waiting. $generation_free_detail $pipeline_capture No local backup data was deleted.
+Action: Check Backblaze Caps & Alerts and API access. Hetzner retries automatically every ${GENERATION_UPLOAD_RETRY_SECS}s."
+        elif [ "$generation_backlog" -lt "$GENERATION_BACKLOG_WARN_COUNT" ] \
+          && [ "$generation_free_valid" = true ] \
+          && [ "$generation_free_bytes" -ge "$DISK_WARNING_RECOVERY_BYTES" ]
+        then
+          clear_alert generation_backlog \
+            "Backblaze verification is working, the sealed queue is below $GENERATION_BACKLOG_WARN_COUNT generation(s), and local capture has safe headroom again."
+        fi
+        generation_previous_backlog=$generation_backlog
       else
+        generation_previous_backlog=
         raise_alert generation_backlog ERROR \
-          "The sealed generation backlog could not be inspected safely."
+          "Cause: Hetzner could not inspect the sealed-generation queue safely.
+Impact: Upload cleanup is paused and local data is retained.
+Action: Inspect the recorder volume; automatic checks continue every ${GENERATION_UPLOAD_RETRY_SECS}s."
       fi
+      # This older derivative incident was replaced by generation_backlog so a
+      # single remote failure cannot fan out into upload, backlog, and disk
+      # notifications.
+      discard_alert generation_upload_failed
     fi
     sleep "$GENERATION_UPLOAD_RETRY_SECS"
   done
@@ -2204,29 +2585,28 @@ run_b2_usage_scan() {
 
 update_b2_usage_alerts() {
   usage_bytes=$1
-  usage_critical_active=$(alert_file b2_usage_critical active)
-  usage_warning_active=$(alert_file b2_usage_warning active)
+  usage_active=$(alert_file b2_usage active)
+
+  # Retire the two-key implementation silently. One account-capacity problem
+  # must escalate and recover as one incident, not as warning/critical pairs.
+  discard_alert b2_usage_warning
+  discard_alert b2_usage_critical
 
   if [ "$usage_bytes" -ge "$B2_USAGE_CRITICAL_BYTES" ]; then
-    raise_alert_once b2_usage_critical CRITICAL \
-      "Backblaze account storage=${usage_bytes} bytes reached near-limit threshold=${B2_USAGE_CRITICAL_BYTES} bytes (free allowance=${B2_USAGE_ALLOWANCE_BYTES}). Uploads and indefinite remote retention continue."
-  elif [ -e "$usage_critical_active" ] \
-    && [ "$usage_bytes" -lt "$B2_USAGE_CRITICAL_RECOVERY_BYTES" ]
-  then
-    clear_alert b2_usage_critical \
-      "Backblaze account storage recovered below the critical threshold minus hysteresis; stored bytes=${usage_bytes}."
-  fi
-
-  if [ "$usage_bytes" -ge "$B2_USAGE_WARNING_BYTES" ] \
-    && [ "$usage_bytes" -lt "$B2_USAGE_CRITICAL_BYTES" ]
-  then
-    raise_alert_once b2_usage_warning WARNING \
-      "Backblaze account storage=${usage_bytes} bytes reached warning threshold=${B2_USAGE_WARNING_BYTES} bytes (free allowance=${B2_USAGE_ALLOWANCE_BYTES}). Hidden versions and unfinished large-file parts are included."
-  elif [ -e "$usage_warning_active" ] \
+    raise_alert_once b2_usage CRITICAL \
+      "Cause: The archive stores $(human_decimal_bytes "$usage_bytes"), above the $(human_decimal_bytes "$B2_USAGE_CRITICAL_BYTES") critical threshold for the $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES") free allowance.
+Impact: Existing objects remain safe, but Backblaze may reject new uploads when the configured spending cap is reached. Nothing is deleted automatically.
+Action: If indefinite retention is intended, enable paid storage or raise the storage cap in Backblaze Caps & Alerts."
+  elif [ "$usage_bytes" -ge "$B2_USAGE_WARNING_BYTES" ]; then
+    raise_alert_once b2_usage WARNING \
+      "Cause: The archive stores $(human_decimal_bytes "$usage_bytes"), above the $(human_decimal_bytes "$B2_USAGE_WARNING_BYTES") warning threshold for the $(human_decimal_bytes "$B2_USAGE_ALLOWANCE_BYTES") free allowance.
+Impact: Existing objects remain safe. Hidden versions and unfinished parts are included in this measurement.
+Action: Before 10 GB, decide whether to enable paid storage or change the retention plan."
+  elif [ -e "$usage_active" ] \
     && [ "$usage_bytes" -lt "$B2_USAGE_WARNING_RECOVERY_BYTES" ]
   then
-    clear_alert b2_usage_warning \
-      "Backblaze account storage recovered below the warning threshold minus hysteresis; stored bytes=${usage_bytes}."
+    clear_alert b2_usage \
+      "Backblaze storage is back below the warning recovery threshold; current usage is $(human_decimal_bytes "$usage_bytes")."
   fi
 }
 
@@ -2445,7 +2825,6 @@ then
   exit 2
 fi
 B2_USAGE_WARNING_RECOVERY_BYTES=$((B2_USAGE_WARNING_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
-B2_USAGE_CRITICAL_RECOVERY_BYTES=$((B2_USAGE_CRITICAL_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
 if [ "$CACHE_MODE" = b2-generations ]; then
   if ! valid_replay_shell_uint "$REPLAY_RESUME_HEADROOM_SLOTS" \
     || [ "$REPLAY_RESUME_HEADROOM_SLOTS" \
@@ -2858,8 +3237,10 @@ Action: Retrying every ${RESTART_DELAY_SECS}s; Hetzner will not skip forward unt
       "The dedicated recorder volume or fail-closed marker is invalid; capture is paused."
   elif [ "$exit_reason" = low_disk_floor ]; then
     if current_free_bytes=$(available_bytes) && [ "$current_free_bytes" -lt "$MIN_FREE_BYTES" ]; then
-      raise_alert disk_critical CRITICAL \
-        "Recorder stopped at the disk floor. Free bytes=$current_free_bytes, floor=$MIN_FREE_BYTES."
+      # The disk monitor and child-exit path share the same incident key. A
+      # single low-space stop must not fan out into separate disk and pipeline
+      # notifications.
+      update_disk_alerts "$current_free_bytes"
     else
       raise_recorder_restart_alert \
         "Recorder exited after a low-disk stop; status=$status last_slot=$last_slot journal_age_seconds=$journal_age."
