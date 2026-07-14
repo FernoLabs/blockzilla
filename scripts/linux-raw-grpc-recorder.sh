@@ -884,9 +884,24 @@ monitor_primary_sync_alert() {
 
 monitor_child() {
   monitored_pid=$1
-  trap 'exit 0' INT TERM HUP
+  monitor_sleep_pid=
+  trap '
+    if [ -n "$monitor_sleep_pid" ]; then
+      kill -TERM "$monitor_sleep_pid" 2>/dev/null || true
+      wait "$monitor_sleep_pid" 2>/dev/null || true
+    fi
+    exit 0
+  ' INT TERM HUP
   while kill -0 "$monitored_pid" 2>/dev/null; do
-    sleep "$MONITOR_INTERVAL_SECS"
+    # Waiting on an explicit child makes TERM interruptible in dash. A foreground
+    # sleep defers the trap until its full interval, which can turn an immediate
+    # provider replay response into a 30-second reconnect delay.
+    sleep "$MONITOR_INTERVAL_SECS" &
+    monitor_sleep_pid=$!
+    if ! wait "$monitor_sleep_pid" 2>/dev/null; then
+      exit 0
+    fi
+    monitor_sleep_pid=
     if ! kill -0 "$monitored_pid" 2>/dev/null; then
       break
     fi

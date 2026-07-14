@@ -84,6 +84,22 @@ test ! -e "$(alert_file replay_recovery_failed active)"
 test ! -e "$(alert_file replay_recovery_failed last)"
 test "$(alert_title replay_recovery_failed)" = "Provider-gap recovery paused"
 
+# Stopping the monitor must interrupt its interval immediately. Otherwise an
+# already-finished replay probe waits 30 seconds while the provider floor moves.
+MONITOR_INTERVAL_SECS=30
+sleep 30 &
+quick_stop_child_pid=$!
+start_child_monitor "$quick_stop_child_pid"
+sleep 1
+quick_stop_started=$(date +%s)
+kill -TERM "$monitor_pid"
+wait "$monitor_pid"
+quick_stop_elapsed=$(($(date +%s) - quick_stop_started))
+test "$quick_stop_elapsed" -le 2
+kill -TERM "$quick_stop_child_pid" 2>/dev/null || true
+wait "$quick_stop_child_pid" 2>/dev/null || true
+monitor_pid=
+
 # Disk incidents recover only after their configured hysteresis margin.
 MIN_FREE_BYTES=100
 DISK_WARN_FREE_BYTES=200
