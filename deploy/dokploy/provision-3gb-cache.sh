@@ -89,6 +89,15 @@ if [ ! -e "$CACHE_IMAGE" ]; then
   # mke2fs discards preallocated regular-file extents by default. Disabling
   # discard preserves the hard reservation on the host root filesystem.
   mkfs.ext4 -F -m 0 -E nodiscard -L "$CACHE_LABEL" "$image_tmp" >/dev/null
+  [ "$(stat -c %s "$image_tmp")" -eq "$CACHE_BYTES" ] || \
+    die "formatted cache image has wrong size"
+  allocated_bytes=$(( $(stat -c %b "$image_tmp") * 512 ))
+  [ "$allocated_bytes" -ge "$CACHE_BYTES" ] || \
+    die "formatted cache image is sparse"
+  [ "$(blkid -s TYPE -o value "$image_tmp")" = ext4 ] || \
+    die "formatted cache image is not ext4"
+  [ "$(blkid -s LABEL -o value "$image_tmp")" = "$CACHE_LABEL" ] || \
+    die "formatted cache image has an unexpected filesystem label"
   sync -f "$image_tmp"
   mv "$image_tmp" "$CACHE_IMAGE"
   trap - EXIT INT TERM HUP
