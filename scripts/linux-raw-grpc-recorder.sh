@@ -1656,6 +1656,14 @@ generation_remote_prefix() {
     "$prefix_base" "$CLUSTER_ID" "$ORIGIN_NODE_ID" "$prefix_generation_id"
 }
 
+valid_sha256_hex() {
+  sha256_value=$1
+  [ "${#sha256_value}" -eq 64 ] || return 1
+  case "$sha256_value" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+}
+
 load_upload_chain() {
   UPLOAD_CHAIN_ID=
   UPLOAD_CHAIN_HASH=
@@ -1666,10 +1674,7 @@ load_upload_chain() {
   fi
   IFS=' ' read -r UPLOAD_CHAIN_ID UPLOAD_CHAIN_HASH chain_extra < "$chain_file" || return 1
   valid_generation_id "$UPLOAD_CHAIN_ID" || return 1
-  case "$UPLOAD_CHAIN_HASH" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-    *) return 1 ;;
-  esac
+  valid_sha256_hex "$UPLOAD_CHAIN_HASH" || return 1
   [ -z "${chain_extra:-}" ]
 }
 

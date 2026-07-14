@@ -305,6 +305,25 @@ upload_one_generation
 test ! -e "$upload_dir"
 test -s "$GENERATION_RECEIPT_DIR/$upload_id.json"
 test -s "$GENERATION_RECEIPT_DIR/.chain"
+load_upload_chain
+test "$UPLOAD_CHAIN_ID" = "$upload_id"
+test "${#UPLOAD_CHAIN_HASH}" -eq 64
+test "$UPLOAD_CHAIN_HASH" = "$(printf 'a%.0s' $(seq 1 64))"
+
+# The next generation reloads the persisted 64-hex chain and binds its receipt
+# to the predecessor before the local sealed copy can be removed.
+second_upload_id=slot-00000000000000000124
+second_upload_dir=$SEALED_GENERATION_DIR/$second_upload_id
+mkdir "$second_upload_dir"
+printf '%s\n' payload-2 > "$second_upload_dir/payload"
+upload_one_generation
+test ! -e "$second_upload_dir"
+test -s "$GENERATION_RECEIPT_DIR/$second_upload_id.json"
+load_upload_chain
+test "$UPLOAD_CHAIN_ID" = "$second_upload_id"
+test "$UPLOAD_CHAIN_HASH" = "$(printf 'a%.0s' $(seq 1 64))"
+test "$("$GENERATION_PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["predecessor_manifest_sha256"])' \
+  "$GENERATION_RECEIPT_DIR/$second_upload_id.json")" = "$(printf 'a%.0s' $(seq 1 64))"
 
 # A validated replay-window failure first creates immutable generation evidence,
 # then advances the durable monitoring pointer without rotating or deleting data.
