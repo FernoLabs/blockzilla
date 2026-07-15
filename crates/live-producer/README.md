@@ -72,10 +72,11 @@ generations oldest-first through a fsynced intent. It publishes an exact
 retained-boundary anchor when the successor continues the same logical stream;
 an independently replayable legacy base-zero successor needs no anchor. It
 never accepts an upload receipt, heartbeat, or byte watermark as deletion
-authority. Production sender/receiver services are not deployed yet, so the
-current `capture-grpc` process must not be replaced until the private route, key
-material, replay, archive-writer recovery, and power-loss rollout tests are
-complete. See
+authority. The Hetzner Compose sender is available behind an inactive
+`replication` profile, but the production receiver/private route and key
+material are not deployed yet. The current `capture-grpc` process must not be
+replaced until the route, replay, archive-writer recovery, and power-loss
+rollout tests are complete. See
 [`docs/live-ingest-redundancy.md`](../../docs/live-ingest-redundancy.md) for the
 protocol and rollout sequence.
 

@@ -37,6 +37,8 @@ COPY --from=builder --chown=0:0 /src/target/release/blockzilla-live-producer \
     /usr/local/bin/blockzilla-live-producer
 COPY --chown=0:0 --chmod=0755 scripts/linux-raw-grpc-recorder.sh \
     /usr/local/bin/blockzilla-raw-recorder
+COPY --chown=0:0 --chmod=0755 scripts/run-grpc-raw-replicator.sh \
+    /usr/local/bin/blockzilla-raw-replicator
 COPY --chown=0:0 --chmod=0755 scripts/s3_multipart_upload.py \
     /usr/local/bin/blockzilla-s3-upload
 

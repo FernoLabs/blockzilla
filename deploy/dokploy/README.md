@@ -49,9 +49,10 @@ the block enters the bounded RAM fan-out ring. A normal generation is capped at
    not Blockzilla synchronization. Local or remote deletion additionally
    requires a valid signed Blockzilla durable ACK for the exact generation.
    The signed receiver/sender protocol and crash-recoverable local ACK cleanup
-   are implemented and locally tested. They are not present in the current
-   production Compose deployment; production local cleanup and all remote
-   cleanup therefore remain locked, and capture pauses at the hard local floor.
+   are implemented and locally tested. The Compose file includes the Hetzner
+   sender behind the opt-in `replication` profile. Until that profile and the
+   Blockzilla receiver/private route are activated, production local cleanup and
+   all remote cleanup remain locked and capture pauses at the hard local floor.
 
 Routine R2 publication performs conditional PUT plus metadata HEAD, but no
 payload GET. Re-downloading every generation during upload previously consumed
@@ -66,7 +67,8 @@ hard floor: the recorder keeps every durable generation, alerts once, and
 pauses without polling another block.
 
 R2 retention is separate from the configured host limit. The dedicated
-`blockzilla-live-grpc` bucket has a 1 TB safety budget. Its role is overflow and
+`blockzilla-live-grpc` bucket has a self-imposed 1 TB safety budget; R2 does not
+enforce that value as a hard bucket capacity. Its role is overflow and
 disaster recovery, not a six-day history service for every subscriber. The
 receipt-ledger monitor warns at 800 GB and becomes critical at 950 GB. That
 ledger is a lower bound: interrupted/orphan objects require a separate
@@ -86,11 +88,12 @@ alert but can never delete backup data.
 This recorder resumes from its own last durable slot inclusively and checks the
 exact overlap block. It is the only component permitted to use the paid Triton
 token. The authenticated live relay, bounded mTLS raw receiver, signed
-cumulative ACK, and Hetzner sender are implemented and locally tested. They are
-not present in the production Compose deployment yet, and the historical
-Yellowstone reader is still missing. Until the receiver route and sender are
-deployed, Blockzilla must remain stopped rather than silently starting a second
-paid full-block subscription.
+cumulative ACK, and Hetzner sender are implemented and locally tested. The
+Hetzner sender is now defined as an inactive Compose profile, but the Blockzilla
+receiver, private route, certificates, and receiver-spool consumer are not
+deployed yet. The historical Yellowstone reader is also still missing. Until
+the receiver route and sender are activated, Blockzilla must remain stopped
+rather than silently starting a second paid full-block subscription.
 
 The current production recorder/backup layer:
 
@@ -102,12 +105,13 @@ The current production recorder/backup layer:
   only to restore a primary backlog;
 - it can create and verify R2 upload receipts, but those receipts have no local
   or remote deletion authority;
-- Blockzilla's durable raw receiver and Hetzner sender are not deployed, so no
-  production worker consumes the durable ACK WAL. The tested sender now owns
-  local oldest-first ACK cleanup, but production local eviction and remote
-  pruning remain locked until that sender/receiver route is deployed.
+- Blockzilla's durable raw receiver is not deployed and the Hetzner sender
+  profile is inactive, so no production worker consumes the durable ACK WAL.
+  The sender owns local oldest-first ACK cleanup, but production local eviction
+  and remote pruning remain locked until that sender/receiver route is active.
 
-The next deployment step activates the implemented ACK-driven local retention
+The next deployment step starts the Blockzilla receiver on a private route and
+then enables the `replication` profile, activating ACK-driven local retention
 without changing the WAL-first hot path.
 Blockzilla fsyncs the exact raw WAL and cursor, then signs a cumulative
 sequence/digest-chain receipt. Hetzner verifies and fsyncs that ACK before a
@@ -115,8 +119,9 @@ whole generation becomes eligible for local or R2 cleanup. The bounded RAM ring
 remains fan-out only and may evict entries freely because their WAL records are
 already durable.
 
-The optional primary-sync heartbeat remains disabled until the real relay
-consumer writes one. The single-source gateway and durable receipt design is
+The optional primary-sync heartbeat remains disabled until the sender is
+enabled. It then points at the real cumulative ACK WAL, never a generic ping.
+The single-source gateway and durable receipt design is
 documented in
 [`docs/live-grpc-single-source.md`](../../docs/live-grpc-single-source.md); a
 generic ping is not treated as synchronization or deletion authority.
@@ -166,7 +171,7 @@ Create a Compose application from this repository and select
 `docker-compose.dokploy.yml`. Copy the non-secret settings from
 `.env.example` into Dokploy's Environment panel.
 
-Create five Compose **File** mounts under **Advanced → Mounts**:
+Create the five recorder Compose **File** mounts under **Advanced → Mounts**:
 
 | Dokploy file name | Local example | Container secret |
 | --- | --- | --- |
@@ -176,6 +181,19 @@ Create five Compose **File** mounts under **Advanced → Mounts**:
 | `cloudflare-r2.env` | `cloudflare-r2-credentials.example` | `/run/secrets/r2_credentials` |
 | `backblaze-blockzilla.env` | `backblaze-credentials.example` | `/run/secrets/backblaze_credentials` |
 
+Before enabling the `replication` profile, also create these five files. The
+private key is copied at container startup into a UID-10001-owned, mode-0600
+tmpfs file because Compose file mounts are read-only and normally too
+permissive for the fail-closed TLS key loader.
+
+| Dokploy file name | Local starting point | Container secret |
+| --- | --- | --- |
+| `ingest-replica.json` | `ingest-replica.json.example` with the real private endpoint | `/run/secrets/ingest_replica_config` |
+| `blockzilla-primary-ca.crt` | issuing CA certificate | `/run/secrets/blockzilla_primary_ca` |
+| `hetzner-replica.crt` | Hetzner mTLS client certificate | `/run/secrets/hetzner_replica_certificate` |
+| `hetzner-replica.key` | matching mTLS client private key | `/run/secrets/hetzner_replica_private_key` |
+| `blockzilla-receipt.pub` | Blockzilla Ed25519 receipt public key | `/run/secrets/blockzilla_receipt_public_key` |
+
 Keep these host-file settings:
 
 ```dotenv
@@ -184,6 +202,11 @@ BLOCKZILLA_RAW_RELAY_X_TOKEN_HOST_FILE=../files/yellowstone-relay-x-token
 BLOCKZILLA_TELEGRAM_BOT_TOKEN_HOST_FILE=../files/telegram-bot-token
 BLOCKZILLA_R2_CREDENTIALS_HOST_FILE=../files/cloudflare-r2.env
 BLOCKZILLA_B2_CREDENTIALS_HOST_FILE=../files/backblaze-blockzilla.env
+BLOCKZILLA_INGEST_REPLICA_CONFIG_HOST_FILE=../files/ingest-replica.json
+BLOCKZILLA_PRIMARY_CA_HOST_FILE=../files/blockzilla-primary-ca.crt
+BLOCKZILLA_REPLICA_CERTIFICATE_HOST_FILE=../files/hetzner-replica.crt
+BLOCKZILLA_REPLICA_PRIVATE_KEY_HOST_FILE=../files/hetzner-replica.key
+BLOCKZILLA_RECEIPT_PUBLIC_KEY_HOST_FILE=../files/blockzilla-receipt.pub
 ```
 
 Credential files are parsed as literal allowlisted `KEY=value` data and are
@@ -243,7 +266,7 @@ this exact `record-grpc-raw` CLI contract:
 --relay-max-clients "$BLOCKZILLA_RAW_RELAY_MAX_CLIENTS"
 ```
 
-For this Compose deployment, enable it with
+For transient same-network consumers only, enable it with
 `BLOCKZILLA_RAW_RELAY_BIND=0.0.0.0:10001`. Consumers on the private Compose
 network connect to `http://raw-recorder:10001`; no host port is published. The
 downstream token comes only from `/run/secrets/grpc_relay_x_token`. It must be a
@@ -263,6 +286,27 @@ Blockzilla, not a normal subscriber endpoint. A block becomes visible only after
 both its WAL frame and handoff row have been fsynced, and relay publication
 failure stops the recorder.
 
+The durable Blockzilla path is the `raw-replicator` service, not this bounded
+RAM relay. Configure the private HTTPS receiver endpoint and matching TLS
+`server_name` in `ingest-replica.json`, start the Blockzilla receiver first,
+then set:
+
+```dotenv
+COMPOSE_PROFILES=replication
+BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS=600
+```
+
+The Compose profile automatically points the recorder monitor at
+`/data/replication-control/cumulative-ack.wal`; an operator cannot accidentally
+enable replication through `COMPOSE_PROFILES` while leaving the stale-ACK
+Telegram alert off.
+
+The sender reads the shared durable WAL, retries forever, stores verified signed
+ACKs in `replication-control`, and retires only whole ACK-covered generations.
+It has no recorder-health dependency so it can drain a full cache and allow the
+paused recorder to resume. Leave the profile disabled if the receiver route or
+key material is absent; it fails closed and R2 alone cannot provide an ACK.
+
 The R2 usage check is deliberately hourly and follows only the validated local
 receipt chain in `blockzilla-live-grpc`; it does not itself authorize deletion.
 
@@ -272,8 +316,8 @@ the provider-confirmed expired range from these deliberately bypassed 100 slots.
 
 Set `BLOCKZILLA_TELEGRAM_CHAT_ID` and keep Telegram enabled. For a forum topic,
 also set `BLOCKZILLA_TELEGRAM_MESSAGE_THREAD_ID`. Leave
-`BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE` empty for this shadow-recorder-only
-deployment.
+`BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE` empty while the replication profile is
+disabled.
 
 `BLOCKZILLA_RAW_FROM_SLOT` is bootstrap-only. If it is empty, a fresh cache
 starts from the provider's live position. Once a durable row exists, the
@@ -305,7 +349,7 @@ Wait for at least one complete rotation. A healthy local-only check requires:
   its safety copy, manifest, and commit hashes/ETags were verified;
 - crossing the spill-start watermark may copy a generation to R2 but must not
   remove its local directory without a signed Blockzilla ACK;
-- before the ACK sender/receiver and local GC are deployed, pressure reaches the
+- while the replication profile or receiver is inactive, pressure reaches the
   hard floor and pauses capture rather than deleting a local or remote
   generation;
 - the remote prefix is

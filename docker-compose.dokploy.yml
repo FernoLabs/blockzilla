@@ -91,7 +91,9 @@ services:
       BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES: "${BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES:-805306368}"
       BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES: "${BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES:-134217728}"
       BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS: "${BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS:-30}"
-      BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE: "${BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE:-}"
+      # COMPOSE_PROFILES=replication automatically monitors the real ACK WAL.
+      # With no active profile the fallback remains empty and produces no false alert.
+      BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE: "${BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE:-${COMPOSE_PROFILES:+/data/replication-control/cumulative-ack.wal}}"
       BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS: "${BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS:-600}"
 
     volumes:
@@ -144,6 +146,70 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Opt-in durable sender. It reads only fsynced generations from the same
+  # cache, sends them to Blockzilla over mTLS, fsyncs the signed cumulative ACK,
+  # and is the only process allowed to retire ACK-covered local generations.
+  # It deliberately has no dependency on raw-recorder health so it can drain a
+  # full/paused recorder. Enable only after the Blockzilla receiver and private
+  # route are ready with COMPOSE_PROFILES=replication.
+  raw-replicator:
+    profiles: ["replication"]
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.raw-recorder
+      args:
+        RUST_VERSION: "1.96.0"
+    image: ${BLOCKZILLA_RAW_IMAGE:-blockzilla-live-recorder:local}
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-raw-replicator"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+    environment:
+      BLOCKZILLA_REPLICATION_CONFIG_FILE: /run/secrets/ingest_replica_config
+      BLOCKZILLA_REPLICATION_CACHE_ROOT: "${BLOCKZILLA_RAW_CACHE_ROOT:-/data/grpc-cache}"
+      BLOCKZILLA_REPLICATION_PRIVATE_KEY_SOURCE: /run/secrets/hetzner_replica_private_key
+      BLOCKZILLA_REPLICATION_POLL_INTERVAL_MS: "${BLOCKZILLA_REPLICATION_POLL_INTERVAL_MS:-1000}"
+
+    volumes:
+      - type: volume
+        source: raw_data
+        target: /data
+        volume:
+          nocopy: true
+    secrets:
+      - ingest_replica_config
+      - blockzilla_primary_ca
+      - hetzner_replica_certificate
+      - hetzner_replica_private_key
+      - blockzilla_receipt_public_key
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=10001,gid=10001
+
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: ${BLOCKZILLA_REPLICATION_MEMORY_LIMIT:-768m}
+    mem_reservation: ${BLOCKZILLA_REPLICATION_MEMORY_RESERVATION:-128m}
+    memswap_limit: ${BLOCKZILLA_REPLICATION_MEMORY_LIMIT:-768m}
+    deploy:
+      resources:
+        limits:
+          memory: ${BLOCKZILLA_REPLICATION_MEMORY_LIMIT:-768m}
+          pids: 64
+        reservations:
+          memory: ${BLOCKZILLA_REPLICATION_MEMORY_RESERVATION:-128m}
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   raw_data:
     name: ${BLOCKZILLA_RAW_VOLUME_NAME:-blockzilla-live-raw-data-external}
@@ -163,3 +229,13 @@ secrets:
     file: ${BLOCKZILLA_R2_CREDENTIALS_HOST_FILE:-../files/cloudflare-r2.env}
   backblaze_credentials:
     file: ${BLOCKZILLA_B2_CREDENTIALS_HOST_FILE:-../files/backblaze-blockzilla.env}
+  ingest_replica_config:
+    file: ${BLOCKZILLA_INGEST_REPLICA_CONFIG_HOST_FILE:-../files/ingest-replica.json}
+  blockzilla_primary_ca:
+    file: ${BLOCKZILLA_PRIMARY_CA_HOST_FILE:-../files/blockzilla-primary-ca.crt}
+  hetzner_replica_certificate:
+    file: ${BLOCKZILLA_REPLICA_CERTIFICATE_HOST_FILE:-../files/hetzner-replica.crt}
+  hetzner_replica_private_key:
+    file: ${BLOCKZILLA_REPLICA_PRIVATE_KEY_HOST_FILE:-../files/hetzner-replica.key}
+  blockzilla_receipt_public_key:
+    file: ${BLOCKZILLA_RECEIPT_PUBLIC_KEY_HOST_FILE:-../files/blockzilla-receipt.pub}
