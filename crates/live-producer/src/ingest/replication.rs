@@ -12,13 +12,16 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+};
 
 use anyhow::{Context, Result as AnyResult, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    dedup::{ContentDigest, LogicalKey, ObservationId},
+    dedup::{ContentDigest, IngressRecordMeta, LogicalKey, ObservationId},
     spool::{DurableSpoolRecord, SpoolLocation},
 };
 
@@ -1019,11 +1022,78 @@ impl Crc32c {
 const CUMULATIVE_ACK_WAL_MAGIC: &[u8; 8] = b"BZCACK01";
 const CUMULATIVE_ACK_FRAME_MAGIC: &[u8; 4] = b"BZCA";
 const CUMULATIVE_ACK_COMMIT_MAGIC: &[u8; 4] = b"CMIT";
-const CUMULATIVE_ACK_FRAME_VERSION: u16 = 1;
+// Version 2 binds an ACK to the complete physical WAL identity as well as its byte location. A
+// location alone can repeat after a storage-generation rotation and must never authorize cursor
+// advancement in another physical journal.
+const CUMULATIVE_ACK_FRAME_VERSION: u16 = 2;
 const CUMULATIVE_ACK_WAL_HEADER_LEN: u64 = CUMULATIVE_ACK_WAL_MAGIC.len() as u64;
 const CUMULATIVE_ACK_FRAME_FIXED_LEN: u64 = 4 + 2 + 4 + 4;
 const CUMULATIVE_ACK_FRAME_TRAILER_LEN: u64 = 4 + 4;
 const MAX_CUMULATIVE_ACK_FRAME_BYTES: usize = 1024 * 1024;
+/// Compact after this many bytes have accumulated beyond the smallest snapshot of the currently
+/// retained stream states. The snapshot itself may legitimately exceed this value; using growth
+/// rather than absolute WAL length avoids rewriting a large baseline on every later ACK.
+const CUMULATIVE_ACK_COMPACT_GROWTH_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhysicalLocalSpoolBinding {
+    metadata: IngressRecordMeta,
+    location: SpoolLocation,
+}
+
+impl PhysicalLocalSpoolBinding {
+    fn from_record(record: &DurableSpoolRecord) -> Self {
+        Self {
+            metadata: record.metadata().clone(),
+            location: record.location(),
+        }
+    }
+}
+
+/// Exact logical prefix tail mapped to one verified physical local WAL frame.
+///
+/// Hot storage generations have distinct physical journal IDs, but replication deliberately keeps
+/// one logical stream across rotations. This capability can only be constructed inside the crate
+/// after the physical frame and its logical mapping have both been verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableReplicationWitness {
+    stream: ReplicationStreamId,
+    through_sequence: u64,
+    through_content_digest: ContentDigest,
+    local_binding: PhysicalLocalSpoolBinding,
+}
+
+impl DurableReplicationWitness {
+    pub(crate) fn from_verified_mapping(
+        local_record: &DurableSpoolRecord,
+        stream: ReplicationStreamId,
+        through_sequence: u64,
+        through_content_digest: ContentDigest,
+    ) -> AnyResult<Self> {
+        let metadata = local_record.metadata();
+        ensure!(
+            metadata.cluster_id == stream.cluster_id
+                && metadata.observation.origin_node_id == stream.origin_node_id
+                && metadata.source_id == stream.source_id,
+            "logical replication stream does not match its physical local WAL frame"
+        );
+        ensure!(
+            metadata.content_digest == through_content_digest,
+            "logical replication digest does not match its physical local WAL frame"
+        );
+        Ok(Self {
+            stream,
+            through_sequence,
+            through_content_digest,
+            local_binding: PhysicalLocalSpoolBinding::from_record(local_record),
+        })
+    }
+
+    pub fn local_location(&self) -> SpoolLocation {
+        self.local_binding.location
+    }
+}
 
 /// A verified ACK after it has been appended to the local cumulative-ACK journal and fsynced.
 ///
@@ -1031,7 +1101,7 @@ const MAX_CUMULATIVE_ACK_FRAME_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableCumulativeAck {
     ack: VerifiedCumulativeAck,
-    local_location: SpoolLocation,
+    local_binding: PhysicalLocalSpoolBinding,
 }
 
 impl DurableCumulativeAck {
@@ -1040,7 +1110,14 @@ impl DurableCumulativeAck {
     }
 
     pub fn local_location(&self) -> SpoolLocation {
-        self.local_location
+        self.local_binding.location
+    }
+
+    pub(crate) fn matches_replication_witness(&self, witness: &DurableReplicationWitness) -> bool {
+        self.ack.ack().stream == witness.stream
+            && self.ack.ack().through_sequence == witness.through_sequence
+            && self.ack.ack().through_content_digest == witness.through_content_digest
+            && self.local_binding == witness.local_binding
     }
 }
 
@@ -1102,7 +1179,7 @@ impl CumulativeAckWalState {
                     "cumulative ACK reused one sequence for a different digest chain"
                 );
                 ensure!(
-                    stored.local_location == previous.local_location,
+                    stored.local_binding == previous.local_binding,
                     "cumulative ACK reused one sequence for a different local spool frame"
                 );
             }
@@ -1135,8 +1212,11 @@ impl CumulativeAckWalState {
 #[derive(Debug)]
 pub struct CumulativeAckWal {
     path: PathBuf,
+    /// Stable exclusion survives atomic WAL replacement during compaction.
+    _lock_file: File,
     writer: BufWriter<File>,
     state: CumulativeAckWalState,
+    compacted_baseline_bytes: u64,
     poisoned: bool,
 }
 
@@ -1145,6 +1225,10 @@ impl CumulativeAckWal {
         let path = path.as_ref().to_path_buf();
         let parent = durable_parent(&path);
         create_dir_all_durable(&parent)?;
+        let lock_path = cumulative_ack_lock_path(&path);
+        let lock_file = open_cumulative_ack_lock_file(&lock_path)?;
+        try_lock_cumulative_ack_wal(&lock_file, &lock_path)?;
+        remove_orphaned_cumulative_ack_compaction(&path)?;
         let mut file = open_cumulative_ack_file(&path)?;
         try_lock_cumulative_ack_wal(&file, &path)?;
         initialize_cumulative_ack_wal(&mut file, &path)?;
@@ -1159,10 +1243,13 @@ impl CumulativeAckWal {
         }
         file.seek(std::io::SeekFrom::End(0))
             .with_context(|| format!("seek cumulative ACK WAL {}", path.display()))?;
+        let compacted_baseline_bytes = cumulative_ack_compacted_length(&recovered.state)?;
         Ok(Self {
             path,
+            _lock_file: lock_file,
             writer: BufWriter::new(file),
             state: recovered.state,
+            compacted_baseline_bytes,
             poisoned: false,
         })
     }
@@ -1179,16 +1266,22 @@ impl CumulativeAckWal {
         self.state.highest_primary_terms.get(cluster_id).copied()
     }
 
+    /// Latest cumulative ACK that previously crossed this WAL's fsync boundary for `stream`.
+    /// Recovery revalidates framing, checksums, transition monotonicity, and the local spool
+    /// binding stored with the ACK. Signature trust was established before the original append.
+    pub fn latest_stream_ack(&self, stream: &ReplicationStreamId) -> Option<&CumulativePrimaryAck> {
+        self.state
+            .latest_stream_acks
+            .get(stream)
+            .map(|stored| &stored.ack)
+    }
+
     /// Persist an already-authenticated ACK and bind it to the exact local prefix-tail frame.
     pub fn commit_verified(
         &mut self,
         ack: VerifiedCumulativeAck,
         local_tail: &DurableSpoolRecord,
     ) -> AnyResult<DurableCumulativeAck> {
-        ensure!(
-            !self.poisoned,
-            "cumulative ACK WAL writer is poisoned; reopen it to recover before appending"
-        );
         let signed = ack.ack();
         let metadata = local_tail.metadata();
         ensure!(
@@ -1207,62 +1300,76 @@ impl CumulativeAckWal {
             "cumulative ACK content digest does not match durable local spool record"
         );
 
-        let local_location = local_tail.location();
+        self.commit_bound(ack, PhysicalLocalSpoolBinding::from_record(local_tail))
+    }
+
+    /// Persist an authenticated ACK against a verified logical-to-physical generation mapping.
+    pub fn commit_verified_replication(
+        &mut self,
+        ack: VerifiedCumulativeAck,
+        witness: &DurableReplicationWitness,
+    ) -> AnyResult<DurableCumulativeAck> {
+        let signed = ack.ack();
+        ensure!(
+            signed.stream == witness.stream,
+            "cumulative ACK stream does not match durable replication witness"
+        );
+        ensure!(
+            signed.through_sequence == witness.through_sequence,
+            "cumulative ACK sequence does not match durable replication witness"
+        );
+        ensure!(
+            signed.through_content_digest == witness.through_content_digest,
+            "cumulative ACK content digest does not match durable replication witness"
+        );
+        self.commit_bound(ack, witness.local_binding.clone())
+    }
+
+    /// Durably record a newly authenticated fencing term or signing-key transition for the exact
+    /// prefix already bound in this WAL. This is used when `GetAck` returns the same content prefix
+    /// under a newer primary term: the stronger fence must survive a crash even though the source
+    /// cursor does not advance and no new local payload witness exists.
+    pub fn commit_verified_existing_prefix(
+        &mut self,
+        ack: VerifiedCumulativeAck,
+    ) -> AnyResult<DurableCumulativeAck> {
+        let signed = ack.ack();
+        let previous = self
+            .state
+            .latest_stream_acks
+            .get(&signed.stream)
+            .context("cannot update a cumulative ACK fence without a durable local prefix")?;
+        ensure!(
+            signed.through_sequence == previous.ack.through_sequence
+                && signed.through_content_digest == previous.ack.through_content_digest
+                && signed.rolling_chain_digest == previous.ack.rolling_chain_digest,
+            "cumulative ACK fence update changed the durable content prefix"
+        );
+        self.commit_bound(ack, previous.local_binding.clone())
+    }
+
+    fn commit_bound(
+        &mut self,
+        ack: VerifiedCumulativeAck,
+        local_binding: PhysicalLocalSpoolBinding,
+    ) -> AnyResult<DurableCumulativeAck> {
+        ensure!(
+            !self.poisoned,
+            "cumulative ACK WAL writer is poisoned; reopen it to recover before appending"
+        );
+        let signed = ack.ack();
         let stored = StoredCumulativeAckFrame {
             ack: signed.clone(),
-            local_location,
+            local_binding: local_binding.clone(),
         };
         self.state.validate_transition(&stored)?;
-        let payload = serde_json::to_vec(&stored).context("encode cumulative ACK")?;
-        ensure!(
-            payload.len() <= MAX_CUMULATIVE_ACK_FRAME_BYTES,
-            "cumulative ACK frame exceeds {} bytes",
-            MAX_CUMULATIVE_ACK_FRAME_BYTES
-        );
-        let length = u32::try_from(payload.len()).context("cumulative ACK length exceeds u32")?;
-        let version_bytes = CUMULATIVE_ACK_FRAME_VERSION.to_le_bytes();
-        let length_bytes = length.to_le_bytes();
-        let mut header_crc = Crc32c::new();
-        header_crc.update(CUMULATIVE_ACK_FRAME_MAGIC);
-        header_crc.update(&version_bytes);
-        header_crc.update(&length_bytes);
-        let mut payload_crc = Crc32c::new();
-        payload_crc.update(&payload);
+        self.compact_if_needed()?;
+        let frame = encode_cumulative_ack_frame(&stored)?;
 
         self.poisoned = true;
         self.writer
-            .write_all(CUMULATIVE_ACK_FRAME_MAGIC)
-            .with_context(|| format!("write cumulative ACK frame magic {}", self.path.display()))?;
-        self.writer.write_all(&version_bytes).with_context(|| {
-            format!("write cumulative ACK frame version {}", self.path.display())
-        })?;
-        self.writer.write_all(&length_bytes).with_context(|| {
-            format!("write cumulative ACK frame length {}", self.path.display())
-        })?;
-        self.writer
-            .write_all(&header_crc.finish().to_le_bytes())
-            .with_context(|| {
-                format!(
-                    "write cumulative ACK header checksum {}",
-                    self.path.display()
-                )
-            })?;
-        self.writer
-            .write_all(&payload)
-            .with_context(|| format!("write cumulative ACK WAL payload {}", self.path.display()))?;
-        self.writer
-            .write_all(&payload_crc.finish().to_le_bytes())
-            .with_context(|| {
-                format!(
-                    "write cumulative ACK payload checksum {}",
-                    self.path.display()
-                )
-            })?;
-        self.writer
-            .write_all(CUMULATIVE_ACK_COMMIT_MAGIC)
-            .with_context(|| {
-                format!("write cumulative ACK commit marker {}", self.path.display())
-            })?;
+            .write_all(&frame)
+            .with_context(|| format!("write cumulative ACK frame {}", self.path.display()))?;
         self.writer
             .flush()
             .with_context(|| format!("flush cumulative ACK WAL {}", self.path.display()))?;
@@ -1272,10 +1379,97 @@ impl CumulativeAckWal {
             .with_context(|| format!("sync cumulative ACK WAL {}", self.path.display()))?;
         self.state.record(stored);
         self.poisoned = false;
-        Ok(DurableCumulativeAck {
-            ack,
-            local_location,
-        })
+        Ok(DurableCumulativeAck { ack, local_binding })
+    }
+
+    fn compact_if_needed(&mut self) -> AnyResult<()> {
+        let current_len = self
+            .writer
+            .get_ref()
+            .metadata()
+            .with_context(|| format!("inspect cumulative ACK WAL {}", self.path.display()))?
+            .len();
+        let compact_after = self
+            .compacted_baseline_bytes
+            .checked_add(CUMULATIVE_ACK_COMPACT_GROWTH_BYTES)
+            .context("cumulative ACK compaction threshold overflow")?;
+        if current_len < compact_after {
+            return Ok(());
+        }
+
+        self.poisoned = true;
+        self.writer
+            .flush()
+            .with_context(|| format!("flush cumulative ACK WAL {}", self.path.display()))?;
+        let parent = durable_parent(&self.path);
+        // A single deterministic temporary path bounds crash debris to one file. `open` removes a
+        // validated orphan while holding the stable sidecar lock before it touches the live WAL.
+        let temporary = cumulative_ack_compaction_path(&self.path)?;
+        let compacted = (|| -> AnyResult<(BufWriter<File>, u64)> {
+            let mut file = open_receipt_descriptor(&temporary, true).with_context(|| {
+                format!(
+                    "create cumulative ACK compacted WAL {}",
+                    temporary.display()
+                )
+            })?;
+            try_lock_cumulative_ack_wal(&file, &temporary)?;
+            file.write_all(CUMULATIVE_ACK_WAL_MAGIC)?;
+
+            let mut latest = self.state.latest_stream_acks.values().collect::<Vec<_>>();
+            latest.sort_unstable_by(|left, right| {
+                (
+                    left.ack.stream.cluster_id.as_str(),
+                    left.ack.primary_term,
+                    left.ack.stream.origin_node_id.as_str(),
+                    left.ack.stream.source_id.as_str(),
+                    left.ack.stream.journal_id,
+                )
+                    .cmp(&(
+                        right.ack.stream.cluster_id.as_str(),
+                        right.ack.primary_term,
+                        right.ack.stream.origin_node_id.as_str(),
+                        right.ack.stream.source_id.as_str(),
+                        right.ack.stream.journal_id,
+                    ))
+            });
+            for stored in latest {
+                file.write_all(&encode_cumulative_ack_frame(stored)?)?;
+            }
+            file.sync_data().with_context(|| {
+                format!("sync cumulative ACK compacted WAL {}", temporary.display())
+            })?;
+            let compacted_len = file
+                .metadata()
+                .with_context(|| {
+                    format!(
+                        "inspect cumulative ACK compacted WAL {}",
+                        temporary.display()
+                    )
+                })?
+                .len();
+            fs::rename(&temporary, &self.path).with_context(|| {
+                format!(
+                    "publish cumulative ACK compacted WAL {}",
+                    self.path.display()
+                )
+            })?;
+            sync_directory(&parent)?;
+            file.seek(std::io::SeekFrom::End(0))?;
+            Ok((BufWriter::new(file), compacted_len))
+        })();
+        match compacted {
+            Ok((replacement, compacted_len)) => {
+                let previous = std::mem::replace(&mut self.writer, replacement);
+                drop(previous);
+                self.compacted_baseline_bytes = compacted_len;
+                self.poisoned = false;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -1283,7 +1477,57 @@ impl CumulativeAckWal {
 #[serde(deny_unknown_fields)]
 struct StoredCumulativeAckFrame {
     ack: CumulativePrimaryAck,
-    local_location: SpoolLocation,
+    local_binding: PhysicalLocalSpoolBinding,
+}
+
+fn encode_cumulative_ack_frame(stored: &StoredCumulativeAckFrame) -> AnyResult<Vec<u8>> {
+    let payload = serde_json::to_vec(stored).context("encode cumulative ACK")?;
+    ensure!(
+        payload.len() <= MAX_CUMULATIVE_ACK_FRAME_BYTES,
+        "cumulative ACK frame exceeds {} bytes",
+        MAX_CUMULATIVE_ACK_FRAME_BYTES
+    );
+    let length = u32::try_from(payload.len()).context("cumulative ACK length exceeds u32")?;
+    let version_bytes = CUMULATIVE_ACK_FRAME_VERSION.to_le_bytes();
+    let length_bytes = length.to_le_bytes();
+    let mut header_crc = Crc32c::new();
+    header_crc.update(CUMULATIVE_ACK_FRAME_MAGIC);
+    header_crc.update(&version_bytes);
+    header_crc.update(&length_bytes);
+    let mut payload_crc = Crc32c::new();
+    payload_crc.update(&payload);
+
+    let capacity = usize::try_from(CUMULATIVE_ACK_FRAME_FIXED_LEN)
+        .ok()
+        .and_then(|fixed| fixed.checked_add(payload.len()))
+        .and_then(|length| {
+            usize::try_from(CUMULATIVE_ACK_FRAME_TRAILER_LEN)
+                .ok()
+                .and_then(|trailer| length.checked_add(trailer))
+        })
+        .context("cumulative ACK encoded frame length overflows usize")?;
+    let mut frame = Vec::with_capacity(capacity);
+    frame.extend_from_slice(CUMULATIVE_ACK_FRAME_MAGIC);
+    frame.extend_from_slice(&version_bytes);
+    frame.extend_from_slice(&length_bytes);
+    frame.extend_from_slice(&header_crc.finish().to_le_bytes());
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&payload_crc.finish().to_le_bytes());
+    frame.extend_from_slice(CUMULATIVE_ACK_COMMIT_MAGIC);
+    Ok(frame)
+}
+
+fn cumulative_ack_compacted_length(state: &CumulativeAckWalState) -> AnyResult<u64> {
+    state
+        .latest_stream_acks
+        .values()
+        .try_fold(CUMULATIVE_ACK_WAL_HEADER_LEN, |length, stored| {
+            let frame_len = u64::try_from(encode_cumulative_ack_frame(stored)?.len())
+                .context("cumulative ACK frame length exceeds u64")?;
+            length
+                .checked_add(frame_len)
+                .context("cumulative ACK compacted WAL length overflow")
+        })
 }
 
 #[derive(Debug)]
@@ -1461,6 +1705,89 @@ fn open_cumulative_ack_file(path: &Path) -> AnyResult<File> {
     ensure!(
         file.metadata()?.file_type().is_file(),
         "cumulative ACK WAL path is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
+fn cumulative_ack_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+fn cumulative_ack_compaction_path(path: &Path) -> AnyResult<PathBuf> {
+    let parent = durable_parent(path);
+    let file_name = path
+        .file_name()
+        .context("cumulative ACK WAL has no file name")?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{file_name}.compact.tmp")))
+}
+
+fn remove_orphaned_cumulative_ack_compaction(path: &Path) -> AnyResult<()> {
+    let temporary = cumulative_ack_compaction_path(path)?;
+    let metadata = match fs::symlink_metadata(&temporary) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect orphaned cumulative ACK compaction {}",
+                    temporary.display()
+                )
+            });
+        }
+    };
+    ensure!(
+        metadata.file_type().is_file(),
+        "refusing non-regular cumulative ACK compaction temporary: {}",
+        temporary.display()
+    );
+    #[cfg(unix)]
+    {
+        let effective_uid = unsafe { libc::geteuid() };
+        ensure!(
+            metadata.uid() == effective_uid || metadata.uid() == 0,
+            "refusing cumulative ACK compaction temporary owned by uid {}: {}",
+            metadata.uid(),
+            temporary.display()
+        );
+        ensure!(
+            metadata.permissions().mode() & 0o077 == 0,
+            "refusing cumulative ACK compaction temporary with group/world permissions: {}",
+            temporary.display()
+        );
+        ensure!(
+            metadata.nlink() == 1,
+            "refusing multiply-linked cumulative ACK compaction temporary: {}",
+            temporary.display()
+        );
+    }
+    fs::remove_file(&temporary).with_context(|| {
+        format!(
+            "remove orphaned cumulative ACK compaction {}",
+            temporary.display()
+        )
+    })?;
+    sync_directory(&durable_parent(path))
+}
+
+fn open_cumulative_ack_lock_file(path: &Path) -> AnyResult<File> {
+    let file = match open_receipt_descriptor(path, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            open_receipt_descriptor(path, false)
+                .with_context(|| format!("open cumulative ACK lock {}", path.display()))?
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("create cumulative ACK lock {}", path.display()));
+        }
+    };
+    ensure!(
+        file.metadata()?.file_type().is_file(),
+        "cumulative ACK lock path is not a regular file: {}",
         path.display()
     );
     Ok(file)
@@ -1939,11 +2266,20 @@ mod tests {
     }
 
     fn durable_spool_record(label: &str) -> (PathBuf, DurableSpoolRecord) {
+        durable_spool_record_with_journal(label, [7; 16])
+    }
+
+    fn durable_spool_record_with_journal(
+        label: &str,
+        journal_id: [u8; 16],
+    ) -> (PathBuf, DurableSpoolRecord) {
         let root = receipt_wal_path(label).with_extension("spool");
         let payload = b"durable-event";
+        let mut physical_observation = observation();
+        physical_observation.journal_id = journal_id;
         let metadata = IngressRecordMeta::from_payload(
             "solana-mainnet".to_string(),
-            observation(),
+            physical_observation,
             "replica-primary".to_string(),
             LogicalKey::Block {
                 slot: 42,
@@ -1958,7 +2294,7 @@ mod tests {
                 cluster_id: "solana-mainnet".to_string(),
                 origin_node_id: "backup-a".to_string(),
                 source_id: "replica-primary".to_string(),
-                journal_id: [7; 16],
+                journal_id,
             },
             SpoolOptions {
                 segment_target_bytes: 1024 * 1024,
@@ -2040,11 +2376,144 @@ mod tests {
         assert_eq!(durable.ack().primary_term, 5);
         assert_eq!(durable.local_location(), local_record.location());
         assert_eq!(wal.highest_primary_term("solana-mainnet"), Some(5));
+        let stream = durable.ack().stream.clone();
+        assert_eq!(wal.latest_stream_ack(&stream), Some(durable.ack()));
         assert!(std::fs::metadata(&path).unwrap().len() > CUMULATIVE_ACK_WAL_HEADER_LEN);
 
         drop(wal);
+        let recovered = CumulativeAckWal::open(&path).unwrap();
+        assert_eq!(recovered.latest_stream_ack(&stream), Some(durable.ack()));
+        drop(recovered);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn logical_ack_is_bound_to_the_full_physical_generation_witness() {
+        let path = cumulative_ack_wal_path("physical-generation-binding");
+        let lock_path = cumulative_ack_lock_path(&path);
+        let (first_root, first_record) =
+            durable_spool_record_with_journal("physical-generation-a", [8; 16]);
+        let (second_root, second_record) =
+            durable_spool_record_with_journal("physical-generation-b", [9; 16]);
+        assert_eq!(first_record.location(), second_record.location());
+        assert_eq!(
+            first_record.metadata().content_digest,
+            second_record.metadata().content_digest
+        );
+
+        let stream = replication_stream();
+        let first_witness = DurableReplicationWitness::from_verified_mapping(
+            &first_record,
+            stream.clone(),
+            observation().sequence,
+            first_record.metadata().content_digest,
+        )
+        .unwrap();
+        let second_witness = DurableReplicationWitness::from_verified_mapping(
+            &second_record,
+            stream,
+            observation().sequence,
+            second_record.metadata().content_digest,
+        )
+        .unwrap();
+        let mut wal = CumulativeAckWal::open(&path).unwrap();
+        let durable = wal
+            .commit_verified_replication(verified_cumulative_ack(5), &first_witness)
+            .unwrap();
+        assert!(durable.matches_replication_witness(&first_witness));
+        assert!(!durable.matches_replication_witness(&second_witness));
+        assert!(
+            wal.commit_verified_replication(verified_cumulative_ack(5), &second_witness)
+                .unwrap_err()
+                .to_string()
+                .contains("different local spool frame")
+        );
+
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(lock_path).unwrap();
+        std::fs::remove_dir_all(first_root).unwrap();
+        std::fs::remove_dir_all(second_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_wal_compacts_to_latest_stream_state_without_losing_its_fence() {
+        let path = cumulative_ack_wal_path("compaction");
+        let lock_path = cumulative_ack_lock_path(&path);
+        let (spool_root, local_record) = durable_spool_record("cumulative-compaction-record");
+        let expected = {
+            let mut wal = CumulativeAckWal::open(&path).unwrap();
+            let durable = wal
+                .commit_verified(verified_cumulative_ack(5), &local_record)
+                .unwrap();
+            let expected = durable.ack().clone();
+            wal.writer.flush().unwrap();
+            let compact_at = wal
+                .compacted_baseline_bytes
+                .checked_add(CUMULATIVE_ACK_COMPACT_GROWTH_BYTES)
+                .unwrap();
+            wal.writer.get_mut().set_len(compact_at).unwrap();
+            wal.compact_if_needed().unwrap();
+            let compacted_len = std::fs::metadata(&path).unwrap().len();
+            assert_eq!(wal.compacted_baseline_bytes, compacted_len);
+            assert!(compacted_len < compact_at);
+
+            // A snapshot can itself grow beyond 64 MiB. Only bytes appended beyond that
+            // baseline may trigger another rewrite.
+            let below_next_growth = compacted_len
+                .checked_add(CUMULATIVE_ACK_COMPACT_GROWTH_BYTES - 1)
+                .unwrap();
+            wal.writer.get_mut().set_len(below_next_growth).unwrap();
+            wal.compact_if_needed().unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), below_next_growth);
+            wal.writer
+                .get_mut()
+                .set_len(
+                    compacted_len
+                        .checked_add(CUMULATIVE_ACK_COMPACT_GROWTH_BYTES)
+                        .unwrap(),
+                )
+                .unwrap();
+            wal.compact_if_needed().unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), compacted_len);
+            expected
+        };
+
+        let recovered = CumulativeAckWal::open(&path).unwrap();
+        assert_eq!(recovered.highest_primary_term("solana-mainnet"), Some(5));
+        assert_eq!(
+            recovered.latest_stream_ack(&expected.stream),
+            Some(&expected)
+        );
+        drop(recovered);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(lock_path).unwrap();
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_wal_removes_one_fixed_orphaned_compaction_on_open() {
+        let path = cumulative_ack_wal_path("orphaned-compaction");
+        let lock_path = cumulative_ack_lock_path(&path);
+        let temporary = cumulative_ack_compaction_path(&path).unwrap();
+        {
+            let wal = CumulativeAckWal::open(&path).unwrap();
+            drop(wal);
+        }
+        {
+            let mut orphan = open_receipt_descriptor(&temporary, true).unwrap();
+            orphan.write_all(b"incomplete compacted WAL").unwrap();
+            orphan.sync_data().unwrap();
+        }
+        assert!(temporary.exists());
+
+        let wal = CumulativeAckWal::open(&path).unwrap();
+        assert!(!temporary.exists());
+
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(lock_path).unwrap();
     }
 
     #[test]
@@ -2067,6 +2536,36 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), durable_len);
 
         drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_wal_durably_fences_a_new_term_on_the_same_prefix() {
+        let path = cumulative_ack_wal_path("same-prefix-term-fence");
+        let (spool_root, local_record) = durable_spool_record("same-prefix-term-record");
+        let stream = {
+            let mut wal = CumulativeAckWal::open(&path).unwrap();
+            let first = wal
+                .commit_verified(verified_cumulative_ack(5), &local_record)
+                .unwrap();
+            let stream = first.ack().stream.clone();
+            let fenced = wal
+                .commit_verified_existing_prefix(verified_cumulative_ack(6))
+                .unwrap();
+            assert_eq!(fenced.ack().through_sequence, first.ack().through_sequence);
+            assert_eq!(fenced.local_location(), first.local_location());
+            assert_eq!(wal.highest_primary_term("solana-mainnet"), Some(6));
+            stream
+        };
+
+        let recovered = CumulativeAckWal::open(&path).unwrap();
+        assert_eq!(recovered.highest_primary_term("solana-mainnet"), Some(6));
+        assert_eq!(
+            recovered.latest_stream_ack(&stream).unwrap().primary_term,
+            6
+        );
+        drop(recovered);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir_all(spool_root).unwrap();
     }

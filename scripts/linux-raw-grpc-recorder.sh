@@ -101,6 +101,7 @@ SEALED_GENERATION_DIR=$CACHE_ROOT/sealed
 GENERATION_RECEIPT_DIR=${BLOCKZILLA_RAW_CACHE_RECEIPT_DIR:-$CACHE_ROOT/receipts}
 GENERATION_MONITORING_DIR=$CACHE_ROOT/monitoring
 GENERATION_ROTATION_MARKER=$CACHE_ROOT/.rotation
+GENERATION_ROTATION_LOCK=$CACHE_ROOT/.rotation.lock
 B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 REPLAY_RECOVERY_FILE=$GENERATION_MONITORING_DIR/replay-recovery-floor.json
 REPLAY_GAP_DIR=$ACTIVE_GENERATION_DIR/replay-gaps
@@ -2350,6 +2351,30 @@ valid_generation_id() {
   esac
 }
 
+with_generation_rotation_lock() {
+  if [ -L "$GENERATION_ROTATION_LOCK" ] \
+    || { [ -e "$GENERATION_ROTATION_LOCK" ] && [ ! -f "$GENERATION_ROTATION_LOCK" ]; }
+  then
+    echo "cache rotation lock is not a regular file" >&2
+    return 1
+  fi
+  (umask 077; : >> "$GENERATION_ROTATION_LOCK") || return 1
+  chmod 0600 "$GENERATION_ROTATION_LOCK" || return 1
+  exec 9<> "$GENERATION_ROTATION_LOCK" || return 1
+  if ! alert_flock_lock_fd; then
+    exec 9>&-
+    return 1
+  fi
+  if "$@"; then
+    rotation_lock_status=0
+  else
+    rotation_lock_status=$?
+  fi
+  alert_flock_unlock_fd || rotation_lock_status=1
+  exec 9>&-
+  return "$rotation_lock_status"
+}
+
 generation_id_from_verify_report() {
   verify_report=$1
   verified_last_slot=$(sed -n \
@@ -2447,13 +2472,13 @@ complete_rotation_transaction() {
     # Hot rotation publishes the successor before auditing the stopped
     # predecessor, so the Yellowstone stream can remain open. Keep the old
     # directory hidden from the uploader until a complete WAL/protobuf/PoH
-    # replay proves the exact generation ID. Repeating this audit during crash
+    # replay proves the exact generation contents. `slot-<20 digits>` is a monotonic generation
+    # sequence seeded from a tail slot; after a fork/repeated slot it intentionally need not equal
+    # the predecessor's last slot. Repeating this audit during crash
     # recovery is intentional and fail-closed.
     rotation_verify_report=$CACHE_ROOT/.rotation-recovery-verify.$$.json
     rm -f "$rotation_verify_report"
-    if ! verify_generation "$rotation_old" "$rotation_verify_report" \
-      || ! generation_id_from_verify_report "$rotation_verify_report" \
-      || [ "$GENERATION_ID" != "$rotation_id" ]
+    if ! verify_generation "$rotation_old" "$rotation_verify_report"
     then
       rm -f "$rotation_verify_report"
       echo "cache rotation predecessor failed its publication audit for $rotation_id" >&2
@@ -2526,7 +2551,7 @@ cleanup_orphan_generation_seed_temps() {
   fi
 }
 
-recover_rotation_transaction() {
+recover_rotation_transaction_unlocked() {
   cleanup_orphan_generation_seed_temps || return 1
   if [ ! -e "$GENERATION_ROTATION_MARKER" ]; then
     for orphan_next in "$CACHE_ROOT"/.next-slot-*; do
@@ -2552,6 +2577,10 @@ recover_rotation_transaction() {
   complete_rotation_transaction "$ROTATION_GENERATION_ID"
 }
 
+recover_rotation_transaction() {
+  with_generation_rotation_lock recover_rotation_transaction_unlocked
+}
+
 verify_generation() {
   generation_dir=$1
   generation_report=$2
@@ -2561,7 +2590,7 @@ verify_generation() {
     --min-records 1 > "$generation_report"
 }
 
-rotate_active_generation() {
+rotate_active_generation_unlocked() {
   verify_report=$CACHE_ROOT/.rotation-verify.$$.json
   seed_report=$CACHE_ROOT/.rotation-seed.$$.json
   rm -f "$verify_report" "$seed_report"
@@ -2624,6 +2653,10 @@ rotate_active_generation() {
   rm -f "$verify_report" "$seed_report" "$seed_report.verified"
   write_rotation_marker "$rotation_id" || return 1
   complete_rotation_transaction "$rotation_id"
+}
+
+rotate_active_generation() {
+  with_generation_rotation_lock rotate_active_generation_unlocked
 }
 
 prepare_cache_layout() {
@@ -3328,9 +3361,11 @@ generation_upload_worker() {
         generation_upload_attempted=false
         generation_upload_succeeded=false
         upload_status=
+        # Local disk is always the first durable tier. Copy sealed generations to the configured
+        # object store only after the disk enters the spill window; selecting R2 must not turn the
+        # archive into an eager duplicate of every healthy local write.
         if [ "$generation_backlog" -gt 0 ] \
-          && { [ "$OBJECT_STORE" = r2 ] \
-            || [ "$generation_spill_active" = true ]; }
+          && [ "$generation_spill_active" = true ]
         then
           generation_upload_attempted=true
           if upload_one_generation; then

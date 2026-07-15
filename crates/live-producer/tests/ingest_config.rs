@@ -42,14 +42,15 @@ fn shipped_primary_and_replica_examples_validate() {
         primary.redacted_summary().schema_version,
         ingest::INGEST_CONFIG_SCHEMA_VERSION
     );
-    assert_eq!(primary.redacted_summary().enabled_source_count, 2);
+    assert_eq!(primary.redacted_summary().source_count, 0);
+    assert_eq!(primary.redacted_summary().enabled_source_count, 0);
     assert_eq!(
         primary
             .redacted_summary()
             .replica_listener
             .unwrap()
             .max_concurrent_requests,
-        2
+        1
     );
     assert_eq!(replica.redacted_summary().role, "replica");
     assert_eq!(
@@ -57,5 +58,28 @@ fn shipped_primary_and_replica_examples_validate() {
         ingest::INGEST_CONFIG_SCHEMA_VERSION
     );
     assert!(replica.redacted_summary().replica_listener.is_none());
-    assert_eq!(replica.redacted_summary().enabled_source_count, 1);
+    assert_eq!(replica.redacted_summary().source_count, 0);
+    assert_eq!(replica.redacted_summary().enabled_source_count, 0);
+    let ingest::IngestRoleConfig::Primary {
+        node_id: primary_id,
+        replica_listener: Some(listener),
+        ..
+    } = &primary.role
+    else {
+        panic!("expected primary role");
+    };
+    let ingest::IngestRoleConfig::Replica { upstream, .. } = &replica.role else {
+        panic!("expected replica role");
+    };
+    assert_eq!(&upstream.expected_primary_id, primary_id);
+    assert!(upstream.batch.max_events <= listener.max_batch_events);
+    assert!(upstream.batch.max_bytes <= listener.max_batch_compressed_bytes);
+    assert!(upstream.batch.max_uncompressed_bytes <= listener.max_batch_uncompressed_bytes);
+    assert!(upstream.batch.max_compressed_event_bytes <= listener.max_compressed_event_bytes);
+    assert!(upstream.batch.max_uncompressed_event_bytes <= listener.max_uncompressed_event_bytes);
+    assert_eq!(upstream.expected_primary_id, "blockzilla-primary");
+    assert_eq!(
+        upstream.cumulative_ack_wal_file,
+        std::path::Path::new("/data/replication-control/cumulative-ack.wal")
+    );
 }

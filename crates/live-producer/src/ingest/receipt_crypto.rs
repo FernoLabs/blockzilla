@@ -7,13 +7,13 @@
 use std::{
     collections::HashMap,
     fmt,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Read, Take},
     path::Path,
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use ed25519_dalek::{
@@ -211,43 +211,91 @@ impl KeyFileKind {
 }
 
 fn read_key_file(path: &Path, kind: KeyFileKind) -> Result<Vec<u8>> {
-    let link_metadata = std::fs::symlink_metadata(path)
+    let linked_before = fs::symlink_metadata(path)
         .with_context(|| format!("inspect {} key file {}", kind.label(), path.display()))?;
     ensure!(
-        !link_metadata.file_type().is_symlink(),
-        "{} key file must not be a symbolic link: {}",
+        linked_before.file_type().is_file() && !linked_before.file_type().is_symlink(),
+        "{} key path is not a regular non-symlink file: {}",
         kind.label(),
         path.display()
     );
+    validate_key_metadata(path, kind, &linked_before)?;
 
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let mut file = options
         .open(path)
         .with_context(|| format!("open {} key file {}", kind.label(), path.display()))?;
-    let metadata = file.metadata().with_context(|| {
+    let opened_before = file.metadata().with_context(|| {
         format!(
             "inspect opened {} key file {}",
             kind.label(),
             path.display()
         )
     })?;
-    validate_key_metadata(path, kind, &metadata)?;
+    validate_key_metadata(path, kind, &opened_before)?;
+    validate_key_identity(path, kind, &opened_before, &linked_before)?;
 
-    let mut encoded = Vec::with_capacity(metadata.len() as usize);
+    let mut encoded = Vec::with_capacity(opened_before.len() as usize);
     let mut limited: Take<&mut File> = file.by_ref().take(MAX_KEY_FILE_BYTES + 1);
     limited
         .read_to_end(&mut encoded)
         .with_context(|| format!("read {} key file {}", kind.label(), path.display()))?;
     ensure!(
-        encoded.len() as u64 == metadata.len(),
+        encoded.len() as u64 == opened_before.len(),
+        "{} key file changed while being read: {}",
+        kind.label(),
+        path.display()
+    );
+
+    // Opening with O_NOFOLLOW pins the descriptor to one inode. Rechecking both the descriptor
+    // and the operator-visible path also rejects replacement, truncation, unsafe chmod, and chown
+    // races instead of accepting a key whose configured pathname changed during validation.
+    let opened_after = file.metadata().with_context(|| {
+        format!(
+            "reinspect opened {} key file {}",
+            kind.label(),
+            path.display()
+        )
+    })?;
+    let linked_after = fs::symlink_metadata(path)
+        .with_context(|| format!("reinspect {} key file {}", kind.label(), path.display()))?;
+    validate_key_metadata(path, kind, &opened_after)?;
+    validate_key_metadata(path, kind, &linked_after)?;
+    validate_key_identity(path, kind, &opened_after, &linked_after)?;
+    ensure!(
+        opened_after.len() == opened_before.len(),
         "{} key file changed while being read: {}",
         kind.label(),
         path.display()
     );
     Ok(encoded)
+}
+
+fn validate_key_identity(
+    path: &Path,
+    kind: KeyFileKind,
+    opened: &std::fs::Metadata,
+    linked: &std::fs::Metadata,
+) -> Result<()> {
+    ensure!(
+        linked.file_type().is_file() && !linked.file_type().is_symlink(),
+        "{} key path is not a regular non-symlink file: {}",
+        kind.label(),
+        path.display()
+    );
+    #[cfg(unix)]
+    ensure!(
+        opened.dev() == linked.dev() && opened.ino() == linked.ino(),
+        "{} key file changed while it was opened: {}",
+        kind.label(),
+        path.display()
+    );
+    #[cfg(not(unix))]
+    let _ = opened;
+    Ok(())
 }
 
 fn validate_key_metadata(
@@ -284,8 +332,20 @@ fn validate_key_metadata(
                 path.display()
             ),
         }
+        let effective_uid = unsafe { libc::geteuid() };
+        ensure!(
+            trusted_key_owner(metadata.uid(), effective_uid),
+            "{} key file has an untrusted owner: {}",
+            kind.label(),
+            path.display()
+        );
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn trusted_key_owner(owner: u32, effective_uid: u32) -> bool {
+    owner == effective_uid || owner == 0
 }
 
 fn parse_private_key(encoded: &[u8]) -> Result<SigningKey> {
@@ -532,5 +592,42 @@ mod tests {
         let error = Ed25519ReceiptSigner::load_pkcs8_pem("active", private_path)
             .expect_err("permissive private key must fail");
         assert!(error.to_string().contains("0400 or 0600"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_permissive_public_key_permissions() {
+        let directory = TestDirectory::create("public-permissions");
+        let (_, public_path) = write_key_pair(&directory, 32, "permissive");
+        fs::set_permissions(&public_path, fs::Permissions::from_mode(0o666))
+            .expect("make public key writable by everyone");
+
+        let error = Ed25519ReceiptKeyring::load_spki_pem("active", public_path)
+            .expect_err("writable public key must fail");
+        assert!(error.to_string().contains("writable by group/others"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_inode_replaced_between_path_inspection_and_open() {
+        let directory = TestDirectory::create("inode-replacement");
+        let first = directory.path("first.pem");
+        let replacement = directory.path("replacement.pem");
+        write_file(&first, b"first", 0o600);
+        write_file(&replacement, b"second", 0o600);
+
+        let opened = fs::metadata(&first).expect("inspect opened fixture");
+        let linked = fs::symlink_metadata(&replacement).expect("inspect replacement fixture");
+        let error = validate_key_identity(&first, KeyFileKind::Private, &opened, &linked)
+            .expect_err("different inode must fail");
+        assert!(error.to_string().contains("changed while it was opened"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_owner_policy_accepts_only_effective_user_or_root() {
+        assert!(trusted_key_owner(1_000, 1_000));
+        assert!(trusted_key_owner(0, 1_000));
+        assert!(!trusted_key_owner(1_001, 1_000));
     }
 }

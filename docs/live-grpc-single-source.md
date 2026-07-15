@@ -135,7 +135,9 @@ The existing `blockzilla` bucket contains unrelated data. This recorder uses the
 dedicated `blockzilla-live-grpc` bucket and its validated receipt chain. R2 is
 not the normal subscriber replay archive and an R2 upload is not proof that
 Blockzilla consumed a spool. It is a safety copy used when local retention grows
-or Blockzilla is unavailable.
+or Blockzilla is unavailable. Uploads start only after local free space crosses
+the spill watermark; selecting R2 does not eagerly copy every healthy
+generation.
 
 Initial thresholds:
 
@@ -147,19 +149,26 @@ Initial thresholds:
   byte pressure.
 
 Byte pressure never authorizes deletion by itself. The authoritative sync
-watermark is the newest contiguous, signed Blockzilla generation ACK bound to
-the exact R2 manifest/commit and predecessor chain. A heartbeat, `/healthz`, an
-unsigned slot, or a verified R2 upload receipt is telemetry/evidence only. At
-950 GB without enough ACKed generations to recover space, capture pauses and
-opens one clear alert; it never evicts unacknowledged data to satisfy the byte
-target.
+watermark is the newest contiguous, signed Blockzilla ACK bound to the exact raw
+observation chain. Local cleanup additionally matches its complete physical WAL
+witness; remote cleanup must also prove which R2 manifest/commit contains that
+ACKed range. A heartbeat, `/healthz`, an unsigned slot, or a verified R2 upload
+receipt is telemetry/evidence only. At 950 GB without enough ACKed generations
+to recover space, capture pauses and opens one clear alert; it never evicts
+unacknowledged data to satisfy the byte target.
 
-Both local eviction and remote pruning remain locked until the signed ACK
-producer, verifier, durable ACK journal, and whole-generation audit are
-implemented. The existing remote planner remains dry-run only. The eventual
-apply order is oldest acknowledged spool first: `_COMMITTED`, manifest, then
-payloads, followed by a synced completion receipt. An interrupted prune must
-resume idempotently and can never make a partial old generation look committed.
+The current R2 usage monitor follows the validated local receipt chain and can
+therefore undercount interrupted or orphan uploads. Production retention also
+requires a paginated reconciliation of actual objects below the dedicated
+prefix.
+
+The signed ACK producer, verifier, durable ACK journal, and whole-generation
+audit are implemented and locally tested. Local eviction and remote pruning
+remain locked because production GC is not wired. The existing remote planner
+remains dry-run only. The eventual apply order is oldest acknowledged spool
+first: `_COMMITTED`, manifest, then payloads, followed by a synced completion
+receipt. An interrupted prune must resume idempotently and can never make a
+partial old generation look committed.
 
 ## Current and target status
 
@@ -171,8 +180,11 @@ Current:
 - Blockzilla's bounded mTLS raw receiver and signed cumulative ACK producer are
   implemented and locally tested, including crash recovery, persistent stream
   limits, cancellation-safe admission, and disk-first durability ordering;
-- the Hetzner replication sender, its durable verified-ACK journal integration,
-  Blockzilla historical reader, and production deployment are not complete;
+- the Hetzner replication sender and its durable verified-ACK journal are also
+  implemented and locally tested, including stable logical sequences across
+  unique physical storage generations;
+- the sender/receiver services, private route, mTLS material, Blockzilla
+  historical reader, ACK-driven GC, and production deployment are not complete;
 - therefore local and remote durable-copy deletion must remain disabled.
 
 Target:

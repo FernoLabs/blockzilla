@@ -5,7 +5,7 @@
   "max_total_queue_events": 16,
   "role": {
     "mode": "primary",
-    "node_id": "nas-primary",
+    "node_id": "blockzilla-primary",
     "replica_listener": {
       "bind": "0.0.0.0:9443",
       "server_certificate_file": "/etc/blockzilla/tls/primary.crt",
@@ -18,15 +18,15 @@
         "provider": "file",
         "path": "/run/secrets/blockzilla-receipt-2026-q3.key"
       },
-      "max_wire_request_bytes": 20971520,
+      "max_wire_request_bytes": 134283264,
       "max_batch_events": 4,
-      "max_batch_compressed_bytes": 33554432,
+      "max_batch_compressed_bytes": 134217728,
       "max_batch_uncompressed_bytes": 134217728,
-      "max_compressed_event_bytes": 16777216,
-      "max_uncompressed_event_bytes": 67108864,
-      "max_concurrent_requests": 2,
+      "max_compressed_event_bytes": 134217728,
+      "max_uncompressed_event_bytes": 134217728,
+      "max_concurrent_requests": 1,
       "max_open_streams": 64,
-      "max_known_streams": 256,
+      "max_known_streams": 4096,
       "tls_handshake_timeout_ms": 10000,
       "request_idle_timeout_ms": 15000,
       "request_total_timeout_ms": 60000
@@ -43,95 +43,5 @@
     },
     "full_policy": "pause_sources"
   },
-  "sources": [
-    {
-      "id": "yellowstone-a",
-      "enabled": true,
-      "priority": 10,
-      "required_for_epoch_close": true,
-      "queue": {
-        "max_events": 2,
-        "max_bytes": 134217728,
-        "max_event_bytes": 67108864
-      },
-      "input": {
-        "kind": "grpc",
-        "endpoint": "https://grpc-a.example.net",
-        "commitment": "confirmed",
-        "auth": {
-          "method": "x_token",
-          "credential": {
-            "provider": "env",
-            "variable": "BLOCKZILLA_GRPC_A_X_TOKEN"
-          }
-        },
-        "tls": {
-          "ca_file": "/etc/ssl/certs/ca-certificates.crt"
-        },
-        "reconnect": {
-          "initial_delay_ms": 500,
-          "max_delay_ms": 30000,
-          "backoff_factor_milli": 2000,
-          "jitter_percent": 20,
-          "connect_timeout_ms": 5000,
-          "heartbeat_interval_ms": 15000,
-          "idle_timeout_ms": 60000,
-          "max_attempts": null
-        },
-        "resume_overlap_slots": 64
-      }
-    },
-    {
-      "id": "yellowstone-b",
-      "enabled": true,
-      "priority": 20,
-      "required_for_epoch_close": false,
-      "queue": {
-        "max_events": 2,
-        "max_bytes": 134217728,
-        "max_event_bytes": 67108864
-      },
-      "input": {
-        "kind": "grpc",
-        "endpoint": "https://grpc-b.example.net",
-        "commitment": "confirmed",
-        "auth": {
-          "method": "x_token",
-          "credential": {
-            "provider": "file",
-            "path": "/run/secrets/blockzilla-grpc-b-token"
-          }
-        },
-        "tls": {
-          "ca_file": "/etc/ssl/certs/ca-certificates.crt"
-        },
-        "reconnect": {
-          "initial_delay_ms": 500,
-          "max_delay_ms": 30000,
-          "backoff_factor_milli": 2000,
-          "jitter_percent": 20,
-          "connect_timeout_ms": 5000,
-          "heartbeat_interval_ms": 15000,
-          "idle_timeout_ms": 60000,
-          "max_attempts": null
-        },
-        "resume_overlap_slots": 64
-      }
-    },
-    {
-      "id": "shred-lan-a",
-      "enabled": false,
-      "priority": 30,
-      "required_for_epoch_close": false,
-      "queue": {
-        "max_events": 8192,
-        "max_bytes": 33554432,
-        "max_event_bytes": 4096
-      },
-      "input": {
-        "kind": "shred_udp",
-        "bind": "0.0.0.0:10000"
-      }
-    }
-  ]
+  "sources": []
 }

@@ -44,19 +44,33 @@ cargo run -p blockzilla-live-producer -- validate-ingest-config \
 The command prints only a redacted operational summary. `mode: "slave"` is
 accepted as a deprecated input alias and normalizes to `replica`.
 
-The initial implementation also provides source-independent block/entry/shred
+The implementation also provides source-independent block/entry/shred
 identities, deterministic duplicate/conflict/fork classification, a segmented
 raw spool that recomputes content digests, syncs each committed checksummed
-frame, validates sealed segments, and truncates only incomplete crash tails, and
-a checksummed receipt WAL. Both WALs enforce one writer and become fail-stop
-after ambiguous I/O errors. A network response alone cannot make replica data
-eligible for garbage collection: the exact signed receipt must first be verified
-and synced into the local receipt WAL. There is intentionally no segment unlink
-API until a sealed-segment ACK manifest can prove every frame is eligible.
+frame, validates sealed segments, and truncates only incomplete crash tails. A
+bounded mTLS receiver signs cumulative ACKs only after its exact raw WAL state is
+durable. The Hetzner sender verifies and fsyncs each signed ACK before advancing
+its local cursor; storage rotations keep unique physical WAL identities under
+one stable logical replication sequence. Both WALs enforce one writer and
+become fail-stop after ambiguous I/O errors.
 
-These primitives are not wired into the production socket adapters yet. The
-current `capture-grpc` process must not be replaced until replay, archive-writer
-recovery, and power-loss fault tests are complete. See
+Run the locally implemented receiver and raw-WAL sender with:
+
+```bash
+cargo run -p blockzilla-live-producer -- serve-ingest-receiver \
+  --config crates/live-producer/config/ingest-primary.example.json
+
+cargo run -p blockzilla-live-producer -- replicate-grpc-raw \
+  --config crates/live-producer/config/ingest-replica.example.json \
+  --cache-root /data/grpc-cache
+```
+
+A network response alone cannot make replica data eligible for garbage
+collection: the exact signed ACK must first be verified and synced into the
+local cumulative-ACK WAL. Production sender/receiver services and ACK-driven
+oldest-generation GC are not deployed yet, so the current `capture-grpc`
+process must not be replaced until the private route, key material, replay,
+archive-writer recovery, and power-loss rollout tests are complete. See
 [`docs/live-ingest-redundancy.md`](../../docs/live-ingest-redundancy.md) for the
 protocol and rollout sequence.
 

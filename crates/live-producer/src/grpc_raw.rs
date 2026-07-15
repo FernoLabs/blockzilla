@@ -9,10 +9,16 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     future::Future,
-    io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write},
+    io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(unix)]
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{MetadataExt, OpenOptionsExt},
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -42,8 +48,11 @@ use crate::{
     },
     grpc_relay::{YellowstoneBlockRelay, YellowstoneBlockRelayLimits, YellowstoneRelayAuth},
     ingest::{
-        ContentDigest, IngressRecordMeta, LockedSpoolAudit, LogicalKey, ObservationId,
-        SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter, read_spool_record,
+        CommitmentEvidence, ContentDigest, DurableCumulativeAck, DurableReplicationWitness,
+        DurableSpoolRecord, IngressRecordMeta, LockedSpoolAudit, LogicalKey, ObservationId,
+        REPLICATION_PROTOCOL_VERSION, RawReplicationRecord, ReplicationOffer, ReplicationStreamId,
+        SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolRecord, SpoolWriter,
+        read_spool_record,
     },
     layout::ProducerLayout,
 };
@@ -71,6 +80,8 @@ const GENERATION_ROLLOVER_SAFETY_BYTES: u64 = 1024 * 1024;
 const RELAY_X_TOKEN_MAX_BYTES: u64 = 4096;
 const RELAY_SHUTDOWN_GRACE_SECS: u64 = 5;
 const MAX_HANDOFF_RECORD_BYTES: u64 = 64 * 1024;
+const MAX_IDENTITY_FILE_BYTES: u64 = 64 * 1024;
+const MAX_REPLICATION_GENERATION_SCAN: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogOutcome<T> {
@@ -817,6 +828,69 @@ pub struct GrpcRawCommittedRecord {
     pub uncompressed_bytes: u64,
     pub compressed_bytes: Vec<u8>,
     pub update: SubscribeUpdate,
+    raw_protobuf_digest: [u8; 32],
+    durable_local_record: DurableSpoolRecord,
+}
+
+impl GrpcRawCommittedRecord {
+    /// Convert the verified handoff/WAL record into the exact compressed replication payload.
+    /// The decoded Yellowstone value is dropped instead of being retained in the outbound batch.
+    pub fn into_durable_replication_record(self) -> Result<GrpcRawDurableReplicationRecord> {
+        let stream = ReplicationStreamId {
+            cluster_id: self.cluster_id.clone(),
+            origin_node_id: self.observation.origin_node_id.clone(),
+            source_id: self.source_id.clone(),
+            journal_id: self.observation.journal_id,
+        };
+        let durable_replication_witness = DurableReplicationWitness::from_verified_mapping(
+            &self.durable_local_record,
+            stream.clone(),
+            self.observation.sequence,
+            self.content_digest,
+        )?;
+        let blockhash = decode_blockhash(&self.blockhash)?;
+        let record = RawReplicationRecord {
+            offer: ReplicationOffer {
+                protocol_version: REPLICATION_PROTOCOL_VERSION,
+                cluster_id: self.cluster_id,
+                record: self.observation,
+                source_id: self.source_id,
+                logical_key: LogicalKey::Block {
+                    slot: self.slot,
+                    blockhash,
+                },
+                content_digest: self.content_digest,
+                payload_len: self.compressed_bytes.len() as u64,
+                payload_format_version: self.payload_format_version,
+                commitment: CommitmentEvidence::Confirmed,
+            },
+            compressed_payload: self.compressed_bytes,
+            raw_protobuf_sha256: self.raw_protobuf_digest,
+            uncompressed_len: self.uncompressed_bytes,
+        };
+        Ok(GrpcRawDurableReplicationRecord {
+            stream,
+            record,
+            durable_local_record: self.durable_local_record,
+            durable_replication_witness,
+        })
+    }
+}
+
+/// Lean outbound representation of one locally durable raw gRPC record. It retains compressed
+/// bytes and the private local durability witness, but not the decoded Yellowstone allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcRawDurableReplicationRecord {
+    pub stream: ReplicationStreamId,
+    pub record: RawReplicationRecord,
+    durable_local_record: DurableSpoolRecord,
+    durable_replication_witness: DurableReplicationWitness,
+}
+
+impl GrpcRawDurableReplicationRecord {
+    pub fn durable_local_record(&self) -> &DurableSpoolRecord {
+        &self.durable_local_record
+    }
 }
 
 /// Result of a snapshot read of the handoff-committed prefix.
@@ -827,7 +901,987 @@ pub struct GrpcRawCommittedReadReport {
     pub incomplete_handoff_tail_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Incremental, restartable reader for a live handoff journal. It advances only after one row has
+/// been re-read from the checksummed WAL and converted to the lean replication representation.
+/// A final partial JSON row is never consumed.
+#[derive(Debug, Clone)]
+pub struct GrpcRawCommittedCursor {
+    identity: GrpcRawIdentityFile,
+    generation_dir: PathBuf,
+    hot_cache_root: Option<PathBuf>,
+    limits: GrpcRawCommittedReadLimits,
+    next_frame_id: u64,
+    next_replication_sequence: u64,
+    next_handoff_offset: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GrpcRawCommittedBatch {
+    pub records: Vec<GrpcRawDurableReplicationRecord>,
+    pub compressed_bytes: u64,
+    pub uncompressed_bytes: u64,
+    pub incomplete_handoff_tail_bytes: u64,
+    pub snapshot_handoff_bytes: u64,
+    start_frame_id: u64,
+    start_replication_sequence: u64,
+    start_handoff_offset: u64,
+    next_frame_id: u64,
+    next_replication_sequence: u64,
+    next_handoff_offset: u64,
+}
+
+/// Opaque, payload-free reservation cursor retained while the batch bytes are owned by the gRPC
+/// transport. It contains the exact local tail witness needed by the ACK WAL, but it cannot advance
+/// the source cursor without a matching [`DurableCumulativeAck`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcRawCommittedAdvance {
+    stream: ReplicationStreamId,
+    start_frame_id: u64,
+    start_replication_sequence: u64,
+    start_handoff_offset: u64,
+    next_frame_id: u64,
+    next_replication_sequence: u64,
+    next_handoff_offset: u64,
+    durable_replication_witness: DurableReplicationWitness,
+}
+
+/// One immutable sealed generation, or the current active tail, in replication order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcRawReplicationGeneration {
+    pub path: PathBuf,
+    pub sealed: bool,
+}
+
+/// One cursor opened atomically with its hot-queue discovery snapshot.
+#[derive(Debug, Clone)]
+pub struct GrpcRawPreparedReplicationGeneration {
+    pub cursor: GrpcRawCommittedCursor,
+    pub sealed: bool,
+}
+
+/// Discover the bounded hot-generation queue oldest-first, followed by the live active tail.
+/// Discovery fails during an unfinished rotation and rejects aliases/duplicate physical WAL
+/// identities. Adjacent generations may intentionally share one logical replication stream.
+pub fn discover_grpc_raw_replication_generations(
+    cache_root: impl AsRef<Path>,
+) -> Result<Vec<GrpcRawReplicationGeneration>> {
+    let cache_root = cache_root.as_ref();
+    ensure_real_directory(cache_root, "raw gRPC hot-generation root")?;
+    let _rotation_guard = HotRotationGuard::acquire(cache_root, HotRotationLockMode::Shared)?;
+    ensure!(
+        !path_entry_exists(&cache_root.join(HOT_ROTATION_MARKER))?,
+        "raw gRPC generation rotation is in progress; retry after supervisor recovery"
+    );
+    let sealed_root = cache_root.join(HOT_SEALED_DIR);
+    let active = cache_root.join(HOT_ACTIVE_DIR);
+    ensure_real_directory(&sealed_root, "raw gRPC sealed generation root")?;
+    ensure_real_directory(&active, "raw gRPC active generation")?;
+
+    let mut sealed = Vec::new();
+    for entry in fs::read_dir(&sealed_root)
+        .with_context(|| format!("list raw gRPC generations {}", sealed_root.display()))?
+    {
+        let entry = entry.context("read raw gRPC sealed generation entry")?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow!("raw gRPC sealed generation name is not UTF-8"))?;
+        ensure!(
+            valid_hot_generation_id(&name),
+            "invalid raw gRPC sealed generation name {name:?}"
+        );
+        ensure!(
+            sealed.len() < MAX_REPLICATION_GENERATION_SCAN,
+            "raw gRPC sealed generation queue exceeds {MAX_REPLICATION_GENERATION_SCAN} entries"
+        );
+        let file_type = entry
+            .file_type()
+            .context("inspect raw gRPC sealed generation entry")?;
+        ensure!(
+            file_type.is_dir() && !file_type.is_symlink(),
+            "raw gRPC sealed generation is not a real directory"
+        );
+        sealed.push((name, entry.path()));
+    }
+    sealed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+    let mut physical_streams = std::collections::HashSet::with_capacity(sealed.len() + 1);
+    let mut generations = Vec::with_capacity(sealed.len() + 1);
+    for (_, path) in sealed {
+        let identity = read_identity(&path.join(IDENTITY_FILE))?;
+        ensure!(
+            physical_streams.insert(identity.physical_stream_id()),
+            "duplicate raw gRPC physical WAL identity in hot-generation queue"
+        );
+        generations.push(GrpcRawReplicationGeneration { path, sealed: true });
+    }
+    let active_identity = read_identity(&active.join(IDENTITY_FILE))?;
+    ensure!(
+        physical_streams.insert(active_identity.physical_stream_id()),
+        "active raw gRPC physical WAL identity duplicates a sealed generation"
+    );
+    generations.push(GrpcRawReplicationGeneration {
+        path: active,
+        sealed: false,
+    });
+    Ok(generations)
+}
+
+/// Discover the bounded queue and pre-open every cursor while holding one shared rotation lock.
+/// This closes the otherwise unavoidable `/active` pathname race between queue discovery and
+/// identity fencing: the returned active cursor always belongs to the stream that occupied the
+/// discovered snapshot, and follows that identity into `sealed` after the lock is released.
+pub fn open_grpc_raw_replication_generation_cursors(
+    cache_root: impl AsRef<Path>,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<Vec<GrpcRawPreparedReplicationGeneration>> {
+    let cache_root = cache_root.as_ref();
+    ensure_real_directory(cache_root, "raw gRPC hot-generation root")?;
+    let _rotation_guard = HotRotationGuard::acquire(cache_root, HotRotationLockMode::Shared)?;
+    let generations = discover_grpc_raw_replication_generations(cache_root)?;
+    validate_grpc_raw_replication_generation_chain(&generations, limits)?;
+    generations
+        .into_iter()
+        .map(|generation| {
+            let cursor = GrpcRawCommittedCursor::open(&generation.path, limits, 0)?;
+            Ok(GrpcRawPreparedReplicationGeneration {
+                cursor,
+                sealed: generation.sealed,
+            })
+        })
+        .collect()
+}
+
+/// Validate every same-stream physical generation boundary before any durable ACK can be used to
+/// seek a cursor. This prevents a corrupt/lowered logical base from turning an ACK into a skip.
+fn validate_grpc_raw_replication_generation_chain(
+    generations: &[GrpcRawReplicationGeneration],
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<()> {
+    let limits = limits.validate()?;
+    let mut seen_logical_streams = std::collections::HashSet::with_capacity(generations.len());
+    let mut previous: Option<(&GrpcRawReplicationGeneration, GrpcRawIdentityFile)> = None;
+
+    for generation in generations {
+        if generation.sealed {
+            let snapshot = complete_handoff_snapshot(&generation.path.join(HANDOFF_JOURNAL_FILE))?;
+            ensure!(
+                snapshot.complete_offset == snapshot.snapshot_len,
+                "sealed raw gRPC generation has a partial handoff tail"
+            );
+        }
+        let identity = read_identity(&generation.path.join(IDENTITY_FILE))?;
+        let stream = identity.replication_stream_id();
+        match previous.as_ref() {
+            Some((predecessor, predecessor_identity))
+                if predecessor_identity.replication_stream_id() == stream =>
+            {
+                ensure!(
+                    predecessor.sealed,
+                    "only a sealed raw gRPC generation may precede a logical successor"
+                );
+                validate_grpc_raw_replication_generation_boundary(
+                    &predecessor.path,
+                    predecessor_identity,
+                    &generation.path,
+                    &identity,
+                    limits,
+                )?;
+            }
+            Some(_) => {
+                ensure_initial_logical_generation(&identity)?;
+                ensure!(
+                    seen_logical_streams.insert(stream),
+                    "raw gRPC logical replication stream reappeared non-contiguously"
+                );
+            }
+            None => {
+                ensure_initial_logical_generation(&identity)?;
+                seen_logical_streams.insert(stream);
+            }
+        }
+        previous = Some((generation, identity));
+    }
+    Ok(())
+}
+
+fn ensure_initial_logical_generation(identity: &GrpcRawIdentityFile) -> Result<()> {
+    ensure!(
+        identity.replication_sequence_base() == 0
+            && identity.replication_stream_id() == identity.physical_stream_id(),
+        "first retained raw gRPC logical stream generation lacks its base-zero physical anchor"
+    );
+    Ok(())
+}
+
+fn validate_grpc_raw_replication_generation_boundary(
+    predecessor_dir: &Path,
+    predecessor_identity: &GrpcRawIdentityFile,
+    successor_dir: &Path,
+    successor_identity: &GrpcRawIdentityFile,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<()> {
+    ensure!(
+        successor_identity.replication_journal_id.is_some()
+            && successor_identity.replication_sequence_base.is_some(),
+        "logical successor is missing its persisted replication anchor"
+    );
+    let predecessor_journal = predecessor_dir.join(HANDOFF_JOURNAL_FILE);
+    let predecessor_snapshot = complete_handoff_snapshot(&predecessor_journal)?;
+    ensure!(
+        predecessor_snapshot.complete_offset == predecessor_snapshot.snapshot_len,
+        "sealed raw gRPC predecessor has a partial handoff tail"
+    );
+    let predecessor_tail = predecessor_snapshot
+        .state
+        .last
+        .as_ref()
+        .context("logical raw gRPC predecessor is empty")?;
+    let expected_base = predecessor_identity.replication_sequence(predecessor_tail.frame_id)?;
+    ensure!(
+        successor_identity.replication_sequence_base() == expected_base,
+        "logical raw gRPC successor sequence base does not equal predecessor tail"
+    );
+
+    let successor_snapshot = complete_handoff_snapshot(&successor_dir.join(HANDOFF_JOURNAL_FILE))?;
+    let successor_seed = successor_snapshot
+        .state
+        .first
+        .as_ref()
+        .context("logical raw gRPC successor is empty")?;
+    ensure!(
+        successor_seed.frame_id == 0
+            && successor_identity.replication_sequence(successor_seed.frame_id)? == expected_base,
+        "logical raw gRPC successor does not begin at its overlap sequence"
+    );
+
+    let predecessor_record = read_grpc_raw_boundary_spool_record(
+        predecessor_dir,
+        predecessor_identity,
+        predecessor_tail,
+        limits,
+    )?;
+    let successor_record = read_grpc_raw_boundary_spool_record(
+        successor_dir,
+        successor_identity,
+        successor_seed,
+        limits,
+    )?;
+    ensure!(
+        predecessor_record.metadata.logical_key == successor_record.metadata.logical_key
+            && predecessor_record.metadata.content_digest
+                == successor_record.metadata.content_digest
+            && predecessor_record.metadata.payload_format_version
+                == successor_record.metadata.payload_format_version
+            && predecessor_record.payload == successor_record.payload
+            && predecessor_tail.slot == successor_seed.slot
+            && predecessor_tail.parent_slot == successor_seed.parent_slot
+            && predecessor_tail.epoch == successor_seed.epoch
+            && predecessor_tail.epoch_slot_index == successor_seed.epoch_slot_index
+            && predecessor_tail.compressed_len == successor_seed.compressed_len
+            && predecessor_tail.uncompressed_len == successor_seed.uncompressed_len
+            && predecessor_tail
+                .protobuf_sha256
+                .eq_ignore_ascii_case(&successor_seed.protobuf_sha256)
+            && predecessor_tail.blockhash == successor_seed.blockhash,
+        "logical raw gRPC successor seed does not exactly reproduce predecessor tail"
+    );
+    Ok(())
+}
+
+fn read_grpc_raw_boundary_spool_record(
+    generation_dir: &Path,
+    identity: &GrpcRawIdentityFile,
+    row: &GrpcRawHandoffRecord,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<SpoolRecord> {
+    ensure!(
+        row.compressed_len <= limits.max_compressed_record_bytes
+            && row.uncompressed_len <= limits.max_uncompressed_record_bytes,
+        "raw gRPC generation boundary exceeds replication read limits"
+    );
+    let stored = read_spool_record(
+        spool_journal_dir(generation_dir, identity),
+        row.location(),
+        limits.max_compressed_record_bytes,
+    )?;
+    ensure!(
+        stored.metadata.cluster_id == identity.cluster_id
+            && stored.metadata.observation.origin_node_id == identity.origin_node_id
+            && stored.metadata.observation.journal_id == identity.journal_id
+            && stored.metadata.observation.sequence == row.frame_id
+            && stored.metadata.source_id == identity.source_id
+            && stored.metadata.payload_format_version == PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1
+            && stored.payload.len() as u64 == row.compressed_len,
+        "raw gRPC generation boundary WAL/handoff identity mismatch"
+    );
+    Ok(stored)
+}
+
+impl GrpcRawCommittedBatch {
+    /// Move compressed payload ownership directly into the transport while retaining only the
+    /// small cursor/durability token needed to commit the eventual ACK. This avoids a second batch-
+    /// sized payload allocation.
+    pub fn into_transport_parts(
+        self,
+    ) -> Result<(Vec<RawReplicationRecord>, GrpcRawCommittedAdvance)> {
+        let tail = self
+            .records
+            .last()
+            .context("cannot transport an empty raw gRPC committed batch")?;
+        let advance = GrpcRawCommittedAdvance {
+            stream: tail.stream.clone(),
+            start_frame_id: self.start_frame_id,
+            start_replication_sequence: self.start_replication_sequence,
+            start_handoff_offset: self.start_handoff_offset,
+            next_frame_id: self.next_frame_id,
+            next_replication_sequence: self.next_replication_sequence,
+            next_handoff_offset: self.next_handoff_offset,
+            durable_replication_witness: tail.durable_replication_witness.clone(),
+        };
+        let records = self
+            .records
+            .into_iter()
+            .map(|record| record.record)
+            .collect();
+        Ok((records, advance))
+    }
+}
+
+impl GrpcRawCommittedAdvance {
+    pub fn durable_replication_witness(&self) -> &DurableReplicationWitness {
+        &self.durable_replication_witness
+    }
+
+    pub fn through_sequence(&self) -> u64 {
+        self.next_replication_sequence - 1
+    }
+}
+
+impl GrpcRawCommittedCursor {
+    /// Open at the first local frame that has not already been durably acknowledged. Startup scans
+    /// only the bounded JSON handoff rows needed to locate `next_frame_id`; payload/WAL reads then
+    /// proceed incrementally from that byte offset.
+    pub fn open(
+        output_dir: impl AsRef<Path>,
+        limits: GrpcRawCommittedReadLimits,
+        next_frame_id: u64,
+    ) -> Result<Self> {
+        Self::open_inner(output_dir.as_ref(), limits, next_frame_id, None)
+    }
+
+    /// Open only if the directory still names the exact stream discovered by the caller. For an
+    /// active hot generation the identity check and handoff seek are protected by the shared
+    /// rotation lock, so a successor can never be attached to a predecessor's ACK state.
+    pub fn open_fenced(
+        output_dir: impl AsRef<Path>,
+        limits: GrpcRawCommittedReadLimits,
+        next_frame_id: u64,
+        expected_stream: &ReplicationStreamId,
+    ) -> Result<Self> {
+        Self::open_inner(
+            output_dir.as_ref(),
+            limits,
+            next_frame_id,
+            Some(expected_stream),
+        )
+    }
+
+    fn open_inner(
+        output_dir: &Path,
+        limits: GrpcRawCommittedReadLimits,
+        next_frame_id: u64,
+        expected_stream: Option<&ReplicationStreamId>,
+    ) -> Result<Self> {
+        let limits = limits.validate()?;
+        let hot_cache_root = infer_hot_cache_root(output_dir);
+        let _rotation_guard = hot_cache_root
+            .as_deref()
+            .map(|root| HotRotationGuard::acquire(root, HotRotationLockMode::Shared))
+            .transpose()?;
+        let identity = read_identity(&output_dir.join(IDENTITY_FILE))?;
+        if let Some(expected_stream) = expected_stream {
+            ensure!(
+                identity.replication_stream_id() == *expected_stream,
+                "raw gRPC generation identity differs from the expected replication stream"
+            );
+        }
+        let journal_path = output_dir.join(HANDOFF_JOURNAL_FILE);
+        let next_handoff_offset = locate_handoff_sequence(&journal_path, next_frame_id)?;
+        let next_replication_sequence = identity.replication_sequence(next_frame_id)?;
+        Ok(Self {
+            identity,
+            generation_dir: output_dir.to_path_buf(),
+            hot_cache_root,
+            limits,
+            next_frame_id,
+            next_replication_sequence,
+            next_handoff_offset,
+        })
+    }
+
+    pub fn stream(&self) -> ReplicationStreamId {
+        self.identity.replication_stream_id()
+    }
+
+    pub fn physical_stream(&self) -> ReplicationStreamId {
+        self.identity.physical_stream_id()
+    }
+
+    pub fn next_frame_id(&self) -> u64 {
+        self.next_frame_id
+    }
+
+    pub fn next_replication_sequence(&self) -> u64 {
+        self.next_replication_sequence
+    }
+
+    pub fn next_handoff_offset(&self) -> u64 {
+        self.next_handoff_offset
+    }
+
+    pub(crate) fn read_limits(&self) -> GrpcRawCommittedReadLimits {
+        self.limits
+    }
+
+    /// Reposition a cloned, identity-fenced cursor to the first sequence not covered by the local
+    /// durable ACK. Resolution and journal seeking share one rotation lock, so an active cursor
+    /// follows its predecessor into `sealed` without ever opening the successor's handoff file.
+    pub(crate) fn seek_to_replication_sequence(
+        &mut self,
+        next_replication_sequence: u64,
+    ) -> Result<()> {
+        let _rotation_guard = self.acquire_hot_rotation_guard()?;
+        let generation_dir = self.resolve_bound_generation_dir_unlocked()?;
+        let requested_frame_id = self
+            .identity
+            .frame_id_for_replication_sequence(next_replication_sequence)?;
+        let journal_path = generation_dir.join(HANDOFF_JOURNAL_FILE);
+        let (complete_records, complete_offset) = complete_handoff_prefix(&journal_path)?;
+        let (next_frame_id, next_handoff_offset) = if requested_frame_id <= complete_records {
+            (
+                requested_frame_id,
+                locate_handoff_sequence(&journal_path, requested_frame_id)?,
+            )
+        } else {
+            ensure!(
+                generation_dir
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == HOT_SEALED_DIR),
+                "remote durable prefix is ahead of an active raw gRPC generation"
+            );
+            // A later physical generation in this same logical stream has already been ACKed.
+            // Pin this older sealed generation at EOF while retaining the actual logical cursor
+            // so startup reconciliation still names the latest durable prefix.
+            (complete_records, complete_offset)
+        };
+        self.generation_dir = generation_dir;
+        self.next_frame_id = next_frame_id;
+        self.next_replication_sequence = next_replication_sequence;
+        self.next_handoff_offset = next_handoff_offset;
+        Ok(())
+    }
+
+    /// Read a snapshot-bounded batch without advancing the committed cursor. Empty output means
+    /// the cursor is caught up (or is waiting for a partial writer tail); it never means the cursor
+    /// silently skipped a row. The same batch remains readable until
+    /// [`Self::advance_after_durable_ack`] receives the fsynced ACK-WAL token for its exact tail.
+    pub fn read_batch(
+        &self,
+        max_records: usize,
+        max_compressed_bytes: u64,
+        max_uncompressed_bytes: u64,
+    ) -> Result<GrpcRawCommittedBatch> {
+        ensure!(
+            max_records > 0,
+            "raw replication batch record limit must be non-zero"
+        );
+        ensure!(
+            max_compressed_bytes > 0,
+            "raw replication batch byte limit must be non-zero"
+        );
+        ensure!(
+            max_uncompressed_bytes > 0,
+            "raw replication batch uncompressed-byte limit must be non-zero"
+        );
+        // Keep the predecessor visible from identity resolution through the final WAL read. A
+        // concurrent hot rotation takes the exclusive side of this lock, so the cursor can see
+        // either the complete pre-rotation layout or the complete post-rotation layout, never the
+        // short publication interval between them.
+        let _rotation_guard = self.acquire_hot_rotation_guard()?;
+        let generation_dir = self.resolve_bound_generation_dir_unlocked()?;
+        let journal_path = generation_dir.join(HANDOFF_JOURNAL_FILE);
+        let wal_dir = spool_journal_dir(&generation_dir, &self.identity);
+        let mut file = open_regular_readonly_nofollow(&journal_path, "raw gRPC handoff journal")?;
+        let snapshot_len = file
+            .metadata()
+            .with_context(|| format!("inspect raw gRPC journal {}", journal_path.display()))?
+            .len();
+        ensure!(
+            snapshot_len >= self.next_handoff_offset,
+            "raw gRPC handoff journal shrank below the committed cursor"
+        );
+        file.seek(SeekFrom::Start(self.next_handoff_offset))
+            .with_context(|| format!("seek raw gRPC journal {}", journal_path.display()))?;
+        let remaining = snapshot_len - self.next_handoff_offset;
+        let mut reader = BufReader::new(file.take(remaining));
+        let mut line = Vec::new();
+        let mut records = Vec::with_capacity(max_records.min(64));
+        let mut compressed_bytes = 0u64;
+        let mut uncompressed_bytes = 0u64;
+        let mut incomplete_handoff_tail_bytes = 0u64;
+        let mut next_frame_id = self.next_frame_id;
+        let mut next_replication_sequence = self.next_replication_sequence;
+        let mut next_handoff_offset = self.next_handoff_offset;
+
+        while records.len() < max_records {
+            line.clear();
+            let bytes = {
+                let mut bounded = (&mut reader).take(MAX_HANDOFF_RECORD_BYTES + 1);
+                bounded
+                    .read_until(b'\n', &mut line)
+                    .with_context(|| format!("read raw gRPC journal {}", journal_path.display()))?
+            };
+            if bytes == 0 {
+                break;
+            }
+            let bytes = u64::try_from(bytes).context("raw gRPC handoff row length exceeds u64")?;
+            ensure!(
+                bytes <= MAX_HANDOFF_RECORD_BYTES,
+                "raw gRPC handoff row exceeds {MAX_HANDOFF_RECORD_BYTES} bytes"
+            );
+            if !line.ends_with(b"\n") {
+                incomplete_handoff_tail_bytes = bytes;
+                break;
+            }
+            let payload = &line[..line.len() - 1];
+            if payload.iter().all(u8::is_ascii_whitespace) {
+                next_handoff_offset = next_handoff_offset
+                    .checked_add(bytes)
+                    .context("raw gRPC handoff cursor overflow")?;
+                continue;
+            }
+            let row: GrpcRawHandoffRecord = serde_json::from_slice(payload)
+                .with_context(|| format!("decode raw gRPC journal frame {next_frame_id}"))?;
+            validate_handoff_sequence(&row, next_frame_id)?;
+            ensure!(
+                row.compressed_len <= max_compressed_bytes,
+                "raw gRPC frame {} compressed length {} exceeds replication batch maximum {}",
+                row.frame_id,
+                row.compressed_len,
+                max_compressed_bytes
+            );
+            ensure!(
+                row.uncompressed_len <= max_uncompressed_bytes,
+                "raw gRPC frame {} uncompressed length {} exceeds replication batch maximum {}",
+                row.frame_id,
+                row.uncompressed_len,
+                max_uncompressed_bytes
+            );
+            let projected = compressed_bytes
+                .checked_add(row.compressed_len)
+                .context("raw replication batch byte count overflow")?;
+            if !records.is_empty() && projected > max_compressed_bytes {
+                break;
+            }
+            let projected_uncompressed = uncompressed_bytes
+                .checked_add(row.uncompressed_len)
+                .context("raw replication batch uncompressed-byte count overflow")?;
+            if !records.is_empty() && projected_uncompressed > max_uncompressed_bytes {
+                break;
+            }
+            let record = read_verified_grpc_raw_replication_record(
+                &wal_dir,
+                &self.identity,
+                &row,
+                self.limits,
+            )?;
+            ensure!(
+                record.stream == self.stream(),
+                "raw gRPC replication record changed stream identity"
+            );
+            ensure!(
+                record.record.offer.record.sequence == next_replication_sequence,
+                "raw gRPC logical replication sequence is not contiguous"
+            );
+            records.push(record);
+            compressed_bytes = projected;
+            uncompressed_bytes = projected_uncompressed;
+            next_handoff_offset = next_handoff_offset
+                .checked_add(bytes)
+                .context("raw gRPC handoff cursor overflow")?;
+            next_frame_id = next_frame_id
+                .checked_add(1)
+                .context("raw gRPC frame sequence exhausted")?;
+            next_replication_sequence = next_replication_sequence
+                .checked_add(1)
+                .context("raw gRPC logical replication sequence exhausted")?;
+        }
+
+        Ok(GrpcRawCommittedBatch {
+            records,
+            compressed_bytes,
+            uncompressed_bytes,
+            incomplete_handoff_tail_bytes,
+            snapshot_handoff_bytes: snapshot_len,
+            start_frame_id: self.next_frame_id,
+            start_replication_sequence: self.next_replication_sequence,
+            start_handoff_offset: self.next_handoff_offset,
+            next_frame_id,
+            next_replication_sequence,
+            next_handoff_offset,
+        })
+    }
+
+    /// Advance only after the remote cumulative ACK has been authenticated and the replica's ACK
+    /// journal has fsynced it. The durable token must name this reservation's exact local tail.
+    pub fn advance_after_durable_ack(
+        &mut self,
+        advance: &GrpcRawCommittedAdvance,
+        durable_ack: &DurableCumulativeAck,
+    ) -> Result<()> {
+        ensure!(
+            advance.start_frame_id == self.next_frame_id
+                && advance.start_replication_sequence == self.next_replication_sequence
+                && advance.start_handoff_offset == self.next_handoff_offset,
+            "raw gRPC committed batch is stale or belongs to a different cursor position"
+        );
+        ensure!(
+            advance.stream == self.stream() && durable_ack.ack().stream == advance.stream,
+            "durable cumulative ACK belongs to a different raw gRPC stream"
+        );
+        ensure!(
+            durable_ack.ack().through_sequence == advance.through_sequence(),
+            "durable cumulative ACK does not cover the reserved batch tail"
+        );
+        ensure!(
+            durable_ack.matches_replication_witness(&advance.durable_replication_witness),
+            "durable cumulative ACK names a different physical local spool witness"
+        );
+        self.next_frame_id = advance.next_frame_id;
+        self.next_replication_sequence = advance.next_replication_sequence;
+        self.next_handoff_offset = advance.next_handoff_offset;
+        Ok(())
+    }
+
+    /// Resolve the directory that currently owns this immutable generation identity. If an active
+    /// hot generation rotated after this cursor opened, the predecessor is found under `sealed`
+    /// and drained there; the new active journal can never be mistaken for the old stream.
+    pub fn bound_generation_dir(&self) -> Result<PathBuf> {
+        let _rotation_guard = self.acquire_hot_rotation_guard()?;
+        self.resolve_bound_generation_dir_unlocked()
+    }
+
+    pub fn bound_generation_is_sealed(&self) -> Result<bool> {
+        let path = self.bound_generation_dir()?;
+        Ok(path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == HOT_SEALED_DIR))
+    }
+
+    /// Whether a locally durable logical ACK covers the complete committed prefix of this
+    /// physical sealed generation. Callers use this to skip old retained generations before
+    /// remote-ahead reconciliation, which must occur only in the generation containing the next
+    /// locally unacknowledged sequence.
+    pub fn sealed_generation_is_covered_by(&self, through_sequence: u64) -> Result<bool> {
+        let _rotation_guard = self.acquire_hot_rotation_guard()?;
+        let generation_dir = self.resolve_bound_generation_dir_unlocked()?;
+        ensure!(
+            generation_dir
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == HOT_SEALED_DIR),
+            "raw gRPC ACK coverage check requires a sealed generation"
+        );
+        let snapshot = complete_handoff_snapshot(&generation_dir.join(HANDOFF_JOURNAL_FILE))?;
+        ensure!(
+            snapshot.complete_offset == snapshot.snapshot_len,
+            "sealed raw gRPC generation has a partial handoff tail"
+        );
+        let Some(tail) = snapshot.state.last else {
+            return Ok(true);
+        };
+        Ok(through_sequence >= self.identity.replication_sequence(tail.frame_id)?)
+    }
+
+    fn acquire_hot_rotation_guard(&self) -> Result<Option<HotRotationGuard>> {
+        self.hot_cache_root
+            .as_deref()
+            .map(|root| HotRotationGuard::acquire(root, HotRotationLockMode::Shared))
+            .transpose()
+    }
+
+    fn resolve_bound_generation_dir_unlocked(&self) -> Result<PathBuf> {
+        match read_identity_if_present(&self.generation_dir.join(IDENTITY_FILE))? {
+            Some(identity) if identity == self.identity => {
+                return Ok(self.generation_dir.clone());
+            }
+            Some(_) | None => {}
+        }
+        let cache_root = self.hot_cache_root.as_deref().context(
+            "raw gRPC generation identity changed outside a recognized hot-generation layout",
+        )?;
+        let sealed_root = cache_root.join(HOT_SEALED_DIR);
+        let metadata = fs::symlink_metadata(&sealed_root).with_context(|| {
+            format!(
+                "inspect raw gRPC sealed generation root {}",
+                sealed_root.display()
+            )
+        })?;
+        ensure!(
+            metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+            "raw gRPC sealed generation root is not a real directory"
+        );
+        let mut matches = Vec::new();
+        let mut scanned = 0usize;
+        for entry in fs::read_dir(&sealed_root)
+            .with_context(|| format!("list raw gRPC generations {}", sealed_root.display()))?
+        {
+            let entry = entry.context("read raw gRPC sealed generation entry")?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !valid_hot_generation_id(name) {
+                continue;
+            }
+            scanned = scanned
+                .checked_add(1)
+                .context("raw gRPC sealed generation count overflow")?;
+            ensure!(
+                scanned <= MAX_REPLICATION_GENERATION_SCAN,
+                "raw gRPC sealed generation scan exceeds {MAX_REPLICATION_GENERATION_SCAN} entries"
+            );
+            let file_type = entry
+                .file_type()
+                .context("inspect raw gRPC sealed generation entry")?;
+            ensure!(
+                file_type.is_dir() && !file_type.is_symlink(),
+                "raw gRPC sealed generation entry is not a real directory"
+            );
+            let candidate = entry.path();
+            if read_identity_if_present(&candidate.join(IDENTITY_FILE))?
+                .is_some_and(|identity| identity == self.identity)
+            {
+                matches.push(candidate);
+            }
+        }
+        ensure!(
+            matches.len() == 1,
+            "raw gRPC rotated generation identity has {} sealed matches; retry after rotation publication or repair the cache",
+            matches.len()
+        );
+        Ok(matches.remove(0))
+    }
+}
+
+fn infer_hot_cache_root(generation_dir: &Path) -> Option<PathBuf> {
+    if generation_dir
+        .file_name()
+        .is_some_and(|name| name == HOT_ACTIVE_DIR)
+    {
+        generation_dir.parent().map(Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
+fn valid_hot_generation_id(name: &str) -> bool {
+    hot_generation_number(name).is_some()
+}
+
+fn hot_generation_number(name: &str) -> Option<u64> {
+    if name.len() != "slot-".len() + 20 || !name.starts_with("slot-") {
+        return None;
+    }
+    let digits = &name["slot-".len()..];
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn read_identity_if_present(path: &Path) -> Result<Option<GrpcRawIdentityFile>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => read_identity(path).map(Some),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect raw gRPC identity {}", path.display()))
+        }
+    }
+}
+
+fn open_regular_readonly_nofollow(path: &Path, description: &str) -> Result<File> {
+    let linked = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {description} {}", path.display()))?;
+    ensure!(
+        linked.file_type().is_file() && !linked.file_type().is_symlink(),
+        "{description} is not a regular non-symlink file: {}",
+        path.display()
+    );
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options
+        .open(path)
+        .with_context(|| format!("open {description} {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect opened {description} {}", path.display()))?;
+    ensure!(
+        opened.file_type().is_file(),
+        "{description} is not a regular file: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        ensure!(
+            opened.dev() == linked.dev() && opened.ino() == linked.ino(),
+            "{description} changed while it was opened: {}",
+            path.display()
+        );
+        let effective_uid = unsafe { libc::geteuid() };
+        ensure!(
+            opened.uid() == effective_uid || opened.uid() == 0,
+            "{description} has an untrusted owner: {}",
+            path.display()
+        );
+        ensure!(
+            opened.mode() & 0o022 == 0,
+            "{description} must not be writable by group or other users: {}",
+            path.display()
+        );
+    }
+    Ok(file)
+}
+
+/// Count and locate only the newline-committed handoff prefix in one stable file snapshot.
+/// A concurrent writer's partial final row is ignored without truncation.
+fn complete_handoff_prefix(path: &Path) -> Result<(u64, u64)> {
+    let snapshot = complete_handoff_snapshot(path)?;
+    Ok((snapshot.state.records, snapshot.complete_offset))
+}
+
+#[derive(Debug)]
+struct CompleteHandoffSnapshot {
+    state: JournalState,
+    complete_offset: u64,
+    snapshot_len: u64,
+}
+
+fn complete_handoff_snapshot(path: &Path) -> Result<CompleteHandoffSnapshot> {
+    let file = open_regular_readonly_nofollow(path, "raw gRPC handoff journal")?;
+    let snapshot_len = file
+        .metadata()
+        .with_context(|| format!("inspect raw gRPC journal {}", path.display()))?
+        .len();
+    let mut reader = BufReader::new(file.take(snapshot_len));
+    let mut line = Vec::new();
+    let mut state = JournalState::default();
+    let mut offset = 0u64;
+    loop {
+        line.clear();
+        let bytes = {
+            let mut bounded = (&mut reader).take(MAX_HANDOFF_RECORD_BYTES + 1);
+            bounded
+                .read_until(b'\n', &mut line)
+                .with_context(|| format!("read raw gRPC journal {}", path.display()))?
+        };
+        if bytes == 0 {
+            break;
+        }
+        let bytes = u64::try_from(bytes).context("raw gRPC handoff row length exceeds u64")?;
+        ensure!(
+            bytes <= MAX_HANDOFF_RECORD_BYTES,
+            "raw gRPC handoff row exceeds {MAX_HANDOFF_RECORD_BYTES} bytes"
+        );
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let payload = &line[..line.len() - 1];
+        offset = offset
+            .checked_add(bytes)
+            .context("raw gRPC handoff cursor overflow")?;
+        if payload.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let row: GrpcRawHandoffRecord = serde_json::from_slice(payload)
+            .with_context(|| format!("decode raw gRPC journal frame {}", state.records))?;
+        validate_handoff_sequence(&row, state.records)?;
+        state.first.get_or_insert_with(|| row.clone());
+        state.last = Some(row);
+        state.records = state
+            .records
+            .checked_add(1)
+            .context("raw gRPC handoff sequence exhausted")?;
+    }
+    Ok(CompleteHandoffSnapshot {
+        state,
+        complete_offset: offset,
+        snapshot_len,
+    })
+}
+
+fn locate_handoff_sequence(path: &Path, requested_sequence: u64) -> Result<u64> {
+    let file = open_regular_readonly_nofollow(path, "raw gRPC handoff journal")?;
+    let snapshot_len = file
+        .metadata()
+        .with_context(|| format!("inspect raw gRPC journal {}", path.display()))?
+        .len();
+    let mut reader = BufReader::new(file.take(snapshot_len));
+    let mut line = Vec::new();
+    let mut sequence = 0u64;
+    let mut offset = 0u64;
+    loop {
+        line.clear();
+        let bytes = {
+            let mut bounded = (&mut reader).take(MAX_HANDOFF_RECORD_BYTES + 1);
+            bounded
+                .read_until(b'\n', &mut line)
+                .with_context(|| format!("read raw gRPC journal {}", path.display()))?
+        };
+        if bytes == 0 {
+            break;
+        }
+        let bytes = u64::try_from(bytes).context("raw gRPC handoff row length exceeds u64")?;
+        ensure!(
+            bytes <= MAX_HANDOFF_RECORD_BYTES,
+            "raw gRPC handoff row exceeds {MAX_HANDOFF_RECORD_BYTES} bytes"
+        );
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let payload = &line[..line.len() - 1];
+        if payload.iter().all(u8::is_ascii_whitespace) {
+            offset = offset
+                .checked_add(bytes)
+                .context("raw gRPC handoff cursor overflow")?;
+            continue;
+        }
+        let row: GrpcRawHandoffRecord = serde_json::from_slice(payload)
+            .with_context(|| format!("decode raw gRPC journal frame {sequence}"))?;
+        validate_handoff_sequence(&row, sequence)?;
+        if sequence == requested_sequence {
+            return Ok(offset);
+        }
+        sequence = sequence
+            .checked_add(1)
+            .context("raw gRPC handoff sequence exhausted")?;
+        offset = offset
+            .checked_add(bytes)
+            .context("raw gRPC handoff cursor overflow")?;
+    }
+    ensure!(
+        sequence == requested_sequence,
+        "raw gRPC cursor sequence {requested_sequence} is beyond durable handoff tail {sequence}"
+    );
+    Ok(offset)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct GrpcRawIdentityFile {
     schema_version: u32,
     endpoint: String,
@@ -835,6 +1889,12 @@ struct GrpcRawIdentityFile {
     origin_node_id: String,
     source_id: String,
     journal_id: [u8; 16],
+    /// Stable logical replication journal shared by physical hot-storage generations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replication_journal_id: Option<[u8; 16]>,
+    /// Logical sequence represented by physical handoff frame zero in this generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replication_sequence_base: Option<u64>,
     payload_format_version: u16,
 }
 
@@ -847,6 +1907,51 @@ impl GrpcRawIdentityFile {
             journal_id: self.journal_id,
         }
     }
+
+    fn replication_stream_id(&self) -> ReplicationStreamId {
+        ReplicationStreamId {
+            cluster_id: self.cluster_id.clone(),
+            origin_node_id: self.origin_node_id.clone(),
+            source_id: self.source_id.clone(),
+            journal_id: self.replication_journal_id.unwrap_or(self.journal_id),
+        }
+    }
+
+    fn physical_stream_id(&self) -> ReplicationStreamId {
+        ReplicationStreamId {
+            cluster_id: self.cluster_id.clone(),
+            origin_node_id: self.origin_node_id.clone(),
+            source_id: self.source_id.clone(),
+            journal_id: self.journal_id,
+        }
+    }
+
+    fn replication_sequence_base(&self) -> u64 {
+        self.replication_sequence_base.unwrap_or(0)
+    }
+
+    fn replication_sequence(&self, frame_id: u64) -> Result<u64> {
+        self.replication_sequence_base()
+            .checked_add(frame_id)
+            .context("raw gRPC logical replication sequence exhausted")
+    }
+
+    fn frame_id_for_replication_sequence(&self, sequence: u64) -> Result<u64> {
+        sequence
+            .checked_sub(self.replication_sequence_base())
+            .with_context(|| {
+                format!(
+                    "logical replication sequence {sequence} predates generation base {}",
+                    self.replication_sequence_base()
+                )
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrpcRawReplicationGenerationAnchor {
+    journal_id: [u8; 16],
+    sequence_base: u64,
 }
 
 #[derive(Debug, Default)]
@@ -2058,6 +3163,9 @@ fn read_verified_grpc_raw_committed_record(
         row.frame_id
     );
 
+    let raw_protobuf_digest: [u8; 32] = Sha256::digest(&raw).into();
+    let durable_local_record =
+        DurableSpoolRecord::from_verified_committed_read(stored.location, stored.metadata.clone());
     Ok(GrpcRawCommittedRecord {
         cluster_id: stored.metadata.cluster_id.clone(),
         source_id: stored.metadata.source_id.clone(),
@@ -2070,6 +3178,117 @@ fn read_verified_grpc_raw_committed_record(
         uncompressed_bytes: row.uncompressed_len,
         compressed_bytes: stored.payload,
         update,
+        raw_protobuf_digest,
+        durable_local_record,
+    })
+}
+
+/// Verify one committed WAL/handoff row for replication without building a Prost object graph.
+/// The sender needs the exact compressed envelope plus its raw digest, not a decoded block. This
+/// keeps peak memory bounded by the compressed batch and one `uncompressed_len` digest buffer even
+/// for protobufs containing adversarially many tiny repeated messages.
+fn read_verified_grpc_raw_replication_record(
+    wal_dir: &Path,
+    identity: &GrpcRawIdentityFile,
+    row: &GrpcRawHandoffRecord,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<GrpcRawDurableReplicationRecord> {
+    ensure!(
+        row.compressed_len <= limits.max_compressed_record_bytes,
+        "committed raw gRPC frame {} compressed length {} exceeds maximum {}",
+        row.frame_id,
+        row.compressed_len,
+        limits.max_compressed_record_bytes
+    );
+    ensure!(
+        row.uncompressed_len <= limits.max_uncompressed_record_bytes,
+        "committed raw gRPC frame {} uncompressed length {} exceeds maximum {}",
+        row.frame_id,
+        row.uncompressed_len,
+        limits.max_uncompressed_record_bytes
+    );
+    let stored = read_spool_record(wal_dir, row.location(), limits.max_compressed_record_bytes)?;
+    ensure!(
+        stored.metadata.observation.sequence == row.frame_id,
+        "committed raw gRPC WAL/handoff sequence mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.metadata.cluster_id == identity.cluster_id
+            && stored.metadata.observation.origin_node_id == identity.origin_node_id
+            && stored.metadata.observation.journal_id == identity.journal_id
+            && stored.metadata.source_id == identity.source_id
+            && stored.metadata.payload_format_version == PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+        "committed raw gRPC WAL identity/format mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.payload.len() as u64 == row.compressed_len,
+        "committed raw gRPC compressed length mismatch at frame {}",
+        row.frame_id
+    );
+    let logical_key = LogicalKey::Block {
+        slot: row.slot,
+        blockhash: decode_blockhash(&row.blockhash)?,
+    };
+    ensure!(
+        stored.metadata.logical_key == logical_key,
+        "committed raw gRPC logical key mismatch at frame {}",
+        row.frame_id
+    );
+    let raw_capacity = usize::try_from(row.uncompressed_len)
+        .context("committed raw gRPC uncompressed length exceeds usize")?;
+    let raw_protobuf_digest = {
+        let raw = zstd::bulk::decompress(&stored.payload, raw_capacity)
+            .with_context(|| format!("decompress committed raw gRPC frame {}", row.frame_id))?;
+        ensure!(
+            raw.len() as u64 == row.uncompressed_len,
+            "committed raw gRPC uncompressed length mismatch at frame {}",
+            row.frame_id
+        );
+        let digest: [u8; 32] = Sha256::digest(&raw).into();
+        ensure!(
+            hex_bytes(&digest) == row.protobuf_sha256.to_ascii_lowercase(),
+            "committed raw gRPC protobuf checksum mismatch at frame {}",
+            row.frame_id
+        );
+        digest
+    };
+    let stream = identity.replication_stream_id();
+    let replication_sequence = identity.replication_sequence(row.frame_id)?;
+    let durable_local_record =
+        DurableSpoolRecord::from_verified_committed_read(stored.location, stored.metadata.clone());
+    let durable_replication_witness = DurableReplicationWitness::from_verified_mapping(
+        &durable_local_record,
+        stream.clone(),
+        replication_sequence,
+        stored.metadata.content_digest,
+    )?;
+    let record = RawReplicationRecord {
+        offer: ReplicationOffer {
+            protocol_version: REPLICATION_PROTOCOL_VERSION,
+            cluster_id: stream.cluster_id.clone(),
+            record: ObservationId {
+                origin_node_id: stream.origin_node_id.clone(),
+                journal_id: stream.journal_id,
+                sequence: replication_sequence,
+            },
+            source_id: stream.source_id.clone(),
+            logical_key,
+            content_digest: stored.metadata.content_digest,
+            payload_len: stored.payload.len() as u64,
+            payload_format_version: stored.metadata.payload_format_version,
+            commitment: CommitmentEvidence::Confirmed,
+        },
+        compressed_payload: stored.payload,
+        raw_protobuf_sha256: raw_protobuf_digest,
+        uncompressed_len: row.uncompressed_len,
+    };
+    Ok(GrpcRawDurableReplicationRecord {
+        stream,
+        record,
+        durable_local_record,
+        durable_replication_witness,
     })
 }
 
@@ -2412,8 +3631,9 @@ pub fn materialize_grpc_raw_blocks(
 /// Seed a new, empty generation with the exact durable tail record of a stopped source.
 ///
 /// The source remains exclusively locked while it is replay-verified and copied. The target uses
-/// a fresh journal id but preserves the endpoint/source identity and exact compressed protobuf
-/// payload. Publishing is atomic with respect to the target's parent directory.
+/// a fresh physical WAL journal id, but preserves the logical replication journal and maps its
+/// frame zero to the source tail sequence. Publishing is atomic with respect to the target's
+/// parent directory.
 pub fn seed_grpc_raw_generation(
     source_dir: PathBuf,
     target_dir: PathBuf,
@@ -2512,7 +3732,14 @@ pub fn seed_grpc_raw_generation(
             source_id: source_identity.source_id.clone(),
             ..GrpcRawRecordConfig::default()
         };
-        let target_identity = load_or_create_identity(&target_config)?;
+        let replication_anchor = GrpcRawReplicationGenerationAnchor {
+            journal_id: source_identity.replication_stream_id().journal_id,
+            sequence_base: source_identity.replication_sequence(source_tail.frame_id)?,
+        };
+        let target_identity = load_or_create_identity_with_replication_anchor(
+            &target_config,
+            Some(replication_anchor),
+        )?;
         ensure!(
             target_identity.endpoint == source_identity.endpoint
                 && target_identity.cluster_id == source_identity.cluster_id
@@ -2523,6 +3750,12 @@ pub fn seed_grpc_raw_generation(
         ensure!(
             target_identity.journal_id != source_identity.journal_id,
             "seed target unexpectedly reused the source journal id"
+        );
+        ensure!(
+            target_identity.replication_stream_id() == source_identity.replication_stream_id()
+                && target_identity.replication_sequence(0)?
+                    == source_identity.replication_sequence(source_tail.frame_id)?,
+            "seed target did not continue the source logical replication stream"
         );
         let mut target_spool = SpoolWriter::open(
             temporary_dir.join(WAL_ROOT_DIR),
@@ -2599,9 +3832,103 @@ const HOT_ACTIVE_DIR: &str = "active";
 const HOT_SEALED_DIR: &str = "sealed";
 const HOT_RECEIPTS_DIR: &str = "receipts";
 const HOT_ROTATION_MARKER: &str = ".rotation";
+const HOT_ROTATION_LOCK: &str = ".rotation.lock";
+const HOT_GENERATION_SEQUENCE: &str = ".generation-sequence";
+const MAX_HOT_GENERATION_SEQUENCE_BYTES: u64 = 64;
 const REPLAY_GAPS_DIR: &str = "replay-gaps";
 const MAX_HOT_AUXILIARY_FILES: usize = 128;
 const MAX_HOT_AUXILIARY_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+enum HotRotationLockMode {
+    Shared,
+    Exclusive,
+}
+
+#[derive(Debug)]
+struct HotRotationGuard {
+    _file: File,
+}
+
+impl HotRotationGuard {
+    fn acquire(cache_root: &Path, mode: HotRotationLockMode) -> Result<Self> {
+        ensure_real_directory(cache_root, "hot generation root")?;
+        let path = cache_root.join(HOT_ROTATION_LOCK);
+        let linked_before = match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+                    "hot generation rotation lock is not a regular file"
+                );
+                Some(metadata)
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect hot generation rotation lock {}", path.display())
+                });
+            }
+        };
+        let created = linked_before.is_none();
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open hot generation rotation lock {}", path.display()))?;
+        let opened = file
+            .metadata()
+            .with_context(|| format!("inspect hot generation rotation lock {}", path.display()))?;
+        ensure!(
+            opened.file_type().is_file(),
+            "hot generation rotation lock is not a regular file"
+        );
+        let linked_after = fs::symlink_metadata(&path).with_context(|| {
+            format!("reinspect hot generation rotation lock {}", path.display())
+        })?;
+        #[cfg(unix)]
+        {
+            ensure!(
+                opened.dev() == linked_after.dev() && opened.ino() == linked_after.ino(),
+                "hot generation rotation lock changed while it was opened"
+            );
+            if let Some(linked_before) = linked_before.as_ref() {
+                ensure!(
+                    opened.dev() == linked_before.dev() && opened.ino() == linked_before.ino(),
+                    "hot generation rotation lock was replaced while it was opened"
+                );
+            }
+            let effective_uid = unsafe { libc::geteuid() };
+            ensure!(
+                opened.uid() == effective_uid || opened.uid() == 0,
+                "hot generation rotation lock has an untrusted owner"
+            );
+            ensure!(
+                opened.mode() & 0o077 == 0,
+                "hot generation rotation lock must be private"
+            );
+            let operation = match mode {
+                HotRotationLockMode::Shared => libc::LOCK_SH,
+                HotRotationLockMode::Exclusive => libc::LOCK_EX,
+            };
+            // SAFETY: `file` remains owned by the guard for the complete lock lifetime.
+            let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+            if result != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("acquire hot generation rotation lock");
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (linked_before, linked_after, mode);
+        if created {
+            sync_directory(cache_root)?;
+        }
+        Ok(Self { _file: file })
+    }
+}
 
 #[derive(Debug)]
 struct HotRotationResult {
@@ -2703,6 +4030,185 @@ fn hot_rotation_layout(cache_root: &Path, slot: u64) -> HotRotationLayout {
     }
 }
 
+/// Allocate and durably reserve a strictly increasing generation identifier while retaining the
+/// historical `slot-<20 digits>` wire/storage grammar used by the uploader. The identifier is a
+/// generation sequence seeded from a real tail slot; after a repeated/lower fork slot it no longer
+/// promises to equal the predecessor's tail slot. Reserving before publication may leave a harmless
+/// gap after a crash, but it can never reuse an object-store prefix whose local generation was
+/// already acknowledged and removed.
+fn allocate_hot_generation_number(cache_root: &Path, tail_slot: u64) -> Result<u64> {
+    let persisted = read_hot_generation_sequence(cache_root)?;
+    // Retained upload receipts can grow indefinitely. They are consulted exactly once to migrate
+    // a legacy cache; after the synced sequence file exists it is the compact authoritative high
+    // water and rotations remain O(1) regardless of retention length.
+    let high_water = match persisted {
+        Some(value) => Some(value),
+        None => scan_hot_generation_high_water(cache_root)?,
+    };
+    let number = match high_water {
+        Some(high_water) if high_water >= tail_slot => high_water
+            .checked_add(1)
+            .context("hot generation identifier space exhausted")?,
+        _ => tail_slot,
+    };
+    persist_hot_generation_sequence(cache_root, number)?;
+    Ok(number)
+}
+
+fn read_hot_generation_sequence(cache_root: &Path) -> Result<Option<u64>> {
+    let path = cache_root.join(HOT_GENERATION_SEQUENCE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+                "hot generation sequence is not a regular file"
+            );
+            ensure!(
+                metadata.len() > 0 && metadata.len() <= MAX_HOT_GENERATION_SEQUENCE_BYTES,
+                "hot generation sequence has an invalid size"
+            );
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect hot generation sequence {}", path.display()));
+        }
+    }
+    let mut file = open_regular_readonly_nofollow(&path, "hot generation sequence")?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_HOT_GENERATION_SEQUENCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read hot generation sequence {}", path.display()))?;
+    ensure!(
+        !bytes.is_empty() && bytes.len() as u64 <= MAX_HOT_GENERATION_SEQUENCE_BYTES,
+        "hot generation sequence has an invalid size"
+    );
+    let value = std::str::from_utf8(&bytes)
+        .context("hot generation sequence is not UTF-8")?
+        .trim();
+    ensure!(
+        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+        "hot generation sequence is not an unsigned decimal integer"
+    );
+    value
+        .parse::<u64>()
+        .map(Some)
+        .context("hot generation sequence exceeds u64")
+}
+
+fn scan_hot_generation_high_water(cache_root: &Path) -> Result<Option<u64>> {
+    let sealed_root = cache_root.join(HOT_SEALED_DIR);
+    ensure_real_directory(&sealed_root, "hot sealed generation directory")?;
+    let receipts_root = cache_root.join(HOT_RECEIPTS_DIR);
+    ensure_real_directory(&receipts_root, "hot generation receipt directory")?;
+    let mut newest = None::<u64>;
+    let mut count = 0usize;
+    for entry in fs::read_dir(&sealed_root)
+        .with_context(|| format!("list hot sealed generations {}", sealed_root.display()))?
+    {
+        let entry = entry.context("read hot sealed generation entry")?;
+        count = count
+            .checked_add(1)
+            .context("hot sealed generation count overflow")?;
+        ensure!(
+            count <= MAX_REPLICATION_GENERATION_SCAN,
+            "hot sealed generation queue exceeds {MAX_REPLICATION_GENERATION_SCAN} entries"
+        );
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow!("hot sealed generation name is not UTF-8"))?;
+        let number = hot_generation_number(&name)
+            .with_context(|| format!("invalid hot sealed generation name {name:?}"))?;
+        let file_type = entry
+            .file_type()
+            .context("inspect hot sealed generation entry")?;
+        ensure!(
+            file_type.is_dir() && !file_type.is_symlink(),
+            "hot sealed generation is not a real directory"
+        );
+        newest = Some(newest.map_or(number, |current| current.max(number)));
+    }
+    for entry in fs::read_dir(&receipts_root)
+        .with_context(|| format!("list hot generation receipts {}", receipts_root.display()))?
+    {
+        let entry = entry.context("read hot generation receipt entry")?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow!("hot generation receipt name is not UTF-8"))?;
+        if !name.starts_with("slot-") || !name.ends_with(".json") {
+            continue;
+        }
+        count = count
+            .checked_add(1)
+            .context("hot generation evidence count overflow")?;
+        ensure!(
+            count <= MAX_REPLICATION_GENERATION_SCAN,
+            "hot generation evidence exceeds {MAX_REPLICATION_GENERATION_SCAN} entries"
+        );
+        let generation_id = name
+            .strip_suffix(".json")
+            .context("hot generation receipt suffix disappeared")?;
+        let number = hot_generation_number(generation_id)
+            .with_context(|| format!("invalid hot generation receipt name {name:?}"))?;
+        let file_type = entry
+            .file_type()
+            .context("inspect hot generation receipt entry")?;
+        ensure!(
+            file_type.is_file() && !file_type.is_symlink(),
+            "hot generation receipt is not a regular file"
+        );
+        newest = Some(newest.map_or(number, |current| current.max(number)));
+    }
+    Ok(newest)
+}
+
+fn persist_hot_generation_sequence(cache_root: &Path, number: u64) -> Result<()> {
+    let path = cache_root.join(HOT_GENERATION_SEQUENCE);
+    if path_entry_exists(&path)? {
+        // Refuse to replace a hostile or corrupted path. This also validates ownership/mode and
+        // detects an inode swap before the atomic update below.
+        let current = read_hot_generation_sequence(cache_root)?
+            .context("hot generation sequence disappeared before update")?;
+        ensure!(
+            number > current,
+            "hot generation sequence must advance monotonically"
+        );
+    }
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let temporary = cache_root.join(format!(
+        ".generation-sequence.{}.{unique}.tmp",
+        std::process::id()
+    ));
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let mut file = options.open(&temporary).with_context(|| {
+            format!(
+                "create hot generation sequence temporary file {}",
+                temporary.display()
+            )
+        })?;
+        writeln!(file, "{number:020}")?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)
+            .with_context(|| format!("publish hot generation sequence {}", path.display()))?;
+        sync_directory(cache_root)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn hot_rotate_generation(
     config: &GrpcRawRecordConfig,
     cache_root: &Path,
@@ -2710,6 +4216,7 @@ fn hot_rotate_generation(
     spool: &mut SpoolWriter,
     source_tail: &GrpcRawHandoffRecord,
 ) -> Result<HotRotationResult> {
+    let _rotation_guard = HotRotationGuard::acquire(cache_root, HotRotationLockMode::Exclusive)?;
     ensure!(
         spool
             .last_record()
@@ -2728,7 +4235,8 @@ fn hot_rotate_generation(
         "hot generation durable tail sequence differs from its handoff row"
     );
 
-    let layout = hot_rotation_layout(cache_root, source_tail.slot);
+    let generation_number = allocate_hot_generation_number(cache_root, source_tail.slot)?;
+    let layout = hot_rotation_layout(cache_root, generation_number);
     for path in [
         &layout.next,
         &layout.hidden_old,
@@ -2827,10 +4335,23 @@ fn seed_hot_generation_from_tail(
             source_id: source_identity.source_id.clone(),
             ..GrpcRawRecordConfig::default()
         };
-        let target_identity = load_or_create_identity(&target_config)?;
+        let replication_anchor = GrpcRawReplicationGenerationAnchor {
+            journal_id: source_identity.replication_stream_id().journal_id,
+            sequence_base: source_identity.replication_sequence(source_tail.frame_id)?,
+        };
+        let target_identity = load_or_create_identity_with_replication_anchor(
+            &target_config,
+            Some(replication_anchor),
+        )?;
         ensure!(
             target_identity.journal_id != source_identity.journal_id,
             "hot generation successor reused the source journal id"
+        );
+        ensure!(
+            target_identity.replication_stream_id() == source_identity.replication_stream_id()
+                && target_identity.replication_sequence(0)?
+                    == source_identity.replication_sequence(source_tail.frame_id)?,
+            "hot generation successor did not continue the source logical replication stream"
         );
         let mut target_spool = SpoolWriter::open(
             temporary_dir.join(WAL_ROOT_DIR),
@@ -3151,6 +4672,13 @@ fn update_inspect_report(
 }
 
 fn load_or_create_identity(config: &GrpcRawRecordConfig) -> Result<GrpcRawIdentityFile> {
+    load_or_create_identity_with_replication_anchor(config, None)
+}
+
+fn load_or_create_identity_with_replication_anchor(
+    config: &GrpcRawRecordConfig,
+    replication_anchor: Option<GrpcRawReplicationGenerationAnchor>,
+) -> Result<GrpcRawIdentityFile> {
     let path = config.output_dir.join(IDENTITY_FILE);
     if path.exists() {
         let identity = read_identity(&path)?;
@@ -3170,15 +4698,29 @@ fn load_or_create_identity(config: &GrpcRawRecordConfig) -> Result<GrpcRawIdenti
             identity.source_id == config.source_id,
             "raw gRPC source id changed for existing spool"
         );
+        if let Some(anchor) = replication_anchor {
+            ensure!(
+                identity.replication_stream_id().journal_id == anchor.journal_id
+                    && identity.replication_sequence_base() == anchor.sequence_base,
+                "raw gRPC logical replication anchor changed for existing spool"
+            );
+        }
         return Ok(identity);
     }
+    let journal_id = generate_journal_id(config);
+    let replication_anchor = replication_anchor.unwrap_or(GrpcRawReplicationGenerationAnchor {
+        journal_id,
+        sequence_base: 0,
+    });
     let identity = GrpcRawIdentityFile {
         schema_version: IDENTITY_SCHEMA_VERSION,
         endpoint: config.endpoint.clone(),
         cluster_id: config.cluster_id.clone(),
         origin_node_id: config.origin_node_id.clone(),
         source_id: config.source_id.clone(),
-        journal_id: generate_journal_id(config),
+        journal_id,
+        replication_journal_id: Some(replication_anchor.journal_id),
+        replication_sequence_base: Some(replication_anchor.sequence_base),
         payload_format_version: PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
     };
     let temp_path = path.with_file_name(format!(".{IDENTITY_FILE}.{}.tmp", std::process::id()));
@@ -3209,9 +4751,27 @@ fn load_or_create_identity(config: &GrpcRawRecordConfig) -> Result<GrpcRawIdenti
 }
 
 fn read_identity(path: &Path) -> Result<GrpcRawIdentityFile> {
-    let file =
-        File::open(path).with_context(|| format!("open raw gRPC identity {}", path.display()))?;
-    let identity: GrpcRawIdentityFile = serde_json::from_reader(file)
+    let mut file = open_regular_readonly_nofollow(path, "raw gRPC identity")?;
+    let length = file
+        .metadata()
+        .with_context(|| format!("inspect raw gRPC identity {}", path.display()))?
+        .len();
+    ensure!(
+        length > 0 && length <= MAX_IDENTITY_FILE_BYTES,
+        "raw gRPC identity must be 1..={MAX_IDENTITY_FILE_BYTES} bytes: {}",
+        path.display()
+    );
+    let mut encoded = Vec::with_capacity(length as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_IDENTITY_FILE_BYTES + 1)
+        .read_to_end(&mut encoded)
+        .with_context(|| format!("read raw gRPC identity {}", path.display()))?;
+    ensure!(
+        encoded.len() as u64 == length,
+        "raw gRPC identity changed while it was read: {}",
+        path.display()
+    );
+    let identity: GrpcRawIdentityFile = serde_json::from_slice(&encoded)
         .with_context(|| format!("decode raw gRPC identity {}", path.display()))?;
     ensure!(
         identity.schema_version == IDENTITY_SCHEMA_VERSION,
@@ -3221,7 +4781,36 @@ fn read_identity(path: &Path) -> Result<GrpcRawIdentityFile> {
         identity.payload_format_version == PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
         "unsupported raw gRPC payload format"
     );
+    ensure!(
+        identity.replication_journal_id.is_some() == identity.replication_sequence_base.is_some(),
+        "raw gRPC identity has an incomplete logical replication anchor"
+    );
+    for (name, value) in [
+        ("cluster_id", identity.cluster_id.as_str()),
+        ("origin_node_id", identity.origin_node_id.as_str()),
+        ("source_id", identity.source_id.as_str()),
+    ] {
+        ensure!(
+            valid_replication_identity_component(value),
+            "raw gRPC identity {name} is not a safe stable identifier"
+        );
+    }
+    ensure!(
+        !identity.endpoint.is_empty()
+            && identity.endpoint.len() <= 4096
+            && !identity.endpoint.chars().any(char::is_control),
+        "raw gRPC identity endpoint is invalid"
+    );
     Ok(identity)
+}
+
+fn valid_replication_identity_component(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value.len() <= 64
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn generate_journal_id(config: &GrpcRawRecordConfig) -> [u8; 16] {
@@ -3517,6 +5106,8 @@ fn minimum_generation_bytes(config: &GrpcRawRecordConfig) -> Result<u64> {
         origin_node_id: config.origin_node_id.clone(),
         source_id: config.source_id.clone(),
         journal_id: [u8::MAX; 16],
+        replication_journal_id: Some([u8::MAX; 16]),
+        replication_sequence_base: Some(u64::MAX),
         payload_format_version: PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
     };
     let identity_bytes = u64::try_from(serde_json::to_vec_pretty(&identity_reserve)?.len())
@@ -4142,6 +5733,19 @@ mod tests {
     use std::io::Cursor;
     use yellowstone_grpc_proto::prelude::SubscribeUpdateEntry;
 
+    struct AcceptCumulativeSignature;
+
+    impl crate::ingest::CumulativeAckSignatureVerifier for AcceptCumulativeSignature {
+        fn verify_cumulative_ack_signature(
+            &self,
+            _key_id: &str,
+            _signing_bytes: &[u8],
+            _signature: &[u8],
+        ) -> bool {
+            true
+        }
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4453,6 +6057,16 @@ mod tests {
         );
         assert_eq!(target_identity.source_id, source_identity.source_id);
         assert_ne!(target_identity.journal_id, source_identity.journal_id);
+        assert_eq!(
+            target_identity.replication_stream_id(),
+            source_identity.replication_stream_id()
+        );
+        assert_eq!(
+            target_identity.replication_sequence(0).unwrap(),
+            source_identity
+                .replication_sequence(source_tail.frame_id)
+                .unwrap()
+        );
         let target_state =
             read_handoff_journal(&target_dir.join(HANDOFF_JOURNAL_FILE), false).unwrap();
         assert_eq!(target_state.records, 1);
@@ -4531,6 +6145,14 @@ mod tests {
         assert_eq!(rotated.seeded_tail.frame_id, 0);
         assert_eq!(rotated.seeded_tail.slot, source_tail.slot);
         assert_ne!(identity.journal_id, source_journal_id);
+        assert_eq!(
+            identity.replication_stream_id().journal_id,
+            source_journal_id
+        );
+        assert_eq!(
+            identity.replication_sequence(0).unwrap(),
+            source_tail.frame_id
+        );
         assert!(!cache_root.join(HOT_ROTATION_MARKER).exists());
         assert!(
             cache_root
@@ -4556,6 +6178,43 @@ mod tests {
         assert_eq!(active_verification.records_verified, 2);
         assert_eq!(active_verification.first_slot, Some(source_tail.slot));
         assert_eq!(active_verification.last_slot, Some(source_tail.slot + 1));
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn hot_generation_sequence_never_reuses_a_repeated_tail_slot() {
+        let cache_root = temp_dir("hot-generation-sequence");
+        fs::create_dir_all(cache_root.join(HOT_ACTIVE_DIR)).unwrap();
+        fs::create_dir(cache_root.join(HOT_SEALED_DIR)).unwrap();
+        fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+
+        assert_eq!(allocate_hot_generation_number(&cache_root, 42).unwrap(), 42);
+        assert_eq!(read_hot_generation_sequence(&cache_root).unwrap(), Some(42));
+        assert_eq!(allocate_hot_generation_number(&cache_root, 42).unwrap(), 43);
+        assert_eq!(read_hot_generation_sequence(&cache_root).unwrap(), Some(43));
+        assert_eq!(allocate_hot_generation_number(&cache_root, 7).unwrap(), 44);
+
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn hot_generation_sequence_bootstraps_from_old_upload_receipts() {
+        let cache_root = temp_dir("hot-generation-receipt-sequence");
+        fs::create_dir_all(cache_root.join(HOT_ACTIVE_DIR)).unwrap();
+        fs::create_dir(cache_root.join(HOT_SEALED_DIR)).unwrap();
+        let receipts = cache_root.join(HOT_RECEIPTS_DIR);
+        fs::create_dir(&receipts).unwrap();
+        fs::write(receipts.join("slot-00000000000000000123.json"), b"{}\n").unwrap();
+
+        assert_eq!(
+            allocate_hot_generation_number(&cache_root, 100).unwrap(),
+            124
+        );
+        assert_eq!(
+            read_hot_generation_sequence(&cache_root).unwrap(),
+            Some(124)
+        );
+
         fs::remove_dir_all(cache_root).unwrap();
     }
 
@@ -5299,6 +6958,505 @@ mod tests {
         .unwrap();
         assert_eq!(report.records, 2);
         assert_eq!(slots, vec![1_000, 1_001]);
+
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_cursor_batches_incrementally_and_restarts_from_a_durable_ack() {
+        let root = temp_dir("committed-cursor-restart");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let mut rows = Vec::new();
+        for frame_id in 0..3 {
+            let row = append_fixture(&mut spool, &identity, &update(1_050 + frame_id), frame_id);
+            append_handoff_record(&journal, &row).unwrap();
+            rows.push(row);
+        }
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+
+        let mut cursor = GrpcRawCommittedCursor::open(&root, limits, 0).unwrap();
+        assert_eq!(cursor.next_frame_id(), 0);
+        assert_eq!(cursor.stream().cluster_id, identity.cluster_id);
+        let first = cursor
+            .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(first.records.len(), 2);
+        assert_eq!(cursor.next_frame_id(), 0);
+        assert_eq!(first.records[0].record.offer.record.sequence, 0);
+        assert_eq!(first.records[1].record.offer.record.sequence, 1);
+        assert_eq!(
+            first.records[1].durable_local_record().location(),
+            rows[1].location()
+        );
+        assert_eq!(
+            first.records[1]
+                .durable_local_record()
+                .metadata()
+                .content_digest,
+            first.records[1].record.offer.content_digest
+        );
+        let expected_raw = update(1_051).encode_to_vec();
+        assert_eq!(
+            first.records[1].record.raw_protobuf_sha256,
+            <[u8; 32]>::from(Sha256::digest(expected_raw))
+        );
+        let stream = cursor.stream();
+        let mut rolling_chain = crate::ingest::cumulative_chain_seed(&stream).unwrap();
+        for record in &first.records {
+            rolling_chain =
+                crate::ingest::cumulative_chain_next(&stream, rolling_chain, &record.record.offer)
+                    .unwrap();
+        }
+        let tail = first.records.last().unwrap();
+        let ack = crate::ingest::CumulativePrimaryAck {
+            protocol_version: REPLICATION_PROTOCOL_VERSION,
+            stream: stream.clone(),
+            primary_id: "primary-a".to_string(),
+            primary_term: 1,
+            through_sequence: tail.record.offer.record.sequence,
+            through_content_digest: tail.record.offer.content_digest,
+            rolling_chain_digest: rolling_chain,
+            disposition: crate::ingest::ReceiptDisposition::DurablyStored,
+            durable_lsn: 2,
+            signing_key_id: "receipt-key".to_string(),
+            signature: vec![7; 64],
+        };
+        let verified = crate::ingest::verify_cumulative_ack(
+            ack,
+            crate::ingest::ExpectedCumulativeAck {
+                stream: &stream,
+                primary_id: "primary-a",
+                minimum_primary_term: 1,
+                through_sequence: tail.record.offer.record.sequence,
+                through_content_digest: tail.record.offer.content_digest,
+                rolling_chain_digest: rolling_chain,
+            },
+            &AcceptCumulativeSignature,
+        )
+        .unwrap();
+        let (_transport_records, advance) = first.into_transport_parts().unwrap();
+        let mut ack_wal = crate::ingest::CumulativeAckWal::open(root.join("acks.wal")).unwrap();
+        let durable_ack = ack_wal
+            .commit_verified_replication(verified, advance.durable_replication_witness())
+            .unwrap();
+        cursor
+            .advance_after_durable_ack(&advance, &durable_ack)
+            .unwrap();
+        assert_eq!(cursor.next_frame_id(), 2);
+        assert_eq!(
+            cursor
+                .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+                .unwrap()
+                .records[0]
+                .record
+                .offer
+                .record
+                .sequence,
+            2
+        );
+
+        // A process restart resumes from the sequence after the locally durable cumulative ACK.
+        let restarted = GrpcRawCommittedCursor::open(&root, limits, 2).unwrap();
+        let tail = restarted
+            .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(tail.records.len(), 1);
+        assert_eq!(tail.records[0].record.offer.record.sequence, 2);
+        assert_eq!(restarted.next_frame_id(), 2);
+        assert_eq!(
+            restarted
+                .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+                .unwrap()
+                .records,
+            tail.records
+        );
+        assert!(
+            GrpcRawCommittedCursor::open(&root, limits, 4)
+                .unwrap_err()
+                .to_string()
+                .contains("beyond durable handoff tail")
+        );
+
+        drop(ack_wal);
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_cursor_does_not_advance_when_a_later_reserved_row_is_invalid() {
+        let root = temp_dir("committed-cursor-transactional-error");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let first = append_fixture(&mut spool, &identity, &update(1_055), 0);
+        append_handoff_record(&journal, &first).unwrap();
+        let mut corrupt = append_fixture(&mut spool, &identity, &update(1_056), 1);
+        corrupt.protobuf_sha256 = "00".repeat(32);
+        append_handoff_record(&journal, &corrupt).unwrap();
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let cursor = GrpcRawCommittedCursor::open(&root, limits, 0).unwrap();
+        let initial_offset = cursor.next_handoff_offset();
+        let error = cursor
+            .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+            .unwrap_err();
+        assert!(error.to_string().contains("protobuf checksum mismatch"));
+        assert_eq!(cursor.next_frame_id(), 0);
+        assert_eq!(cursor.next_handoff_offset(), initial_offset);
+        let retried = cursor
+            .read_batch(1, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(retried.records.len(), 1);
+        assert_eq!(retried.records[0].record.offer.record.sequence, 0);
+
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_cursor_follows_its_unacked_generation_into_the_sealed_queue() {
+        let cache_root = temp_dir("committed-cursor-hot-rotation");
+        let active = cache_root.join(HOT_ACTIVE_DIR);
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir(cache_root.join(HOT_SEALED_DIR)).unwrap();
+        fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+        let mut config = test_config(active.clone());
+        config.hot_generation_root = Some(cache_root.clone());
+        config.max_generation_bytes = minimum_generation_bytes(&config).unwrap();
+        validate_hot_generation_config(&config).unwrap();
+        let mut identity = load_or_create_identity(&config).unwrap();
+        let predecessor_journal_id = identity.journal_id;
+        let mut spool = SpoolWriter::open(
+            active.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = active.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let mut tail = None;
+        for frame_id in 0..3 {
+            let row = append_fixture(
+                &mut spool,
+                &identity,
+                &complete_poh_update(1_070 + frame_id),
+                frame_id,
+            );
+            append_handoff_record(&journal, &row).unwrap();
+            tail = Some(row);
+        }
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let mut cursor = GrpcRawCommittedCursor::open(&active, limits, 0).unwrap();
+        let rotated = hot_rotate_generation(
+            &config,
+            &cache_root,
+            &mut identity,
+            &mut spool,
+            tail.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_ne!(identity.journal_id, predecessor_journal_id);
+        assert_eq!(rotated.next_frame_id, 1);
+
+        let bound = cursor.bound_generation_dir().unwrap();
+        assert_eq!(
+            bound.parent(),
+            Some(cache_root.join(HOT_SEALED_DIR).as_path())
+        );
+        assert!(cursor.bound_generation_is_sealed().unwrap());
+        let predecessor = cursor
+            .read_batch(4, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(predecessor.records.len(), 3);
+        assert_eq!(
+            predecessor
+                .records
+                .iter()
+                .map(|record| record.record.offer.record.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(
+            predecessor
+                .records
+                .iter()
+                .all(|record| record.stream.journal_id == predecessor_journal_id)
+        );
+
+        let mut successor = GrpcRawCommittedCursor::open(&active, limits, 0).unwrap();
+        assert_eq!(successor.stream().journal_id, predecessor_journal_id);
+        assert_ne!(
+            successor.physical_stream().journal_id,
+            predecessor_journal_id
+        );
+        assert_eq!(successor.next_replication_sequence(), 2);
+        let seeded = successor
+            .read_batch(1, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(seeded.records.len(), 1);
+        assert_eq!(seeded.records[0].record.offer.record.sequence, 2);
+
+        let successor_trigger =
+            append_fixture(&mut spool, &identity, &complete_poh_update(1_073), 1);
+        append_handoff_record(&journal, &successor_trigger).unwrap();
+        successor.seek_to_replication_sequence(3).unwrap();
+        let after_seed = successor
+            .read_batch(1, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(after_seed.records[0].record.offer.record.sequence, 3);
+
+        hot_rotate_generation(
+            &config,
+            &cache_root,
+            &mut identity,
+            &mut spool,
+            &successor_trigger,
+        )
+        .unwrap();
+        // After a restart, one ACK from a later generation can cover this older retained
+        // physical generation. It is pinned at EOF rather than failing an out-of-range seek.
+        cursor.seek_to_replication_sequence(4).unwrap();
+        assert_eq!(cursor.next_replication_sequence(), 4);
+        assert_eq!(cursor.next_frame_id(), 3);
+        assert!(
+            cursor
+                .read_batch(1, config.max_record_bytes, config.max_record_bytes)
+                .unwrap()
+                .records
+                .is_empty()
+        );
+
+        drop(spool);
+        let active_identity_path = active.join(IDENTITY_FILE);
+        let mut corrupted_identity = read_identity(&active_identity_path).unwrap();
+        corrupted_identity.replication_sequence_base = Some(2);
+        fs::write(
+            &active_identity_path,
+            serde_json::to_vec_pretty(&corrupted_identity).unwrap(),
+        )
+        .unwrap();
+        let error = open_grpc_raw_replication_generation_cursors(&cache_root, limits).unwrap_err();
+        assert!(error.to_string().contains("sequence base"));
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn replication_generation_discovery_orders_sealed_before_active_and_fences_rotation() {
+        let cache_root = temp_dir("replication-generation-discovery");
+        let active = cache_root.join(HOT_ACTIVE_DIR);
+        let sealed_root = cache_root.join(HOT_SEALED_DIR);
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir(&sealed_root).unwrap();
+        load_or_create_identity(&test_config(active.clone())).unwrap();
+        let newer = sealed_root.join("slot-00000000000000000200");
+        let older = sealed_root.join("slot-00000000000000000100");
+        fs::create_dir(&newer).unwrap();
+        fs::create_dir(&older).unwrap();
+        load_or_create_identity(&test_config(newer.clone())).unwrap();
+        load_or_create_identity(&test_config(older.clone())).unwrap();
+        for generation in [&active, &newer, &older] {
+            recover_handoff_journal(&generation.join(HANDOFF_JOURNAL_FILE)).unwrap();
+        }
+
+        let generations = discover_grpc_raw_replication_generations(&cache_root).unwrap();
+        assert_eq!(
+            generations,
+            vec![
+                GrpcRawReplicationGeneration {
+                    path: older.clone(),
+                    sealed: true,
+                },
+                GrpcRawReplicationGeneration {
+                    path: newer.clone(),
+                    sealed: true,
+                },
+                GrpcRawReplicationGeneration {
+                    path: active.clone(),
+                    sealed: false,
+                },
+            ]
+        );
+        let prepared = open_grpc_raw_replication_generation_cursors(
+            &cache_root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: 1024,
+                max_uncompressed_record_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            prepared
+                .iter()
+                .map(|generation| generation.sealed)
+                .collect::<Vec<_>>(),
+            vec![true, true, false]
+        );
+        assert_eq!(prepared[0].cursor.bound_generation_dir().unwrap(), older);
+        assert_eq!(prepared[1].cursor.bound_generation_dir().unwrap(), newer);
+        assert_eq!(prepared[2].cursor.bound_generation_dir().unwrap(), active);
+
+        // A sealed legacy generation may be followed by an unrelated logical stream. Its torn
+        // final row must still fail discovery instead of looking like a caught-up generation.
+        let newer_journal = newer.join(HANDOFF_JOURNAL_FILE);
+        fs::write(&newer_journal, b"{\"partial\":").unwrap();
+        let error = open_grpc_raw_replication_generation_cursors(
+            &cache_root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: 1024,
+                max_uncompressed_record_bytes: 1024,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("sealed raw gRPC generation has a partial handoff tail")
+        );
+        fs::write(&newer_journal, b"").unwrap();
+
+        let older_identity_path = older.join(IDENTITY_FILE);
+        let mut corrupted_identity = read_identity(&older_identity_path).unwrap();
+        corrupted_identity.replication_sequence_base = Some(1);
+        fs::write(
+            &older_identity_path,
+            serde_json::to_vec_pretty(&corrupted_identity).unwrap(),
+        )
+        .unwrap();
+        let error = open_grpc_raw_replication_generation_cursors(
+            &cache_root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: 1024,
+                max_uncompressed_record_bytes: 1024,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("base-zero physical anchor"));
+
+        let marker = cache_root.join(HOT_ROTATION_MARKER);
+        File::create(&marker).unwrap().sync_all().unwrap();
+        assert!(
+            discover_grpc_raw_replication_generations(&cache_root)
+                .unwrap_err()
+                .to_string()
+                .contains("rotation is in progress")
+        );
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn committed_cursor_preserves_byte_limited_and_partial_rows_for_the_next_read() {
+        let root = temp_dir("committed-cursor-boundaries");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let first_row = append_fixture(&mut spool, &identity, &update(1_060), 0);
+        let second_row = append_fixture(&mut spool, &identity, &update(1_061), 1);
+        append_handoff_record(&journal, &first_row).unwrap();
+        append_handoff_record(&journal, &second_row).unwrap();
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let cursor = GrpcRawCommittedCursor::open(&root, limits, 0).unwrap();
+
+        let one = cursor
+            .read_batch(2, first_row.compressed_len, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(one.records.len(), 1);
+        assert_eq!(cursor.next_frame_id(), 0);
+        let one_by_uncompressed = cursor
+            .read_batch(2, config.max_record_bytes, first_row.uncompressed_len)
+            .unwrap();
+        assert_eq!(one_by_uncompressed.records.len(), 1);
+        assert_eq!(
+            one_by_uncompressed.uncompressed_bytes,
+            first_row.uncompressed_len
+        );
+        let mut second_cursor = GrpcRawCommittedCursor::open(&root, limits, 1).unwrap();
+        let two = second_cursor
+            .read_batch(1, second_row.compressed_len, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(two.records.len(), 1);
+        assert_eq!(two.records[0].record.offer.record.sequence, 1);
+
+        let pending_row = append_fixture(&mut spool, &identity, &update(1_062), 2);
+        let pending_json = serde_json::to_vec(&pending_row).unwrap();
+        let split = pending_json.len() / 2;
+        let mut append = OpenOptions::new().append(true).open(&journal).unwrap();
+        append.write_all(&pending_json[..split]).unwrap();
+        append.sync_data().unwrap();
+        drop(append);
+        second_cursor = GrpcRawCommittedCursor::open(&root, limits, 2).unwrap();
+        let before_offset = second_cursor.next_handoff_offset();
+        let partial = second_cursor
+            .read_batch(1, pending_row.compressed_len, config.max_record_bytes)
+            .unwrap();
+        assert!(partial.records.is_empty());
+        assert_eq!(
+            partial.incomplete_handoff_tail_bytes,
+            u64::try_from(split).unwrap()
+        );
+        assert_eq!(second_cursor.next_frame_id(), 2);
+        assert_eq!(second_cursor.next_handoff_offset(), before_offset);
+
+        let mut append = OpenOptions::new().append(true).open(&journal).unwrap();
+        append.write_all(&pending_json[split..]).unwrap();
+        append.write_all(b"\n").unwrap();
+        append.sync_data().unwrap();
+        drop(append);
+        let completed = second_cursor
+            .read_batch(1, pending_row.compressed_len, config.max_record_bytes)
+            .unwrap();
+        assert_eq!(completed.records.len(), 1);
+        assert_eq!(completed.records[0].record.offer.record.sequence, 2);
+        assert_eq!(second_cursor.next_frame_id(), 2);
 
         drop(spool);
         fs::remove_dir_all(root).unwrap();

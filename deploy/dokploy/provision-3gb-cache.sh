@@ -1,14 +1,15 @@
 #!/bin/sh
 set -eu
 
-# Provision a hard-capped, preallocated ext4 cache on the Dokploy host. This is
-# deliberately a bounded disk-first tier: sealed generations remain local until
-# pressure requires an exactly verified Backblaze spill.
+# Provision a configurable, hard-capped, preallocated ext4 cache on the Dokploy host. This is a
+# bounded disk-first tier: every accepted block lands here before RAM fan-out, and sealed
+# generations remain local until a signed Blockzilla ACK authorizes eventual cleanup.
 
 umask 077
 export LC_ALL=C
 
 CACHE_BYTES=${BLOCKZILLA_CACHE_BYTES:-3221225472}
+MINIMUM_CACHE_BYTES=${BLOCKZILLA_MINIMUM_CACHE_BYTES:-3221225472}
 ROOT_RESERVE_BYTES=${BLOCKZILLA_ROOT_RESERVE_BYTES:-4294967296}
 CACHE_IMAGE=${BLOCKZILLA_CACHE_IMAGE:-/var/lib/blockzilla/raw-cache.ext4}
 MOUNT_PATH=${BLOCKZILLA_CACHE_MOUNT_PATH:-/mnt/blockzilla-raw}
@@ -17,6 +18,7 @@ CACHE_LABEL=bz-raw-cache-v1
 MARKER_NAME=.blockzilla-raw-volume
 MARKER_VALUE=blockzilla-raw-cache-v1
 DATA_DIR_NAME=grpc-cache
+CONTROL_DIR_NAME=replication-control
 RUNTIME_UID=${BLOCKZILLA_RUNTIME_UID:-10001}
 RUNTIME_GID=${BLOCKZILLA_RUNTIME_GID:-10001}
 FSTAB=${BLOCKZILLA_FSTAB_PATH:-/etc/fstab}
@@ -33,13 +35,16 @@ require_uint() {
 }
 
 require_uint BLOCKZILLA_CACHE_BYTES "$CACHE_BYTES"
+require_uint BLOCKZILLA_MINIMUM_CACHE_BYTES "$MINIMUM_CACHE_BYTES"
 require_uint BLOCKZILLA_ROOT_RESERVE_BYTES "$ROOT_RESERVE_BYTES"
 require_uint BLOCKZILLA_RUNTIME_UID "$RUNTIME_UID"
 require_uint BLOCKZILLA_RUNTIME_GID "$RUNTIME_GID"
 
 [ "$(id -u)" -eq 0 ] || die "must run as root"
-[ "$CACHE_BYTES" -eq 3221225472 ] || \
-  die "this deployment requires an exact 3 GiB cache (3221225472 bytes)"
+[ "$MINIMUM_CACHE_BYTES" -ge 1073741824 ] || \
+  die "BLOCKZILLA_MINIMUM_CACHE_BYTES must be at least 1 GiB"
+[ "$CACHE_BYTES" -ge "$MINIMUM_CACHE_BYTES" ] || \
+  die "BLOCKZILLA_CACHE_BYTES is below BLOCKZILLA_MINIMUM_CACHE_BYTES"
 
 for command_name in \
   blkid blockdev df docker fallocate findmnt losetup mkfs.ext4 mount readlink \
@@ -172,6 +177,14 @@ else
 fi
 chown "$RUNTIME_UID:$RUNTIME_GID" "$data_path"
 chmod 0700 "$data_path"
+control_path=$MOUNT_PATH/$CONTROL_DIR_NAME
+if [ -e "$control_path" ]; then
+  [ -d "$control_path" ] && [ ! -L "$control_path" ] || die "invalid replication control directory"
+else
+  mkdir "$control_path"
+fi
+chown "$RUNTIME_UID:$RUNTIME_GID" "$control_path"
+chmod 0700 "$control_path"
 sync -f "$MOUNT_PATH"
 
 if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then

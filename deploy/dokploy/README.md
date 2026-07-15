@@ -1,8 +1,8 @@
 # Sole Yellowstone recorder and relay on Dokploy
 
 This deployment is the single paid Yellowstone source for Blockzilla. Hetzner
-records every confirmed full-block envelope into a durable WAL, publishes
-bounded immutable generations to Cloudflare R2, and serves the same durably
+records every confirmed full-block envelope into a durable WAL, can copy
+bounded immutable generations to Cloudflare R2 under local pressure, and serves the same durably
 accepted stream to authenticated downstream consumers. Blockzilla indexers and
 other products must subscribe to the Hetzner relay; they must not open their own
 Triton full-block subscriptions.
@@ -18,10 +18,12 @@ Yellowstone endpoint. Until the relay command and private network route have
 passed the fan-out/replay tests, keep all duplicate paid consumers disabled and
 do not top up Triton.
 
-The Hetzner host uses an exact, preallocated **3 GiB disk-first cache**. This is
-the final durability order, not an interim fallback: every accepted block and
-handoff row are fsynced locally before the block enters the bounded RAM fan-out
-ring. A normal generation is capped at 384 MiB and follows this lifecycle:
+The Hetzner host uses a hard-capped, preallocated **disk-first cache**. The
+current conservative reservation is 3 GiB; the provisioner also accepts a
+larger explicit size when the host has enough free space above its protected
+root reserve. Every accepted block and handoff row are fsynced locally before
+the block enters the bounded RAM fan-out ring. A normal generation is capped at
+384 MiB and follows this lifecycle:
 
 1. The Rust recorder durably appends to `/data/grpc-cache/active`.
 2. At the generation byte limit, the Rust recorder keeps the same Yellowstone
@@ -46,27 +48,30 @@ ring. A normal generation is capped at 384 MiB and follows this lifecycle:
    published only after all remote verification succeeds. It proves the R2 copy,
    not Blockzilla synchronization. Local or remote deletion additionally
    requires a valid signed Blockzilla durable ACK for the exact generation.
-   Until that ACK producer and verifier exist, both cleanup paths remain locked
-   and capture pauses at the hard local floor.
+   The signed receiver/sender protocol is implemented and locally tested, but
+   production GC is not wired; both cleanup paths remain locked and capture
+   pauses at the hard local floor.
 
 Routine R2 publication performs conditional PUT plus metadata HEAD, but no
 payload GET. Re-downloading every generation during upload previously consumed
 about twice the ingest volume and exhausted Backblaze's separate daily download
 cap. Payloads are downloaded and fully rehashed only during replay/restore.
 
-At the measured 5–6 GiB/hour input rate, 3 GiB is only 30–36 minutes of
-theoretical storage. The 768 MiB and 1.125 GiB watermarks can trigger and monitor
-R2 safety-copy work, but an R2 commit alone must not reclaim local space. Before
-signed ACK cleanup is deployed, a sustained Blockzilla outage therefore ends at
-the 384 MiB hard floor: the recorder keeps every durable generation, alerts
-once, and pauses without polling another block.
+At the measured 5–6 GiB/hour input rate, the current 3 GiB reservation is only
+30–36 minutes of theoretical storage. The spill watermarks can trigger R2
+safety-copy work, but an R2 commit alone must not reclaim local space. Before
+signed-ACK GC is deployed, a sustained Blockzilla outage therefore ends at the
+hard floor: the recorder keeps every durable generation, alerts once, and
+pauses without polling another block.
 
-R2 retention is separate from the 3 GiB host limit. The dedicated
+R2 retention is separate from the configured host limit. The dedicated
 `blockzilla-live-grpc` bucket has a 1 TB safety budget. Its role is overflow and
 disaster recovery, not a six-day history service for every subscriber. The
-receipt-ledger monitor warns at 800 GB and becomes critical at 950 GB. At that
-point capture pauses if signed ACKs do not expose enough safe cleanup; byte
-pressure never evicts unacknowledged data.
+receipt-ledger monitor warns at 800 GB and becomes critical at 950 GB. That
+ledger is a lower bound: interrupted/orphan objects require a separate
+paginated bucket reconciliation before production retention is enabled. At the
+critical watermark capture pauses if signed ACKs do not expose enough safe
+cleanup; byte pressure never evicts unacknowledged data.
 
 Cleanup may remove only whole, verified, oldest generations beneath this
 recorder's exact prefix after a valid signed Blockzilla durable ACK binds their
@@ -79,10 +84,12 @@ alert but can never delete backup data.
 
 This recorder resumes from its own last durable slot inclusively and checks the
 exact overlap block. It is the only component permitted to use the paid Triton
-token. The authenticated live relay is implemented, but Blockzilla's durable
-raw receiver, signed ACK, and historical Yellowstone reader are not deployed;
-until they are, Blockzilla must remain stopped rather than silently starting a
-second paid full-block subscription.
+token. The authenticated live relay, bounded mTLS raw receiver, signed
+cumulative ACK, and Hetzner sender are implemented and locally tested. They are
+not present in the production Compose deployment yet, and the historical
+Yellowstone reader is still missing. Until the receiver route and sender are
+deployed, Blockzilla must remain stopped rather than silently starting a second
+paid full-block subscription.
 
 The current recorder/backup layer:
 
@@ -94,10 +101,12 @@ The current recorder/backup layer:
   only to restore a primary backlog;
 - it can create and verify R2 upload receipts, but those receipts have no local
   or remote deletion authority;
-- Blockzilla's durable raw receiver and signed ACK producer/verifier are not
-  deployed, so both local eviction and remote pruning remain locked.
+- Blockzilla's durable raw receiver and Hetzner sender are not deployed, and no
+  worker consumes the durable ACK WAL for GC, so both local eviction and remote
+  pruning remain locked.
 
-The target adds ACK-driven retention without changing the WAL-first hot path.
+The next deployment step adds ACK-driven retention without changing the
+WAL-first hot path.
 Blockzilla fsyncs the exact raw WAL and cursor, then signs a cumulative
 sequence/digest-chain receipt. Hetzner verifies and fsyncs that ACK before a
 whole generation becomes eligible for local or R2 cleanup. The bounded RAM ring
@@ -113,17 +122,23 @@ generic ping is not treated as synchronization or deletion authority.
 ## Host cache
 
 Run [`provision-3gb-cache.sh`](provision-3gb-cache.sh) as root on the selected
-Dokploy server. It is idempotent and fail-closed:
+Dokploy server. The legacy filename is retained for compatibility; the size is
+configurable. It is idempotent and fail-closed:
 
 ```sh
 sudo ./deploy/dokploy/provision-3gb-cache.sh
+
+# Example for a new 8 GiB cache; this does not resize an existing image.
+sudo BLOCKZILLA_CACHE_BYTES=8589934592 \
+  ./deploy/dokploy/provision-3gb-cache.sh
 ```
 
 The script:
 
-- requires at least 7 GiB free before first provisioning, leaving a 4 GiB root
-  reserve after allocating the cache;
-- creates a non-sparse 3,221,225,472-byte ext4 image at
+- requires at least the requested cache size plus the configured 4 GiB root
+  reserve before first provisioning;
+- defaults to a non-sparse 3,221,225,472-byte ext4 image and accepts a larger
+  `BLOCKZILLA_CACHE_BYTES` value at
   `/var/lib/blockzilla/raw-cache.ext4`;
 - persists its loop mount at `/mnt/blockzilla-raw` in `/etc/fstab`;
 - uses `nosuid,nodev,noexec,noatime` and zero ext4 reserved-block percentage;
@@ -138,9 +153,10 @@ the original numeric device marker validation. If the loop mount is missing,
 the marker is absent from the underlying host directory and capture cannot
 silently fall back to the root filesystem.
 
-Build the recorder image before reserving the 3 GiB file when the server root
-disk is tight. Docker build layers live under Docker's data root, outside this
-cache.
+An existing image is never silently resized: a different requested size fails
+closed and requires an explicit stopped-service migration. Build the recorder
+image before reserving the cache file when the server root disk is tight.
+Docker build layers live under Docker's data root, outside this cache.
 
 ## Dokploy configuration
 
@@ -172,9 +188,9 @@ Credential files are parsed as literal allowlisted `KEY=value` data and are
 never sourced as shell. The R2 token should have Object Read & Write access only
 to the `blockzilla-live-grpc` bucket; application code is further confined to
 `live-grpc-backup/v1`. The ordinary uploader never deletes committed objects.
-Retention remains dry-run-only until the signed Blockzilla ACK verifier exists;
-its eventual apply path may delete only ACK-covered, validated whole generations
-below that prefix.
+Retention remains dry-run-only until the locally implemented signed Blockzilla
+ACK verifier is wired into the production GC path. Its eventual apply path may
+delete only ACK-covered, validated whole generations below that prefix.
 
 The bounded-cache settings are:
 

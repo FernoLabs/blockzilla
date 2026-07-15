@@ -1314,7 +1314,10 @@ fn manager_error_status(error: ReceiverManagerError) -> Status {
             Status::resource_exhausted("replication open-stream limit reached")
         }
         ReceiverManagerError::KnownLimit => {
-            Status::resource_exhausted("replication known-stream limit reached")
+            // This durable registry cannot recover merely by retrying the same generation. Treat
+            // exhaustion as an operator-action condition so the sender fails visibly instead of
+            // filling Hetzner while retrying forever.
+            Status::failed_precondition("replication known-stream limit reached")
         }
         ReceiverManagerError::Push(error) if is_capacity_error(&error) => {
             Status::resource_exhausted("durable receiver storage limit reached")
@@ -2176,5 +2179,9 @@ mod tests {
         });
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
         assert!(!status.message().contains("secret-field"));
+
+        let status = manager_error_status(ReceiverManagerError::KnownLimit);
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "replication known-stream limit reached");
     }
 }

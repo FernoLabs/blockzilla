@@ -248,7 +248,7 @@ generation is committed to B2.
 | Failure | Required result |
 | --- | --- |
 | Blockzilla offline | Today the independent Hetzner recorder continues locally and spills only under disk pressure. Signed ACK lag detection and Blockzilla catch-up are not implemented yet. |
-| B2 offline | No unverified local deletion; the 3 GiB recorder pauses safely at its floor and alerts. |
+| B2 offline | No unverified local deletion; the configured local recorder cache pauses safely at its floor and alerts. |
 | Lost ACK response | Blockzilla republishes the same idempotent signed receipt; no cursor jumps. |
 | Crash before NAS fsync | No ACK is published. Staging is recovered or removed on restart. |
 | Crash after NAS fsync but before ACK | The local receipt is replayed and the same ACK is republished. |

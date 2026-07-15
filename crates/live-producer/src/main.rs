@@ -15,18 +15,26 @@ use blockzilla_live_producer::{
         inspect_capture, probe_grpc, watch_grpc_epoch_boundaries,
     },
     grpc_raw::{
-        GrpcRawMaterializeConfig, GrpcRawRecordConfig, inspect_grpc_raw_blocks,
-        materialize_grpc_raw_blocks, record_grpc_raw_blocks, seed_grpc_raw_generation,
-        verify_grpc_raw_poh,
+        GrpcRawCommittedCursor, GrpcRawCommittedReadLimits, GrpcRawMaterializeConfig,
+        GrpcRawRecordConfig, inspect_grpc_raw_blocks, materialize_grpc_raw_blocks,
+        open_grpc_raw_replication_generation_cursors, record_grpc_raw_blocks,
+        seed_grpc_raw_generation, verify_grpc_raw_poh,
     },
-    ingest::{IngestConfig, RawReplicationServerRuntime, load_ingest_receiver_config},
+    ingest::{
+        CumulativeAckWal, IngestConfig, IngestRoleConfig, RawReplicationServerRuntime,
+        ReconnectConfig, ReplicaUpstreamConfig, ReplicationSendOutcome, ReplicationSender,
+        ReplicationSenderErrorKind, ReplicationStreamId, load_ingest_receiver_config,
+    },
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
         sync_epoch_info,
     },
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Debug, Parser)]
@@ -66,6 +74,8 @@ enum Command {
     ValidateIngestConfig(ValidateIngestConfigArgs),
     /// Run the bounded, mTLS-only durable inbound replication receiver.
     ServeIngestReceiver(ServeIngestReceiverArgs),
+    /// Replicate the local raw-gRPC hot queue to the configured primary.
+    ReplicateGrpcRaw(ReplicateGrpcRawArgs),
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +98,21 @@ struct ServeIngestReceiverArgs {
     /// Strict schema-v2 primary ingest configuration containing role.replica_listener.
     #[arg(long)]
     config: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ReplicateGrpcRawArgs {
+    /// Strict schema-v2 replica ingest configuration containing role.upstream.
+    #[arg(long)]
+    config: std::path::PathBuf,
+
+    /// Raw-gRPC hot-generation root; must lexically equal config.spool.root.
+    #[arg(long)]
+    cache_root: std::path::PathBuf,
+
+    /// Delay while the active generation is caught up and awaiting new durable rows or rotation.
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -949,17 +974,391 @@ async fn main() -> Result<()> {
                 primary_term = runtime.primary_term(),
                 "starting mTLS ingest replication receiver"
             );
-            runtime
-                .serve_with_shutdown(receiver_shutdown_signal())
-                .await?;
+            runtime.serve_with_shutdown(shutdown_signal()).await?;
             tracing::info!("mTLS ingest replication receiver stopped cleanly");
         }
+        Command::ReplicateGrpcRaw(args) => replicate_grpc_raw(args).await?,
     }
 
     Ok(())
 }
 
-async fn receiver_shutdown_signal() {
+struct PreparedGrpcRawGeneration {
+    cursor: GrpcRawCommittedCursor,
+    stream: ReplicationStreamId,
+    physical_stream: ReplicationStreamId,
+    discovered_sealed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicateGenerationOutcome {
+    SealedCaughtUp,
+    Shutdown,
+}
+
+struct ReplicationRetryBackoff {
+    reconnect: ReconnectConfig,
+    retries: u32,
+    next_delay_ms: u64,
+}
+
+impl ReplicationRetryBackoff {
+    fn new(reconnect: &ReconnectConfig) -> Self {
+        Self {
+            reconnect: reconnect.clone(),
+            retries: 0,
+            next_delay_ms: reconnect.initial_delay_ms,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.retries = 0;
+        self.next_delay_ms = self.reconnect.initial_delay_ms;
+    }
+
+    fn next_delay(&mut self) -> Option<(u32, Duration)> {
+        if self
+            .reconnect
+            .max_attempts
+            .is_some_and(|maximum| self.retries >= maximum)
+        {
+            return None;
+        }
+
+        self.retries = self.retries.saturating_add(1);
+        let base_delay_ms = self.next_delay_ms.min(self.reconnect.max_delay_ms);
+        let scaled = (u128::from(base_delay_ms)
+            .saturating_mul(u128::from(self.reconnect.backoff_factor_milli))
+            / 1_000)
+            .min(u128::from(self.reconnect.max_delay_ms));
+        self.next_delay_ms = scaled as u64;
+
+        let spread = u128::from(base_delay_ms)
+            .saturating_mul(u128::from(self.reconnect.jitter_percent))
+            / 100;
+        let delay_ms = if spread == 0 {
+            base_delay_ms
+        } else {
+            let entropy = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+                ^ (u128::from(std::process::id()) << 64)
+                ^ u128::from(self.retries);
+            let lower = u128::from(base_delay_ms).saturating_sub(spread);
+            let width = spread.saturating_mul(2).saturating_add(1);
+            (lower.saturating_add(entropy % width)).min(u128::from(self.reconnect.max_delay_ms))
+                as u64
+        };
+        Some((self.retries, Duration::from_millis(delay_ms.max(1))))
+    }
+}
+
+async fn replicate_grpc_raw(args: ReplicateGrpcRawArgs) -> Result<()> {
+    anyhow::ensure!(
+        args.poll_interval_ms > 0,
+        "--poll-interval-ms must be non-zero"
+    );
+
+    let config = load_ingest_receiver_config(&args.config)?;
+    let (node_id, upstream) = match &config.role {
+        IngestRoleConfig::Replica { node_id, upstream } => (node_id.clone(), upstream.clone()),
+        IngestRoleConfig::Primary { .. } => {
+            anyhow::bail!("replicate-grpc-raw requires role.mode=replica")
+        }
+    };
+    anyhow::ensure!(
+        args.cache_root == config.spool.root,
+        "--cache-root must lexically equal config.spool.root"
+    );
+
+    let read_limits = GrpcRawCommittedReadLimits {
+        max_compressed_record_bytes: upstream.batch.max_compressed_event_bytes,
+        max_uncompressed_record_bytes: upstream.batch.max_uncompressed_event_bytes,
+    };
+    let poll_interval = Duration::from_millis(args.poll_interval_ms);
+    let mut completed_sealed_generations = HashSet::new();
+    let mut shutdown = replication_shutdown_receiver();
+
+    tracing::info!(
+        node_id = %node_id,
+        cluster_id = %config.cluster_id,
+        poll_interval_ms = args.poll_interval_ms,
+        "starting raw gRPC replica"
+    );
+
+    'replication: loop {
+        if replication_shutdown_requested(&shutdown) {
+            break;
+        }
+
+        // Discovery and cursor opening share one rotation lock. Keeping each cursor alive pins
+        // its exact stream identity even if the active pathname rotates while older generations
+        // are still draining.
+        let prepared =
+            prepare_grpc_raw_generations(&args.cache_root, read_limits, &config.cluster_id)?;
+        let locally_durable_through = {
+            let ack_wal = CumulativeAckWal::open(&upstream.cumulative_ack_wal_file)
+                .context("open cumulative ACK WAL for generation coverage")?;
+            prepared
+                .iter()
+                .filter_map(|generation| {
+                    ack_wal
+                        .latest_stream_ack(&generation.stream)
+                        .map(|ack| (generation.stream.clone(), ack.through_sequence))
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let present_sealed_generations = prepared
+            .iter()
+            .filter(|generation| generation.discovered_sealed)
+            .map(|generation| generation.physical_stream.clone())
+            .collect::<HashSet<_>>();
+        completed_sealed_generations.retain(|stream| present_sealed_generations.contains(stream));
+
+        for generation in prepared {
+            if generation.discovered_sealed {
+                if let Some(through_sequence) = locally_durable_through.get(&generation.stream) {
+                    if generation
+                        .cursor
+                        .sealed_generation_is_covered_by(*through_sequence)
+                        .context("check sealed generation against local durable ACK")?
+                    {
+                        tracing::debug!(
+                            origin_node_id = %generation.stream.origin_node_id,
+                            source_id = %generation.stream.source_id,
+                            "sealed raw gRPC generation is already covered by the local durable ACK"
+                        );
+                        completed_sealed_generations.insert(generation.physical_stream);
+                        continue;
+                    }
+                }
+            }
+            if generation.discovered_sealed
+                && completed_sealed_generations.contains(&generation.physical_stream)
+            {
+                tracing::debug!(
+                    origin_node_id = %generation.stream.origin_node_id,
+                    source_id = %generation.stream.source_id,
+                    "sealed raw gRPC generation remains caught up"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                origin_node_id = %generation.stream.origin_node_id,
+                source_id = %generation.stream.source_id,
+                discovered_sealed = generation.discovered_sealed,
+                "replicating raw gRPC generation"
+            );
+            match replicate_grpc_raw_generation(
+                &generation,
+                &upstream,
+                poll_interval,
+                &mut shutdown,
+            )
+            .await?
+            {
+                ReplicateGenerationOutcome::SealedCaughtUp => {
+                    completed_sealed_generations.insert(generation.physical_stream);
+                }
+                ReplicateGenerationOutcome::Shutdown => break 'replication,
+            }
+        }
+    }
+
+    tracing::info!("raw gRPC replica stopped cleanly");
+    Ok(())
+}
+
+fn prepare_grpc_raw_generations(
+    cache_root: &std::path::Path,
+    read_limits: GrpcRawCommittedReadLimits,
+    cluster_id: &str,
+) -> Result<Vec<PreparedGrpcRawGeneration>> {
+    let generations = open_grpc_raw_replication_generation_cursors(cache_root, read_limits)
+        .context("atomically discover and open raw gRPC replication generations")?;
+    let mut prepared = Vec::with_capacity(generations.len());
+    for generation in generations {
+        let cursor = generation.cursor;
+        let stream = cursor.stream();
+        let physical_stream = cursor.physical_stream();
+        anyhow::ensure!(
+            stream.cluster_id == cluster_id,
+            "raw gRPC generation stream.cluster_id does not match config.cluster_id"
+        );
+        prepared.push(PreparedGrpcRawGeneration {
+            cursor,
+            stream,
+            physical_stream,
+            discovered_sealed: generation.sealed,
+        });
+    }
+    Ok(prepared)
+}
+
+async fn replicate_grpc_raw_generation(
+    generation: &PreparedGrpcRawGeneration,
+    upstream: &ReplicaUpstreamConfig,
+    poll_interval: Duration,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<ReplicateGenerationOutcome> {
+    let mut retry = ReplicationRetryBackoff::new(&upstream.reconnect);
+    let mut sender = loop {
+        let connection = tokio::select! {
+            biased;
+            _ = replication_shutdown_notified(shutdown) => {
+                return Ok(ReplicateGenerationOutcome::Shutdown);
+            }
+            connection = ReplicationSender::connect_preopened(
+                generation.cursor.clone(),
+                upstream,
+            ) => {
+                connection
+            }
+        };
+        match connection {
+            Ok(sender) => {
+                anyhow::ensure!(
+                    sender.stream().cluster_id == generation.stream.cluster_id,
+                    "connected raw gRPC stream cluster differs from the pre-opened generation"
+                );
+                if sender.stream() != &generation.stream {
+                    if generation.discovered_sealed {
+                        anyhow::bail!(
+                            "sealed raw gRPC generation identity changed before connection"
+                        );
+                    }
+                    // The active path rotated after it was pre-opened but before connect fenced
+                    // it. Drop this successor and resolve the original cursor into sealed.
+                    drop(sender);
+                    tracing::debug!(
+                        "active raw gRPC generation rotated before sender binding; retrying its predecessor"
+                    );
+                    if replication_wait_or_shutdown(poll_interval, shutdown).await {
+                        return Ok(ReplicateGenerationOutcome::Shutdown);
+                    }
+                    continue;
+                }
+                retry.reset();
+                break sender;
+            }
+            Err(error) if error.kind() == ReplicationSenderErrorKind::Transport => {
+                let Some((attempt, delay)) = retry.next_delay() else {
+                    anyhow::bail!("raw gRPC connection transport retry limit exhausted");
+                };
+                tracing::warn!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    "raw gRPC primary is unavailable; retrying connection"
+                );
+                if replication_wait_or_shutdown(delay, shutdown).await {
+                    return Ok(ReplicateGenerationOutcome::Shutdown);
+                }
+            }
+            Err(error) => {
+                return Err(
+                    anyhow::Error::new(error).context("raw gRPC sender connection failed closed")
+                );
+            }
+        }
+    };
+
+    loop {
+        let outcome = tokio::select! {
+            biased;
+            _ = replication_shutdown_notified(shutdown) => {
+                return Ok(ReplicateGenerationOutcome::Shutdown);
+            }
+            outcome = sender.send_once() => outcome,
+        };
+        match outcome {
+            Ok(ReplicationSendOutcome::Advanced {
+                records,
+                compressed_bytes,
+                through_sequence,
+                primary_term,
+            }) => {
+                retry.reset();
+                tracing::debug!(
+                    records,
+                    compressed_bytes,
+                    through_sequence,
+                    primary_term,
+                    "raw gRPC replication advanced"
+                );
+            }
+            Ok(ReplicationSendOutcome::CaughtUp) => {
+                retry.reset();
+                if sender
+                    .bound_generation_is_sealed()
+                    .context("resolve caught-up raw gRPC generation identity")?
+                {
+                    tracing::info!(
+                        next_sequence = sender.next_sequence(),
+                        "sealed raw gRPC generation is durably caught up"
+                    );
+                    return Ok(ReplicateGenerationOutcome::SealedCaughtUp);
+                }
+                tracing::debug!(
+                    next_sequence = sender.next_sequence(),
+                    "active raw gRPC generation is caught up; polling"
+                );
+                if replication_wait_or_shutdown(poll_interval, shutdown).await {
+                    return Ok(ReplicateGenerationOutcome::Shutdown);
+                }
+            }
+            Err(error) if error.kind() == ReplicationSenderErrorKind::Transport => {
+                let Some((attempt, delay)) = retry.next_delay() else {
+                    anyhow::bail!("raw gRPC send transport retry limit exhausted");
+                };
+                tracing::warn!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    "raw gRPC replication transport failed; retrying exact batch"
+                );
+                if replication_wait_or_shutdown(delay, shutdown).await {
+                    return Ok(ReplicateGenerationOutcome::Shutdown);
+                }
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("raw gRPC sender failed closed"));
+            }
+        }
+    }
+}
+
+fn replication_shutdown_receiver() -> tokio::sync::watch::Receiver<bool> {
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = sender.send(true);
+    });
+    receiver
+}
+
+fn replication_shutdown_requested(receiver: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *receiver.borrow()
+}
+
+async fn replication_shutdown_notified(receiver: &mut tokio::sync::watch::Receiver<bool>) {
+    if replication_shutdown_requested(receiver) {
+        return;
+    }
+    let _ = receiver.changed().await;
+}
+
+async fn replication_wait_or_shutdown(
+    delay: Duration,
+    receiver: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = replication_shutdown_notified(receiver) => true,
+        _ = tokio::time::sleep(delay) => false,
+    }
+}
+
+async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let mut terminate =

@@ -94,6 +94,16 @@ pub struct DurableSpoolRecord {
 }
 
 impl DurableSpoolRecord {
+    /// Reconstruct a durability witness from a checksummed spool read that is independently bound
+    /// to a synced commit journal. This is crate-private so arbitrary callers cannot promote an
+    /// uncommitted read into deletion authority.
+    pub(crate) fn from_verified_committed_read(
+        location: SpoolLocation,
+        metadata: IngressRecordMeta,
+    ) -> Self {
+        Self { location, metadata }
+    }
+
     pub fn location(&self) -> SpoolLocation {
         self.location
     }

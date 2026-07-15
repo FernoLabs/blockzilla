@@ -15,6 +15,8 @@ pub const INGEST_CONFIG_SCHEMA_VERSION: u32 = 2;
 pub const REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES: u64 = 64 * 1024;
 /// Conservative heap allowance for IDs, offers, Vec entries, and allocator metadata per record.
 pub const REPLICATION_RECORD_MEMORY_RESERVE_BYTES: u64 = 64 * 1024;
+/// The replication cursor verifies one bounded raw protobuf digest without Prost-decoding it.
+pub const REPLICATION_RAW_VERIFY_MEMORY_MULTIPLIER: u64 = 1;
 
 /// Complete configuration for redundant live ingestion.
 ///
@@ -83,6 +85,10 @@ pub struct ReplicaListenerConfig {
 #[serde(deny_unknown_fields)]
 pub struct ReplicaUpstreamConfig {
     pub endpoint: String,
+    /// Application identity expected in every signed cumulative ACK.
+    pub expected_primary_id: String,
+    /// Local durable journal for verified cumulative ACKs and primary-term fencing.
+    pub cumulative_ack_wal_file: PathBuf,
     pub tls: ClientTlsConfig,
     pub auth: ReplicaAuthConfig,
     /// Public keys accepted for durable deletion receipts. Keep old and new keys during rotation.
@@ -103,6 +109,12 @@ pub struct TrustedReceiptKeyConfig {
 pub struct ReplicaBatchLimits {
     pub max_events: usize,
     pub max_bytes: u64,
+    /// Hard cumulative uncompressed-size ceiling for one streamed RPC batch.
+    pub max_uncompressed_bytes: u64,
+    /// Hard compressed-payload ceiling for one source WAL record.
+    pub max_compressed_event_bytes: u64,
+    /// Hard decompressed protobuf ceiling used before allocation and decoding.
+    pub max_uncompressed_event_bytes: u64,
     pub ack_timeout_ms: u64,
 }
 
@@ -408,16 +420,16 @@ impl IngestConfig {
         self.validate_role(&mut issues);
         self.spool.validate("spool", &mut issues);
 
-        let replica_listener = match &self.role {
+        let (replica_listener, replica_upstream) = match &self.role {
             IngestRoleConfig::Primary {
                 replica_listener, ..
-            } => replica_listener.as_ref(),
-            IngestRoleConfig::Replica { .. } => None,
+            } => (replica_listener.as_ref(), None),
+            IngestRoleConfig::Replica { upstream, .. } => (None, Some(upstream)),
         };
         if self.sources.is_empty() {
-            if replica_listener.is_none() {
+            if replica_listener.is_none() && replica_upstream.is_none() {
                 issues.push(
-                    "sources may be empty only for a primary with role.replica_listener"
+                    "sources may be empty only for role.replica or a primary with role.replica_listener"
                         .to_string(),
                 );
             }
@@ -494,6 +506,43 @@ impl IngestConfig {
                     )),
                     None => issues.push(
                         "enabled source queue and replica listener event sum overflows usize"
+                            .to_string(),
+                    ),
+                    Some(_) => {}
+                }
+            }
+        }
+        if let Some(upstream) = replica_upstream {
+            match (
+                enabled_queue_bytes,
+                upstream.batch.max_in_flight_memory_bytes(),
+            ) {
+                (Some(source_bytes), Some(sender_bytes)) => {
+                    match source_bytes.checked_add(sender_bytes) {
+                        Some(total) if total > self.max_total_queue_bytes => issues.push(format!(
+                            "enabled source queues plus replica sender batch memory {total} exceed max_total_queue_bytes {}",
+                            self.max_total_queue_bytes
+                        )),
+                        None => issues.push(
+                            "enabled source queue and replica sender batch byte sum overflows u64"
+                                .to_string(),
+                        ),
+                        Some(_) => {}
+                    }
+                }
+                (_, None) => issues.push(format!(
+                    "role.upstream.batch bounded payload, wire, metadata, or raw verification workspace memory overflows u64"
+                )),
+                (None, Some(_)) => {}
+            }
+            if let Some(source_events) = enabled_queue_events {
+                match source_events.checked_add(upstream.batch.max_events) {
+                    Some(total) if total > self.max_total_queue_events => issues.push(format!(
+                        "enabled source queues plus replica sender batch events {total} exceed max_total_queue_events {}",
+                        self.max_total_queue_events
+                    )),
+                    None => issues.push(
+                        "enabled source queue and replica sender batch event sum overflows usize"
                             .to_string(),
                     ),
                     Some(_) => {}
@@ -815,13 +864,49 @@ impl ReplicaListenerConfig {
 impl ReplicaUpstreamConfig {
     fn validate(&self, prefix: &str, spool: &SpoolConfig, issues: &mut Vec<String>) {
         validate_secure_stream_endpoint(&self.endpoint, &format!("{prefix}.endpoint"), issues);
+        validate_stable_id(
+            &self.expected_primary_id,
+            &format!("{prefix}.expected_primary_id"),
+            issues,
+        );
+        validate_absolute_file(
+            &self.cumulative_ack_wal_file,
+            &format!("{prefix}.cumulative_ack_wal_file"),
+            issues,
+        );
+        validate_outside_spool(
+            &self.cumulative_ack_wal_file,
+            &format!("{prefix}.cumulative_ack_wal_file"),
+            spool,
+            issues,
+        );
         self.tls.validate(&format!("{prefix}.tls"), issues);
+        for (name, path) in [
+            ("ca_file", self.tls.ca_file.as_ref()),
+            (
+                "client_certificate_file",
+                self.tls.client_certificate_file.as_ref(),
+            ),
+            (
+                "client_private_key_file",
+                self.tls.client_private_key_file.as_ref(),
+            ),
+        ] {
+            if let Some(path) = path {
+                validate_outside_spool(path, &format!("{prefix}.tls.{name}"), spool, issues);
+            }
+        }
         self.reconnect
             .validate(&format!("{prefix}.reconnect"), issues);
         self.batch.validate(&format!("{prefix}.batch"), issues);
         if self.batch.max_bytes > spool.segment_bytes {
             issues.push(format!(
                 "{prefix}.batch.max_bytes exceeds spool.segment_bytes"
+            ));
+        }
+        if self.batch.max_compressed_event_bytes > spool.segment_bytes {
+            issues.push(format!(
+                "{prefix}.batch.max_compressed_event_bytes exceeds spool.segment_bytes"
             ));
         }
         match &self.auth {
@@ -872,6 +957,12 @@ impl ReplicaUpstreamConfig {
                 &format!("{key_prefix}.public_key_file"),
                 issues,
             );
+            validate_outside_spool(
+                &key.public_key_file,
+                &format!("{key_prefix}.public_key_file"),
+                spool,
+                issues,
+            );
             if !key_ids.insert(key.key_id.as_str()) {
                 issues.push(format!(
                     "{key_prefix}.key_id duplicates trusted receipt key id {:?}",
@@ -887,10 +978,66 @@ impl ReplicaBatchLimits {
         validate_nonzero_usize(self.max_events, &format!("{prefix}.max_events"), issues);
         validate_nonzero_u64(self.max_bytes, &format!("{prefix}.max_bytes"), issues);
         validate_nonzero_u64(
+            self.max_uncompressed_bytes,
+            &format!("{prefix}.max_uncompressed_bytes"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_compressed_event_bytes,
+            &format!("{prefix}.max_compressed_event_bytes"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_uncompressed_event_bytes,
+            &format!("{prefix}.max_uncompressed_event_bytes"),
+            issues,
+        );
+        if self.max_compressed_event_bytes > self.max_bytes {
+            issues.push(format!(
+                "{prefix}.max_compressed_event_bytes must be <= {prefix}.max_bytes"
+            ));
+        }
+        if self.max_uncompressed_event_bytes > self.max_uncompressed_bytes {
+            issues.push(format!(
+                "{prefix}.max_uncompressed_event_bytes must be <= {prefix}.max_uncompressed_bytes"
+            ));
+        }
+        for (name, value) in [
+            (
+                "max_compressed_event_bytes",
+                self.max_compressed_event_bytes,
+            ),
+            (
+                "max_uncompressed_event_bytes",
+                self.max_uncompressed_event_bytes,
+            ),
+        ] {
+            if usize::try_from(value).is_err() {
+                issues.push(format!(
+                    "{prefix}.{name} exceeds this process address space"
+                ));
+            }
+        }
+        validate_nonzero_u64(
             self.ack_timeout_ms,
             &format!("{prefix}.ack_timeout_ms"),
             issues,
         );
+    }
+
+    fn max_in_flight_memory_bytes(&self) -> Option<u64> {
+        let records = u64::try_from(self.max_events).ok()?;
+        let metadata = records.checked_mul(REPLICATION_RECORD_MEMORY_RESERVE_BYTES)?;
+        let raw_verify_workspace = self
+            .max_uncompressed_event_bytes
+            .checked_mul(REPLICATION_RAW_VERIFY_MEMORY_MULTIPLIER)?;
+        let wire_workspace = self
+            .max_compressed_event_bytes
+            .checked_add(REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES)?;
+        self.max_bytes
+            .checked_add(metadata)?
+            .checked_add(raw_verify_workspace)?
+            .checked_add(wire_workspace)
     }
 }
 
@@ -1231,6 +1378,14 @@ fn validate_absolute_directory(path: &Path, field: &str, issues: &mut Vec<String
     }
 }
 
+fn validate_outside_spool(path: &Path, field: &str, spool: &SpoolConfig, issues: &mut Vec<String>) {
+    if path.starts_with(&spool.root) {
+        issues.push(format!(
+            "{field} must be outside spool.root; the spool is an exclusive journal tree"
+        ));
+    }
+}
+
 fn validate_socket_addr(value: &str, field: &str, issues: &mut Vec<String>) {
     if SocketAddr::from_str(value).is_err() {
         issues.push(format!("{field} must be an IP socket address"));
@@ -1473,6 +1628,8 @@ mod tests {
             "node_id": "backup-ingester-1",
             "upstream": {
                 "endpoint": "https://192.168.1.45:9555",
+                "expected_primary_id": "nas-primary",
+                "cumulative_ack_wal_file": "/var/lib/blockzilla/replica-control/cumulative-ack.wal",
                 "tls": {
                     "ca_file": "/etc/blockzilla/tls/primary-ca.crt",
                     "client_certificate_file": "/etc/blockzilla/tls/replica.crt",
@@ -1496,10 +1653,14 @@ mod tests {
                 "batch": {
                     "max_events": 128,
                     "max_bytes": 67_108_864u64,
+                    "max_uncompressed_bytes": 134_217_728u64,
+                    "max_compressed_event_bytes": 67_108_864u64,
+                    "max_uncompressed_event_bytes": 134_217_728u64,
                     "ack_timeout_ms": 30_000
                 }
             }
         });
+        value["sources"] = json!([]);
         value
     }
 
@@ -1534,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_sources_require_a_valid_primary_replica_listener() {
+    fn empty_sources_are_valid_for_replica_or_primary_listener() {
         let mut primary_without_listener = valid_primary_json();
         primary_without_listener["role"]
             .as_object_mut()
@@ -1542,12 +1703,13 @@ mod tests {
             .remove("replica_listener");
         primary_without_listener["sources"] = json!([]);
         let error = validation_text(&primary_without_listener);
-        assert!(error.contains("sources may be empty only for a primary"));
+        assert!(error.contains(
+            "sources may be empty only for role.replica or a primary with role.replica_listener"
+        ));
 
-        let mut replica = valid_replica_json("replica");
-        replica["sources"] = json!([]);
-        let error = validation_text(&replica);
-        assert!(error.contains("sources may be empty only for a primary"));
+        let replica = decode_and_validate(&valid_replica_json("replica")).unwrap();
+        assert!(replica.sources.is_empty());
+        assert_eq!(replica.redacted_summary().source_count, 0);
 
         let mut invalid_listener = valid_primary_json();
         invalid_listener["sources"] = json!([]);
@@ -1555,6 +1717,23 @@ mod tests {
             json!("relative/primary-term");
         let error = validation_text(&invalid_listener);
         assert!(error.contains("primary_term_file must be an absolute, unambiguous file path"));
+    }
+
+    #[test]
+    fn replica_sender_batch_must_fit_process_memory_and_event_budgets() {
+        let mut value = valid_replica_json("replica");
+        // 64 MiB batch + 8 MiB record metadata + one 128 MiB raw verification buffer + one
+        // 64 MiB/64 KiB wire message = 276,889,600 bytes of conservative peak memory.
+        value["max_total_queue_bytes"] = json!(276_889_599u64);
+        value["max_total_queue_events"] = json!(127);
+
+        let error = validation_text(&value);
+        assert!(error.contains(
+            "replica sender batch memory 276889600 exceed max_total_queue_bytes 276889599"
+        ));
+        assert!(
+            error.contains("replica sender batch events 128 exceed max_total_queue_events 127")
+        );
     }
 
     #[test]
@@ -1752,6 +1931,79 @@ mod tests {
     }
 
     #[test]
+    fn replica_sender_control_plane_is_explicit_and_validated() {
+        let config = decode_and_validate(&valid_replica_json("replica")).unwrap();
+        let IngestRoleConfig::Replica { upstream, .. } = config.role else {
+            panic!("expected replica role");
+        };
+        assert_eq!(upstream.expected_primary_id, "nas-primary");
+        assert_eq!(
+            upstream.cumulative_ack_wal_file,
+            Path::new("/var/lib/blockzilla/replica-control/cumulative-ack.wal")
+        );
+
+        let mut invalid = valid_replica_json("replica");
+        invalid["role"]["upstream"]["expected_primary_id"] = json!("not a stable/id");
+        invalid["role"]["upstream"]["cumulative_ack_wal_file"] =
+            json!("relative/cumulative-ack.wal");
+        let error = validation_text(&invalid);
+        assert!(error.contains("expected_primary_id must be 1-64 ASCII characters"));
+        assert!(
+            error.contains("cumulative_ack_wal_file must be an absolute, unambiguous file path")
+        );
+    }
+
+    #[test]
+    fn replica_sender_files_must_stay_outside_the_journal_tree() {
+        let mut value = valid_replica_json("replica");
+        let spool_root = "/var/lib/blockzilla/ingress-spool";
+        value["role"]["upstream"]["cumulative_ack_wal_file"] =
+            json!(format!("{spool_root}/cumulative-ack.wal"));
+        value["role"]["upstream"]["tls"]["ca_file"] = json!(format!("{spool_root}/primary-ca.crt"));
+        value["role"]["upstream"]["tls"]["client_certificate_file"] =
+            json!(format!("{spool_root}/replica.crt"));
+        value["role"]["upstream"]["tls"]["client_private_key_file"] =
+            json!(format!("{spool_root}/replica.key"));
+        value["role"]["upstream"]["trusted_receipt_keys"][0]["public_key_file"] =
+            json!(format!("{spool_root}/receipt.pub"));
+
+        let error = validation_text(&value);
+        for field in [
+            "cumulative_ack_wal_file",
+            "tls.ca_file",
+            "tls.client_certificate_file",
+            "tls.client_private_key_file",
+            "trusted_receipt_keys[0].public_key_file",
+        ] {
+            assert!(
+                error.contains(&format!("{field} must be outside spool.root")),
+                "missing outside-spool validation for {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn replica_sender_control_plane_fields_are_required() {
+        let mut missing_primary = valid_replica_json("replica");
+        missing_primary["role"]["upstream"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_primary_id");
+        let error = decode_and_validate(&missing_primary)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing field `expected_primary_id`"));
+
+        let mut missing_wal = valid_replica_json("replica");
+        missing_wal["role"]["upstream"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cumulative_ack_wal_file");
+        let error = decode_and_validate(&missing_wal).unwrap_err().to_string();
+        assert!(error.contains("missing field `cumulative_ack_wal_file`"));
+    }
+
+    #[test]
     fn replica_structurally_requires_node_upstream_and_auth() {
         let mut value = valid_primary_json();
         value["role"] = json!({
@@ -1759,9 +2011,18 @@ mod tests {
             "node_id": "backup-1",
             "upstream": {
                 "endpoint": "https://primary.example.net",
+                "expected_primary_id": "nas-primary",
+                "cumulative_ack_wal_file": "/var/lib/blockzilla/replica-control/cumulative-ack.wal",
                 "tls": {},
                 "reconnect": reconnect_json(),
-                "batch": { "max_events": 1, "max_bytes": 1024, "ack_timeout_ms": 1000 }
+                "batch": {
+                    "max_events": 1,
+                    "max_bytes": 1024,
+                    "max_uncompressed_bytes": 2048,
+                    "max_compressed_event_bytes": 1024,
+                    "max_uncompressed_event_bytes": 2048,
+                    "ack_timeout_ms": 1000
+                }
             }
         });
         let error = decode_and_validate(&value).unwrap_err().to_string();

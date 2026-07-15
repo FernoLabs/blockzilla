@@ -202,6 +202,7 @@ SEALED_GENERATION_DIR=$CACHE_ROOT/sealed
 GENERATION_RECEIPT_DIR=$CACHE_ROOT/receipts
 GENERATION_MONITORING_DIR=$CACHE_ROOT/monitoring
 GENERATION_ROTATION_MARKER=$CACHE_ROOT/.rotation
+GENERATION_ROTATION_LOCK=$CACHE_ROOT/.rotation.lock
 B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 REPLAY_RECOVERY_FILE=$GENERATION_MONITORING_DIR/replay-recovery-floor.json
 REPLAY_GAP_DIR=$ACTIVE_GENERATION_DIR/replay-gaps
@@ -253,6 +254,9 @@ case "$command_name" in
         *) shift ;;
       esac
     done
+    if [ -e "$output_dir/fail-verify" ]; then
+      exit 1
+    fi
     slot=$(cat "$output_dir/slot")
     printf '{\n  "records_verified": 1,\n  "last_slot": %s\n}\n' "$slot"
     ;;
@@ -327,6 +331,17 @@ write_replay_report() {
     "$replay_fixture_requested" "$replay_fixture_available" \
     > "$replay_fixture_path"
 }
+
+# Rotation never follows a lock-file symlink or mutates its target.
+reset_rotation_fixture
+rotation_lock_target=$fixture_root/rotation-lock-target
+printf '%s\n' keep > "$rotation_lock_target"
+ln -s "$rotation_lock_target" "$GENERATION_ROTATION_LOCK"
+if recover_rotation_transaction; then
+  echo "rotation accepted a symlink lock file" >&2
+  exit 1
+fi
+test "$(cat "$rotation_lock_target")" = keep
 
 # Interrupted Rust seed creation leaves a hidden sibling of its .next-slot
 # target. Recovery removes only names that exactly match Rust's validated
@@ -410,8 +425,9 @@ unset BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT
 recover_rotation_transaction
 assert_rotated
 
-# Crash recovery must not expose a hidden predecessor until its full audit
-# proves the generation ID recorded in the durable transaction marker.
+# Crash recovery must not expose a hidden predecessor until its full content
+# audit succeeds. The generation ID is a monotonic sequence and intentionally
+# need not equal the predecessor's tail slot after a fork or repeated slot.
 reset_rotation_fixture
 BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT=after_successor_active
 if rotate_active_generation; then
@@ -419,15 +435,15 @@ if rotate_active_generation; then
   exit 1
 fi
 hidden_old=$CACHE_ROOT/.sealed-slot-00000000000000000123
-printf '%s\n' 124 > "$hidden_old/slot"
+touch "$hidden_old/fail-verify"
 unset BLOCKZILLA_RAW_TEST_FAIL_ROTATION_AT
 if recover_rotation_transaction; then
-  echo "rotation recovery published a predecessor with the wrong audited tail" >&2
+  echo "rotation recovery published a predecessor that failed its content audit" >&2
   exit 1
 fi
 test -d "$hidden_old"
 test -z "$(find "$SEALED_GENERATION_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
-printf '%s\n' 123 > "$hidden_old/slot"
+rm -f "$hidden_old/fail-verify"
 recover_rotation_transaction
 assert_rotated
 
@@ -842,10 +858,9 @@ test -s "$GENERATION_RECEIPT_DIR/$r2_upload_id.json"
 printf '%s\n' 8 > "$r2_active_bytes"
 test "$(r2_receipt_ledger_bytes)" -eq 8
 
-# R2 commits a newly sealed generation immediately at healthy headroom, keeps
-# the verified local directory, and does not re-upload either retained copy on
-# the next worker start. Healthy upload retention must not create the old false
-# "space did not increase" incident.
+# Healthy local headroom keeps a newly sealed generation on Hetzner without eagerly copying it to
+# R2. Once the spill watermark is crossed, the worker uploads the oldest generation but still
+# retains the verified local directory because object-store proof is not a Blockzilla ACK.
 r2_healthy_id=slot-00000000000000000401
 r2_healthy_dir=$SEALED_GENERATION_DIR/$r2_healthy_id
 mkdir "$r2_healthy_dir"
@@ -865,8 +880,26 @@ r2_calls_before=$(grep -c '^command=upload-generation$' "$mock_uploader_calls")
 test -d "$r2_upload_dir"
 test -d "$r2_healthy_dir"
 test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls")" \
-  -eq $((r2_calls_before + 1))
+  -eq "$r2_calls_before"
 test ! -e "$(alert_file generation_backlog active)"
+(
+  MIN_FREE_BYTES=100
+  MAX_GENERATION_BYTES=80
+  GENERATION_SPILL_START_PERCENT=25
+  GENERATION_SPILL_RECOVERY_PERCENT=35
+  validate_data_volume() { return 0; }
+  available_bytes() { printf '%s\n' 200; }
+  filesystem_capacity_bytes() { printf '%s\n' 1000; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls")" \
+  -eq $((r2_calls_before + 1))
+test -d "$r2_healthy_dir"
+test -s "$GENERATION_RECEIPT_DIR/$r2_healthy_id.json"
+discard_alert generation_backlog
+
+# Returning to healthy headroom does not re-upload either retained copy.
 r2_calls_after=$(grep -c '^command=upload-generation$' "$mock_uploader_calls")
 (
   MIN_FREE_BYTES=100
@@ -881,7 +914,6 @@ r2_calls_after=$(grep -c '^command=upload-generation$' "$mock_uploader_calls")
 )
 test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls")" \
   -eq "$r2_calls_after"
-test -d "$r2_healthy_dir"
 
 # R2 accounting is anchor-aware because the uploader owns `.chain` and
 # `.r2-retention-anchor.json` validation. The shell always supplies a maximum
