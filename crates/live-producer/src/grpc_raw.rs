@@ -58,6 +58,9 @@ use crate::{
     layout::ProducerLayout,
 };
 
+mod receiver_bridge;
+pub use receiver_bridge::*;
+
 const IDENTITY_SCHEMA_VERSION: u32 = 1;
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
 const RESUME_COVERAGE_WARNING_SCHEMA_VERSION: u32 = 1;
@@ -4897,7 +4900,15 @@ impl HotRotationGuard {
         };
         let created = linked_before.is_none();
         let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
+        // A replication reader only needs a shared advisory lock. Opening an
+        // already-initialized lock file read-only lets the canary mount the
+        // recorder WAL read-only at the filesystem boundary. Writers and the
+        // one-time initializer still require a writable descriptor.
+        if matches!(mode, HotRotationLockMode::Shared) && !created {
+            options.read(true);
+        } else {
+            options.read(true).write(true).create(true);
+        }
         #[cfg(unix)]
         options
             .mode(0o600)
@@ -5005,6 +5016,11 @@ fn validate_hot_generation_config(config: &GrpcRawRecordConfig) -> Result<()> {
         &root.join(HOT_RECEIPTS_DIR),
         "hot generation receipt directory",
     )?;
+    // Create the stable advisory lock during every compatible recorder
+    // startup, not only at the first rotation. A read-only pull source can then
+    // require this file as evidence that the writer knows the same rotation
+    // protocol; manufacturing the file beside an older writer is unsupported.
+    let _rotation_guard = HotRotationGuard::acquire(root, HotRotationLockMode::Exclusive)?;
     ensure!(
         !path_entry_exists(&root.join(HOT_ROTATION_MARKER))?,
         "hot generation rotation marker must be recovered by the supervisor before startup"
@@ -7178,6 +7194,10 @@ mod tests {
         config.hot_generation_root = Some(cache_root.clone());
         config.max_generation_bytes = minimum_generation_bytes(&config).unwrap();
         validate_hot_generation_config(&config).unwrap();
+        let rotation_lock = fs::symlink_metadata(cache_root.join(HOT_ROTATION_LOCK)).unwrap();
+        assert!(rotation_lock.file_type().is_file());
+        #[cfg(unix)]
+        assert_eq!(rotation_lock.mode() & 0o777, 0o600);
 
         let mut identity = load_or_create_identity(&config).unwrap();
         let mut spool = SpoolWriter::open(
@@ -7784,6 +7804,26 @@ mod tests {
         assert_eq!(read_hot_generation_sequence(&cache_root).unwrap(), Some(43));
         assert_eq!(allocate_hot_generation_number(&cache_root, 7).unwrap(), 44);
 
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_hot_rotation_lock_opens_an_initialized_read_only_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cache_root = temp_dir("read-only-hot-rotation-lock");
+        fs::create_dir_all(&cache_root).unwrap();
+        let lock_path = cache_root.join(HOT_ROTATION_LOCK);
+        fs::write(&lock_path, []).unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o400)).unwrap();
+        fs::set_permissions(&cache_root, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let guard = HotRotationGuard::acquire(&cache_root, HotRotationLockMode::Shared).unwrap();
+        drop(guard);
+
+        fs::set_permissions(&cache_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
         fs::remove_dir_all(cache_root).unwrap();
     }
 

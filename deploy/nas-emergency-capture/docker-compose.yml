@@ -1,0 +1,73 @@
+name: blockzilla-emergency-capture
+
+services:
+  raw-capture:
+    image: ${BLOCKZILLA_EMERGENCY_CAPTURE_IMAGE:-blockzilla-live-receiver:2026-07-15}
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-live-producer"]
+    command:
+      - record-grpc-raw
+      - --endpoint
+      - ${BLOCKZILLA_GRPC_ENDPOINT:?set the Triton Yellowstone endpoint}
+      - --output-dir
+      - /data/continuous
+      - --max-blocks
+      - "1000000000"
+      - --timeout-secs
+      - "31536000"
+      - --idle-timeout-secs
+      - "180"
+      - --compression-level
+      - "1"
+      - --segment-target-bytes
+      - "1073741824"
+      - --max-record-bytes
+      - "134217728"
+      - --min-free-bytes
+      - "1099511627776"
+      - --resume-coverage-warning-file
+      - /data/continuous/.monitoring/resume-coverage-warning.json
+      - --cluster-id
+      - solana-mainnet
+      - --origin-node-id
+      - blockzilla-nas-00
+      - --source-id
+      - grpc-raw-triton-nas-continuous
+
+    environment:
+      BLOCKZILLA_GRPC_X_TOKEN: ${BLOCKZILLA_GRPC_X_TOKEN:?set the Triton Yellowstone x-token}
+      RUST_LOG: ${RUST_LOG:-info}
+
+    volumes:
+      - type: bind
+        source: ${BLOCKZILLA_EMERGENCY_CAPTURE_HOST_PATH:-/home/ach/data/blockzilla-emergency-grpc}
+        target: /data
+
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test -s /data/continuous/raw-blocks.jsonl &&
+          find /data/continuous/raw-blocks.jsonl -mmin -4 -print -quit | grep -q .
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 5m
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 768m
+    mem_reservation: 128m
+    memswap_limit: 768m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=1777,uid=10001,gid=10001
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,304 @@
+name: ${COMPOSE_PROJECT_NAME:-blockzilla-ingest-receiver}
+
+services:
+  # Intentionally profile-gated. A plain `docker compose up` starts nothing.
+  # Enable only after the raw TCP private route and Hetzner trust bundle exist.
+  raw-receiver:
+    # The extra profiles keep the dependency active when either the new
+    # outbound pull client or the temporary legacy tunnel is selected alone.
+    profiles: ["receiver", "pull-client", "legacy-tunnel"]
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.raw-recorder
+      args:
+        RUST_VERSION: "1.96.0"
+    image: ${BLOCKZILLA_RECEIVER_IMAGE:-blockzilla-live-receiver:local}
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-raw-receiver"]
+    restart: unless-stopped
+    # A legal 128 MiB replication request may remain in flight for up to ten
+    # minutes on a degraded route. Allow it to finish and fsync on shutdown.
+    stop_grace_period: 660s
+
+    environment:
+      BLOCKZILLA_RECEIVER_CONFIG_FILE: /run/secrets/ingest_primary_config
+      BLOCKZILLA_RECEIVER_SERVER_PRIVATE_KEY_SOURCE: /run/secrets/blockzilla_primary_private_key
+      BLOCKZILLA_RECEIVER_RECEIPT_SIGNING_KEY_SOURCE: /run/secrets/blockzilla_receipt_signing_key
+      BLOCKZILLA_RECEIVER_CONTROL_DIRECTORY: /data/replication-control
+
+    volumes:
+      - type: bind
+        source: ${BLOCKZILLA_RECEIVER_DATA_HOST_PATH:?set the dedicated receiver data directory}
+        target: /data
+
+    secrets:
+      - ingest_primary_config
+      - blockzilla_primary_certificate
+      - blockzilla_primary_private_key
+      - blockzilla_replica_ca
+      - replication_allowed_nodes
+      - blockzilla_receipt_signing_key
+
+    # Both private keys are copied here as mode 0600 by UID 10001 before the
+    # binary starts. The original file-backed secrets remain read-only.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=10001,gid=10001
+
+    # The receiver has a dedicated, non-host Docker IP. Cloudflare advertises
+    # only this /32, so WARP enrollment cannot expose the NAS SSH/admin ports.
+    # There is deliberately no host port publication.
+    expose:
+      - "9443"
+    networks:
+      receiver_ingress:
+        ipv4_address: ${BLOCKZILLA_RECEIVER_PRIVATE_IP:-10.253.45.2}
+
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: ${BLOCKZILLA_RECEIVER_MEMORY_LIMIT:-768m}
+    mem_reservation: ${BLOCKZILLA_RECEIVER_MEMORY_RESERVATION:-128m}
+    memswap_limit: ${BLOCKZILLA_RECEIVER_MEMORY_LIMIT:-768m}
+    deploy:
+      resources:
+        limits:
+          memory: ${BLOCKZILLA_RECEIVER_MEMORY_LIMIT:-768m}
+          pids: 64
+        reservations:
+          memory: ${BLOCKZILLA_RECEIVER_MEMORY_RESERVATION:-128m}
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Blockzilla initiates every public connection. It pulls exactly one
+  # source-bounded batch, forwards it over NAS-local mTLS to raw-receiver, and
+  # returns only the receiver's already-fsynced signed cumulative ACK. It has
+  # no receiver-data mount and no inbound port. Its image tag is deliberately
+  # separate from raw-receiver so a pull-client build cannot replace the image
+  # backing the live receiver container.
+  pull-client:
+    profiles: ["pull-client"]
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.raw-recorder
+      args:
+        RUST_VERSION: "1.96.0"
+    image: ${BLOCKZILLA_PULL_CLIENT_IMAGE:-blockzilla-live-pull-client:local}
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-raw-pull-client"]
+    restart: unless-stopped
+    stop_grace_period: 660s
+
+    depends_on:
+      raw-receiver:
+        condition: service_started
+
+    environment:
+      BLOCKZILLA_PULL_CLIENT_CONFIG_FILE: /run/secrets/grpc_pull_client_config
+      BLOCKZILLA_PULL_CLIENT_CERTIFICATE_FILE: /run/secrets/blockzilla_pull_client_certificate
+      BLOCKZILLA_PULL_CLIENT_PRIVATE_KEY_SOURCE: /run/secrets/blockzilla_pull_client_private_key
+      BLOCKZILLA_PULL_CLIENT_CA_FILE: /run/secrets/replication_ca
+      BLOCKZILLA_PULL_CLIENT_RECEIPT_PUBLIC_KEY_FILE: /run/secrets/blockzilla_receipt_public_key
+      BLOCKZILLA_PULL_CLIENT_POLL_INTERVAL_MS: "${BLOCKZILLA_PULL_CLIENT_POLL_INTERVAL_MS:-1000}"
+
+    secrets:
+      - grpc_pull_client_config
+      - blockzilla_pull_client_certificate
+      - blockzilla_pull_client_private_key
+      - replication_ca
+      - blockzilla_receipt_public_key
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=10001,gid=10001
+
+    networks:
+      receiver_ingress:
+      pull_egress:
+        # The default route is public egress to Hetzner. The internal ingress
+        # bridge remains the only route to the local receiver.
+        gw_priority: 1
+
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 768m
+    mem_reservation: 128m
+    memswap_limit: 768m
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+          pids: 64
+        reservations:
+          memory: 128m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Opt-in replay bridge. It reads the receiver's canonical WAL read-only and
+  # copies only its locally fsynced prefix into a separate standard raw-gRPC
+  # generation. It has no network and no cleanup authority. Leave this profile
+  # disabled until the receiver has created a journal and its 32-hex ID is set.
+  receiver-bridge:
+    profiles: ["bridge"]
+    platform: linux/amd64
+    image: ${BLOCKZILLA_RECEIVER_IMAGE:-blockzilla-live-receiver:local}
+    entrypoint: ["/usr/bin/tini", "-g", "--", "/usr/local/bin/blockzilla-receiver-bridge"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+    environment:
+      BLOCKZILLA_RECEIVER_BRIDGE_SOURCE_ROOT: /receiver-data/blockzilla-ingest-primary/replication-receiver
+      BLOCKZILLA_RECEIVER_BRIDGE_OUTPUT_DIR: /derived/raw-current
+      BLOCKZILLA_RECEIVER_BRIDGE_CLUSTER_ID: ${BLOCKZILLA_RECEIVER_BRIDGE_CLUSTER_ID:-solana-mainnet}
+      BLOCKZILLA_RECEIVER_BRIDGE_ORIGIN_NODE_ID: ${BLOCKZILLA_RECEIVER_BRIDGE_ORIGIN_NODE_ID:-hetzner-dokploy-01}
+      BLOCKZILLA_RECEIVER_BRIDGE_SOURCE_ID: ${BLOCKZILLA_RECEIVER_BRIDGE_SOURCE_ID:-grpc-raw-hetzner-backup}
+      BLOCKZILLA_RECEIVER_BRIDGE_JOURNAL_ID: ${BLOCKZILLA_RECEIVER_BRIDGE_JOURNAL_ID:-}
+      BLOCKZILLA_RECEIVER_BRIDGE_MAX_RECORDS: ${BLOCKZILLA_RECEIVER_BRIDGE_MAX_RECORDS:-128}
+      BLOCKZILLA_RECEIVER_BRIDGE_MAX_UNCOMPRESSED_RECORD_BYTES: ${BLOCKZILLA_RECEIVER_BRIDGE_MAX_UNCOMPRESSED_RECORD_BYTES:-134217728}
+      BLOCKZILLA_RECEIVER_BRIDGE_MAX_OUTPUT_BYTES: ${BLOCKZILLA_RECEIVER_BRIDGE_MAX_OUTPUT_BYTES:-8796093022208}
+      BLOCKZILLA_RECEIVER_BRIDGE_MIN_FREE_BYTES: ${BLOCKZILLA_RECEIVER_BRIDGE_MIN_FREE_BYTES:-6597069766656}
+      BLOCKZILLA_RECEIVER_BRIDGE_POLL_INTERVAL_SECS: ${BLOCKZILLA_RECEIVER_BRIDGE_POLL_INTERVAL_SECS:-2}
+      BLOCKZILLA_RECEIVER_BRIDGE_FAILURE_RETRY_SECS: ${BLOCKZILLA_RECEIVER_BRIDGE_FAILURE_RETRY_SECS:-60}
+
+    volumes:
+      - type: bind
+        source: ${BLOCKZILLA_RECEIVER_DATA_HOST_PATH:?set the dedicated receiver data directory}
+        target: /receiver-data
+        read_only: true
+      - type: bind
+        source: ${BLOCKZILLA_RECEIVER_BRIDGE_OUTPUT_HOST_PATH:?set the dedicated bridge output directory}
+        target: /derived
+
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=10001,gid=10001
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: ${BLOCKZILLA_RECEIVER_BRIDGE_MEMORY_LIMIT:-768m}
+    mem_reservation: ${BLOCKZILLA_RECEIVER_BRIDGE_MEMORY_RESERVATION:-128m}
+    memswap_limit: ${BLOCKZILLA_RECEIVER_BRIDGE_MEMORY_LIMIT:-768m}
+    deploy:
+      resources:
+        limits:
+          memory: ${BLOCKZILLA_RECEIVER_BRIDGE_MEMORY_LIMIT:-768m}
+          pids: 64
+        reservations:
+          memory: ${BLOCKZILLA_RECEIVER_BRIDGE_MEMORY_RESERVATION:-128m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Cloudflare's private-network connector. It does not terminate or inspect
+  # the receiver TLS session; Hetzner's WARP client reaches 10.253.45.2:9443
+  # and the receiver still performs end-to-end mTLS authentication itself.
+  cloudflared:
+    # Rollback path only. Keep the currently running connector until the direct
+    # public pull path passes the durable end-to-end proof, then stop it in a
+    # separate change.
+    profiles: ["legacy-tunnel"]
+    image: cloudflare/cloudflared:2026.7.2
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token-file
+      - /run/secrets/cloudflare_tunnel_token
+    restart: unless-stopped
+    depends_on:
+      raw-receiver:
+        condition: service_started
+    networks:
+      receiver_ingress:
+        ipv4_address: ${BLOCKZILLA_CLOUDFLARED_PRIVATE_IP:-10.253.45.3}
+      cloudflare_egress:
+        # Keep the connector's default route on the ordinary NAT bridge. The
+        # internal ingress bridge exists only to reach the receiver.
+        gw_priority: 1
+    secrets:
+      - cloudflare_tunnel_token
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    mem_reservation: 32m
+    memswap_limit: 128m
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          pids: 64
+        reservations:
+          memory: 32m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  receiver_ingress:
+    name: ${BLOCKZILLA_RECEIVER_INGRESS_NETWORK_NAME:-blockzilla-receiver-ingress}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${BLOCKZILLA_RECEIVER_PRIVATE_SUBNET:-10.253.45.0/29}
+  cloudflare_egress:
+    name: ${BLOCKZILLA_CLOUDFLARED_EGRESS_NETWORK_NAME:-blockzilla-cloudflared-egress}
+    driver: bridge
+  pull_egress:
+    name: ${BLOCKZILLA_PULL_EGRESS_NETWORK_NAME:-blockzilla-pull-egress}
+    driver: bridge
+
+secrets:
+  ingest_primary_config:
+    file: ${BLOCKZILLA_RECEIVER_CONFIG_HOST_FILE:?set the receiver config file}
+  blockzilla_primary_certificate:
+    file: ${BLOCKZILLA_RECEIVER_CERTIFICATE_HOST_FILE:?set the Blockzilla server certificate file}
+  blockzilla_primary_private_key:
+    file: ${BLOCKZILLA_RECEIVER_PRIVATE_KEY_HOST_FILE:?set the Blockzilla server private-key file}
+  blockzilla_replica_ca:
+    file: ${BLOCKZILLA_RECEIVER_CLIENT_CA_HOST_FILE:?set the replica client CA file}
+  replication_allowed_nodes:
+    file: ${BLOCKZILLA_RECEIVER_ALLOWLIST_HOST_FILE:?set the strict replica allowlist file}
+  blockzilla_receipt_signing_key:
+    file: ${BLOCKZILLA_RECEIVER_RECEIPT_KEY_HOST_FILE:?set the Ed25519 receipt private-key file}
+  cloudflare_tunnel_token:
+    # /dev/null keeps the direct pull profile independent from the legacy
+    # tunnel credential. Set the host-file variable before enabling that path.
+    file: ${BLOCKZILLA_CLOUDFLARED_TOKEN_HOST_FILE:-/dev/null}
+  grpc_pull_client_config:
+    file: ${BLOCKZILLA_PULL_CLIENT_CONFIG_HOST_FILE:-/dev/null}
+  blockzilla_pull_client_certificate:
+    file: ${BLOCKZILLA_PULL_CLIENT_CERTIFICATE_HOST_FILE:-/dev/null}
+  blockzilla_pull_client_private_key:
+    file: ${BLOCKZILLA_PULL_CLIENT_PRIVATE_KEY_HOST_FILE:-/dev/null}
+  replication_ca:
+    file: ${BLOCKZILLA_REPLICATION_CA_HOST_FILE:-/dev/null}
+  blockzilla_receipt_public_key:
+    file: ${BLOCKZILLA_RECEIPT_PUBLIC_KEY_HOST_FILE:-/dev/null}

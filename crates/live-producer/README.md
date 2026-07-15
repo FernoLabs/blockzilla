@@ -65,6 +65,24 @@ cargo run -p blockzilla-live-producer -- replicate-grpc-raw \
   --cache-root /data/grpc-cache
 ```
 
+On Blockzilla, copy only the receiver's locally fsynced prefix into a separate standard raw-gRPC
+generation for the existing PoH verifier and epoch materializer:
+
+```bash
+cargo run --release -p blockzilla-live-producer -- bridge-receiver-grpc-raw \
+  --receiver-spool-root /volume1/blockzilla/receiver-spool \
+  --output-dir /volume1/blockzilla/receiver-derived/raw-current \
+  --cluster-id solana-mainnet \
+  --origin-node-id HETZNER_ORIGIN_ID \
+  --source-id grpc-raw-hetzner-backup \
+  --journal-id 32_HEX_CHARACTERS
+```
+
+The receiver stays live and its WAL is opened read-only. Bridge, indexing, and compaction progress
+are separate from the signed ACK that authorizes Hetzner cleanup. See
+[`docs/receiver-wal-bridge.md`](../../docs/receiver-wal-bridge.md) for restart semantics and the
+cutover checklist.
+
 A network response alone cannot make replica data eligible for garbage
 collection: the exact signed ACK must first be verified and synced into the
 local cumulative-ACK WAL. `replicate-grpc-raw` then retires covered sealed

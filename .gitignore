@@ -10,6 +10,8 @@
 /blockzilla-v2/
 /local-archive-v2-runs/
 /personal/
+/deploy/blockzilla-receiver/secrets/
+/deploy/blockzilla-receiver/pki/
 /piggy-analysis/
 /local-slices/
 account-index-local/

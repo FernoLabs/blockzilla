@@ -1,5 +1,71 @@
 # Sole Yellowstone recorder and relay on Dokploy
 
+## Direct pull-source canary
+
+Deploy `docker-compose.dokploy-pull-source.yml` as a **new Dokploy Compose
+application** using `pull-source.env.example`. It attaches the existing external
+`blockzilla-live-raw-data-external` volume read-only at `/source-data` and keeps
+its ACK WAL in the separate stable read/write `blockzilla-live-pull-control`
+volume mounted at `/control`. It publishes direct Tonic mTLS on host TCP
+`10443` to container TCP `9443`. It has no Triton, Telegram, R2, or Backblaze
+secrets and cannot open another paid Yellowstone subscription. Do not add a
+Dokploy domain or a TLS-terminating reverse proxy.
+
+The separate application is the canary target because creating it does not
+recreate or restart the existing recorder. Its source config must:
+
+- bind `0.0.0.0:9443` and read `/source-data/grpc-cache`;
+- persist ACK state at `/control/pull-cumulative-ack.wal`;
+- publish the non-authoritative Telegram-monitor snapshot at
+  `/control/pull-ack-status.json` only after that ACK WAL is synced;
+- select at most one event per batch;
+- trust only the generated pull-client certificate fingerprint and the
+  Blockzilla receipt public key; and
+- keep generation GC disabled until the direct pull, receiver fsync, signed ACK,
+  ACK-WAL fsync, restart, and exact replay proof all pass.
+
+Build the source image off-host and preload it on Hetzner. Set
+`BLOCKZILLA_PULL_SOURCE_IMAGE_ID` to the exact `sha256:...` content address
+reported by `docker image inspect --format '{{.Id}}'` on both machines. The
+standalone production Compose accepts that content address rather than a
+mutable tag, has no `build` stanza, and uses `pull_policy: never`, so a
+deployment cannot consume the small server's Docker filesystem or silently
+substitute another image.
+
+Pre-create the external `blockzilla-live-pull-control` volume in a trusted
+operator step. The `pull-control-init` one-shot service creates no network and
+mounts only that volume; it sets its root to UID/GID `10001:10001`, mode `0700`,
+before the source starts. Because the volume is external, deleting the Dokploy
+application or running `down -v` cannot delete its ACK WAL. The source wrapper
+then fails closed unless `/source-data` is an actual read-only mount, its cache
+and pre-created lock are readable, and `/control` is writable. Never delete or
+replace the control volume while its binary ACK WAL is retention authority.
+
+Before the first canary start, run the recorder from the same reviewed image (or
+an explicitly compatible build) so its rotations take the exclusive side of
+the source's shared lock. Verify that the recorder created the mode-`0600`,
+UID/GID-`10001:10001` `/data/grpc-cache/.rotation.lock`. Never manufacture that
+file to make an older, non-locking writer look compatible, and never give the
+public source a read/write recorder mount to initialize it.
+
+Create these six Dokploy File mounts for the new application. The server private
+key is copied at startup into a UID-10001-owned mode-0600 tmpfs file. Copy
+`grpc-pull-source.json.example` for the config and make its trusted receipt key
+id match the NAS receiver's signing key id.
+
+| Dokploy file name | Container secret |
+| --- | --- |
+| `grpc-pull-source.json` | `/run/secrets/grpc_pull_source_config` |
+| `hetzner-pull-source.crt` | `/run/secrets/hetzner_pull_source_certificate` |
+| `hetzner-pull-source.key` | `/run/secrets/hetzner_pull_source_private_key` |
+| `pull-client-ca.crt` | `/run/secrets/pull_client_ca` |
+| `pull-allowed-nodes.json` | `/run/secrets/pull_allowed_nodes` |
+| `blockzilla-receipt.pub` | `/run/secrets/blockzilla_receipt_public_key` |
+
+The integrated `pull-source` profile in `docker-compose.dokploy.yml` is only a
+future consolidation option. Keep the recorder application's
+`COMPOSE_PROFILES` empty during the canary.
+
 This deployment is the single paid Yellowstone source for Blockzilla. Hetzner
 records every confirmed full-block envelope into a durable WAL, can copy
 bounded immutable generations to Cloudflare R2 under local pressure, and serves the same durably
@@ -48,11 +114,12 @@ the block enters the bounded RAM fan-out ring. A normal generation is capped at
    published only after all remote verification succeeds. It proves the R2 copy,
    not Blockzilla synchronization. Local or remote deletion additionally
    requires a valid signed Blockzilla durable ACK for the exact generation.
-   The signed receiver/sender protocol and crash-recoverable local ACK cleanup
-   are implemented and locally tested. The Compose file includes the Hetzner
-   sender behind the opt-in `replication` profile. Until that profile and the
-   Blockzilla receiver/private route are activated, production local cleanup and
-   all remote cleanup remain locked and capture pauses at the hard local floor.
+   The signed receiver protocol and crash-recoverable local ACK cleanup are
+   implemented and locally tested. The standalone Hetzner pull source serves
+   the same durable WAL to a Blockzilla-initiated mTLS client. Until its full
+   canary passes and GC is explicitly enabled in source configuration,
+   production local cleanup and all remote cleanup remain locked and capture
+   pauses at the hard local floor.
 
 Routine R2 publication performs conditional PUT plus metadata HEAD, but no
 payload GET. Re-downloading every generation during upload previously consumed
@@ -88,11 +155,10 @@ alert but can never delete backup data.
 This recorder resumes from its own last durable slot inclusively and checks the
 exact overlap block. It is the only component permitted to use the paid Triton
 token. The authenticated live relay, bounded mTLS raw receiver, signed
-cumulative ACK, and Hetzner sender are implemented and locally tested. The
-Hetzner sender is now defined as an inactive Compose profile, but the Blockzilla
-receiver, private route, certificates, and receiver-spool consumer are not
-deployed yet. The historical Yellowstone reader is also still missing. Until
-the receiver route and sender are activated, Blockzilla must remain stopped
+cumulative ACK, Hetzner pull source, and outbound Blockzilla pull client are
+implemented for local testing. The production direct path and receiver-spool
+consumer are not yet proven. The historical Yellowstone reader is also still
+missing. Until the pull path is activated, Blockzilla must remain stopped
 rather than silently starting a second paid full-block subscription.
 
 The current production recorder/backup layer:
@@ -105,22 +171,24 @@ The current production recorder/backup layer:
   only to restore a primary backlog;
 - it can create and verify R2 upload receipts, but those receipts have no local
   or remote deletion authority;
-- Blockzilla's durable raw receiver is not deployed and the Hetzner sender
-  profile is inactive, so no production worker consumes the durable ACK WAL.
-  The sender owns local oldest-first ACK cleanup, but production local eviction
-  and remote pruning remain locked until that sender/receiver route is active.
+- Blockzilla's durable raw receiver and outbound pull client are not yet proven
+  against the standalone Dokploy source, so no production worker consumes the
+  new durable ACK WAL. Production local eviction and remote pruning stay locked
+  during this proof.
 
-The next deployment step starts the Blockzilla receiver on a private route and
-then enables the `replication` profile, activating ACK-driven local retention
-without changing the WAL-first hot path.
+The next deployment step starts the standalone source with GC disabled, then
+starts the NAS receiver and outbound `pull-client` profile. This changes no
+WAL-first hot-path process.
 Blockzilla fsyncs the exact raw WAL and cursor, then signs a cumulative
 sequence/digest-chain receipt. Hetzner verifies and fsyncs that ACK before a
-whole generation becomes eligible for local or R2 cleanup. The bounded RAM ring
+whole generation becomes eligible for local cleanup. R2 remote pruning remains
+disabled until it has its own ACK-bound manifest/apply path. The bounded RAM ring
 remains fan-out only and may evict entries freely because their WAL records are
 already durable.
 
-The optional primary-sync heartbeat remains disabled until the sender is
-enabled. It then points at the real cumulative ACK WAL, never a generic ping.
+The optional primary-sync monitor remains disabled until the source publishes a
+stable post-fsync status snapshot. It never treats a generic ping, connection
+state, or mtime-only approximation as synchronization.
 The single-source gateway and durable receipt design is
 documented in
 [`docs/live-grpc-single-source.md`](../../docs/live-grpc-single-source.md); a
@@ -181,19 +249,6 @@ Create the five recorder Compose **File** mounts under **Advanced → Mounts**:
 | `cloudflare-r2.env` | `cloudflare-r2-credentials.example` | `/run/secrets/r2_credentials` |
 | `backblaze-blockzilla.env` | `backblaze-credentials.example` | `/run/secrets/backblaze_credentials` |
 
-Before enabling the `replication` profile, also create these five files. The
-private key is copied at container startup into a UID-10001-owned, mode-0600
-tmpfs file because Compose file mounts are read-only and normally too
-permissive for the fail-closed TLS key loader.
-
-| Dokploy file name | Local starting point | Container secret |
-| --- | --- | --- |
-| `ingest-replica.json` | `ingest-replica.json.example` with the real private endpoint | `/run/secrets/ingest_replica_config` |
-| `blockzilla-primary-ca.crt` | issuing CA certificate | `/run/secrets/blockzilla_primary_ca` |
-| `hetzner-replica.crt` | Hetzner mTLS client certificate | `/run/secrets/hetzner_replica_certificate` |
-| `hetzner-replica.key` | matching mTLS client private key | `/run/secrets/hetzner_replica_private_key` |
-| `blockzilla-receipt.pub` | Blockzilla Ed25519 receipt public key | `/run/secrets/blockzilla_receipt_public_key` |
-
 Keep these host-file settings:
 
 ```dotenv
@@ -202,11 +257,6 @@ BLOCKZILLA_RAW_RELAY_X_TOKEN_HOST_FILE=../files/yellowstone-relay-x-token
 BLOCKZILLA_TELEGRAM_BOT_TOKEN_HOST_FILE=../files/telegram-bot-token
 BLOCKZILLA_R2_CREDENTIALS_HOST_FILE=../files/cloudflare-r2.env
 BLOCKZILLA_B2_CREDENTIALS_HOST_FILE=../files/backblaze-blockzilla.env
-BLOCKZILLA_INGEST_REPLICA_CONFIG_HOST_FILE=../files/ingest-replica.json
-BLOCKZILLA_PRIMARY_CA_HOST_FILE=../files/blockzilla-primary-ca.crt
-BLOCKZILLA_REPLICA_CERTIFICATE_HOST_FILE=../files/hetzner-replica.crt
-BLOCKZILLA_REPLICA_PRIVATE_KEY_HOST_FILE=../files/hetzner-replica.key
-BLOCKZILLA_RECEIPT_PUBLIC_KEY_HOST_FILE=../files/blockzilla-receipt.pub
 ```
 
 Credential files are parsed as literal allowlisted `KEY=value` data and are
@@ -286,26 +336,22 @@ Blockzilla, not a normal subscriber endpoint. A block becomes visible only after
 both its WAL frame and handoff row have been fsynced, and relay publication
 failure stops the recorder.
 
-The durable Blockzilla path is the `raw-replicator` service, not this bounded
-RAM relay. Configure the private HTTPS receiver endpoint and matching TLS
-`server_name` in `ingest-replica.json`, start the Blockzilla receiver first,
-then set:
+The durable Blockzilla path is the standalone `pull-source` plus the NAS
+`pull-client`, not this bounded RAM relay. Blockzilla connects to
+`https://188.245.147.127:10443` using TLS name
+`blockzilla-hetzner-source`; the source never connects inbound to the NAS.
+The client forwards each exact batch to the local receiver, waits for its
+fsynced signed ACK, and only then submits that ACK to Hetzner. The source
+persists the verified ACK before answering. A read, disconnect, generic ping,
+R2 receipt, or unsigned slot cannot advance retention.
 
-```dotenv
-COMPOSE_PROFILES=replication
-BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS=600
-```
-
-The Compose profile automatically points the recorder monitor at
-`/data/replication-control/cumulative-ack.wal`; an operator cannot accidentally
-enable replication through `COMPOSE_PROFILES` while leaving the stale-ACK
-Telegram alert off.
-
-The sender reads the shared durable WAL, retries forever, stores verified signed
-ACKs in `replication-control`, and retires only whole ACK-covered generations.
-It has no recorder-health dependency so it can drain a full cache and allow the
-paused recorder to resume. Leave the profile disabled if the receiver route or
-key material is absent; it fails closed and R2 alone cannot provide an ACK.
+Keep source GC disabled during the canary. The read-only recorder mount makes
+this a filesystem capability boundary, not merely a config flag. Once restart
+and replay tests prove the exact durable chain, enabling local oldest-first
+cleanup requires a separate reviewed Compose revision that changes the recorder
+mount to read/write together with the explicit `gc.enabled=true` config change.
+Do not make either change through an environment toggle. R2 cleanup remains
+disabled.
 
 The R2 usage check is deliberately hourly and follows only the validated local
 receipt chain in `blockzilla-live-grpc`; it does not itself authorize deletion.
@@ -316,8 +362,11 @@ the provider-confirmed expired range from these deliberately bypassed 100 slots.
 
 Set `BLOCKZILLA_TELEGRAM_CHAT_ID` and keep Telegram enabled. For a forum topic,
 also set `BLOCKZILLA_TELEGRAM_MESSAGE_THREAD_ID`. Leave
-`BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE` empty while the replication profile is
-disabled.
+`BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE` empty until the direct-path canary has
+produced `/control/pull-ack-status.json`. In a later reviewed revision, mount
+the same control volume read-only into the recorder at `/data/pull-control` and
+point its monitor at `/data/pull-control/pull-ack-status.json`. The JSON snapshot
+is for alerts only; the binary ACK WAL remains the sole cleanup authority.
 
 `BLOCKZILLA_RAW_FROM_SLOT` is bootstrap-only. If it is empty, a fresh cache
 starts from the provider's live position. Once a durable row exists, the
@@ -349,14 +398,16 @@ Wait for at least one complete rotation. A healthy local-only check requires:
   its safety copy, manifest, and commit hashes/ETags were verified;
 - crossing the spill-start watermark may copy a generation to R2 but must not
   remove its local directory without a signed Blockzilla ACK;
-- while the replication profile or receiver is inactive, pressure reaches the
+- while the pull source/client proof is incomplete or GC is disabled, pressure reaches the
   hard floor and pauses capture rather than deleting a local or remote
   generation;
 - the remote prefix is
   `live-grpc-backup/v1/<cluster>/<origin>/slot-<20-digit-slot>/`;
 - after signed ACK cleanup is deployed, a valid ACK can return free space above
   the recovery watermark; before then no cleanup-based recovery is expected;
-- the container remains healthy and no upload/backlog incident is active.
+- `/tmp/blockzilla-raw-recorder.state` inside the recorder says `running`, the
+  healthcheck passes, and no upload/backlog incident is active. A live PID with
+  no new fsynced handoff row is `stalled`, not healthy.
 
 Do not retire another recorder based only on a healthy badge. Compare at least
 1,000 overlapping `(slot, blockhash)` records and their ordered PoH entry
@@ -399,7 +450,7 @@ while a failure that stays open beyond that window is announced. Failed
 deliveries remain pending for retry.
 
 Messages are intentionally short: at most five useful lines with a status,
-storage in decimal `MB`/`GB`, and one action. Telegram already supplies the
+storage in decimal `MB`/`GB`/`TB`, and one action. Telegram already supplies the
 timestamp, so node IDs, raw byte counts, and storage implementation terms are
 not shown. Example:
 
@@ -413,13 +464,13 @@ Action: Check R2 credentials or service status; automatic retry is on.
 
 | Alert | Meaning | Response |
 | --- | --- | --- |
-| Recorder restart / no gRPC blocks | The recorder restarted or no block was saved for three minutes. | Check the gRPC connection if it stays active. |
+| Recorder restart / gRPC backup stalled | The process may still be alive, but no new block crossed the fsynced handoff boundary for three minutes. | Check the gRPC provider or connection. |
 | gRPC reconnect not verified | The provider did not replay the last saved slot, so reconnect coverage is uncertain. | Compare the range with another source and repair any gaps. |
 | Missing gRPC slots | A confirmed provider-history range is absent from the backup. | Repair that range from another source if needed. |
 | Backup disk unavailable | Hetzner cannot use or inspect the backup disk, so recording is paused. | Check the Hetzner volume mount. |
 | Backup storage problem | Cloudflare R2 upload is blocked or Hetzner space is too low. | Follow the single action shown in the alert. |
 | Cloudflare R2 safety storage filling up | This recorder's verified safety copies reached 800 GB and become critical at 950 GB. | If Blockzilla has not signed the oldest spool, nothing is deleted; restore sync or expand the budget. |
-| Blockzilla confirmation missing | Active only when a confirmation source is configured. | Check the Blockzilla connection. |
+| Blockzilla backup copy not confirmed | Local durable data is newer than the signed receiver ACK. An old ACK is normal when there is no newer local data. This does not report indexing or compaction progress. | Check the Blockzilla receiver connection. |
 
 Because the notifier runs inside this container, it cannot report total host
 loss, loss of all outbound networking, or a container killed before it sends.

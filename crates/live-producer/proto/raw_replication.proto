@@ -14,6 +14,38 @@ service RawReplication {
   rpc GetAck(GetAckRequest) returns (GetAckResponse);
 }
 
+// Outbound-client pull contract for a single, server-pinned durable source.
+//
+// The runtime MUST require and verify mutual TLS for every RPC. PullBatch deliberately accepts no
+// stream identity, sequence, slot, cursor, or size hint: the server selects its configured source
+// and the first prefix not covered by its own locally-fsynced ACK WAL. CommitAck is the only state
+// transition and its signed value must be verified and fsynced against the exact served local WAL
+// witness before a runtime may advance its cursor or consider retention.
+service RawReplicationPull {
+  // Return at most one server-bounded batch. Each existing PushBatchRequest contains one record and
+  // its complete stream identity, preserving the incremental decoding and validation boundary used
+  // by the push protocol. Clean stream EOF marks the batch boundary; an empty stream means caught
+  // up and never means that the server skipped data.
+  rpc PullBatch(PullBatchRequest) returns (stream PushBatchRequest);
+
+  // Submit Blockzilla's signed cumulative durable ACK for the exact batch most recently served.
+  // A successful response is protocol flow control, not a second deletion receipt.
+  rpc CommitAck(CumulativePrimaryAck) returns (CommitAckResponse);
+}
+
+// Offset-free by construction. Protocol negotiation is the only client-controlled field.
+message PullBatchRequest {
+  uint32 protocol_version = 1;
+}
+
+// Response correlation and monitoring only. These fields do not create cursor or retention
+// authority; the signed ACK submitted in CommitAck remains the only durable protocol evidence.
+message CommitAckResponse {
+  uint32 protocol_version = 1;
+  StreamId stream = 2;
+  uint64 through_sequence = 3;
+}
+
 message StreamId {
   string cluster_id = 1;
   string origin_node_id = 2;

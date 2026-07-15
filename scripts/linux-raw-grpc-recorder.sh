@@ -25,7 +25,7 @@ MAX_RECORD_BYTES=${BLOCKZILLA_RAW_MAX_RECORD_BYTES:-134217728}
 REQUIRE_COMPLETE_POH=${BLOCKZILLA_RAW_REQUIRE_COMPLETE_POH:-true}
 CLUSTER_ID=${BLOCKZILLA_RAW_CLUSTER_ID:-solana-mainnet}
 ORIGIN_NODE_ID=${BLOCKZILLA_RAW_ORIGIN_NODE_ID:-hetzner-dokploy-01}
-SOURCE_ID=${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-primary}
+SOURCE_ID=${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-backup}
 
 # The legacy mode keeps one ever-growing dedicated-volume spool. The bounded
 # cache mode stores one live generation at a stable path and exposes immutable
@@ -130,6 +130,7 @@ STATE_DIR=${BLOCKZILLA_RAW_STATE_DIR:-/tmp}
 STATE_FILE=$STATE_DIR/blockzilla-raw-recorder.state
 STARTED_FILE=$STATE_DIR/blockzilla-raw-recorder.started
 JOURNAL_FILE=$OUTPUT_DIR/raw-blocks.jsonl
+IDENTITY_FILE=$OUTPUT_DIR/identity.json
 VOLUME_MARKER=${BLOCKZILLA_RAW_VOLUME_MARKER:-/data/.blockzilla-raw-volume}
 if [ "$CACHE_MODE" = b2-generations ]; then
   # Incident state must survive container rebuilds. Otherwise every deploy or
@@ -432,6 +433,21 @@ write_state() {
   return 0
 }
 
+recorder_state_value() {
+  [ -r "$STATE_FILE" ] || return 1
+  IFS=' ' read -r current_state _current_state_time < "$STATE_FILE" || return 1
+  case "$current_state" in
+    ''|*[!a-z_]*) return 1 ;;
+  esac
+  printf '%s\n' "$current_state"
+}
+
+write_state_if_changed() {
+  desired_state=$1
+  current_state=$(recorder_state_value 2>/dev/null || true)
+  [ "$current_state" = "$desired_state" ] || write_state "$desired_state"
+}
+
 validate_telegram_config() {
   case "$TELEGRAM_ENABLED" in
     true) ;;
@@ -596,7 +612,7 @@ alert_file() {
 alert_title() {
   case "$1" in
     recorder_restarting) printf '%s\n' 'Recorder restarting' ;;
-    grpc_stale) printf '%s\n' 'No new gRPC blocks' ;;
+    grpc_stale) printf '%s\n' 'gRPC backup stalled' ;;
     volume_invalid) printf '%s\n' 'Backup disk unavailable' ;;
     disk_check_failed) printf '%s\n' 'Cannot check backup disk' ;;
     disk_space) printf '%s\n' 'Backup disk is low' ;;
@@ -608,7 +624,7 @@ alert_title() {
     b2_usage_critical) printf '%s\n' 'Backblaze archive almost full' ;;
     r2_usage_check_failed) printf '%s\n' 'Cannot check Cloudflare R2 archive' ;;
     r2_usage) printf '%s\n' 'Cloudflare R2 archive usage' ;;
-    primary_sync_stale) printf '%s\n' 'Blockzilla confirmation missing' ;;
+    primary_sync_stale) printf '%s\n' 'Blockzilla backup copy not confirmed' ;;
     upstream_access_blocked) printf '%s\n' 'gRPC provider access blocked' ;;
     generation_rotation_failed) printf '%s\n' 'Local backup is paused' ;;
     replay_recovery_failed) printf '%s\n' 'gRPC recovery is paused' ;;
@@ -625,7 +641,14 @@ human_decimal_bytes() {
   case "$human_value" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  if [ "$human_value" -ge 1000000000 ]; then
+  if [ "$human_value" -ge 1000000000000 ]; then
+    human_tenths=$(((human_value + 50000000000) / 100000000000))
+    if [ $((human_tenths % 10)) -eq 0 ]; then
+      printf '%s TB' "$((human_tenths / 10))"
+    else
+      printf '%s.%s TB' "$((human_tenths / 10))" "$((human_tenths % 10))"
+    fi
+  elif [ "$human_value" -ge 1000000000 ]; then
     human_tenths=$(((human_value + 50000000) / 100000000))
     if [ $((human_tenths % 10)) -eq 0 ]; then
       printf '%s GB' "$((human_tenths / 10))"
@@ -1332,6 +1355,82 @@ file_age_seconds() {
   fi
 }
 
+receiver_ack_has_pending_local_data() {
+  ack_path=$1
+  [ -s "$JOURNAL_FILE" ] || return 1
+  [ -f "$IDENTITY_FILE" ] && [ ! -L "$IDENTITY_FILE" ] && [ -r "$IDENTITY_FILE" ] || return 2
+  ack_compare_python='import json, os, sys
+
+ack_path, identity_path, journal_path = sys.argv[1:]
+
+def fail():
+    raise ValueError("invalid receiver ACK monitoring input")
+
+def journal_hex(value):
+    if isinstance(value, str) and len(value) == 32:
+        int(value, 16)
+        return value.lower()
+    if not isinstance(value, list) or len(value) != 16:
+        fail()
+    if any(not isinstance(byte, int) or byte < 0 or byte > 255 for byte in value):
+        fail()
+    return "".join(f"{byte:02x}" for byte in value)
+
+with open(ack_path, "r", encoding="utf-8") as file:
+    ack = json.load(file)
+with open(identity_path, "r", encoding="utf-8") as file:
+    identity = json.load(file)
+
+if ack.get("schema_version") != 1:
+    fail()
+for field in ("cluster_id", "origin_node_id", "source_id"):
+    if not isinstance(ack.get(field), str) or ack[field] != identity.get(field):
+        fail()
+
+replication_journal = identity.get("replication_journal_id")
+replication_base = identity.get("replication_sequence_base")
+if replication_journal is None and replication_base is None:
+    replication_journal = identity.get("journal_id")
+    replication_base = 0
+if replication_journal is None or not isinstance(replication_base, int) or replication_base < 0:
+    fail()
+if ack.get("journal_id") != journal_hex(replication_journal):
+    fail()
+
+with open(journal_path, "rb") as file:
+    size = os.fstat(file.fileno()).st_size
+    window = min(size, 2 * 1024 * 1024)
+    file.seek(size - window)
+    data = file.read(window)
+if not data:
+    sys.exit(1)
+if not data.endswith(b"\n"):
+    marker = data.rfind(b"\n")
+    if marker < 0:
+        fail()
+    data = data[:marker + 1]
+lines = [line for line in data.splitlines() if line.strip()]
+if not lines:
+    fail()
+row = json.loads(lines[-1])
+frame_id = row.get("frame_id")
+through_sequence = ack.get("through_sequence")
+if not isinstance(frame_id, int) or frame_id < 0:
+    fail()
+if not isinstance(through_sequence, int) or through_sequence < 0:
+    fail()
+local_sequence = replication_base + frame_id
+sys.exit(0 if through_sequence < local_sequence else 1)'
+  if [ "$CACHE_MODE" = b2-generations ]; then
+    flock -s "$GENERATION_ROTATION_LOCK" \
+      "$GENERATION_PYTHON_BIN" -c "$ack_compare_python" \
+      "$ack_path" "$IDENTITY_FILE" "$JOURNAL_FILE"
+  else
+    "$GENERATION_PYTHON_BIN" -c "$ack_compare_python" \
+      "$ack_path" "$IDENTITY_FILE" "$JOURNAL_FILE"
+  fi
+}
+
 monitor_disk_alerts() {
   if ! monitor_free_bytes=$(available_bytes); then
     raise_alert disk_check_failed ERROR \
@@ -1427,6 +1526,39 @@ Action: None."
   fi
 }
 
+mark_grpc_stalled() {
+  stalled_status=$1
+  write_state_if_changed stalled
+  remember_alert_journal_floor grpc_stale
+  raise_alert grpc_stale ERROR \
+    "Status: STALLED. $stalled_status
+Data: Everything saved earlier is safe.
+Action: Check the gRPC provider or connection."
+}
+
+write_capture_progress_state() {
+  if [ -s "$JOURNAL_FILE" ]; then
+    capture_state_age=$(file_age_seconds "$JOURNAL_FILE") || {
+      write_state_if_changed stalled
+      return 0
+    }
+    if [ "$capture_state_age" -gt "$RAW_STALE_AFTER_SECS" ]; then
+      write_state_if_changed stalled
+      return 0
+    fi
+  elif [ -e "$STARTED_FILE" ]; then
+    capture_state_age=$(file_age_seconds "$STARTED_FILE") || {
+      write_state_if_changed stalled
+      return 0
+    }
+    if [ "$capture_state_age" -gt "$STARTUP_GRACE_SECS" ]; then
+      write_state_if_changed stalled
+      return 0
+    fi
+  fi
+  write_state_if_changed running
+}
+
 monitor_feed_alerts() {
   # Consume a reconnect warning before closing a provider-history incident.
   # The first post-gap append deliberately produces both signals; keeping the
@@ -1435,14 +1567,16 @@ monitor_feed_alerts() {
   if [ -s "$JOURNAL_FILE" ]; then
     monitor_age=$(file_age_seconds "$JOURNAL_FILE") || return 0
     if [ "$monitor_age" -gt "$RAW_STALE_AFTER_SECS" ]; then
-      remember_alert_journal_floor grpc_stale
-      raise_alert grpc_stale ERROR \
-        "Status: No new gRPC block was saved for $(human_duration "$monitor_age").
-Data: Everything saved earlier is safe.
-Action: Check the gRPC provider or connection."
+      # This is a durable-progress state, not a process-liveness state. A live
+      # PID with an unchanged fsynced handoff journal is still stalled.
+      mark_grpc_stalled \
+        "No new gRPC block was saved for $(human_duration "$monitor_age")."
     else
+      if [ "$(recorder_state_value 2>/dev/null || true)" = stalled ]; then
+        write_state running
+      fi
       clear_alert_after_journal_growth grpc_stale \
-        "Status: New gRPC blocks are being saved again.
+        "Status: RUNNING. New gRPC blocks are being saved again.
 Data: New blocks are being saved; everything saved earlier is safe.
 Action: None."
     fi
@@ -1463,11 +1597,7 @@ Action: Compare that range with another source if needed." \
   elif [ -e "$STARTED_FILE" ]; then
     monitor_start_age=$(file_age_seconds "$STARTED_FILE") || return 0
     if [ "$monitor_start_age" -gt "$STARTUP_GRACE_SECS" ]; then
-      remember_alert_journal_floor grpc_stale
-      raise_alert grpc_stale ERROR \
-        "Status: No gRPC block was saved after startup.
-Data: No new backup data is arriving.
-Action: Check the gRPC provider or connection."
+      mark_grpc_stalled "No gRPC block was saved after startup."
     fi
   fi
 
@@ -1724,42 +1854,60 @@ monitor_primary_sync_alert() {
   if [ "$TELEGRAM_ENABLED" != true ] || [ -z "$PRIMARY_SYNC_HEARTBEAT_FILE" ]; then
     return 0
   fi
-  heartbeat_seen_file=$(alert_file primary_sync_stale seen)
+  # Compatibility keeps the old HEARTBEAT variable name, but this file is the
+  # fsynced signed receiver-ACK WAL. It says nothing about indexing or
+  # compaction progress, which require their own watermarks and incidents.
+  receiver_ack_seen_file=$(alert_file primary_sync_stale seen)
   if [ -L "$PRIMARY_SYNC_HEARTBEAT_FILE" ] \
     || [ ! -f "$PRIMARY_SYNC_HEARTBEAT_FILE" ] \
     || [ ! -r "$PRIMARY_SYNC_HEARTBEAT_FILE" ]
   then
-    heartbeat_should_alert=false
-    if [ -e "$heartbeat_seen_file" ]; then
-      heartbeat_should_alert=true
-    elif heartbeat_start_age=$(file_age_seconds "$STARTED_FILE" 2>/dev/null) \
-      && [ "$heartbeat_start_age" -gt "$PRIMARY_SYNC_STALE_AFTER_SECS" ]
+    receiver_ack_should_alert=false
+    if [ -s "$JOURNAL_FILE" ] && [ -e "$receiver_ack_seen_file" ]; then
+      receiver_ack_should_alert=true
+    elif [ -s "$JOURNAL_FILE" ] \
+      && receiver_ack_start_age=$(file_age_seconds "$STARTED_FILE" 2>/dev/null) \
+      && [ "$receiver_ack_start_age" -gt "$PRIMARY_SYNC_STALE_AFTER_SECS" ]
     then
-      heartbeat_should_alert=true
+      receiver_ack_should_alert=true
     fi
-    if [ "$heartbeat_should_alert" = true ]; then
+    if [ "$receiver_ack_should_alert" = true ]; then
       raise_alert primary_sync_stale WARNING \
-        "Status: Blockzilla confirmation is missing.
-Data: Nothing is deleted because of this alert.
-Action: Check the Blockzilla connection."
+        "Status: Blockzilla has not confirmed receiving the backup copy.
+Data: Hetzner keeps all unconfirmed blocks. Indexing is a separate check.
+Action: Check the Blockzilla receiver connection."
     fi
     return 0
   fi
 
-  if ! : > "$heartbeat_seen_file"; then
-    echo "$(timestamp) telegram_alert heartbeat_state_write_failed" >&2
+  if ! : > "$receiver_ack_seen_file"; then
+    echo "$(timestamp) telegram_alert receiver_ack_state_write_failed" >&2
   fi
-  heartbeat_age=$(file_age_seconds "$PRIMARY_SYNC_HEARTBEAT_FILE") || heartbeat_age=$PRIMARY_SYNC_STALE_AFTER_SECS
-  if [ "$heartbeat_age" -gt "$PRIMARY_SYNC_STALE_AFTER_SECS" ]; then
-    raise_alert primary_sync_stale WARNING \
-      "Status: No Blockzilla confirmation for $(human_duration "$heartbeat_age").
-Data: Nothing is deleted because of this alert.
-Action: Check the Blockzilla connection."
-  else
-    clear_alert primary_sync_stale \
-      "Status: Blockzilla confirmations are arriving again.
-Data: Hetzner backup remains safe.
+  receiver_ack_pending_status=0
+  receiver_ack_has_pending_local_data "$PRIMARY_SYNC_HEARTBEAT_FILE" \
+    || receiver_ack_pending_status=$?
+  case "$receiver_ack_pending_status" in
+    0) ;;
+    1)
+      clear_alert primary_sync_stale \
+        "Status: Blockzilla has confirmed the current backup copy.
+Data: This confirms receiver storage only, not indexing.
 Action: None."
+      return 0
+      ;;
+    *)
+      echo "$(timestamp) telegram_alert receiver_ack_progress_check_failed" >&2
+      return 0
+      ;;
+  esac
+
+  receiver_ack_age=$(file_age_seconds "$PRIMARY_SYNC_HEARTBEAT_FILE") \
+    || receiver_ack_age=$PRIMARY_SYNC_STALE_AFTER_SECS
+  if [ "$receiver_ack_age" -gt "$PRIMARY_SYNC_STALE_AFTER_SECS" ]; then
+    raise_alert primary_sync_stale WARNING \
+      "Status: Blockzilla has not confirmed a new backup copy for $(human_duration "$receiver_ack_age").
+Data: Hetzner keeps all unconfirmed blocks. Indexing is a separate check.
+Action: Check the Blockzilla receiver connection."
   fi
 }
 
@@ -4100,6 +4248,10 @@ healthcheck() {
 
   if [ -r "$STATE_FILE" ]; then
     IFS=' ' read -r recorder_state _state_time < "$STATE_FILE" || recorder_state=unknown
+    if [ "$recorder_state" = stalled ]; then
+      echo "raw recorder state is STALLED: no new durable gRPC block" >&2
+      return 1
+    fi
     if [ "$recorder_state" = low_disk ] \
       || [ "$recorder_state" = disk_check_failed ] \
       || [ "$recorder_state" = cache_rotation_failed ] \
@@ -4123,7 +4275,7 @@ healthcheck() {
     if [ "$age" -le "$stale_after" ]; then
       return 0
     fi
-    echo "raw journal is stale: age_seconds=$age limit_seconds=$stale_after" >&2
+    echo "raw recorder is STALLED: no new durable gRPC block; age_seconds=$age limit_seconds=$stale_after" >&2
     return 1
   fi
 
@@ -4140,7 +4292,7 @@ healthcheck() {
   if [ "$startup_age" -le "$startup_grace" ]; then
     return 0
   fi
-  echo "raw journal was not created within startup grace: age_seconds=$startup_age" >&2
+  echo "raw recorder is STALLED: no durable gRPC block after startup; age_seconds=$startup_age" >&2
   return 1
 }
 
@@ -4661,7 +4813,10 @@ Action: None."
   fi
   set -- "$@" --resume-coverage-warning-file "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"
 
-  write_state running
+  # Starting a process is not durable ingest progress. Preserve `stalled` until
+  # this journal is fresh; the child monitor changes it to running only after a
+  # new fsynced handoff row appears.
+  write_capture_progress_state
   echo "$(timestamp) raw_recorder starting output=$OUTPUT_DIR free_bytes=$free_bytes" >&2
   : > "$CHILD_REPORT_FILE"
   start_raw_recorder_child "$@"
@@ -4802,6 +4957,7 @@ Action: Check the recorder logs. Automatic retry is on."
     sleep "$RESTART_DELAY_SECS"
     continue
   fi
+  next_recorder_state=backoff
   if ! validate_data_volume true >/dev/null 2>&1; then
     raise_alert volume_invalid CRITICAL \
       "Status: The Hetzner backup disk is unavailable. Backup is paused.
@@ -4817,10 +4973,13 @@ Action: Check the Hetzner volume mount."
       raise_recorder_restart_alert \
         "Recorder exited after a low-disk stop; status=$status last_slot=$last_slot journal_age_seconds=$journal_age."
     fi
-  elif [ "$exit_reason" = durable_block_idle_timeout ] \
-    && [ -e "$(alert_file grpc_stale active)" ]
-  then
-    : # The stale-journal incident already owns the alert and recovery transition.
+  elif [ "$exit_reason" = durable_block_idle_timeout ]; then
+    # The in-process watchdog may fire between monitor intervals. Keep this on
+    # the same incident/state transition instead of misreporting a healthy PID
+    # restart, and do not clear it merely because the replacement child starts.
+    next_recorder_state=stalled
+    mark_grpc_stalled \
+      "No new gRPC blocks arrived before the safety timeout; the recorder is reconnecting."
   else
     raise_recorder_restart_alert \
       "Recorder exited; status=$status reason=$exit_reason last_slot=$last_slot journal_age_seconds=$journal_age. Restarting after ${RESTART_DELAY_SECS}s."
@@ -4828,7 +4987,7 @@ Action: Check the Hetzner volume mount."
   if [ -s "$CHILD_REPORT_FILE" ]; then
     sed -n '1,200p' "$CHILD_REPORT_FILE"
   fi
-  write_state backoff
+  write_state "$next_recorder_state"
   echo "$(timestamp) raw_recorder exited status=$status reason=$exit_reason; retrying in ${RESTART_DELAY_SECS}s" >&2
   sleep "$RESTART_DELAY_SECS"
 done

@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Docker Compose file secrets are normally mounted read-only with mode 0444.
-# The replication client deliberately rejects a group/world-readable private
-# key, so copy only that key into this container's private tmpfs before exec.
+# File-backed Compose secrets retain their host ownership and mode. Copy only
+# the client private key into this container's private tmpfs so the replication
+# client always consumes a UID-only runtime copy with mode 0600.
 
 umask 077
 export LC_ALL=C
@@ -13,6 +13,7 @@ CACHE_ROOT=${BLOCKZILLA_REPLICATION_CACHE_ROOT:-/data/grpc-cache}
 SOURCE_PRIVATE_KEY=${BLOCKZILLA_REPLICATION_PRIVATE_KEY_SOURCE:-/run/secrets/hetzner_replica_private_key}
 RUNTIME_PRIVATE_KEY=/tmp/blockzilla-replicator/client-private-key.pem
 POLL_INTERVAL_MS=${BLOCKZILLA_REPLICATION_POLL_INTERVAL_MS:-1000}
+ACK_STATUS_FILE=${BLOCKZILLA_REPLICATION_ACK_STATUS_FILE:-/data/replication-control/receiver-ack-status.json}
 
 die() {
   printf '%s\n' "raw-replicator: $*" >&2
@@ -37,6 +38,11 @@ require_regular_readable_file "replication client private key" "$SOURCE_PRIVATE_
 [ -d "$CACHE_ROOT" ] && [ ! -L "$CACHE_ROOT" ] || \
   die "replication cache root must be a non-symlink directory"
 
+status_directory=${ACK_STATUS_FILE%/*}
+mkdir -p "$status_directory"
+[ -d "$status_directory" ] && [ ! -L "$status_directory" ] && [ -w "$status_directory" ] || \
+  die "replication ACK status directory must be writable and non-symlinked"
+
 key_directory=${RUNTIME_PRIVATE_KEY%/*}
 mkdir -p "$key_directory"
 [ -d "$key_directory" ] && [ ! -L "$key_directory" ] || \
@@ -48,4 +54,5 @@ install -m 0600 "$SOURCE_PRIVATE_KEY" "$RUNTIME_PRIVATE_KEY"
 exec /usr/local/bin/blockzilla-live-producer replicate-grpc-raw \
   --config "$CONFIG_FILE" \
   --cache-root "$CACHE_ROOT" \
+  --ack-status-file "$ACK_STATUS_FILE" \
   --poll-interval-ms "$POLL_INTERVAL_MS"

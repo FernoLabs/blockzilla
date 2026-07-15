@@ -14,6 +14,10 @@ telegram-bot-token
 !**/.env.example
 personal
 **/personal
+deploy/blockzilla-receiver/secrets
+deploy/blockzilla-receiver/pki
+**/deploy/blockzilla-receiver/secrets
+**/deploy/blockzilla-receiver/pki
 
 # Build output, package-manager caches, and local capture/benchmark artifacts.
 target

@@ -352,6 +352,109 @@ test ! -e "$(alert_file replay_recovery_failed active)"
 test ! -e "$(alert_file replay_recovery_failed delivered)"
 test "$(alert_title replay_recovery_failed)" = "gRPC recovery is paused"
 
+# A live child with an unchanged fsynced handoff journal is explicitly STALLED.
+# Process liveness cannot keep either the state file or Telegram looking healthy.
+(
+  stalled_message=$fixture_root/grpc-stalled-message
+  stalled_health_error=$fixture_root/grpc-stalled-health-error
+  fixture_journal_age=$((RAW_STALE_AFTER_SECS + 1))
+  mkdir -p "$OUTPUT_DIR" "$STATE_DIR"
+  printf '%s\n' '{"slot":100}' > "$JOURNAL_FILE"
+  telegram_send() { printf '%s\n' "$1" > "$stalled_message"; }
+  journal_size() { wc -c < "$JOURNAL_FILE" | tr -d ' '; }
+  file_age_seconds() { printf '%s\n' "$fixture_journal_age"; }
+  discard_alert grpc_stale
+  write_state running
+
+  monitor_feed_alerts
+  grep -q '^stalled ' "$STATE_FILE"
+  grep -q '^gRPC backup stalled$' "$stalled_message"
+  grep -q '^Status: STALLED\. No new gRPC block was saved for ' "$stalled_message"
+  write_capture_progress_state
+  grep -q '^stalled ' "$STATE_FILE"
+
+  validate_data_paths() { return 0; }
+  validate_object_store() { return 0; }
+  validate_data_volume() { return 0; }
+  if healthcheck 2> "$stalled_health_error"; then
+    echo "healthcheck accepted an explicitly stalled recorder" >&2
+    exit 1
+  fi
+  grep -q 'state is STALLED: no new durable gRPC block' "$stalled_health_error"
+
+  fixture_journal_age=0
+  printf '%s\n' '{"slot":101}' >> "$JOURNAL_FILE"
+  monitor_feed_alerts
+  grep -q '^running ' "$STATE_FILE"
+  grep -q '^Status: RUNNING\. New gRPC blocks are being saved again\.$' \
+    "$stalled_message"
+  test ! -e "$(alert_file grpc_stale active)"
+  discard_alert grpc_stale
+  rm -f "$JOURNAL_FILE" "$STATE_FILE"
+)
+
+# Receiver-copy ACK age is its own signal. Exact logical sequences, not mtimes,
+# decide coverage: a newly written status for an older ACK must not falsely
+# clear the incident. The operator copy remains separate from indexing/compaction.
+(
+  receiver_ack_file=$fixture_root/receiver-ack-status.json
+  receiver_ack_message=$fixture_root/receiver-ack-message
+  receiver_ack_send_count=0
+  receiver_now=$(date +%s)
+  receiver_ack_modified=$((receiver_now - PRIMARY_SYNC_STALE_AFTER_SECS - 60))
+  PRIMARY_SYNC_HEARTBEAT_FILE=$receiver_ack_file
+  mkdir -p "$OUTPUT_DIR"
+  printf '%s\n' '{"schema_version":1,"endpoint":"test","cluster_id":"solana-mainnet","origin_node_id":"hetzner-dokploy-01","source_id":"grpc-raw-hetzner-backup","journal_id":[17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17],"replication_journal_id":null,"replication_sequence_base":null,"payload_format_version":2}' > "$IDENTITY_FILE"
+  printf '%s\n' '{"schema_version":1,"cluster_id":"solana-mainnet","origin_node_id":"hetzner-dokploy-01","source_id":"grpc-raw-hetzner-backup","journal_id":"11111111111111111111111111111111","through_sequence":0,"primary_term":1,"updated_unix_secs":1}' > "$receiver_ack_file"
+  printf '%s\n' '{"frame_id":0}' > "$JOURNAL_FILE"
+  telegram_send() {
+    receiver_ack_send_count=$((receiver_ack_send_count + 1))
+    printf '%s\n' "$1" > "$receiver_ack_message"
+  }
+  stat() {
+    if [ "$#" -eq 3 ] && [ "$1" = -c ]; then
+      case "$2:$3" in
+        "%Y:$receiver_ack_file") printf '%s\n' "$receiver_ack_modified"; return 0 ;;
+        "%s:$JOURNAL_FILE") wc -c < "$JOURNAL_FILE" | tr -d ' '; return 0 ;;
+      esac
+    fi
+    command stat "$@"
+  }
+  discard_alert primary_sync_stale
+  rm -f "$(alert_file primary_sync_stale seen)"
+
+  monitor_primary_sync_alert
+  test "$receiver_ack_send_count" -eq 0
+  test ! -e "$(alert_file primary_sync_stale active)"
+
+  printf '%s\n' '{"frame_id":1}' >> "$JOURNAL_FILE"
+  monitor_primary_sync_alert
+  test "$receiver_ack_send_count" -eq 1
+  grep -q '^Blockzilla backup copy not confirmed$' "$receiver_ack_message"
+  grep -q '^Data: Hetzner keeps all unconfirmed blocks\. Indexing is a separate check\.$' \
+    "$receiver_ack_message"
+  assert_simple_storage_message "$receiver_ack_message"
+
+  # A late write of the same older sequence is still pending, even though its
+  # file timestamp is now fresh.
+  receiver_ack_modified=$receiver_now
+  monitor_primary_sync_alert
+  test "$receiver_ack_send_count" -eq 1
+  test -e "$(alert_file primary_sync_stale active)"
+
+  printf '%s\n' '{"schema_version":1,"cluster_id":"solana-mainnet","origin_node_id":"hetzner-dokploy-01","source_id":"grpc-raw-hetzner-backup","journal_id":"11111111111111111111111111111111","through_sequence":1,"primary_term":1,"updated_unix_secs":2}' > "$receiver_ack_file"
+  monitor_primary_sync_alert
+  test "$receiver_ack_send_count" -eq 2
+  grep -q '^Status: Blockzilla has confirmed the current backup copy\.$' \
+    "$receiver_ack_message"
+  grep -q '^Data: This confirms receiver storage only, not indexing\.$' \
+    "$receiver_ack_message"
+  assert_simple_storage_message "$receiver_ack_message"
+  test ! -e "$(alert_file primary_sync_stale active)"
+  discard_alert primary_sync_stale
+  rm -f "$(alert_file primary_sync_stale seen)" "$JOURNAL_FILE"
+)
+
 # Stopping the monitor must interrupt its interval immediately. Otherwise an
 # already-finished replay probe waits 30 seconds while the provider floor moves.
 MONITOR_INTERVAL_SECS=30
@@ -496,6 +599,7 @@ test "$(human_decimal_bytes 402427904)" = "402 MB"
 test "$(human_decimal_bytes 1207959552)" = "1.2 GB"
 test "$(human_decimal_bytes 3221225472)" = "3.2 GB"
 test "$(human_decimal_bytes 10000000000)" = "10 GB"
+test "$(human_decimal_bytes 17592186044416)" = "17.6 TB"
 test "$(human_decimal_bytes 999999999)" = "1 GB"
 test "$(human_decimal_bytes 999999)" = "<1 MB"
 discard_alert generation_backlog

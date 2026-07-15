@@ -73,7 +73,7 @@ services:
       BLOCKZILLA_RAW_VOLUME_MARKER: "${BLOCKZILLA_RAW_VOLUME_MARKER:-/data/.blockzilla-raw-volume}"
       BLOCKZILLA_RAW_CLUSTER_ID: "${BLOCKZILLA_RAW_CLUSTER_ID:-solana-mainnet}"
       BLOCKZILLA_RAW_ORIGIN_NODE_ID: "${BLOCKZILLA_RAW_ORIGIN_NODE_ID:-hetzner-dokploy-01}"
-      BLOCKZILLA_RAW_SOURCE_ID: "${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-primary}"
+      BLOCKZILLA_RAW_SOURCE_ID: "${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-backup}"
       # Empty bind keeps the downstream relay disabled. The supervisor must add the matching
       # record-grpc-raw CLI flags only when this is non-empty.
       BLOCKZILLA_RAW_RELAY_BIND: "${BLOCKZILLA_RAW_RELAY_BIND:-}"
@@ -91,10 +91,14 @@ services:
       BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES: "${BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES:-805306368}"
       BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES: "${BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES:-134217728}"
       BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS: "${BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS:-30}"
-      # COMPOSE_PROFILES=replication automatically monitors the real ACK WAL.
-      # With no active profile the fallback remains empty and produces no false alert.
-      BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE: "${BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE:-${COMPOSE_PROFILES:+/data/replication-control/cumulative-ack.wal}}"
-      BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS: "${BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS:-600}"
+      # Keep empty until the pull source publishes
+      # /control/pull-ack-status.json after a proven canary. A later reviewed
+      # revision may mount that control volume read-only into this recorder.
+      # Profile names and ACK-WAL mtimes are not evidence.
+      BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE: "${BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE:-}"
+      # Longer than one legal slow 630-second ACK wait, avoiding false alarms
+      # while still detecting a genuinely stale Blockzilla durable receipt.
+      BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS: "${BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS:-900}"
 
     volumes:
       - type: volume
@@ -146,14 +150,15 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Opt-in durable sender. It reads only fsynced generations from the same
-  # cache, sends them to Blockzilla over mTLS, fsyncs the signed cumulative ACK,
-  # and is the only process allowed to retire ACK-covered local generations.
-  # It deliberately has no dependency on raw-recorder health so it can drain a
-  # full/paused recorder. Enable only after the Blockzilla receiver and private
-  # route are ready with COMPOSE_PROFILES=replication.
-  raw-replicator:
-    profiles: ["replication"]
+  # Opt-in public pull source. Blockzilla initiates the connection, pulls only
+  # the source-selected oldest unacknowledged prefix over direct Tonic mTLS,
+  # fsyncs it through its local receiver, and returns that receiver's signed
+  # cumulative ACK. Merely reading this endpoint never advances retention.
+  # There is deliberately no dependency on raw-recorder health so Blockzilla
+  # can drain a full or paused recorder. Keep ACK-driven GC disabled in the
+  # source config until the complete direct-path proof has passed.
+  pull-source:
+    profiles: ["pull-source"]
     platform: linux/amd64
     build:
       context: .
@@ -161,27 +166,40 @@ services:
       args:
         RUST_VERSION: "1.96.0"
     image: ${BLOCKZILLA_RAW_IMAGE:-blockzilla-live-recorder:local}
-    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-raw-replicator"]
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-raw-pull-source"]
     restart: unless-stopped
-    stop_grace_period: 45s
+    stop_grace_period: 660s
 
     environment:
-      BLOCKZILLA_REPLICATION_CONFIG_FILE: /run/secrets/ingest_replica_config
-      BLOCKZILLA_REPLICATION_CACHE_ROOT: "${BLOCKZILLA_RAW_CACHE_ROOT:-/data/grpc-cache}"
-      BLOCKZILLA_REPLICATION_PRIVATE_KEY_SOURCE: /run/secrets/hetzner_replica_private_key
-      BLOCKZILLA_REPLICATION_POLL_INTERVAL_MS: "${BLOCKZILLA_REPLICATION_POLL_INTERVAL_MS:-1000}"
+      BLOCKZILLA_PULL_SOURCE_CONFIG_FILE: /run/secrets/grpc_pull_source_config
+      BLOCKZILLA_PULL_SOURCE_CERTIFICATE_FILE: /run/secrets/hetzner_pull_source_certificate
+      BLOCKZILLA_PULL_SOURCE_PRIVATE_KEY_SOURCE: /run/secrets/hetzner_pull_source_private_key
+      BLOCKZILLA_PULL_SOURCE_CLIENT_CA_FILE: /run/secrets/pull_client_ca
+      BLOCKZILLA_PULL_SOURCE_ALLOWLIST_FILE: /run/secrets/pull_allowed_nodes
+      BLOCKZILLA_PULL_SOURCE_RECEIPT_PUBLIC_KEY_FILE: /run/secrets/blockzilla_receipt_public_key
 
     volumes:
       - type: volume
         source: raw_data
-        target: /data
+        target: /source-data
+        read_only: true
         volume:
           nocopy: true
+      - type: volume
+        source: pull_control
+        target: /control
+        volume:
+          nocopy: true
+    ports:
+      # Direct TCP publication: Tonic retains the client certificate and does
+      # all mTLS authentication itself; no HTTP proxy terminates this session.
+      - "${BLOCKZILLA_PULL_SOURCE_HOST_PORT:-10443}:9443"
     secrets:
-      - ingest_replica_config
-      - blockzilla_primary_ca
-      - hetzner_replica_certificate
-      - hetzner_replica_private_key
+      - grpc_pull_source_config
+      - hetzner_pull_source_certificate
+      - hetzner_pull_source_private_key
+      - pull_client_ca
+      - pull_allowed_nodes
       - blockzilla_receipt_public_key
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=10001,gid=10001
@@ -193,16 +211,18 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 64
-    mem_limit: ${BLOCKZILLA_REPLICATION_MEMORY_LIMIT:-768m}
-    mem_reservation: ${BLOCKZILLA_REPLICATION_MEMORY_RESERVATION:-128m}
-    memswap_limit: ${BLOCKZILLA_REPLICATION_MEMORY_LIMIT:-768m}
+    # Fixed ceiling: operators cannot accidentally override the source above
+    # the agreed 768 MiB host budget through an environment value.
+    mem_limit: 768m
+    mem_reservation: 128m
+    memswap_limit: 768m
     deploy:
       resources:
         limits:
-          memory: ${BLOCKZILLA_REPLICATION_MEMORY_LIMIT:-768m}
+          memory: 768m
           pids: 64
         reservations:
-          memory: ${BLOCKZILLA_REPLICATION_MEMORY_RESERVATION:-128m}
+          memory: 128m
 
     logging:
       driver: json-file
@@ -213,6 +233,11 @@ services:
 volumes:
   raw_data:
     name: ${BLOCKZILLA_RAW_VOLUME_NAME:-blockzilla-live-raw-data-external}
+    external: true
+  pull_control:
+    # The standalone canary creates this stable control volume. The integrated
+    # profile may only reuse it; it must never silently create fresh ACK state.
+    name: ${BLOCKZILLA_PULL_CONTROL_VOLUME_NAME:-blockzilla-live-pull-control}
     external: true
 
 secrets:
@@ -229,13 +254,15 @@ secrets:
     file: ${BLOCKZILLA_R2_CREDENTIALS_HOST_FILE:-../files/cloudflare-r2.env}
   backblaze_credentials:
     file: ${BLOCKZILLA_B2_CREDENTIALS_HOST_FILE:-../files/backblaze-blockzilla.env}
-  ingest_replica_config:
-    file: ${BLOCKZILLA_INGEST_REPLICA_CONFIG_HOST_FILE:-../files/ingest-replica.json}
-  blockzilla_primary_ca:
-    file: ${BLOCKZILLA_PRIMARY_CA_HOST_FILE:-../files/blockzilla-primary-ca.crt}
-  hetzner_replica_certificate:
-    file: ${BLOCKZILLA_REPLICA_CERTIFICATE_HOST_FILE:-../files/hetzner-replica.crt}
-  hetzner_replica_private_key:
-    file: ${BLOCKZILLA_REPLICA_PRIVATE_KEY_HOST_FILE:-../files/hetzner-replica.key}
+  grpc_pull_source_config:
+    file: ${BLOCKZILLA_PULL_SOURCE_CONFIG_HOST_FILE:-../files/grpc-pull-source.json}
+  hetzner_pull_source_certificate:
+    file: ${BLOCKZILLA_PULL_SOURCE_CERTIFICATE_HOST_FILE:-../files/hetzner-pull-source.crt}
+  hetzner_pull_source_private_key:
+    file: ${BLOCKZILLA_PULL_SOURCE_PRIVATE_KEY_HOST_FILE:-../files/hetzner-pull-source.key}
+  pull_client_ca:
+    file: ${BLOCKZILLA_PULL_CLIENT_CA_HOST_FILE:-../files/pull-client-ca.crt}
+  pull_allowed_nodes:
+    file: ${BLOCKZILLA_PULL_SOURCE_ALLOWLIST_HOST_FILE:-../files/pull-allowed-nodes.json}
   blockzilla_receipt_public_key:
     file: ${BLOCKZILLA_RECEIPT_PUBLIC_KEY_HOST_FILE:-../files/blockzilla-receipt.pub}

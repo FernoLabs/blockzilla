@@ -26,7 +26,7 @@ use tonic::transport::{
 use zeroize::Zeroizing;
 
 use super::{
-    CumulativePrimaryAck, GetAckState, REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES,
+    ClientTlsConfig, CumulativePrimaryAck, GetAckState, REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES,
     RawReplicationRecord, ReplicaAuthConfig, ReplicaUpstreamConfig, ReplicationStreamId,
     ValidatedPushRecord, wire,
 };
@@ -213,43 +213,13 @@ impl RawReplicationClient {
     pub async fn connect(config: &ReplicaUpstreamConfig) -> Result<Self, ReplicationClientError> {
         validate_mtls_config(config)?;
         let limits = ReplicationClientLimits::from_config(config)?;
-        let endpoint_uri = normalize_secure_endpoint(&config.endpoint)?;
-        let server_name = config
-            .tls
-            .server_name
-            .as_deref()
-            .ok_or_else(invalid_configuration)?;
-        if !valid_server_name(server_name) {
-            return Err(invalid_configuration());
-        }
-
-        let (ca, identity) = load_client_tls_material(config)?;
-        let tls = TonicClientTlsConfig::new()
-            .ca_certificate(ca)
-            .identity(identity)
-            .domain_name(server_name.to_owned());
-        let endpoint = Endpoint::from_shared(endpoint_uri)
-            .map_err(|_| invalid_configuration())?
-            .connect_timeout(limits.connect_timeout)
-            .timeout(limits.request_timeout)
-            .tls_config(tls)
-            .map_err(|_| {
-                ReplicationClientError::new(ReplicationClientErrorKind::TlsConfiguration)
-            })?;
-
-        let channel = match timeout(limits.connect_timeout, endpoint.connect()).await {
-            Ok(Ok(channel)) => channel,
-            Ok(Err(_)) => {
-                return Err(ReplicationClientError::new(
-                    ReplicationClientErrorKind::Connect,
-                ));
-            }
-            Err(_) => {
-                return Err(ReplicationClientError::new(
-                    ReplicationClientErrorKind::ConnectTimeout,
-                ));
-            }
-        };
+        let channel = connect_strict_mtls_channel(
+            &config.endpoint,
+            &config.tls,
+            limits.connect_timeout,
+            limits.request_timeout,
+        )
+        .await?;
         Ok(Self { channel, limits })
     }
 
@@ -314,6 +284,52 @@ impl RawReplicationClient {
     }
 }
 
+/// Establish the same fail-closed mTLS channel used by both replication directions.
+///
+/// This stays crate-private so callers cannot accidentally bypass either protocol's bounded RPC
+/// wrapper and operate directly on a credential-bearing channel.
+pub(crate) async fn connect_strict_mtls_channel(
+    endpoint: &str,
+    tls_config: &ClientTlsConfig,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<Channel, ReplicationClientError> {
+    if connect_timeout.is_zero() || request_timeout.is_zero() {
+        return Err(invalid_configuration());
+    }
+    validate_client_tls_config(tls_config)?;
+    let endpoint_uri = normalize_secure_endpoint(endpoint)?;
+    let server_name = tls_config
+        .server_name
+        .as_deref()
+        .ok_or_else(invalid_configuration)?;
+    if !valid_server_name(server_name) {
+        return Err(invalid_configuration());
+    }
+
+    let (ca, identity) = load_client_tls_material(tls_config)?;
+    let tls = TonicClientTlsConfig::new()
+        .ca_certificate(ca)
+        .identity(identity)
+        .domain_name(server_name.to_owned());
+    let endpoint = Endpoint::from_shared(endpoint_uri)
+        .map_err(|_| invalid_configuration())?
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .tls_config(tls)
+        .map_err(|_| ReplicationClientError::new(ReplicationClientErrorKind::TlsConfiguration))?;
+
+    match timeout(connect_timeout, endpoint.connect()).await {
+        Ok(Ok(channel)) => Ok(channel),
+        Ok(Err(_)) => Err(ReplicationClientError::new(
+            ReplicationClientErrorKind::Connect,
+        )),
+        Err(_) => Err(ReplicationClientError::new(
+            ReplicationClientErrorKind::ConnectTimeout,
+        )),
+    }
+}
+
 impl fmt::Debug for RawReplicationClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -325,11 +341,17 @@ impl fmt::Debug for RawReplicationClient {
 }
 
 fn validate_mtls_config(config: &ReplicaUpstreamConfig) -> Result<(), ReplicationClientError> {
-    if !matches!(config.auth, ReplicaAuthConfig::MutualTls)
-        || config.tls.ca_file.is_none()
-        || config.tls.client_certificate_file.is_none()
-        || config.tls.client_private_key_file.is_none()
-        || config.tls.server_name.is_none()
+    if !matches!(config.auth, ReplicaAuthConfig::MutualTls) {
+        return Err(invalid_configuration());
+    }
+    validate_client_tls_config(&config.tls)
+}
+
+fn validate_client_tls_config(config: &ClientTlsConfig) -> Result<(), ReplicationClientError> {
+    if config.ca_file.is_none()
+        || config.client_certificate_file.is_none()
+        || config.client_private_key_file.is_none()
+        || config.server_name.is_none()
     {
         return Err(invalid_configuration());
     }
@@ -409,20 +431,17 @@ fn build_push_requests(
 }
 
 fn load_client_tls_material(
-    config: &ReplicaUpstreamConfig,
+    config: &ClientTlsConfig,
 ) -> Result<(Certificate, Identity), ReplicationClientError> {
     let ca_path = config
-        .tls
         .ca_file
         .as_deref()
         .ok_or_else(invalid_configuration)?;
     let certificate_path = config
-        .tls
         .client_certificate_file
         .as_deref()
         .ok_or_else(invalid_configuration)?;
     let private_key_path = config
-        .tls
         .client_private_key_file
         .as_deref()
         .ok_or_else(invalid_configuration)?;

@@ -28,6 +28,45 @@ const DIGEST_BYTES: usize = 32;
 const ED25519_SIGNATURE_BYTES: usize = 64;
 const MAX_ID_BYTES: usize = 64;
 
+/// Validated offset-free request for the server-selected next durable replication batch.
+///
+/// This is intentionally a zero-sized capability. The protobuf request contains only the protocol
+/// version, so callers cannot smuggle a sequence, slot, stream, or batch-size choice into the pull
+/// state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ValidatedPullBatchRequest;
+
+/// Validated correlation response after the server has accepted a submitted cumulative ACK.
+///
+/// This value is not cursor or deletion authority. Only the signed ACK after crossing the server's
+/// local cumulative-ACK WAL fsync boundary can authorize retention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedCommitAckResponse {
+    stream: ReplicationStreamId,
+    through_sequence: u64,
+}
+
+impl ValidatedCommitAckResponse {
+    pub fn new(
+        stream: ReplicationStreamId,
+        through_sequence: u64,
+    ) -> Result<Self, ReplicationWireError> {
+        validate_stream(&stream)?;
+        Ok(Self {
+            stream,
+            through_sequence,
+        })
+    }
+
+    pub fn stream(&self) -> &ReplicationStreamId {
+        &self.stream
+    }
+
+    pub fn through_sequence(&self) -> u64 {
+        self.through_sequence
+    }
+}
+
 /// A non-empty batch belonging to exactly one replication stream.
 ///
 /// Construct this only after the streaming handler has enforced its cumulative record and byte
@@ -212,6 +251,47 @@ impl fmt::Display for ReplicationWireError {
 }
 
 impl Error for ReplicationWireError {}
+
+impl TryFrom<wire::PullBatchRequest> for ValidatedPullBatchRequest {
+    type Error = ReplicationWireError;
+
+    fn try_from(value: wire::PullBatchRequest) -> Result<Self, Self::Error> {
+        protocol_version(value.protocol_version)?;
+        Ok(Self)
+    }
+}
+
+impl From<ValidatedPullBatchRequest> for wire::PullBatchRequest {
+    fn from(_value: ValidatedPullBatchRequest) -> Self {
+        Self {
+            protocol_version: u32::from(REPLICATION_PROTOCOL_VERSION),
+        }
+    }
+}
+
+impl TryFrom<wire::CommitAckResponse> for ValidatedCommitAckResponse {
+    type Error = ReplicationWireError;
+
+    fn try_from(value: wire::CommitAckResponse) -> Result<Self, Self::Error> {
+        protocol_version(value.protocol_version)?;
+        Self::new(
+            required(value.stream, "commit_ack.stream")?.try_into()?,
+            value.through_sequence,
+        )
+    }
+}
+
+impl TryFrom<&ValidatedCommitAckResponse> for wire::CommitAckResponse {
+    type Error = ReplicationWireError;
+
+    fn try_from(value: &ValidatedCommitAckResponse) -> Result<Self, Self::Error> {
+        Ok(Self {
+            protocol_version: u32::from(REPLICATION_PROTOCOL_VERSION),
+            stream: Some(wire::StreamId::try_from(value.stream())?),
+            through_sequence: value.through_sequence(),
+        })
+    }
+}
 
 impl TryFrom<wire::StreamId> for ReplicationStreamId {
     type Error = ReplicationWireError;
@@ -989,6 +1069,119 @@ mod tests {
             ReplicationStreamId::try_from(request).expect("decode request"),
             expected
         );
+    }
+
+    #[test]
+    fn pull_control_messages_are_protocol_only_and_strictly_versioned() {
+        let request = wire::PullBatchRequest::from(ValidatedPullBatchRequest);
+        assert_eq!(
+            request,
+            wire::PullBatchRequest {
+                protocol_version: u32::from(REPLICATION_PROTOCOL_VERSION),
+            }
+        );
+        assert_eq!(
+            ValidatedPullBatchRequest::try_from(request).expect("decode pull request"),
+            ValidatedPullBatchRequest
+        );
+
+        let expected_response =
+            ValidatedCommitAckResponse::new(stream(), 42).expect("valid commit response");
+        let response =
+            wire::CommitAckResponse::try_from(&expected_response).expect("encode commit response");
+        assert_eq!(
+            response,
+            wire::CommitAckResponse {
+                protocol_version: u32::from(REPLICATION_PROTOCOL_VERSION),
+                stream: Some(wire::StreamId::try_from(&stream()).expect("encode stream")),
+                through_sequence: 42,
+            }
+        );
+        assert_eq!(
+            ValidatedCommitAckResponse::try_from(response).expect("decode commit response"),
+            expected_response
+        );
+
+        for unsupported in [0, u32::from(REPLICATION_PROTOCOL_VERSION) + 1] {
+            assert!(matches!(
+                ValidatedPullBatchRequest::try_from(wire::PullBatchRequest {
+                    protocol_version: unsupported,
+                }),
+                Err(ReplicationWireError::UnsupportedProtocol { value }) if value == unsupported
+            ));
+            assert!(matches!(
+                ValidatedCommitAckResponse::try_from(wire::CommitAckResponse {
+                    protocol_version: unsupported,
+                    stream: Some(wire::StreamId::try_from(&stream()).expect("encode stream")),
+                    through_sequence: 42,
+                }),
+                Err(ReplicationWireError::UnsupportedProtocol { value }) if value == unsupported
+            ));
+        }
+
+        let out_of_range = u32::from(u16::MAX) + 1;
+        assert!(matches!(
+            ValidatedPullBatchRequest::try_from(wire::PullBatchRequest {
+                protocol_version: out_of_range,
+            }),
+            Err(ReplicationWireError::IntegerOutOfRange {
+                field: "protocol_version",
+                value,
+            }) if value == u64::from(out_of_range)
+        ));
+
+        assert!(matches!(
+            ValidatedCommitAckResponse::try_from(wire::CommitAckResponse {
+                protocol_version: u32::from(REPLICATION_PROTOCOL_VERSION),
+                stream: None,
+                through_sequence: 42,
+            }),
+            Err(ReplicationWireError::MissingField {
+                field: "commit_ack.stream"
+            })
+        ));
+
+        let mut invalid_stream = wire::StreamId::try_from(&stream()).expect("encode stream");
+        invalid_stream.journal_id.pop();
+        assert!(matches!(
+            ValidatedCommitAckResponse::try_from(wire::CommitAckResponse {
+                protocol_version: u32::from(REPLICATION_PROTOCOL_VERSION),
+                stream: Some(invalid_stream),
+                through_sequence: 42,
+            }),
+            Err(ReplicationWireError::InvalidLength {
+                field: "stream.journal_id",
+                expected: JOURNAL_ID_BYTES,
+                actual: 15,
+            })
+        ));
+    }
+
+    #[test]
+    fn pull_stream_records_reuse_the_strict_push_record_envelope() {
+        let expected_stream = stream();
+        let expected_record = raw_record(17);
+        let wire_record = wire::PushBatchRequest::try_from(
+            ValidatedPushRecord::new(expected_stream.clone(), expected_record.clone())
+                .expect("validate pulled record"),
+        )
+        .expect("encode pulled record");
+        let decoded = ValidatedPushRecord::try_from(wire_record).expect("decode pulled record");
+        assert_eq!(decoded.stream(), &expected_stream);
+        assert_eq!(decoded.record(), &expected_record);
+
+        let mut missing_stream = wire::PushBatchRequest::try_from(
+            ValidatedPushRecord::new(expected_stream, expected_record)
+                .expect("validate pulled record"),
+        )
+        .expect("encode pulled record");
+        missing_stream.stream = None;
+        assert!(matches!(
+            ValidatedPushRecord::try_from(missing_stream),
+            Err(ReplicationWireError::MissingField {
+                field: "push_batch.stream"
+            })
+        ));
     }
 
     #[test]

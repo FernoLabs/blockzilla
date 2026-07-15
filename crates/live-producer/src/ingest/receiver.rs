@@ -50,6 +50,22 @@ const NEW_JOURNAL_PROJECTION_BYTES: u64 = 64 * 1024;
 const MAX_BLOCK_TRANSACTIONS: u64 = 100_000;
 const MAX_BLOCK_ENTRIES: u64 = 100_000;
 
+/// Read-only view of the receiver's locally synced raw-byte prefix.
+///
+/// This is intentionally not a signed ACK, an indexer watermark, a compaction receipt, or cleanup
+/// authority. It is suitable for bounding a local read-only materializer because every named
+/// sequence has crossed both the raw spool fsync and receiver-progress fsync boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverDurableProgress {
+    pub stream: ReplicationStreamId,
+    pub through_sequence: u64,
+    pub through_content_digest: ContentDigest,
+    pub rolling_chain_digest: ContentDigest,
+    pub durable_lsn: u64,
+    pub spool_location: SpoolLocation,
+    pub unobserved_tail_bytes: u64,
+}
+
 /// Independent memory and decompression limits enforced before a batch mutates durable state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawReceiverLimits {
@@ -1583,6 +1599,37 @@ impl ReceiverProgressWal {
     }
 }
 
+/// Recover a stable, read-only snapshot of a live receiver progress WAL.
+///
+/// The descriptor is opened without a writer lock and without write permissions. Concurrent
+/// append is safe because only checksum-and-commit-complete frames are considered. Concurrent
+/// compaction is safe because the open descriptor continues to reference either the complete old
+/// inode or the complete atomically installed replacement. Bytes appended after this read reaches
+/// EOF are reported as unobserved tail and never enter the returned cursor.
+pub fn read_receiver_durable_progress(
+    path: impl AsRef<Path>,
+    stream: &ReplicationStreamId,
+) -> Result<Option<ReceiverDurableProgress>> {
+    let path = path.as_ref();
+    let mut file = open_progress_descriptor_read_only(path)?;
+    let recovered = recover_progress_wal(&mut file, path, stream, 1)
+        .context("recover read-only receiver progress snapshot")?;
+    let observed_len = file
+        .metadata()
+        .with_context(|| format!("inspect receiver progress WAL {}", path.display()))?
+        .len();
+    let unobserved_tail_bytes = observed_len.saturating_sub(recovered.valid_len);
+    Ok(recovered.latest.map(|latest| ReceiverDurableProgress {
+        stream: latest.stream,
+        through_sequence: latest.offer.record.sequence,
+        through_content_digest: latest.offer.content_digest,
+        rolling_chain_digest: latest.rolling_chain_digest,
+        durable_lsn: latest.durable_lsn,
+        spool_location: latest.spool_location,
+        unobserved_tail_bytes,
+    }))
+}
+
 fn validate_progress_transition(
     previous: Option<&StoredProgressFrame>,
     frame: &StoredProgressFrame,
@@ -1904,6 +1951,22 @@ fn open_progress_descriptor(path: &Path, create_new: bool) -> io::Result<File> {
     Ok(file)
 }
 
+fn open_progress_descriptor_read_only(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .with_context(|| format!("open receiver progress WAL read-only {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "receiver progress WAL is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
 #[cfg(unix)]
 fn try_lock_progress_file(file: &File, path: &Path) -> Result<()> {
     // SAFETY: this descriptor remains owned by ReceiverProgressWal for the lock lifetime.
@@ -2054,6 +2117,39 @@ fn open_receiver_capacity_lock(spool_root: &Path) -> Result<File> {
         sync_directory(spool_root)?;
     }
     Ok(file)
+}
+
+/// Serialize a read-only local consumer's filesystem admission with receiver batches.
+///
+/// The lock file must already have been durably created by the receiver. Opening it read-only
+/// keeps callers such as the WAL bridge compatible with a read-only receiver bind mount; `flock`
+/// coordinates the descriptor without modifying the canonical receiver tree.
+pub(crate) fn with_receiver_capacity_lock<T>(
+    spool_root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let path = spool_root.join(RECEIVER_CAPACITY_LOCK_FILE);
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect receiver capacity lock {}", path.display()))?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "receiver capacity lock must be a regular non-symlink file: {}",
+        path.display()
+    );
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(&path)
+        .with_context(|| format!("open receiver capacity lock read-only {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "opened receiver capacity lock is not a regular file: {}",
+        path.display()
+    );
+    let _guard = ReceiverCapacityGuard::acquire(file)?;
+    operation()
 }
 
 fn admit_receiver_open(config: &RawReceiverConfig) -> Result<()> {

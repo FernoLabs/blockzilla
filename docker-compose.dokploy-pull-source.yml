@@ -1,0 +1,146 @@
+name: ${COMPOSE_PROJECT_NAME:-blockzilla-grpc-pull-source}
+
+# Deploy this as a separate Dokploy Compose application. It attaches the
+# recorder's existing external WAL volume read-only, while durable ACK state
+# lives in a separate named control volume. It does not recreate, restart, or
+# depend on the paid Yellowstone recorder service.
+services:
+  # One-time ownership initialization for the independent ACK-control volume.
+  # This service has no network and never sees the recorder WAL or any secret.
+  pull-control-init:
+    platform: linux/amd64
+    image: ${BLOCKZILLA_PULL_SOURCE_IMAGE_ID:?set the preloaded sha256 image ID}
+    pull_policy: never
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        chown 0:0 /control
+        chmod 0700 /control
+        chown 10001:10001 /control
+    restart: "no"
+    network_mode: none
+    user: "0:0"
+    volumes:
+      - type: volume
+        source: pull_control
+        target: /control
+        volume:
+          nocopy: true
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 16
+    mem_limit: 32m
+    memswap_limit: 32m
+
+  pull-source:
+    platform: linux/amd64
+    # Hetzner has too little Docker-root headroom for this Rust build. Load an
+    # immutable image built off-host, then require it to exist locally. Keep the
+    # tag separate from the paid recorder image.
+    image: ${BLOCKZILLA_PULL_SOURCE_IMAGE_ID:?set the preloaded sha256 image ID}
+    pull_policy: never
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/blockzilla-raw-pull-source"]
+    restart: unless-stopped
+    stop_grace_period: 660s
+
+    depends_on:
+      pull-control-init:
+        condition: service_completed_successfully
+
+    environment:
+      BLOCKZILLA_PULL_SOURCE_CONFIG_FILE: /run/secrets/grpc_pull_source_config
+      BLOCKZILLA_PULL_SOURCE_CERTIFICATE_FILE: /run/secrets/hetzner_pull_source_certificate
+      BLOCKZILLA_PULL_SOURCE_PRIVATE_KEY_SOURCE: /run/secrets/hetzner_pull_source_private_key
+      BLOCKZILLA_PULL_SOURCE_CLIENT_CA_FILE: /run/secrets/pull_client_ca
+      BLOCKZILLA_PULL_SOURCE_ALLOWLIST_FILE: /run/secrets/pull_allowed_nodes
+      BLOCKZILLA_PULL_SOURCE_RECEIPT_PUBLIC_KEY_FILE: /run/secrets/blockzilla_receipt_public_key
+
+    volumes:
+      - type: volume
+        source: raw_data
+        target: /source-data
+        read_only: true
+        volume:
+          nocopy: true
+      - type: volume
+        source: pull_control
+        target: /control
+        volume:
+          nocopy: true
+    ports:
+      # Direct Tonic mTLS. Do not add a Dokploy domain, Traefik router, or any
+      # TLS-terminating proxy in front of this port.
+      - "${BLOCKZILLA_PULL_SOURCE_HOST_PORT:-10443}:9443"
+    secrets:
+      - grpc_pull_source_config
+      - hetzner_pull_source_certificate
+      - hetzner_pull_source_private_key
+      - pull_client_ca
+      - pull_allowed_nodes
+      - blockzilla_receipt_public_key
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=10001,gid=10001
+
+    healthcheck:
+      # 9443 is 0x24E3. Check the container-local listening socket without
+      # generating a failed TLS handshake or depending on external routing.
+      test: ["CMD-SHELL", "grep -q '00000000:24E3 .* 0A ' /proc/net/tcp"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 768m
+    mem_reservation: 128m
+    memswap_limit: 768m
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+          pids: 64
+        reservations:
+          memory: 128m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  raw_data:
+    # This is the already-provisioned recorder volume. Compose must fail rather
+    # than create an empty replacement when the external volume is absent.
+    name: ${BLOCKZILLA_RAW_VOLUME_NAME:-blockzilla-live-raw-data-external}
+    external: true
+  pull_control:
+    # Pre-created outside this application's lifecycle. `down -v` or deleting
+    # the Dokploy app must never remove the ACK WAL.
+    name: ${BLOCKZILLA_PULL_CONTROL_VOLUME_NAME:-blockzilla-live-pull-control}
+    external: true
+
+secrets:
+  grpc_pull_source_config:
+    file: ${BLOCKZILLA_PULL_SOURCE_CONFIG_HOST_FILE:-../files/grpc-pull-source.json}
+  hetzner_pull_source_certificate:
+    file: ${BLOCKZILLA_PULL_SOURCE_CERTIFICATE_HOST_FILE:-../files/hetzner-pull-source.crt}
+  hetzner_pull_source_private_key:
+    file: ${BLOCKZILLA_PULL_SOURCE_PRIVATE_KEY_HOST_FILE:-../files/hetzner-pull-source.key}
+  pull_client_ca:
+    file: ${BLOCKZILLA_PULL_CLIENT_CA_HOST_FILE:-../files/pull-client-ca.crt}
+  pull_allowed_nodes:
+    file: ${BLOCKZILLA_PULL_SOURCE_ALLOWLIST_HOST_FILE:-../files/pull-allowed-nodes.json}
+  blockzilla_receipt_public_key:
+    file: ${BLOCKZILLA_RECEIPT_PUBLIC_KEY_HOST_FILE:-../files/blockzilla-receipt.pub}

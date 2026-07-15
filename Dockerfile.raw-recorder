@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG RUST_VERSION=1.96.0
+ARG TARGETPLATFORM=linux/amd64
 
 FROM --platform=$TARGETPLATFORM rust:${RUST_VERSION}-bookworm AS builder
 ARG TARGETPLATFORM
@@ -12,13 +13,14 @@ WORKDIR /src
 # The repository's developer config uses target-cpu=native. Keep the image portable
 # across amd64 hosts while enabling the exact AES/SSE2 features required by gxhash.
 ENV CARGO_INCREMENTAL=0 \
+    CARGO_BUILD_JOBS=2 \
     RUSTFLAGS="-C target-cpu=x86-64 -C target-feature=+aes,+sse2"
 
 COPY . .
 
-RUN --mount=type=cache,id=blockzilla-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=blockzilla-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --locked --release -p blockzilla-live-producer --bin blockzilla-live-producer
+# Keep this compatible with NAS Docker installations that have BuildKit in the
+# engine but do not ship the separate buildx CLI plugin.
+RUN cargo build --locked --release -p blockzilla-live-producer --bin blockzilla-live-producer
 
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime
 ARG TARGETPLATFORM
@@ -35,11 +37,28 @@ RUN test "$TARGETPLATFORM" = "linux/amd64" \
 
 COPY --from=builder --chown=0:0 /src/target/release/blockzilla-live-producer \
     /usr/local/bin/blockzilla-live-producer
-COPY --chown=0:0 --chmod=0755 scripts/linux-raw-grpc-recorder.sh \
+COPY --chown=0:0 scripts/linux-raw-grpc-recorder.sh \
     /usr/local/bin/blockzilla-raw-recorder
-COPY --chown=0:0 --chmod=0755 scripts/run-grpc-raw-replicator.sh \
+COPY --chown=0:0 scripts/run-grpc-raw-replicator.sh \
     /usr/local/bin/blockzilla-raw-replicator
-COPY --chown=0:0 --chmod=0755 scripts/s3_multipart_upload.py \
+COPY --chown=0:0 scripts/run-grpc-raw-receiver.sh \
+    /usr/local/bin/blockzilla-raw-receiver
+COPY --chown=0:0 scripts/run-grpc-receiver-bridge.sh \
+    /usr/local/bin/blockzilla-receiver-bridge
+COPY --chown=0:0 scripts/run-grpc-raw-pull-source.sh \
+    /usr/local/bin/blockzilla-raw-pull-source
+COPY --chown=0:0 scripts/run-grpc-raw-pull-client.sh \
+    /usr/local/bin/blockzilla-raw-pull-client
+COPY --chown=0:0 scripts/s3_multipart_upload.py \
+    /usr/local/bin/blockzilla-s3-upload
+
+RUN chmod 0755 \
+    /usr/local/bin/blockzilla-raw-recorder \
+    /usr/local/bin/blockzilla-raw-replicator \
+    /usr/local/bin/blockzilla-raw-receiver \
+    /usr/local/bin/blockzilla-receiver-bridge \
+    /usr/local/bin/blockzilla-raw-pull-source \
+    /usr/local/bin/blockzilla-raw-pull-client \
     /usr/local/bin/blockzilla-s3-upload
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

@@ -277,12 +277,12 @@ struct AllowedIdentity {
 }
 
 #[derive(Clone)]
-struct AuthenticatedClient {
+pub(crate) struct AuthenticatedClient {
     identities: Arc<HashSet<AllowedIdentity>>,
 }
 
 impl AuthenticatedClient {
-    fn permits(&self, stream: &ReplicationStreamId) -> bool {
+    pub(crate) fn permits(&self, stream: &ReplicationStreamId) -> bool {
         self.identities.contains(&AllowedIdentity {
             cluster_id: stream.cluster_id.clone(),
             origin_node_id: stream.origin_node_id.clone(),
@@ -311,6 +311,28 @@ impl AuthError {
                 Status::permission_denied("client certificate is not authorized for this stream")
             }
         }
+    }
+}
+
+impl ClientCertificateAllowlist {
+    /// Authenticate the verified leaf certificate attached by Tonic's mTLS transport.
+    ///
+    /// Keeping this extraction next to the allowlist prevents another replication service from
+    /// accidentally trusting an unverified header or application-supplied certificate. The
+    /// returned capability still has to authorize the server-selected stream with
+    /// [`AuthenticatedClient::permits`].
+    pub(crate) fn authenticate_request<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<AuthenticatedClient, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or(AuthError::MissingCertificate.into_status())?;
+        let leaf = certificates
+            .first()
+            .ok_or(AuthError::MissingCertificate.into_status())?;
+        self.authenticate_leaf(leaf.as_ref())
+            .map_err(AuthError::into_status)
     }
 }
 
@@ -589,7 +611,7 @@ impl fmt::Debug for RawReplicationServerRuntime {
     }
 }
 
-fn load_mtls_server_material(
+pub(crate) fn load_mtls_server_material(
     certificate_path: &Path,
     private_key_path: &Path,
     client_ca_path: &Path,
@@ -795,16 +817,7 @@ impl RawReplicationService {
     }
 
     fn authenticate<T>(&self, request: &Request<T>) -> Result<AuthenticatedClient, Status> {
-        let certificates = request
-            .peer_certs()
-            .ok_or(AuthError::MissingCertificate.into_status())?;
-        let leaf = certificates
-            .first()
-            .ok_or(AuthError::MissingCertificate.into_status())?;
-        self.inner
-            .allowlist
-            .authenticate_leaf(leaf.as_ref())
-            .map_err(AuthError::into_status)
+        self.inner.allowlist.authenticate_request(request)
     }
 
     fn acquire_admission(&self) -> Result<OwnedSemaphorePermit, Status> {

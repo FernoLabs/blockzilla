@@ -7,7 +7,7 @@
     "mode": "replica",
     "node_id": "hetzner-dokploy-01",
     "upstream": {
-      "endpoint": "https://BLOCKZILLA_PRIVATE_ADDRESS:9443",
+      "endpoint": "https://10.253.45.2:9443",
       "expected_primary_id": "blockzilla-primary",
       "cumulative_ack_wal_file": "/data/replication-control/cumulative-ack.wal",
       "tls": {
@@ -41,7 +41,7 @@
         "max_uncompressed_bytes": 134217728,
         "max_compressed_event_bytes": 134217728,
         "max_uncompressed_event_bytes": 134217728,
-        "ack_timeout_ms": 30000
+        "ack_timeout_ms": 630000
       }
     }
   },

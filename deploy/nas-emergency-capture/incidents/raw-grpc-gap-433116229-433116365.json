@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "incident_id": "raw-grpc-gap-433116229-433116365",
+  "detected_at_utc": "2026-07-15T18:35:11Z",
+  "status": "rpc_backfilled_exact_yellowstone_unavailable",
+  "cause": "The first 1 GiB hot-generation audit blocked stream consumption long enough for Triton to cancel the subscription. Triton did not replay the requested durable overlap slot after restart.",
+  "raw_yellowstone_gap": {
+    "last_durable_slot_before_gap": 433116228,
+    "last_durable_blockhash_before_gap": "LnueetRM3ZWrZGiHsahXWZLZjs7A2X1xw9ugbrxpP3n",
+    "first_durable_slot_after_gap": 433116366,
+    "first_durable_blockhash_after_gap": "B8FEwW11SoB5NfDqpAWW28gEopmcrMQNsP74oC2XAzkV",
+    "missing_start_slot": 433116229,
+    "missing_end_slot": 433116365,
+    "missing_slot_count": 137
+  },
+  "triton_replay_evidence": [
+    {
+      "requested_slot": 433116229,
+      "reported_oldest_available_slot": 433116233,
+      "observed_at_utc": "2026-07-15T18:41:13Z"
+    },
+    {
+      "requested_slot": 433116233,
+      "reported_oldest_available_slot": 433116343,
+      "observed_at_utc": "2026-07-15T18:41:57Z"
+    },
+    {
+      "requested_slot": 433116365,
+      "reported_oldest_available_slot": 433116440,
+      "observed_at_utc": "2026-07-15T18:42:37Z"
+    }
+  ],
+  "rpc_backfill": {
+    "format": "Solana getBlock JSON with base64 full transactions and rewards",
+    "gap_start_slot": 433116229,
+    "gap_end_slot": 433116365,
+    "gap_files_written": 137,
+    "boundary_overlap_slots": [
+      433116228,
+      433116366
+    ],
+    "total_files_with_boundaries": 139,
+    "gap_transaction_count": 209683,
+    "first_gap_blockhash": "yPTnRWVqCxHrtyW733RuZgTe94jCvzJ1qNYPcB6fTcx",
+    "last_gap_blockhash": "74uCMSVjBqPUFab6nnnRADS3LFJNzWX4imyBPRwLHhEH",
+    "missing_files": [],
+    "field_errors": [],
+    "chain_mismatches": [],
+    "raw_rpc_slot_228_hash_match": true,
+    "raw_rpc_slot_366_hash_match": true,
+    "path": "rpc-gap-433116229-433116365/repair/rpc-get-block/epoch-1002",
+    "checksum_manifest": "rpc-gap-433116229-433116365/SHA256SUMS.getBlock"
+  },
+  "limitation": "The RPC backfill preserves block bodies, transactions, metadata, and rewards. Standard getBlock does not reproduce the exact Yellowstone SubscribeUpdate protobuf or its entry-level PoH payload, so those exact bytes remain unavailable for slots 433116229 through 433116365.",
+  "retention": "retain_forever_until_explicit_manual_review"
+}

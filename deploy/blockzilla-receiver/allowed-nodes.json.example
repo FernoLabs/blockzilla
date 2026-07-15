@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "clients": [
+    {
+      "certificate_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "identities": [
+        {
+          "cluster_id": "solana-mainnet",
+          "origin_node_id": "hetzner-dokploy-01",
+          "source_id": "grpc-raw-hetzner-backup"
+        }
+      ]
+    }
+  ]
+}

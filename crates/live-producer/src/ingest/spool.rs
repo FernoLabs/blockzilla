@@ -124,6 +124,37 @@ pub struct SpoolRecord {
     pub payload: Vec<u8>,
 }
 
+/// Result of a lock-free, read-only snapshot of a receiver spool's durable prefix.
+///
+/// The caller supplies the independently recovered receiver-progress sequence. This reader never
+/// promotes a merely visible active-segment tail into durability: it exposes records only through
+/// that already-synced progress boundary. It does not take the writer lock and never creates,
+/// truncates, renames, or removes a source file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpoolCommittedSnapshotReport {
+    pub records: u64,
+    pub first_sequence: Option<u64>,
+    pub last_sequence: Option<u64>,
+    pub durable_through_sequence: u64,
+    pub reached_durable_tail: bool,
+}
+
+/// Resolve the canonical journal directory for one spool identity without touching storage.
+pub fn spool_journal_dir_path(
+    spool_root: impl AsRef<Path>,
+    identity: &SpoolJournalIdentity,
+) -> Result<PathBuf> {
+    validate_path_component(&identity.cluster_id, "cluster id")?;
+    validate_path_component(&identity.origin_node_id, "origin node id")?;
+    validate_path_component(&identity.source_id, "source id")?;
+    Ok(spool_root
+        .as_ref()
+        .join(&identity.cluster_id)
+        .join(&identity.origin_node_id)
+        .join(&identity.source_id)
+        .join(hex_journal_id(identity.journal_id)))
+}
+
 /// Read-only validation result that keeps the journal's exclusive writer lock held.
 ///
 /// Holding the lock makes the reported durable tail stable for the lifetime of this value. The
@@ -877,8 +908,7 @@ pub fn read_spool_record(
 ) -> Result<SpoolRecord> {
     let journal_dir = journal_dir.as_ref();
     let path = segment_path(journal_dir, location.segment_id);
-    let (mut file, created) = open_regular_file(&path, false)?;
-    ensure!(!created, "spool replay unexpectedly created a segment");
+    let mut file = open_regular_file_read_only(&path)?;
     file.seek(SeekFrom::Start(location.frame_offset))
         .with_context(|| format!("seek spool frame in {}", path.display()))?;
 
@@ -1000,6 +1030,260 @@ pub fn read_spool_record(
         metadata,
         payload,
     })
+}
+
+/// Visit a bounded suffix of the receiver spool through an independently durable progress cursor.
+///
+/// `after` is the last source location already materialized by the caller. When present, the
+/// referenced frame is fully revalidated before the scan skips past it. `durable_through_sequence`
+/// must come from [`crate::ingest::read_receiver_durable_progress`], not from a slot, heartbeat,
+/// R2 upload, or indexer watermark. The callback sees exact compressed bytes one record at a time.
+///
+/// This function is deliberately compatible with an active writer. Segment names and lengths are
+/// snapshotted read-only; an incomplete visible writer tail is ignored unless the supplied durable
+/// progress cursor says that record must already exist, which is treated as corruption.
+pub fn read_spool_committed_snapshot_after<F>(
+    spool_root: impl AsRef<Path>,
+    identity: SpoolJournalIdentity,
+    max_record_bytes: u64,
+    after: Option<SpoolLocation>,
+    durable_through_sequence: u64,
+    max_records: usize,
+    mut visit: F,
+) -> Result<SpoolCommittedSnapshotReport>
+where
+    F: FnMut(SpoolRecord) -> Result<()>,
+{
+    ensure!(
+        max_record_bytes > 0,
+        "spool snapshot record-byte limit must be non-zero"
+    );
+    ensure!(
+        max_records > 0,
+        "spool snapshot record limit must be non-zero"
+    );
+    let journal_dir = spool_journal_dir_path(spool_root, &identity)?;
+    let segment_ids = segment_ids(&journal_dir)?;
+    ensure!(
+        !segment_ids.is_empty(),
+        "spool journal has no segments: {}",
+        journal_dir.display()
+    );
+
+    let mut previous = match after {
+        Some(location) => {
+            let record = read_spool_record(&journal_dir, location, max_record_bytes)
+                .context("validate receiver spool resume location")?;
+            ensure_spool_record_identity(&record, &identity)?;
+            ensure!(
+                record.metadata.observation.sequence <= durable_through_sequence,
+                "receiver spool resume location is beyond durable progress"
+            );
+            Some(record.metadata)
+        }
+        None => None,
+    };
+    if previous
+        .as_ref()
+        .is_some_and(|metadata| metadata.observation.sequence == durable_through_sequence)
+    {
+        return Ok(SpoolCommittedSnapshotReport {
+            records: 0,
+            first_sequence: None,
+            last_sequence: previous
+                .as_ref()
+                .map(|metadata| metadata.observation.sequence),
+            durable_through_sequence,
+            reached_durable_tail: true,
+        });
+    }
+
+    let mut report = SpoolCommittedSnapshotReport {
+        records: 0,
+        first_sequence: None,
+        last_sequence: previous
+            .as_ref()
+            .map(|metadata| metadata.observation.sequence),
+        durable_through_sequence,
+        reached_durable_tail: false,
+    };
+    let mut stopped_at_limit = false;
+    for (segment_index, segment_id) in segment_ids.iter().copied().enumerate() {
+        if after.is_some_and(|location| segment_id < location.segment_id) {
+            continue;
+        }
+        let path = segment_path(&journal_dir, segment_id);
+        let mut file = open_regular_file_read_only(&path)?;
+        let snapshot_len = file
+            .metadata()
+            .with_context(|| format!("inspect spool segment {}", path.display()))?
+            .len();
+        ensure!(
+            snapshot_len >= SEGMENT_HEADER_LEN,
+            "spool segment is shorter than its header: {}",
+            path.display()
+        );
+        let mut segment_magic = [0u8; 8];
+        file.read_exact(&mut segment_magic)
+            .with_context(|| format!("read spool segment header {}", path.display()))?;
+        ensure!(
+            &segment_magic == SEGMENT_MAGIC,
+            "invalid spool segment header in {}",
+            path.display()
+        );
+        let mut offset = match after.filter(|location| location.segment_id == segment_id) {
+            Some(location) => location
+                .frame_offset
+                .checked_add(location.frame_len)
+                .context("receiver spool resume location overflow")?,
+            None => SEGMENT_HEADER_LEN,
+        };
+        ensure!(
+            offset >= SEGMENT_HEADER_LEN && offset <= snapshot_len,
+            "receiver spool resume location is outside {}",
+            path.display()
+        );
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("seek spool snapshot {}", path.display()))?;
+
+        while offset < snapshot_len && report.records < max_records as u64 {
+            let remaining = snapshot_len - offset;
+            if remaining < FRAME_FIXED_LEN {
+                let is_final_segment = segment_index + 1 == segment_ids.len();
+                ensure!(
+                    is_final_segment,
+                    "sealed spool segment has an incomplete frame header: {}",
+                    path.display()
+                );
+                break;
+            }
+
+            let mut frame_magic = [0u8; 4];
+            let mut version_bytes = [0u8; 2];
+            let mut metadata_len_bytes = [0u8; 4];
+            let mut payload_len_bytes = [0u8; 8];
+            let mut expected_header_crc_bytes = [0u8; 4];
+            file.read_exact(&mut frame_magic)?;
+            file.read_exact(&mut version_bytes)?;
+            file.read_exact(&mut metadata_len_bytes)?;
+            file.read_exact(&mut payload_len_bytes)?;
+            file.read_exact(&mut expected_header_crc_bytes)?;
+            ensure!(
+                &frame_magic == FRAME_MAGIC,
+                "corrupt spool frame magic at {offset} in {}",
+                path.display()
+            );
+            ensure!(
+                u16::from_le_bytes(version_bytes) == FRAME_VERSION,
+                "unsupported spool frame version at {offset} in {}",
+                path.display()
+            );
+            let metadata_len = u32::from_le_bytes(metadata_len_bytes) as usize;
+            let payload_len = u64::from_le_bytes(payload_len_bytes);
+            ensure!(
+                metadata_len <= MAX_METADATA_BYTES,
+                "spool metadata length exceeds maximum at {offset} in {}",
+                path.display()
+            );
+            ensure!(
+                payload_len <= max_record_bytes,
+                "spool payload length {payload_len} exceeds configured maximum {}",
+                max_record_bytes
+            );
+            let mut header_crc = Crc32c::new();
+            header_crc.update(&frame_magic);
+            header_crc.update(&version_bytes);
+            header_crc.update(&metadata_len_bytes);
+            header_crc.update(&payload_len_bytes);
+            ensure!(
+                header_crc.finish() == u32::from_le_bytes(expected_header_crc_bytes),
+                "spool frame header checksum mismatch at {offset} in {}",
+                path.display()
+            );
+            let frame_len = FRAME_FIXED_LEN
+                .checked_add(metadata_len as u64)
+                .and_then(|length| length.checked_add(payload_len))
+                .and_then(|length| length.checked_add(FRAME_TRAILER_LEN))
+                .context("spool snapshot frame length overflow")?;
+            let frame_end = offset
+                .checked_add(frame_len)
+                .context("spool snapshot offset overflow")?;
+            if frame_end > snapshot_len {
+                let is_final_segment = segment_index + 1 == segment_ids.len();
+                ensure!(
+                    is_final_segment,
+                    "sealed spool segment has an incomplete frame: {}",
+                    path.display()
+                );
+                break;
+            }
+
+            let location = SpoolLocation {
+                segment_id,
+                frame_offset: offset,
+                frame_len,
+            };
+            let record = read_spool_record(&journal_dir, location, max_record_bytes)?;
+            ensure_spool_record_identity(&record, &identity)?;
+            if let Some(previous) = previous.as_ref() {
+                ensure_observation_follows(previous, &record.metadata)?;
+            }
+            let sequence = record.metadata.observation.sequence;
+            ensure!(
+                sequence <= durable_through_sequence,
+                "receiver spool record {sequence} is beyond supplied durable progress {durable_through_sequence}"
+            );
+            report.first_sequence.get_or_insert(sequence);
+            report.last_sequence = Some(sequence);
+            let metadata = record.metadata.clone();
+            visit(record).with_context(|| {
+                format!(
+                    "visit receiver spool sequence {sequence} at {}",
+                    path.display()
+                )
+            })?;
+            report.records = report
+                .records
+                .checked_add(1)
+                .context("spool snapshot record count overflow")?;
+            previous = Some(metadata);
+            offset = frame_end;
+            file.seek(SeekFrom::Start(offset))
+                .with_context(|| format!("seek next spool snapshot frame {}", path.display()))?;
+            if sequence == durable_through_sequence {
+                report.reached_durable_tail = true;
+                return Ok(report);
+            }
+        }
+        if report.records == max_records as u64 {
+            stopped_at_limit = true;
+            break;
+        }
+    }
+
+    if !stopped_at_limit {
+        ensure!(
+            report.last_sequence == Some(durable_through_sequence),
+            "receiver progress is durable through sequence {durable_through_sequence}, but the spool snapshot ended at {:?}",
+            report.last_sequence
+        );
+        report.reached_durable_tail = true;
+    }
+    Ok(report)
+}
+
+fn ensure_spool_record_identity(
+    record: &SpoolRecord,
+    identity: &SpoolJournalIdentity,
+) -> Result<()> {
+    ensure!(
+        record.metadata.cluster_id == identity.cluster_id
+            && record.metadata.observation.origin_node_id == identity.origin_node_id
+            && record.metadata.source_id == identity.source_id
+            && record.metadata.observation.journal_id == identity.journal_id,
+        "spool record identity does not match requested journal"
+    );
+    Ok(())
 }
 
 fn read_exact_or_incomplete_tail<R: Read>(
@@ -1353,6 +1637,87 @@ mod tests {
         assert_eq!(loaded.location, durable.location());
         assert_eq!(loaded.metadata, *durable.metadata());
         assert_eq!(loaded.payload, b"payload");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_snapshot_never_exposes_a_frame_beyond_supplied_durable_progress() {
+        let root = temp_root("read-durable-prefix");
+        let options = SpoolOptions {
+            segment_target_bytes: 200,
+            max_record_bytes: 1024,
+        };
+        let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+        let first = spool
+            .append_and_sync(metadata(1, b"first"), b"first")
+            .unwrap();
+        spool
+            .append_and_sync(
+                metadata(2, b"visible-but-not-progress-covered"),
+                b"visible-but-not-progress-covered",
+            )
+            .unwrap();
+        let bytes_before = fs::read_dir(spool.journal_dir())
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("segment-") && name.ends_with(".wal"))
+            })
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum::<u64>();
+
+        let mut observed = Vec::new();
+        let report = read_spool_committed_snapshot_after(
+            &root,
+            journal_identity(),
+            options.max_record_bytes,
+            None,
+            1,
+            8,
+            |record| {
+                observed.push(record.metadata.observation.sequence);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, [1]);
+        assert_eq!(report.last_sequence, Some(1));
+        assert!(report.reached_durable_tail);
+        assert_eq!(
+            fs::read_dir(spool.journal_dir())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("segment-") && name.ends_with(".wal"))
+                })
+                .map(|entry| entry.metadata().unwrap().len())
+                .sum::<u64>(),
+            bytes_before
+        );
+
+        observed.clear();
+        let report = read_spool_committed_snapshot_after(
+            &root,
+            journal_identity(),
+            options.max_record_bytes,
+            Some(first.location()),
+            2,
+            8,
+            |record| {
+                observed.push(record.metadata.observation.sequence);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, [2]);
+        assert!(report.reached_durable_tail);
+        drop(spool);
         fs::remove_dir_all(root).unwrap();
     }
 

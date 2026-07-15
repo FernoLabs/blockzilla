@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "bind": "0.0.0.0:9443",
+  "tls": {
+    "server_certificate_file": "/run/secrets/hetzner_pull_source_certificate",
+    "server_private_key_file": "/tmp/blockzilla-pull-source/server-private-key.pem",
+    "client_ca_file": "/run/secrets/pull_client_ca",
+    "handshake_timeout_ms": 10000
+  },
+  "allowed_nodes_file": "/run/secrets/pull_allowed_nodes",
+  "cache_root": "/source-data/grpc-cache",
+  "cumulative_ack_wal_file": "/control/pull-cumulative-ack.wal",
+  "ack_status_file": "/control/pull-ack-status.json",
+  "expected_primary_id": "blockzilla-primary",
+  "trusted_receipt_keys": [
+    {
+      "key_id": "receipt-2026-q3",
+      "public_key_file": "/run/secrets/blockzilla_receipt_public_key"
+    }
+  ],
+  "gc": {
+    "enabled": false
+  },
+  "limits": {
+    "max_records": 1,
+    "max_batch_compressed_bytes": 134217728,
+    "max_batch_uncompressed_bytes": 134217728,
+    "max_compressed_record_bytes": 134217728,
+    "max_uncompressed_record_bytes": 134217728
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "source": {
+    "endpoint": "https://188.245.147.127:10443",
+    "tls": {
+      "ca_file": "/run/secrets/replication_ca",
+      "client_certificate_file": "/run/secrets/blockzilla_pull_client_certificate",
+      "client_private_key_file": "/tmp/blockzilla-pull-client/client-private-key.pem",
+      "server_name": "blockzilla-hetzner-source"
+    },
+    "connect_timeout_ms": 10000,
+    "request_timeout_ms": 630000,
+    "stream_idle_timeout_ms": 120000,
+    "batch": {
+      "max_events": 1,
+      "max_bytes": 134217728,
+      "max_uncompressed_bytes": 268435456,
+      "max_compressed_event_bytes": 134217728,
+      "max_uncompressed_event_bytes": 268435456
+    }
+  },
+  "local_sink": {
+    "endpoint": "https://10.253.45.2:9443",
+    "expected_primary_id": "blockzilla-primary",
+    "cumulative_ack_wal_file": "/tmp/blockzilla-pull-client/not-used-by-pull-client.wal",
+    "tls": {
+      "ca_file": "/run/secrets/replication_ca",
+      "client_certificate_file": "/run/secrets/blockzilla_pull_client_certificate",
+      "client_private_key_file": "/tmp/blockzilla-pull-client/client-private-key.pem",
+      "server_name": "blockzilla-primary"
+    },
+    "auth": {
+      "method": "mutual_tls"
+    },
+    "trusted_receipt_keys": [
+      {
+        "key_id": "receipt-2026-q3",
+        "public_key_file": "/run/secrets/blockzilla_receipt_public_key"
+      }
+    ],
+    "reconnect": {
+      "initial_delay_ms": 250,
+      "max_delay_ms": 30000,
+      "backoff_factor_milli": 2000,
+      "jitter_percent": 20,
+      "connect_timeout_ms": 10000,
+      "heartbeat_interval_ms": 5000,
+      "idle_timeout_ms": 20000,
+      "max_attempts": null
+    },
+    "batch": {
+      "max_events": 1,
+      "max_bytes": 134217728,
+      "max_uncompressed_bytes": 268435456,
+      "max_compressed_event_bytes": 134217728,
+      "max_uncompressed_event_bytes": 268435456,
+      "ack_timeout_ms": 600000
+    }
+  }
+}
