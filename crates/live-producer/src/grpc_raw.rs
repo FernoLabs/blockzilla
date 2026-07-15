@@ -42,8 +42,8 @@ use crate::{
     },
     grpc_relay::{YellowstoneBlockRelay, YellowstoneBlockRelayLimits, YellowstoneRelayAuth},
     ingest::{
-        IngressRecordMeta, LockedSpoolAudit, LogicalKey, ObservationId, SpoolJournalIdentity,
-        SpoolLocation, SpoolOptions, SpoolWriter, read_spool_record,
+        ContentDigest, IngressRecordMeta, LockedSpoolAudit, LogicalKey, ObservationId,
+        SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter, read_spool_record,
     },
     layout::ProducerLayout,
 };
@@ -70,6 +70,7 @@ const SUBSCRIBE_PING_ID: i32 = 1;
 const GENERATION_ROLLOVER_SAFETY_BYTES: u64 = 1024 * 1024;
 const RELAY_X_TOKEN_MAX_BYTES: u64 = 4096;
 const RELAY_SHUTDOWN_GRACE_SECS: u64 = 5;
+const MAX_HANDOFF_RECORD_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogOutcome<T> {
@@ -775,6 +776,55 @@ impl GrpcRawHandoffRecord {
             frame_len: self.frame_len,
         }
     }
+}
+
+/// Allocation limits for lock-free reads of committed raw gRPC records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcRawCommittedReadLimits {
+    pub max_compressed_record_bytes: u64,
+    pub max_uncompressed_record_bytes: u64,
+}
+
+impl GrpcRawCommittedReadLimits {
+    fn validate(self) -> Result<Self> {
+        ensure!(
+            self.max_compressed_record_bytes > 0,
+            "maximum compressed raw gRPC record bytes must be non-zero"
+        );
+        ensure!(
+            self.max_uncompressed_record_bytes > 0,
+            "maximum uncompressed raw gRPC record bytes must be non-zero"
+        );
+        Ok(self)
+    }
+}
+
+/// One handoff-committed raw record, verified directly against its WAL frame.
+///
+/// `compressed_bytes` is the exact independent zstd frame stored in the WAL; it is never
+/// recompressed by this reader. `update` is decoded only after all WAL, identity, length, and raw
+/// protobuf digest checks succeed.
+#[derive(Debug, Clone)]
+pub struct GrpcRawCommittedRecord {
+    pub cluster_id: String,
+    pub source_id: String,
+    pub observation: ObservationId,
+    pub slot: u64,
+    pub blockhash: String,
+    pub content_digest: ContentDigest,
+    pub payload_format_version: u16,
+    pub raw_protobuf_sha256: String,
+    pub uncompressed_bytes: u64,
+    pub compressed_bytes: Vec<u8>,
+    pub update: SubscribeUpdate,
+}
+
+/// Result of a snapshot read of the handoff-committed prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcRawCommittedReadReport {
+    pub records: u64,
+    /// Bytes after the last newline in the handoff snapshot. These are never decoded or visited.
+    pub incomplete_handoff_tail_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1856,6 +1906,171 @@ where
     F: FnMut(&GrpcRawHandoffRecord, SubscribeUpdate) -> Result<()>,
 {
     Ok(replay_grpc_raw_blocks_audited(output_dir, max_record_bytes, visit)?.records)
+}
+
+/// Read the complete, newline-committed handoff prefix without taking the WAL writer lock.
+///
+/// The handoff file length is snapshotted once. A final partial row is reported and ignored, and a
+/// WAL record that has not yet crossed the handoff boundary is invisible. Every visited row is
+/// independently verified by [`read_spool_record`], bounded-decompressed, SHA-checked, and prost
+/// decoded before it is exposed. This works for both active and stopped generation directories and
+/// never opens or requires the spool's exclusive `writer.lock`.
+pub fn read_grpc_raw_committed_records<F>(
+    output_dir: impl AsRef<Path>,
+    limits: GrpcRawCommittedReadLimits,
+    mut visit: F,
+) -> Result<GrpcRawCommittedReadReport>
+where
+    F: FnMut(GrpcRawCommittedRecord) -> Result<()>,
+{
+    let limits = limits.validate()?;
+    let output_dir = output_dir.as_ref();
+    let identity = read_identity(&output_dir.join(IDENTITY_FILE))?;
+    let wal_dir = spool_journal_dir(output_dir, &identity);
+    let journal_path = output_dir.join(HANDOFF_JOURNAL_FILE);
+    let file = File::open(&journal_path)
+        .with_context(|| format!("open raw gRPC journal {}", journal_path.display()))?;
+    let snapshot_len = file
+        .metadata()
+        .with_context(|| format!("inspect raw gRPC journal {}", journal_path.display()))?
+        .len();
+    let mut reader = BufReader::new(file.take(snapshot_len));
+    let mut line = Vec::new();
+    let mut records = 0u64;
+    let mut incomplete_handoff_tail_bytes = 0u64;
+
+    loop {
+        line.clear();
+        let bytes = {
+            let mut bounded = (&mut reader).take(MAX_HANDOFF_RECORD_BYTES + 1);
+            bounded
+                .read_until(b'\n', &mut line)
+                .with_context(|| format!("read raw gRPC journal {}", journal_path.display()))?
+        };
+        if bytes == 0 {
+            break;
+        }
+        let bytes = u64::try_from(bytes).context("raw gRPC handoff row length exceeds u64")?;
+        ensure!(
+            bytes <= MAX_HANDOFF_RECORD_BYTES,
+            "raw gRPC handoff row exceeds {MAX_HANDOFF_RECORD_BYTES} bytes"
+        );
+        if !line.ends_with(b"\n") {
+            incomplete_handoff_tail_bytes = bytes;
+            break;
+        }
+        let payload = &line[..line.len() - 1];
+        if payload.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let row: GrpcRawHandoffRecord = serde_json::from_slice(payload)
+            .with_context(|| format!("decode raw gRPC journal frame {records}"))?;
+        validate_handoff_sequence(&row, records)?;
+        let record = read_verified_grpc_raw_committed_record(&wal_dir, &identity, &row, limits)?;
+        visit(record).with_context(|| format!("visit committed raw gRPC frame {records}"))?;
+        records = records
+            .checked_add(1)
+            .context("committed raw gRPC record count overflow")?;
+    }
+
+    Ok(GrpcRawCommittedReadReport {
+        records,
+        incomplete_handoff_tail_bytes,
+    })
+}
+
+fn read_verified_grpc_raw_committed_record(
+    wal_dir: &Path,
+    identity: &GrpcRawIdentityFile,
+    row: &GrpcRawHandoffRecord,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<GrpcRawCommittedRecord> {
+    ensure!(
+        row.compressed_len <= limits.max_compressed_record_bytes,
+        "committed raw gRPC frame {} compressed length {} exceeds maximum {}",
+        row.frame_id,
+        row.compressed_len,
+        limits.max_compressed_record_bytes
+    );
+    ensure!(
+        row.uncompressed_len <= limits.max_uncompressed_record_bytes,
+        "committed raw gRPC frame {} uncompressed length {} exceeds maximum {}",
+        row.frame_id,
+        row.uncompressed_len,
+        limits.max_uncompressed_record_bytes
+    );
+    let stored = read_spool_record(wal_dir, row.location(), limits.max_compressed_record_bytes)?;
+    ensure!(
+        stored.metadata.observation.sequence == row.frame_id,
+        "committed raw gRPC WAL/handoff sequence mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.metadata.cluster_id == identity.cluster_id
+            && stored.metadata.observation.origin_node_id == identity.origin_node_id
+            && stored.metadata.observation.journal_id == identity.journal_id
+            && stored.metadata.source_id == identity.source_id
+            && stored.metadata.payload_format_version == PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+        "committed raw gRPC WAL identity/format mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.payload.len() as u64 == row.compressed_len,
+        "committed raw gRPC compressed length mismatch at frame {}",
+        row.frame_id
+    );
+    let raw_capacity = usize::try_from(row.uncompressed_len)
+        .context("committed raw gRPC uncompressed length exceeds usize")?;
+    let raw = zstd::bulk::decompress(&stored.payload, raw_capacity)
+        .with_context(|| format!("decompress committed raw gRPC frame {}", row.frame_id))?;
+    ensure!(
+        raw.len() as u64 == row.uncompressed_len,
+        "committed raw gRPC uncompressed length mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        sha256_hex(&raw) == row.protobuf_sha256,
+        "committed raw gRPC protobuf checksum mismatch at frame {}",
+        row.frame_id
+    );
+    let update = SubscribeUpdate::decode(raw.as_slice())
+        .with_context(|| format!("decode committed raw gRPC protobuf frame {}", row.frame_id))?;
+    let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
+        return Err(anyhow!(
+            "committed raw gRPC frame {} is not a block update",
+            row.frame_id
+        ));
+    };
+    ensure!(
+        block.slot == row.slot
+            && block.parent_slot == row.parent_slot
+            && block.blockhash == row.blockhash,
+        "committed raw gRPC protobuf metadata mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.metadata.logical_key
+            == (LogicalKey::Block {
+                slot: block.slot,
+                blockhash: decode_blockhash(&block.blockhash)?,
+            }),
+        "committed raw gRPC logical key mismatch at frame {}",
+        row.frame_id
+    );
+
+    Ok(GrpcRawCommittedRecord {
+        cluster_id: stored.metadata.cluster_id.clone(),
+        source_id: stored.metadata.source_id.clone(),
+        observation: stored.metadata.observation.clone(),
+        slot: block.slot,
+        blockhash: block.blockhash.clone(),
+        content_digest: stored.metadata.content_digest,
+        payload_format_version: stored.metadata.payload_format_version,
+        raw_protobuf_sha256: row.protobuf_sha256.clone(),
+        uncompressed_bytes: row.uncompressed_len,
+        compressed_bytes: stored.payload,
+        update,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4999,6 +5214,303 @@ mod tests {
         .unwrap();
         assert_eq!(count, 3);
         assert_eq!(slots, vec![100, 101, 102]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_reader_reads_active_writer_and_only_the_handoff_prefix() {
+        let root = temp_dir("committed-reader-active");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let first_update = update(1_000);
+        let first_row = append_fixture(&mut spool, &identity, &first_update, 0);
+        append_handoff_record(&journal, &first_row).unwrap();
+        let second_update = update(1_001);
+        let second_row = append_fixture(&mut spool, &identity, &second_update, 1);
+
+        let expected_compressed = zstd::bulk::compress(&first_update.encode_to_vec(), 1).unwrap();
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let mut committed = Vec::new();
+        let report = read_grpc_raw_committed_records(&root, limits, |record| {
+            committed.push(record);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(report.records, 1);
+        assert_eq!(report.incomplete_handoff_tail_bytes, 0);
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].cluster_id, identity.cluster_id);
+        assert_eq!(committed[0].source_id, identity.source_id);
+        assert_eq!(
+            committed[0].observation.origin_node_id,
+            identity.origin_node_id
+        );
+        assert_eq!(committed[0].observation.journal_id, identity.journal_id);
+        assert_eq!(committed[0].observation.sequence, 0);
+        assert_eq!(committed[0].slot, 1_000);
+        assert_eq!(committed[0].blockhash, first_row.blockhash);
+        assert_eq!(
+            committed[0].content_digest,
+            crate::ingest::compute_content_digest(
+                &identity.cluster_id,
+                &LogicalKey::Block {
+                    slot: 1_000,
+                    blockhash: decode_blockhash(&first_row.blockhash).unwrap(),
+                },
+                PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+                &expected_compressed,
+            )
+        );
+        assert_eq!(
+            committed[0].payload_format_version,
+            PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1
+        );
+        assert_eq!(committed[0].raw_protobuf_sha256, first_row.protobuf_sha256);
+        assert_eq!(
+            committed[0].uncompressed_bytes,
+            first_update.encoded_len() as u64
+        );
+        assert_eq!(committed[0].compressed_bytes, expected_compressed);
+        assert_eq!(committed[0].update, first_update);
+
+        // The writer still owns its exclusive lock. Publishing the second handoff row makes that
+        // already-fsynced WAL record visible without closing or reopening the writer.
+        append_handoff_record(&journal, &second_row).unwrap();
+        let mut slots = Vec::new();
+        let report = read_grpc_raw_committed_records(&root, limits, |record| {
+            slots.push(record.slot);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(report.records, 2);
+        assert_eq!(slots, vec![1_000, 1_001]);
+
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_reader_ignores_and_reports_a_partial_handoff_tail() {
+        let root = temp_dir("committed-reader-partial-handoff");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let committed_row = append_fixture(&mut spool, &identity, &update(1_100), 0);
+        append_handoff_record(&journal, &committed_row).unwrap();
+        let pending_row = append_fixture(&mut spool, &identity, &update(1_101), 1);
+        let pending_json = serde_json::to_vec(&pending_row).unwrap();
+        let partial = &pending_json[..pending_json.len() / 2];
+        let mut journal_append = OpenOptions::new().append(true).open(&journal).unwrap();
+        journal_append.write_all(partial).unwrap();
+        journal_append.sync_data().unwrap();
+        drop(journal_append);
+        let before = fs::read(&journal).unwrap();
+
+        let mut slots = Vec::new();
+        let report = read_grpc_raw_committed_records(
+            &root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: config.max_record_bytes,
+                max_uncompressed_record_bytes: config.max_record_bytes,
+            },
+            |record| {
+                slots.push(record.slot);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(report.records, 1);
+        assert_eq!(
+            report.incomplete_handoff_tail_bytes,
+            u64::try_from(partial.len()).unwrap()
+        );
+        assert_eq!(slots, vec![1_100]);
+        assert_eq!(fs::read(&journal).unwrap(), before);
+
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_reader_rejects_wal_metadata_and_protobuf_digest_mismatches() {
+        let metadata_root = temp_dir("committed-reader-metadata-mismatch");
+        fs::create_dir_all(&metadata_root).unwrap();
+        let metadata_config = test_config(metadata_root.clone());
+        let metadata_identity = load_or_create_identity(&metadata_config).unwrap();
+        let mut metadata_spool = SpoolWriter::open(
+            metadata_root.join(WAL_ROOT_DIR),
+            metadata_identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: metadata_config.segment_target_bytes,
+                max_record_bytes: metadata_config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let metadata_journal = metadata_root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&metadata_journal).unwrap();
+        let source = update(1_200);
+        let Some(UpdateOneof::Block(block)) = source.update_oneof.as_ref() else {
+            panic!("fixture update is not a block")
+        };
+        let raw = source.encode_to_vec();
+        let compressed = zstd::bulk::compress(&raw, 1).unwrap();
+        let wrong_key_metadata = IngressRecordMeta::from_payload(
+            metadata_identity.cluster_id.clone(),
+            ObservationId {
+                origin_node_id: metadata_identity.origin_node_id.clone(),
+                journal_id: metadata_identity.journal_id,
+                sequence: 0,
+            },
+            metadata_identity.source_id.clone(),
+            LogicalKey::Block {
+                slot: block.slot + 1,
+                blockhash: decode_blockhash(&block.blockhash).unwrap(),
+            },
+            PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+            &compressed,
+        );
+        let durable = metadata_spool
+            .append_and_sync(wrong_key_metadata, &compressed)
+            .unwrap();
+        let metadata_row = handoff_record_from_block(
+            block,
+            0,
+            EpochSlot::from_slot(block.slot, OLD_FAITHFUL_SLOTS_PER_EPOCH),
+            durable.location(),
+            raw.len() as u64,
+            compressed.len() as u64,
+            sha256_hex(&raw),
+        );
+        append_handoff_record(&metadata_journal, &metadata_row).unwrap();
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: metadata_config.max_record_bytes,
+            max_uncompressed_record_bytes: metadata_config.max_record_bytes,
+        };
+        let error =
+            read_grpc_raw_committed_records(&metadata_root, limits, |_| Ok(())).unwrap_err();
+        assert!(error.to_string().contains("logical key mismatch"));
+        drop(metadata_spool);
+        fs::remove_dir_all(metadata_root).unwrap();
+
+        let digest_root = temp_dir("committed-reader-digest-mismatch");
+        fs::create_dir_all(&digest_root).unwrap();
+        let digest_config = test_config(digest_root.clone());
+        let digest_identity = load_or_create_identity(&digest_config).unwrap();
+        let mut digest_spool = SpoolWriter::open(
+            digest_root.join(WAL_ROOT_DIR),
+            digest_identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: digest_config.segment_target_bytes,
+                max_record_bytes: digest_config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let digest_journal = digest_root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&digest_journal).unwrap();
+        let mut digest_row = append_fixture(&mut digest_spool, &digest_identity, &update(1_201), 0);
+        digest_row.protobuf_sha256 = "00".repeat(32);
+        append_handoff_record(&digest_journal, &digest_row).unwrap();
+        let error = read_grpc_raw_committed_records(
+            &digest_root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: digest_config.max_record_bytes,
+                max_uncompressed_record_bytes: digest_config.max_record_bytes,
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("protobuf checksum mismatch"));
+
+        drop(digest_spool);
+        fs::remove_dir_all(digest_root).unwrap();
+    }
+
+    #[test]
+    fn committed_reader_enforces_compressed_and_uncompressed_byte_limits() {
+        let root = temp_dir("committed-reader-limits");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let row = append_fixture(&mut spool, &identity, &update(1_300), 0);
+        append_handoff_record(&journal, &row).unwrap();
+
+        let compressed_error = read_grpc_raw_committed_records(
+            &root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: row.compressed_len - 1,
+                max_uncompressed_record_bytes: row.uncompressed_len,
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(compressed_error.to_string().contains("compressed length"));
+        assert!(compressed_error.to_string().contains("exceeds maximum"));
+
+        let uncompressed_error = read_grpc_raw_committed_records(
+            &root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: row.compressed_len,
+                max_uncompressed_record_bytes: row.uncompressed_len - 1,
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            uncompressed_error
+                .to_string()
+                .contains("uncompressed length")
+        );
+        assert!(uncompressed_error.to_string().contains("exceeds maximum"));
+
+        let zero_limit_error = read_grpc_raw_committed_records(
+            &root,
+            GrpcRawCommittedReadLimits {
+                max_compressed_record_bytes: 0,
+                max_uncompressed_record_bytes: row.uncompressed_len,
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(zero_limit_error.to_string().contains("must be non-zero"));
+
+        drop(spool);
         fs::remove_dir_all(root).unwrap();
     }
 

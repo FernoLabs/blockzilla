@@ -5,6 +5,7 @@
 //! receipt must first be authenticated and then committed to the replica's receipt journal.
 
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, Write},
     path::{Path, PathBuf},
@@ -23,6 +24,9 @@ use super::{
 
 pub const REPLICATION_PROTOCOL_VERSION: u16 = 1;
 const RECEIPT_SIGNING_DOMAIN: &[u8] = b"BLOCKZILLA-INGEST-RECEIPT-v1";
+const CUMULATIVE_ACK_SIGNING_DOMAIN: &[u8] = b"BLOCKZILLA-INGEST-CUMULATIVE-ACK-v1";
+const CUMULATIVE_CHAIN_SEED_DOMAIN: &[u8] = b"BLOCKZILLA-INGEST-CUMULATIVE-CHAIN-SEED-v1";
+const CUMULATIVE_CHAIN_STEP_DOMAIN: &[u8] = b"BLOCKZILLA-INGEST-CUMULATIVE-CHAIN-STEP-v1";
 const ED25519_SIGNATURE_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +40,29 @@ pub struct ReplicationOffer {
     pub payload_len: u64,
     pub payload_format_version: u16,
     pub commitment: CommitmentEvidence,
+}
+
+/// Stable identity of one independently ordered replication journal.
+///
+/// Sequence numbers are contiguous only inside this identity. A newly created journal receives a
+/// new `journal_id`, even when it continues the same origin/source pair.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReplicationStreamId {
+    pub cluster_id: String,
+    pub origin_node_id: String,
+    pub source_id: String,
+    pub journal_id: [u8; 16],
+}
+
+impl ReplicationStreamId {
+    pub fn from_offer(offer: &ReplicationOffer) -> Self {
+        Self {
+            cluster_id: offer.cluster_id.clone(),
+            origin_node_id: offer.record.origin_node_id.clone(),
+            source_id: offer.source_id.clone(),
+            journal_id: offer.record.journal_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +92,324 @@ impl ReceiptDisposition {
             Self::DurablyStored | Self::AlreadyCommitted | Self::DurablyStoredConflict
         )
     }
+}
+
+/// Deterministic digest before the first observation in a replication stream.
+///
+/// The seed is stream-specific, preventing an otherwise identical observation prefix from being
+/// transplanted between clusters, origins, sources, or journals.
+pub fn cumulative_chain_seed(
+    stream: &ReplicationStreamId,
+) -> Result<ContentDigest, CumulativeAckValidationError> {
+    validate_stream_id(stream)?;
+    let mut encoded = Vec::with_capacity(256);
+    encoded.extend_from_slice(CUMULATIVE_CHAIN_SEED_DOMAIN);
+    encoded.extend_from_slice(&REPLICATION_PROTOCOL_VERSION.to_le_bytes());
+    push_stream_id(&mut encoded, stream)?;
+    Ok(ContentDigest(sha256(&encoded)))
+}
+
+/// Extend a stream's rolling digest with one complete replication offer.
+///
+/// `ReplicationOffer::content_digest` binds the exact payload bytes. The remaining offer fields
+/// bind their observation identity, semantic identity, payload format, source, and commitment.
+pub fn cumulative_chain_next(
+    stream: &ReplicationStreamId,
+    previous: ContentDigest,
+    offer: &ReplicationOffer,
+) -> Result<ContentDigest, CumulativeAckValidationError> {
+    if offer.protocol_version != REPLICATION_PROTOCOL_VERSION {
+        return Err(CumulativeAckValidationError::UnsupportedProtocol);
+    }
+    if ReplicationStreamId::from_offer(offer) != *stream {
+        return Err(CumulativeAckValidationError::WrongStream);
+    }
+    validate_stream_id(stream)?;
+    validate_replication_offer(offer)?;
+
+    let mut encoded = Vec::with_capacity(512);
+    encoded.extend_from_slice(CUMULATIVE_CHAIN_STEP_DOMAIN);
+    encoded.extend_from_slice(&previous.0);
+    push_replication_offer(&mut encoded, offer)?;
+    Ok(ContentDigest(sha256(&encoded)))
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(bytes).into()
+}
+
+fn validate_stream_id(stream: &ReplicationStreamId) -> Result<(), CumulativeAckValidationError> {
+    validate_bounded_string(&stream.cluster_id)?;
+    validate_bounded_string(&stream.origin_node_id)?;
+    validate_bounded_string(&stream.source_id)?;
+    Ok(())
+}
+
+fn validate_replication_offer(
+    offer: &ReplicationOffer,
+) -> Result<(), CumulativeAckValidationError> {
+    validate_bounded_string(&offer.cluster_id)?;
+    validate_bounded_string(&offer.record.origin_node_id)?;
+    validate_bounded_string(&offer.source_id)?;
+    if offer.payload_format_version == 0 {
+        return Err(CumulativeAckValidationError::InvalidField);
+    }
+    Ok(())
+}
+
+fn validate_bounded_string(value: &str) -> Result<(), CumulativeAckValidationError> {
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        Err(CumulativeAckValidationError::InvalidField)
+    } else {
+        Ok(())
+    }
+}
+
+fn push_stream_id(
+    output: &mut Vec<u8>,
+    stream: &ReplicationStreamId,
+) -> Result<(), CumulativeAckValidationError> {
+    push_cumulative_bounded_string(output, &stream.cluster_id)?;
+    push_cumulative_bounded_string(output, &stream.origin_node_id)?;
+    push_cumulative_bounded_string(output, &stream.source_id)?;
+    output.extend_from_slice(&stream.journal_id);
+    Ok(())
+}
+
+fn push_replication_offer(
+    output: &mut Vec<u8>,
+    offer: &ReplicationOffer,
+) -> Result<(), CumulativeAckValidationError> {
+    output.extend_from_slice(&offer.protocol_version.to_le_bytes());
+    push_cumulative_bounded_string(output, &offer.cluster_id)?;
+    push_cumulative_bounded_string(output, &offer.record.origin_node_id)?;
+    output.extend_from_slice(&offer.record.journal_id);
+    output.extend_from_slice(&offer.record.sequence.to_le_bytes());
+    push_cumulative_bounded_string(output, &offer.source_id)?;
+    push_logical_key(output, &offer.logical_key);
+    output.extend_from_slice(&offer.content_digest.0);
+    output.extend_from_slice(&offer.payload_len.to_le_bytes());
+    output.extend_from_slice(&offer.payload_format_version.to_le_bytes());
+    output.push(commitment_tag(offer.commitment));
+    Ok(())
+}
+
+fn push_logical_key(output: &mut Vec<u8>, key: &LogicalKey) {
+    match key {
+        LogicalKey::Block { slot, blockhash } => {
+            output.push(1);
+            output.extend_from_slice(&slot.to_le_bytes());
+            output.extend_from_slice(blockhash);
+        }
+        LogicalKey::Entry {
+            slot,
+            entry_index,
+            entry_hash,
+        } => {
+            output.push(2);
+            output.extend_from_slice(&slot.to_le_bytes());
+            output.extend_from_slice(&entry_index.to_le_bytes());
+            output.extend_from_slice(entry_hash);
+        }
+        LogicalKey::Shred {
+            slot,
+            kind,
+            shred_index,
+            fec_set_index,
+        } => {
+            output.push(3);
+            output.extend_from_slice(&slot.to_le_bytes());
+            output.push(match kind {
+                super::dedup::ShredKind::Data => 1,
+                super::dedup::ShredKind::Coding => 2,
+            });
+            output.extend_from_slice(&shred_index.to_le_bytes());
+            match fec_set_index {
+                Some(index) => {
+                    output.push(1);
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                None => output.push(0),
+            }
+        }
+    }
+}
+
+fn commitment_tag(commitment: CommitmentEvidence) -> u8 {
+    match commitment {
+        CommitmentEvidence::Unknown => 1,
+        CommitmentEvidence::Processed => 2,
+        CommitmentEvidence::Confirmed => 3,
+        CommitmentEvidence::Finalized => 4,
+    }
+}
+
+fn disposition_tag(disposition: ReceiptDisposition) -> u8 {
+    match disposition {
+        ReceiptDisposition::DurablyStored => 1,
+        ReceiptDisposition::AlreadyCommitted => 2,
+        ReceiptDisposition::DurablyStoredConflict => 3,
+        ReceiptDisposition::Rejected => 4,
+    }
+}
+
+/// Signed proof that one primary durably holds a complete contiguous stream prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CumulativePrimaryAck {
+    pub protocol_version: u16,
+    pub stream: ReplicationStreamId,
+    pub primary_id: String,
+    pub primary_term: u64,
+    pub through_sequence: u64,
+    pub through_content_digest: ContentDigest,
+    pub rolling_chain_digest: ContentDigest,
+    pub disposition: ReceiptDisposition,
+    pub durable_lsn: u64,
+    pub signing_key_id: String,
+    pub signature: Vec<u8>,
+}
+
+impl CumulativePrimaryAck {
+    /// Canonical, domain-separated bytes covered by the cumulative ACK signature.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, CumulativeAckValidationError> {
+        validate_signable_cumulative_ack_fields(self)?;
+        let mut output = Vec::with_capacity(384);
+        output.extend_from_slice(CUMULATIVE_ACK_SIGNING_DOMAIN);
+        output.extend_from_slice(&self.protocol_version.to_le_bytes());
+        push_stream_id(&mut output, &self.stream)?;
+        push_cumulative_bounded_string(&mut output, &self.primary_id)?;
+        output.extend_from_slice(&self.primary_term.to_le_bytes());
+        output.extend_from_slice(&self.through_sequence.to_le_bytes());
+        output.extend_from_slice(&self.through_content_digest.0);
+        output.extend_from_slice(&self.rolling_chain_digest.0);
+        output.push(disposition_tag(self.disposition));
+        output.extend_from_slice(&self.durable_lsn.to_le_bytes());
+        push_cumulative_bounded_string(&mut output, &self.signing_key_id)?;
+        Ok(output)
+    }
+}
+
+fn push_cumulative_bounded_string(
+    output: &mut Vec<u8>,
+    value: &str,
+) -> Result<(), CumulativeAckValidationError> {
+    validate_bounded_string(value)?;
+    let length =
+        u16::try_from(value.len()).map_err(|_| CumulativeAckValidationError::InvalidField)?;
+    output.extend_from_slice(&length.to_le_bytes());
+    output.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn validate_signable_cumulative_ack_fields(
+    ack: &CumulativePrimaryAck,
+) -> Result<(), CumulativeAckValidationError> {
+    validate_stream_id(&ack.stream)?;
+    validate_bounded_string(&ack.primary_id)?;
+    validate_bounded_string(&ack.signing_key_id)?;
+    if ack.primary_term == 0 {
+        return Err(CumulativeAckValidationError::InvalidField);
+    }
+    Ok(())
+}
+
+/// Local expectations bind a signed ACK to an exact durable stream prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedCumulativeAck<'a> {
+    pub stream: &'a ReplicationStreamId,
+    pub primary_id: &'a str,
+    pub minimum_primary_term: u64,
+    pub through_sequence: u64,
+    pub through_content_digest: ContentDigest,
+    pub rolling_chain_digest: ContentDigest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CumulativeAckValidationError {
+    UnsupportedProtocol,
+    WrongStream,
+    WrongPrimary,
+    PrimaryTermRollback,
+    WrongSequence,
+    WrongContent,
+    WrongChain,
+    EmptySigningKeyId,
+    EmptySignature,
+    InvalidSignatureLength,
+    InvalidField,
+    InvalidSignature,
+}
+
+/// Pluggable verifier backed by configured trusted primary public keys.
+#[allow(dead_code)] // The concrete Ed25519 keyring is wired independently from protocol state.
+pub(crate) trait CumulativeAckSignatureVerifier {
+    fn verify_cumulative_ack_signature(
+        &self,
+        key_id: &str,
+        signing_bytes: &[u8],
+        signature: &[u8],
+    ) -> bool;
+}
+
+/// An authenticated cumulative ACK bound to one exact local stream prefix.
+///
+/// This value is not durable authority. It must first cross [`CumulativeAckWal::commit_verified`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCumulativeAck(CumulativePrimaryAck);
+
+impl VerifiedCumulativeAck {
+    pub fn ack(&self) -> &CumulativePrimaryAck {
+        &self.0
+    }
+}
+
+#[allow(dead_code)] // Used by the concrete replication client when transport lands.
+pub(crate) fn verify_cumulative_ack<V: CumulativeAckSignatureVerifier>(
+    ack: CumulativePrimaryAck,
+    expected: ExpectedCumulativeAck<'_>,
+    verifier: &V,
+) -> std::result::Result<VerifiedCumulativeAck, CumulativeAckValidationError> {
+    if ack.protocol_version != REPLICATION_PROTOCOL_VERSION {
+        return Err(CumulativeAckValidationError::UnsupportedProtocol);
+    }
+    if ack.stream != *expected.stream {
+        return Err(CumulativeAckValidationError::WrongStream);
+    }
+    if ack.primary_id != expected.primary_id {
+        return Err(CumulativeAckValidationError::WrongPrimary);
+    }
+    if ack.primary_term < expected.minimum_primary_term {
+        return Err(CumulativeAckValidationError::PrimaryTermRollback);
+    }
+    if ack.through_sequence != expected.through_sequence {
+        return Err(CumulativeAckValidationError::WrongSequence);
+    }
+    if ack.through_content_digest != expected.through_content_digest {
+        return Err(CumulativeAckValidationError::WrongContent);
+    }
+    if ack.rolling_chain_digest != expected.rolling_chain_digest {
+        return Err(CumulativeAckValidationError::WrongChain);
+    }
+    if ack.signing_key_id.trim().is_empty() {
+        return Err(CumulativeAckValidationError::EmptySigningKeyId);
+    }
+    if ack.signature.is_empty() {
+        return Err(CumulativeAckValidationError::EmptySignature);
+    }
+    if ack.signature.len() != ED25519_SIGNATURE_BYTES {
+        return Err(CumulativeAckValidationError::InvalidSignatureLength);
+    }
+    let signing_bytes = ack.signing_bytes()?;
+    if !verifier.verify_cumulative_ack_signature(
+        &ack.signing_key_id,
+        &signing_bytes,
+        &ack.signature,
+    ) {
+        return Err(CumulativeAckValidationError::InvalidSignature);
+    }
+    Ok(VerifiedCumulativeAck(ack))
 }
 
 /// Receipt returned by the primary after its durability boundary.
@@ -661,6 +1006,470 @@ impl Crc32c {
     }
 }
 
+const CUMULATIVE_ACK_WAL_MAGIC: &[u8; 8] = b"BZCACK01";
+const CUMULATIVE_ACK_FRAME_MAGIC: &[u8; 4] = b"BZCA";
+const CUMULATIVE_ACK_COMMIT_MAGIC: &[u8; 4] = b"CMIT";
+const CUMULATIVE_ACK_FRAME_VERSION: u16 = 1;
+const CUMULATIVE_ACK_WAL_HEADER_LEN: u64 = CUMULATIVE_ACK_WAL_MAGIC.len() as u64;
+const CUMULATIVE_ACK_FRAME_FIXED_LEN: u64 = 4 + 2 + 4 + 4;
+const CUMULATIVE_ACK_FRAME_TRAILER_LEN: u64 = 4 + 4;
+const MAX_CUMULATIVE_ACK_FRAME_BYTES: usize = 1024 * 1024;
+
+/// A verified ACK after it has been appended to the local cumulative-ACK journal and fsynced.
+///
+/// This is durable protocol evidence only. It deliberately exposes no deletion/GC operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableCumulativeAck {
+    ack: VerifiedCumulativeAck,
+    local_location: SpoolLocation,
+}
+
+impl DurableCumulativeAck {
+    pub fn ack(&self) -> &CumulativePrimaryAck {
+        self.ack.ack()
+    }
+
+    pub fn local_location(&self) -> SpoolLocation {
+        self.local_location
+    }
+}
+
+#[derive(Debug, Default)]
+struct CumulativeAckWalState {
+    // A fencing term belongs to the logical primary cluster, not one node name. Keying this by
+    // primary_id would let an old primary bypass the fence merely by changing identities.
+    highest_primary_terms: HashMap<String, u64>,
+    latest_stream_acks: HashMap<ReplicationStreamId, StoredCumulativeAckFrame>,
+}
+
+impl CumulativeAckWalState {
+    fn validate_transition(&self, stored: &StoredCumulativeAckFrame) -> AnyResult<()> {
+        let ack = &stored.ack;
+        ensure!(
+            ack.protocol_version == REPLICATION_PROTOCOL_VERSION,
+            "unsupported cumulative ACK protocol version {}",
+            ack.protocol_version
+        );
+        validate_signable_cumulative_ack_fields(ack)
+            .map_err(|_| anyhow::anyhow!("cumulative ACK contains an invalid signable field"))?;
+        ensure!(
+            ack.signature.len() == ED25519_SIGNATURE_BYTES,
+            "cumulative ACK signature length is {}, expected {}",
+            ack.signature.len(),
+            ED25519_SIGNATURE_BYTES
+        );
+
+        if let Some(highest_term) = self.highest_primary_terms.get(&ack.stream.cluster_id) {
+            ensure!(
+                ack.primary_term >= *highest_term,
+                "cumulative ACK primary term rollback: received {}, highest durable {}",
+                ack.primary_term,
+                highest_term
+            );
+        }
+
+        if let Some(previous) = self.latest_stream_acks.get(&ack.stream) {
+            if ack.primary_id != previous.ack.primary_id {
+                ensure!(
+                    ack.primary_term > previous.ack.primary_term,
+                    "cumulative ACK primary identity changed without a higher fencing term"
+                );
+            }
+            ensure!(
+                ack.through_sequence >= previous.ack.through_sequence,
+                "cumulative ACK sequence rollback: received {}, highest durable {}",
+                ack.through_sequence,
+                previous.ack.through_sequence
+            );
+            if ack.through_sequence == previous.ack.through_sequence {
+                ensure!(
+                    ack.through_content_digest == previous.ack.through_content_digest
+                        && ack.rolling_chain_digest == previous.ack.rolling_chain_digest,
+                    "cumulative ACK reused one sequence for a different digest chain"
+                );
+                ensure!(
+                    stored.local_location == previous.local_location,
+                    "cumulative ACK reused one sequence for a different local spool frame"
+                );
+            }
+            if ack.primary_term == previous.ack.primary_term {
+                ensure!(
+                    ack.durable_lsn >= previous.ack.durable_lsn,
+                    "cumulative ACK durable LSN rollback within primary term {}",
+                    ack.primary_term
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, stored: StoredCumulativeAckFrame) {
+        let ack = &stored.ack;
+        self.highest_primary_terms
+            .entry(ack.stream.cluster_id.clone())
+            .and_modify(|term| *term = (*term).max(ack.primary_term))
+            .or_insert(ack.primary_term);
+        self.latest_stream_acks.insert(ack.stream.clone(), stored);
+    }
+}
+
+/// Append-only journal for authenticated cumulative ACKs.
+///
+/// `commit_verified` returns a durable token only after the complete frame and commit marker have
+/// been flushed and `sync_data` succeeds. Recovery truncates only an incomplete final frame;
+/// committed corruption and primary-term/sequence rollback fail closed.
+#[derive(Debug)]
+pub struct CumulativeAckWal {
+    path: PathBuf,
+    writer: BufWriter<File>,
+    state: CumulativeAckWalState,
+    poisoned: bool,
+}
+
+impl CumulativeAckWal {
+    pub fn open(path: impl AsRef<Path>) -> AnyResult<Self> {
+        let path = path.as_ref().to_path_buf();
+        let parent = durable_parent(&path);
+        create_dir_all_durable(&parent)?;
+        let mut file = open_cumulative_ack_file(&path)?;
+        try_lock_cumulative_ack_wal(&file, &path)?;
+        initialize_cumulative_ack_wal(&mut file, &path)?;
+        sync_directory(&parent)?;
+        let file_len = file.metadata()?.len();
+        let recovered = recover_cumulative_ack_wal(&mut file, &path)?;
+        if recovered.valid_len != file_len {
+            file.set_len(recovered.valid_len)
+                .with_context(|| format!("truncate cumulative ACK WAL {}", path.display()))?;
+            file.sync_data()
+                .with_context(|| format!("sync recovered cumulative ACK WAL {}", path.display()))?;
+        }
+        file.seek(std::io::SeekFrom::End(0))
+            .with_context(|| format!("seek cumulative ACK WAL {}", path.display()))?;
+        Ok(Self {
+            path,
+            writer: BufWriter::new(file),
+            state: recovered.state,
+            poisoned: false,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    pub fn highest_primary_term(&self, cluster_id: &str) -> Option<u64> {
+        self.state.highest_primary_terms.get(cluster_id).copied()
+    }
+
+    /// Persist an already-authenticated ACK and bind it to the exact local prefix-tail frame.
+    pub fn commit_verified(
+        &mut self,
+        ack: VerifiedCumulativeAck,
+        local_tail: &DurableSpoolRecord,
+    ) -> AnyResult<DurableCumulativeAck> {
+        ensure!(
+            !self.poisoned,
+            "cumulative ACK WAL writer is poisoned; reopen it to recover before appending"
+        );
+        let signed = ack.ack();
+        let metadata = local_tail.metadata();
+        ensure!(
+            metadata.cluster_id == signed.stream.cluster_id
+                && metadata.observation.origin_node_id == signed.stream.origin_node_id
+                && metadata.observation.journal_id == signed.stream.journal_id
+                && metadata.source_id == signed.stream.source_id,
+            "cumulative ACK stream does not match durable local spool record"
+        );
+        ensure!(
+            metadata.observation.sequence == signed.through_sequence,
+            "cumulative ACK sequence does not match durable local spool record"
+        );
+        ensure!(
+            metadata.content_digest == signed.through_content_digest,
+            "cumulative ACK content digest does not match durable local spool record"
+        );
+
+        let local_location = local_tail.location();
+        let stored = StoredCumulativeAckFrame {
+            ack: signed.clone(),
+            local_location,
+        };
+        self.state.validate_transition(&stored)?;
+        let payload = serde_json::to_vec(&stored).context("encode cumulative ACK")?;
+        ensure!(
+            payload.len() <= MAX_CUMULATIVE_ACK_FRAME_BYTES,
+            "cumulative ACK frame exceeds {} bytes",
+            MAX_CUMULATIVE_ACK_FRAME_BYTES
+        );
+        let length = u32::try_from(payload.len()).context("cumulative ACK length exceeds u32")?;
+        let version_bytes = CUMULATIVE_ACK_FRAME_VERSION.to_le_bytes();
+        let length_bytes = length.to_le_bytes();
+        let mut header_crc = Crc32c::new();
+        header_crc.update(CUMULATIVE_ACK_FRAME_MAGIC);
+        header_crc.update(&version_bytes);
+        header_crc.update(&length_bytes);
+        let mut payload_crc = Crc32c::new();
+        payload_crc.update(&payload);
+
+        self.poisoned = true;
+        self.writer
+            .write_all(CUMULATIVE_ACK_FRAME_MAGIC)
+            .with_context(|| format!("write cumulative ACK frame magic {}", self.path.display()))?;
+        self.writer.write_all(&version_bytes).with_context(|| {
+            format!("write cumulative ACK frame version {}", self.path.display())
+        })?;
+        self.writer.write_all(&length_bytes).with_context(|| {
+            format!("write cumulative ACK frame length {}", self.path.display())
+        })?;
+        self.writer
+            .write_all(&header_crc.finish().to_le_bytes())
+            .with_context(|| {
+                format!(
+                    "write cumulative ACK header checksum {}",
+                    self.path.display()
+                )
+            })?;
+        self.writer
+            .write_all(&payload)
+            .with_context(|| format!("write cumulative ACK WAL payload {}", self.path.display()))?;
+        self.writer
+            .write_all(&payload_crc.finish().to_le_bytes())
+            .with_context(|| {
+                format!(
+                    "write cumulative ACK payload checksum {}",
+                    self.path.display()
+                )
+            })?;
+        self.writer
+            .write_all(CUMULATIVE_ACK_COMMIT_MAGIC)
+            .with_context(|| {
+                format!("write cumulative ACK commit marker {}", self.path.display())
+            })?;
+        self.writer
+            .flush()
+            .with_context(|| format!("flush cumulative ACK WAL {}", self.path.display()))?;
+        self.writer
+            .get_ref()
+            .sync_data()
+            .with_context(|| format!("sync cumulative ACK WAL {}", self.path.display()))?;
+        self.state.record(stored);
+        self.poisoned = false;
+        Ok(DurableCumulativeAck {
+            ack,
+            local_location,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCumulativeAckFrame {
+    ack: CumulativePrimaryAck,
+    local_location: SpoolLocation,
+}
+
+#[derive(Debug)]
+struct RecoveredCumulativeAckWal {
+    valid_len: u64,
+    state: CumulativeAckWalState,
+}
+
+fn recover_cumulative_ack_wal(
+    file: &mut File,
+    path: &Path,
+) -> AnyResult<RecoveredCumulativeAckWal> {
+    file.seek(std::io::SeekFrom::Start(0))
+        .with_context(|| format!("seek cumulative ACK WAL {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut wal_magic = [0u8; 8];
+    reader
+        .read_exact(&mut wal_magic)
+        .with_context(|| format!("read cumulative ACK WAL header {}", path.display()))?;
+    ensure!(
+        &wal_magic == CUMULATIVE_ACK_WAL_MAGIC,
+        "invalid cumulative ACK WAL header in {}",
+        path.display()
+    );
+    let mut valid_len = CUMULATIVE_ACK_WAL_HEADER_LEN;
+    let mut state = CumulativeAckWalState::default();
+    loop {
+        let frame_offset = valid_len;
+        let mut frame_magic = [0u8; 4];
+        if !read_cumulative_ack_exact_or_tail(&mut reader, &mut frame_magic, path)? {
+            break;
+        }
+        ensure!(
+            &frame_magic == CUMULATIVE_ACK_FRAME_MAGIC,
+            "corrupt cumulative ACK frame magic at {} in {}",
+            frame_offset,
+            path.display()
+        );
+
+        let mut version_bytes = [0u8; 2];
+        if !read_cumulative_ack_exact_or_tail(&mut reader, &mut version_bytes, path)? {
+            break;
+        }
+        let mut length_bytes = [0u8; 4];
+        if !read_cumulative_ack_exact_or_tail(&mut reader, &mut length_bytes, path)? {
+            break;
+        }
+        let mut expected_header_crc_bytes = [0u8; 4];
+        if !read_cumulative_ack_exact_or_tail(&mut reader, &mut expected_header_crc_bytes, path)? {
+            break;
+        }
+        let mut header_crc = Crc32c::new();
+        header_crc.update(&frame_magic);
+        header_crc.update(&version_bytes);
+        header_crc.update(&length_bytes);
+        ensure!(
+            header_crc.finish() == u32::from_le_bytes(expected_header_crc_bytes),
+            "cumulative ACK header checksum mismatch at {} in {}",
+            frame_offset,
+            path.display()
+        );
+        ensure!(
+            u16::from_le_bytes(version_bytes) == CUMULATIVE_ACK_FRAME_VERSION,
+            "unsupported cumulative ACK frame version at {} in {}",
+            frame_offset,
+            path.display()
+        );
+
+        let payload_len = u32::from_le_bytes(length_bytes) as usize;
+        ensure!(
+            payload_len <= MAX_CUMULATIVE_ACK_FRAME_BYTES,
+            "cumulative ACK frame length {} exceeds maximum at {} in {}",
+            payload_len,
+            frame_offset,
+            path.display()
+        );
+        let mut payload = vec![0u8; payload_len];
+        if !read_cumulative_ack_exact_or_tail(&mut reader, &mut payload, path)? {
+            break;
+        }
+        let mut expected_payload_crc_bytes = [0u8; 4];
+        if !read_cumulative_ack_exact_or_tail(&mut reader, &mut expected_payload_crc_bytes, path)? {
+            break;
+        }
+        let mut commit_magic = [0u8; 4];
+        if !read_cumulative_ack_exact_or_tail(&mut reader, &mut commit_magic, path)? {
+            break;
+        }
+        let mut payload_crc = Crc32c::new();
+        payload_crc.update(&payload);
+        ensure!(
+            payload_crc.finish() == u32::from_le_bytes(expected_payload_crc_bytes),
+            "cumulative ACK payload checksum mismatch at {} in {}",
+            frame_offset,
+            path.display()
+        );
+        ensure!(
+            &commit_magic == CUMULATIVE_ACK_COMMIT_MAGIC,
+            "missing cumulative ACK commit marker at {} in {}",
+            frame_offset,
+            path.display()
+        );
+        let stored: StoredCumulativeAckFrame =
+            serde_json::from_slice(&payload).with_context(|| {
+                format!(
+                    "decode committed cumulative ACK frame at {} in {}",
+                    frame_offset,
+                    path.display()
+                )
+            })?;
+        state.validate_transition(&stored).with_context(|| {
+            format!(
+                "validate committed cumulative ACK frame at {} in {}",
+                frame_offset,
+                path.display()
+            )
+        })?;
+        state.record(stored);
+        valid_len = valid_len
+            .checked_add(CUMULATIVE_ACK_FRAME_FIXED_LEN)
+            .and_then(|length| length.checked_add(payload_len as u64))
+            .and_then(|length| length.checked_add(CUMULATIVE_ACK_FRAME_TRAILER_LEN))
+            .context("cumulative ACK WAL length overflow")?;
+    }
+    Ok(RecoveredCumulativeAckWal { valid_len, state })
+}
+
+fn initialize_cumulative_ack_wal(file: &mut File, path: &Path) -> AnyResult<()> {
+    let length = file.metadata()?.len();
+    if length >= CUMULATIVE_ACK_WAL_HEADER_LEN {
+        return Ok(());
+    }
+    let mut existing = vec![0u8; length as usize];
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.read_exact(&mut existing)?;
+    ensure!(
+        CUMULATIVE_ACK_WAL_MAGIC.starts_with(&existing),
+        "refusing non-cumulative-ACK file with invalid partial header: {}",
+        path.display()
+    );
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.write_all(CUMULATIVE_ACK_WAL_MAGIC)
+        .with_context(|| format!("write cumulative ACK WAL header {}", path.display()))?;
+    file.sync_data()
+        .with_context(|| format!("sync cumulative ACK WAL header {}", path.display()))
+}
+
+fn read_cumulative_ack_exact_or_tail<R: Read>(
+    reader: &mut R,
+    output: &mut [u8],
+    path: &Path,
+) -> AnyResult<bool> {
+    match reader.read_exact(output) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("read cumulative ACK WAL {}", path.display()))
+        }
+    }
+}
+
+fn open_cumulative_ack_file(path: &Path) -> AnyResult<File> {
+    let file = match open_receipt_descriptor(path, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            open_receipt_descriptor(path, false)
+                .with_context(|| format!("open existing cumulative ACK WAL {}", path.display()))?
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("create cumulative ACK WAL {}", path.display()));
+        }
+    };
+    ensure!(
+        file.metadata()?.file_type().is_file(),
+        "cumulative ACK WAL path is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn try_lock_cumulative_ack_wal(file: &File, path: &Path) -> AnyResult<()> {
+    // SAFETY: the descriptor remains owned by the cumulative ACK WAL for the lock lifetime.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+            .with_context(|| format!("lock cumulative ACK WAL {}", path.display()))
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock_cumulative_ack_wal(file: &File, path: &Path) -> AnyResult<()> {
+    file.try_lock()
+        .with_context(|| format!("lock cumulative ACK WAL {}", path.display()))
+}
+
 /// State of one replica record. Disconnects and process restarts return non-durable network states
 /// to `LocalSpoolDurable`. `LocalReceiptDurable` makes only this record eligible for a later
 /// sealed-segment audit; it does not directly authorize unlinking a segment.
@@ -751,6 +1560,38 @@ mod tests {
         }
     }
 
+    struct AcceptCumulativeSignature;
+
+    impl CumulativeAckSignatureVerifier for AcceptCumulativeSignature {
+        fn verify_cumulative_ack_signature(
+            &self,
+            _key_id: &str,
+            _signing_bytes: &[u8],
+            _signature: &[u8],
+        ) -> bool {
+            true
+        }
+    }
+
+    struct ExactCumulativeSignature {
+        key_id: String,
+        signing_bytes: Vec<u8>,
+        signature: Vec<u8>,
+    }
+
+    impl CumulativeAckSignatureVerifier for ExactCumulativeSignature {
+        fn verify_cumulative_ack_signature(
+            &self,
+            key_id: &str,
+            signing_bytes: &[u8],
+            signature: &[u8],
+        ) -> bool {
+            key_id == self.key_id
+                && signing_bytes == self.signing_bytes
+                && signature == self.signature
+        }
+    }
+
     fn observation() -> ObservationId {
         ObservationId {
             origin_node_id: "backup-a".to_string(),
@@ -785,6 +1626,79 @@ mod tests {
         }
     }
 
+    fn replication_stream() -> ReplicationStreamId {
+        ReplicationStreamId {
+            cluster_id: "solana-mainnet".to_string(),
+            origin_node_id: "backup-a".to_string(),
+            source_id: "replica-primary".to_string(),
+            journal_id: [7; 16],
+        }
+    }
+
+    fn replication_offer(sequence: u64) -> ReplicationOffer {
+        let logical_key = LogicalKey::Block {
+            slot: 42 + sequence,
+            blockhash: [sequence as u8; 32],
+        };
+        let payload = format!("payload-{sequence}");
+        ReplicationOffer {
+            protocol_version: REPLICATION_PROTOCOL_VERSION,
+            cluster_id: "solana-mainnet".to_string(),
+            record: ObservationId {
+                origin_node_id: "backup-a".to_string(),
+                journal_id: [7; 16],
+                sequence,
+            },
+            source_id: "replica-primary".to_string(),
+            logical_key: logical_key.clone(),
+            content_digest: compute_content_digest(
+                "solana-mainnet",
+                &logical_key,
+                1,
+                payload.as_bytes(),
+            ),
+            payload_len: payload.len() as u64,
+            payload_format_version: 1,
+            commitment: CommitmentEvidence::Confirmed,
+        }
+    }
+
+    fn cumulative_ack(primary_term: u64) -> CumulativePrimaryAck {
+        CumulativePrimaryAck {
+            protocol_version: REPLICATION_PROTOCOL_VERSION,
+            stream: replication_stream(),
+            primary_id: "nas-primary".to_string(),
+            primary_term,
+            through_sequence: observation().sequence,
+            through_content_digest: receipt(ReceiptDisposition::DurablyStored).content_digest,
+            rolling_chain_digest: ContentDigest([4; 32]),
+            disposition: ReceiptDisposition::DurablyStored,
+            durable_lsn: 123,
+            signing_key_id: "2026-q3".to_string(),
+            signature: vec![1; ED25519_SIGNATURE_BYTES],
+        }
+    }
+
+    fn expected_cumulative_ack<'a>(
+        ack: &'a CumulativePrimaryAck,
+        minimum_primary_term: u64,
+    ) -> ExpectedCumulativeAck<'a> {
+        ExpectedCumulativeAck {
+            stream: &ack.stream,
+            primary_id: &ack.primary_id,
+            minimum_primary_term,
+            through_sequence: ack.through_sequence,
+            through_content_digest: ack.through_content_digest,
+            rolling_chain_digest: ack.rolling_chain_digest,
+        }
+    }
+
+    fn verified_cumulative_ack(primary_term: u64) -> VerifiedCumulativeAck {
+        let ack = cumulative_ack(primary_term);
+        let expected = expected_cumulative_ack(&ack, 0);
+        verify_cumulative_ack(ack.clone(), expected, &AcceptCumulativeSignature).unwrap()
+    }
+
     #[test]
     fn unsigned_receipt_can_be_canonically_signed_and_verified() {
         let mut signed_receipt = receipt(ReceiptDisposition::DurablyStored);
@@ -813,6 +1727,160 @@ mod tests {
         assert_eq!(verified.receipt().record, expected_record);
     }
 
+    #[test]
+    fn cumulative_chain_is_deterministic_and_bound_to_stream_and_offer() {
+        let stream = replication_stream();
+        let seed = cumulative_chain_seed(&stream).unwrap();
+        assert_eq!(seed, cumulative_chain_seed(&stream).unwrap());
+        assert_eq!(
+            seed,
+            ContentDigest([
+                0xdc, 0x30, 0xef, 0xbc, 0x10, 0x6e, 0x94, 0x7b, 0x51, 0xe0, 0x89, 0xd6, 0xe3, 0xe5,
+                0x04, 0x3d, 0x10, 0xcd, 0xab, 0x87, 0x2e, 0xf8, 0x1d, 0x4e, 0x48, 0xbd, 0xff, 0xa0,
+                0xa5, 0x8b, 0x76, 0xfb,
+            ])
+        );
+
+        let offer = replication_offer(0);
+        let first = cumulative_chain_next(&stream, seed, &offer).unwrap();
+        assert_eq!(first, cumulative_chain_next(&stream, seed, &offer).unwrap());
+        assert_eq!(
+            first,
+            ContentDigest([
+                0x23, 0x7c, 0x67, 0x4b, 0xc7, 0xc6, 0xdb, 0xcd, 0x44, 0x63, 0xe7, 0xa6, 0x02, 0x95,
+                0x0d, 0x25, 0xe1, 0x2c, 0x7c, 0x06, 0xb5, 0x23, 0xa8, 0x88, 0x7e, 0x76, 0x70, 0xa8,
+                0x47, 0xe1, 0x68, 0x9f,
+            ])
+        );
+
+        let mut changed_stream = stream.clone();
+        changed_stream.journal_id = [8; 16];
+        assert_ne!(seed, cumulative_chain_seed(&changed_stream).unwrap());
+        assert_eq!(
+            cumulative_chain_next(&changed_stream, seed, &offer),
+            Err(CumulativeAckValidationError::WrongStream)
+        );
+
+        let mut changed_offer = offer.clone();
+        changed_offer.content_digest = ContentDigest([9; 32]);
+        assert_ne!(
+            first,
+            cumulative_chain_next(&stream, seed, &changed_offer).unwrap()
+        );
+    }
+
+    #[test]
+    fn cumulative_ack_signing_is_canonical_and_detects_signed_field_tampering() {
+        let mut signed = cumulative_ack(7);
+        signed.signature.clear();
+        let signing_bytes = signed.signing_bytes().unwrap();
+        assert_eq!(signing_bytes, signed.signing_bytes().unwrap());
+        assert_eq!(
+            sha256(&signing_bytes),
+            [
+                0x5f, 0x30, 0xdb, 0xbf, 0x89, 0x25, 0xab, 0x74, 0x11, 0x75, 0x64, 0xc0, 0x88, 0x3c,
+                0x67, 0xe0, 0xe5, 0x95, 0x29, 0x55, 0xda, 0x7d, 0xbb, 0x8d, 0x30, 0x7e, 0x9d, 0xe9,
+                0x51, 0xdf, 0x42, 0x23,
+            ]
+        );
+        let signature = vec![0xa5; ED25519_SIGNATURE_BYTES];
+        signed.signature.clone_from(&signature);
+        let expected_stream = signed.stream.clone();
+        let expected_primary = signed.primary_id.clone();
+        let expected_sequence = signed.through_sequence;
+        let expected_content = signed.through_content_digest;
+        let expected_chain = signed.rolling_chain_digest;
+        let verifier = ExactCumulativeSignature {
+            key_id: signed.signing_key_id.clone(),
+            signing_bytes,
+            signature,
+        };
+        let expected = || ExpectedCumulativeAck {
+            stream: &expected_stream,
+            primary_id: &expected_primary,
+            minimum_primary_term: 7,
+            through_sequence: expected_sequence,
+            through_content_digest: expected_content,
+            rolling_chain_digest: expected_chain,
+        };
+
+        verify_cumulative_ack(signed.clone(), expected(), &verifier).unwrap();
+
+        let mut tampered = signed.clone();
+        tampered.durable_lsn += 1;
+        assert_eq!(
+            verify_cumulative_ack(tampered, expected(), &verifier),
+            Err(CumulativeAckValidationError::InvalidSignature)
+        );
+        let mut tampered = signed.clone();
+        tampered.disposition = ReceiptDisposition::DurablyStoredConflict;
+        assert_eq!(
+            verify_cumulative_ack(tampered, expected(), &verifier),
+            Err(CumulativeAckValidationError::InvalidSignature)
+        );
+        let mut tampered = signed.clone();
+        tampered.primary_term += 1;
+        assert_eq!(
+            verify_cumulative_ack(tampered, expected(), &verifier),
+            Err(CumulativeAckValidationError::InvalidSignature)
+        );
+        let mut tampered = signed;
+        tampered.signing_key_id = "other-key".to_string();
+        assert_eq!(
+            verify_cumulative_ack(tampered, expected(), &verifier),
+            Err(CumulativeAckValidationError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn cumulative_ack_rejects_wrong_stream_sequence_content_chain_and_term() {
+        let ack = cumulative_ack(7);
+        let expected_stream = ack.stream.clone();
+        let expected_primary = ack.primary_id.clone();
+        let expected_sequence = ack.through_sequence;
+        let expected_content = ack.through_content_digest;
+        let expected_chain = ack.rolling_chain_digest;
+        let expected = || ExpectedCumulativeAck {
+            stream: &expected_stream,
+            primary_id: &expected_primary,
+            minimum_primary_term: 7,
+            through_sequence: expected_sequence,
+            through_content_digest: expected_content,
+            rolling_chain_digest: expected_chain,
+        };
+
+        let mut wrong = ack.clone();
+        wrong.stream.journal_id = [9; 16];
+        assert_eq!(
+            verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
+            Err(CumulativeAckValidationError::WrongStream)
+        );
+        let mut wrong = ack.clone();
+        wrong.through_sequence += 1;
+        assert_eq!(
+            verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
+            Err(CumulativeAckValidationError::WrongSequence)
+        );
+        let mut wrong = ack.clone();
+        wrong.through_content_digest = ContentDigest([10; 32]);
+        assert_eq!(
+            verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
+            Err(CumulativeAckValidationError::WrongContent)
+        );
+        let mut wrong = ack.clone();
+        wrong.rolling_chain_digest = ContentDigest([11; 32]);
+        assert_eq!(
+            verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
+            Err(CumulativeAckValidationError::WrongChain)
+        );
+        let mut wrong = ack;
+        wrong.primary_term = 6;
+        assert_eq!(
+            verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
+            Err(CumulativeAckValidationError::PrimaryTermRollback)
+        );
+    }
+
     fn verified(disposition: ReceiptDisposition) -> VerifiedReceipt {
         let record = observation();
         let content_digest = receipt(disposition).content_digest;
@@ -838,6 +1906,10 @@ mod tests {
             "blockzilla-ingest-{label}-{}-{unique}.acks.wal",
             std::process::id()
         ))
+    }
+
+    fn cumulative_ack_wal_path(label: &str) -> PathBuf {
+        receipt_wal_path(&format!("cumulative-{label}"))
     }
 
     fn durable_spool_record(label: &str) -> (PathBuf, DurableSpoolRecord) {
@@ -927,6 +1999,161 @@ mod tests {
             ),
             RecordGcEligibility::NotDurable
         );
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_becomes_durable_only_through_its_synced_wal() {
+        let path = cumulative_ack_wal_path("durable");
+        let (spool_root, local_record) = durable_spool_record("cumulative-durable-record");
+        let mut wal = CumulativeAckWal::open(&path).unwrap();
+        let durable = wal
+            .commit_verified(verified_cumulative_ack(5), &local_record)
+            .unwrap();
+
+        assert_eq!(durable.ack().primary_term, 5);
+        assert_eq!(durable.local_location(), local_record.location());
+        assert_eq!(wal.highest_primary_term("solana-mainnet"), Some(5));
+        assert!(std::fs::metadata(&path).unwrap().len() > CUMULATIVE_ACK_WAL_HEADER_LEN);
+
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_wal_rejects_primary_term_rollback_after_restart() {
+        let path = cumulative_ack_wal_path("term-rollback");
+        let (spool_root, local_record) = durable_spool_record("term-rollback-record");
+        {
+            let mut wal = CumulativeAckWal::open(&path).unwrap();
+            wal.commit_verified(verified_cumulative_ack(5), &local_record)
+                .unwrap();
+        }
+        let durable_len = std::fs::metadata(&path).unwrap().len();
+        let mut wal = CumulativeAckWal::open(&path).unwrap();
+        assert_eq!(wal.highest_primary_term("solana-mainnet"), Some(5));
+        let error = wal
+            .commit_verified(verified_cumulative_ack(4), &local_record)
+            .unwrap_err();
+        assert!(error.to_string().contains("primary term rollback"));
+        assert!(!wal.is_poisoned());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), durable_len);
+
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_wal_fences_terms_across_primary_identity_changes() {
+        let path = cumulative_ack_wal_path("cross-primary-term-fence");
+        let (spool_root, local_record) = durable_spool_record("cross-primary-term-record");
+        {
+            let mut standby = cumulative_ack(6);
+            standby.primary_id = "nas-standby".to_owned();
+            let expected = expected_cumulative_ack(&standby, 6);
+            let verified =
+                verify_cumulative_ack(standby.clone(), expected, &AcceptCumulativeSignature)
+                    .unwrap();
+            let mut wal = CumulativeAckWal::open(&path).unwrap();
+            wal.commit_verified(verified, &local_record).unwrap();
+            assert_eq!(wal.highest_primary_term("solana-mainnet"), Some(6));
+        }
+
+        let old_primary = cumulative_ack(5);
+        let expected = expected_cumulative_ack(&old_primary, 5);
+        let verified =
+            verify_cumulative_ack(old_primary.clone(), expected, &AcceptCumulativeSignature)
+                .unwrap();
+        let mut wal = CumulativeAckWal::open(&path).unwrap();
+        let error = wal.commit_verified(verified, &local_record).unwrap_err();
+        assert!(error.to_string().contains("primary term rollback"));
+
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_wal_rejects_same_sequence_with_a_different_chain() {
+        let path = cumulative_ack_wal_path("chain-reuse");
+        let (spool_root, local_record) = durable_spool_record("chain-reuse-record");
+        let mut wal = CumulativeAckWal::open(&path).unwrap();
+        wal.commit_verified(verified_cumulative_ack(5), &local_record)
+            .unwrap();
+        let durable_len = std::fs::metadata(&path).unwrap().len();
+
+        let mut changed = cumulative_ack(5);
+        changed.rolling_chain_digest = ContentDigest([12; 32]);
+        let expected = expected_cumulative_ack(&changed, 5);
+        let verified =
+            verify_cumulative_ack(changed.clone(), expected, &AcceptCumulativeSignature).unwrap();
+        let error = wal.commit_verified(verified, &local_record).unwrap_err();
+        assert!(error.to_string().contains("different digest chain"));
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), durable_len);
+
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_wal_truncates_partial_crash_tail_and_retains_term_fence() {
+        let path = cumulative_ack_wal_path("crash-tail");
+        let (spool_root, local_record) = durable_spool_record("crash-tail-record");
+        let durable_len = {
+            let mut wal = CumulativeAckWal::open(&path).unwrap();
+            wal.commit_verified(verified_cumulative_ack(8), &local_record)
+                .unwrap();
+            std::fs::metadata(&path).unwrap().len()
+        };
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(CUMULATIVE_ACK_FRAME_MAGIC).unwrap();
+        file.write_all(&CUMULATIVE_ACK_FRAME_VERSION.to_le_bytes()[..1])
+            .unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        let mut wal = CumulativeAckWal::open(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), durable_len);
+        assert_eq!(wal.highest_primary_term("solana-mainnet"), Some(8));
+        assert!(
+            wal.commit_verified(verified_cumulative_ack(7), &local_record)
+                .unwrap_err()
+                .to_string()
+                .contains("primary term rollback")
+        );
+
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(spool_root).unwrap();
+    }
+
+    #[test]
+    fn committed_cumulative_ack_corruption_fails_closed_without_truncation() {
+        let path = cumulative_ack_wal_path("corrupt");
+        let (spool_root, local_record) = durable_spool_record("cumulative-corrupt-record");
+        {
+            let mut wal = CumulativeAckWal::open(&path).unwrap();
+            wal.commit_verified(verified_cumulative_ack(5), &local_record)
+                .unwrap();
+        }
+        let original_len = std::fs::metadata(&path).unwrap().len();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(std::io::SeekFrom::Start(CUMULATIVE_ACK_WAL_HEADER_LEN))
+            .unwrap();
+        file.write_all(b"X").unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        assert!(CumulativeAckWal::open(&path).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), original_len);
+        std::fs::remove_file(path).unwrap();
         std::fs::remove_dir_all(spool_root).unwrap();
     }
 

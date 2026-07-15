@@ -14,6 +14,7 @@ anyhow = "1.0.102"
 ahash = "0.8.12"
 blockzilla-format = { path = "../blockzilla-format" }
 clap = { version = "4.6.1", features = ["derive"] }
+ed25519-dalek = { version = "3.0.0", features = ["pem"] }
 five8 = "1.0.0"
 futures = "0.3.32"
 gxhash = "3.5.0"
@@ -33,3 +34,4 @@ wincode = "0.5.4"
 yellowstone-grpc-client = "13.1.0"
 yellowstone-grpc-proto = "12.4.0"
 zstd = "0.13.3"
+zeroize = "1.9.0"
