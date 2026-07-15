@@ -12,7 +12,7 @@
       "server_private_key_file": "/run/secrets/blockzilla-primary.key",
       "client_ca_file": "/etc/blockzilla/tls/replica-ca.crt",
       "allowed_nodes_file": "/etc/blockzilla/replication/allowed-nodes.json",
-      "primary_term_file": "/data/blockzilla-ingest-primary/primary-term",
+      "primary_term_file": "/data/blockzilla-ingest-control/primary-term",
       "receipt_signing_key_id": "receipt-2026-q3",
       "receipt_signing_key": {
         "provider": "file",
@@ -26,6 +26,8 @@
       "max_uncompressed_event_bytes": 67108864,
       "max_concurrent_requests": 2,
       "max_open_streams": 64,
+      "max_known_streams": 256,
+      "tls_handshake_timeout_ms": 10000,
       "request_idle_timeout_ms": 15000,
       "request_total_timeout_ms": 60000
     }

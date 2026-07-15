@@ -19,7 +19,7 @@ use blockzilla_live_producer::{
         materialize_grpc_raw_blocks, record_grpc_raw_blocks, seed_grpc_raw_generation,
         verify_grpc_raw_poh,
     },
-    ingest::IngestConfig,
+    ingest::{IngestConfig, RawReplicationServerRuntime, load_ingest_receiver_config},
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
         sync_epoch_info,
@@ -64,6 +64,8 @@ enum Command {
     BenchFixture(BenchFixtureArgs),
     /// Validate a redundant-ingest JSON config and print only its redacted summary.
     ValidateIngestConfig(ValidateIngestConfigArgs),
+    /// Run the bounded, mTLS-only durable inbound replication receiver.
+    ServeIngestReceiver(ServeIngestReceiverArgs),
 }
 
 #[derive(Debug, Args)]
@@ -77,6 +79,13 @@ struct RunArgs {
 
 #[derive(Debug, Args)]
 struct ValidateIngestConfigArgs {
+    #[arg(long)]
+    config: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ServeIngestReceiverArgs {
+    /// Strict schema-v2 primary ingest configuration containing role.replica_listener.
     #[arg(long)]
     config: std::path::PathBuf,
 }
@@ -932,9 +941,49 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&config.redacted_summary())?
             );
         }
+        Command::ServeIngestReceiver(args) => {
+            let config = load_ingest_receiver_config(&args.config)?;
+            let runtime = RawReplicationServerRuntime::from_ingest_config(&config)?;
+            tracing::info!(
+                bind = %runtime.bind_address(),
+                primary_term = runtime.primary_term(),
+                "starting mTLS ingest replication receiver"
+            );
+            runtime
+                .serve_with_shutdown(receiver_shutdown_signal())
+                .await?;
+            tracing::info!("mTLS ingest replication receiver stopped cleanly");
+        }
     }
 
     Ok(())
+}
+
+async fn receiver_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    tracing::error!(%error, "failed to install SIGTERM handler");
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                }
+            };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "failed to await interrupt signal");
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(%error, "failed to await interrupt signal");
+    }
 }
 
 fn init_tracing() {

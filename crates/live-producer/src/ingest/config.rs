@@ -72,6 +72,9 @@ pub struct ReplicaListenerConfig {
     pub max_uncompressed_event_bytes: u64,
     pub max_concurrent_requests: usize,
     pub max_open_streams: usize,
+    /// Persistent on-disk journal cap; prevents journal-id cycling from exhausting inodes.
+    pub max_known_streams: usize,
+    pub tls_handshake_timeout_ms: u64,
     pub request_idle_timeout_ms: u64,
     pub request_total_timeout_ms: u64,
 }
@@ -292,6 +295,8 @@ pub struct RedactedReplicaListenerSummary {
     pub max_uncompressed_event_bytes: u64,
     pub max_concurrent_requests: usize,
     pub max_open_streams: usize,
+    pub max_known_streams: usize,
+    pub tls_handshake_timeout_ms: u64,
     pub request_idle_timeout_ms: u64,
     pub request_total_timeout_ms: u64,
     pub max_in_flight_events: usize,
@@ -600,6 +605,11 @@ impl ReplicaListenerConfig {
             ("primary_term_file", &self.primary_term_file),
         ] {
             validate_absolute_file(path, &format!("{prefix}.{name}"), issues);
+            if path.starts_with(&spool.root) {
+                issues.push(format!(
+                    "{prefix}.{name} must be outside spool.root; the spool is an exclusive journal tree"
+                ));
+            }
         }
         validate_stable_id(
             &self.receipt_signing_key_id,
@@ -608,6 +618,17 @@ impl ReplicaListenerConfig {
         );
         self.receipt_signing_key
             .validate(&format!("{prefix}.receipt_signing_key"), issues);
+        if !matches!(self.receipt_signing_key, SecretRef::File { .. }) {
+            issues.push(format!(
+                "{prefix}.receipt_signing_key must use a private file, not an environment value"
+            ));
+        } else if let SecretRef::File { path } = &self.receipt_signing_key
+            && path.starts_with(&spool.root)
+        {
+            issues.push(format!(
+                "{prefix}.receipt_signing_key.path must be outside spool.root; the spool is an exclusive journal tree"
+            ));
+        }
         validate_nonzero_u64(
             self.max_wire_request_bytes,
             &format!("{prefix}.max_wire_request_bytes"),
@@ -648,6 +669,16 @@ impl ReplicaListenerConfig {
             &format!("{prefix}.max_open_streams"),
             issues,
         );
+        validate_nonzero_usize(
+            self.max_known_streams,
+            &format!("{prefix}.max_known_streams"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.tls_handshake_timeout_ms,
+            &format!("{prefix}.tls_handshake_timeout_ms"),
+            issues,
+        );
         validate_nonzero_u64(
             self.request_idle_timeout_ms,
             &format!("{prefix}.request_idle_timeout_ms"),
@@ -665,6 +696,14 @@ impl ReplicaListenerConfig {
         }
         if self.max_open_streams > 4_096 {
             issues.push(format!("{prefix}.max_open_streams must be <= 4096"));
+        }
+        if self.max_known_streams > 65_536 {
+            issues.push(format!("{prefix}.max_known_streams must be <= 65536"));
+        }
+        if self.max_known_streams < self.max_open_streams {
+            issues.push(format!(
+                "{prefix}.max_known_streams must be >= {prefix}.max_open_streams"
+            ));
         }
         for (name, value) in [
             ("max_wire_request_bytes", self.max_wire_request_bytes),
@@ -763,6 +802,8 @@ impl ReplicaListenerConfig {
             max_uncompressed_event_bytes: self.max_uncompressed_event_bytes,
             max_concurrent_requests: self.max_concurrent_requests,
             max_open_streams: self.max_open_streams,
+            max_known_streams: self.max_known_streams,
+            tls_handshake_timeout_ms: self.tls_handshake_timeout_ms,
             request_idle_timeout_ms: self.request_idle_timeout_ms,
             request_total_timeout_ms: self.request_total_timeout_ms,
             max_in_flight_events: self.max_in_flight_events().unwrap_or(usize::MAX),
@@ -795,6 +836,9 @@ impl ReplicaUpstreamConfig {
             }
             ReplicaAuthConfig::Bearer { credential } => {
                 credential.validate(&format!("{prefix}.auth.credential"), issues);
+                issues.push(format!(
+                    "{prefix}.auth.method must be mutual_tls for the raw replication protocol"
+                ));
             }
             ReplicaAuthConfig::Ed25519 {
                 key_id,
@@ -808,6 +852,9 @@ impl ReplicaUpstreamConfig {
                     &format!("{prefix}.auth.upstream_public_key_file"),
                     issues,
                 );
+                issues.push(format!(
+                    "{prefix}.auth.method must be mutual_tls for the raw replication protocol"
+                ));
             }
         }
 
@@ -1338,7 +1385,7 @@ mod tests {
                     "server_private_key_file": "/etc/blockzilla/tls/server.key",
                     "client_ca_file": "/etc/blockzilla/tls/replica-ca.crt",
                     "allowed_nodes_file": "/etc/blockzilla/auth/replicas.json",
-                    "primary_term_file": "/var/lib/blockzilla/ingress-spool/primary-term",
+                    "primary_term_file": "/var/lib/blockzilla/ingress-control/primary-term",
                     "receipt_signing_key_id": "receipt-2026-q3",
                     "receipt_signing_key": {
                         "provider": "file",
@@ -1352,6 +1399,8 @@ mod tests {
                     "max_uncompressed_event_bytes": 134_217_728u64,
                     "max_concurrent_requests": 2,
                     "max_open_streams": 64,
+                    "max_known_streams": 256,
+                    "tls_handshake_timeout_ms": 10_000,
                     "request_idle_timeout_ms": 15_000,
                     "request_total_timeout_ms": 60_000
                 }
@@ -1425,14 +1474,13 @@ mod tests {
             "upstream": {
                 "endpoint": "https://192.168.1.45:9555",
                 "tls": {
-                    "ca_file": "/etc/blockzilla/tls/primary-ca.crt"
+                    "ca_file": "/etc/blockzilla/tls/primary-ca.crt",
+                    "client_certificate_file": "/etc/blockzilla/tls/replica.crt",
+                    "client_private_key_file": "/etc/blockzilla/tls/replica.key",
+                    "server_name": "nas-primary"
                 },
                 "auth": {
-                    "method": "bearer",
-                    "credential": {
-                        "provider": "file",
-                        "path": "/etc/blockzilla/secrets/replication.token"
-                    }
+                    "method": "mutual_tls"
                 },
                 "trusted_receipt_keys": [
                     {
@@ -1510,6 +1558,20 @@ mod tests {
     }
 
     #[test]
+    fn replica_listener_control_files_must_stay_outside_the_journal_tree() {
+        let mut value = valid_primary_json();
+        value["role"]["replica_listener"]["primary_term_file"] =
+            json!("/var/lib/blockzilla/ingress-spool/primary-term");
+        value["role"]["replica_listener"]["receipt_signing_key"] = json!({
+            "provider": "file",
+            "path": "/var/lib/blockzilla/ingress-spool/receipt.key"
+        });
+        let error = validation_text(&value);
+        assert!(error.contains("primary_term_file must be outside spool.root"));
+        assert!(error.contains("receipt_signing_key.path must be outside spool.root"));
+    }
+
+    #[test]
     fn replica_listener_limits_are_nonzero_and_fit_spool_and_process_budgets() {
         let mut zero = valid_primary_json();
         let zero_listener = &mut zero["role"]["replica_listener"];
@@ -1521,6 +1583,8 @@ mod tests {
         zero_listener["max_uncompressed_event_bytes"] = json!(0);
         zero_listener["max_concurrent_requests"] = json!(0);
         zero_listener["max_open_streams"] = json!(0);
+        zero_listener["max_known_streams"] = json!(0);
+        zero_listener["tls_handshake_timeout_ms"] = json!(0);
         zero_listener["request_idle_timeout_ms"] = json!(0);
         zero_listener["request_total_timeout_ms"] = json!(0);
         let error = validation_text(&zero);
@@ -1532,12 +1596,18 @@ mod tests {
         assert!(error.contains("max_uncompressed_event_bytes must be non-zero"));
         assert!(error.contains("max_concurrent_requests must be non-zero"));
         assert!(error.contains("max_open_streams must be non-zero"));
+        assert!(error.contains("max_known_streams must be non-zero"));
+        assert!(error.contains("tls_handshake_timeout_ms must be non-zero"));
         assert!(error.contains("request_idle_timeout_ms must be non-zero"));
         assert!(error.contains("request_total_timeout_ms must be non-zero"));
 
         let mut incoherent = valid_primary_json();
         let listener = &mut incoherent["role"]["replica_listener"];
         listener["primary_term_file"] = json!("relative.term");
+        listener["receipt_signing_key"] = json!({
+            "provider": "env",
+            "variable": "BLOCKZILLA_RECEIPT_PRIVATE_KEY"
+        });
         listener["max_wire_request_bytes"] = json!(1_200_000_000u64);
         listener["max_batch_events"] = json!(100);
         listener["max_batch_compressed_bytes"] = json!(1_300_000_000u64);
@@ -1545,10 +1615,13 @@ mod tests {
         listener["max_compressed_event_bytes"] = json!(1_400_000_000u64);
         listener["max_uncompressed_event_bytes"] = json!(1_400_000_000u64);
         listener["max_concurrent_requests"] = json!(2);
+        listener["max_open_streams"] = json!(100);
+        listener["max_known_streams"] = json!(10);
         listener["request_idle_timeout_ms"] = json!(60_000);
         listener["request_total_timeout_ms"] = json!(30_000);
         let error = validation_text(&incoherent);
         assert!(error.contains("primary_term_file must be an absolute"));
+        assert!(error.contains("receipt_signing_key must use a private file"));
         assert!(error.contains(
             "max_compressed_event_bytes must be <= role.replica_listener.max_batch_compressed_bytes"
         ));
@@ -1558,6 +1631,9 @@ mod tests {
         assert!(error.contains("max_wire_request_bytes exceeds max_total_queue_bytes"));
         assert!(error.contains("in-flight request/decompression memory"));
         assert!(error.contains("in-flight batch events"));
+        assert!(
+            error.contains("max_known_streams must be >= role.replica_listener.max_open_streams")
+        );
         assert!(error.contains(
             "request_total_timeout_ms must be >= role.replica_listener.request_idle_timeout_ms"
         ));
@@ -1706,9 +1782,36 @@ mod tests {
         let mut value = valid_replica_json("replica");
         value["role"]["upstream"]["endpoint"] = json!("http://primary.example.net");
         value["role"]["upstream"]["auth"] = json!({ "method": "mutual_tls" });
+        value["role"]["upstream"]["tls"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_certificate_file");
+        value["role"]["upstream"]["tls"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_private_key_file");
         let error = validation_text(&value);
         assert!(error.contains("must use https:// or grpcs://"));
         assert!(error.contains("requires TLS client certificate"));
+    }
+
+    #[test]
+    fn replica_rejects_non_mtls_authentication_modes() {
+        let mut bearer = valid_replica_json("replica");
+        bearer["role"]["upstream"]["auth"] = json!({
+            "method": "bearer",
+            "credential": { "provider": "file", "path": "/run/secrets/replica.token" }
+        });
+        assert!(validation_text(&bearer).contains("must be mutual_tls"));
+
+        let mut ed25519 = valid_replica_json("replica");
+        ed25519["role"]["upstream"]["auth"] = json!({
+            "method": "ed25519",
+            "key_id": "replica-key",
+            "signing_key": { "provider": "file", "path": "/run/secrets/replica.key" },
+            "upstream_public_key_file": "/etc/blockzilla/keys/primary.pub"
+        });
+        assert!(validation_text(&ed25519).contains("must be mutual_tls"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod primary_term;
 pub mod receipt_crypto;
 pub mod receiver;
 pub mod replication;
+pub mod replication_service;
 pub mod replication_wire;
 pub mod spool;
 
@@ -15,5 +16,6 @@ pub use primary_term::*;
 pub use receipt_crypto::*;
 pub use receiver::*;
 pub use replication::*;
+pub use replication_service::*;
 pub use replication_wire::*;
 pub use spool::*;

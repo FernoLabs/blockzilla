@@ -256,6 +256,20 @@ fn ensure_secure_parent(path: &Path) -> Result<()> {
         "primary term parent is not a real directory: {}",
         path.display()
     );
+    #[cfg(unix)]
+    {
+        ensure!(
+            metadata.mode() & 0o022 == 0,
+            "primary term parent must not be group- or world-writable: {}",
+            path.display()
+        );
+        let effective_uid = unsafe { libc::geteuid() };
+        ensure!(
+            metadata.uid() == effective_uid || metadata.uid() == 0,
+            "primary term parent must be owned by this user or root: {}",
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -612,6 +626,18 @@ mod tests {
                 state_path.display()
             )
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_parent_directory_fails_closed_before_creating_state() {
+        let directory = TestDirectory::new();
+        fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o777)).unwrap();
+        let state_path = directory.join("primary.term");
+
+        assert!(PrimaryTermStore::new(&state_path).acquire().is_err());
+        assert!(!state_path.exists());
+        assert!(!sidecar_path(&state_path, LOCK_SUFFIX).unwrap().exists());
     }
 
     #[test]

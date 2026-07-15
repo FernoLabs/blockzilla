@@ -168,8 +168,11 @@ Current:
 - every accepted block is WAL-fsynced before relay publication;
 - the authenticated bounded live relay is implemented;
 - sealed generations can be copied and verified in the dedicated R2 bucket;
-- Blockzilla's durable raw receiver, signed ACK producer/verifier, and historical
-  reader are not deployed;
+- Blockzilla's bounded mTLS raw receiver and signed cumulative ACK producer are
+  implemented and locally tested, including crash recovery, persistent stream
+  limits, cancellation-safe admission, and disk-first durability ordering;
+- the Hetzner replication sender, its durable verified-ACK journal integration,
+  Blockzilla historical reader, and production deployment are not complete;
 - therefore local and remote durable-copy deletion must remain disabled.
 
 Target:

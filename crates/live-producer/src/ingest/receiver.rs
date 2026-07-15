@@ -6,13 +6,16 @@
 
 use std::{
     collections::VecDeque,
-    fs::{self, File, OpenOptions},
+    fs::{self, DirBuilder, File, OpenOptions},
     io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
-use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
@@ -104,6 +107,70 @@ pub struct RawReplicationRecord {
     pub uncompressed_len: u64,
 }
 
+/// Perform the complete CPU/memory-bounded validation needed before a service admits a brand-new
+/// persistent journal. This function never creates files or mutates receiver state.
+///
+/// `require_initial_sequence_zero` must be true only after the caller has established, under its
+/// journal-admission lock, that the stream has no existing durable directory.
+pub fn validate_raw_replication_batch(
+    records: &[RawReplicationRecord],
+    stream: &ReplicationStreamId,
+    limits: RawReceiverLimits,
+    require_initial_sequence_zero: bool,
+) -> Result<()> {
+    limits.validate()?;
+    cumulative_chain_seed(stream)
+        .map_err(|error| anyhow!("receiver stream identity is invalid: {error:?}"))?;
+    ensure!(!records.is_empty(), "receiver batch must not be empty");
+    ensure!(
+        records.len() <= limits.max_batch_records,
+        "receiver batch has {} records, maximum {}",
+        records.len(),
+        limits.max_batch_records
+    );
+    if require_initial_sequence_zero {
+        ensure!(
+            records[0].offer.record.sequence == 0,
+            "receiver stream must start at sequence 0, received {}",
+            records[0].offer.record.sequence
+        );
+    }
+
+    let mut compressed_total = 0u64;
+    let mut uncompressed_total = 0u64;
+    let mut previous_sequence: Option<u64> = None;
+    for record in records {
+        compressed_total = compressed_total
+            .checked_add(record.compressed_payload.len() as u64)
+            .context("receiver batch compressed-byte accounting overflow")?;
+        uncompressed_total = uncompressed_total
+            .checked_add(record.uncompressed_len)
+            .context("receiver batch uncompressed-byte accounting overflow")?;
+        ensure!(
+            compressed_total <= limits.max_batch_compressed_bytes,
+            "receiver batch compressed bytes exceed configured maximum"
+        );
+        ensure!(
+            uncompressed_total <= limits.max_batch_uncompressed_bytes,
+            "receiver batch uncompressed bytes exceed configured maximum"
+        );
+        if let Some(previous) = previous_sequence {
+            let expected = previous
+                .checked_add(1)
+                .context("receiver batch sequence exhausted")?;
+            ensure!(
+                record.offer.record.sequence == expected,
+                "receiver batch sequence is not contiguous: {} after {}",
+                record.offer.record.sequence,
+                previous
+            );
+        }
+        previous_sequence = Some(record.offer.record.sequence);
+        validate_raw_replication_record(record, stream, limits)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct RawReceiverConfig {
     pub spool_root: PathBuf,
@@ -118,6 +185,10 @@ pub struct RawReceiverConfig {
 
 impl RawReceiverConfig {
     fn validate(self) -> Result<Self> {
+        ensure!(
+            self.spool_root.is_absolute() && self.spool_root != Path::new("/"),
+            "receiver spool root must be an absolute non-root directory"
+        );
         ensure!(
             is_stable_receiver_id(&self.primary_id),
             "receiver primary id must be 1..=64 ASCII identifier characters"
@@ -174,12 +245,7 @@ pub struct BlockzillaRawReceiver {
 impl BlockzillaRawReceiver {
     pub fn open(config: RawReceiverConfig) -> Result<Self> {
         let config = config.validate()?;
-        fs::create_dir_all(&config.spool_root).with_context(|| {
-            format!(
-                "create Blockzilla receiver spool root {}",
-                config.spool_root.display()
-            )
-        })?;
+        ensure_receiver_spool_root_durable(&config.spool_root)?;
         let capacity_lock = open_receiver_capacity_lock(&config.spool_root)?;
         let _capacity_guard = ReceiverCapacityGuard::acquire(
             capacity_lock
@@ -629,6 +695,21 @@ fn validate_record_against_stream(
     stream: &ReplicationStreamId,
     limits: RawReceiverLimits,
 ) -> Result<ValidatedRawRecord> {
+    let metadata = validate_raw_replication_record(&record, stream, limits)?;
+    Ok(ValidatedRawRecord {
+        offer: record.offer,
+        compressed_payload: record.compressed_payload,
+        raw_protobuf_sha256: record.raw_protobuf_sha256,
+        uncompressed_len: record.uncompressed_len,
+        metadata,
+    })
+}
+
+fn validate_raw_replication_record(
+    record: &RawReplicationRecord,
+    stream: &ReplicationStreamId,
+    limits: RawReceiverLimits,
+) -> Result<IngressRecordMeta> {
     validate_offer_identity(&record.offer, stream)?;
     ensure!(
         record.compressed_payload.len() as u64 == record.offer.payload_len,
@@ -643,12 +724,17 @@ fn validate_record_against_stream(
             && record.uncompressed_len <= limits.max_uncompressed_record_bytes,
         "receiver uncompressed record length is outside configured bounds"
     );
-    validate_decoded_record(
-        record.offer,
-        record.compressed_payload,
+    let capacity = usize::try_from(record.uncompressed_len)
+        .context("receiver uncompressed record length exceeds addressable memory")?;
+    let raw = zstd::bulk::decompress(&record.compressed_payload, capacity)
+        .context("decompress receiver raw protobuf")?;
+    validate_decoded_record_with_raw(
+        &record.offer,
+        &record.compressed_payload,
         record.raw_protobuf_sha256,
         record.uncompressed_len,
         limits,
+        &raw,
     )
 }
 
@@ -672,14 +758,21 @@ fn validate_recovered_record(
         .context("decompress recovered receiver protobuf")?;
     record.uncompressed_len = raw.len() as u64;
     record.raw_protobuf_sha256 = Sha256::digest(&raw).into();
-    validate_decoded_record_with_raw(
-        record.offer,
-        record.compressed_payload,
+    let metadata = validate_decoded_record_with_raw(
+        &record.offer,
+        &record.compressed_payload,
         record.raw_protobuf_sha256,
         record.uncompressed_len,
         limits,
-        raw,
-    )
+        &raw,
+    )?;
+    Ok(ValidatedRawRecord {
+        offer: record.offer,
+        compressed_payload: record.compressed_payload,
+        raw_protobuf_sha256: record.raw_protobuf_sha256,
+        uncompressed_len: record.uncompressed_len,
+        metadata,
+    })
 }
 
 fn validate_offer_identity(offer: &ReplicationOffer, stream: &ReplicationStreamId) -> Result<()> {
@@ -704,35 +797,14 @@ fn validate_offer_identity(offer: &ReplicationOffer, stream: &ReplicationStreamI
     Ok(())
 }
 
-fn validate_decoded_record(
-    offer: ReplicationOffer,
-    compressed_payload: Vec<u8>,
-    raw_protobuf_sha256: [u8; 32],
-    uncompressed_len: u64,
-    limits: RawReceiverLimits,
-) -> Result<ValidatedRawRecord> {
-    let capacity = usize::try_from(uncompressed_len)
-        .context("receiver uncompressed record length exceeds addressable memory")?;
-    let raw = zstd::bulk::decompress(&compressed_payload, capacity)
-        .context("decompress receiver raw protobuf")?;
-    validate_decoded_record_with_raw(
-        offer,
-        compressed_payload,
-        raw_protobuf_sha256,
-        uncompressed_len,
-        limits,
-        raw,
-    )
-}
-
 fn validate_decoded_record_with_raw(
-    offer: ReplicationOffer,
-    compressed_payload: Vec<u8>,
+    offer: &ReplicationOffer,
+    compressed_payload: &[u8],
     raw_protobuf_sha256: [u8; 32],
     uncompressed_len: u64,
     limits: RawReceiverLimits,
-    raw: Vec<u8>,
-) -> Result<ValidatedRawRecord> {
+    raw: &[u8],
+) -> Result<IngressRecordMeta> {
     ensure!(
         uncompressed_len > 0 && uncompressed_len <= limits.max_uncompressed_record_bytes,
         "receiver uncompressed record length is outside configured bounds"
@@ -742,7 +814,7 @@ fn validate_decoded_record_with_raw(
         "receiver raw protobuf length differs from declared uncompressed length"
     );
     ensure!(
-        <[u8; 32]>::from(Sha256::digest(&raw)) == raw_protobuf_sha256,
+        <[u8; 32]>::from(Sha256::digest(raw)) == raw_protobuf_sha256,
         "receiver raw protobuf SHA-256 mismatch"
     );
     ensure!(
@@ -750,11 +822,11 @@ fn validate_decoded_record_with_raw(
             &offer.cluster_id,
             &offer.logical_key,
             offer.payload_format_version,
-            &compressed_payload,
+            compressed_payload,
         ) == offer.content_digest,
         "receiver replication offer content digest mismatch"
     );
-    let block = scan_subscribe_update_block(&raw)?;
+    let block = scan_subscribe_update_block(raw)?;
     let logical_key = LogicalKey::Block {
         slot: block.slot,
         blockhash: block.blockhash,
@@ -763,7 +835,7 @@ fn validate_decoded_record_with_raw(
         offer.logical_key == logical_key,
         "receiver protobuf block identity differs from replication offer"
     );
-    let metadata = IngressRecordMeta {
+    Ok(IngressRecordMeta {
         cluster_id: offer.cluster_id.clone(),
         observation: offer.record.clone(),
         source_id: offer.source_id.clone(),
@@ -771,13 +843,6 @@ fn validate_decoded_record_with_raw(
         payload_format_version: offer.payload_format_version,
         content_digest: offer.content_digest,
         payload_len: offer.payload_len,
-    };
-    Ok(ValidatedRawRecord {
-        offer,
-        compressed_payload,
-        raw_protobuf_sha256,
-        uncompressed_len,
-        metadata,
     })
 }
 
@@ -1864,6 +1929,102 @@ fn sync_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("sync receiver progress directory {}", path.display()))
 }
 
+/// Create the receiver root without leaving an acknowledged journal reachable only through an
+/// unsynced directory entry. Every missing component is installed one at a time and its parent is
+/// synced before the receiver can append data. Existing roots are revalidated and their immediate
+/// parent is synced as a conservative repair for a creator that may have crashed before fsync.
+pub(crate) fn ensure_receiver_spool_root_durable(path: &Path) -> Result<()> {
+    ensure!(
+        path.is_absolute() && path != Path::new("/"),
+        "receiver spool root must be an absolute non-root directory"
+    );
+
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    loop {
+        match fs::symlink_metadata(cursor) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    "receiver spool ancestor is not a real directory: {}",
+                    cursor.display()
+                );
+                break;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                missing.push(cursor.to_path_buf());
+                cursor = cursor.parent().with_context(|| {
+                    format!(
+                        "receiver spool root has no existing ancestor: {}",
+                        path.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect receiver spool ancestor {}", cursor.display())
+                });
+            }
+        }
+    }
+
+    for directory in missing.iter().rev() {
+        match create_receiver_directory(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("create receiver spool directory {}", directory.display())
+                });
+            }
+        }
+        validate_secure_receiver_root(directory, "receiver spool directory")?;
+        sync_directory(directory)?;
+        if let Some(parent) = directory.parent() {
+            sync_directory(parent)?;
+        }
+    }
+
+    validate_secure_receiver_root(path, "receiver spool root")?;
+    sync_directory(path)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn create_receiver_directory(path: &Path) -> io::Result<()> {
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path)
+}
+
+fn validate_secure_receiver_root(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "{label} must be a real directory: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        ensure!(
+            metadata.mode() & 0o022 == 0,
+            "{label} must not be group- or world-writable: {}",
+            path.display()
+        );
+        let effective_uid = unsafe { libc::geteuid() };
+        ensure!(
+            metadata.uid() == effective_uid || metadata.uid() == 0,
+            "{label} must be owned by this user or root: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn is_stable_receiver_id(value: &str) -> bool {
     let mut characters = value.chars();
     characters
@@ -2129,6 +2290,9 @@ mod tests {
     use super::*;
     use crate::ingest::ObservationId;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
 
     struct TestRoot(PathBuf);
@@ -2288,6 +2452,54 @@ mod tests {
             raw_protobuf_sha256: Sha256::digest(&raw).into(),
             uncompressed_len: raw.len() as u64,
         }
+    }
+
+    #[test]
+    fn stateless_new_stream_validation_never_creates_storage() {
+        let root = TestRoot::new("stateless-validation");
+        let config = config(&root, 4);
+        let valid = record(0, 100, 9);
+        validate_raw_replication_batch(
+            std::slice::from_ref(&valid),
+            &config.stream,
+            config.limits,
+            true,
+        )
+        .expect("validate complete initial record");
+        assert!(!root.0.exists());
+
+        let non_initial = record(1, 101, 10);
+        assert!(
+            validate_raw_replication_batch(
+                std::slice::from_ref(&non_initial),
+                &config.stream,
+                config.limits,
+                true,
+            )
+            .is_err()
+        );
+        let mut corrupt = valid;
+        corrupt.compressed_payload[0] ^= 0x80;
+        assert!(
+            validate_raw_replication_batch(
+                std::slice::from_ref(&corrupt),
+                &config.stream,
+                config.limits,
+                true,
+            )
+            .is_err()
+        );
+        assert!(!root.0.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receiver_rejects_a_world_writable_existing_root() {
+        let root = TestRoot::new("unsafe-root");
+        fs::create_dir(&root.0).unwrap();
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(BlockzillaRawReceiver::open(config(&root, 4)).is_err());
+        assert!(!root.0.join(RECEIVER_CAPACITY_LOCK_FILE).exists());
     }
 
     fn spool_segment_bytes(journal: &Path) -> u64 {
