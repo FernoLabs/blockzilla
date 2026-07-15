@@ -1,0 +1,1077 @@
+--- a/crates/hivezilla/src/nas_pipeline.rs
++++ b/crates/hivezilla/src/nas_pipeline.rs
+@@ -77,7 +77,8 @@
+ const MIN_CAR_DOWNLOAD_PROJECTION_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+ const MIN_SCAN_OUTPUT_PROJECTION_BYTES: u64 = 1024 * 1024 * 1024;
+ const MIN_FINALIZER_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024;
+-const LEGACY_COMPACT_MEMORY_MIB: u64 = 3_072;
++const LEGACY_COMPACT_MIN_MEMORY_MIB: u64 = 1_024;
++const LEGACY_COMPACT_MEMORY_OVERHEAD_MIB: u64 = 384;
+ const LEGACY_COMPACT_OWNERSHIP_KIND: &str = "historical_compact_reuse";
+ const LEGACY_BLOCKHASH_LOCK_DIR: &str = ".blockhash.lock";
+ const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
+@@ -101,6 +102,7 @@
+     pub live_root: PathBuf,
+     pub state_root: PathBuf,
+     pub scan_concurrency: usize,
++    pub legacy_compact_concurrency: usize,
+     pub scan_memory_mib: u64,
+     pub finalizer_memory_mib: u64,
+     pub memory_reserve_mib: u64,
+@@ -414,7 +416,7 @@
+ struct RuntimeState {
+     acquisitions: BTreeMap<u64, ManagedChild>,
+     scans: BTreeMap<u64, ManagedChild>,
+-    legacy_compact: Option<ManagedChild>,
++    legacy_compacts: BTreeMap<u64, ManagedChild>,
+     finalizer: Option<ManagedChild>,
+     errors: VecDeque<PipelineError>,
+     failures: BTreeMap<String, String>,
+@@ -1149,7 +1151,7 @@
+         .acquisitions
+         .values()
+         .chain(runtime.scans.values())
+-        .chain(runtime.legacy_compact.iter())
++        .chain(runtime.legacy_compacts.values())
+         .chain(runtime.finalizer.iter())
+         .find(|child| child.kind.key() == key)
+         .and_then(|child| child.pid);
+@@ -1906,10 +1908,7 @@
+     let scan_marker = scan_marker_is_valid(&output.join(SCAN_MARKER));
+     let ambiguous_car = car_paths_ambiguous(&config.car_root, epoch);
+     let active_scan = runtime.scans.contains_key(&epoch);
+-    let active_legacy_compact = matches!(
+-        runtime.legacy_compact.as_ref().map(|child| &child.kind),
+-        Some(ChildKind::HistoricalCompactReuse { epoch: active }) if *active == epoch
+-    );
++    let active_legacy_compact = runtime.legacy_compacts.contains_key(&epoch);
+     let active_acquisition = runtime.acquisitions.get(&epoch);
+     let adopted_acquisition = active_acquisition
+         .is_none()
+@@ -2324,6 +2323,22 @@
+         return true;
+     };
+     let output = config.archive_root.join(format!("epoch-{previous}"));
++    if let Some(owner) = read_ownership(&output) {
++        // Generated reader files can become structurally complete just before
++        // their child exits. Only the controller's completed commit is a safe
++        // predecessor boundary; active and failed pipeline-owned predecessors
++        // must not release their successor. A successor with its own durable
++        // prev tail bypasses this function in legacy_compact_dependency_ready.
++        if owner.id != previous.to_string()
++            || owner.state != "complete"
++            || !matches!(
++                owner.kind.as_str(),
++                "historical_scan" | "historical_finalizer" | LEGACY_COMPACT_OWNERSHIP_KIND
++            )
++        {
++            return false;
++        }
++    }
+     historical_archive_core_complete(&output, false)
+         && blockhash_registry_valid(&output)
+         && (hot_block_index_matches_blob_and_blockhashes(&output)
+@@ -3349,39 +3364,118 @@
+     })
+ }
+ 
+-fn legacy_compact_admission_blocked_reason(
+-    config: &NasPipelineConfig,
+-    machine: &MachineSnapshot,
+-    epoch: &EpochSnapshot,
+-) -> Option<String> {
+-    let disk_reserve = config.disk_reserve_gib.saturating_mul(1024 * 1024 * 1024);
+-    let projected_disk = scan_remaining_disk_projection(epoch);
+-    if machine.disk_total_bytes == 0
+-        || machine.disk_available_bytes < disk_reserve.saturating_add(projected_disk)
+-    {
+-        return Some(format!(
+-            "legacy compact/reuse disk admission blocked: available {:.1} GiB, projected output {:.1} GiB, reserve {} GiB",
+-            machine.disk_available_bytes as f64 / 1024f64.powi(3),
+-            projected_disk as f64 / 1024f64.powi(3),
+-            config.disk_reserve_gib,
+-        ));
++fn legacy_compact_memory_reservation_bytes(output: &Path) -> u64 {
++    let sidecars = [
++        REGISTRY_FILE,
++        REGISTRY_INDEX_FILE,
++        REGISTRY_COUNTS_FILE,
++        BLOCKHASH_REGISTRY_FILE,
++    ]
++    .iter()
++    .fold(0u64, |sum, name| {
++        sum.saturating_add(file_len(&output.join(name)))
++    });
++    sidecars
++        .saturating_add(LEGACY_COMPACT_MEMORY_OVERHEAD_MIB.saturating_mul(1024 * 1024))
++        .max(LEGACY_COMPACT_MIN_MEMORY_MIB.saturating_mul(1024 * 1024))
++}
++
++#[derive(Debug)]
++struct LegacyCompactAdmission {
++    disk_headroom: Option<u64>,
++    memory_headroom: Option<u64>,
++}
++
++impl LegacyCompactAdmission {
++    fn new(
++        config: &NasPipelineConfig,
++        machine: &MachineSnapshot,
++        epochs: &[EpochSnapshot],
++        active_rss: &BTreeMap<u64, u64>,
++    ) -> Self {
++        let active_disk_growth = active_rss.keys().fold(0u64, |sum, epoch| {
++            sum.saturating_add(
++                epochs
++                    .iter()
++                    .find(|candidate| candidate.epoch == *epoch)
++                    .map(scan_remaining_disk_projection)
++                    .unwrap_or(MIN_SCAN_OUTPUT_PROJECTION_BYTES),
++            )
++        });
++        let active_memory_growth = active_rss.iter().fold(0u64, |sum, (epoch, rss)| {
++            let output = epochs
++                .iter()
++                .find(|candidate| candidate.epoch == *epoch)
++                .map(|candidate| candidate.output_path.clone())
++                .unwrap_or_else(|| config.archive_root.join(format!("epoch-{epoch}")));
++            // MemAvailable already excludes current RSS. Reserve only the
++            // lane's possible future growth; swap is deliberately not treated
++            // as admission headroom.
++            sum.saturating_add(
++                legacy_compact_memory_reservation_bytes(&output).saturating_sub(*rss),
++            )
++        });
++        let disk_reserve = config.disk_reserve_gib.saturating_mul(1024 * 1024 * 1024);
++        let memory_reserve = config.memory_reserve_mib.saturating_mul(1024 * 1024);
++        Self {
++            disk_headroom: (machine.disk_total_bytes > 0).then(|| {
++                machine
++                    .disk_available_bytes
++                    .saturating_sub(disk_reserve)
++                    .saturating_sub(active_disk_growth)
++            }),
++            memory_headroom: (machine.memory_total_bytes > 0).then(|| {
++                machine
++                    .memory_available_bytes
++                    .saturating_sub(memory_reserve)
++                    .saturating_sub(active_memory_growth)
++            }),
++        }
+     }
+-    if machine.memory_total_bytes == 0 {
+-        return Some(
+-            "legacy compact/reuse memory admission blocked: memory capacity unavailable"
+-                .to_string(),
+-        );
++
++    fn blocked_reason(
++        &self,
++        config: &NasPipelineConfig,
++        machine: &MachineSnapshot,
++        epoch: &EpochSnapshot,
++    ) -> Option<String> {
++        let projected_disk = scan_remaining_disk_projection(epoch);
++        if self
++            .disk_headroom
++            .is_none_or(|headroom| headroom < projected_disk)
++        {
++            return Some(format!(
++                "legacy compact/reuse disk admission blocked: available {:.1} GiB, next remaining output {:.1} GiB, reserve {} GiB",
++                machine.disk_available_bytes as f64 / 1024f64.powi(3),
++                projected_disk as f64 / 1024f64.powi(3),
++                config.disk_reserve_gib,
++            ));
++        }
++        let estimate = legacy_compact_memory_reservation_bytes(&epoch.output_path);
++        if self
++            .memory_headroom
++            .is_none_or(|headroom| headroom < estimate)
++        {
++            return Some(format!(
++                "legacy compact/reuse memory admission blocked: available {:.1} MiB, next reservation {:.1} MiB, reserve {} MiB",
++                machine.memory_available_bytes as f64 / 1024f64.powi(2),
++                estimate as f64 / 1024f64.powi(2),
++                config.memory_reserve_mib,
++            ));
++        }
++        None
+     }
+-    let reserve = config.memory_reserve_mib.saturating_mul(1024 * 1024);
+-    let estimate = LEGACY_COMPACT_MEMORY_MIB.saturating_mul(1024 * 1024);
+-    (machine.memory_available_bytes < reserve.saturating_add(estimate)).then(|| {
+-        format!(
+-            "legacy compact/reuse memory admission blocked: available {:.1} MiB, estimate {} MiB, reserve {} MiB",
+-            machine.memory_available_bytes as f64 / 1024f64.powi(2),
+-            LEGACY_COMPACT_MEMORY_MIB,
+-            config.memory_reserve_mib,
+-        )
+-    })
++
++    fn reserve(&mut self, epoch: &EpochSnapshot) {
++        let projected_disk = scan_remaining_disk_projection(epoch);
++        let estimate = legacy_compact_memory_reservation_bytes(&epoch.output_path);
++        if let Some(headroom) = &mut self.disk_headroom {
++            *headroom = headroom.saturating_sub(projected_disk);
++        }
++        if let Some(headroom) = &mut self.memory_headroom {
++            *headroom = headroom.saturating_sub(estimate);
++        }
++    }
+ }
+ 
+ fn finalizer_is_admissible(
+@@ -3836,13 +3930,12 @@
+                 .map(|(epoch, child)| lane_from_child(child, Some(*epoch), None, now, runtime)),
+         )
+         .collect::<Vec<_>>();
+-    if let Some(compact) = runtime.legacy_compact.as_ref() {
+-        let epoch = match compact.kind {
+-            ChildKind::HistoricalCompactReuse { epoch } => Some(epoch),
+-            _ => None,
+-        };
+-        lanes.push(lane_from_child(compact, epoch, None, now, runtime));
+-    }
++    lanes.extend(
++        runtime
++            .legacy_compacts
++            .iter()
++            .map(|(epoch, compact)| lane_from_child(compact, Some(*epoch), None, now, runtime)),
++    );
+     if let Some(finalizer) = runtime.finalizer.as_ref() {
+         let (epoch, capture_id) = match &finalizer.kind {
+             ChildKind::CarDownload { epoch, .. } | ChildKind::CarPreflight { epoch, .. } => {
+@@ -3902,9 +3995,100 @@
+         rss_bytes,
+         started_unix_secs: Some(child.started_unix_secs),
+         updated_unix_secs: now,
++    }
++}
++
++fn active_legacy_compact_rss(
++    snapshot: &PipelineSnapshot,
++    runtime: &RuntimeState,
++) -> BTreeMap<u64, u64> {
++    let mut active = runtime
++        .legacy_compacts
++        .iter()
++        .map(|(epoch, child)| {
++            (
++                *epoch,
++                child.pid.and_then(process_rss_bytes).unwrap_or_default(),
++            )
++        })
++        .collect::<BTreeMap<_, _>>();
++    for lane in snapshot
++        .lanes
++        .iter()
++        .filter(|lane| lane.kind == "historical_compact_reuse")
++    {
++        let Some(epoch) = lane.epoch else {
++            continue;
++        };
++        let rss = lane
++            .rss_bytes
++            .or(lane.progress.rss_bytes)
++            .unwrap_or_default();
++        active
++            .entry(epoch)
++            .and_modify(|managed_rss| *managed_rss = (*managed_rss).max(rss))
++            .or_insert(rss);
+     }
++    active
+ }
+ 
++fn active_ordinary_scan_count(snapshot: &PipelineSnapshot, runtime: &RuntimeState) -> usize {
++    let mut active = runtime.scans.keys().copied().collect::<BTreeSet<_>>();
++    active.extend(
++        snapshot
++            .lanes
++            .iter()
++            .filter(|lane| lane.kind == "historical_scan")
++            .filter_map(|lane| lane.epoch),
++    );
++    active.len()
++}
++
++async fn top_up_legacy_compacts(
++    config: &NasPipelineConfig,
++    snapshot: &PipelineSnapshot,
++    runtime: &mut RuntimeState,
++) -> usize {
++    let active_rss = active_legacy_compact_rss(snapshot, runtime);
++    let mut active_epochs = active_rss.keys().copied().collect::<BTreeSet<_>>();
++    let mut admission =
++        LegacyCompactAdmission::new(config, &snapshot.machine, &snapshot.epochs, &active_rss);
++    let mut started = 0usize;
++    for epoch in snapshot.epochs.iter().filter(|epoch| {
++        legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
++    }) {
++        if active_epochs.len() >= config.legacy_compact_concurrency {
++            break;
++        }
++        if active_epochs.contains(&epoch.epoch)
++            || admission
++                .blocked_reason(config, &snapshot.machine, epoch)
++                .is_some()
++        {
++            // A large or otherwise blocked range head must not prevent a
++            // smaller independent range from using the remaining envelope.
++            continue;
++        }
++        match spawn_legacy_compact_reuse(config, epoch).await {
++            Ok(child) => {
++                runtime.legacy_compacts.insert(epoch.epoch, child);
++                active_epochs.insert(epoch.epoch);
++                admission.reserve(epoch);
++                started = started.saturating_add(1);
++            }
++            Err(error) => {
++                // Treat spawn failures like every other child failure, but do
++                // not impose head-of-line blocking on independent ranges.
++                let key = format!("compact_reuse:{}", epoch.epoch);
++                let message = format!("{key} spawn failed: {error:#}");
++                set_runtime_failure(config, runtime, key, message.clone());
++                record_error(config, runtime, "legacy_compact", message);
++            }
++        }
++    }
++    started
++}
++
+ async fn schedule_work(
+     config: &NasPipelineConfig,
+     snapshot: &PipelineSnapshot,
+@@ -3916,17 +4100,7 @@
+     if !snapshot.inventory.complete {
+         return Ok(());
+     }
+-    let legacy_compact_active = runtime.legacy_compact.is_some()
+-        || snapshot
+-            .lanes
+-            .iter()
+-            .any(|lane| lane.kind == "historical_compact_reuse");
+-    // The legacy rewrite has its own conservative memory envelope and is
+-    // deliberately exclusive. An adopted child after controller restart is
+-    // represented by the same distinct lane, so it is never duplicated.
+-    if legacy_compact_active {
+-        return Ok(());
+-    }
++    let active_legacy_compacts = active_legacy_compact_rss(snapshot, runtime);
+     let finalizer_active = runtime.finalizer.is_some()
+         || snapshot
+             .epochs
+@@ -3940,10 +4114,7 @@
+         return Ok(());
+     }
+ 
+-    // A closed capture with explicit READY approval already had live priority
+-    // before the sweep policy. Preserve that narrow exception, but never overlap
+-    // it with an acquisition or scan. Historical finalizers remain deferred.
+-    let adopted_active_scans = active_scan_count(&snapshot.epochs, runtime.scans.keys().copied());
++    let adopted_active_scans = active_ordinary_scan_count(snapshot, runtime);
+     let adopted_acquisitions = snapshot
+         .epochs
+         .iter()
+@@ -3952,6 +4123,35 @@
+                 && acquisition_claim_active(config, epoch.epoch)
+         })
+         .count();
++    let acquisition_candidates = snapshot
++        .epochs
++        .iter()
++        .filter_map(|epoch| acquisition_action(config, epoch).map(|action| (epoch, action)))
++        .collect::<Vec<_>>();
++    let live_ready_pending = snapshot.finalizer_queue.iter().any(|task| {
++        task.kind == "live" && finalizer_is_admissible(config, &snapshot.machine, task)
++    });
++
++    // Legacy lanes may run together, but remain mutually exclusive with every
++    // acquisition, ordinary scan, and finalizer class. Once higher-priority
++    // live/acquisition work appears, stop topping up and let the current set
++    // drain so that priority work cannot be starved by a continuously refilled
++    // legacy queue.
++    if !active_legacy_compacts.is_empty() {
++        if runtime.acquisitions.is_empty()
++            && adopted_acquisitions == 0
++            && adopted_active_scans == 0
++            && !live_ready_pending
++            && acquisition_candidates.is_empty()
++        {
++            top_up_legacy_compacts(config, snapshot, runtime).await;
++        }
++        return Ok(());
++    }
++
++    // A closed capture with explicit READY approval already had live priority
++    // before the sweep policy. Preserve that narrow exception, but never overlap
++    // it with an acquisition or scan. Historical finalizers remain deferred.
+     if let Some(live_task) = snapshot
+         .finalizer_queue
+         .iter()
+@@ -3974,11 +4174,6 @@
+     // Acquisition and preflight are a global census phase. Do not start a new
+     // compact scan until every runnable acquisition task in this inventory
+     // generation has either completed or reached a terminal failure/gap.
+-    let acquisition_candidates = snapshot
+-        .epochs
+-        .iter()
+-        .filter_map(|epoch| acquisition_action(config, epoch).map(|action| (epoch, action)))
+-        .collect::<Vec<_>>();
+     if !acquisition_candidates.is_empty()
+         || !runtime.acquisitions.is_empty()
+         || adopted_acquisitions > 0
+@@ -4062,16 +4257,8 @@
+     // child counted until it has actually been reaped, while also accounting
+     // for adopted scans discovered from filesystem/process state after restart.
+     let active_scans = adopted_active_scans;
+-    if active_scans == 0 && runtime.scans.is_empty() {
+-        for epoch in snapshot.epochs.iter().filter(|epoch| {
+-            legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
+-        }) {
+-            if legacy_compact_admission_blocked_reason(config, &snapshot.machine, epoch).is_some() {
+-                // Keep looking: a blocked range head must not prevent an
+-                // independent range, or ordinary scan work, from advancing.
+-                continue;
+-            }
+-            runtime.legacy_compact = Some(spawn_legacy_compact_reuse(config, epoch).await?);
++    if active_scans == 0 && runtime.scans.is_empty() && !live_ready_pending {
++        if top_up_legacy_compacts(config, snapshot, runtime).await > 0 {
+             return Ok(());
+         }
+     }
+@@ -4935,27 +5122,49 @@
+             None => {}
+         }
+     }
+-    let legacy_compact_result = runtime
+-        .legacy_compact
++    reap_legacy_compacts(&state.config, runtime);
++    let finalizer_result = runtime
++        .finalizer
+         .as_mut()
+         .and_then(|child| child.child.try_wait().transpose());
+-    match legacy_compact_result {
++    match finalizer_result {
+         Some(Ok(status)) => {
+-            let child = runtime
+-                .legacy_compact
+-                .take()
+-                .expect("legacy compact child exists");
++            let child = runtime.finalizer.take().expect("finalizer exists");
+             handle_child_exit(&state.config, runtime, child, status.success());
+         }
+         Some(Err(error)) => {
+-            let child = runtime
+-                .legacy_compact
+-                .take()
+-                .expect("legacy compact child exists");
++            let child = runtime.finalizer.take().expect("finalizer exists");
+             let message = format!("poll {}: {error:#}", child.kind.key());
+             runtime.failures.insert(child.kind.key(), message.clone());
+-            if let ChildKind::HistoricalCompactReuse { epoch } = child.kind {
+-                let output = state.config.archive_root.join(format!("epoch-{epoch}"));
++            record_error(&state.config, runtime, "child", message);
++        }
++        None => {}
++    }
++}
++
++fn reap_legacy_compacts(config: &NasPipelineConfig, runtime: &mut RuntimeState) {
++    let epochs = runtime.legacy_compacts.keys().copied().collect::<Vec<_>>();
++    for epoch in epochs {
++        let result = runtime
++            .legacy_compacts
++            .get_mut(&epoch)
++            .and_then(|child| child.child.try_wait().transpose());
++        match result {
++            Some(Ok(status)) => {
++                let child = runtime
++                    .legacy_compacts
++                    .remove(&epoch)
++                    .expect("legacy compact child exists");
++                handle_child_exit(config, runtime, child, status.success());
++            }
++            Some(Err(error)) => {
++                let child = runtime
++                    .legacy_compacts
++                    .remove(&epoch)
++                    .expect("legacy compact child exists");
++                let message = format!("poll {}: {error:#}", child.kind.key());
++                set_runtime_failure(config, runtime, child.kind.key(), message.clone());
++                let output = config.archive_root.join(format!("epoch-{epoch}"));
+                 let _ = write_ownership(
+                     &output,
+                     LEGACY_COMPACT_OWNERSHIP_KIND,
+@@ -4964,27 +5173,10 @@
+                     Some(message.clone()),
+                 );
+                 let _ = set_ownership_pid(&output, None);
++                record_error(config, runtime, "child", message);
+             }
+-            record_error(&state.config, runtime, "child", message);
+-        }
+-        None => {}
+-    }
+-    let finalizer_result = runtime
+-        .finalizer
+-        .as_mut()
+-        .and_then(|child| child.child.try_wait().transpose());
+-    match finalizer_result {
+-        Some(Ok(status)) => {
+-            let child = runtime.finalizer.take().expect("finalizer exists");
+-            handle_child_exit(&state.config, runtime, child, status.success());
+-        }
+-        Some(Err(error)) => {
+-            let child = runtime.finalizer.take().expect("finalizer exists");
+-            let message = format!("poll {}: {error:#}", child.kind.key());
+-            runtime.failures.insert(child.kind.key(), message.clone());
+-            record_error(&state.config, runtime, "child", message);
++            None => {}
+         }
+-        None => {}
+     }
+ }
+ 
+@@ -6123,6 +6315,7 @@
+             live_root: root.join("live"),
+             state_root: root.join("state"),
+             scan_concurrency: 4,
++            legacy_compact_concurrency: 1,
+             scan_memory_mib: 800,
+             finalizer_memory_mib: 512,
+             memory_reserve_mib: 256,
+@@ -6342,6 +6535,35 @@
+         snapshot
+     }
+ 
++    fn make_legacy_range_ready(config: &NasPipelineConfig, epoch: u64) {
++        fs::create_dir_all(&config.car_root).unwrap();
++        fs::write(config.car_root.join(format!("epoch-{epoch}.car")), b"car").unwrap();
++        let predecessor = config.archive_root.join(format!("epoch-{}", epoch - 1));
++        write_legacy_registry_sidecars(&predecessor, false);
++        write_legacy_reader_core(&predecessor);
++        write_legacy_registry_sidecars(&config.archive_root.join(format!("epoch-{epoch}")), false);
++    }
++
++    fn legacy_scheduler_machine(
++        config: &NasPipelineConfig,
++        memory_mib: u64,
++        disk_gib: u64,
++    ) -> MachineSnapshot {
++        MachineSnapshot {
++            memory_total_bytes: 16 * 1024 * 1024 * 1024,
++            memory_available_bytes: config
++                .memory_reserve_mib
++                .saturating_add(memory_mib)
++                .saturating_mul(1024 * 1024),
++            disk_total_bytes: 2 * 1024 * 1024 * 1024 * 1024,
++            disk_available_bytes: config
++                .disk_reserve_gib
++                .saturating_add(disk_gib)
++                .saturating_mul(1024 * 1024 * 1024),
++            ..MachineSnapshot::default()
++        }
++    }
++
+     fn write_live_candidate(output: &Path) {
+         for name in [
+             META_FILE,
+@@ -6767,7 +6989,76 @@
+         assert_eq!(
+             legacy_compact_previous_car(&config, 700),
+             Some(config.car_root.join("epoch-699.car.zst"))
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn legacy_compact_never_races_active_or_failed_pipeline_predecessor() {
++        let root = temp_root("legacy-compact-predecessor-race");
++        let config = test_config(&root);
++        fs::create_dir_all(&config.car_root).unwrap();
++        fs::write(config.car_root.join("epoch-700.car.zst"), b"car").unwrap();
++        let output = config.archive_root.join("epoch-700");
++        write_legacy_registry_sidecars(&output, false);
++        let predecessor = config.archive_root.join("epoch-699");
++        write_legacy_registry_sidecars(&predecessor, false);
++        write_legacy_reader_core(&predecessor);
++
++        write_ownership(
++            &predecessor,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            "699",
++            "compact_reuse",
++            None,
++        )
++        .unwrap();
++        assert!(!predecessor_seed_sidecars_usable(&config, 700));
++        assert_eq!(
++            legacy_compact_reuse_status(&config, 700),
++            LegacyCompactReuseStatus::WaitingForPrevious
++        );
++
++        write_ownership(
++            &predecessor,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            "699",
++            "failed",
++            Some("simulated failure".to_string()),
++        )
++        .unwrap();
++        assert!(!predecessor_seed_sidecars_usable(&config, 700));
++
++        // A candidate's own durable tail is authoritative and allows an
++        // independent start even while the predecessor is still active.
++        write_ownership(
++            &predecessor,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            "699",
++            "compact_reuse",
++            None,
++        )
++        .unwrap();
++        fs::write(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE), [0u8; 40]).unwrap();
++        assert_eq!(
++            legacy_compact_reuse_status(&config, 700),
++            LegacyCompactReuseStatus::Ready
+         );
++        fs::remove_file(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE)).unwrap();
++
++        write_ownership(
++            &predecessor,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            "699",
++            "complete",
++            None,
++        )
++        .unwrap();
++        assert!(predecessor_seed_sidecars_usable(&config, 700));
++        assert_eq!(
++            legacy_compact_reuse_status(&config, 700),
++            LegacyCompactReuseStatus::Ready
++        );
+         fs::remove_dir_all(root).unwrap();
+     }
+ 
+@@ -6859,6 +7150,51 @@
+         );
+         assert!(failed_output.join(BLOCKS_FILE).is_file());
+         assert!(!config.archive_root.join(".pipeline-quarantine").exists());
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn legacy_reaper_removes_every_finished_worker_from_map() {
++        let root = temp_root("legacy-multi-reap");
++        let config = test_config(&root);
++        fs::create_dir_all(config.state_root.join("logs")).unwrap();
++        let mut runtime = RuntimeState::default();
++        for epoch in [700, 800] {
++            let output = config.archive_root.join(format!("epoch-{epoch}"));
++            write_legacy_registry_sidecars(&output, false);
++            write_legacy_reader_core(&output);
++            write_ownership(
++                &output,
++                LEGACY_COMPACT_OWNERSHIP_KIND,
++                &epoch.to_string(),
++                "compact_reuse",
++                None,
++            )
++            .unwrap();
++            let log = config
++                .state_root
++                .join("logs")
++                .join(format!("epoch-{epoch}.log"));
++            fs::write(&log, b"").unwrap();
++            let child = make_finished_child(
++                ChildKind::HistoricalCompactReuse { epoch },
++                historical_progress_path(&config.state_root, epoch),
++                log,
++            )
++            .await;
++            runtime.legacy_compacts.insert(epoch, child);
++        }
++
++        reap_legacy_compacts(&config, &mut runtime);
++        assert!(runtime.legacy_compacts.is_empty());
++        for epoch in [700, 800] {
++            assert_eq!(
++                read_ownership(&config.archive_root.join(format!("epoch-{epoch}")))
++                    .unwrap()
++                    .state,
++                "complete"
++            );
++        }
+         fs::remove_dir_all(root).unwrap();
+     }
+ 
+@@ -7022,7 +7358,116 @@
+                 .as_deref()
+                 .unwrap()
+                 .starts_with("disk admission blocked")
++        );
++    }
++
++    #[test]
++    fn legacy_compact_admission_aggregates_same_pass_and_active_growth() {
++        let root = temp_root("legacy-multi-admission");
++        let config = test_config(&root);
++        let epochs = [700, 800, 900]
++            .into_iter()
++            .map(|epoch| {
++                let snapshot = test_epoch(&root, epoch, HistoricalState::Queued);
++                write_legacy_registry_sidecars(&snapshot.output_path, false);
++                snapshot
++            })
++            .collect::<Vec<_>>();
++        let gib = 1024 * 1024 * 1024;
++        let mib = 1024 * 1024;
++        let machine = MachineSnapshot {
++            memory_total_bytes: 8 * gib,
++            memory_available_bytes: config.memory_reserve_mib * mib + 2 * gib,
++            // Swap must never increase admission headroom.
++            swap_total_bytes: 64 * gib,
++            disk_total_bytes: 2 * 1024 * gib,
++            disk_available_bytes: config.disk_reserve_gib * gib + 2 * gib,
++            ..MachineSnapshot::default()
++        };
++        let mut admission =
++            LegacyCompactAdmission::new(&config, &machine, &epochs, &BTreeMap::new());
++        for epoch in &epochs[..2] {
++            assert!(admission.blocked_reason(&config, &machine, epoch).is_none());
++            admission.reserve(epoch);
++        }
++        assert!(
++            admission
++                .blocked_reason(&config, &machine, &epochs[2])
++                .is_some()
++        );
++
++        let active = BTreeMap::from([(700, 512 * mib)]);
++        let active_machine = MachineSnapshot {
++            memory_total_bytes: 8 * gib,
++            // The active 1 GiB lane retains 512 MiB of future reservation;
++            // exactly one more 1 GiB lane fits in the remaining envelope.
++            memory_available_bytes: config.memory_reserve_mib * mib + 1536 * mib,
++            swap_total_bytes: 64 * gib,
++            disk_total_bytes: 2 * 1024 * gib,
++            disk_available_bytes: config.disk_reserve_gib * gib + 2 * gib,
++            ..MachineSnapshot::default()
++        };
++        let mut admission = LegacyCompactAdmission::new(&config, &active_machine, &epochs, &active);
++        assert!(
++            admission
++                .blocked_reason(&config, &active_machine, &epochs[1])
++                .is_none()
++        );
++        admission.reserve(&epochs[1]);
++        assert!(
++            admission
++                .blocked_reason(&config, &active_machine, &epochs[2])
++                .is_some()
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn large_legacy_candidate_self_throttles_without_blocking_smaller_range() {
++        let root = temp_root("legacy-large-self-throttle");
++        let config = test_config(&root);
++        let large = test_epoch(&root, 700, HistoricalState::Queued);
++        let small = test_epoch(&root, 800, HistoricalState::Queued);
++        write_legacy_registry_sidecars(&large.output_path, false);
++        write_legacy_registry_sidecars(&small.output_path, false);
++        OpenOptions::new()
++            .write(true)
++            .open(large.output_path.join(REGISTRY_FILE))
++            .unwrap()
++            .set_len(2 * 1024 * 1024 * 1024)
++            .unwrap();
++        assert!(
++            legacy_compact_memory_reservation_bytes(&large.output_path) > 2 * 1024 * 1024 * 1024
++        );
++        assert_eq!(
++            legacy_compact_memory_reservation_bytes(&small.output_path),
++            1024 * 1024 * 1024
++        );
++        let gib = 1024 * 1024 * 1024;
++        let machine = MachineSnapshot {
++            memory_total_bytes: 8 * gib,
++            memory_available_bytes: config.memory_reserve_mib * 1024 * 1024 + gib,
++            disk_total_bytes: 2 * 1024 * gib,
++            disk_available_bytes: config.disk_reserve_gib * gib + 2 * gib,
++            ..MachineSnapshot::default()
++        };
++        let admission = LegacyCompactAdmission::new(
++            &config,
++            &machine,
++            &[large.clone(), small.clone()],
++            &BTreeMap::new(),
+         );
++        assert!(
++            admission
++                .blocked_reason(&config, &machine, &large)
++                .is_some()
++        );
++        assert!(
++            admission
++                .blocked_reason(&config, &machine, &small)
++                .is_none()
++        );
++        fs::remove_dir_all(root).unwrap();
+     }
+ 
+     #[test]
+@@ -7254,6 +7699,196 @@
+     }
+ 
+     #[tokio::test]
++    async fn legacy_scheduler_fills_two_independent_heads_to_configured_cap() {
++        let root = temp_root("legacy-cap-two");
++        let mut config = test_config(&root);
++        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
++        config.legacy_compact_concurrency = 2;
++        let mut snapshot = schedulable_snapshot(
++            &root,
++            [700, 800, 900]
++                .into_iter()
++                .map(|epoch| test_epoch(&root, epoch, HistoricalState::Queued))
++                .collect(),
++        );
++        for epoch in [700, 800, 900] {
++            make_legacy_range_ready(&config, epoch);
++        }
++        snapshot.machine = legacy_scheduler_machine(&config, 3 * 1024, 3);
++        let mut runtime = RuntimeState::default();
++
++        schedule_work(&config, &snapshot, &mut runtime)
++            .await
++            .unwrap();
++        assert_eq!(
++            runtime.legacy_compacts.keys().copied().collect::<Vec<_>>(),
++            vec![700, 800]
++        );
++        for child in runtime.legacy_compacts.values_mut() {
++            let _ = child.child.wait().await;
++        }
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn adopted_legacy_lane_counts_toward_cap_and_can_be_topped_up() {
++        let root = temp_root("legacy-adopted-top-up");
++        let mut config = test_config(&root);
++        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
++        config.legacy_compact_concurrency = 2;
++        let mut snapshot = schedulable_snapshot(
++            &root,
++            vec![
++                test_epoch(&root, 700, HistoricalState::Scanning),
++                test_epoch(&root, 800, HistoricalState::Queued),
++            ],
++        );
++        for epoch in [700, 800] {
++            make_legacy_range_ready(&config, epoch);
++        }
++        let adopted_rss = 512 * 1024 * 1024;
++        snapshot.machine = legacy_scheduler_machine(&config, 1536, 2);
++        snapshot.lanes.push(LaneSnapshot {
++            id: "compact_reuse:700".to_string(),
++            kind: "historical_compact_reuse".to_string(),
++            epoch: Some(700),
++            capture_id: None,
++            phase: "compact_reuse".to_string(),
++            state: "running".to_string(),
++            pid: None,
++            progress: ProgressSnapshot {
++                rss_bytes: Some(adopted_rss),
++                ..ProgressSnapshot::default()
++            },
++            rss_bytes: Some(adopted_rss),
++            started_unix_secs: None,
++            updated_unix_secs: unix_now(),
++        });
++        let mut runtime = RuntimeState::default();
++
++        schedule_work(&config, &snapshot, &mut runtime)
++            .await
++            .unwrap();
++        assert_eq!(
++            runtime.legacy_compacts.keys().copied().collect::<Vec<_>>(),
++            vec![800]
++        );
++        let active = active_legacy_compact_rss(&snapshot, &runtime);
++        assert_eq!(active.keys().copied().collect::<Vec<_>>(), vec![700, 800]);
++        let _ = runtime
++            .legacy_compacts
++            .get_mut(&800)
++            .unwrap()
++            .child
++            .wait()
++            .await;
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn ready_live_work_stops_legacy_top_up_until_adopted_lane_drains() {
++        let root = temp_root("legacy-drain-for-live");
++        let mut config = test_config(&root);
++        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
++        config.legacy_compact_concurrency = 2;
++        let mut snapshot = schedulable_snapshot(
++            &root,
++            vec![
++                test_epoch(&root, 700, HistoricalState::Scanning),
++                test_epoch(&root, 800, HistoricalState::Queued),
++            ],
++        );
++        for epoch in [700, 800] {
++            make_legacy_range_ready(&config, epoch);
++        }
++        snapshot.machine = legacy_scheduler_machine(&config, 2 * 1024, 2);
++        snapshot.lanes.push(LaneSnapshot {
++            id: "compact_reuse:700".to_string(),
++            kind: "historical_compact_reuse".to_string(),
++            epoch: Some(700),
++            capture_id: None,
++            phase: "compact_reuse".to_string(),
++            state: "running".to_string(),
++            pid: None,
++            progress: ProgressSnapshot::default(),
++            rss_bytes: Some(0),
++            started_unix_secs: None,
++            updated_unix_secs: unix_now(),
++        });
++        snapshot.finalizer_queue.push(FinalizerQueueItem {
++            kind: "live".to_string(),
++            epoch: Some(900),
++            id: "ready-capture".to_string(),
++            phase: "registry_merge".to_string(),
++            state: "ready_to_package".to_string(),
++            estimated_memory_bytes: 512 * 1024 * 1024,
++            estimated_disk_bytes: 1024 * 1024 * 1024,
++            deferred_reason: None,
++        });
++        let mut runtime = RuntimeState::default();
++
++        schedule_work(&config, &snapshot, &mut runtime)
++            .await
++            .unwrap();
++        assert!(runtime.legacy_compacts.is_empty());
++        assert!(runtime.finalizer.is_none());
++
++        // A live item that cannot pass admission must not suppress reuse lanes
++        // forever; it will be reconsidered after machine headroom changes.
++        snapshot.finalizer_queue[0].estimated_memory_bytes = 4 * 1024 * 1024 * 1024;
++        schedule_work(&config, &snapshot, &mut runtime)
++            .await
++            .unwrap();
++        assert!(runtime.legacy_compacts.contains_key(&800));
++        let _ = runtime
++            .legacy_compacts
++            .get_mut(&800)
++            .unwrap()
++            .child
++            .wait()
++            .await;
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn legacy_spawn_failure_does_not_block_next_independent_head() {
++        let root = temp_root("legacy-spawn-hol");
++        let mut config = test_config(&root);
++        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
++        config.legacy_compact_concurrency = 2;
++        let mut snapshot = schedulable_snapshot(
++            &root,
++            vec![
++                test_epoch(&root, 700, HistoricalState::Queued),
++                test_epoch(&root, 800, HistoricalState::Queued),
++            ],
++        );
++        for epoch in [700, 800] {
++            make_legacy_range_ready(&config, epoch);
++        }
++        // The filesystem inventory made 700 ready, but simulate its output
++        // path changing before claim. The following independent head must
++        // still be attempted in this scheduler pass.
++        snapshot.epochs[0].output_path = root.join("changed-before-claim/epoch-700");
++        snapshot.machine = legacy_scheduler_machine(&config, 2 * 1024, 2);
++        let mut runtime = RuntimeState::default();
++
++        schedule_work(&config, &snapshot, &mut runtime)
++            .await
++            .unwrap();
++        assert!(runtime.failures.contains_key("compact_reuse:700"));
++        assert!(runtime.legacy_compacts.contains_key(&800));
++        let _ = runtime
++            .legacy_compacts
++            .get_mut(&800)
++            .unwrap()
++            .child
++            .wait()
++            .await;
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
+     async fn memory_blocked_queue_head_does_not_starve_fitting_finalizer() {
+         let root = temp_root("finalizer-head-of-line");
+         let mut config = test_config(&root);
+--- a/crates/hivezilla/src/main.rs
++++ b/crates/hivezilla/src/main.rs
+@@ -205,6 +205,9 @@
+     state_root: PathBuf,
+     #[arg(long, default_value_t = 4)]
+     scan_concurrency: usize,
++    /// Maximum concurrent one-pass legacy registry reuse lanes.
++    #[arg(long, default_value_t = 1)]
++    legacy_compact_concurrency: usize,
+     /// Expected peak RSS for one full historical scan lane.
+     #[arg(long, default_value_t = 800)]
+     scan_memory_mib: u64,
+@@ -379,6 +382,10 @@
+             anyhow::ensure!(
+                 args.scan_concurrency > 0,
+                 "--scan-concurrency must be positive"
++            );
++            anyhow::ensure!(
++                args.legacy_compact_concurrency > 0,
++                "--legacy-compact-concurrency must be positive"
+             );
+             anyhow::ensure!(
+                 args.finalizer_memory_mib > 0,
+@@ -400,6 +407,7 @@
+                 live_root: args.live_root,
+                 state_root: args.state_root,
+                 scan_concurrency: args.scan_concurrency,
++                legacy_compact_concurrency: args.legacy_compact_concurrency,
+                 scan_memory_mib: args.scan_memory_mib,
+                 finalizer_memory_mib: args.finalizer_memory_mib,
+                 memory_reserve_mib: args.memory_reserve_mib,
+--- a/crates/hivezilla/README.md
++++ b/crates/hivezilla/README.md
+@@ -117,6 +117,20 @@
+ Use `--dry-run` on the coordinator while testing. It will accept events and log
+ the artifact pull / `hcloud server delete` actions without executing them.
+ 
++### NAS pipeline legacy lanes
++
++The NAS pipeline can run independent legacy registry-reuse range heads in
++parallel with `--legacy-compact-concurrency` (default `1`). These lanes remain
++mutually exclusive with downloads, ordinary scans, and finalizers. Admission
++reserves the four reused registry sidecars plus 384 MiB per epoch, with a 1 GiB
++minimum, in addition to `--memory-reserve-mib`.
++
++```bash
++cargo run -p blockzilla-hivezilla -- nas-pipeline \
++  --legacy-compact-concurrency 2 \
++  --memory-reserve-mib 1536
++```
++
+ ## Hetzner sizing
+ 
+ Use `estimate-hetzner` before renting machines. The default model uses epoch
+

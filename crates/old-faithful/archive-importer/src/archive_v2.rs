@@ -4417,7 +4417,9 @@ impl HotBlockAccountBenchStats {
 
 #[derive(Debug, SchemaRead)]
 struct CompactMetaLoadedAddressView {
-    _err: Option<SkipBytes>,
+    // CompactTransactionError is an inline tagged enum, not a length-prefixed
+    // byte sequence. Decode it exactly so later fields stay wire-aligned.
+    _err: Option<CompactTransactionError>,
     _fee: SkipU64,
     _pre_balances: Vec<SkipU64>,
     _post_balances: Vec<SkipU64>,

@@ -31,7 +31,20 @@ pub const WINCODE_LOG_ARCHIVE_KEYS_FREQUENCY_SORTED: u32 = 1 << 0;
 pub const WINCODE_ARCHIVE_V2_VERSION: u16 = 2;
 pub const WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION: u16 = 2;
 pub const WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION: u16 = 2;
+/// Maximum serialized size of one block-local access payload.
+///
+/// Producers and consumers share this bound so an index can never advertise a frame that a
+/// validator refuses to allocate or decode.
+pub const ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 pub const WINCODE_BLOCKZILLA_GET_BLOCK_BUNDLE_VERSION: u16 = 1;
+/// Archive records use unsigned LEB128 integer encoding.
+pub const WINCODE_ARCHIVE_V2_FLAG_LEB128: u32 = 1 << 0;
+/// Archive blocks contain raw pubkeys rather than a finalized pubkey registry.
+pub const WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY: u32 = 1 << 1;
+/// Registry IDs use seeded first-seen order rather than same-epoch frequency order.
+pub const WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY: u32 = 1 << 2;
+/// Registry counts include every typed `CompactPubkey` reference, including rewards and logs.
+pub const WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS: u32 = 1 << 3;
 pub const ARCHIVE_V2_HOT_TX_ROW_LEN: usize = 28;
 
 #[derive(Debug, Clone, Copy)]
@@ -962,7 +975,7 @@ pub struct WincodeArchiveV2NoRegistryMeta {
     pub pre_balances: Vec<u64>,
     pub post_balances: Vec<u64>,
     pub inner_instructions: Option<Vec<CompactInnerInstructions>>,
-    pub logs: Option<Vec<String>>,
+    pub logs: Option<WincodeArchiveV2NoRegistryLogs>,
     pub pre_token_balances: Vec<WincodeArchiveV2NoRegistryTokenBalance>,
     pub post_token_balances: Vec<WincodeArchiveV2NoRegistryTokenBalance>,
     pub rewards: Vec<WincodeArchiveV2NoRegistryReward>,
@@ -971,6 +984,16 @@ pub struct WincodeArchiveV2NoRegistryMeta {
     pub return_data: Option<WincodeArchiveV2NoRegistryReturnData>,
     pub compute_units_consumed: Option<u64>,
     pub cost_units: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub enum WincodeArchiveV2NoRegistryLogs {
+    Raw(Vec<String>),
+    WincodeZstd {
+        uncompressed_len: u64,
+        bytes: Vec<u8>,
+    },
+    Compact(CompactLogStream),
 }
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]

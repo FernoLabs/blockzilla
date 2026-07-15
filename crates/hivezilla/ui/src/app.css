@@ -7,53 +7,91 @@
     "SF Pro Text",
     "Helvetica Neue",
     sans-serif;
-  background: #0e0e10;
-  color: #f0f0f0;
-  font-size: 15px;
+  font-synthesis: none;
+  background: #111113;
+  color: #ededee;
   line-height: 1.45;
+
+  --background: #111113;
+  --surface: #171719;
+  --surface-raised: #1d1d20;
+  --border: #303035;
+  --border-strong: #44444b;
+  --text: #ededee;
+  --muted: #9c9ca3;
+  --faint: #85858d;
+  --green: #4fb68a;
+  --amber: #d2a352;
+  --orange: #c87945;
+  --red: #d26b6b;
+  --violet: #9d83cb;
+  --slate: #737983;
+
+  --status-complete-bg: #164534;
+  --status-complete-accent: #52d19b;
+  --status-first-seen-complete-bg: #403a2b;
+  --status-first-seen-complete-accent: #d4bc78;
+  --status-legacy-complete-bg: #3b5b3e;
+  --status-legacy-complete-accent: #b8d99d;
+  --status-active-bg: #1f4144;
+  --status-active-accent: #67bec2;
+  --status-ready-bg: #39453a;
+  --status-ready-accent: #a6c584;
+  --status-finalizing-bg: #473866;
+  --status-finalizing-accent: #c0a5ff;
+  --status-partial-bg: #3d424a;
+  --status-partial-accent: #a5acb8;
+  --status-queued-bg: #202126;
+  --status-queued-accent: #737986;
+  --status-missing-bg: #452326;
+  --status-missing-accent: #df7379;
+  --status-na-bg: #191a1e;
+  --status-na-accent: #656a73;
+  --status-attention-bg: #533713;
+  --status-attention-accent: #f0b95b;
+  --status-failed-bg: #552329;
+  --status-failed-accent: #f07880;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--background);
+}
+
 body {
-  margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #0e0e10;
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-size: 14px;
 }
 
 button,
-input {
+input,
+select,
+textarea {
+  color: inherit;
   font: inherit;
 }
 
-button {
-  border: 1px solid #3a3a42;
-  border-radius: 8px;
-  background: #f0f0f0;
-  color: #0e0e10;
-  cursor: pointer;
-  height: 36px;
-  padding: 0 12px;
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
 }
 
-button:hover {
-  background: #ffffff;
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
 }
 
-input {
-  height: 36px;
-  min-width: 260px;
-  border: 1px solid #3a3a42;
-  border-radius: 8px;
-  background: #151519;
-  color: #f0f0f0;
-  padding: 0 10px;
-}
-
-input:focus {
-  border-color: #00d4aa;
-  outline: 2px solid rgb(0 212 170 / 18%);
+::selection {
+  background: #315b4a;
+  color: #ffffff;
 }

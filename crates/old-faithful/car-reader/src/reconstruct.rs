@@ -4,7 +4,7 @@ use std::{
     io::Read,
 };
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -109,32 +109,149 @@ pub struct NodeLocation {
     pub car_offset: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawCidRef {
     pub cid: Option<Cid36>,
-    pub normalized_bytes: Vec<u8>,
-    pub cbor_bytes: Vec<u8>,
+    bytes: RawCidRefBytes,
     pub tagged: bool,
+}
+
+/// Exact encoded bytes for a CID reference.
+///
+/// The overwhelmingly common CAR CID is kept inline. Unusual identity CIDs and malformed
+/// references retain their exact bytes in one allocation so lossless reconstruction remains
+/// possible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RawCidRefBytes {
+    Standard {
+        cbor_bytes: [u8; 37],
+        len: u8,
+    },
+    Owned {
+        /// `split == false`: CBOR is the full slice and normalized bytes start at `boundary`.
+        /// `split == true`: normalized bytes precede CBOR bytes at `boundary`.
+        bytes: Box<[u8]>,
+        boundary: usize,
+        split: bool,
+    },
 }
 
 impl RawCidRef {
     fn from_borrowed(value: CborCidRef<'_>) -> Result<Self, ReconstructError> {
-        let normalized_bytes = normalize_ref_bytes(value.bytes).to_vec();
+        let normalized_bytes = normalize_ref_bytes(value.bytes);
+        let cid = Cid36::from_ref_bytes(normalized_bytes);
+        let bytes = if cid.is_some() {
+            debug_assert!(matches!(value.bytes.len(), 36 | 37));
+            let mut cbor_bytes = [0u8; 37];
+            cbor_bytes[..value.bytes.len()].copy_from_slice(value.bytes);
+            RawCidRefBytes::Standard {
+                cbor_bytes,
+                len: value.bytes.len() as u8,
+            }
+        } else {
+            RawCidRefBytes::Owned {
+                bytes: value.bytes.to_vec().into_boxed_slice(),
+                boundary: usize::from(value.bytes.first() == Some(&0)),
+                split: false,
+            }
+        };
+
         Ok(Self {
-            cid: Cid36::from_ref_bytes(&normalized_bytes),
-            normalized_bytes,
-            cbor_bytes: value.bytes.to_vec(),
+            cid,
+            bytes,
             tagged: value.tagged,
         })
     }
 
-    #[cfg(test)]
-    fn from_car_cid(cid: Cid36) -> Self {
+    /// Construct the canonical tagged CBOR form of a normal CAR CID reference.
+    pub fn from_car_cid(cid: Cid36) -> Self {
+        let cbor_bytes = cid.cbor_bytes();
         Self {
             cid: Some(cid),
-            normalized_bytes: cid.car_bytes().to_vec(),
-            cbor_bytes: cid.cbor_bytes().to_vec(),
+            bytes: RawCidRefBytes::Standard {
+                cbor_bytes,
+                len: cbor_bytes.len() as u8,
+            },
             tagged: true,
+        }
+    }
+
+    fn from_serialized_parts(
+        cid: Option<Cid36>,
+        normalized_bytes: Vec<u8>,
+        cbor_bytes: Vec<u8>,
+        tagged: bool,
+    ) -> Self {
+        let normalized_matches_cbor = normalize_ref_bytes(&cbor_bytes) == normalized_bytes;
+        let is_inline_standard = cid.is_some()
+            && normalized_matches_cbor
+            && cid
+                .as_ref()
+                .is_some_and(|cid| cid.car_bytes().as_slice() == normalized_bytes)
+            && matches!(cbor_bytes.len(), 36 | 37);
+
+        let bytes = if is_inline_standard {
+            let mut inline = [0u8; 37];
+            inline[..cbor_bytes.len()].copy_from_slice(&cbor_bytes);
+            RawCidRefBytes::Standard {
+                cbor_bytes: inline,
+                len: cbor_bytes.len() as u8,
+            }
+        } else if normalized_matches_cbor {
+            let boundary = usize::from(cbor_bytes.first() == Some(&0));
+            RawCidRefBytes::Owned {
+                bytes: cbor_bytes.into_boxed_slice(),
+                boundary,
+                split: false,
+            }
+        } else {
+            let boundary = normalized_bytes.len();
+            let mut bytes = Vec::with_capacity(boundary.saturating_add(cbor_bytes.len()));
+            bytes.extend_from_slice(&normalized_bytes);
+            bytes.extend_from_slice(&cbor_bytes);
+            RawCidRefBytes::Owned {
+                bytes: bytes.into_boxed_slice(),
+                boundary,
+                split: true,
+            }
+        };
+
+        Self { cid, bytes, tagged }
+    }
+
+    #[inline]
+    pub fn normalized_bytes(&self) -> &[u8] {
+        match &self.bytes {
+            RawCidRefBytes::Standard { cbor_bytes, len } => {
+                normalize_ref_bytes(&cbor_bytes[..usize::from(*len)])
+            }
+            RawCidRefBytes::Owned {
+                bytes,
+                boundary,
+                split: false,
+            } => &bytes[*boundary..],
+            RawCidRefBytes::Owned {
+                bytes,
+                boundary,
+                split: true,
+            } => &bytes[..*boundary],
+        }
+    }
+
+    #[inline]
+    pub fn cbor_bytes(&self) -> &[u8] {
+        match &self.bytes {
+            RawCidRefBytes::Standard { cbor_bytes, len } => &cbor_bytes[..usize::from(*len)],
+            RawCidRefBytes::Owned {
+                bytes,
+                split: false,
+                ..
+            } => bytes,
+            RawCidRefBytes::Owned {
+                bytes,
+                boundary,
+                split: true,
+            } => &bytes[*boundary..],
         }
     }
 
@@ -143,17 +260,56 @@ impl RawCidRef {
             e.tag(minicbor::data::Tag::new(42))
                 .expect("vec encoder is infallible");
         }
-        e.bytes(&self.cbor_bytes)
+        e.bytes(self.cbor_bytes())
             .expect("vec encoder is infallible");
     }
 
     fn require_car_cid(&self) -> Result<Cid36, ReconstructError> {
         self.cid
-            .ok_or_else(|| ReconstructError::UnsupportedCidRef(self.normalized_bytes.clone()))
+            .ok_or_else(|| ReconstructError::UnsupportedCidRef(self.normalized_bytes().to_vec()))
     }
 
     pub fn inline_raw_bytes(&self) -> Option<&[u8]> {
-        parse_inline_raw_identity_cid(&self.normalized_bytes)
+        parse_inline_raw_identity_cid(self.normalized_bytes())
+    }
+}
+
+impl Serialize for RawCidRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Preserve the field order and byte-sequence representation emitted by the former
+        // derived implementation so existing postcard lossless archives stay readable.
+        let mut state = serializer.serialize_struct("RawCidRef", 4)?;
+        state.serialize_field("cid", &self.cid)?;
+        state.serialize_field("normalized_bytes", self.normalized_bytes())?;
+        state.serialize_field("cbor_bytes", self.cbor_bytes())?;
+        state.serialize_field("tagged", &self.tagged)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RawCidRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SerializedRawCidRef {
+            cid: Option<Cid36>,
+            normalized_bytes: Vec<u8>,
+            cbor_bytes: Vec<u8>,
+            tagged: bool,
+        }
+
+        let value = SerializedRawCidRef::deserialize(deserializer)?;
+        Ok(Self::from_serialized_parts(
+            value.cid,
+            value.normalized_bytes,
+            value.cbor_bytes,
+            value.tagged,
+        ))
     }
 }
 
@@ -169,7 +325,13 @@ pub struct RawDataFrame {
 }
 
 impl RawDataFrame {
-    fn from_borrowed(value: &DataFrame<'_>) -> Result<Self, ReconstructError> {
+    fn from_borrowed_with_data_buffer<F>(
+        value: &DataFrame<'_>,
+        take_data_buffer: &mut F,
+    ) -> Result<Self, ReconstructError>
+    where
+        F: FnMut(usize) -> Vec<u8>,
+    {
         let next = match value.next.as_ref() {
             Some(next) => next
                 .iter()
@@ -181,12 +343,17 @@ impl RawDataFrame {
             None => Vec::new(),
         };
 
+        let mut data = take_data_buffer(value.data.len());
+        data.clear();
+        data.reserve(value.data.len());
+        data.extend_from_slice(value.data);
+
         Ok(Self {
             hash: value.hash,
             hash_was_negative: value.hash_was_negative,
             index: value.index,
             total: value.total,
-            data: value.data.to_vec(),
+            data,
             next,
         })
     }
@@ -273,15 +440,19 @@ pub struct StandaloneDataFrame {
 }
 
 impl StandaloneDataFrame {
-    fn from_borrowed(
+    fn from_borrowed_with_data_buffer<F>(
         location: NodeLocation,
         cid: Cid36,
         frame: &DataFrame<'_>,
-    ) -> Result<Self, ReconstructError> {
+        take_data_buffer: &mut F,
+    ) -> Result<Self, ReconstructError>
+    where
+        F: FnMut(usize) -> Vec<u8>,
+    {
         Ok(Self {
             location,
             cid,
-            frame: RawDataFrame::from_borrowed(frame)?,
+            frame: RawDataFrame::from_borrowed_with_data_buffer(frame, take_data_buffer)?,
         })
     }
 
@@ -301,18 +472,22 @@ pub struct RawTransactionNode {
 }
 
 impl RawTransactionNode {
-    fn from_borrowed(
+    fn from_borrowed_with_data_buffers<F>(
         location: NodeLocation,
         cid: Cid36,
         tx: &TransactionNode<'_>,
-    ) -> Result<Self, ReconstructError> {
+        take_data_buffer: &mut F,
+    ) -> Result<Self, ReconstructError>
+    where
+        F: FnMut(usize) -> Vec<u8>,
+    {
         Ok(Self {
             location,
             cid,
             slot: tx.slot,
             index: tx.index,
-            data: RawDataFrame::from_borrowed(&tx.data)?,
-            metadata: RawDataFrame::from_borrowed(&tx.metadata)?,
+            data: RawDataFrame::from_borrowed_with_data_buffer(&tx.data, take_data_buffer)?,
+            metadata: RawDataFrame::from_borrowed_with_data_buffer(&tx.metadata, take_data_buffer)?,
         })
     }
 
@@ -428,16 +603,20 @@ pub struct RawRewardsNode {
 }
 
 impl RawRewardsNode {
-    fn from_borrowed(
+    fn from_borrowed_with_data_buffer<F>(
         location: NodeLocation,
         cid: Cid36,
         rewards: &RewardsNode<'_>,
-    ) -> Result<Self, ReconstructError> {
+        take_data_buffer: &mut F,
+    ) -> Result<Self, ReconstructError>
+    where
+        F: FnMut(usize) -> Vec<u8>,
+    {
         Ok(Self {
             location,
             cid,
             slot: rewards.slot,
-            data: RawDataFrame::from_borrowed(&rewards.data)?,
+            data: RawDataFrame::from_borrowed_with_data_buffer(&rewards.data, take_data_buffer)?,
         })
     }
 
@@ -803,7 +982,7 @@ impl LosslessCarBlock {
                 );
             } else if rewards_ref.inline_raw_bytes().is_none() {
                 return Err(ReconstructError::UnsupportedCidRef(
-                    rewards_ref.normalized_bytes.clone(),
+                    rewards_ref.normalized_bytes().to_vec(),
                 ));
             }
         }
@@ -909,11 +1088,36 @@ pub fn decode_raw_node(
     cid: Cid36,
     payload: &[u8],
 ) -> Result<RawNode, ReconstructError> {
+    decode_raw_node_with_data_buffers(location, cid, payload, &mut |len| Vec::with_capacity(len))
+}
+
+/// Decodes a lossless raw node while obtaining each [`RawDataFrame`] payload
+/// buffer from the caller.
+///
+/// The callback is invoked once for rewards and standalone dataframe nodes,
+/// twice for transaction nodes (transaction data followed by metadata), and
+/// not at all for other node kinds. Returned buffer contents are discarded;
+/// their allocations are retained when they are large enough. The existing
+/// [`decode_raw_node`] API remains the allocation-owning convenience path.
+pub fn decode_raw_node_with_data_buffers<F>(
+    location: NodeLocation,
+    cid: Cid36,
+    payload: &[u8],
+    take_data_buffer: &mut F,
+) -> Result<RawNode, ReconstructError>
+where
+    F: FnMut(usize) -> Vec<u8>,
+{
     let node = decode_node(payload).map_err(|err| ReconstructError::NodeDecode(err.to_string()))?;
 
     Ok(match node {
         Node::Transaction(tx) => {
-            RawNode::Transaction(RawTransactionNode::from_borrowed(location, cid, &tx)?)
+            RawNode::Transaction(RawTransactionNode::from_borrowed_with_data_buffers(
+                location,
+                cid,
+                &tx,
+                take_data_buffer,
+            )?)
         }
         Node::Entry(entry) => RawNode::Entry(RawEntryNode::from_borrowed(location, cid, &entry)?),
         Node::Block(block) => {
@@ -923,11 +1127,19 @@ pub fn decode_raw_node(
             RawNode::Subset(RawSubsetNode::from_borrowed(location, cid, &subset)?)
         }
         Node::Epoch(epoch) => RawNode::Epoch(RawEpochNode::from_borrowed(location, cid, &epoch)?),
-        Node::Rewards(rewards) => {
-            RawNode::Rewards(RawRewardsNode::from_borrowed(location, cid, &rewards)?)
-        }
+        Node::Rewards(rewards) => RawNode::Rewards(RawRewardsNode::from_borrowed_with_data_buffer(
+            location,
+            cid,
+            &rewards,
+            take_data_buffer,
+        )?),
         Node::DataFrame(frame) => {
-            RawNode::DataFrame(StandaloneDataFrame::from_borrowed(location, cid, &frame)?)
+            RawNode::DataFrame(StandaloneDataFrame::from_borrowed_with_data_buffer(
+                location,
+                cid,
+                &frame,
+                take_data_buffer,
+            )?)
         }
     })
 }
@@ -1278,16 +1490,156 @@ fn hex_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAR_CID_PREFIX, Cid36, LosslessCarBlock, NodeLocation, RawCidRef, RawNode, decode_raw_node,
-        validate_car_stream,
+        CAR_CID_PREFIX, Cid36, LosslessCarBlock, NodeLocation, RawCidRef, RawCidRefBytes,
+        RawDataFrame, RawNode, ReconstructError, StandaloneDataFrame, decode_raw_node,
+        decode_raw_node_with_data_buffers, validate_car_stream,
     };
-    use crate::{CarBlockReader, confirmed_block};
+    use crate::{CarBlockReader, confirmed_block, node::CborCidRef};
     use prost::Message;
-    use std::io::Cursor;
+    use serde::Serialize;
+    use std::{
+        collections::{HashMap, VecDeque},
+        io::Cursor,
+    };
 
     #[test]
     fn cid_prefix_matches_old_faithful() {
         assert_eq!(CAR_CID_PREFIX, [0x01, 0x71, 0x12, 0x20]);
+    }
+
+    #[test]
+    fn normal_tagged_leading_zero_cid_ref_is_inline_and_lossless() {
+        let cid = Cid36::compute(b"normal tagged CID");
+        let cbor_bytes = cid.cbor_bytes();
+        let raw = RawCidRef::from_borrowed(CborCidRef {
+            bytes: &cbor_bytes,
+            tagged: true,
+        })
+        .expect("decode normal CID ref");
+
+        assert!(matches!(raw.bytes, RawCidRefBytes::Standard { .. }));
+        assert_eq!(raw.cid, Some(cid));
+        assert_eq!(raw.normalized_bytes(), cid.car_bytes());
+        assert_eq!(raw.cbor_bytes(), cbor_bytes);
+        assert!(raw.tagged);
+        assert_eq!(
+            encode_raw_cid_ref(&raw),
+            encode_cbor_cid_ref(&cbor_bytes, true)
+        );
+    }
+
+    #[test]
+    fn normal_untagged_cid_ref_without_leading_zero_is_inline_and_lossless() {
+        let cid = Cid36::compute(b"normal untagged CID");
+        let car_bytes = *cid.car_bytes();
+        let raw = RawCidRef::from_borrowed(CborCidRef {
+            bytes: &car_bytes,
+            tagged: false,
+        })
+        .expect("decode untagged CID ref");
+
+        assert!(matches!(raw.bytes, RawCidRefBytes::Standard { .. }));
+        assert_eq!(raw.cid, Some(cid));
+        assert_eq!(raw.normalized_bytes(), car_bytes);
+        assert_eq!(raw.cbor_bytes(), car_bytes);
+        assert!(!raw.tagged);
+        assert_eq!(
+            encode_raw_cid_ref(&raw),
+            encode_cbor_cid_ref(&car_bytes, false)
+        );
+    }
+
+    #[test]
+    fn inline_identity_cid_uses_owned_fallback_and_preserves_bytes() {
+        let digest = [9u8, 8, 7, 6];
+        // CIDv1 + raw codec + identity multihash + digest length + digest. The initial zero is
+        // the conventional CBOR CID byte-string prefix and is not part of the normalized CID.
+        let cbor_bytes = [0, 1, 0x55, 0, digest.len() as u8, 9, 8, 7, 6];
+        let raw = RawCidRef::from_borrowed(CborCidRef {
+            bytes: &cbor_bytes,
+            tagged: true,
+        })
+        .expect("decode identity CID ref");
+
+        assert!(matches!(raw.bytes, RawCidRefBytes::Owned { .. }));
+        assert_eq!(raw.cid, None);
+        assert_eq!(raw.normalized_bytes(), &cbor_bytes[1..]);
+        assert_eq!(raw.cbor_bytes(), cbor_bytes);
+        assert_eq!(raw.inline_raw_bytes(), Some(digest.as_slice()));
+        assert_eq!(
+            encode_raw_cid_ref(&raw),
+            encode_cbor_cid_ref(&cbor_bytes, true)
+        );
+    }
+
+    #[test]
+    fn malformed_cid_ref_uses_owned_fallback_without_changing_semantics() {
+        let cbor_bytes = [0, 0xff, 0x01, 0x02];
+        let raw = RawCidRef::from_borrowed(CborCidRef {
+            bytes: &cbor_bytes,
+            tagged: false,
+        })
+        .expect("retain malformed CID ref");
+
+        assert!(matches!(raw.bytes, RawCidRefBytes::Owned { .. }));
+        assert_eq!(raw.cid, None);
+        assert_eq!(raw.normalized_bytes(), &cbor_bytes[1..]);
+        assert_eq!(raw.cbor_bytes(), cbor_bytes);
+        assert_eq!(raw.inline_raw_bytes(), None);
+        assert!(matches!(
+            raw.require_car_cid(),
+            Err(ReconstructError::UnsupportedCidRef(bytes)) if bytes == cbor_bytes[1..]
+        ));
+        assert_eq!(
+            encode_raw_cid_ref(&raw),
+            encode_cbor_cid_ref(&cbor_bytes, false)
+        );
+    }
+
+    #[test]
+    fn cid_ref_postcard_encoding_remains_compatible_with_legacy_vec_fields() {
+        #[derive(Serialize)]
+        struct LegacyRawCidRef {
+            cid: Option<Cid36>,
+            normalized_bytes: Vec<u8>,
+            cbor_bytes: Vec<u8>,
+            tagged: bool,
+        }
+
+        let cid = Cid36::compute(b"postcard compatibility");
+        let raw = RawCidRef::from_car_cid(cid);
+        let legacy = LegacyRawCidRef {
+            cid: raw.cid,
+            normalized_bytes: raw.normalized_bytes().to_vec(),
+            cbor_bytes: raw.cbor_bytes().to_vec(),
+            tagged: raw.tagged,
+        };
+
+        let current_bytes = postcard::to_allocvec(&raw).expect("serialize current CID ref");
+        let legacy_bytes = postcard::to_allocvec(&legacy).expect("serialize legacy CID ref");
+        assert_eq!(current_bytes, legacy_bytes);
+
+        let decoded: RawCidRef =
+            postcard::from_bytes(&legacy_bytes).expect("decode legacy CID ref");
+        assert_eq!(decoded, raw);
+        assert!(matches!(decoded.bytes, RawCidRefBytes::Standard { .. }));
+    }
+
+    fn encode_raw_cid_ref(value: &RawCidRef) -> Vec<u8> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        value.encode_into(&mut encoder);
+        encoder.into_writer()
+    }
+
+    fn encode_cbor_cid_ref(bytes: &[u8], tagged: bool) -> Vec<u8> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        if tagged {
+            encoder
+                .tag(minicbor::data::Tag::new(42))
+                .expect("vec encoder is infallible");
+        }
+        encoder.bytes(bytes).expect("vec encoder is infallible");
+        encoder.into_writer()
     }
 
     #[test]
@@ -1353,6 +1705,217 @@ mod tests {
         let encoded = frame.encode_payload();
         assert_eq!(encoded, payload);
         assert_eq!(Cid36::compute(&encoded), cid);
+    }
+
+    #[test]
+    fn pooled_raw_transaction_decode_reuses_both_payload_buffers() {
+        let tx_data = [1u8, 2, 3, 4, 5, 6];
+        let metadata = [7u8, 8, 9, 10];
+        let data_frame = encode_dataframe(&tx_data);
+        let metadata_frame = encode_dataframe(&metadata);
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder.array(5).unwrap();
+        encoder.u64(0).unwrap();
+        encoder.writer_mut().extend_from_slice(&data_frame);
+        encoder.writer_mut().extend_from_slice(&metadata_frame);
+        encoder.u64(42).unwrap();
+        encoder.u64(3).unwrap();
+        let payload = encoder.into_writer();
+        let cid = Cid36::compute(&payload);
+
+        let mut tx_buffer = Vec::with_capacity(128);
+        tx_buffer.extend_from_slice(b"discard tx contents");
+        let tx_ptr = tx_buffer.as_ptr();
+        let mut metadata_buffer = Vec::with_capacity(64);
+        metadata_buffer.extend_from_slice(b"discard metadata contents");
+        let metadata_ptr = metadata_buffer.as_ptr();
+        let mut supplied = VecDeque::from([tx_buffer, metadata_buffer]);
+        let mut requested = Vec::new();
+        let pooled = decode_raw_node_with_data_buffers(
+            NodeLocation {
+                entry_index: 1,
+                car_offset: 2,
+            },
+            cid,
+            &payload,
+            &mut |required| {
+                requested.push(required);
+                supplied.pop_front().expect("supplied dataframe buffer")
+            },
+        )
+        .unwrap();
+        let ordinary = decode_raw_node(
+            NodeLocation {
+                entry_index: 1,
+                car_offset: 2,
+            },
+            cid,
+            &payload,
+        )
+        .unwrap();
+
+        assert_eq!(pooled, ordinary);
+        assert_eq!(requested, vec![tx_data.len(), metadata.len()]);
+        assert!(supplied.is_empty());
+        let RawNode::Transaction(transaction) = pooled else {
+            panic!("expected transaction")
+        };
+        assert_eq!(transaction.data.data, tx_data);
+        assert_eq!(transaction.metadata.data, metadata);
+        assert_eq!(transaction.data.data.as_ptr(), tx_ptr);
+        assert_eq!(transaction.metadata.data.as_ptr(), metadata_ptr);
+        assert_eq!(transaction.encode_payload(), payload);
+    }
+
+    #[test]
+    fn pooled_rewards_decode_reuses_payload_buffer() {
+        let rewards_data = [41u8, 42, 43, 44, 45];
+        let payload = encode_rewards_node(99, &rewards_data);
+        let cid = Cid36::compute(&payload);
+        let mut supplied = Vec::with_capacity(128);
+        supplied.extend_from_slice(b"discard rewards contents");
+        let supplied_ptr = supplied.as_ptr();
+        let pooled = decode_raw_node_with_data_buffers(
+            NodeLocation {
+                entry_index: 8,
+                car_offset: 9,
+            },
+            cid,
+            &payload,
+            &mut |required| {
+                assert_eq!(required, rewards_data.len());
+                std::mem::take(&mut supplied)
+            },
+        )
+        .unwrap();
+        let ordinary = decode_raw_node(
+            NodeLocation {
+                entry_index: 8,
+                car_offset: 9,
+            },
+            cid,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(pooled, ordinary);
+        let RawNode::Rewards(rewards) = pooled else {
+            panic!("expected rewards")
+        };
+        assert_eq!(rewards.data.data, rewards_data);
+        assert_eq!(rewards.data.data.as_ptr(), supplied_ptr);
+        assert_eq!(rewards.encode_payload(), payload);
+    }
+
+    #[test]
+    fn pooled_dataframe_preserves_negative_hash_and_odd_continuations() {
+        let continuation_cid = Cid36::compute(b"pooled continuation");
+        let normal_ref = RawCidRef::from_car_cid(continuation_cid);
+        let identity_digest = [9u8, 8, 7, 6];
+        let identity_bytes = [0, 1, 0x55, 0, identity_digest.len() as u8, 9, 8, 7, 6];
+        let identity_ref = RawCidRef::from_borrowed(CborCidRef {
+            bytes: &identity_bytes,
+            tagged: true,
+        })
+        .unwrap();
+        let malformed_bytes = [0, 0xff, 0x01, 0x02];
+        let malformed_ref = RawCidRef::from_borrowed(CborCidRef {
+            bytes: &malformed_bytes,
+            tagged: false,
+        })
+        .unwrap();
+        let signed_hash = -5_787_489_622_768_765_176i64;
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder.array(6).unwrap();
+        encoder.u64(6).unwrap();
+        encoder.i64(signed_hash).unwrap();
+        encoder.null().unwrap();
+        encoder.null().unwrap();
+        encoder.bytes(&[1, 2]).unwrap();
+        encoder.array(3).unwrap();
+        normal_ref.encode_into(&mut encoder);
+        identity_ref.encode_into(&mut encoder);
+        malformed_ref.encode_into(&mut encoder);
+        let payload = encoder.into_writer();
+        let cid = Cid36::compute(&payload);
+
+        let mut supplied = Vec::with_capacity(256);
+        supplied.extend_from_slice(b"contents must be cleared");
+        let supplied_ptr = supplied.as_ptr();
+        let pooled = decode_raw_node_with_data_buffers(
+            NodeLocation {
+                entry_index: 4,
+                car_offset: 5,
+            },
+            cid,
+            &payload,
+            &mut |required| {
+                assert_eq!(required, 2);
+                std::mem::take(&mut supplied)
+            },
+        )
+        .unwrap();
+        let ordinary = decode_raw_node(
+            NodeLocation {
+                entry_index: 4,
+                car_offset: 5,
+            },
+            cid,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(pooled, ordinary);
+
+        let RawNode::DataFrame(frame) = pooled else {
+            panic!("expected dataframe")
+        };
+        assert_eq!(frame.frame.data.as_ptr(), supplied_ptr);
+        assert_eq!(frame.frame.hash, Some(signed_hash as u64));
+        assert!(frame.frame.hash_was_negative);
+        assert_eq!(frame.encode_payload(), payload);
+        assert_eq!(Cid36::compute(&frame.encode_payload()), cid);
+
+        let continuation = StandaloneDataFrame {
+            location: NodeLocation {
+                entry_index: 6,
+                car_offset: 7,
+            },
+            cid: continuation_cid,
+            frame: RawDataFrame {
+                hash: None,
+                hash_was_negative: false,
+                index: None,
+                total: None,
+                data: vec![3, 4],
+                next: Vec::new(),
+            },
+        };
+        let dataframes = HashMap::from([(continuation_cid, continuation)]);
+        let mut supported = frame.frame.clone();
+        supported.next.pop();
+        assert_eq!(
+            supported.reassemble_bytes(&dataframes).unwrap(),
+            [1, 2, 3, 4, 9, 8, 7, 6]
+        );
+        assert!(matches!(
+            frame.frame.reassemble_bytes(&dataframes),
+            Err(ReconstructError::UnsupportedCidRef(bytes))
+                if bytes == malformed_bytes[1..]
+        ));
+
+        let mut cyclic_continuation = dataframes[&continuation_cid].clone();
+        cyclic_continuation
+            .frame
+            .next
+            .push(RawCidRef::from_car_cid(cid));
+        let cyclic = HashMap::from([
+            (continuation_cid, cyclic_continuation),
+            (cid, frame.clone()),
+        ]);
+        assert!(matches!(
+            frame.frame.reassemble_bytes(&cyclic),
+            Err(ReconstructError::DataFrameCycle(cycle_cid))
+                if cycle_cid == continuation_cid
+        ));
     }
 
     fn build_synthetic_car() -> Vec<u8> {

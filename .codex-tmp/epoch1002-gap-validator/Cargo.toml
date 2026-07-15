@@ -1,0 +1,22 @@
+[package]
+name = "epoch1002-gap-validator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.22.1"
+five8 = "1.0.0"
+of-car-reader = { path = "/volume1/@home/ach/dev/blockzilla-v1-registry-mphf-20260616/crates/old-faithful/car-reader", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.11.0"
+wincode = "0.5.4"
+
+[profile.release]
+opt-level = 2
+debug = false
+strip = true
+lto = "thin"
+codegen-units = 2
+

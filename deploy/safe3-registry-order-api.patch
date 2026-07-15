@@ -1,0 +1,429 @@
+--- a/crates/hivezilla/src/nas_pipeline.rs
++++ b/crates/hivezilla/src/nas_pipeline.rs
+@@ -69,7 +69,11 @@
+ // task's peak memory.
+ const PREFLIGHT_MEMORY_MIB: u64 = 2_304;
+ const MAX_PREFLIGHT_RECEIPT_BYTES: u64 = 1024 * 1024;
++const MAX_FIRST_SEEN_MANIFEST_BYTES: u64 = 64 * 1024;
+ const SCAN_MARKER_MAGIC: &str = "blockzilla-first-seen-scan-complete-v1";
++const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
++const REGISTRY_INDEX_VERSION: u16 = 2;
++const REGISTRY_INDEX_HEADER_LEN: u16 = 8 + 2 + 2 + 8;
+ const PIPELINE_LOCK_FILE: &str = "pipeline.lock";
+ const ACQUISITION_FAILURES_FILE: &str = "acquisition-failures.json";
+ const MIN_CAR_DOWNLOAD_PROJECTION_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+@@ -114,6 +118,15 @@
+     Complete,
+     Failed,
+     Blocked,
++}
++
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RegistryOrder {
++    UsageSorted,
++    FirstSeen,
++    #[default]
++    Unknown,
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+@@ -152,6 +165,8 @@
+ pub struct EpochSnapshot {
+     pub epoch: u64,
+     pub state: HistoricalState,
++    #[serde(default)]
++    pub registry_order: RegistryOrder,
+     pub input_path: Option<PathBuf>,
+     pub output_path: PathBuf,
+     pub car_bytes: u64,
+@@ -2019,6 +2034,7 @@
+         require_first_seen_manifest,
+         legacy_no_access_complete,
+     );
++    let registry_order = classify_registry_order(&output, state);
+ 
+     let updated_unix_secs = progress
+         .updated_unix_secs
+@@ -2028,6 +2044,7 @@
+     EpochSnapshot {
+         epoch,
+         state,
++        registry_order,
+         car_bytes: input.as_deref().map(file_len).unwrap_or(0),
+         artifacts,
+         input_path: input,
+@@ -2726,9 +2743,131 @@
+         .all(|name| path.join(name).is_file());
+     reader_core_complete
+         && optional_empty_files_exist
+-        && (!require_first_seen_manifest || is_nonempty_file(&path.join(FIRST_SEEN_MANIFEST_FILE)))
++        && (!require_first_seen_manifest
++            || first_seen_manifest_declares_first_seen(&path.join(FIRST_SEEN_MANIFEST_FILE)))
++}
++
++fn classify_registry_order(path: &Path, state: HistoricalState) -> RegistryOrder {
++    let Some(registry_keys) = structurally_valid_registry_key_count(&path.join(REGISTRY_FILE))
++    else {
++        return RegistryOrder::Unknown;
++    };
++    let manifest_status = first_seen_manifest_status(&path.join(FIRST_SEEN_MANIFEST_FILE));
++
++    if matches!(
++        state,
++        HistoricalState::ScanReady | HistoricalState::Finalizing | HistoricalState::Complete
++    ) && manifest_status == FirstSeenManifestStatus::FirstSeen
++    {
++        return RegistryOrder::FirstSeen;
++    }
++
++    if state == HistoricalState::Complete
++        && manifest_status == FirstSeenManifestStatus::Absent
++        && registry_index_matches_key_count(&path.join(REGISTRY_INDEX_FILE), registry_keys)
++    {
++        return RegistryOrder::UsageSorted;
++    }
++
++    RegistryOrder::Unknown
+ }
+ 
++fn structurally_valid_registry_key_count(path: &Path) -> Option<u64> {
++    let metadata = fs::metadata(path).ok()?;
++    let bytes = metadata.is_file().then_some(metadata.len())?;
++    (bytes > 0 && bytes.is_multiple_of(32))
++        .then_some(bytes / 32)
++        .filter(|keys| *keys <= u64::from(u32::MAX))
++}
++
++fn registry_index_matches_key_count(path: &Path, registry_keys: u64) -> bool {
++    let Ok(metadata) = fs::metadata(path) else {
++        return false;
++    };
++    let Some(minimum_len) = registry_keys
++        .checked_mul(12)
++        .and_then(|rows| rows.checked_add(u64::from(REGISTRY_INDEX_HEADER_LEN)))
++        .and_then(|rows| rows.checked_add(1))
++    else {
++        return false;
++    };
++    if !metadata.is_file() || metadata.len() < minimum_len {
++        return false;
++    }
++
++    let Ok(mut file) = File::open(path) else {
++        return false;
++    };
++    let mut header = [0u8; REGISTRY_INDEX_HEADER_LEN as usize];
++    if file.read_exact(&mut header).is_err() {
++        return false;
++    }
++    header[..8] == *REGISTRY_INDEX_MAGIC
++        && u16::from_le_bytes([header[8], header[9]]) == REGISTRY_INDEX_VERSION
++        && u16::from_le_bytes([header[10], header[11]]) == REGISTRY_INDEX_HEADER_LEN
++        && u64::from_le_bytes(header[12..20].try_into().unwrap()) == registry_keys
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum FirstSeenManifestStatus {
++    Absent,
++    FirstSeen,
++    Invalid,
++}
++
++fn first_seen_manifest_status(path: &Path) -> FirstSeenManifestStatus {
++    match fs::symlink_metadata(path) {
++        Ok(_) => {}
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
++            return FirstSeenManifestStatus::Absent;
++        }
++        Err(_) => return FirstSeenManifestStatus::Invalid,
++    }
++
++    let Ok(metadata) = fs::metadata(path) else {
++        return FirstSeenManifestStatus::Invalid;
++    };
++    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_FIRST_SEEN_MANIFEST_BYTES
++    {
++        return FirstSeenManifestStatus::Invalid;
++    }
++
++    let Ok(file) = File::open(path) else {
++        return FirstSeenManifestStatus::Invalid;
++    };
++    let mut bytes = Vec::with_capacity(metadata.len() as usize);
++    if file
++        .take(MAX_FIRST_SEEN_MANIFEST_BYTES + 1)
++        .read_to_end(&mut bytes)
++        .is_err()
++        || bytes.len() as u64 > MAX_FIRST_SEEN_MANIFEST_BYTES
++    {
++        return FirstSeenManifestStatus::Invalid;
++    }
++    let Ok(manifest) = std::str::from_utf8(&bytes) else {
++        return FirstSeenManifestStatus::Invalid;
++    };
++
++    let mut registry_order = None;
++    for line in manifest.lines() {
++        let Some(value) = line.strip_prefix("registry_order=") else {
++            continue;
++        };
++        if registry_order.replace(value).is_some() {
++            return FirstSeenManifestStatus::Invalid;
++        }
++    }
++    if registry_order == Some("first_seen_v1") {
++        FirstSeenManifestStatus::FirstSeen
++    } else {
++        FirstSeenManifestStatus::Invalid
++    }
++}
++
++fn first_seen_manifest_declares_first_seen(path: &Path) -> bool {
++    first_seen_manifest_status(path) == FirstSeenManifestStatus::FirstSeen
++}
++
+ fn ownership_is_first_seen(owner: &OwnershipMarker) -> bool {
+     matches!(
+         owner.kind.as_str(),
+@@ -2758,9 +2897,9 @@
+     }
+     if require_first_seen_manifest
+         && historical_archive_core_complete(path, false)
+-        && !is_nonempty_file(&path.join(FIRST_SEEN_MANIFEST_FILE))
++        && !first_seen_manifest_declares_first_seen(&path.join(FIRST_SEEN_MANIFEST_FILE))
+     {
+-        return "pipeline-owned first-seen output is missing its final manifest".to_string();
++        return "pipeline-owned first-seen output is missing a valid final manifest".to_string();
+     }
+     "output exists without a complete reader core or scan-ready marker".to_string()
+ }
+@@ -5584,10 +5723,7 @@
+     fn write_historical_candidate(output: &Path, include_access: bool) {
+         for name in [
+             META_FILE,
+-            REGISTRY_FILE,
+             REGISTRY_COUNTS_FILE,
+-            REGISTRY_INDEX_FILE,
+-            FIRST_SEEN_MANIFEST_FILE,
+             BLOCKHASH_REGISTRY_FILE,
+             BLOCKS_FILE,
+             BLOCK_INDEX_FILE,
+@@ -5596,6 +5732,8 @@
+         ] {
+             fs::write(output.join(name), b"ok").unwrap();
+         }
++        write_structural_registry_and_index(output, 1);
++        write_valid_first_seen_manifest(output);
+         for name in [
+             SIGNATURES_FILE,
+             VOTE_HASH_REGISTRY_FILE,
+@@ -5610,6 +5748,31 @@
+         }
+     }
+ 
++    fn write_valid_first_seen_manifest(output: &Path) {
++        fs::write(
++            output.join(FIRST_SEEN_MANIFEST_FILE),
++            b"version=1\nregistry_order=first_seen_v1\n",
++        )
++        .unwrap();
++    }
++
++    fn write_structural_registry_and_index(output: &Path, registry_keys: u64) {
++        fs::write(
++            output.join(REGISTRY_FILE),
++            vec![0; usize::try_from(registry_keys * 32).unwrap()],
++        )
++        .unwrap();
++        let mut index = Vec::from(*REGISTRY_INDEX_MAGIC);
++        index.extend_from_slice(&REGISTRY_INDEX_VERSION.to_le_bytes());
++        index.extend_from_slice(&REGISTRY_INDEX_HEADER_LEN.to_le_bytes());
++        index.extend_from_slice(&registry_keys.to_le_bytes());
++        index.resize(
++            usize::try_from(u64::from(REGISTRY_INDEX_HEADER_LEN) + registry_keys * 12 + 1).unwrap(),
++            0,
++        );
++        fs::write(output.join(REGISTRY_INDEX_FILE), index).unwrap();
++    }
++
+     fn write_scan_marker(output: &Path) {
+         fs::write(
+             output.join(SCAN_MARKER),
+@@ -5622,6 +5785,7 @@
+         EpochSnapshot {
+             epoch,
+             state,
++            registry_order: RegistryOrder::Unknown,
+             input_path: Some(root.join("cars").join(format!("epoch-{epoch}.car"))),
+             output_path: root.join("archives").join(format!("epoch-{epoch}")),
+             car_bytes: 1,
+@@ -5729,6 +5893,12 @@
+         write_scan_marker(&output);
+         let scan_ready = classify_epoch(&config, &runtime, 700, unix_now());
+         assert_eq!(scan_ready.state, HistoricalState::ScanReady);
++        assert_eq!(scan_ready.registry_order, RegistryOrder::Unknown);
++        fs::write(output.join(REGISTRY_FILE), [0; 32]).unwrap();
++        write_valid_first_seen_manifest(&output);
++        let published_manifest = classify_epoch(&config, &runtime, 700, unix_now());
++        assert_eq!(published_manifest.state, HistoricalState::ScanReady);
++        assert_eq!(published_manifest.registry_order, RegistryOrder::FirstSeen);
+         write_ownership(&output, "historical_scan", "700", "running", None).unwrap();
+         set_ownership_pid(&output, Some(u32::MAX)).unwrap();
+         runtime
+@@ -5745,9 +5915,104 @@
+         fs::remove_file(output.join(FIRST_SEEN_MANIFEST_FILE)).unwrap();
+         let missing_manifest = classify_epoch(&config, &runtime, 700, unix_now());
+         assert_eq!(missing_manifest.state, HistoricalState::Blocked);
+-        fs::write(output.join(FIRST_SEEN_MANIFEST_FILE), b"ok").unwrap();
++        assert_eq!(missing_manifest.registry_order, RegistryOrder::Unknown);
++        fs::write(
++            output.join(FIRST_SEEN_MANIFEST_FILE),
++            b"version=1\nregistry_order=usage_sorted\n",
++        )
++        .unwrap();
++        let invalid_manifest = classify_epoch(&config, &runtime, 700, unix_now());
++        assert_eq!(invalid_manifest.state, HistoricalState::Blocked);
++        assert_eq!(invalid_manifest.registry_order, RegistryOrder::Unknown);
++        write_valid_first_seen_manifest(&output);
+         let complete = classify_epoch(&config, &runtime, 700, unix_now());
+         assert_eq!(complete.state, HistoricalState::Complete);
++        assert_eq!(complete.registry_order, RegistryOrder::FirstSeen);
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn first_seen_manifest_parser_is_bounded_and_exact() {
++        let root = temp_root("registry-order-manifest");
++        fs::create_dir_all(&root).unwrap();
++        let manifest = root.join(FIRST_SEEN_MANIFEST_FILE);
++
++        fs::write(&manifest, b"registry_order=first_seen_v10\n").unwrap();
++        assert!(!first_seen_manifest_declares_first_seen(&manifest));
++
++        fs::write(&manifest, b"not_registry_order=first_seen_v1\n").unwrap();
++        assert!(!first_seen_manifest_declares_first_seen(&manifest));
++
++        fs::write(
++            &manifest,
++            b"version=1\nregistry_order=first_seen_v1\nregistry_order=usage_sorted\n",
++        )
++        .unwrap();
++        assert!(!first_seen_manifest_declares_first_seen(&manifest));
++
++        fs::write(
++            &manifest,
++            b"version=1\nregistry_order=first_seen_v1\nreferences=1\n",
++        )
++        .unwrap();
++        assert!(first_seen_manifest_declares_first_seen(&manifest));
++
++        let mut oversized = b"registry_order=first_seen_v1\n".to_vec();
++        oversized.resize(MAX_FIRST_SEEN_MANIFEST_BYTES as usize + 1, b'x');
++        fs::write(&manifest, oversized).unwrap();
++        assert!(!first_seen_manifest_declares_first_seen(&manifest));
++
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn complete_legacy_archive_requires_coherent_registry_index_for_usage_sorted() {
++        let root = temp_root("registry-order-legacy");
++        let config = test_config(&root);
++        fs::create_dir_all(&config.archive_root).unwrap();
++        let output = config.archive_root.join("epoch-700");
++        fs::create_dir_all(&output).unwrap();
++        write_historical_candidate(&output, false);
++        fs::remove_file(output.join(FIRST_SEEN_MANIFEST_FILE)).unwrap();
++
++        let usage_sorted = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
++        assert_eq!(usage_sorted.state, HistoricalState::Complete);
++        assert_eq!(usage_sorted.registry_order, RegistryOrder::UsageSorted);
++
++        let manifest_path = output.join(FIRST_SEEN_MANIFEST_FILE);
++        fs::write(&manifest_path, b"version=1\nregistry_order=usage_sorted\n").unwrap();
++        let invalid_manifest = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
++        assert_eq!(invalid_manifest.state, HistoricalState::Complete);
++        assert_eq!(invalid_manifest.registry_order, RegistryOrder::Unknown);
++
++        fs::remove_file(&manifest_path).unwrap();
++        fs::create_dir(&manifest_path).unwrap();
++        let manifest_directory = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
++        assert_eq!(manifest_directory.state, HistoricalState::Complete);
++        assert_eq!(manifest_directory.registry_order, RegistryOrder::Unknown);
++        fs::remove_dir(&manifest_path).unwrap();
++
++        let mut oversized_manifest = b"registry_order=first_seen_v1\n".to_vec();
++        oversized_manifest.resize(MAX_FIRST_SEEN_MANIFEST_BYTES as usize + 1, b'x');
++        fs::write(&manifest_path, oversized_manifest).unwrap();
++        let oversized_manifest = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
++        assert_eq!(oversized_manifest.state, HistoricalState::Complete);
++        assert_eq!(oversized_manifest.registry_order, RegistryOrder::Unknown);
++        fs::remove_file(&manifest_path).unwrap();
++
++        let index_path = output.join(REGISTRY_INDEX_FILE);
++        let mut index = fs::read(&index_path).unwrap();
++        index[12..20].copy_from_slice(&2u64.to_le_bytes());
++        fs::write(&index_path, index).unwrap();
++        let incoherent = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
++        assert_eq!(incoherent.state, HistoricalState::Complete);
++        assert_eq!(incoherent.registry_order, RegistryOrder::Unknown);
++
++        fs::remove_file(output.join(REGISTRY_FILE)).unwrap();
++        let missing_registry = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
++        assert_ne!(missing_registry.state, HistoricalState::Complete);
++        assert_eq!(missing_registry.registry_order, RegistryOrder::Unknown);
++
+         fs::remove_dir_all(root).unwrap();
+     }
+ 
+@@ -5827,6 +6092,7 @@
+ 
+         let legacy = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
+         assert_eq!(legacy.state, HistoricalState::Complete);
++        assert_eq!(legacy.registry_order, RegistryOrder::UsageSorted);
+         assert_eq!(legacy.input_path, None);
+         assert_eq!(
+             legacy.message.as_deref(),
+@@ -6037,6 +6303,9 @@
+         let mut snapshot = empty_snapshot(true);
+         snapshot.sequence = 7;
+         snapshot.summary.queued = 2;
++        snapshot
++            .epochs
++            .push(test_epoch(Path::new("/tmp"), 700, HistoricalState::Queued));
+         let value = serde_json::to_value(&snapshot).unwrap();
+         assert_eq!(value["schema_version"], 2);
+         assert_eq!(value["sequence"], 7);
+@@ -6050,6 +6319,15 @@
+         assert!(value.get("live").is_some());
+         assert!(value.get("finalizer_queue").is_some());
+         assert!(value.get("errors").is_some());
++        assert_eq!(value["epochs"][0]["registry_order"], "unknown");
++
++        let mut legacy_epoch = value["epochs"][0].clone();
++        legacy_epoch
++            .as_object_mut()
++            .unwrap()
++            .remove("registry_order");
++        let legacy_epoch: EpochSnapshot = serde_json::from_value(legacy_epoch).unwrap();
++        assert_eq!(legacy_epoch.registry_order, RegistryOrder::Unknown);
+     }
+ 
+     #[test]
+@@ -6442,6 +6720,7 @@
+         let epoch = |epoch, state| EpochSnapshot {
+             epoch,
+             state,
++            registry_order: RegistryOrder::Unknown,
+             input_path: None,
+             output_path: PathBuf::from(format!("/archives/epoch-{epoch}")),
+             car_bytes: 0,
+@@ -6465,6 +6744,7 @@
+         let mut epoch = EpochSnapshot {
+             epoch: 700,
+             state: HistoricalState::Queued,
++            registry_order: RegistryOrder::Unknown,
+             input_path: Some(config.car_root.join("epoch-700.car")),
+             output_path: config.archive_root.join("epoch-700"),
+             car_bytes: 1,

@@ -22,6 +22,51 @@ That makes it immediately useful for manual machines, Hetzner/AWS/GCP boxes
 launched by hand, or marketplace hosts where cloud-init/user-data is enough.
 Provider API drivers can then be added behind the same plan format.
 
+## One-call epoch slot audit
+
+`hivezilla-epoch-slot-audit` makes one bounded, finalized `getBlocks` request
+for a closed Old Faithful epoch and stores the result as a 54,000-byte slot
+bitmap. Later comparisons reuse that snapshot and do not call the provider
+again unless `--refresh-rpc-snapshot` is explicit. The RPC URL and optional
+`x-token` are read only from named environment variables and are never written
+to receipts.
+
+The caller must first publish a small eligibility receipt proving that the
+whole epoch is finalized:
+
+```json
+{
+  "schema_version": 1,
+  "cluster_label": "mainnet-beta",
+  "finalized_through_slot": 432431999,
+  "observed_unix_secs": 1783987200,
+  "source_label": "live-finalized-watermark"
+}
+```
+
+Then compare the RPC bitmap with either a structurally validated Archive V2
+hot index (`--archive-dir`) or an atomically published epoch repair union
+(`--repair-bundle`):
+
+```bash
+export HIVEZILLA_EPOCH_AUDIT_RPC_URL='https://provider.example/rpc'
+
+cargo run -p blockzilla-hivezilla \
+  --bin hivezilla-epoch-slot-audit -- \
+  --epoch 1000 \
+  --provider-label configured-mainnet-provider \
+  --cluster-label mainnet-beta \
+  --eligibility-receipt /path/to/finalized-watermark.json \
+  --state-dir /path/to/epoch-slot-audits \
+  --repair-bundle /path/to/epoch-1000-repair-view
+```
+
+Exact local/RPC agreement is reported as `agrees_unproven` by default. Enable
+`--provider-archival-guarantee` only when the configured provider contract
+guarantees complete historical results; only then does exact agreement become
+`slot_coverage_verified` and RPC omissions become defensible skipped slots.
+This worker proves produced-slot membership, not block-payload integrity.
+
 ## Whole-epoch fanout
 
 This is the safest first production mode because the current Archive V2 hot

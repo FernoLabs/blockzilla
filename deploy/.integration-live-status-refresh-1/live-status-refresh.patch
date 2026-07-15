@@ -1,0 +1,159 @@
+--- a/crates/hivezilla/src/nas_pipeline.rs
++++ b/crates/hivezilla/src/nas_pipeline.rs
+@@ -3250,7 +3250,8 @@
+         .as_deref()
+         .and_then(read_progress)
+         .unwrap_or_default();
+-    let journal = read_live_journal_tail(&capture_dir.join("journal/grpc-blocks.jsonl"));
++    let journal_path = capture_dir.join("journal/grpc-blocks.jsonl");
++    let journal = read_live_journal_tail(&journal_path);
+     // Capture directories are epoch-scoped. A repair/tail block can belong to
+     // the next epoch, so `last_slot` must be the weakest fallback; otherwise an
+     // epoch-1000 capture with a 1001 tail is mislabeled as epoch 1001 and
+@@ -3325,22 +3326,11 @@
+     if let Some(pid) = progress.pid {
+         progress.rss_bytes = process_rss_bytes(pid);
+     }
+-    if progress.first_slot.is_none() {
+-        progress.first_slot = journal
+-            .as_ref()
+-            .and_then(|row| json_u64(row, &["first_slot"]));
+-    }
+-    if progress.last_slot.is_none() {
+-        progress.last_slot = journal
+-            .as_ref()
+-            .and_then(|row| json_u64(row, &["slot", "last_slot"]));
+-    }
+-    if progress.blocks_done == 0 {
+-        progress.blocks_done = journal
+-            .as_ref()
+-            .and_then(|row| json_u64(row, &["block_id"]))
+-            .map_or(0, |block_id| block_id.saturating_add(1));
+-    }
++    merge_live_journal_progress(
++        &mut progress,
++        journal.as_ref(),
++        modified_unix_secs(&journal_path),
++    );
+     let progress_state_active = match progress.state.as_deref() {
+         Some("capturing" | "running" | "starting") => true,
+         // In particular, the producer publishes `closed` at an epoch boundary
+@@ -4959,13 +4949,47 @@
+         .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_string))
+ }
+ 
++fn merge_live_journal_progress(
++    progress: &mut ProgressSnapshot,
++    journal: Option<&Value>,
++    journal_updated_unix_secs: Option<u64>,
++) {
++    let Some(row) = journal else {
++        return;
++    };
++    if progress.first_slot.is_none() {
++        progress.first_slot = json_u64(row, &["first_slot"]);
++    }
++    if let Some(last_slot) = json_u64(row, &["slot", "last_slot"]) {
++        progress.last_slot = Some(
++            progress
++                .last_slot
++                .map_or(last_slot, |snapshot_slot| snapshot_slot.max(last_slot)),
++        );
++    }
++    if let Some(blocks_done) =
++        json_u64(row, &["block_id"]).map(|block_id| block_id.saturating_add(1))
++    {
++        progress.blocks_done = progress.blocks_done.max(blocks_done);
++    }
++    if let Some(journal_updated) = journal_updated_unix_secs {
++        progress.updated_unix_secs = Some(
++            progress
++                .updated_unix_secs
++                .map_or(journal_updated, |snapshot_updated| {
++                    snapshot_updated.max(journal_updated)
++                }),
++        );
++    }
++}
++
+ fn read_live_journal_tail(path: &Path) -> Option<Value> {
+     let mut file = File::open(path).ok()?;
+     let len = file.metadata().ok()?.len();
+     let read_len = len.min(128 * 1024);
+     file.seek(SeekFrom::End(-(read_len as i64))).ok()?;
+     let mut bytes = Vec::with_capacity(read_len as usize);
+-    file.read_to_end(&mut bytes).ok()?;
++    file.take(read_len).read_to_end(&mut bytes).ok()?;
+     bytes.split(|byte| *byte == b'\n').rev().find_map(|line| {
+         (!line.is_empty())
+             .then(|| serde_json::from_slice(line).ok())
+@@ -6500,6 +6524,69 @@
+     }
+ 
+     #[test]
++    fn live_journal_tail_refreshes_stale_nonzero_progress_and_ignores_partial_row() {
++        let root = temp_root("live-journal-refresh");
++        let config = test_config(&root);
++        fs::create_dir_all(&config.live_root).unwrap();
++        let capture = config.live_root.join("epoch-1001-capture-postupgrade-test");
++        let journal_dir = capture.join("journal");
++        fs::create_dir_all(&journal_dir).unwrap();
++        fs::write(
++            capture.join("progress.json"),
++            br#"{"phase":"capture","state":"capturing","blocks_done":7716,"first_slot":432655313,"last_slot":432663030,"blocks_per_sec":12.5,"updated_unix_secs":123}"#,
++        )
++        .unwrap();
++        let journal_path = journal_dir.join("grpc-blocks.jsonl");
++        fs::write(
++            &journal_path,
++            concat!(
++                "{\"slot\":432703876,\"epoch\":1001,\"block_id\":48541}\n",
++                "{\"slot\":432703877,\"epoch\":1001,\"block_id\":48542}\n",
++                "{\"slot\":432800000,\"epoch\":1001,\"block_id\":49799"
++            ),
++        )
++        .unwrap();
++        let journal_mtime = modified_unix_secs(&journal_path).unwrap();
++
++        let classified =
++            classify_live_capture(&config, &RuntimeState::default(), capture, unix_now());
++        assert_eq!(classified.state, LiveState::Capturing);
++        assert_eq!(classified.first_slot, Some(432655313));
++        assert_eq!(classified.last_slot, Some(432703877));
++        assert_eq!(classified.blocks_written, 48543);
++        assert_eq!(classified.updated_unix_secs, journal_mtime.max(123));
++        assert_eq!(classified.progress.phase.as_deref(), Some("capture"));
++        assert_eq!(classified.progress.blocks_per_sec, Some(12.5));
++        assert_eq!(
++            classified.progress.updated_unix_secs,
++            Some(journal_mtime.max(123))
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn live_journal_merge_is_monotonic_when_snapshot_is_newer() {
++        let mut progress = ProgressSnapshot {
++            blocks_done: 500,
++            first_slot: Some(1000),
++            last_slot: Some(1500),
++            updated_unix_secs: Some(300),
++            ..ProgressSnapshot::default()
++        };
++        let row = serde_json::json!({
++            "block_id": 398,
++            "first_slot": 900,
++            "slot": 1400,
++        });
++
++        merge_live_journal_progress(&mut progress, Some(&row), Some(200));
++        assert_eq!(progress.blocks_done, 500);
++        assert_eq!(progress.first_slot, Some(1000));
++        assert_eq!(progress.last_slot, Some(1500));
++        assert_eq!(progress.updated_unix_secs, Some(300));
++    }
++
++    #[test]
+     fn live_epochs_have_one_current_capture_and_do_not_become_historical_gaps() {
+         let root = temp_root("live-unified-census");
+         let mut config = test_config(&root);

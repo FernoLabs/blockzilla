@@ -1,0 +1,192 @@
+diff --git a/crates/hivezilla/src/nas_pipeline.rs b/crates/hivezilla/src/nas_pipeline.rs
+--- a/crates/hivezilla/src/nas_pipeline.rs
++++ b/crates/hivezilla/src/nas_pipeline.rs
+@@ -1554,3 +1554,1 @@
+-        finalizer_queue
+-            .first()
+-            .and_then(|item| finalizer_admission_blocked_reason(config, &machine, item))
++        finalizer_queue_admission_blocked_reason(config, &machine, &finalizer_queue)
+@@ -1560,3 +1558,1 @@
+-        finalizer_queue
+-            .first()
+-            .and_then(|item| finalizer_admission_blocked_reason(config, &machine, item))
++        finalizer_queue_admission_blocked_reason(config, &machine, &finalizer_queue)
+@@ -2783,9 +2783,13 @@ fn finalizer_memory_floor_bytes(config: &NasPipelineConfig) -> u64 {
+ }
+ 
+ fn estimate_mphf_build_bytes(config: &NasPipelineConfig, registry_bytes: u64) -> u64 {
++    // The bounded builder maps registry.bin and disables ph's per-key hash
++    // cache. A production run over a 399,597,536-byte registry peaked at
++    // 557,972 KiB RSS. Keep a deliberately wider 2x input allowance plus the
++    // fixed build overhead for allocator, MPHF, values, and tags.
+     finalizer_memory_floor_bytes(config).max(
+         registry_bytes
+-            .saturating_mul(4)
++            .saturating_mul(2)
+             .saturating_add(FINALIZER_BUILD_OVERHEAD_BYTES),
+     )
+ }
+@@ -2834,6 +2838,39 @@ fn finalizer_admission_blocked_reason(
+     })
+ }
+ 
++fn finalizer_is_admissible(
++    config: &NasPipelineConfig,
++    machine: &MachineSnapshot,
++    task: &FinalizerQueueItem,
++) -> bool {
++    task.deferred_reason.is_none()
++        && finalizer_admission_blocked_reason(config, machine, task).is_none()
++}
++
++fn first_admissible_finalizer<'a>(
++    config: &NasPipelineConfig,
++    machine: &MachineSnapshot,
++    queue: &'a [FinalizerQueueItem],
++) -> Option<&'a FinalizerQueueItem> {
++    queue
++        .iter()
++        .find(|task| finalizer_is_admissible(config, machine, task))
++}
++
++fn finalizer_queue_admission_blocked_reason(
++    config: &NasPipelineConfig,
++    machine: &MachineSnapshot,
++    queue: &[FinalizerQueueItem],
++) -> Option<String> {
++    if first_admissible_finalizer(config, machine, queue).is_some() {
++        return None;
++    }
++    queue
++        .iter()
++        .filter(|task| task.deferred_reason.is_none())
++        .find_map(|task| finalizer_admission_blocked_reason(config, machine, task))
++}
++
+ fn summarize_epochs(epochs: &[EpochSnapshot]) -> PipelineSummary {
+     let mut summary = PipelineSummary {
+         epochs_total: epochs.len(),
+@@ -3344,10 +3377,11 @@ async fn schedule_work(
+         })
+         .count();
+     if let Some(live_task) = snapshot
+         .finalizer_queue
+-        .first()
+-        .filter(|task| task.kind == "live")
++        .iter()
++        .filter(|task| task.kind == "live")
++        .find(|task| finalizer_is_admissible(config, &snapshot.machine, task))
+     {
+         if !runtime.acquisitions.is_empty() || adopted_acquisitions > 0 || adopted_active_scans > 0
+         {
+             return Ok(());
+@@ -3477,7 +3515,11 @@ async fn schedule_work(
+         return Ok(());
+     }
+ 
+-    let Some(task) = snapshot.finalizer_queue.first() else {
++    let Some(task) = first_admissible_finalizer(
++        config,
++        &snapshot.machine,
++        &snapshot.finalizer_queue,
++    ) else {
+         return Ok(());
+     };
+     attempt_finalizer(config, snapshot, runtime, task).await
+@@ -5878,6 +5920,51 @@ mod tests {
+         assert!(reason.starts_with("finalizer memory admission blocked"));
+     }
+ 
++    #[test]
++    fn mphf_memory_estimate_uses_bounded_builder_envelope() {
++        let root = temp_root("bounded-mphf-estimate");
++        let config = test_config(&root);
++
++        assert_eq!(
++            estimate_mphf_build_bytes(&config, 1024 * 1024 * 1024),
++            2 * 1024 * 1024 * 1024 + FINALIZER_BUILD_OVERHEAD_BYTES
++        );
++        assert_eq!(
++            estimate_mphf_build_bytes(&config, 1024),
++            finalizer_memory_floor_bytes(&config)
++        );
++    }
++
++    #[test]
++    fn finalizer_queue_is_blocked_only_when_no_non_deferred_task_fits() {
++        let root = temp_root("finalizer-queue-admission");
++        let config = test_config(&root);
++        let machine = MachineSnapshot {
++            memory_total_bytes: 8 * 1024 * 1024 * 1024,
++            memory_available_bytes: 2 * 1024 * 1024 * 1024,
++            disk_total_bytes: 2 * 1024 * 1024 * 1024 * 1024,
++            disk_available_bytes: 500 * 1024 * 1024 * 1024,
++            ..MachineSnapshot::default()
++        };
++        let mut queue = vec![historical_queue_item(305), historical_queue_item(405)];
++        queue[0].estimated_memory_bytes = 4 * 1024 * 1024 * 1024;
++        queue[1].estimated_memory_bytes = 512 * 1024 * 1024;
++
++        assert_eq!(
++            first_admissible_finalizer(&config, &machine, &queue).map(|task| task.epoch),
++            Some(Some(405))
++        );
++        assert!(finalizer_queue_admission_blocked_reason(&config, &machine, &queue).is_none());
++
++        queue[1].deferred_reason = Some("historical scan sweep in progress".to_string());
++        assert!(first_admissible_finalizer(&config, &machine, &queue).is_none());
++        assert!(
++            finalizer_queue_admission_blocked_reason(&config, &machine, &queue)
++                .unwrap()
++                .starts_with("finalizer memory admission blocked")
++        );
++    }
++
+     #[test]
+     fn live_finalizer_queue_advances_through_durable_stages() {
+         let root = temp_root("live-finalizer-stages");
+@@ -6034,6 +6120,44 @@ mod tests {
+         fs::remove_dir_all(root).unwrap();
+     }
+ 
++    #[tokio::test]
++    async fn memory_blocked_queue_head_does_not_starve_fitting_finalizer() {
++        let root = temp_root("finalizer-head-of-line");
++        let mut config = test_config(&root);
++        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
++        let mut snapshot = schedulable_snapshot(
++            &root,
++            vec![
++                test_epoch(&root, 305, HistoricalState::ScanReady),
++                test_epoch(&root, 405, HistoricalState::ScanReady),
++            ],
++        );
++        snapshot.machine = MachineSnapshot {
++            memory_total_bytes: 8 * 1024 * 1024 * 1024,
++            memory_available_bytes: 2 * 1024 * 1024 * 1024,
++            disk_total_bytes: 2 * 1024 * 1024 * 1024 * 1024,
++            disk_available_bytes: 500 * 1024 * 1024 * 1024,
++            ..MachineSnapshot::default()
++        };
++        snapshot.finalizer_queue[0].estimated_memory_bytes = 4 * 1024 * 1024 * 1024;
++        snapshot.finalizer_queue[1].estimated_memory_bytes = 512 * 1024 * 1024;
++        for epoch in &snapshot.epochs {
++            fs::create_dir_all(&epoch.output_path).unwrap();
++            write_scan_marker(&epoch.output_path);
++        }
++        let mut runtime = RuntimeState::default();
++
++        schedule_work(&config, &snapshot, &mut runtime)
++            .await
++            .unwrap();
++        assert!(matches!(
++            runtime.finalizer.as_ref().map(|child| &child.kind),
++            Some(ChildKind::HistoricalFinalizer { epoch: 405 })
++        ));
++        let _ = runtime.finalizer.as_mut().unwrap().child.wait().await;
++        fs::remove_dir_all(root).unwrap();
++    }
++
+     #[tokio::test]
+     async fn acquisition_phase_blocks_scans_and_incomplete_inventory_blocks_everything() {
+         let root = temp_root("acquisition-barrier");

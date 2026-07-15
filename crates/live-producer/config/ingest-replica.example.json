@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "cluster_id": "solana-mainnet",
+  "max_total_queue_bytes": 134217728,
+  "max_total_queue_events": 4,
+  "role": {
+    "mode": "replica",
+    "node_id": "backup-ingester-1",
+    "upstream": {
+      "endpoint": "https://192.168.1.45:9443",
+      "tls": {
+        "ca_file": "/etc/blockzilla/tls/primary-ca.crt",
+        "client_certificate_file": "/etc/blockzilla/tls/replica.crt",
+        "client_private_key_file": "/run/secrets/blockzilla-replica.key",
+        "server_name": "nas-primary"
+      },
+      "auth": {
+        "method": "mutual_tls"
+      },
+      "trusted_receipt_keys": [
+        {
+          "key_id": "receipt-2026-q2",
+          "public_key_file": "/etc/blockzilla/keys/receipt-2026-q2.pub"
+        },
+        {
+          "key_id": "receipt-2026-q3",
+          "public_key_file": "/etc/blockzilla/keys/receipt-2026-q3.pub"
+        }
+      ],
+      "reconnect": {
+        "initial_delay_ms": 500,
+        "max_delay_ms": 30000,
+        "backoff_factor_milli": 2000,
+        "jitter_percent": 20,
+        "connect_timeout_ms": 5000,
+        "heartbeat_interval_ms": 15000,
+        "idle_timeout_ms": 60000,
+        "max_attempts": null
+      },
+      "batch": {
+        "max_events": 64,
+        "max_bytes": 33554432,
+        "ack_timeout_ms": 30000
+      }
+    }
+  },
+  "spool": {
+    "root": "/data/blockzilla-ingest-replica",
+    "max_bytes": 1099511627776,
+    "segment_bytes": 268435456,
+    "reserve_free_bytes": 10737418240,
+    "sync": {
+      "max_delay_ms": 10,
+      "max_unsynced_bytes": 4194304
+    },
+    "full_policy": "pause_sources"
+  },
+  "sources": [
+    {
+      "id": "yellowstone-backup",
+      "enabled": true,
+      "priority": 10,
+      "required_for_epoch_close": true,
+      "queue": {
+        "max_events": 2,
+        "max_bytes": 134217728,
+        "max_event_bytes": 67108864
+      },
+      "input": {
+        "kind": "grpc",
+        "endpoint": "https://grpc-backup.example.net",
+        "commitment": "confirmed",
+        "auth": {
+          "method": "x_token",
+          "credential": {
+            "provider": "env",
+            "variable": "BLOCKZILLA_BACKUP_GRPC_X_TOKEN"
+          }
+        },
+        "tls": {
+          "ca_file": "/etc/ssl/certs/ca-certificates.crt"
+        },
+        "reconnect": {
+          "initial_delay_ms": 500,
+          "max_delay_ms": 30000,
+          "backoff_factor_milli": 2000,
+          "jitter_percent": 20,
+          "connect_timeout_ms": 5000,
+          "heartbeat_interval_ms": 15000,
+          "idle_timeout_ms": 60000,
+          "max_attempts": null
+        },
+        "resume_overlap_slots": 64
+      }
+    }
+  ]
+}

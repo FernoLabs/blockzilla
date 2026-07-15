@@ -1,0 +1,104 @@
+name: ${COMPOSE_PROJECT_NAME:-blockzilla-live}
+
+services:
+  raw-recorder:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.raw-recorder
+      args:
+        RUST_VERSION: "1.96.0"
+    image: ${BLOCKZILLA_RAW_IMAGE:-blockzilla-live-recorder:local}
+    restart: unless-stopped
+    stop_grace_period: 45s
+
+    environment:
+      BLOCKZILLA_GRPC_ENDPOINT: "${BLOCKZILLA_GRPC_ENDPOINT:?set the Yellowstone gRPC endpoint}"
+      BLOCKZILLA_GRPC_X_TOKEN_FILE: "/run/secrets/grpc_x_token"
+      BLOCKZILLA_GRPC_ACCEPT_COMPRESSION: "${BLOCKZILLA_GRPC_ACCEPT_COMPRESSION:-zstd}"
+      BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW: "${BLOCKZILLA_GRPC_HTTP2_ADAPTIVE_WINDOW:-false}"
+      BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_INTERVAL_SECS: "${BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_INTERVAL_SECS:-30}"
+      BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_TIMEOUT_SECS: "${BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_TIMEOUT_SECS:-10}"
+      BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_WHILE_IDLE: "${BLOCKZILLA_GRPC_HTTP2_KEEP_ALIVE_WHILE_IDLE:-false}"
+      BLOCKZILLA_RAW_OUTPUT_DIR: "${BLOCKZILLA_RAW_OUTPUT_DIR:-/data/grpc-raw}"
+      BLOCKZILLA_RAW_FROM_SLOT: "${BLOCKZILLA_RAW_FROM_SLOT:-}"
+      BLOCKZILLA_RAW_MIN_FREE_BYTES: "${BLOCKZILLA_RAW_MIN_FREE_BYTES:-21474836480}"
+      BLOCKZILLA_RAW_MAX_BLOCKS: "${BLOCKZILLA_RAW_MAX_BLOCKS:-1000000000}"
+      BLOCKZILLA_RAW_TIMEOUT_SECS: "${BLOCKZILLA_RAW_TIMEOUT_SECS:-31536000}"
+      BLOCKZILLA_RAW_IDLE_TIMEOUT_SECS: "${BLOCKZILLA_RAW_IDLE_TIMEOUT_SECS:-180}"
+      BLOCKZILLA_RAW_RESTART_DELAY_SECS: "${BLOCKZILLA_RAW_RESTART_DELAY_SECS:-5}"
+      BLOCKZILLA_RAW_LOW_DISK_RECHECK_SECS: "${BLOCKZILLA_RAW_LOW_DISK_RECHECK_SECS:-60}"
+      BLOCKZILLA_RAW_COMPRESSION_LEVEL: "${BLOCKZILLA_RAW_COMPRESSION_LEVEL:-1}"
+      BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES: "${BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES:-268435456}"
+      BLOCKZILLA_RAW_MAX_RECORD_BYTES: "${BLOCKZILLA_RAW_MAX_RECORD_BYTES:-134217728}"
+      BLOCKZILLA_RAW_REQUIRE_COMPLETE_POH: "${BLOCKZILLA_RAW_REQUIRE_COMPLETE_POH:-true}"
+      BLOCKZILLA_RAW_VOLUME_MARKER: "${BLOCKZILLA_RAW_VOLUME_MARKER:-/data/.blockzilla-raw-volume}"
+      BLOCKZILLA_RAW_CLUSTER_ID: "${BLOCKZILLA_RAW_CLUSTER_ID:-solana-mainnet}"
+      BLOCKZILLA_RAW_ORIGIN_NODE_ID: "${BLOCKZILLA_RAW_ORIGIN_NODE_ID:-hetzner-dokploy-01}"
+      BLOCKZILLA_RAW_SOURCE_ID: "${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-backup}"
+      BLOCKZILLA_RAW_STALE_AFTER_SECS: "${BLOCKZILLA_RAW_STALE_AFTER_SECS:-180}"
+      BLOCKZILLA_RAW_STARTUP_GRACE_SECS: "${BLOCKZILLA_RAW_STARTUP_GRACE_SECS:-300}"
+      BLOCKZILLA_TELEGRAM_ENABLED: "${BLOCKZILLA_TELEGRAM_ENABLED:-true}"
+      BLOCKZILLA_TELEGRAM_BOT_TOKEN_FILE: "/run/secrets/telegram_bot_token"
+      BLOCKZILLA_TELEGRAM_CHAT_ID: "${BLOCKZILLA_TELEGRAM_CHAT_ID:?set the Telegram destination chat ID}"
+      BLOCKZILLA_TELEGRAM_MESSAGE_THREAD_ID: "${BLOCKZILLA_TELEGRAM_MESSAGE_THREAD_ID:-}"
+      BLOCKZILLA_TELEGRAM_ALERT_COOLDOWN_SECS: "${BLOCKZILLA_TELEGRAM_ALERT_COOLDOWN_SECS:-900}"
+      BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES: "${BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES:-32212254720}"
+      BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES: "${BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES:-1073741824}"
+      BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS: "${BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS:-30}"
+      BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE: "${BLOCKZILLA_PRIMARY_SYNC_HEARTBEAT_FILE:-}"
+      BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS: "${BLOCKZILLA_PRIMARY_SYNC_STALE_AFTER_SECS:-600}"
+
+    volumes:
+      - type: volume
+        source: raw_data
+        target: /data
+        volume:
+          nocopy: true
+    secrets:
+      - grpc_x_token
+      - telegram_bot_token
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=1777,uid=10001,gid=10001
+
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: ${BLOCKZILLA_RAW_MEMORY_LIMIT:-768m}
+    mem_reservation: ${BLOCKZILLA_RAW_MEMORY_RESERVATION:-128m}
+    memswap_limit: ${BLOCKZILLA_RAW_MEMORY_LIMIT:-768m}
+    deploy:
+      resources:
+        limits:
+          memory: ${BLOCKZILLA_RAW_MEMORY_LIMIT:-768m}
+          pids: 64
+        reservations:
+          memory: ${BLOCKZILLA_RAW_MEMORY_RESERVATION:-128m}
+
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/blockzilla-raw-recorder", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  raw_data:
+    name: ${BLOCKZILLA_RAW_VOLUME_NAME:-blockzilla-live-raw-data-external}
+    external: true
+
+secrets:
+  grpc_x_token:
+    file: ${BLOCKZILLA_GRPC_X_TOKEN_HOST_FILE:-/etc/blockzilla/yellowstone-x-token}
+  telegram_bot_token:
+    file: ${BLOCKZILLA_TELEGRAM_BOT_TOKEN_HOST_FILE:-/etc/blockzilla/telegram-bot-token}

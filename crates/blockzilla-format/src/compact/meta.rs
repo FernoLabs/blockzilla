@@ -480,22 +480,40 @@ pub fn compact_meta_from_proto(
     })
 }
 
-pub fn compact_meta_from_protobuf_visit(bytes: &[u8], index: &KeyIndex) -> Result<CompactMetaV1> {
+pub fn compact_meta_from_protobuf_visit<'metadata>(
+    bytes: &'metadata [u8],
+    index: &KeyIndex,
+) -> Result<CompactMetaV1> {
     let mut visitor = CompactMetaVisitor::new(index);
     visit_protobuf_transaction_status_meta(bytes, &mut visitor)
         .map_err(|err| anyhow::anyhow!("protobuf visit: {err}"))?;
     visitor.finish()
 }
 
-struct CompactMetaVisitor<'a> {
-    index: &'a KeyIndex,
+const BALANCES_RESERVE: usize = 32;
+const INNER_INSTRUCTION_GROUPS_RESERVE: usize = 4;
+const INNER_INSTRUCTIONS_PER_GROUP_RESERVE: usize = 4;
+const LOG_MESSAGES_RESERVE: usize = 16;
+const TOKEN_BALANCES_RESERVE: usize = 8;
+const REWARDS_RESERVE: usize = 1;
+const LOADED_ADDRESSES_RESERVE: usize = 8;
+
+#[inline]
+fn reserve_on_first<T>(values: &mut Vec<T>, additional: usize) {
+    if values.capacity() == 0 {
+        values.reserve(additional);
+    }
+}
+
+struct CompactMetaVisitor<'index, 'metadata> {
+    index: &'index KeyIndex,
     err: Option<CompactTransactionError>,
     fee: u64,
     pre_balances: Vec<u64>,
     post_balances: Vec<u64>,
     inner_instructions: Vec<CompactInnerInstructions>,
     inner_instructions_none: bool,
-    log_messages: Vec<String>,
+    log_messages: Vec<&'metadata str>,
     log_messages_none: bool,
     pre_token_balances: Vec<CompactTokenBalance>,
     post_token_balances: Vec<CompactTokenBalance>,
@@ -509,8 +527,8 @@ struct CompactMetaVisitor<'a> {
     error: Option<anyhow::Error>,
 }
 
-impl<'a> CompactMetaVisitor<'a> {
-    fn new(index: &'a KeyIndex) -> Self {
+impl<'index, 'metadata> CompactMetaVisitor<'index, 'metadata> {
+    fn new(index: &'index KeyIndex) -> Self {
         Self {
             index,
             err: None,
@@ -553,7 +571,10 @@ impl<'a> CompactMetaVisitor<'a> {
         let logs = if self.log_messages_none {
             None
         } else {
-            Some(crate::log::parse_logs(&self.log_messages, self.index))
+            Some(crate::log::parse_log_strs_with_compactor(
+                &self.log_messages,
+                self.index,
+            ))
         };
         let return_data = if self.return_data_none {
             None
@@ -580,7 +601,9 @@ impl<'a> CompactMetaVisitor<'a> {
     }
 }
 
-impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
+impl<'index, 'metadata> TransactionStatusMetaVisitor<'metadata>
+    for CompactMetaVisitor<'index, 'metadata>
+{
     #[inline]
     fn wants_status_error(&self) -> bool {
         true
@@ -632,7 +655,7 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn status_error(&mut self, err: &'b [u8]) {
+    fn status_error(&mut self, err: &'metadata [u8]) {
         match CompactTransactionError::from_stored_wincode_bytes(err) {
             Ok(err) => self.err = Some(err),
             Err(err) => self.record_error(err),
@@ -646,24 +669,30 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
 
     #[inline]
     fn pre_balance(&mut self, _index: usize, lamports: u64) {
+        reserve_on_first(&mut self.pre_balances, BALANCES_RESERVE);
         self.pre_balances.push(lamports);
     }
 
     #[inline]
     fn post_balance(&mut self, _index: usize, lamports: u64) {
+        reserve_on_first(&mut self.post_balances, BALANCES_RESERVE);
         self.post_balances.push(lamports);
     }
 
     #[inline]
-    fn inner_instruction(&mut self, instruction: InnerInstructionVisit<'b>) {
+    fn inner_instruction(&mut self, instruction: InnerInstructionVisit<'metadata>) {
         if self
             .inner_instructions
             .last()
             .is_none_or(|group| group.index != instruction.outer_instruction_index)
         {
+            reserve_on_first(
+                &mut self.inner_instructions,
+                INNER_INSTRUCTION_GROUPS_RESERVE,
+            );
             self.inner_instructions.push(CompactInnerInstructions {
                 index: instruction.outer_instruction_index,
-                instructions: Vec::new(),
+                instructions: Vec::with_capacity(INNER_INSTRUCTIONS_PER_GROUP_RESERVE),
             });
         }
 
@@ -684,8 +713,9 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn log_message(&mut self, message: &'b str) {
-        self.log_messages.push(message.to_owned());
+    fn log_message(&mut self, message: &'metadata str) {
+        reserve_on_first(&mut self.log_messages, LOG_MESSAGES_RESERVE);
+        self.log_messages.push(message);
     }
 
     #[inline]
@@ -694,7 +724,8 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn pre_token_balance(&mut self, balance: TokenBalanceVisit<'b>) {
+    fn pre_token_balance(&mut self, balance: TokenBalanceVisit<'metadata>) {
+        reserve_on_first(&mut self.pre_token_balances, TOKEN_BALANCES_RESERVE);
         match compact_token_balance_visit(balance, self.index) {
             Ok(balance) => self.pre_token_balances.push(balance),
             Err(err) => self.record_error(err),
@@ -702,7 +733,8 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn post_token_balance(&mut self, balance: TokenBalanceVisit<'b>) {
+    fn post_token_balance(&mut self, balance: TokenBalanceVisit<'metadata>) {
+        reserve_on_first(&mut self.post_token_balances, TOKEN_BALANCES_RESERVE);
         match compact_token_balance_visit(balance, self.index) {
             Ok(balance) => self.post_token_balances.push(balance),
             Err(err) => self.record_error(err),
@@ -710,7 +742,8 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn reward_raw(&mut self, bytes: &'b [u8]) {
+    fn reward_raw(&mut self, bytes: &'metadata [u8]) {
+        reserve_on_first(&mut self.rewards, REWARDS_RESERVE);
         match of_car_reader::confirmed_block::Reward::decode(bytes)
             .map_err(anyhow::Error::from)
             .and_then(|reward| compact_reward(&reward, self.index))
@@ -721,7 +754,11 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn loaded_writable_address(&mut self, address: &'b [u8]) {
+    fn loaded_writable_address(&mut self, address: &'metadata [u8]) {
+        reserve_on_first(
+            &mut self.loaded_writable_addresses,
+            LOADED_ADDRESSES_RESERVE,
+        );
         match address.try_into() {
             Ok(address) => self
                 .loaded_writable_addresses
@@ -734,7 +771,11 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn loaded_readonly_address(&mut self, address: &'b [u8]) {
+    fn loaded_readonly_address(&mut self, address: &'metadata [u8]) {
+        reserve_on_first(
+            &mut self.loaded_readonly_addresses,
+            LOADED_ADDRESSES_RESERVE,
+        );
         match address.try_into() {
             Ok(address) => self
                 .loaded_readonly_addresses
@@ -747,7 +788,7 @@ impl<'a, 'b> TransactionStatusMetaVisitor<'b> for CompactMetaVisitor<'a> {
     }
 
     #[inline]
-    fn return_data(&mut self, return_data: ReturnDataVisit<'b>) {
+    fn return_data(&mut self, return_data: ReturnDataVisit<'metadata>) {
         match return_data.program_id.try_into() {
             Ok(program_id) => {
                 self.return_data = Some(CompactReturnData {
@@ -865,6 +906,115 @@ fn compact_reward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use of_car_reader::confirmed_block::{
+        InnerInstruction, InnerInstructions, ReturnData, Reward, TokenBalance,
+        TransactionStatusMeta, UiTokenAmount,
+    };
+
+    fn assert_protobuf_visitor_matches_owned(meta: &TransactionStatusMeta, index: &KeyIndex) {
+        let expected = compact_meta_from_proto(meta, index).expect("compact owned metadata");
+        let protobuf = meta.encode_to_vec();
+        let actual = compact_meta_from_protobuf_visit(&protobuf, index)
+            .expect("compact borrowed protobuf metadata");
+
+        assert_eq!(
+            wincode::serialize(&actual).expect("serialize borrowed compact metadata"),
+            wincode::serialize(&expected).expect("serialize owned compact metadata")
+        );
+    }
+
+    fn representative_log_metadata() -> (TransactionStatusMeta, KeyIndex) {
+        const SYSTEM: &str = "11111111111111111111111111111111";
+        const COMPUTE_BUDGET: &str = "ComputeBudget111111111111111111111111111111";
+        const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+        let system = Pubkey::from_str(SYSTEM).unwrap().to_bytes();
+        let compute_budget = Pubkey::from_str(COMPUTE_BUDGET).unwrap().to_bytes();
+        let token = Pubkey::from_str(TOKEN).unwrap().to_bytes();
+        let index = KeyIndex::build(vec![system, compute_budget, token]);
+
+        let log_messages = vec![
+            format!("Program {COMPUTE_BUDGET} invoke [1]"),
+            "Program log: Instruction: RequestUnits".to_owned(),
+            format!("Program {COMPUTE_BUDGET} consumed 150 of 200000 compute units"),
+            format!("Program {COMPUTE_BUDGET} success"),
+            format!("Program {SYSTEM} invoke [1]"),
+            "Transfer: insufficient lamports 3, need 5".to_owned(),
+            "Program data: AQID BAU=".to_owned(),
+            format!("Program return: {SYSTEM} AQID"),
+            "Program log: an unstructured payload".to_owned(),
+            "plain runtime text".to_owned(),
+            format!("Program {SYSTEM} success"),
+        ];
+
+        let meta = TransactionStatusMeta {
+            fee: 5_000,
+            pre_balances: (0..40).map(|value| value * 10).collect(),
+            post_balances: (0..40).map(|value| value * 10 + 1).collect(),
+            inner_instructions: vec![InnerInstructions {
+                index: 2,
+                instructions: vec![
+                    InnerInstruction {
+                        program_id_index: 3,
+                        accounts: vec![0, 1, 2],
+                        data: vec![9, 8, 7],
+                        stack_height: Some(2),
+                    },
+                    InnerInstruction {
+                        program_id_index: 4,
+                        accounts: vec![3, 4],
+                        data: vec![6, 5],
+                        stack_height: None,
+                    },
+                ],
+            }],
+            inner_instructions_none: false,
+            log_messages,
+            log_messages_none: false,
+            pre_token_balances: vec![TokenBalance {
+                account_index: 1,
+                mint: TOKEN.to_owned(),
+                ui_token_amount: Some(UiTokenAmount {
+                    ui_amount: 42.0,
+                    decimals: 6,
+                    amount: "42000000".to_owned(),
+                    ui_amount_string: "42".to_owned(),
+                }),
+                owner: SYSTEM.to_owned(),
+                program_id: TOKEN.to_owned(),
+            }],
+            post_token_balances: vec![TokenBalance {
+                account_index: 1,
+                mint: TOKEN.to_owned(),
+                ui_token_amount: Some(UiTokenAmount {
+                    ui_amount: 43.0,
+                    decimals: 6,
+                    amount: "43000000".to_owned(),
+                    ui_amount_string: "43".to_owned(),
+                }),
+                owner: SYSTEM.to_owned(),
+                program_id: TOKEN.to_owned(),
+            }],
+            rewards: vec![Reward {
+                pubkey: SYSTEM.to_owned(),
+                lamports: 50,
+                post_balance: 1_000,
+                reward_type: 1,
+                commission: "7".to_owned(),
+            }],
+            loaded_writable_addresses: vec![system.to_vec(), token.to_vec()],
+            loaded_readonly_addresses: vec![compute_budget.to_vec()],
+            return_data: Some(ReturnData {
+                program_id: system.to_vec(),
+                data: vec![1, 2, 3, 4],
+            }),
+            return_data_none: false,
+            compute_units_consumed: Some(123_456),
+            cost_units: Some(123_999),
+            ..TransactionStatusMeta::default()
+        };
+        (meta, index)
+    }
 
     #[test]
     fn compact_transaction_error_decodes_stored_wincode_bytes() {
@@ -901,5 +1051,22 @@ mod tests {
                 CompactInstructionError::BorshIoError(ref message)
             ) if message.is_empty()
         ));
+    }
+
+    #[test]
+    fn borrowed_log_visitor_is_byte_identical_to_owned_metadata_compaction() {
+        let (meta, index) = representative_log_metadata();
+        assert_protobuf_visitor_matches_owned(&meta, &index);
+    }
+
+    #[test]
+    fn borrowed_log_visitor_preserves_none_and_empty_log_semantics() {
+        let (mut meta, index) = representative_log_metadata();
+        meta.log_messages_none = true;
+        assert_protobuf_visitor_matches_owned(&meta, &index);
+
+        meta.log_messages.clear();
+        meta.log_messages_none = false;
+        assert_protobuf_visitor_matches_owned(&meta, &index);
     }
 }

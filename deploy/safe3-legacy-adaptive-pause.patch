@@ -1,0 +1,2551 @@
+--- a/crates/hivezilla/src/nas_pipeline.rs
++++ b/crates/hivezilla/src/nas_pipeline.rs
+@@ -107,6 +107,12 @@
+     pub legacy_compact_cpu_budget_cores: u64,
+     pub legacy_compact_io_mib_per_sec_per_worker: u64,
+     pub legacy_compact_io_budget_mib_per_sec: u64,
++    pub legacy_compact_auto_pause: bool,
++    pub legacy_compact_min_running: usize,
++    pub legacy_compact_memory_guard_mib: u64,
++    pub legacy_compact_io_pause_full_avg10: f64,
++    pub legacy_compact_io_resume_full_avg10: f64,
++    pub legacy_compact_pause_cooldown: Duration,
+     pub scan_memory_mib: u64,
+     pub finalizer_memory_mib: u64,
+     pub memory_reserve_mib: u64,
+@@ -261,6 +267,10 @@
+     pub capture_id: Option<String>,
+     pub phase: String,
+     pub state: String,
++    #[serde(default)]
++    pub auto_paused: bool,
++    #[serde(default)]
++    pub auto_pause_reason: Option<String>,
+     pub pid: Option<u32>,
+     pub progress: ProgressSnapshot,
+     pub rss_bytes: Option<u64>,
+@@ -331,7 +341,33 @@
+     pub legacy_compact_capacity_admitted: usize,
+     #[serde(default)]
+     pub legacy_compact_active: usize,
++    #[serde(default)]
++    pub legacy_compact_running: usize,
++    #[serde(default)]
++    pub legacy_compact_paused: usize,
++    #[serde(default)]
++    pub legacy_compact_auto_paused: usize,
++    #[serde(default)]
++    pub legacy_compact_auto_pause_enabled: bool,
+     #[serde(default)]
++    pub legacy_compact_min_running: usize,
++    #[serde(default)]
++    pub legacy_compact_memory_guard_mib: u64,
++    #[serde(default)]
++    pub legacy_compact_memory_pause_available_mib: u64,
++    #[serde(default)]
++    pub legacy_compact_memory_resume_available_mib: u64,
++    #[serde(default)]
++    pub legacy_compact_io_pause_full_avg10: f64,
++    #[serde(default)]
++    pub legacy_compact_io_resume_full_avg10: f64,
++    #[serde(default)]
++    pub legacy_compact_pause_cooldown_secs: u64,
++    #[serde(default)]
++    pub legacy_compact_last_action_unix_secs: Option<u64>,
++    #[serde(default)]
++    pub legacy_compact_last_action: Option<String>,
++    #[serde(default)]
+     pub legacy_compact_cpu_cores_per_worker: u64,
+     #[serde(default)]
+     pub legacy_compact_cpu_budget_cores: u64,
+@@ -358,6 +394,14 @@
+     pub car_disk_total_bytes: u64,
+     pub car_disk_available_bytes: u64,
+     pub load_1m: f64,
++    #[serde(default)]
++    pub io_pressure_some_avg10: Option<f64>,
++    #[serde(default)]
++    pub io_pressure_full_avg10: Option<f64>,
++    #[serde(default)]
++    pub memory_pressure_some_avg10: Option<f64>,
++    #[serde(default)]
++    pub memory_pressure_full_avg10: Option<f64>,
+     pub service_rss_bytes: u64,
+     pub children_rss_bytes: u64,
+ }
+@@ -445,9 +489,33 @@
+     scheduler_paused: bool,
+     scheduler_updated_unix_secs: u64,
+     paused_jobs: BTreeSet<String>,
++    auto_paused_legacy: BTreeMap<u64, AutoPausedLegacy>,
++    legacy_last_adaptive_action_unix_secs: u64,
++    legacy_last_adaptive_action_reason: Option<String>,
++    adopted_legacy_compacts: BTreeMap<u64, AdoptedLegacyCompact>,
+     inventory_generation: u64,
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize)]
++struct AutoPausedLegacy {
++    epoch: u64,
++    pid: u32,
++    #[serde(default)]
++    process_start_ticks: Option<u64>,
++    reason: String,
++    paused_unix_secs: u64,
++}
++
++#[derive(Debug, Clone)]
++struct AdoptedLegacyCompact {
++    epoch: u64,
++    pid: u32,
++    owner_schema_version: u32,
++    process_start_ticks: u64,
++    progress_path: PathBuf,
++    identity_tainted: bool,
++}
++
+ #[derive(Debug)]
+ struct ManagedChild {
+     child: Child,
+@@ -573,7 +641,29 @@
+     anyhow::ensure!(
+         config.download_concurrency > 0,
+         "download concurrency must be positive"
++    );
++    let legacy_resource = legacy_compact_resource_capacity(&config);
++    anyhow::ensure!(
++        !config.legacy_compact_auto_pause
++            || config.legacy_compact_min_running <= legacy_resource.effective_slots,
++        "legacy compact minimum running ({}) exceeds effective capacity ({})",
++        config.legacy_compact_min_running,
++        legacy_resource.effective_slots,
++    );
++    anyhow::ensure!(
++        config.legacy_compact_io_pause_full_avg10.is_finite()
++            && config.legacy_compact_io_resume_full_avg10.is_finite()
++            && config.legacy_compact_io_resume_full_avg10 >= 0.0
++            && config.legacy_compact_io_pause_full_avg10 <= 100.0
++            && config.legacy_compact_io_resume_full_avg10 <= 100.0
++            && config.legacy_compact_io_pause_full_avg10
++                > config.legacy_compact_io_resume_full_avg10,
++        "legacy compact IO pause full avg10 must be finite and greater than the non-negative resume threshold"
+     );
++    anyhow::ensure!(
++        !config.legacy_compact_pause_cooldown.is_zero(),
++        "legacy compact pause cooldown must be positive"
++    );
+     if let Some(template) = config.car_source_url_template.as_deref() {
+         anyhow::ensure!(
+             template.contains("{epoch}"),
+@@ -620,7 +710,7 @@
+         runtime: Mutex::new(RuntimeState::default()),
+     });
+     load_persisted_errors(&state).await;
+-    load_control_state(&state).await;
++    load_control_state(&state).await?;
+     load_acquisition_failures(&state).await;
+ 
+     // Bind before the first reconciliation. This also protects an upgrade
+@@ -629,6 +719,11 @@
+     let listener = tokio::net::TcpListener::bind(config.bind)
+         .await
+         .with_context(|| format!("bind NAS pipeline on {}", config.bind))?;
++    if config.execute {
++        recover_auto_paused_legacy(&state).await?;
++        track_adopted_legacy_compacts(&state).await?;
++        recover_manual_paused_legacy(&state).await?;
++    }
+     reconcile_and_schedule(&state).await;
+ 
+     let scheduler_state = Arc::clone(&state);
+@@ -1098,29 +1193,97 @@
+     let snapshot = state.snapshot.read().await.clone();
+     let (pid, expected_path) = controlled_job_pid(&state, &snapshot, &kind, &id, &key).await?;
+     validate_process_identity(pid, &state.config.blockzilla_bin, &expected_path, &kind)?;
++    let legacy_epoch = (kind == "historical_compact_reuse")
++        .then(|| id.parse::<u64>().ok())
++        .flatten();
++    let mut runtime = state.runtime.lock().await;
++    // Serialize the full persisted-state/signal transaction with scheduling,
++    // reaping, and concurrent controls. Revalidate after taking the mutex so
++    // the PID cannot be swapped by a completed/retried runtime child.
++    validate_process_identity(pid, &state.config.blockzilla_bin, &expected_path, &kind)?;
++    let managed_legacy = legacy_epoch.is_some_and(|epoch| {
++        runtime
++            .legacy_compacts
++            .get(&epoch)
++            .is_some_and(|child| child.pid == Some(pid))
++    });
++    let adopted_legacy = legacy_epoch.and_then(|epoch| {
++        runtime
++            .adopted_legacy_compacts
++            .get(&epoch)
++            .filter(|child| child.pid == pid)
++    });
++    let adopted_identity_trusted = adopted_legacy.is_some_and(|child| {
++        !child.identity_tainted
++            && process_stat_identity(pid)
++                .is_some_and(|(_, start_ticks)| start_ticks == child.process_start_ticks)
++            && legacy_epoch.is_some_and(|epoch| {
++                process_cmdline_matches_legacy_exact(&state.config, epoch, pid) == Some(true)
++            })
++    });
++    let managed_identity_trusted = managed_legacy
++        && legacy_epoch.is_some_and(|epoch| {
++            process_cmdline_matches_legacy_exact(&state.config, epoch, pid) == Some(true)
++        });
++    if (managed_legacy || adopted_legacy.is_some())
++        && !(managed_identity_trusted || adopted_identity_trusted)
++    {
++        return Err(ControlError::Conflict(format!(
++            "tracked legacy pid {pid} failed stable starttime and byte-exact argv validation"
++        )));
++    }
++    let trusted_legacy = managed_identity_trusted || adopted_identity_trusted;
++    let trusted_legacy_group = trusted_legacy && process_is_group_leader(pid);
+     let signal = if pause { libc::SIGSTOP } else { libc::SIGCONT };
+     // SAFETY: kill sends a signal to the positively identified child process.
+-    let signal_target = if matches!(kind.as_str(), "car_download" | "car_preflight") {
+-        -(pid as libc::pid_t)
++    let signal_target = controlled_signal_target(&kind, pid, trusted_legacy_group);
++
++    if pause {
++        // Publish the manual ownership transfer before SIGSTOP. A crash can
++        // then never leave an unrecorded stop or an auto record that startup
++        // would resume against the operator's explicit pause.
++        let was_manual = runtime.paused_jobs.contains(&key);
++        let previous_auto =
++            legacy_epoch.and_then(|epoch| runtime.auto_paused_legacy.get(&epoch).cloned());
++        set_manual_pause_state(&mut runtime, &key, legacy_epoch, true);
++        if let Err(error) = persist_control_state(&state.config, &runtime) {
++            restore_manual_pause_state(&mut runtime, &key, legacy_epoch, was_manual, previous_auto);
++            return Err(ControlError::Internal(error));
++        }
++        // SAFETY: argv was validated and negative targets are used only for
++        // controller-created process-group leaders.
++        if unsafe { libc::kill(signal_target, signal) } != 0 {
++            let signal_error = std::io::Error::last_os_error();
++            restore_manual_pause_state(&mut runtime, &key, legacy_epoch, was_manual, previous_auto);
++            let rollback = persist_control_state(&state.config, &runtime).err();
++            return Err(ControlError::Internal(anyhow::anyhow!(
++                "manual pause signal failed: {signal_error}; intent rollback={rollback:?}"
++            )));
++        }
+     } else {
+-        pid as libc::pid_t
+-    };
+-    if unsafe { libc::kill(signal_target, signal) } != 0 {
+-        return Err(ControlError::Internal(
+-            std::io::Error::last_os_error().into(),
+-        ));
+-    }
+-    {
+-        let mut runtime = state.runtime.lock().await;
+-        if pause {
+-            runtime.paused_jobs.insert(key.clone());
+-        } else {
+-            runtime.paused_jobs.remove(&key);
++        let was_manual = runtime.paused_jobs.contains(&key);
++        let previous_auto =
++            legacy_epoch.and_then(|epoch| runtime.auto_paused_legacy.get(&epoch).cloned());
++        // Resume signal first: duplicate SIGCONT during crash recovery is
++        // harmless, whereas clearing the record first could strand a stop.
++        if unsafe { libc::kill(signal_target, signal) } != 0 {
++            return Err(ControlError::Internal(
++                std::io::Error::last_os_error().into(),
++            ));
+         }
+-        persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
+-        append_control_event(&state.config, if pause { "pause" } else { "resume" }, &key)
+-            .map_err(ControlError::Internal)?;
++        set_manual_pause_state(&mut runtime, &key, legacy_epoch, false);
++        if let Err(error) = persist_control_state(&state.config, &runtime) {
++            restore_manual_pause_state(&mut runtime, &key, legacy_epoch, was_manual, previous_auto);
++            // SAFETY: restore the stopped state that remains on disk.
++            let rollback_signal = unsafe { libc::kill(signal_target, libc::SIGSTOP) };
++            return Err(ControlError::Internal(anyhow::anyhow!(
++                "persist manual resume failed: {error:#}; SIGSTOP rollback result={rollback_signal}"
++            )));
++        }
+     }
++    append_control_event(&state.config, if pause { "pause" } else { "resume" }, &key)
++        .map_err(ControlError::Internal)?;
++    drop(runtime);
+     reconcile_and_schedule(&state).await;
+     let sequence = state.snapshot.read().await.sequence;
+     Ok(Json(ControlResponse {
+@@ -1132,6 +1295,53 @@
+     }))
+ }
+ 
++fn controlled_signal_target(kind: &str, pid: u32, trusted_legacy_group: bool) -> libc::pid_t {
++    if matches!(kind, "car_download" | "car_preflight") || trusted_legacy_group {
++        -(pid as libc::pid_t)
++    } else {
++        pid as libc::pid_t
++    }
++}
++
++fn set_manual_pause_state(
++    runtime: &mut RuntimeState,
++    key: &str,
++    legacy_epoch: Option<u64>,
++    pause: bool,
++) {
++    if pause {
++        if let Some(epoch) = legacy_epoch {
++            runtime.auto_paused_legacy.remove(&epoch);
++        }
++        runtime.paused_jobs.insert(key.to_string());
++    } else {
++        runtime.paused_jobs.remove(key);
++        if let Some(epoch) = legacy_epoch {
++            runtime.auto_paused_legacy.remove(&epoch);
++        }
++    }
++}
++
++fn restore_manual_pause_state(
++    runtime: &mut RuntimeState,
++    key: &str,
++    legacy_epoch: Option<u64>,
++    was_manual: bool,
++    previous_auto: Option<AutoPausedLegacy>,
++) {
++    if was_manual {
++        runtime.paused_jobs.insert(key.to_string());
++    } else {
++        runtime.paused_jobs.remove(key);
++    }
++    if let Some(epoch) = legacy_epoch {
++        runtime.auto_paused_legacy.remove(&epoch);
++        if let Some(record) = previous_auto {
++            runtime.auto_paused_legacy.insert(epoch, record);
++        }
++    }
++}
++
+ fn control_job_key(kind: &str, id: &str) -> Result<String, ControlError> {
+     match kind {
+         "car_download" => id
+@@ -1176,7 +1386,14 @@
+         .chain(runtime.legacy_compacts.values())
+         .chain(runtime.finalizer.iter())
+         .find(|child| child.kind.key() == key)
+-        .and_then(|child| child.pid);
++        .and_then(|child| child.pid)
++        .or_else(|| {
++            runtime
++                .adopted_legacy_compacts
++                .values()
++                .find(|child| format!("compact_reuse:{}", child.epoch) == key)
++                .map(|child| child.pid)
++        });
+     drop(runtime);
+     match kind {
+         "car_download" | "car_preflight" => {
+@@ -1274,12 +1491,14 @@
+         }
+         "historical_compact_reuse" => {
+             args.get(1).copied() == Some(b"build-archive-v2-hot-blocks")
++                && args.get(3).copied() == Some(expected_path)
+                 && args
+                     .windows(2)
+                     .any(|pair| pair[0] == b"--registry-dir" && pair[1] == expected_path)
+                 && args.iter().any(|arg| *arg == b"--resume")
+                 && args.iter().any(|arg| *arg == b"--no-access")
+                 && !args.iter().any(|arg| *arg == b"--first-seen-registry")
++                && !args.iter().any(|arg| *arg == b"--first-seen-scan-only")
+         }
+         "historical_finalizer" => args.get(1).copied() == Some(b"finalize-archive-v2-first-seen"),
+         "live_finalizer" => matches!(
+@@ -1315,12 +1534,14 @@
+ async fn reconcile_and_schedule(state: &Arc<AppState>) {
+     let mut runtime = state.runtime.lock().await;
+     reap_children(state, &mut runtime).await;
++    reap_adopted_legacy_compacts(&state.config, &mut runtime);
+     reconcile_acquisition_state(&state.config, &mut runtime);
+     runtime.inventory_generation = runtime.inventory_generation.saturating_add(1);
+     let inventory_generation = runtime.inventory_generation;
+ 
+     let mut snapshot = reconcile_filesystem(&state.config, &runtime, inventory_generation);
+     if state.config.execute {
++        adjust_legacy_workers_for_pressure(&state.config, &snapshot, &mut runtime, unix_now());
+         if let Err(error) = schedule_work(&state.config, &snapshot, &mut runtime).await {
+             record_error(
+                 &state.config,
+@@ -1410,6 +1631,8 @@
+                 .unwrap_or(&marker.kind)
+                 .to_string(),
+             state: lane_state.to_string(),
++            auto_paused: false,
++            auto_pause_reason: None,
+             pid: Some(marker.pid),
+             progress: ProgressSnapshot {
+                 phase: Some(marker.kind.clone()),
+@@ -1457,6 +1680,8 @@
+             } else {
+                 "running".to_string()
+             },
++            auto_paused: false,
++            auto_pause_reason: None,
+             pid: epoch.progress.pid,
+             progress: epoch.progress.clone(),
+             rss_bytes: epoch.progress.rss_bytes,
+@@ -1488,6 +1713,8 @@
+             } else {
+                 "running".to_string()
+             },
++            auto_paused: false,
++            auto_pause_reason: None,
+             pid: epoch.progress.pid,
+             progress: epoch.progress.clone(),
+             rss_bytes: epoch.progress.rss_bytes,
+@@ -1514,6 +1741,8 @@
+             } else {
+                 "running".to_string()
+             },
++            auto_paused: false,
++            auto_pause_reason: None,
+             pid: capture.progress.pid,
+             progress: capture.progress.clone(),
+             rss_bytes: capture.progress.rss_bytes,
+@@ -1577,6 +1806,34 @@
+     summary.legacy_compact_capacity_effective = legacy_resource.effective_slots;
+     summary.legacy_compact_capacity_admitted = legacy_admitted;
+     summary.legacy_compact_active = legacy_active_rss.len();
++    summary.legacy_compact_running = lanes
++        .iter()
++        .filter(|lane| lane.kind == "historical_compact_reuse" && lane.state.as_str() != "paused")
++        .count();
++    summary.legacy_compact_paused = lanes
++        .iter()
++        .filter(|lane| lane.kind == "historical_compact_reuse" && lane.state.as_str() == "paused")
++        .count();
++    summary.legacy_compact_auto_paused = lanes
++        .iter()
++        .filter(|lane| lane.kind == "historical_compact_reuse" && lane.auto_paused)
++        .count();
++    summary.legacy_compact_auto_pause_enabled = config.legacy_compact_auto_pause;
++    summary.legacy_compact_min_running = config.legacy_compact_min_running;
++    summary.legacy_compact_memory_guard_mib = config.legacy_compact_memory_guard_mib;
++    summary.legacy_compact_memory_pause_available_mib = config
++        .memory_reserve_mib
++        .saturating_add(config.legacy_compact_memory_guard_mib);
++    summary.legacy_compact_memory_resume_available_mib = config
++        .memory_reserve_mib
++        .saturating_add(config.legacy_compact_memory_guard_mib.saturating_mul(2));
++    summary.legacy_compact_io_pause_full_avg10 = config.legacy_compact_io_pause_full_avg10;
++    summary.legacy_compact_io_resume_full_avg10 = config.legacy_compact_io_resume_full_avg10;
++    summary.legacy_compact_pause_cooldown_secs = config.legacy_compact_pause_cooldown.as_secs();
++    summary.legacy_compact_last_action_unix_secs = (runtime.legacy_last_adaptive_action_unix_secs
++        > 0)
++    .then_some(runtime.legacy_last_adaptive_action_unix_secs);
++    summary.legacy_compact_last_action = runtime.legacy_last_adaptive_action_reason.clone();
+     summary.legacy_compact_cpu_cores_per_worker = config.legacy_compact_cpu_cores_per_worker;
+     summary.legacy_compact_cpu_budget_cores = config.legacy_compact_cpu_budget_cores;
+     summary.legacy_compact_io_mib_per_sec_per_worker =
+@@ -1949,7 +2206,8 @@
+     let scan_marker = scan_marker_is_valid(&output.join(SCAN_MARKER));
+     let ambiguous_car = car_paths_ambiguous(&config.car_root, epoch);
+     let active_scan = runtime.scans.contains_key(&epoch);
+-    let active_legacy_compact = runtime.legacy_compacts.contains_key(&epoch);
++    let active_legacy_compact = runtime.legacy_compacts.contains_key(&epoch)
++        || runtime.adopted_legacy_compacts.contains_key(&epoch);
+     let active_acquisition = runtime.acquisitions.get(&epoch);
+     let adopted_acquisition = active_acquisition
+         .is_none()
+@@ -4080,6 +4338,12 @@
+             .iter()
+             .map(|(epoch, compact)| lane_from_child(compact, Some(*epoch), None, now, runtime)),
+     );
++    lanes.extend(
++        runtime
++            .adopted_legacy_compacts
++            .values()
++            .map(|compact| lane_from_adopted_legacy(compact, now, runtime)),
++    );
+     if let Some(finalizer) = runtime.finalizer.as_ref() {
+         let (epoch, capture_id) = match &finalizer.kind {
+             ChildKind::CarDownload { epoch, .. } | ChildKind::CarPreflight { epoch, .. } => {
+@@ -4096,6 +4360,43 @@
+     lanes
+ }
+ 
++fn lane_from_adopted_legacy(
++    compact: &AdoptedLegacyCompact,
++    now: u64,
++    runtime: &RuntimeState,
++) -> LaneSnapshot {
++    let key = format!("compact_reuse:{}", compact.epoch);
++    let mut progress = read_progress(&compact.progress_path).unwrap_or_default();
++    let rss_bytes = process_rss_bytes(compact.pid);
++    progress.pid = Some(compact.pid);
++    progress.rss_bytes = rss_bytes;
++    progress.phase = Some("compact_reuse".to_string());
++    progress.state = Some(if runtime.paused_jobs.contains(&key) {
++        "paused".to_string()
++    } else {
++        "running".to_string()
++    });
++    LaneSnapshot {
++        id: key.clone(),
++        kind: "historical_compact_reuse".to_string(),
++        epoch: Some(compact.epoch),
++        capture_id: None,
++        phase: "compact_reuse".to_string(),
++        state: if runtime.paused_jobs.contains(&key) {
++            "paused".to_string()
++        } else {
++            "running".to_string()
++        },
++        auto_paused: false,
++        auto_pause_reason: None,
++        pid: Some(compact.pid),
++        progress,
++        rss_bytes,
++        started_unix_secs: None,
++        updated_unix_secs: now,
++    }
++}
++
+ fn lane_from_child(
+     child: &ManagedChild,
+     epoch: Option<u64>,
+@@ -4123,17 +4424,28 @@
+         ChildKind::HistoricalFinalizer { .. } => ("historical_finalizer", "finalize"),
+         ChildKind::LiveFinalizer { phase, .. } => ("live_finalizer", phase.as_str()),
+     };
++    let key = child.kind.key();
++    let auto_pause = match child.kind {
++        ChildKind::HistoricalCompactReuse { epoch } => runtime.auto_paused_legacy.get(&epoch),
++        _ => None,
++    };
++    let paused = runtime.paused_jobs.contains(&key) || auto_pause.is_some();
++    if paused {
++        progress.state = Some("paused".to_string());
++    }
+     LaneSnapshot {
+-        id: child.kind.key(),
++        id: key.clone(),
+         kind: kind.to_string(),
+         epoch,
+         capture_id,
+         phase: progress.phase.clone().unwrap_or_else(|| phase.to_string()),
+-        state: if runtime.paused_jobs.contains(&child.kind.key()) {
++        state: if paused {
+             "paused".to_string()
+         } else {
+             "running".to_string()
+         },
++        auto_paused: auto_pause.is_some(),
++        auto_pause_reason: auto_pause.map(|record| record.reason.clone()),
+         pid: child.pid,
+         progress,
+         rss_bytes,
+@@ -4168,6 +4480,9 @@
+     for epoch in runtime.legacy_compacts.keys() {
+         active.entry(*epoch).or_insert(0);
+     }
++    for epoch in runtime.adopted_legacy_compacts.keys() {
++        active.entry(*epoch).or_insert(0);
++    }
+     active
+ }
+ 
+@@ -4190,6 +4505,319 @@
+     active.len()
+ }
+ 
++#[derive(Debug, Clone, PartialEq)]
++enum LegacyPressureState {
++    Pause(String),
++    Hold,
++    Resume,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++enum LegacyAdaptiveDecision {
++    Pause { epoch: u64, reason: String },
++    Resume { epoch: u64, reason: String },
++}
++
++fn legacy_pressure_state(
++    config: &NasPipelineConfig,
++    machine: &MachineSnapshot,
++) -> LegacyPressureState {
++    let mib = 1024 * 1024;
++    let pause_available = config
++        .memory_reserve_mib
++        .saturating_add(config.legacy_compact_memory_guard_mib)
++        .saturating_mul(mib);
++    let resume_available = config
++        .memory_reserve_mib
++        .saturating_add(config.legacy_compact_memory_guard_mib.saturating_mul(2))
++        .saturating_mul(mib);
++    let memory_known = machine.memory_total_bytes > 0;
++    let memory_low = memory_known && machine.memory_available_bytes < pause_available;
++    let io_high = machine
++        .io_pressure_full_avg10
++        .is_some_and(|value| value >= config.legacy_compact_io_pause_full_avg10);
++    if memory_low || io_high {
++        let mut reasons = Vec::new();
++        if memory_low {
++            reasons.push(format!(
++                "MemAvailable {:.1} MiB is below pause threshold {} MiB; SIGSTOP arrests growth but RSS remains fully reserved",
++                machine.memory_available_bytes as f64 / mib as f64,
++                pause_available / mib,
++            ));
++        }
++        if io_high {
++            reasons.push(format!(
++                "IO PSI full avg10 {:.2} reached pause threshold {:.2}",
++                machine.io_pressure_full_avg10.unwrap_or_default(),
++                config.legacy_compact_io_pause_full_avg10,
++            ));
++        }
++        return LegacyPressureState::Pause(reasons.join("; "));
++    }
++
++    let memory_recovered = !memory_known || machine.memory_available_bytes >= resume_available;
++    // PSI absence is unknown telemetry, not a reason to hold a safe resume.
++    let io_recovered = machine
++        .io_pressure_full_avg10
++        .is_none_or(|value| value <= config.legacy_compact_io_resume_full_avg10);
++    if memory_recovered && io_recovered {
++        LegacyPressureState::Resume
++    } else {
++        LegacyPressureState::Hold
++    }
++}
++
++fn legacy_adaptive_cooldown_elapsed(
++    config: &NasPipelineConfig,
++    last_action_unix_secs: u64,
++    now: u64,
++) -> bool {
++    last_action_unix_secs == 0
++        || now.saturating_sub(last_action_unix_secs)
++            >= config.legacy_compact_pause_cooldown.as_secs()
++}
++
++fn plan_legacy_adaptive_action(
++    config: &NasPipelineConfig,
++    machine: &MachineSnapshot,
++    total_running: usize,
++    managed_running_epochs: &[u64],
++    auto_paused: &[AutoPausedLegacy],
++    last_action_unix_secs: u64,
++    now: u64,
++) -> Option<LegacyAdaptiveDecision> {
++    if !config.legacy_compact_auto_pause
++        || !legacy_adaptive_cooldown_elapsed(config, last_action_unix_secs, now)
++    {
++        return None;
++    }
++    match legacy_pressure_state(config, machine) {
++        LegacyPressureState::Pause(reason) => {
++            if total_running <= config.legacy_compact_min_running {
++                return None;
++            }
++            managed_running_epochs
++                .iter()
++                .copied()
++                .max()
++                .map(|epoch| LegacyAdaptiveDecision::Pause { epoch, reason })
++        }
++        LegacyPressureState::Resume => auto_paused
++            .iter()
++            .min_by_key(|record| (record.paused_unix_secs, record.epoch))
++            .map(|record| LegacyAdaptiveDecision::Resume {
++                epoch: record.epoch,
++                reason: "MemAvailable and IO PSI crossed resume thresholds".to_string(),
++            }),
++        LegacyPressureState::Hold => None,
++    }
++}
++
++fn record_legacy_adaptive_action(
++    config: &NasPipelineConfig,
++    runtime: &mut RuntimeState,
++    at_unix_secs: u64,
++    action: String,
++) {
++    runtime.legacy_last_adaptive_action_unix_secs = at_unix_secs;
++    runtime.legacy_last_adaptive_action_reason = Some(action.clone());
++    if let Err(error) = persist_control_state(config, runtime) {
++        record_error(
++            config,
++            runtime,
++            "legacy_auto_pause",
++            format!("persist adaptive state: {error:#}"),
++        );
++    }
++    if let Err(error) = append_control_event(config, "legacy_adaptive", &action) {
++        record_error(
++            config,
++            runtime,
++            "legacy_auto_pause",
++            format!("append adaptive event: {error:#}"),
++        );
++    }
++}
++
++fn adjust_legacy_workers_for_pressure(
++    config: &NasPipelineConfig,
++    snapshot: &PipelineSnapshot,
++    runtime: &mut RuntimeState,
++    now: u64,
++) {
++    if !config.legacy_compact_auto_pause {
++        return;
++    }
++    let total_running = snapshot
++        .lanes
++        .iter()
++        .filter(|lane| lane.kind == "historical_compact_reuse" && lane.state.as_str() != "paused")
++        .count();
++    let managed_running_epochs = runtime
++        .legacy_compacts
++        .iter()
++        .filter_map(|(epoch, child)| {
++            let key = format!("compact_reuse:{epoch}");
++            (!runtime.paused_jobs.contains(&key)
++                && !runtime.auto_paused_legacy.contains_key(epoch)
++                && child.pid.is_some())
++            .then_some(*epoch)
++        })
++        .collect::<Vec<_>>();
++    let resumable = runtime
++        .auto_paused_legacy
++        .values()
++        .filter(|record| {
++            !runtime
++                .paused_jobs
++                .contains(&format!("compact_reuse:{}", record.epoch))
++                && runtime
++                    .legacy_compacts
++                    .get(&record.epoch)
++                    .is_some_and(|child| child.pid == Some(record.pid))
++        })
++        .cloned()
++        .collect::<Vec<_>>();
++    let Some(decision) = plan_legacy_adaptive_action(
++        config,
++        &snapshot.machine,
++        total_running,
++        &managed_running_epochs,
++        &resumable,
++        runtime.legacy_last_adaptive_action_unix_secs,
++        now,
++    ) else {
++        return;
++    };
++
++    match decision {
++        LegacyAdaptiveDecision::Pause { epoch, reason } => {
++            let Some(pid) = runtime
++                .legacy_compacts
++                .get(&epoch)
++                .and_then(|child| child.pid)
++            else {
++                return;
++            };
++            if process_cmdline_matches_legacy_exact(config, epoch, pid) != Some(true)
++                || !process_is_group_leader(pid)
++            {
++                record_error(
++                    config,
++                    runtime,
++                    "legacy_auto_pause",
++                    format!("refused to pause compact_reuse:{epoch}: pid {pid} identity changed"),
++                );
++                return;
++            }
++            let Some((_, process_start_ticks)) = process_stat_identity(pid) else {
++                record_error(
++                    config,
++                    runtime,
++                    "legacy_auto_pause",
++                    format!(
++                        "refused to pause compact_reuse:{epoch}: pid {pid} starttime unavailable"
++                    ),
++                );
++                return;
++            };
++            let action = format!("auto-paused compact_reuse:{epoch}: {reason}");
++            let previous_last_at = runtime.legacy_last_adaptive_action_unix_secs;
++            let previous_last_reason = runtime.legacy_last_adaptive_action_reason.clone();
++            runtime.auto_paused_legacy.insert(
++                epoch,
++                AutoPausedLegacy {
++                    epoch,
++                    pid,
++                    process_start_ticks: Some(process_start_ticks),
++                    reason: reason.clone(),
++                    paused_unix_secs: now,
++                },
++            );
++            runtime.legacy_last_adaptive_action_unix_secs = now;
++            runtime.legacy_last_adaptive_action_reason = Some(action.clone());
++            // Persist intent before SIGSTOP. A crash after this point but
++            // before the signal is harmless because startup SIGCONT is
++            // idempotent; the inverse ordering could strand an unrecorded stop.
++            if let Err(error) = persist_control_state(config, runtime) {
++                runtime.auto_paused_legacy.remove(&epoch);
++                runtime.legacy_last_adaptive_action_unix_secs = previous_last_at;
++                runtime.legacy_last_adaptive_action_reason = previous_last_reason;
++                record_error(
++                    config,
++                    runtime,
++                    "legacy_auto_pause",
++                    format!(
++                        "refused to stop compact_reuse:{epoch}: persist pause intent: {error:#}"
++                    ),
++                );
++                return;
++            }
++            // SAFETY: this managed legacy child was spawned as an isolated
++            // process-group leader and its exact argv was validated above.
++            if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGSTOP) } != 0 {
++                let signal_error = std::io::Error::last_os_error();
++                runtime.auto_paused_legacy.remove(&epoch);
++                runtime.legacy_last_adaptive_action_unix_secs = previous_last_at;
++                runtime.legacy_last_adaptive_action_reason = previous_last_reason;
++                let rollback_error = persist_control_state(config, runtime).err();
++                record_error(
++                    config,
++                    runtime,
++                    "legacy_auto_pause",
++                    format!(
++                        "pause compact_reuse:{epoch} process group {pid}: {signal_error}; rollback persist={rollback_error:?}"
++                    ),
++                );
++                return;
++            }
++            if let Err(error) = append_control_event(config, "legacy_adaptive", &action) {
++                record_error(
++                    config,
++                    runtime,
++                    "legacy_auto_pause",
++                    format!("append adaptive pause event: {error:#}"),
++                );
++            }
++        }
++        LegacyAdaptiveDecision::Resume { epoch, reason } => {
++            let Some(record) = runtime.auto_paused_legacy.get(&epoch).cloned() else {
++                return;
++            };
++            if runtime
++                .paused_jobs
++                .contains(&format!("compact_reuse:{epoch}"))
++                || process_cmdline_matches_legacy_exact(config, epoch, record.pid) != Some(true)
++                || !process_is_group_leader(record.pid)
++            {
++                return;
++            }
++            // SAFETY: the auto-paused record can only be created for a managed
++            // process-group leader after exact argv validation.
++            if unsafe { libc::kill(-(record.pid as libc::pid_t), libc::SIGCONT) } != 0 {
++                record_error(
++                    config,
++                    runtime,
++                    "legacy_auto_pause",
++                    format!(
++                        "resume compact_reuse:{epoch} process group {}: {}",
++                        record.pid,
++                        std::io::Error::last_os_error()
++                    ),
++                );
++                return;
++            }
++            runtime.auto_paused_legacy.remove(&epoch);
++            record_legacy_adaptive_action(
++                config,
++                runtime,
++                now,
++                format!("auto-resumed compact_reuse:{epoch}: {reason}"),
++            );
++        }
++    }
++}
++
+ async fn top_up_legacy_compacts(
+     config: &NasPipelineConfig,
+     snapshot: &PipelineSnapshot,
+@@ -4200,6 +4828,24 @@
+     let mut admission =
+         LegacyCompactAdmission::new(config, &snapshot.machine, &snapshot.epochs, &active_rss);
+     let resource_capacity = legacy_compact_resource_capacity(config).effective_slots;
++    let now = unix_now();
++    if config.legacy_compact_auto_pause
++        && (!matches!(
++            legacy_pressure_state(config, &snapshot.machine),
++            LegacyPressureState::Resume
++        ) || !legacy_adaptive_cooldown_elapsed(
++            config,
++            runtime.legacy_last_adaptive_action_unix_secs,
++            now,
++        ))
++    {
++        return 0;
++    }
++    let start_limit = if config.legacy_compact_auto_pause {
++        1
++    } else {
++        usize::MAX
++    };
+     let mut started = 0usize;
+     for epoch in snapshot.epochs.iter().filter(|epoch| {
+         legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
+@@ -4224,6 +4870,17 @@
+                 active_epochs.insert(epoch.epoch);
+                 admission.reserve(epoch);
+                 started = started.saturating_add(1);
++                if config.legacy_compact_auto_pause {
++                    record_legacy_adaptive_action(
++                        config,
++                        runtime,
++                        now,
++                        format!(
++                            "started compact_reuse:{} after pressure recovery",
++                            epoch.epoch
++                        ),
++                    );
++                }
+             }
+             Err(error) => {
+                 // Treat spawn failures like every other child failure, but do
+@@ -4233,6 +4890,9 @@
+                 record_error(config, runtime, "legacy_compact", message);
+             }
+         }
++        if started >= start_limit {
++            break;
++        }
+     }
+     started
+ }
+@@ -5189,7 +5849,9 @@
+         .kill_on_drop(false);
+     if matches!(
+         &kind,
+-        ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. }
++        ChildKind::CarDownload { .. }
++            | ChildKind::CarPreflight { .. }
++            | ChildKind::HistoricalCompactReuse { .. }
+     ) {
+         command.process_group(0);
+     }
+@@ -5215,7 +5877,7 @@
+         .spawn()
+         .with_context(|| format!("spawn {} with {}", kind.key(), executable.display()));
+     drop(inherited_lock);
+-    let child = child_result?;
++    let mut child = child_result?;
+     let pid = child.id();
+     let owned_output = match &kind {
+         ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. } => None,
+@@ -5228,7 +5890,33 @@
+             epoch.map(|epoch| config.archive_root.join(format!("epoch-{epoch}")))
+         }
+     };
+-    if let Some(output) = owned_output.as_deref() {
++    if let ChildKind::HistoricalCompactReuse { epoch } = &kind {
++        let output = config.archive_root.join(format!("epoch-{epoch}"));
++        let publication = (|| -> Result<()> {
++            let pid = pid.context("spawned legacy compact has no pid")?;
++            set_ownership_pid(&output, Some(pid))?;
++            let owner = read_ownership(&output)
++                .context("legacy compact ownership marker disappeared after spawn")?;
++            anyhow::ensure!(
++                owner_matches_legacy_identity(&owner, *epoch, pid, SCHEMA_VERSION),
++                "legacy compact owner PID publication did not preserve exact schema/kind/id/state/pid"
++            );
++            Ok(())
++        })();
++        if let Err(error) = publication {
++            if let Some(pid) = pid {
++                // SAFETY: this command was requested with process_group(0);
++                // kill the whole group before returning a failed admission.
++                let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
++            } else {
++                let _ = child.kill().await;
++            }
++            let _ = child.wait().await;
++            return Err(error.context(format!(
++                "establish recoverable ownership for compact_reuse:{epoch}"
++            )));
++        }
++    } else if let Some(output) = owned_output.as_deref() {
+         let _ = set_ownership_pid(output, pid);
+     }
+     Ok(ManagedChild {
+@@ -5315,9 +6003,191 @@
+             record_error(&state.config, runtime, "child", message);
+         }
+         None => {}
++    }
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum AdoptedLegacyProcessState {
++    Running,
++    Gone,
++    LiveIdentityChanged,
++}
++
++fn adopted_legacy_process_state(
++    config: &NasPipelineConfig,
++    compact: &AdoptedLegacyCompact,
++) -> AdoptedLegacyProcessState {
++    let Some((state, start_ticks)) = process_stat_identity(compact.pid) else {
++        return if process_exists(compact.pid) {
++            // A transiently unreadable /proc record is unknown. Retain its
++            // capacity and never turn uncertainty into a completion commit.
++            AdoptedLegacyProcessState::Running
++        } else {
++            AdoptedLegacyProcessState::Gone
++        };
++    };
++    if start_ticks != compact.process_start_ticks {
++        return AdoptedLegacyProcessState::LiveIdentityChanged;
++    }
++    if state == 'Z' {
++        return AdoptedLegacyProcessState::Running;
++    }
++    match process_cmdline_matches_legacy_exact(config, compact.epoch, compact.pid) {
++        Some(true) => AdoptedLegacyProcessState::Running,
++        Some(false) => AdoptedLegacyProcessState::LiveIdentityChanged,
++        None => AdoptedLegacyProcessState::Running,
+     }
+ }
+ 
++fn commit_adopted_legacy_complete(
++    config: &NasPipelineConfig,
++    compact: &AdoptedLegacyCompact,
++) -> Result<()> {
++    anyhow::ensure!(
++        !compact.identity_tainted,
++        "live PID/starttime/argv identity was previously tainted"
++    );
++    let output = config.archive_root.join(format!("epoch-{}", compact.epoch));
++    let mut owner = read_ownership(&output).context("ownership marker is missing or invalid")?;
++    anyhow::ensure!(
++        owner_matches_legacy_identity(
++            &owner,
++            compact.epoch,
++            compact.pid,
++            compact.owner_schema_version,
++        ),
++        "ownership schema/kind/id/state/pid changed"
++    );
++    let progress = read_progress(&compact.progress_path).context("progress JSON is missing")?;
++    anyhow::ensure!(
++        progress.pid == Some(compact.pid),
++        "progress pid {:?} does not match tracked pid {}",
++        progress.pid,
++        compact.pid
++    );
++    anyhow::ensure!(
++        progress.state.as_deref() == Some("complete"),
++        "progress state {:?} is not complete",
++        progress.state
++    );
++    anyhow::ensure!(
++        legacy_compact_reader_complete(&output),
++        "reader-core validation failed"
++    );
++    owner.state = "complete".to_string();
++    owner.pid = None;
++    owner.updated_unix_secs = unix_now();
++    owner.message = Some(
++        "trusted adopted compact/reuse exit: exact owner, progress pid/state, and reader core validated"
++            .to_string(),
++    );
++    publish_ownership_marker(&output, &owner)
++}
++
++fn fail_adopted_legacy(
++    config: &NasPipelineConfig,
++    runtime: &mut RuntimeState,
++    compact: &AdoptedLegacyCompact,
++    detail: String,
++) {
++    let key = format!("compact_reuse:{}", compact.epoch);
++    let message = format!(
++        "trusted adopted {key}/pid:{} failed closed: {detail}",
++        compact.pid
++    );
++    set_runtime_failure(config, runtime, key, message.clone());
++    let output = config.archive_root.join(format!("epoch-{}", compact.epoch));
++    if let Some(mut owner) = read_ownership(&output)
++        && owner_matches_legacy_identity(
++            &owner,
++            compact.epoch,
++            compact.pid,
++            compact.owner_schema_version,
++        )
++    {
++        owner.state = "failed".to_string();
++        owner.pid = None;
++        owner.updated_unix_secs = unix_now();
++        owner.message = Some(message.clone());
++        if let Err(error) = publish_ownership_marker(&output, &owner) {
++            record_error(
++                config,
++                runtime,
++                "adopted_legacy",
++                format!("{message}; failed to publish failure marker: {error:#}"),
++            );
++            return;
++        }
++    }
++    record_error(config, runtime, "adopted_legacy", message);
++}
++
++fn reap_adopted_legacy_compacts(config: &NasPipelineConfig, runtime: &mut RuntimeState) {
++    let epochs = runtime
++        .adopted_legacy_compacts
++        .keys()
++        .copied()
++        .collect::<Vec<_>>();
++    for epoch in epochs {
++        let Some(compact) = runtime.adopted_legacy_compacts.get(&epoch).cloned() else {
++            continue;
++        };
++        match adopted_legacy_process_state(config, &compact) {
++            AdoptedLegacyProcessState::Running => continue,
++            AdoptedLegacyProcessState::LiveIdentityChanged => {
++                if !compact.identity_tainted {
++                    if let Some(tracked) = runtime.adopted_legacy_compacts.get_mut(&epoch) {
++                        tracked.identity_tainted = true;
++                    }
++                    let message = format!(
++                        "compact_reuse:{epoch}/pid:{} live PID starttime or exact argv identity changed; retaining full capacity until disappearance and permanently forbidding trusted commit",
++                        compact.pid
++                    );
++                    set_runtime_failure(
++                        config,
++                        runtime,
++                        format!("compact_reuse:{epoch}"),
++                        message.clone(),
++                    );
++                    record_error(config, runtime, "adopted_legacy", message);
++                }
++            }
++            AdoptedLegacyProcessState::Gone => {
++                runtime.adopted_legacy_compacts.remove(&epoch);
++                if compact.identity_tainted {
++                    fail_adopted_legacy(
++                        config,
++                        runtime,
++                        &compact,
++                        "live identity was tainted before PID disappearance".to_string(),
++                    );
++                    continue;
++                }
++                match commit_adopted_legacy_complete(config, &compact) {
++                    Ok(()) => {
++                        clear_runtime_failure(config, runtime, &format!("compact_reuse:{epoch}"));
++                        if let Err(error) = append_control_event(
++                            config,
++                            "adopted_legacy_complete",
++                            &format!("compact_reuse:{epoch}/pid:{}", compact.pid),
++                        ) {
++                            record_error(
++                                config,
++                                runtime,
++                                "adopted_legacy",
++                                format!("record trusted adopted completion: {error:#}"),
++                            );
++                        }
++                    }
++                    Err(error) => {
++                        fail_adopted_legacy(config, runtime, &compact, format!("{error:#}"));
++                    }
++                }
++            }
++        }
++    }
++}
++
+ fn reap_legacy_compacts(config: &NasPipelineConfig, runtime: &mut RuntimeState) {
+     let epochs = runtime.legacy_compacts.keys().copied().collect::<Vec<_>>();
+     for epoch in epochs {
+@@ -5331,6 +6201,7 @@
+                     .legacy_compacts
+                     .remove(&epoch)
+                     .expect("legacy compact child exists");
++                clear_legacy_pause_state_after_exit(config, runtime, epoch);
+                 handle_child_exit(config, runtime, child, status.success());
+             }
+             Some(Err(error)) => {
+@@ -5338,6 +6209,7 @@
+                     .legacy_compacts
+                     .remove(&epoch)
+                     .expect("legacy compact child exists");
++                clear_legacy_pause_state_after_exit(config, runtime, epoch);
+                 let message = format!("poll {}: {error:#}", child.kind.key());
+                 set_runtime_failure(config, runtime, child.kind.key(), message.clone());
+                 let output = config.archive_root.join(format!("epoch-{epoch}"));
+@@ -5356,6 +6228,25 @@
+     }
+ }
+ 
++fn clear_legacy_pause_state_after_exit(
++    config: &NasPipelineConfig,
++    runtime: &mut RuntimeState,
++    epoch: u64,
++) {
++    let changed = runtime.auto_paused_legacy.remove(&epoch).is_some()
++        | runtime
++            .paused_jobs
++            .remove(&format!("compact_reuse:{epoch}"));
++    if changed && let Err(error) = persist_control_state(config, runtime) {
++        record_error(
++            config,
++            runtime,
++            "legacy_auto_pause",
++            format!("persist exited compact/reuse pause cleanup: {error:#}"),
++        );
++    }
++}
++
+ fn handle_child_exit(
+     config: &NasPipelineConfig,
+     runtime: &mut RuntimeState,
+@@ -5657,7 +6548,6 @@
+ ) -> Result<()> {
+     fs::create_dir_all(output)
+         .with_context(|| format!("create pipeline-owned output {}", output.display()))?;
+-    let path = output.join(OWNERSHIP_MARKER);
+     let created_unix_secs = read_ownership(output)
+         .map(|owner| owner.created_unix_secs)
+         .unwrap_or_else(unix_now);
+@@ -5671,6 +6561,11 @@
+         message,
+         pid: read_ownership(output).and_then(|owner| owner.pid),
+     };
++    publish_ownership_marker(output, &owner)
++}
++
++fn publish_ownership_marker(output: &Path, owner: &OwnershipMarker) -> Result<()> {
++    let path = output.join(OWNERSHIP_MARKER);
+     let temp = output.join(format!(".{OWNERSHIP_MARKER}.{}.tmp", std::process::id()));
+     fs::write(&temp, serde_json::to_vec_pretty(&owner)?)
+         .with_context(|| format!("write ownership temp {}", temp.display()))?;
+@@ -5786,6 +6681,26 @@
+     Path::new("/proc").join(pid.to_string()).exists()
+ }
+ 
++fn process_stat_identity(pid: u32) -> Option<(char, u64)> {
++    let stat = fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("stat")).ok()?;
++    // comm may contain spaces and parentheses, so fields only become stable
++    // after the final ") ". The remaining token 0 is field 3 (state), and
++    // token 19 is field 22 (process start time in clock ticks).
++    let fields = stat
++        .rsplit_once(") ")?
++        .1
++        .split_whitespace()
++        .collect::<Vec<_>>();
++    let state = fields.first()?.chars().next()?;
++    let start_ticks = fields.get(19)?.parse().ok()?;
++    Some((state, start_ticks))
++}
++
++fn process_is_group_leader(pid: u32) -> bool {
++    // SAFETY: getpgid only queries the supplied process identifier.
++    unsafe { libc::getpgid(pid as libc::pid_t) == pid as libc::pid_t }
++}
++
+ fn process_cmdline_contains(pid: u32, expected_path: &Path) -> bool {
+     let Ok(bytes) = fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")) else {
+         return false;
+@@ -5807,6 +6722,55 @@
+         .is_ok_and(|bytes| argv_matches_job(&bytes, blockzilla_bin, expected_path, kind))
+ }
+ 
++fn expected_legacy_compact_argv(config: &NasPipelineConfig, epoch: u64) -> Option<Vec<Vec<u8>>> {
++    if car_paths_ambiguous(&config.car_root, epoch) {
++        return None;
++    }
++    let input = car_path(&config.car_root, epoch)?;
++    let output = config.archive_root.join(format!("epoch-{epoch}"));
++    let previous_car = (epoch > 0)
++        .then(|| legacy_compact_previous_car(config, epoch))
++        .flatten();
++    if epoch > 0 && previous_car.is_none() {
++        return None;
++    }
++    let mut expected = vec![config.blockzilla_bin.as_os_str().as_bytes().to_vec()];
++    expected.extend(
++        legacy_compact_reuse_args(config, &input, &output, previous_car.as_deref())
++            .into_iter()
++            .map(|arg| arg.as_os_str().as_bytes().to_vec()),
++    );
++    Some(expected)
++}
++
++/// `None` means the process cmdline or scheduler inputs were not readable.
++/// Callers must retain capacity/fail closed rather than treating unknown as a
++/// mismatch or a completed process.
++fn process_cmdline_matches_legacy_exact(
++    config: &NasPipelineConfig,
++    epoch: u64,
++    pid: u32,
++) -> Option<bool> {
++    let bytes = fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")).ok()?;
++    legacy_compact_argv_matches_bytes(config, epoch, &bytes)
++}
++
++fn legacy_compact_argv_matches_bytes(
++    config: &NasPipelineConfig,
++    epoch: u64,
++    bytes: &[u8],
++) -> Option<bool> {
++    let expected = expected_legacy_compact_argv(config, epoch)?;
++    if bytes.last() != Some(&0) {
++        return Some(false);
++    }
++    let actual = bytes[..bytes.len().saturating_sub(1)]
++        .split(|byte| *byte == 0)
++        .map(<[u8]>::to_vec)
++        .collect::<Vec<_>>();
++    Some(actual == expected)
++}
++
+ fn process_rss_bytes(pid: u32) -> Option<u64> {
+     let status =
+         fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("status")).ok()?;
+@@ -5848,13 +6812,39 @@
+     })
+ }
+ 
+-fn machine_snapshot(
+-    archive_path: &Path,
+-    car_path: &Path,
+-    children_rss_bytes: u64,
+-) -> MachineSnapshot {
+-    let memory = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+-    let memory_total_bytes = parse_meminfo_kib(&memory, "MemTotal:").saturating_mul(1024);
++fn parse_psi_avg10(pressure: &str, class: &str) -> Option<f64> {
++    pressure.lines().find_map(|line| {
++        let mut fields = line.split_whitespace();
++        if fields.next()? != class {
++            return None;
++        }
++        fields.find_map(|field| {
++            field
++                .strip_prefix("avg10=")?
++                .parse::<f64>()
++                .ok()
++                .filter(|value| value.is_finite() && *value >= 0.0)
++        })
++    })
++}
++
++fn pressure_avg10(path: &str) -> (Option<f64>, Option<f64>) {
++    let Ok(pressure) = fs::read_to_string(path) else {
++        return (None, None);
++    };
++    (
++        parse_psi_avg10(&pressure, "some"),
++        parse_psi_avg10(&pressure, "full"),
++    )
++}
++
++fn machine_snapshot(
++    archive_path: &Path,
++    car_path: &Path,
++    children_rss_bytes: u64,
++) -> MachineSnapshot {
++    let memory = fs::read_to_string("/proc/meminfo").unwrap_or_default();
++    let memory_total_bytes = parse_meminfo_kib(&memory, "MemTotal:").saturating_mul(1024);
+     let memory_available_bytes = parse_meminfo_kib(&memory, "MemAvailable:").saturating_mul(1024);
+     let swap_total_bytes = parse_meminfo_kib(&memory, "SwapTotal:").saturating_mul(1024);
+     let swap_free_bytes = parse_meminfo_kib(&memory, "SwapFree:").saturating_mul(1024);
+@@ -5862,6 +6852,9 @@
+         .ok()
+         .and_then(|line| line.split_whitespace().next()?.parse().ok())
+         .unwrap_or(0.0);
++    let (io_pressure_some_avg10, io_pressure_full_avg10) = pressure_avg10("/proc/pressure/io");
++    let (memory_pressure_some_avg10, memory_pressure_full_avg10) =
++        pressure_avg10("/proc/pressure/memory");
+     let (disk_total_bytes, disk_available_bytes) =
+         filesystem_capacity(archive_path).unwrap_or_default();
+     let (car_disk_total_bytes, car_disk_available_bytes) =
+@@ -5879,6 +6872,10 @@
+         car_disk_total_bytes,
+         car_disk_available_bytes,
+         load_1m,
++        io_pressure_some_avg10,
++        io_pressure_full_avg10,
++        memory_pressure_some_avg10,
++        memory_pressure_full_avg10,
+         service_rss_bytes: process_rss_bytes(std::process::id()).unwrap_or(0),
+         children_rss_bytes,
+     }
+@@ -6429,6 +7426,12 @@
+     scheduler_paused: bool,
+     scheduler_updated_unix_secs: u64,
+     paused_jobs: BTreeSet<String>,
++    #[serde(default)]
++    auto_paused_legacy: BTreeMap<u64, AutoPausedLegacy>,
++    #[serde(default)]
++    legacy_last_adaptive_action_unix_secs: u64,
++    #[serde(default)]
++    legacy_last_adaptive_action_reason: Option<String>,
+ }
+ 
+ fn persist_control_state(config: &NasPipelineConfig, runtime: &RuntimeState) -> Result<()> {
+@@ -6436,6 +7439,9 @@
+         scheduler_paused: runtime.scheduler_paused,
+         scheduler_updated_unix_secs: runtime.scheduler_updated_unix_secs,
+         paused_jobs: runtime.paused_jobs.clone(),
++        auto_paused_legacy: runtime.auto_paused_legacy.clone(),
++        legacy_last_adaptive_action_unix_secs: runtime.legacy_last_adaptive_action_unix_secs,
++        legacy_last_adaptive_action_reason: runtime.legacy_last_adaptive_action_reason.clone(),
+     };
+     let path = config.state_root.join("control-state.json");
+     let temp = config
+@@ -6446,18 +7452,335 @@
+     fs::rename(&temp, &path).with_context(|| format!("publish control state {}", path.display()))
+ }
+ 
+-async fn load_control_state(state: &Arc<AppState>) {
++async fn load_control_state(state: &Arc<AppState>) -> Result<()> {
+     let path = state.config.state_root.join("control-state.json");
+-    let Ok(bytes) = fs::read(path) else {
+-        return;
++    let bytes = match fs::read(&path) {
++        Ok(bytes) => bytes,
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
++        Err(error) => {
++            return Err(error)
++                .with_context(|| format!("read existing control state {}", path.display()));
++        }
+     };
+-    let Ok(saved) = serde_json::from_slice::<PersistedControlState>(&bytes) else {
+-        return;
+-    };
++    let saved = serde_json::from_slice::<PersistedControlState>(&bytes)
++        .with_context(|| format!("parse existing control state {}", path.display()))?;
+     let mut runtime = state.runtime.lock().await;
+     runtime.scheduler_paused = saved.scheduler_paused;
+     runtime.scheduler_updated_unix_secs = saved.scheduler_updated_unix_secs;
+     runtime.paused_jobs = saved.paused_jobs;
++    runtime.auto_paused_legacy = saved.auto_paused_legacy;
++    runtime.legacy_last_adaptive_action_unix_secs = saved.legacy_last_adaptive_action_unix_secs;
++    runtime.legacy_last_adaptive_action_reason = saved.legacy_last_adaptive_action_reason;
++    Ok(())
++}
++
++fn owner_matches_legacy_identity(
++    owner: &OwnershipMarker,
++    epoch: u64,
++    pid: u32,
++    schema_version: u32,
++) -> bool {
++    owner.schema_version == schema_version
++        && owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND
++        && owner.id == epoch.to_string()
++        && owner.state == "compact_reuse"
++        && owner.pid == Some(pid)
++}
++
++fn trusted_adopted_legacy_candidate(
++    config: &NasPipelineConfig,
++    epoch: u64,
++) -> Option<AdoptedLegacyCompact> {
++    let output = config.archive_root.join(format!("epoch-{epoch}"));
++    let first_owner = read_ownership(&output)?;
++    let pid = first_owner.pid?;
++    if !owner_matches_legacy_identity(&first_owner, epoch, pid, SCHEMA_VERSION) {
++        return None;
++    }
++    let (first_state, first_start_ticks) = process_stat_identity(pid)?;
++    if first_state == 'Z' || process_cmdline_matches_legacy_exact(config, epoch, pid) != Some(true)
++    {
++        return None;
++    }
++    let (second_state, second_start_ticks) = process_stat_identity(pid)?;
++    let second_owner = read_ownership(&output)?;
++    if second_state == 'Z'
++        || first_start_ticks != second_start_ticks
++        || !owner_matches_legacy_identity(&second_owner, epoch, pid, first_owner.schema_version)
++    {
++        return None;
++    }
++    Some(AdoptedLegacyCompact {
++        epoch,
++        pid,
++        owner_schema_version: first_owner.schema_version,
++        process_start_ticks: first_start_ticks,
++        progress_path: historical_progress_path(&config.state_root, epoch),
++        identity_tainted: false,
++    })
++}
++
++async fn track_adopted_legacy_compacts(state: &Arc<AppState>) -> Result<()> {
++    let entries = fs::read_dir(&state.config.archive_root).with_context(|| {
++        format!(
++            "audit all archive epochs for adopted legacy workers in {}",
++            state.config.archive_root.display()
++        )
++    })?;
++    let mut audit_epochs = BTreeSet::new();
++    for entry in entries {
++        let entry = entry.with_context(|| {
++            format!(
++                "read archive entry while auditing adopted legacy workers in {}",
++                state.config.archive_root.display()
++            )
++        })?;
++        let file_type = entry.file_type().with_context(|| {
++            format!(
++                "stat archive entry while auditing adopted legacy workers: {}",
++                entry.path().display()
++            )
++        })?;
++        if file_type.is_dir()
++            && let Some(epoch) = entry
++                .file_name()
++                .to_str()
++                .and_then(parse_archive_epoch_name)
++        {
++            audit_epochs.insert(epoch);
++        }
++    }
++    let mut candidates = Vec::new();
++    for epoch in audit_epochs {
++        let output = state.config.archive_root.join(format!("epoch-{epoch}"));
++        let claim = read_ownership(&output).filter(|owner| {
++            owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND && owner.state == "compact_reuse"
++        });
++        if claim.as_ref().is_some_and(|owner| owner.pid.is_none()) {
++            anyhow::bail!(
++                "compact/reuse owner epoch {epoch} (schema {}) has no PID; refusing scheduler startup because a crash may have occurred between spawn and recoverable PID publication",
++                claim.as_ref().map_or(0, |owner| owner.schema_version),
++            );
++        }
++        let live_claim = claim.as_ref().and_then(|owner| owner.pid);
++        match trusted_adopted_legacy_candidate(&state.config, epoch) {
++            Some(candidate) => candidates.push(candidate),
++            None if live_claim.is_some_and(process_exists) => {
++                let pid = live_claim.unwrap();
++                anyhow::bail!(
++                    "live compact/reuse owner epoch {epoch} pid {pid} could not prove exact current-schema owner, stable starttime, and byte-exact scheduler argv; refusing to start scheduler without counting it"
++                );
++            }
++            None => {}
++        }
++    }
++    let mut runtime = state.runtime.lock().await;
++    for candidate in candidates {
++        if runtime.legacy_compacts.contains_key(&candidate.epoch) {
++            continue;
++        }
++        let epoch = candidate.epoch;
++        let pid = candidate.pid;
++        runtime.adopted_legacy_compacts.insert(epoch, candidate);
++        let target = format!("compact_reuse:{epoch}/pid:{pid}");
++        if let Err(error) = append_control_event(&state.config, "adopted_legacy_track", &target) {
++            record_error(
++                &state.config,
++                &mut runtime,
++                "adopted_legacy",
++                format!("record adopted legacy lane {target}: {error:#}"),
++            );
++        }
++    }
++    Ok(())
++}
++
++async fn recover_manual_paused_legacy(state: &Arc<AppState>) -> Result<()> {
++    let mut runtime = state.runtime.lock().await;
++    let paused_epochs = runtime
++        .paused_jobs
++        .iter()
++        .filter_map(|key| key.strip_prefix("compact_reuse:")?.parse::<u64>().ok())
++        .collect::<Vec<_>>();
++    let mut changed = false;
++    for epoch in paused_epochs {
++        let key = format!("compact_reuse:{epoch}");
++        let Some(compact) = runtime.adopted_legacy_compacts.get(&epoch).cloned() else {
++            let owner = read_ownership(&state.config.archive_root.join(format!("epoch-{epoch}")));
++            let demonstrably_terminal = owner.as_ref().is_some_and(|owner| {
++                owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND
++                    && owner.id == epoch.to_string()
++                    && (owner.pid.is_some_and(|pid| !process_exists(pid))
++                        || (owner.pid.is_none()
++                            && matches!(
++                                owner.state.as_str(),
++                                "complete" | "failed" | "retry_ready"
++                            )))
++            });
++            if demonstrably_terminal {
++                runtime.paused_jobs.remove(&key);
++                changed = true;
++                record_error(
++                    &state.config,
++                    &mut runtime,
++                    "manual_pause_recovery",
++                    format!(
++                        "cleared stale manual pause {key} only after exact ownership proved the PID gone or terminal"
++                    ),
++                );
++                continue;
++            }
++            anyhow::bail!(
++                "manual pause {key} has no trusted adopted identity and ownership cannot prove a gone/terminal PID; retained pause and refused startup"
++            );
++        };
++        let trusted = !compact.identity_tainted
++            && process_stat_identity(compact.pid)
++                .is_some_and(|(_, start_ticks)| start_ticks == compact.process_start_ticks)
++            && process_cmdline_matches_legacy_exact(&state.config, compact.epoch, compact.pid)
++                == Some(true);
++        if !trusted {
++            anyhow::bail!(
++                "manual pause {key}/pid:{} could not prove stable starttime and byte-exact argv; retained pause and refused startup",
++                compact.pid
++            );
++        }
++        let group = process_is_group_leader(compact.pid);
++        let target = controlled_signal_target("historical_compact_reuse", compact.pid, group);
++        // SAFETY: the tracked PID has stable starttime and byte-exact argv;
++        // negative scope is selected only when it is the group leader.
++        if unsafe { libc::kill(target, libc::SIGSTOP) } != 0 {
++            anyhow::bail!(
++                "reapply manual pause {key}/pid:{} failed: {}",
++                compact.pid,
++                std::io::Error::last_os_error()
++            );
++        }
++        append_control_event(
++            &state.config,
++            "manual_pause_recovery",
++            &format!("{key}/pid:{}", compact.pid),
++        )?;
++    }
++    if changed {
++        persist_control_state(&state.config, &runtime)
++            .context("persist stale manual pause cleanup")?;
++    }
++    Ok(())
++}
++
++async fn recover_auto_paused_legacy(state: &Arc<AppState>) -> Result<()> {
++    let mut runtime = state.runtime.lock().await;
++    if runtime.auto_paused_legacy.is_empty() {
++        return Ok(());
++    }
++    let records = runtime
++        .auto_paused_legacy
++        .values()
++        .cloned()
++        .collect::<Vec<_>>();
++    let mut last_recovery = None;
++    for record in records {
++        let key = format!("compact_reuse:{}", record.epoch);
++        if runtime.paused_jobs.contains(&key) {
++            record_error(
++                &state.config,
++                &mut runtime,
++                "legacy_auto_pause_recovery",
++                format!(
++                    "left manually paused {key} stopped and discarded overlapping automatic pause record"
++                ),
++            );
++            runtime.auto_paused_legacy.remove(&record.epoch);
++            continue;
++        }
++        let output = state
++            .config
++            .archive_root
++            .join(format!("epoch-{}", record.epoch));
++        let trusted = read_ownership(&output).is_some_and(|owner| {
++            owner_matches_legacy_identity(&owner, record.epoch, record.pid, SCHEMA_VERSION)
++        }) && record.process_start_ticks.is_some_and(|expected| {
++            process_stat_identity(record.pid).is_some_and(|(_, observed)| observed == expected)
++        }) && process_is_group_leader(record.pid)
++            && process_cmdline_matches_legacy_exact(&state.config, record.epoch, record.pid)
++                == Some(true);
++        if !trusted {
++            if !process_exists(record.pid) {
++                record_error(
++                    &state.config,
++                    &mut runtime,
++                    "legacy_auto_pause_recovery",
++                    format!(
++                        "cleared automatic pause record {key}/pid:{} only after the PID demonstrably disappeared",
++                        record.pid
++                    ),
++                );
++                runtime.auto_paused_legacy.remove(&record.epoch);
++                continue;
++            }
++            let message = format!(
++                "automatic pause record {key}/pid:{} is still live but exact owner, byte-exact argv, or process-group identity is unprovable; retained record and refused scheduler startup",
++                record.pid
++            );
++            record_error(
++                &state.config,
++                &mut runtime,
++                "legacy_auto_pause_recovery",
++                message.clone(),
++            );
++            persist_control_state(&state.config, &runtime)
++                .context("persist unprovable live automatic pause record")?;
++            anyhow::bail!(message);
++        }
++        // SAFETY: the persisted record originated from an auto-paused managed
++        // group; current owner, argv, and group-leader identity were rechecked.
++        if unsafe { libc::kill(-(record.pid as libc::pid_t), libc::SIGCONT) } == 0 {
++            let action = format!("startup auto-resumed {key}/pid:{}", record.pid);
++            last_recovery = Some(action.clone());
++            runtime.auto_paused_legacy.remove(&record.epoch);
++            if let Err(error) =
++                append_control_event(&state.config, "legacy_auto_resume_recovery", &action)
++            {
++                record_error(
++                    &state.config,
++                    &mut runtime,
++                    "legacy_auto_pause_recovery",
++                    format!("record {action}: {error:#}"),
++                );
++            }
++        } else {
++            let signal_error = std::io::Error::last_os_error();
++            record_error(
++                &state.config,
++                &mut runtime,
++                "legacy_auto_pause_recovery",
++                format!(
++                    "failed to resume {key}/pid:{}: {}",
++                    record.pid, signal_error
++                ),
++            );
++            // Retain the trusted record and fail startup. Erasing the only
++            // recovery evidence could strand a stopped process permanently.
++            persist_control_state(&state.config, &runtime).with_context(|| {
++                format!(
++                    "persist trusted auto-pause recovery failure for {key}/pid:{}",
++                    record.pid
++                )
++            })?;
++            anyhow::bail!(
++                "trusted auto-paused {key}/pid:{} could not be resumed: {signal_error}",
++                record.pid
++            );
++        }
++    }
++    if let Some(action) = last_recovery {
++        runtime.legacy_last_adaptive_action_unix_secs = unix_now();
++        runtime.legacy_last_adaptive_action_reason = Some(action);
++    }
++    persist_control_state(&state.config, &runtime)
++        .context("persist recovered automatic pause state")?;
++    Ok(())
+ }
+ 
+ fn append_control_event(config: &NasPipelineConfig, action: &str, target: &str) -> Result<()> {
+@@ -6496,6 +7819,12 @@
+             legacy_compact_cpu_budget_cores: 1,
+             legacy_compact_io_mib_per_sec_per_worker: 120,
+             legacy_compact_io_budget_mib_per_sec: 120,
++            legacy_compact_auto_pause: false,
++            legacy_compact_min_running: 1,
++            legacy_compact_memory_guard_mib: 512,
++            legacy_compact_io_pause_full_avg10: 20.0,
++            legacy_compact_io_resume_full_avg10: 5.0,
++            legacy_compact_pause_cooldown: Duration::from_secs(30),
+             scan_memory_mib: 800,
+             finalizer_memory_mib: 512,
+             memory_reserve_mib: 256,
+@@ -6750,8 +8079,65 @@
+         config.legacy_compact_cpu_budget_cores = workers as u64;
+         config.legacy_compact_io_mib_per_sec_per_worker = 120;
+         config.legacy_compact_io_budget_mib_per_sec = (workers as u64).saturating_mul(120);
++    }
++
++    fn write_adopted_legacy_proof(
++        config: &NasPipelineConfig,
++        epoch: u64,
++        pid: u32,
++        progress_pid: u32,
++        progress_state: &str,
++        valid_core: bool,
++    ) -> AdoptedLegacyCompact {
++        let output = config.archive_root.join(format!("epoch-{epoch}"));
++        write_legacy_registry_sidecars(&output, false);
++        if valid_core {
++            write_legacy_reader_core(&output);
++        }
++        let owner = OwnershipMarker {
++            schema_version: SCHEMA_VERSION,
++            kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
++            id: epoch.to_string(),
++            state: "compact_reuse".to_string(),
++            created_unix_secs: 1,
++            updated_unix_secs: 2,
++            message: None,
++            pid: Some(pid),
++        };
++        publish_ownership_marker(&output, &owner).unwrap();
++        let progress_path = historical_progress_path(&config.state_root, epoch);
++        fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
++        fs::write(
++            &progress_path,
++            serde_json::to_vec(&serde_json::json!({
++                "pid": progress_pid,
++                "state": progress_state,
++                "phase": "compact_reuse",
++            }))
++            .unwrap(),
++        )
++        .unwrap();
++        AdoptedLegacyCompact {
++            epoch,
++            pid,
++            owner_schema_version: SCHEMA_VERSION,
++            process_start_ticks: 1,
++            progress_path,
++            identity_tainted: false,
++        }
+     }
+ 
++    fn test_app_state(config: NasPipelineConfig) -> Arc<AppState> {
++        let (updates, _) = broadcast::channel(4);
++        Arc::new(AppState {
++            config,
++            snapshot: RwLock::new(empty_snapshot(false)),
++            updates,
++            sequence: AtomicU64::new(0),
++            runtime: Mutex::new(RuntimeState::default()),
++        })
++    }
++
+     fn write_live_candidate(output: &Path) {
+         for name in [
+             META_FILE,
+@@ -8050,6 +9436,8 @@
+             capture_id: None,
+             phase: "compact_reuse".to_string(),
+             state: "running".to_string(),
++            auto_paused: false,
++            auto_pause_reason: None,
+             pid: None,
+             progress: ProgressSnapshot {
+                 rss_bytes: Some(adopted_rss),
+@@ -8109,6 +9497,8 @@
+             capture_id: None,
+             phase: "compact_reuse".to_string(),
+             state: "running".to_string(),
++            auto_paused: false,
++            auto_pause_reason: None,
+             pid: None,
+             progress: ProgressSnapshot {
+                 rss_bytes: Some(adopted_rss),
+@@ -8161,6 +9551,8 @@
+             capture_id: None,
+             phase: "compact_reuse".to_string(),
+             state: "running".to_string(),
++            auto_paused: false,
++            auto_pause_reason: None,
+             pid: None,
+             progress: ProgressSnapshot {
+                 rss_bytes: Some(adopted_rss),
+@@ -8746,9 +10138,606 @@
+             "Bearer secret".parse().unwrap(),
+         );
+         assert!(authorize_control(&config, &headers).is_ok());
++    }
++
++    #[test]
++    fn parses_linux_psi_avg10() {
++        let pressure = "some avg10=12.34 avg60=4.00 avg300=1.00 total=9\nfull avg10=5.67 avg60=2.00 avg300=0.50 total=3\n";
++        assert_eq!(parse_psi_avg10(pressure, "some"), Some(12.34));
++        assert_eq!(parse_psi_avg10(pressure, "full"), Some(5.67));
++        assert_eq!(parse_psi_avg10(pressure, "missing"), None);
++        assert_eq!(parse_psi_avg10("full avg10=NaN total=1", "full"), None);
++    }
++
++    #[test]
++    fn adaptive_decision_applies_pressure_hysteresis_cooldown_and_lane_order() {
++        let root = temp_root("adaptive-decision");
++        let mut config = test_config(&root);
++        allow_legacy_workers(&mut config, 3);
++        config.legacy_compact_auto_pause = true;
++        config.legacy_compact_min_running = 1;
++        config.legacy_compact_pause_cooldown = Duration::from_secs(30);
++        let mib = 1024 * 1024;
++        let resume_mib = config
++            .memory_reserve_mib
++            .saturating_add(config.legacy_compact_memory_guard_mib * 2);
++        let mut machine = MachineSnapshot {
++            memory_total_bytes: 16 * 1024 * 1024 * 1024,
++            memory_available_bytes: resume_mib * mib,
++            io_pressure_full_avg10: Some(25.0),
++            ..MachineSnapshot::default()
++        };
++        assert_eq!(
++            plan_legacy_adaptive_action(&config, &machine, 3, &[700, 900, 800], &[], 0, 100,),
++            Some(LegacyAdaptiveDecision::Pause {
++                epoch: 900,
++                reason: "IO PSI full avg10 25.00 reached pause threshold 20.00".to_string(),
++            })
++        );
++        assert!(
++            plan_legacy_adaptive_action(&config, &machine, 3, &[700, 800, 900], &[], 90, 100,)
++                .is_none(),
++            "cooldown must permit only one lane action"
++        );
++        assert!(
++            plan_legacy_adaptive_action(&config, &machine, 1, &[900], &[], 0, 100,).is_none(),
++            "minimum running must stop further pauses"
++        );
++
++        machine.io_pressure_full_avg10 = Some(10.0);
++        assert_eq!(
++            legacy_pressure_state(&config, &machine),
++            LegacyPressureState::Hold
++        );
++        machine.io_pressure_full_avg10 = Some(5.0);
++        machine.memory_available_bytes = (resume_mib - 1) * mib;
++        assert_eq!(
++            legacy_pressure_state(&config, &machine),
++            LegacyPressureState::Hold
++        );
++
++        machine.memory_available_bytes = resume_mib * mib;
++        machine.io_pressure_full_avg10 = None;
++        let paused = vec![
++            AutoPausedLegacy {
++                epoch: 800,
++                pid: 8,
++                process_start_ticks: None,
++                reason: "pressure".to_string(),
++                paused_unix_secs: 80,
++            },
++            AutoPausedLegacy {
++                epoch: 900,
++                pid: 9,
++                process_start_ticks: None,
++                reason: "pressure".to_string(),
++                paused_unix_secs: 70,
++            },
++        ];
++        assert_eq!(
++            plan_legacy_adaptive_action(&config, &machine, 1, &[], &paused, 0, 100),
++            Some(LegacyAdaptiveDecision::Resume {
++                epoch: 900,
++                reason: "MemAvailable and IO PSI crossed resume thresholds".to_string(),
++            }),
++            "missing PSI is unknown and the oldest auto-pause resumes first"
++        );
++
++        machine.memory_available_bytes = config
++            .memory_reserve_mib
++            .saturating_add(config.legacy_compact_memory_guard_mib)
++            .saturating_sub(1)
++            * mib;
++        assert!(matches!(
++            legacy_pressure_state(&config, &machine),
++            LegacyPressureState::Pause(reason) if reason.contains("MemAvailable")
++        ));
+     }
+ 
+     #[test]
++    fn manual_pause_transfers_auto_ownership_and_resume_clears_both() {
++        let mut runtime = RuntimeState::default();
++        runtime.auto_paused_legacy.insert(
++            700,
++            AutoPausedLegacy {
++                epoch: 700,
++                pid: 70,
++                process_start_ticks: None,
++                reason: "IO pressure".to_string(),
++                paused_unix_secs: 1,
++            },
++        );
++        set_manual_pause_state(&mut runtime, "compact_reuse:700", Some(700), true);
++        assert!(runtime.paused_jobs.contains("compact_reuse:700"));
++        assert!(!runtime.auto_paused_legacy.contains_key(&700));
++        set_manual_pause_state(&mut runtime, "compact_reuse:700", Some(700), false);
++        assert!(!runtime.paused_jobs.contains("compact_reuse:700"));
++        assert!(!runtime.auto_paused_legacy.contains_key(&700));
++    }
++
++    #[tokio::test]
++    async fn paused_lane_api_and_exit_cleanup_are_consistent() {
++        let root = temp_root("paused-lane-api");
++        let config = test_config(&root);
++        fs::create_dir_all(&config.state_root).unwrap();
++        let progress_path = historical_progress_path(&config.state_root, 700);
++        fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
++        fs::write(
++            &progress_path,
++            br#"{"pid":1,"state":"running","phase":"compact_reuse"}"#,
++        )
++        .unwrap();
++        let child = make_finished_child(
++            ChildKind::HistoricalCompactReuse { epoch: 700 },
++            progress_path,
++            config.state_root.join("lane.log"),
++        )
++        .await;
++        let mut runtime = RuntimeState::default();
++        runtime.paused_jobs.insert("compact_reuse:700".to_string());
++        runtime.auto_paused_legacy.insert(
++            700,
++            AutoPausedLegacy {
++                epoch: 700,
++                pid: child.pid.unwrap_or_default(),
++                process_start_ticks: None,
++                reason: "memory pressure".to_string(),
++                paused_unix_secs: 1,
++            },
++        );
++        let lane = lane_from_child(&child, Some(700), None, unix_now(), &runtime);
++        assert_eq!(lane.state, "paused");
++        assert_eq!(lane.progress.state.as_deref(), Some("paused"));
++        assert!(lane.auto_paused);
++        clear_legacy_pause_state_after_exit(&config, &mut runtime, 700);
++        assert!(!runtime.paused_jobs.contains("compact_reuse:700"));
++        assert!(!runtime.auto_paused_legacy.contains_key(&700));
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn paused_legacy_lane_remains_in_hard_rss_capacity() {
++        let root = temp_root("paused-capacity");
++        let snapshot_lane = LaneSnapshot {
++            id: "compact_reuse:700".to_string(),
++            kind: "historical_compact_reuse".to_string(),
++            epoch: Some(700),
++            capture_id: None,
++            phase: "compact_reuse".to_string(),
++            state: "paused".to_string(),
++            auto_paused: true,
++            auto_pause_reason: Some("IO pressure".to_string()),
++            pid: Some(70),
++            progress: ProgressSnapshot::default(),
++            rss_bytes: Some(700 * 1024 * 1024),
++            started_unix_secs: None,
++            updated_unix_secs: 1,
++        };
++        let active = sampled_legacy_compact_rss(&[snapshot_lane], &RuntimeState::default());
++        assert_eq!(active.len(), 1);
++        assert_eq!(active[&700], 700 * 1024 * 1024);
++        let _ = root;
++    }
++
++    #[tokio::test]
++    async fn adaptive_ramp_starts_one_lane_per_cooldown() {
++        let root = temp_root("adaptive-ramp");
++        let mut config = test_config(&root);
++        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
++        allow_legacy_workers(&mut config, 3);
++        config.legacy_compact_auto_pause = true;
++        config.legacy_compact_min_running = 1;
++        let mut snapshot = schedulable_snapshot(
++            &root,
++            [700, 800, 900]
++                .into_iter()
++                .map(|epoch| test_epoch(&root, epoch, HistoricalState::Queued))
++                .collect(),
++        );
++        for epoch in [700, 800, 900] {
++            make_legacy_range_ready(&config, epoch);
++        }
++        snapshot.machine = legacy_scheduler_machine(&config, 4 * 1024, 4);
++        let mut runtime = RuntimeState::default();
++        assert_eq!(
++            top_up_legacy_compacts(&config, &snapshot, &mut runtime).await,
++            1
++        );
++        assert_eq!(runtime.legacy_compacts.len(), 1);
++        assert_eq!(
++            top_up_legacy_compacts(&config, &snapshot, &mut runtime).await,
++            0
++        );
++        for child in runtime.legacy_compacts.values_mut() {
++            let _ = child.child.wait().await;
++        }
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn trusted_adopted_completion_commits_only_exact_terminal_proof() {
++        let root = temp_root("adopted-complete");
++        let config = test_config(&root);
++        let pid = u32::MAX - 100;
++        assert!(!process_exists(pid));
++        let compact = write_adopted_legacy_proof(&config, 700, pid, pid, "complete", true);
++        let mut runtime = RuntimeState::default();
++        runtime.adopted_legacy_compacts.insert(700, compact);
++        reap_adopted_legacy_compacts(&config, &mut runtime);
++        let owner = read_ownership(&config.archive_root.join("epoch-700")).unwrap();
++        assert_eq!(owner.state, "complete");
++        assert_eq!(owner.pid, None);
++        assert!(!runtime.failures.contains_key("compact_reuse:700"));
++        assert!(
++            fs::read_to_string(config.state_root.join("control-events.jsonl"))
++                .unwrap()
++                .contains("adopted_legacy_complete")
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn adopted_completion_rejects_progress_pid_state_and_invalid_core() {
++        for (label, progress_pid_delta, state, valid_core) in [
++            ("pid", 1u32, "complete", true),
++            ("state", 0u32, "running", true),
++            ("core", 0u32, "complete", false),
++        ] {
++            let root = temp_root(&format!("adopted-reject-{label}"));
++            let config = test_config(&root);
++            let pid = u32::MAX - 200;
++            let compact = write_adopted_legacy_proof(
++                &config,
++                700,
++                pid,
++                pid - progress_pid_delta,
++                state,
++                valid_core,
++            );
++            let mut runtime = RuntimeState::default();
++            runtime.adopted_legacy_compacts.insert(700, compact);
++            reap_adopted_legacy_compacts(&config, &mut runtime);
++            let owner = read_ownership(&config.archive_root.join("epoch-700")).unwrap();
++            assert_eq!(owner.state, "failed", "case={label}");
++            assert_ne!(owner.state, "complete", "case={label}");
++            assert!(runtime.failures.contains_key("compact_reuse:700"));
++            fs::remove_dir_all(root).unwrap();
++        }
++    }
++
++    #[test]
++    fn adopted_completion_never_overwrites_changed_owner() {
++        for variant in 0..5 {
++            let root = temp_root(&format!("adopted-owner-change-{variant}"));
++            let config = test_config(&root);
++            let pid = u32::MAX - 300;
++            let compact = write_adopted_legacy_proof(&config, 700, pid, pid, "complete", true);
++            let output = config.archive_root.join("epoch-700");
++            let mut owner = read_ownership(&output).unwrap();
++            match variant {
++                0 => owner.schema_version += 1,
++                1 => owner.kind = "historical_scan".to_string(),
++                2 => owner.id = "701".to_string(),
++                3 => owner.state = "retry_ready".to_string(),
++                4 => owner.pid = Some(pid - 1),
++                _ => unreachable!(),
++            }
++            publish_ownership_marker(&output, &owner).unwrap();
++            let before = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
++            let mut runtime = RuntimeState::default();
++            runtime.adopted_legacy_compacts.insert(700, compact);
++            reap_adopted_legacy_compacts(&config, &mut runtime);
++            let after = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
++            assert_eq!(before, after, "variant={variant}");
++            assert!(runtime.failures.contains_key("compact_reuse:700"));
++            fs::remove_dir_all(root).unwrap();
++        }
++    }
++
++    #[test]
++    fn live_pid_reuse_or_argv_change_is_tainted_and_kept_in_capacity() {
++        let root = temp_root("adopted-taint");
++        let config = test_config(&root);
++        let pid = std::process::id();
++        let mut compact = write_adopted_legacy_proof(&config, 700, pid, pid, "complete", true);
++        compact.process_start_ticks = process_stat_identity(pid).unwrap().1.saturating_add(1);
++        assert_eq!(
++            adopted_legacy_process_state(&config, &compact),
++            AdoptedLegacyProcessState::LiveIdentityChanged
++        );
++        let mut runtime = RuntimeState::default();
++        runtime.adopted_legacy_compacts.insert(700, compact);
++        reap_adopted_legacy_compacts(&config, &mut runtime);
++        assert!(runtime.adopted_legacy_compacts.contains_key(&700));
++        assert!(runtime.adopted_legacy_compacts[&700].identity_tainted);
++        assert!(runtime.failures.contains_key("compact_reuse:700"));
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn auto_pause_recovery_clears_gone_but_retains_live_unprovable_pid() {
++        let gone_root = temp_root("auto-recovery-gone");
++        let gone_config = test_config(&gone_root);
++        fs::create_dir_all(&gone_config.state_root).unwrap();
++        let gone_state = test_app_state(gone_config);
++        gone_state.runtime.lock().await.auto_paused_legacy.insert(
++            700,
++            AutoPausedLegacy {
++                epoch: 700,
++                pid: u32::MAX - 400,
++                process_start_ticks: None,
++                reason: "pressure".to_string(),
++                paused_unix_secs: 1,
++            },
++        );
++        recover_auto_paused_legacy(&gone_state).await.unwrap();
++        assert!(
++            gone_state
++                .runtime
++                .lock()
++                .await
++                .auto_paused_legacy
++                .is_empty()
++        );
++        fs::remove_dir_all(gone_root).unwrap();
++
++        let live_root = temp_root("auto-recovery-live");
++        let live_config = test_config(&live_root);
++        fs::create_dir_all(&live_config.state_root).unwrap();
++        let live_state = test_app_state(live_config);
++        let pid = std::process::id();
++        live_state.runtime.lock().await.auto_paused_legacy.insert(
++            700,
++            AutoPausedLegacy {
++                epoch: 700,
++                pid,
++                process_start_ticks: None,
++                reason: "pressure".to_string(),
++                paused_unix_secs: 1,
++            },
++        );
++        assert!(recover_auto_paused_legacy(&live_state).await.is_err());
++        assert!(
++            live_state
++                .runtime
++                .lock()
++                .await
++                .auto_paused_legacy
++                .contains_key(&700)
++        );
++        fs::remove_dir_all(live_root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn malformed_existing_control_state_fails_closed() {
++        let root = temp_root("malformed-control-state");
++        let config = test_config(&root);
++        fs::create_dir_all(&config.state_root).unwrap();
++        fs::write(config.state_root.join("control-state.json"), b"not-json").unwrap();
++        let state = test_app_state(config);
++        assert!(load_control_state(&state).await.is_err());
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn manual_pause_recovery_clears_only_gone_owner_and_retains_live_unknown() {
++        let gone_root = temp_root("manual-recovery-gone");
++        let gone_config = test_config(&gone_root);
++        fs::create_dir_all(&gone_config.state_root).unwrap();
++        let output = gone_config.archive_root.join("epoch-700");
++        fs::create_dir_all(&output).unwrap();
++        publish_ownership_marker(
++            &output,
++            &OwnershipMarker {
++                schema_version: SCHEMA_VERSION,
++                kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
++                id: "700".to_string(),
++                state: "compact_reuse".to_string(),
++                created_unix_secs: 1,
++                updated_unix_secs: 1,
++                message: None,
++                pid: Some(u32::MAX - 500),
++            },
++        )
++        .unwrap();
++        let gone_state = test_app_state(gone_config);
++        gone_state
++            .runtime
++            .lock()
++            .await
++            .paused_jobs
++            .insert("compact_reuse:700".to_string());
++        recover_manual_paused_legacy(&gone_state).await.unwrap();
++        assert!(gone_state.runtime.lock().await.paused_jobs.is_empty());
++        fs::remove_dir_all(gone_root).unwrap();
++
++        let live_root = temp_root("manual-recovery-live");
++        let live_config = test_config(&live_root);
++        fs::create_dir_all(&live_config.state_root).unwrap();
++        let output = live_config.archive_root.join("epoch-700");
++        fs::create_dir_all(&output).unwrap();
++        publish_ownership_marker(
++            &output,
++            &OwnershipMarker {
++                schema_version: SCHEMA_VERSION,
++                kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
++                id: "700".to_string(),
++                state: "compact_reuse".to_string(),
++                created_unix_secs: 1,
++                updated_unix_secs: 1,
++                message: None,
++                pid: Some(std::process::id()),
++            },
++        )
++        .unwrap();
++        let live_state = test_app_state(live_config);
++        live_state
++            .runtime
++            .lock()
++            .await
++            .paused_jobs
++            .insert("compact_reuse:700".to_string());
++        assert!(recover_manual_paused_legacy(&live_state).await.is_err());
++        assert!(
++            live_state
++                .runtime
++                .lock()
++                .await
++                .paused_jobs
++                .contains("compact_reuse:700")
++        );
++        fs::remove_dir_all(live_root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn startup_rejects_live_unprovable_and_pidless_compact_owner() {
++        let live_root = temp_root("track-live-mismatch");
++        let live_config = test_config(&live_root);
++        let output = live_config.archive_root.join("epoch-700");
++        fs::create_dir_all(&output).unwrap();
++        publish_ownership_marker(
++            &output,
++            &OwnershipMarker {
++                schema_version: SCHEMA_VERSION,
++                kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
++                id: "700".to_string(),
++                state: "compact_reuse".to_string(),
++                created_unix_secs: 1,
++                updated_unix_secs: 1,
++                message: None,
++                pid: Some(std::process::id()),
++            },
++        )
++        .unwrap();
++        let state = test_app_state(live_config);
++        assert!(track_adopted_legacy_compacts(&state).await.is_err());
++        fs::remove_dir_all(live_root).unwrap();
++
++        let pidless_root = temp_root("track-pidless");
++        let mut pidless_config = test_config(&pidless_root);
++        pidless_config.start_epoch = Some(800);
++        pidless_config.end_epoch = Some(800);
++        let output = pidless_config.archive_root.join("epoch-700");
++        fs::create_dir_all(&output).unwrap();
++        publish_ownership_marker(
++            &output,
++            &OwnershipMarker {
++                schema_version: SCHEMA_VERSION,
++                kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
++                id: "700".to_string(),
++                state: "compact_reuse".to_string(),
++                created_unix_secs: 1,
++                updated_unix_secs: 1,
++                message: None,
++                pid: None,
++            },
++        )
++        .unwrap();
++        let state = test_app_state(pidless_config.clone());
++        assert!(track_adopted_legacy_compacts(&state).await.is_err());
++        let mut old_owner = read_ownership(&output).unwrap();
++        old_owner.schema_version = SCHEMA_VERSION.saturating_sub(1);
++        publish_ownership_marker(&output, &old_owner).unwrap();
++        let state = test_app_state(pidless_config);
++        assert!(
++            track_adopted_legacy_compacts(&state).await.is_err(),
++            "old-schema pidless and out-of-scope active claims must also fail closed"
++        );
++        fs::remove_dir_all(pidless_root).unwrap();
++    }
++
++    #[test]
++    fn legacy_adoption_requires_byte_exact_scheduler_argv() {
++        let root = temp_root("exact-legacy-argv");
++        let config = test_config(&root);
++        make_legacy_range_ready(&config, 700);
++        let expected = expected_legacy_compact_argv(&config, 700).unwrap();
++        let encode = |argv: &[Vec<u8>]| {
++            argv.iter()
++                .flat_map(|arg| arg.iter().copied().chain(std::iter::once(0)))
++                .collect::<Vec<_>>()
++        };
++        assert_eq!(
++            legacy_compact_argv_matches_bytes(&config, 700, &encode(&expected)),
++            Some(true)
++        );
++        let mut wrong_input = expected.clone();
++        wrong_input[2] = b"/wrong/epoch-700.car".to_vec();
++        assert_eq!(
++            legacy_compact_argv_matches_bytes(&config, 700, &encode(&wrong_input)),
++            Some(false)
++        );
++        let mut extra = expected.clone();
++        extra.push(b"--unexpected".to_vec());
++        assert_eq!(
++            legacy_compact_argv_matches_bytes(&config, 700, &encode(&extra)),
++            Some(false)
++        );
++        let mut extra_empty = expected.clone();
++        extra_empty.push(Vec::new());
++        assert_eq!(
++            legacy_compact_argv_matches_bytes(&config, 700, &encode(&extra_empty)),
++            Some(false)
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn legacy_spawn_is_group_leader_and_removes_stale_progress() {
++        let root = temp_root("legacy-pg-spawn");
++        let config = test_config(&root);
++        fs::create_dir_all(&config.state_root).unwrap();
++        let output = config.archive_root.join("epoch-700");
++        fs::create_dir_all(&output).unwrap();
++        write_ownership(
++            &output,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            "700",
++            "compact_reuse",
++            None,
++        )
++        .unwrap();
++        let progress = historical_progress_path(&config.state_root, 700);
++        fs::create_dir_all(progress.parent().unwrap()).unwrap();
++        fs::write(&progress, br#"{"pid":1,"state":"complete"}"#).unwrap();
++        let mut child = spawn_command_child(
++            &config,
++            Path::new("/bin/sleep"),
++            vec!["60".into()],
++            ChildKind::HistoricalCompactReuse { epoch: 700 },
++            progress.clone(),
++            config.state_root.join("sleep.log"),
++            None,
++        )
++        .await
++        .unwrap();
++        let pid = child.pid.unwrap();
++        assert!(process_is_group_leader(pid));
++        assert_eq!(
++            controlled_signal_target("historical_compact_reuse", pid, true),
++            -(pid as libc::pid_t)
++        );
++        assert!(
++            !progress.exists(),
++            "stale complete progress must be removed before exec"
++        );
++        // SAFETY: the test child is an isolated group leader.
++        let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
++        let _ = child.child.wait().await;
++
++        let mut ordinary = Command::new("/bin/sleep").arg("60").spawn().unwrap();
++        let ordinary_pid = ordinary.id().unwrap();
++        assert!(!process_is_group_leader(ordinary_pid));
++        assert_eq!(
++            controlled_signal_target("historical_compact_reuse", ordinary_pid, false),
++            ordinary_pid as libc::pid_t
++        );
++        let _ = ordinary.kill().await;
++        let _ = ordinary.wait().await;
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
+     fn process_identity_routes_scanners_and_finalizers_by_exact_argv() {
+         let bin = Path::new("/opt/blockzilla/bin/blockzilla");
+         let output = Path::new("/archives/epoch-700");
+--- a/crates/hivezilla/src/main.rs
++++ b/crates/hivezilla/src/main.rs
+@@ -220,6 +220,24 @@
+     /// Aggregate disk-throughput admission budget shared by legacy compact lanes.
+     #[arg(long, default_value_t = 120)]
+     legacy_compact_io_budget_mib_per_sec: u64,
++    /// Adaptively stop/resume managed legacy lane process groups under pressure.
++    #[arg(long)]
++    legacy_compact_auto_pause: bool,
++    /// Minimum number of legacy lanes kept running by adaptive pause.
++    #[arg(long, default_value_t = 1)]
++    legacy_compact_min_running: usize,
++    /// Extra MemAvailable guard above the hard scheduler reserve.
++    #[arg(long, default_value_t = 512)]
++    legacy_compact_memory_guard_mib: u64,
++    /// Pause when Linux IO PSI full avg10 reaches this percentage.
++    #[arg(long, default_value_t = 20.0)]
++    legacy_compact_io_pause_full_avg10: f64,
++    /// Resume only when Linux IO PSI full avg10 falls to this percentage.
++    #[arg(long, default_value_t = 5.0)]
++    legacy_compact_io_resume_full_avg10: f64,
++    /// Minimum seconds between one-lane adaptive actions.
++    #[arg(long, default_value_t = 30)]
++    legacy_compact_pause_cooldown_secs: u64,
+     /// Expected peak RSS for one full historical scan lane.
+     #[arg(long, default_value_t = 800)]
+     scan_memory_mib: u64,
+@@ -415,7 +433,42 @@
+                 args.legacy_compact_io_budget_mib_per_sec > 0,
+                 "--legacy-compact-io-budget-mib-per-sec must be positive"
+             );
++            let legacy_effective_capacity = args
++                .legacy_compact_concurrency
++                .min(
++                    usize::try_from(
++                        args.legacy_compact_cpu_budget_cores
++                            / args.legacy_compact_cpu_cores_per_worker,
++                    )
++                    .unwrap_or(usize::MAX),
++                )
++                .min(
++                    usize::try_from(
++                        args.legacy_compact_io_budget_mib_per_sec
++                            / args.legacy_compact_io_mib_per_sec_per_worker,
++                    )
++                    .unwrap_or(usize::MAX),
++                );
++            anyhow::ensure!(
++                !args.legacy_compact_auto_pause
++                    || args.legacy_compact_min_running <= legacy_effective_capacity,
++                "--legacy-compact-min-running must not exceed effective legacy capacity ({legacy_effective_capacity})"
++            );
++            anyhow::ensure!(
++                args.legacy_compact_io_pause_full_avg10.is_finite()
++                    && args.legacy_compact_io_resume_full_avg10.is_finite()
++                    && args.legacy_compact_io_resume_full_avg10 >= 0.0
++                    && args.legacy_compact_io_pause_full_avg10 <= 100.0
++                    && args.legacy_compact_io_resume_full_avg10 <= 100.0
++                    && args.legacy_compact_io_pause_full_avg10
++                        > args.legacy_compact_io_resume_full_avg10,
++                "--legacy-compact-io-pause-full-avg10 must be finite and greater than the non-negative resume threshold"
++            );
+             anyhow::ensure!(
++                args.legacy_compact_pause_cooldown_secs > 0,
++                "--legacy-compact-pause-cooldown-secs must be positive"
++            );
++            anyhow::ensure!(
+                 args.finalizer_memory_mib > 0,
+                 "--finalizer-memory-mib must be positive"
+             );
+@@ -441,6 +494,14 @@
+                 legacy_compact_io_mib_per_sec_per_worker: args
+                     .legacy_compact_io_mib_per_sec_per_worker,
+                 legacy_compact_io_budget_mib_per_sec: args.legacy_compact_io_budget_mib_per_sec,
++                legacy_compact_auto_pause: args.legacy_compact_auto_pause,
++                legacy_compact_min_running: args.legacy_compact_min_running,
++                legacy_compact_memory_guard_mib: args.legacy_compact_memory_guard_mib,
++                legacy_compact_io_pause_full_avg10: args.legacy_compact_io_pause_full_avg10,
++                legacy_compact_io_resume_full_avg10: args.legacy_compact_io_resume_full_avg10,
++                legacy_compact_pause_cooldown: std::time::Duration::from_secs(
++                    args.legacy_compact_pause_cooldown_secs,
++                ),
+                 scan_memory_mib: args.scan_memory_mib,
+                 finalizer_memory_mib: args.finalizer_memory_mib,
+                 memory_reserve_mib: args.memory_reserve_mib,

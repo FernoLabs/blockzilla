@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use blockzilla_hivezilla::coordinator::{gb_to_bytes, tb_to_bytes};
 use blockzilla_hivezilla::{
     BuildMode, CapacityEstimate, CapacityEstimateRequest, CoordinatorConfig, HivezillaPlan,
-    MachineSpec, PlanRequest, ProviderKind, ProviderSpec, RenderWorkerScriptRequest,
-    SLOTS_PER_EPOCH, build_plan, estimate_capacity, hetzner_server_type, hetzner_server_types,
-    render_worker_script, run_coordinator,
+    MachineSpec, NasPipelineConfig, PlanRequest, ProviderKind, ProviderSpec,
+    RenderWorkerScriptRequest, SLOTS_PER_EPOCH, build_plan, estimate_capacity, hetzner_server_type,
+    hetzner_server_types, render_worker_script, run_coordinator, run_nas_pipeline,
 };
 use clap::{Args, Parser, Subcommand};
 use std::{
@@ -29,6 +29,9 @@ enum Command {
     Plan(PlanArgs),
     /// Run the NAS-side event listener that receives completed worker jobs.
     Coordinate(CoordinateArgs),
+    /// Observe or execute the local NAS historical and live compaction pipeline.
+    #[command(name = "pipeline", alias = "nas-pipeline")]
+    NasPipeline(NasPipelineArgs),
     /// Estimate Hetzner Cloud machines, wall time, scratch disk, and compute cost.
     EstimateHetzner(EstimateHetznerArgs),
     /// Print a short summary for an existing plan.
@@ -54,7 +57,6 @@ struct PlanArgs {
     /// Last epoch in an inclusive range. Defaults to start-epoch when omitted.
     #[arg(long)]
     end_epoch: Option<u64>,
-
     /// Input CAR template. Supports {epoch}, {shard}, {start_slot}, {end_slot}, {worker}.
     #[arg(long, default_value = "/data/old-faithful/epoch-{epoch}.car.zst")]
     input_template: String,
@@ -187,6 +189,80 @@ struct CoordinateArgs {
 }
 
 #[derive(Debug, Args)]
+struct NasPipelineArgs {
+    /// Address for the monitoring API and dashboard.
+    #[arg(long, default_value = "0.0.0.0:8788")]
+    bind: SocketAddr,
+    #[arg(long, default_value = "./target/release/blockzilla")]
+    blockzilla_bin: PathBuf,
+    /// Optional newer repair-capable binary. Defaults to --blockzilla-bin.
+    #[arg(long)]
+    repair_blockzilla_bin: Option<PathBuf>,
+    #[arg(long, default_value = "/volume1/blockzilla")]
+    car_root: PathBuf,
+    #[arg(long, default_value = "/volume1/@home/ach/dev/blockzilla-v2")]
+    archive_root: PathBuf,
+    #[arg(long, default_value = "/volume1/@home/ach/dev/blockzilla-live")]
+    live_root: PathBuf,
+    #[arg(long, default_value = "nas-pipeline-state")]
+    state_root: PathBuf,
+    #[arg(long, default_value_t = 4)]
+    scan_concurrency: usize,
+    /// Expected peak RSS for one full historical scan lane.
+    #[arg(long, default_value_t = 800)]
+    scan_memory_mib: u64,
+    /// Minimum RSS budget for a finalizer stage. MPHF stages scale this from registry size.
+    #[arg(long, default_value_t = 512)]
+    finalizer_memory_mib: u64,
+    /// Memory left available after projected scan growth.
+    #[arg(long, default_value_t = 256)]
+    memory_reserve_mib: u64,
+    /// Free archive filesystem space below which no new work starts.
+    #[arg(long, default_value_t = 256)]
+    disk_reserve_gib: u64,
+    #[arg(long, default_value_t = 1)]
+    level: i32,
+    /// Actually launch compaction children. Omit for the safe observer mode.
+    #[arg(long)]
+    execute: bool,
+    /// Omit the block-access sidecars from historical first-seen scans.
+    #[arg(long)]
+    no_access: bool,
+    #[arg(long)]
+    start_epoch: Option<u64>,
+    #[arg(long)]
+    end_epoch: Option<u64>,
+    /// Prefer epochs in this inclusive range before the normal historical queue.
+    /// Candidates inside the range are considered newest first.
+    #[arg(long)]
+    priority_epoch_start: Option<u64>,
+    #[arg(long)]
+    priority_epoch_end: Option<u64>,
+    /// Optional CAR source URL containing `{epoch}`. Requires explicit start/end bounds.
+    #[arg(long)]
+    car_source_url_template: Option<String>,
+    /// Maximum concurrent CAR download/preflight children.
+    #[arg(long, default_value_t = 1)]
+    download_concurrency: usize,
+    /// Structurally preflight canonical CARs before launching new historical scans.
+    #[arg(long)]
+    preflight_car: bool,
+    #[arg(long, default_value_t = 5)]
+    poll_interval_secs: u64,
+    #[arg(long, default_value = "/tmp/blockzilla-first-seen-finalizer.lock")]
+    finalizer_lock: PathBuf,
+    /// Optional built dashboard directory. index.html is used as the SPA fallback.
+    #[arg(long)]
+    ui_dir: Option<PathBuf>,
+    /// Environment variable containing the bearer token for control mutations.
+    #[arg(long, default_value = "HIVEZILLA_CONTROL_TOKEN")]
+    control_token_env: String,
+    /// Permit mutation endpoints without a bearer token. Intended only for trusted LANs.
+    #[arg(long)]
+    allow_unauthenticated_controls: bool,
+}
+
+#[derive(Debug, Args)]
 struct EstimateHetznerArgs {
     /// Number of whole epochs to process.
     #[arg(long, default_value_t = 1)]
@@ -287,6 +363,81 @@ async fn main() -> Result<()> {
                 dry_run: args.dry_run,
                 target_bytes: tb_to_bytes(args.target_tb),
                 default_job_input_bytes: gb_to_bytes(args.default_job_input_gb),
+            })
+            .await?;
+        }
+        Command::NasPipeline(args) => {
+            if args.car_source_url_template.is_some() {
+                anyhow::ensure!(
+                    args.start_epoch.is_some() && args.end_epoch.is_some(),
+                    "--car-source-url-template requires explicit --start-epoch and --end-epoch"
+                );
+                anyhow::ensure!(
+                    args.car_source_url_template
+                        .as_deref()
+                        .is_some_and(|template| template.contains("{epoch}")),
+                    "--car-source-url-template must contain {{epoch}}"
+                );
+            }
+            let end_epoch = args.end_epoch.or(args.start_epoch);
+            if let (Some(start), Some(end)) = (args.start_epoch, end_epoch) {
+                anyhow::ensure!(start <= end, "--start-epoch must not exceed --end-epoch");
+            } else if args.end_epoch.is_some() {
+                anyhow::bail!("--end-epoch requires --start-epoch");
+            }
+            let priority_epoch_end = args.priority_epoch_end.or(args.priority_epoch_start);
+            if let (Some(start), Some(end)) = (args.priority_epoch_start, priority_epoch_end) {
+                anyhow::ensure!(
+                    start <= end,
+                    "--priority-epoch-start must not exceed --priority-epoch-end"
+                );
+            } else if args.priority_epoch_end.is_some() {
+                anyhow::bail!("--priority-epoch-end requires --priority-epoch-start");
+            }
+            anyhow::ensure!(
+                args.scan_concurrency > 0,
+                "--scan-concurrency must be positive"
+            );
+            anyhow::ensure!(
+                args.finalizer_memory_mib > 0,
+                "--finalizer-memory-mib must be positive"
+            );
+            anyhow::ensure!(
+                args.download_concurrency > 0,
+                "--download-concurrency must be positive"
+            );
+            anyhow::ensure!(
+                args.poll_interval_secs > 0,
+                "--poll-interval-secs must be positive"
+            );
+            run_nas_pipeline(NasPipelineConfig {
+                bind: args.bind,
+                blockzilla_bin: args.blockzilla_bin,
+                repair_blockzilla_bin: args.repair_blockzilla_bin,
+                car_root: args.car_root,
+                archive_root: args.archive_root,
+                live_root: args.live_root,
+                state_root: args.state_root,
+                scan_concurrency: args.scan_concurrency,
+                scan_memory_mib: args.scan_memory_mib,
+                finalizer_memory_mib: args.finalizer_memory_mib,
+                memory_reserve_mib: args.memory_reserve_mib,
+                disk_reserve_gib: args.disk_reserve_gib,
+                level: args.level,
+                execute: args.execute,
+                no_access: args.no_access,
+                start_epoch: args.start_epoch,
+                end_epoch,
+                priority_epoch_start: args.priority_epoch_start,
+                priority_epoch_end,
+                car_source_url_template: args.car_source_url_template,
+                download_concurrency: args.download_concurrency,
+                preflight_car: args.preflight_car,
+                poll_interval: std::time::Duration::from_secs(args.poll_interval_secs),
+                finalizer_lock: args.finalizer_lock,
+                ui_dir: args.ui_dir,
+                control_token: env::var(&args.control_token_env).ok(),
+                allow_unauthenticated_controls: args.allow_unauthenticated_controls,
             })
             .await?;
         }

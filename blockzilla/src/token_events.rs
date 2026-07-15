@@ -7,8 +7,9 @@ use blockzilla_format::{
     ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
     ArchiveV2HotBlockBlob, ArchiveV2HotInstruction, ArchiveV2HotInstructionData,
     ArchiveV2HotMessagePayload, ArchiveV2HotTxRow, CompactInnerInstruction,
-    CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactPubkey, KeyIndex, KeyStore,
-    archive_v2_hot_index_path, read_archive_v2_hot_block_index, wincode_leb128_config,
+    CompactInnerInstructions, CompactLogStream, CompactMetaV1, CompactPubkey,
+    CompactTransactionError, KeyIndex, KeyStore, archive_v2_hot_index_path,
+    read_archive_v2_hot_block_index, wincode_leb128_config,
 };
 use core::mem::MaybeUninit;
 use of_car_reader::{
@@ -41,12 +42,7 @@ use std::{
     time::Instant,
 };
 use tracing::info;
-use wincode::{
-    ReadResult, SchemaRead,
-    config::{Config, ConfigCore},
-    io::Reader,
-    len::SeqLen,
-};
+use wincode::{ReadResult, SchemaRead, config::ConfigCore, io::Reader};
 
 use crate::{BUFFER_SIZE, ProgressTracker, TokenEventInputFormat};
 
@@ -619,7 +615,10 @@ impl<'a> HotKeyLookup<'a> {
 
 #[derive(Debug, SchemaRead)]
 struct CompactMetaInstructionView {
-    _err: Option<SkipBytes>,
+    // CompactTransactionError is encoded inline as a tagged enum, not as a
+    // length-prefixed byte sequence. Decode it exactly to keep the following
+    // fields aligned when a transaction failed.
+    _err: Option<CompactTransactionError>,
     _fee: SkipU64,
     _pre_balances: Vec<SkipU64>,
     _post_balances: Vec<SkipU64>,
@@ -637,7 +636,7 @@ struct CompactMetaInstructionView {
 
 #[derive(Debug, SchemaRead)]
 struct CompactMetaInnerInstructionView {
-    _err: Option<SkipBytes>,
+    _err: Option<CompactTransactionError>,
     _fee: SkipU64,
     _pre_balances: Vec<SkipU64>,
     _post_balances: Vec<SkipU64>,
@@ -679,21 +678,6 @@ impl_skip_primitive!(SkipU32, u32);
 impl_skip_primitive!(SkipU64, u64);
 impl_skip_primitive!(SkipI32, i32);
 impl_skip_primitive!(SkipI64, i64);
-
-#[derive(Debug)]
-struct SkipBytes;
-
-unsafe impl<'de, C: Config> SchemaRead<'de, C> for SkipBytes {
-    type Dst = Self;
-
-    #[inline]
-    fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
-        let len = <C::LengthEncoding as SeqLen<C>>::read(reader.by_ref())?;
-        let _ = reader.take_scoped(len)?;
-        dst.write(Self);
-        Ok(())
-    }
-}
 
 #[derive(Debug)]
 struct SkipCompactPubkey;
@@ -5436,4 +5420,64 @@ fn rate(value: u64, elapsed: f64) -> f64 {
 
 fn mib_rate(bytes: u64, elapsed: f64) -> f64 {
     rate(bytes, elapsed) / 1024.0 / 1024.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blockzilla_format::CompactInstructionError;
+
+    #[test]
+    fn partial_metadata_views_keep_alignment_after_transaction_error() {
+        let metadata = CompactMetaV1 {
+            err: Some(CompactTransactionError::InstructionError(
+                3,
+                CompactInstructionError::Custom(0xfeed_beef),
+            )),
+            fee: 5_000,
+            pre_balances: vec![10_000, 20_000],
+            post_balances: vec![5_000, 20_000],
+            inner_instructions: Some(vec![CompactInnerInstructions {
+                index: 2,
+                instructions: vec![CompactInnerInstruction {
+                    program_id_index: 7,
+                    accounts: vec![1, 4],
+                    data: vec![9, 8, 7],
+                    stack_height: Some(2),
+                }],
+            }]),
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: vec![CompactPubkey::id(11)],
+            loaded_readonly_addresses: vec![CompactPubkey::raw([12; 32])],
+            return_data: None,
+            compute_units_consumed: Some(42),
+            cost_units: Some(43),
+        };
+        let bytes = wincode::config::serialize(&metadata, wincode_leb128_config()).unwrap();
+
+        let instruction_view: CompactMetaInstructionView =
+            wincode::config::deserialize(&bytes, wincode_leb128_config()).unwrap();
+        let inner_view: CompactMetaInnerInstructionView =
+            wincode::config::deserialize(&bytes, wincode_leb128_config()).unwrap();
+
+        let instruction_groups = instruction_view.inner_instructions.unwrap();
+        assert_eq!(instruction_groups.len(), 1);
+        assert_eq!(instruction_groups[0].index, 2);
+        assert_eq!(instruction_groups[0].instructions[0].program_id_index, 7);
+        assert_eq!(
+            instruction_view.loaded_writable_addresses,
+            [CompactPubkey::id(11)]
+        );
+        assert_eq!(
+            instruction_view.loaded_readonly_addresses,
+            [CompactPubkey::raw([12; 32])]
+        );
+
+        let inner_groups = inner_view.inner_instructions.unwrap();
+        assert_eq!(inner_groups.len(), 1);
+        assert_eq!(inner_groups[0].instructions[0].data, [9, 8, 7]);
+    }
 }

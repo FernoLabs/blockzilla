@@ -1,0 +1,34 @@
+.git
+.gitignore
+.DS_Store
+
+# Local credentials and operator-only configuration must never enter an image.
+.env
+.env.*
+*.env
+**/*.env
+**/yellowstone-x-token
+telegram-bot-token
+**/telegram-bot-token
+!.env.example
+!**/.env.example
+personal
+**/personal
+
+# Build output, package-manager caches, and local capture/benchmark artifacts.
+target
+**/target
+**/node_modules
+**/.svelte-kit
+tmp
+dist
+debug
+reports
+*.car
+*.car.*
+*.log
+
+# Editor and OS metadata.
+.idea
+.vscode
+**/.DS_Store

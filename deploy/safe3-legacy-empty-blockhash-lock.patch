@@ -1,0 +1,84 @@
+--- a/crates/hivezilla/src/nas_pipeline.rs
++++ b/crates/hivezilla/src/nas_pipeline.rs
+@@ -78,6 +78,7 @@
+ const MIN_FINALIZER_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024;
+ const LEGACY_COMPACT_MEMORY_MIB: u64 = 3_072;
+ const LEGACY_COMPACT_OWNERSHIP_KIND: &str = "historical_compact_reuse";
++const LEGACY_BLOCKHASH_LOCK_DIR: &str = ".blockhash.lock";
+ const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
+ const REGISTRY_INDEX_VERSION: u16 = 2;
+ const REGISTRY_INDEX_HEADER_LEN: usize = 20;
+@@ -2215,7 +2216,7 @@
+         && optional_blockhash_v3_valid(output)
+ }
+ 
+-fn directory_contains_only_files(path: &Path, allowed: &[&str]) -> bool {
++fn directory_contains_only_legacy_entries(path: &Path, allowed_files: &[&str]) -> bool {
+     let Ok(entries) = fs::read_dir(path) else {
+         return false;
+     };
+@@ -2223,11 +2224,23 @@
+         let Ok(entry) = entry else {
+             return false;
+         };
+-        entry.file_type().is_ok_and(|kind| kind.is_file())
+-            && entry
+-                .file_name()
+-                .to_str()
+-                .is_some_and(|name| allowed.contains(&name))
++        let Ok(kind) = entry.file_type() else {
++            return false;
++        };
++        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
++            return false;
++        };
++        if kind.is_file() {
++            return allowed_files.contains(&name.as_str());
++        }
++        if kind.is_dir() && name == LEGACY_BLOCKHASH_LOCK_DIR {
++            // Two legacy outputs retain this old lock directory. It is safe
++            // migration metadata only when it is still empty; nested files,
++            // symlinks, and every other directory remain a hard rejection.
++            return fs::read_dir(entry.path())
++                .is_ok_and(|mut nested| nested.next().is_none());
++        }
++        false
+     })
+ }
+ 
+@@ -2242,7 +2255,7 @@
+         // Seven otherwise registry-only legacy directories contain a stale
+         // standalone PoH file. build_hot_blocks opens PoH with File::create,
+         // so this one known generated file is safe to overwrite in place.
+-        && directory_contains_only_files(
++        && directory_contains_only_legacy_entries(
+             output,
+             &[
+                 REGISTRY_FILE,
+@@ -2259,7 +2272,7 @@
+ fn legacy_owned_retry_shape(output: &Path) -> bool {
+     legacy_reusable_sidecars_valid(output)
+         && (!output.join(PREVIOUS_BLOCKHASH_TAIL_FILE).exists() || previous_tail_valid(output))
+-        && directory_contains_only_files(
++        && directory_contains_only_legacy_entries(
+             output,
+             &[
+                 OWNERSHIP_MARKER,
+@@ -6443,7 +6456,17 @@
+         // Known stale standalone PoH is safe because the builder truncates it.
+         fs::write(output.join(POH_FILE), b"stale").unwrap();
+ 
++        // Two legacy epochs also retain an old empty blockhash lock
++        // directory. Empty is harmless, but any nested entry is rejected.
++        let stale_lock = output.join(LEGACY_BLOCKHASH_LOCK_DIR);
++        fs::create_dir(&stale_lock).unwrap();
+         assert!(legacy_registry_only_shape(&output));
++        fs::write(stale_lock.join("owner"), b"unexpected").unwrap();
++        assert!(!legacy_registry_only_shape(&output));
++        fs::remove_file(stale_lock.join("owner")).unwrap();
++        fs::remove_dir(&stale_lock).unwrap();
++
++        assert!(legacy_registry_only_shape(&output));
+         assert_eq!(
+             legacy_compact_reuse_status(&config, 700),
+             LegacyCompactReuseStatus::Ready

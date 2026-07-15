@@ -240,16 +240,25 @@ signature lookup index can be built either online as a mutable index or as an
 epoch-finalization step over the append-only signature file.
 
 The account/pubkey registry is different. The best compact ids depend on epoch
-frequency, so the live path should count pubkeys as blocks arrive and keep the
-first archive in a no-registry or raw-pubkey form. At epoch close:
+frequency, so the live path should keep producing a partial registry sidecar as
+blocks arrive. The preferred sidecar is `index/pubkey-runs/*.bin`: sorted raw
+`(pubkey[32], count:u32)` chunks built from per-block sorted/deduped pubkeys.
 
-1. sort the counted pubkeys by usage frequency
+The block artifact should still move as much semantic work as possible into
+capture. Instead of keeping only no-registry blocks, the next target format is
+`blocks/live-pre-hot-blocks.bin`: a stream of `LivePreHotBlock` records whose
+hot message/metadata payloads are already decoded and optimized, but whose
+pubkey references remain `CompactPubkey::Raw([u8; 32])`. At epoch close:
+
+1. merge the partial pubkey-run sidecar by usage frequency
 2. write the final ordered `registry.bin`
-3. repack the no-registry live archive into the compact registry-backed archive
-4. keep source/completeness journals so the repack can be audited
+3. stream pre-hot blocks and rewrite raw pubkey refs to `CompactPubkey::Id`
+4. serialize/compress the canonical hot blocks and write final indexes
+5. keep source/completeness journals so the repack can be audited
 
-This gives the live producer a simple append-only hot path without giving up the
-space savings of an epoch-frequency registry.
+This makes epoch close a registry lookup plus re-encode/compress pass instead of
+a full transaction/metadata/log decode pass. The desired bottleneck becomes
+registry lookup, zstd, and disk I/O.
 
 ## First Implementation Slice
 

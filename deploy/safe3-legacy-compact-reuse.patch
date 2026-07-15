@@ -1,0 +1,1327 @@
+--- a/crates/hivezilla/src/nas_pipeline.rs
++++ b/crates/hivezilla/src/nas_pipeline.rs
+@@ -42,6 +42,7 @@
+ const REGISTRY_FILE: &str = "registry.bin";
+ const REGISTRY_COUNTS_FILE: &str = "registry_counts.bin";
+ const REGISTRY_INDEX_FILE: &str = "registry.mphf";
++const BLOCKHASH_INDEX_V3_FILE: &str = "blockhash_index_v3.bin";
+ const FIRST_SEEN_MANIFEST_FILE: &str = "registry-first-seen.manifest";
+ const BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
+ const BLOCKS_FILE: &str = "archive-v2-blocks.zstd";
+@@ -75,6 +76,19 @@
+ const MIN_CAR_DOWNLOAD_PROJECTION_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+ const MIN_SCAN_OUTPUT_PROJECTION_BYTES: u64 = 1024 * 1024 * 1024;
+ const MIN_FINALIZER_SCRATCH_BYTES: u64 = 1024 * 1024 * 1024;
++const LEGACY_COMPACT_MEMORY_MIB: u64 = 3_072;
++const LEGACY_COMPACT_OWNERSHIP_KIND: &str = "historical_compact_reuse";
++const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
++const REGISTRY_INDEX_VERSION: u16 = 2;
++const REGISTRY_INDEX_HEADER_LEN: usize = 20;
++const HOT_BLOCK_INDEX_MAGIC: &[u8; 8] = b"BZV2HIX1";
++const HOT_BLOCK_INDEX_VERSION: u16 = 1;
++const HOT_BLOCK_INDEX_HEADER_LEN: usize = 36;
++const HOT_BLOCK_INDEX_ROW_LEN: u64 = 52;
++const BLOCKHASH_INDEX_V3_MAGIC: &[u8; 8] = b"BZBHIX3!";
++const BLOCKHASH_INDEX_V3_VERSION: u16 = 3;
++const BLOCKHASH_INDEX_V3_HEADER_LEN: usize = 20;
++const BLOCKHASH_INDEX_V3_ROW_LEN: u64 = 48;
+ 
+ #[derive(Debug, Clone)]
+ pub struct NasPipelineConfig {
+@@ -403,6 +417,7 @@
+ struct RuntimeState {
+     acquisitions: BTreeMap<u64, ManagedChild>,
+     scans: BTreeMap<u64, ManagedChild>,
++    legacy_compact: Option<ManagedChild>,
+     finalizer: Option<ManagedChild>,
+     errors: VecDeque<PipelineError>,
+     failures: BTreeMap<String, String>,
+@@ -467,6 +482,9 @@
+     HistoricalScan {
+         epoch: u64,
+     },
++    HistoricalCompactReuse {
++        epoch: u64,
++    },
+     HistoricalFinalizer {
+         epoch: u64,
+     },
+@@ -509,6 +527,7 @@
+             Self::CarDownload { epoch, .. } => format!("download:{epoch}"),
+             Self::CarPreflight { epoch, .. } => format!("preflight:{epoch}"),
+             Self::HistoricalScan { epoch } => format!("scan:{epoch}"),
++            Self::HistoricalCompactReuse { epoch } => format!("compact_reuse:{epoch}"),
+             Self::HistoricalFinalizer { epoch } => format!("finalize:{epoch}"),
+             Self::LiveFinalizer { id, .. } => format!("live:{id}"),
+         }
+@@ -847,7 +866,7 @@
+         }));
+     }
+     let (target, progress_path, failure_keys) = match kind.as_str() {
+-        "historical_scan" | "historical_finalizer" => {
++        "historical_scan" | "historical_compact_reuse" | "historical_finalizer" => {
+             let epoch = id.parse::<u64>().map_err(|_| {
+                 ControlError::BadRequest("historical retry id must be an epoch number".to_string())
+             })?;
+@@ -865,7 +884,11 @@
+             (
+                 epoch_state.output_path.clone(),
+                 historical_progress_path(&state.config.state_root, epoch),
+-                vec![format!("scan:{epoch}"), format!("finalize:{epoch}")],
++                vec![
++                    format!("scan:{epoch}"),
++                    format!("compact_reuse:{epoch}"),
++                    format!("finalize:{epoch}"),
++                ],
+             )
+         }
+         "live_finalizer" => {
+@@ -906,7 +929,8 @@
+         &target,
+         !state.config.no_access,
+         target_requires_manifest,
+-    ) {
++    ) || pipeline_owned_legacy_compact_complete(&target)
++    {
+         return Err(ControlError::Conflict(
+             "completed output cannot be retried".to_string(),
+         ));
+@@ -929,6 +953,7 @@
+             | "running"
+             | "finalizing"
+             | "packaging"
++            | "compact_reuse"
+             | "registry_merge"
+             | "mphf_build"
+             | "hot_rewrite"
+@@ -946,7 +971,25 @@
+             "pipeline-owned process is still running".to_string(),
+         ));
+     }
+-    let retry_message = if kind == "live_finalizer" {
++    let retry_message = if owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND {
++        // This lane adopted a vetted legacy registry-only output. Its four
++        // registry sidecars are the migration input, not disposable partial
++        // output. The compact builder truncates/replaces its own generated
++        // reader files on --resume, so retry only resets safe ownership.
++        write_ownership(
++            &target,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            &owner.id,
++            "retry_ready",
++            None,
++        )
++        .map_err(ControlError::Internal)?;
++        set_ownership_pid(&target, None).map_err(ControlError::Internal)?;
++        format!(
++            "preserved legacy registry sidecars and partial reader files in {}",
++            target.display()
++        )
++    } else if kind == "live_finalizer" {
+         // Live finalization is staged and each completed boundary is durable.
+         // Keep valid registry/MPHF artifacts so retry resumes at the first
+         // missing stage instead of repeating the whole epoch.
+@@ -1011,10 +1054,10 @@
+ 
+ fn ownership_matches_retry(owner: &OwnershipMarker, kind: &str, id: &str) -> bool {
+     match kind {
+-        "historical_scan" | "historical_finalizer" => {
++        "historical_scan" | "historical_compact_reuse" | "historical_finalizer" => {
+             matches!(
+                 owner.kind.as_str(),
+-                "historical_scan" | "historical_finalizer"
++                "historical_scan" | "historical_compact_reuse" | "historical_finalizer"
+             ) && owner.id == id
+         }
+         "live_finalizer" => owner.kind == "live_finalizer" && owner.id == id,
+@@ -1082,6 +1125,10 @@
+             .parse::<u64>()
+             .map(|epoch| format!("scan:{epoch}"))
+             .map_err(|_| ControlError::BadRequest("scan id must be an epoch".to_string())),
++        "historical_compact_reuse" => id
++            .parse::<u64>()
++            .map(|epoch| format!("compact_reuse:{epoch}"))
++            .map_err(|_| ControlError::BadRequest("compact/reuse id must be an epoch".to_string())),
+         "historical_finalizer" => id
+             .parse::<u64>()
+             .map(|epoch| format!("finalize:{epoch}"))
+@@ -1105,6 +1152,7 @@
+         .acquisitions
+         .values()
+         .chain(runtime.scans.values())
++        .chain(runtime.legacy_compact.iter())
+         .chain(runtime.finalizer.iter())
+         .find(|child| child.kind.key() == key)
+         .and_then(|child| child.pid);
+@@ -1120,7 +1168,7 @@
+             let pid = runtime_pid.unwrap_or(marker.pid);
+             Ok((pid, marker.expected_path))
+         }
+-        "historical_scan" | "historical_finalizer" => {
++        "historical_scan" | "historical_compact_reuse" | "historical_finalizer" => {
+             let epoch = id.parse::<u64>().map_err(|_| {
+                 ControlError::BadRequest("historical id must be an epoch".to_string())
+             })?;
+@@ -1202,6 +1250,15 @@
+         "historical_scan" => {
+             args.get(1).copied() == Some(b"build-archive-v2-hot-blocks")
+                 && args.iter().any(|arg| *arg == b"--first-seen-scan-only")
++        }
++        "historical_compact_reuse" => {
++            args.get(1).copied() == Some(b"build-archive-v2-hot-blocks")
++                && args
++                    .windows(2)
++                    .any(|pair| pair[0] == b"--registry-dir" && pair[1] == expected_path)
++                && args.iter().any(|arg| *arg == b"--resume")
++                && args.iter().any(|arg| *arg == b"--no-access")
++                && !args.iter().any(|arg| *arg == b"--first-seen-registry")
+         }
+         "historical_finalizer" => args.get(1).copied() == Some(b"finalize-archive-v2-first-seen"),
+         "live_finalizer" => matches!(
+@@ -1356,20 +1413,31 @@
+         .iter()
+         .filter(|epoch| epoch.state == HistoricalState::Scanning)
+     {
+-        let id = format!("scan:{}", epoch.epoch);
++        let legacy_compact = read_ownership(&epoch.output_path).is_some_and(|owner| {
++            owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND && owner.id == epoch.epoch.to_string()
++        });
++        let (id, kind, default_phase) = if legacy_compact {
++            (
++                format!("compact_reuse:{}", epoch.epoch),
++                "historical_compact_reuse",
++                "compact_reuse",
++            )
++        } else {
++            (format!("scan:{}", epoch.epoch), "historical_scan", "scan")
++        };
+         if lanes.iter().any(|lane| lane.id == id) {
+             continue;
+         }
+         lanes.push(LaneSnapshot {
+             id: id.clone(),
+-            kind: "historical_scan".to_string(),
++            kind: kind.to_string(),
+             epoch: Some(epoch.epoch),
+             capture_id: None,
+             phase: epoch
+                 .progress
+                 .phase
+                 .clone()
+-                .unwrap_or_else(|| "scan".to_string()),
++                .unwrap_or_else(|| default_phase.to_string()),
+             state: if runtime.paused_jobs.contains(&id) {
+                 "paused".to_string()
+             } else {
+@@ -1847,24 +1915,44 @@
+         progress.rss_bytes = process_rss_bytes(pid);
+     }
+     let owner = read_ownership(&output);
+-    let owner_matches_epoch = owner
++    let owner_is_first_seen = owner.as_ref().is_some_and(ownership_is_first_seen);
++    let owner_is_legacy_compact = owner
+         .as_ref()
+-        .is_some_and(|owner| ownership_is_first_seen(owner) && owner.id == epoch.to_string());
+-    let require_first_seen_manifest = owner
+-        .as_ref()
+-        .is_some_and(|owner| owner_matches_epoch && ownership_is_first_seen(owner));
++        .is_some_and(|owner| owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND);
++    let owner_matches_epoch = owner.as_ref().is_some_and(|owner| {
++        (owner_is_first_seen || owner_is_legacy_compact) && owner.id == epoch.to_string()
++    });
++    let require_first_seen_manifest = owner_matches_epoch && owner_is_first_seen;
+     let legacy_no_access_complete = allow_legacy_no_access
+         && legacy_no_access_archive_complete(
+             &output,
+             !config.no_access,
+             require_first_seen_manifest,
+         );
+-    let output_complete =
+-        historical_archive_strict_complete(&output, !config.no_access, require_first_seen_manifest)
+-            || legacy_no_access_complete;
++    // A compact/reuse child publishes directly into its adopted directory.
++    // Require the controller's successful-exit commit before accepting those
++    // files; otherwise a controller restart near EOF could bless a torn core.
++    let legacy_compact_reuse_complete = owner_matches_epoch
++        && owner_is_legacy_compact
++        && owner
++            .as_ref()
++            .is_some_and(|owner| owner.state == "complete")
++        && legacy_compact_reader_complete(&output);
++    let output_complete = (!owner_is_legacy_compact
++        && historical_archive_strict_complete(
++            &output,
++            !config.no_access,
++            require_first_seen_manifest,
++        ))
++        || legacy_no_access_complete
++        || legacy_compact_reuse_complete;
+     let scan_marker = scan_marker_is_valid(&output.join(SCAN_MARKER));
+     let ambiguous_car = car_paths_ambiguous(&config.car_root, epoch);
+     let active_scan = runtime.scans.contains_key(&epoch);
++    let active_legacy_compact = matches!(
++        runtime.legacy_compact.as_ref().map(|child| &child.kind),
++        Some(ChildKind::HistoricalCompactReuse { epoch: active }) if *active == epoch
++    );
+     let active_acquisition = runtime.acquisitions.get(&epoch);
+     let adopted_acquisition = active_acquisition
+         .is_none()
+@@ -1879,10 +1967,12 @@
+     );
+     let progress_alive = progress_is_alive(&progress, now);
+     let failure_key_scan = format!("scan:{epoch}");
++    let failure_key_compact_reuse = format!("compact_reuse:{epoch}");
+     let failure_key_finalize = format!("finalize:{epoch}");
+     let failure = runtime
+         .failures
+         .get(&failure_key_scan)
++        .or_else(|| runtime.failures.get(&failure_key_compact_reuse))
+         .or_else(|| runtime.failures.get(&failure_key_finalize))
+         .or_else(|| runtime.failures.get(&format!("download:{epoch}")))
+         .or_else(|| runtime.failures.get(&format!("preflight:{epoch}")))
+@@ -1906,15 +1996,35 @@
+                 )
+             })
+     });
+-    let owner_process_active = owner_scanning || owner_finalizing;
++    let owner_compacting = owner.as_ref().is_some_and(|owner| {
++        owner_matches_epoch
++            && owner_is_legacy_compact
++            && owner.state == "compact_reuse"
++            && owner.pid.is_some_and(|pid| {
++                process_cmdline_matches_job(
++                    pid,
++                    &config.blockzilla_bin,
++                    &output,
++                    "historical_compact_reuse",
++                )
++            })
++    });
++    let owner_process_active = owner_scanning || owner_compacting || owner_finalizing;
+     let ownership_failure = owner
+         .as_ref()
+         .filter(|_| owner_matches_epoch)
+         .and_then(|owner| {
+             if owner.state == "failed" {
+                 owner.message.clone()
+-            } else if matches!(owner.state.as_str(), "running" | "finalizing")
+-                && owner.pid.is_some()
++            } else if owner_is_legacy_compact
++                && owner.state == "complete"
++                && !legacy_compact_reader_complete(&output)
++            {
++                Some("legacy compact/reuse commit failed reader-core validation".to_string())
++            } else if matches!(
++                owner.state.as_str(),
++                "running" | "compact_reuse" | "finalizing"
++            ) && owner.pid.is_some()
+                 && !owner_process_active
+             {
+                 Some("pipeline-owned process is no longer running".to_string())
+@@ -1922,24 +2032,44 @@
+                 None
+             }
+         });
+-    if owner_finalizing {
++    if owner_compacting {
+         progress.pid = owner.as_ref().and_then(|owner| owner.pid);
+         progress.rss_bytes = progress.pid.and_then(process_rss_bytes);
++        progress.phase = Some("compact_reuse".to_string());
++        progress.state = Some("running".to_string());
++    } else if owner_finalizing {
++        progress.pid = owner.as_ref().and_then(|owner| owner.pid);
++        progress.rss_bytes = progress.pid.and_then(process_rss_bytes);
+         progress.phase = Some("finalize".to_string());
+         progress.state = Some("running".to_string());
+     }
++    let legacy_compact_status = legacy_compact_reuse_status(config, epoch);
++    let legacy_compact_managed =
++        owner_is_legacy_compact || legacy_compact_status != LegacyCompactReuseStatus::NotCandidate;
+     let output_has_files = directory_has_entries(&output);
+ 
+     let (state, message) = if output_complete {
+         (
+             HistoricalState::Complete,
+-            legacy_no_access_complete.then(|| {
+-                "accepted legacy no-access archive; both block-access sidecars were intentionally absent in the previous format"
+-                    .to_string()
+-            }),
++            if legacy_compact_reuse_complete {
++                Some(
++                    "legacy compact/reuse light-complete: reader core validated; block-access sidecars intentionally absent"
++                        .to_string(),
++                )
++            } else {
++                legacy_no_access_complete.then(|| {
++                    "accepted legacy no-access archive; both block-access sidecars were intentionally absent in the previous format"
++                        .to_string()
++                })
++            },
+         )
+     } else if active_finalizer || owner_finalizing {
+         (HistoricalState::Finalizing, None)
++    } else if active_legacy_compact || owner_compacting {
++        (
++            HistoricalState::Scanning,
++            Some("legacy compact/reuse is streaming and validating the CAR once".to_string()),
++        )
+     } else if active_scan || owner_scanning {
+         (HistoricalState::Scanning, None)
+     } else if scan_marker {
+@@ -1953,6 +2083,22 @@
+         )
+     } else if let Some(message) = failure.or(ownership_failure) {
+         (HistoricalState::Failed, Some(message))
++    } else if legacy_compact_status == LegacyCompactReuseStatus::Ready {
++        (
++            HistoricalState::Queued,
++            Some(
++                "legacy registry sidecars are ready for one-pass compact/reuse; separate CAR preflight is bypassed"
++                    .to_string(),
++            ),
++        )
++    } else if legacy_compact_status == LegacyCompactReuseStatus::WaitingForPrevious {
++        (
++            HistoricalState::Queued,
++            Some(
++                "legacy compact/reuse is waiting for a usable previous blockhash tail or predecessor reader sidecars"
++                    .to_string(),
++            ),
++        )
+     } else if progress_alive {
+         (HistoricalState::Scanning, None)
+     } else if output_has_files {
+@@ -2018,6 +2164,8 @@
+         state,
+         require_first_seen_manifest,
+         legacy_no_access_complete,
++        legacy_compact_reuse_complete,
++        legacy_compact_managed,
+     );
+ 
+     let updated_unix_secs = progress
+@@ -2056,8 +2204,195 @@
+ fn car_paths_ambiguous(root: &Path, epoch: u64) -> bool {
+     is_nonempty_file(&root.join(format!("epoch-{epoch}.car.zst")))
+         && is_nonempty_file(&root.join(format!("epoch-{epoch}.car")))
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum LegacyCompactReuseStatus {
++    NotCandidate,
++    WaitingForPrevious,
++    Ready,
++}
++
++fn read_fixed_header<const N: usize>(path: &Path) -> Option<[u8; N]> {
++    let mut header = [0u8; N];
++    File::open(path).ok()?.read_exact(&mut header).ok()?;
++    Some(header)
++}
++
++fn registry_index_matches_registry(output: &Path) -> bool {
++    let registry = output.join(REGISTRY_FILE);
++    let registry_bytes = file_len(&registry);
++    if registry_bytes == 0 || !registry_bytes.is_multiple_of(32) {
++        return false;
++    }
++    let path = output.join(REGISTRY_INDEX_FILE);
++    let Some(header) = read_fixed_header::<REGISTRY_INDEX_HEADER_LEN>(&path) else {
++        return false;
++    };
++    let keys = u64::from_le_bytes(header[12..20].try_into().unwrap());
++    header[..8] == REGISTRY_INDEX_MAGIC[..]
++        && u16::from_le_bytes(header[8..10].try_into().unwrap()) == REGISTRY_INDEX_VERSION
++        && usize::from(u16::from_le_bytes(header[10..12].try_into().unwrap()))
++            == REGISTRY_INDEX_HEADER_LEN
++        && keys == registry_bytes / 32
++        // values[u32] + tags[u64] precede the serialized MPHF body.
++        && file_len(&path)
++            > (REGISTRY_INDEX_HEADER_LEN as u64).saturating_add(keys.saturating_mul(12))
+ }
+ 
++fn blockhash_registry_valid(output: &Path) -> bool {
++    let bytes = file_len(&output.join(BLOCKHASH_REGISTRY_FILE));
++    bytes > 0 && bytes.is_multiple_of(32)
++}
++
++fn optional_blockhash_v3_valid(output: &Path) -> bool {
++    let path = output.join(BLOCKHASH_INDEX_V3_FILE);
++    if !path.exists() {
++        return true;
++    }
++    let Some(header) = read_fixed_header::<BLOCKHASH_INDEX_V3_HEADER_LEN>(&path) else {
++        return false;
++    };
++    let rows = u64::from_le_bytes(header[12..20].try_into().unwrap());
++    header[..8] == BLOCKHASH_INDEX_V3_MAGIC[..]
++        && u16::from_le_bytes(header[8..10].try_into().unwrap()) == BLOCKHASH_INDEX_V3_VERSION
++        && u16::from_le_bytes(header[10..12].try_into().unwrap())
++            == BLOCKHASH_INDEX_V3_ROW_LEN as u16
++        && rows == file_len(&output.join(BLOCKHASH_REGISTRY_FILE)) / 32
++        && file_len(&path)
++            == (BLOCKHASH_INDEX_V3_HEADER_LEN as u64)
++                .saturating_add(rows.saturating_mul(BLOCKHASH_INDEX_V3_ROW_LEN))
++}
++
++fn legacy_reusable_sidecars_valid(output: &Path) -> bool {
++    is_nonempty_file(&output.join(REGISTRY_COUNTS_FILE))
++        && registry_index_matches_registry(output)
++        && blockhash_registry_valid(output)
++        && optional_blockhash_v3_valid(output)
++}
++
++fn directory_contains_only_files(path: &Path, allowed: &[&str]) -> bool {
++    let Ok(entries) = fs::read_dir(path) else {
++        return false;
++    };
++    entries.into_iter().all(|entry| {
++        let Ok(entry) = entry else {
++            return false;
++        };
++        entry.file_type().is_ok_and(|kind| kind.is_file())
++            && entry
++                .file_name()
++                .to_str()
++                .is_some_and(|name| allowed.contains(&name))
++    })
++}
++
++fn previous_tail_valid(output: &Path) -> bool {
++    let bytes = file_len(&output.join(PREVIOUS_BLOCKHASH_TAIL_FILE));
++    bytes > 0 && bytes.is_multiple_of(40)
++}
++
++fn legacy_registry_only_shape(output: &Path) -> bool {
++    legacy_reusable_sidecars_valid(output)
++        && (!output.join(PREVIOUS_BLOCKHASH_TAIL_FILE).exists() || previous_tail_valid(output))
++        // Seven otherwise registry-only legacy directories contain a stale
++        // standalone PoH file. build_hot_blocks opens PoH with File::create,
++        // so this one known generated file is safe to overwrite in place.
++        && directory_contains_only_files(
++            output,
++            &[
++                REGISTRY_FILE,
++                REGISTRY_COUNTS_FILE,
++                REGISTRY_INDEX_FILE,
++                BLOCKHASH_REGISTRY_FILE,
++                BLOCKHASH_INDEX_V3_FILE,
++                PREVIOUS_BLOCKHASH_TAIL_FILE,
++                POH_FILE,
++            ],
++        )
++}
++
++fn legacy_owned_retry_shape(output: &Path) -> bool {
++    legacy_reusable_sidecars_valid(output)
++        && (!output.join(PREVIOUS_BLOCKHASH_TAIL_FILE).exists() || previous_tail_valid(output))
++        && directory_contains_only_files(
++            output,
++            &[
++                OWNERSHIP_MARKER,
++                REGISTRY_FILE,
++                REGISTRY_COUNTS_FILE,
++                REGISTRY_INDEX_FILE,
++                BLOCKHASH_REGISTRY_FILE,
++                BLOCKHASH_INDEX_V3_FILE,
++                PREVIOUS_BLOCKHASH_TAIL_FILE,
++                META_FILE,
++                BLOCKS_FILE,
++                BLOCK_INDEX_FILE,
++                "archive-v2-blocks.index.tmp",
++                POH_FILE,
++                SHREDDING_FILE,
++                SIGNATURES_FILE,
++                VOTE_HASH_REGISTRY_FILE,
++            ],
++        )
++}
++
++fn legacy_compact_previous_car(config: &NasPipelineConfig, epoch: u64) -> Option<PathBuf> {
++    let previous = epoch.checked_sub(1)?;
++    // --previous-car is also the predecessor-epoch hint used by Blockzilla's
++    // sidecar lookup. A completed predecessor's CAR may already be deleted;
++    // the dependency gate below guarantees the hinted path is never opened as
++    // a fallback when it is synthetic.
++    Some(
++        car_path(&config.car_root, previous)
++            .unwrap_or_else(|| config.car_root.join(format!("epoch-{previous}.car.zst"))),
++    )
++}
++
++fn predecessor_seed_sidecars_usable(config: &NasPipelineConfig, epoch: u64) -> bool {
++    let Some(previous) = epoch.checked_sub(1) else {
++        return true;
++    };
++    let output = config.archive_root.join(format!("epoch-{previous}"));
++    historical_archive_core_complete(&output, false)
++        && blockhash_registry_valid(&output)
++        && (hot_block_index_matches_blob_and_blockhashes(&output)
++            || is_nonempty_file(&output.join(POH_FILE)))
++}
++
++fn legacy_compact_dependency_ready(config: &NasPipelineConfig, epoch: u64) -> bool {
++    if epoch == 0 {
++        return true;
++    }
++    previous_tail_valid(&config.archive_root.join(format!("epoch-{epoch}")))
++        || predecessor_seed_sidecars_usable(config, epoch)
++}
++
++fn legacy_compact_reuse_status(config: &NasPipelineConfig, epoch: u64) -> LegacyCompactReuseStatus {
++    if car_paths_ambiguous(&config.car_root, epoch) || car_path(&config.car_root, epoch).is_none() {
++        return LegacyCompactReuseStatus::NotCandidate;
++    }
++    let output = config.archive_root.join(format!("epoch-{epoch}"));
++    let safe_shape = match read_ownership(&output) {
++        None => legacy_registry_only_shape(&output),
++        Some(owner) => {
++            owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND
++                && owner.id == epoch.to_string()
++                && owner.state == "retry_ready"
++                && owner.pid.is_none()
++                && legacy_owned_retry_shape(&output)
++        }
++    };
++    if !safe_shape {
++        return LegacyCompactReuseStatus::NotCandidate;
++    }
++    if legacy_compact_dependency_ready(config, epoch) {
++        LegacyCompactReuseStatus::Ready
++    } else {
++        LegacyCompactReuseStatus::WaitingForPrevious
++    }
++}
++
+ #[derive(Debug, Default)]
+ struct CarPreflightStatus {
+     source_matches: bool,
+@@ -2280,6 +2615,8 @@
+     epoch_state: HistoricalState,
+     require_first_seen_manifest: bool,
+     legacy_no_access_complete: bool,
++    legacy_compact_reuse_complete: bool,
++    legacy_compact_managed: bool,
+ ) -> Vec<ArtifactSnapshot> {
+     let scan_already_durable = matches!(
+         epoch_state,
+@@ -2343,7 +2680,10 @@
+         },
+     }];
+ 
+-    let preflight_applicable = config.preflight_car && !scan_already_durable;
++    // This migration lane opens/decompresses the CAR once and validates every
++    // decoded block against the adopted blockhash registry while compacting.
++    let preflight_applicable =
++        config.preflight_car && !scan_already_durable && !legacy_compact_managed;
+     let preflight_state = if !preflight_applicable {
+         ArtifactState::NotApplicable
+     } else if matches!(
+@@ -2371,7 +2711,12 @@
+             &config.state_root,
+             epoch,
+         )),
+-        message: if preflight_state == ArtifactState::Invalid {
++        message: if legacy_compact_managed {
++            Some(
++                "bypassed for legacy compact/reuse; the one-pass builder validates the CAR while processing"
++                    .to_string(),
++            )
++        } else if preflight_state == ArtifactState::Invalid {
+             Some("receipt is stale, malformed, or failed structural validation".to_string())
+         } else if preflight_state == ArtifactState::Verified {
+             Some("structural receipt matches size+mtime; CAR CIDs were not recomputed".to_string())
+@@ -2420,7 +2765,8 @@
+     let access_outputs_required = scan_outputs_required
+         || (!config.no_access
+             && historical_archive_core_complete(output, require_first_seen_manifest)
+-            && !legacy_no_access_complete);
++            && !legacy_no_access_complete
++            && !legacy_compact_reuse_complete);
+     artifacts.push(marker_artifact(output.join(SCAN_MARKER), epoch_state));
+     artifacts.extend([
+         candidate_or_file_artifact(
+@@ -2524,6 +2870,7 @@
+             !config.no_access,
+             access_outputs_required,
+             legacy_no_access_complete,
++            legacy_compact_reuse_complete,
+         ),
+         access_artifact(
+             ArtifactKind::BlockAccessIndex,
+@@ -2531,6 +2878,7 @@
+             !config.no_access,
+             access_outputs_required,
+             legacy_no_access_complete,
++            legacy_compact_reuse_complete,
+         ),
+         archive_file_artifact(
+             ArtifactKind::PreviousBlockhashTail,
+@@ -2646,7 +2994,22 @@
+     access_enabled: bool,
+     required_now: bool,
+     legacy_no_access_complete: bool,
++    legacy_compact_reuse_complete: bool,
+ ) -> ArtifactSnapshot {
++    if legacy_compact_reuse_complete {
++        return ArtifactSnapshot {
++            kind,
++            state: ArtifactState::NotApplicable,
++            requirement: ArtifactRequirement::Optional,
++            required_now: false,
++            bytes: file_len(&path),
++            modified_unix_secs: modified_unix_secs(&path),
++            message: Some(
++                "legacy compact/reuse is intentionally committed as a light reader core without block-access"
++                    .to_string(),
++            ),
++        };
++    }
+     if legacy_no_access_complete {
+         return ArtifactSnapshot {
+             kind,
+@@ -2693,6 +3056,42 @@
+                 .all(|name| is_nonempty_file(&path.join(name))))
+ }
+ 
++fn hot_block_index_matches_blob_and_blockhashes(path: &Path) -> bool {
++    let index_path = path.join(BLOCK_INDEX_FILE);
++    let Some(header) = read_fixed_header::<HOT_BLOCK_INDEX_HEADER_LEN>(&index_path) else {
++        return false;
++    };
++    let rows = u64::from_le_bytes(header[12..20].try_into().unwrap());
++    let blob_bytes = u64::from_le_bytes(header[20..28].try_into().unwrap());
++    let actual_blob_bytes = file_len(&path.join(BLOCKS_FILE));
++    rows > 0
++        && header[..8] == HOT_BLOCK_INDEX_MAGIC[..]
++        && u16::from_le_bytes(header[8..10].try_into().unwrap()) == HOT_BLOCK_INDEX_VERSION
++        && file_len(&index_path)
++            == (HOT_BLOCK_INDEX_HEADER_LEN as u64)
++                .saturating_add(rows.saturating_mul(HOT_BLOCK_INDEX_ROW_LEN))
++        && blob_bytes > 0
++        && blob_bytes == actual_blob_bytes
++        && rows == file_len(&path.join(BLOCKHASH_REGISTRY_FILE)) / 32
++}
++
++fn legacy_compact_reader_complete(path: &Path) -> bool {
++    historical_archive_core_complete(path, false)
++        && legacy_reusable_sidecars_valid(path)
++        && hot_block_index_matches_blob_and_blockhashes(path)
++        && [BLOCK_ACCESS_FILE, BLOCK_ACCESS_INDEX_FILE]
++            .iter()
++            .all(|name| !path.join(name).exists())
++}
++
++fn pipeline_owned_legacy_compact_complete(path: &Path) -> bool {
++    read_ownership(path).is_some_and(|owner| {
++        owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND
++            && owner.state == "complete"
++            && legacy_compact_reader_complete(path)
++    })
++}
++
+ fn legacy_no_access_archive_complete(
+     path: &Path,
+     require_access: bool,
+@@ -2887,6 +3286,41 @@
+     })
+ }
+ 
++fn legacy_compact_admission_blocked_reason(
++    config: &NasPipelineConfig,
++    machine: &MachineSnapshot,
++    epoch: &EpochSnapshot,
++) -> Option<String> {
++    let disk_reserve = config.disk_reserve_gib.saturating_mul(1024 * 1024 * 1024);
++    let projected_disk = scan_remaining_disk_projection(epoch);
++    if machine.disk_total_bytes == 0
++        || machine.disk_available_bytes < disk_reserve.saturating_add(projected_disk)
++    {
++        return Some(format!(
++            "legacy compact/reuse disk admission blocked: available {:.1} GiB, projected output {:.1} GiB, reserve {} GiB",
++            machine.disk_available_bytes as f64 / 1024f64.powi(3),
++            projected_disk as f64 / 1024f64.powi(3),
++            config.disk_reserve_gib,
++        ));
++    }
++    if machine.memory_total_bytes == 0 {
++        return Some(
++            "legacy compact/reuse memory admission blocked: memory capacity unavailable"
++                .to_string(),
++        );
++    }
++    let reserve = config.memory_reserve_mib.saturating_mul(1024 * 1024);
++    let estimate = LEGACY_COMPACT_MEMORY_MIB.saturating_mul(1024 * 1024);
++    (machine.memory_available_bytes < reserve.saturating_add(estimate)).then(|| {
++        format!(
++            "legacy compact/reuse memory admission blocked: available {:.1} MiB, estimate {} MiB, reserve {} MiB",
++            machine.memory_available_bytes as f64 / 1024f64.powi(2),
++            LEGACY_COMPACT_MEMORY_MIB,
++            config.memory_reserve_mib,
++        )
++    })
++}
++
+ fn finalizer_is_admissible(
+     config: &NasPipelineConfig,
+     machine: &MachineSnapshot,
+@@ -3417,6 +3851,7 @@
+             output.join(BLOCK_ACCESS_FILE),
+             !config.no_access,
+             state == LiveState::Complete,
++            false,
+             false,
+         ),
+         access_artifact(
+@@ -3424,6 +3859,7 @@
+             output.join(BLOCK_ACCESS_INDEX_FILE),
+             !config.no_access,
+             state == LiveState::Complete,
++            false,
+             false,
+         ),
+     ]);
+@@ -3443,6 +3879,13 @@
+                 .map(|(epoch, child)| lane_from_child(child, Some(*epoch), None, now, runtime)),
+         )
+         .collect::<Vec<_>>();
++    if let Some(compact) = runtime.legacy_compact.as_ref() {
++        let epoch = match compact.kind {
++            ChildKind::HistoricalCompactReuse { epoch } => Some(epoch),
++            _ => None,
++        };
++        lanes.push(lane_from_child(compact, epoch, None, now, runtime));
++    }
+     if let Some(finalizer) = runtime.finalizer.as_ref() {
+         let (epoch, capture_id) = match &finalizer.kind {
+             ChildKind::CarDownload { epoch, .. } | ChildKind::CarPreflight { epoch, .. } => {
+@@ -3450,7 +3893,9 @@
+             }
+             ChildKind::HistoricalFinalizer { epoch } => (Some(*epoch), None),
+             ChildKind::LiveFinalizer { id, epoch, .. } => (*epoch, Some(id.clone())),
+-            ChildKind::HistoricalScan { epoch } => (Some(*epoch), None),
++            ChildKind::HistoricalScan { epoch } | ChildKind::HistoricalCompactReuse { epoch } => {
++                (Some(*epoch), None)
++            }
+         };
+         lanes.push(lane_from_child(finalizer, epoch, capture_id, now, runtime));
+     }
+@@ -3480,6 +3925,7 @@
+         ChildKind::CarDownload { .. } => ("car_download", "download"),
+         ChildKind::CarPreflight { .. } => ("car_preflight", "preflight"),
+         ChildKind::HistoricalScan { .. } => ("historical_scan", "scan"),
++        ChildKind::HistoricalCompactReuse { .. } => ("historical_compact_reuse", "compact_reuse"),
+         ChildKind::HistoricalFinalizer { .. } => ("historical_finalizer", "finalize"),
+         ChildKind::LiveFinalizer { phase, .. } => ("live_finalizer", phase.as_str()),
+     };
+@@ -3513,6 +3959,17 @@
+     if !snapshot.inventory.complete {
+         return Ok(());
+     }
++    let legacy_compact_active = runtime.legacy_compact.is_some()
++        || snapshot
++            .lanes
++            .iter()
++            .any(|lane| lane.kind == "historical_compact_reuse");
++    // The legacy rewrite has its own conservative memory envelope and is
++    // deliberately exclusive. An adopted child after controller restart is
++    // represented by the same distinct lane, so it is never duplicated.
++    if legacy_compact_active {
++        return Ok(());
++    }
+     let finalizer_active = runtime.finalizer.is_some()
+         || snapshot
+             .epochs
+@@ -3654,6 +4111,19 @@
+     // child counted until it has actually been reaped, while also accounting
+     // for adopted scans discovered from filesystem/process state after restart.
+     let active_scans = adopted_active_scans;
++    if active_scans == 0 && runtime.scans.is_empty() {
++        for epoch in snapshot.epochs.iter().filter(|epoch| {
++            legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
++        }) {
++            if legacy_compact_admission_blocked_reason(config, &snapshot.machine, epoch).is_some() {
++                // Keep looking: a blocked range head must not prevent an
++                // independent range, or ordinary scan work, from advancing.
++                continue;
++            }
++            runtime.legacy_compact = Some(spawn_legacy_compact_reuse(config, epoch).await?);
++            return Ok(());
++        }
++    }
+     let slots = snapshot
+         .summary
+         .scan_capacity_admitted
+@@ -3663,6 +4133,10 @@
+         .iter()
+         .filter(|epoch| epoch.state == HistoricalState::Queued)
+         .filter(|epoch| acquisition_action(config, epoch).is_none())
++        .filter(|epoch| {
++            legacy_compact_reuse_status(config, epoch.epoch)
++                == LegacyCompactReuseStatus::NotCandidate
++        })
+         .take(slots)
+         .cloned()
+         .collect::<Vec<_>>();
+@@ -3732,6 +4206,12 @@
+         return None;
+     }
+     if acquisition_claim_active(config, epoch.epoch) {
++        return None;
++    }
++    if legacy_compact_reuse_status(config, epoch.epoch) != LegacyCompactReuseStatus::NotCandidate {
++        // The compact/reuse child performs the only CAR decompression and
++        // validates records as it rewrites; a standalone preflight would make
++        // this migration read every multi-terabyte input twice.
+         return None;
+     }
+     if epoch.input_path.is_none() && config.car_source_url_template.is_some() {
+@@ -4084,7 +4564,107 @@
+             &epoch.epoch.to_string(),
+             "failed",
+             Some(format!("spawn failed: {error:#}")),
++        );
++    }
++    result
++}
++
++fn legacy_compact_reuse_args(
++    config: &NasPipelineConfig,
++    input: &Path,
++    output: &Path,
++    previous_car: Option<&Path>,
++) -> Vec<std::ffi::OsString> {
++    let mut args = vec![
++        "build-archive-v2-hot-blocks".into(),
++        input.as_os_str().to_owned(),
++        output.as_os_str().to_owned(),
++        "--registry-dir".into(),
++        output.as_os_str().to_owned(),
++        "--resume".into(),
++        "--no-access".into(),
++        "--level".into(),
++        config.level.to_string().into(),
++    ];
++    if let Some(previous_car) = previous_car {
++        args.push("--previous-car".into());
++        args.push(previous_car.as_os_str().to_owned());
++    }
++    args
++}
++
++async fn spawn_legacy_compact_reuse(
++    config: &NasPipelineConfig,
++    epoch: &EpochSnapshot,
++) -> Result<ManagedChild> {
++    anyhow::ensure!(
++        legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready,
++        "epoch {} is not a dependency-ready legacy compact/reuse candidate",
++        epoch.epoch
++    );
++    let input = epoch
++        .input_path
++        .as_deref()
++        .context("legacy compact/reuse candidate has no unambiguous input CAR")?;
++    let previous_car = if epoch.epoch == 0 {
++        None
++    } else {
++        Some(
++            legacy_compact_previous_car(config, epoch.epoch)
++                .context("legacy compact/reuse candidate has no unambiguous predecessor CAR")?,
++        )
++    };
++    match read_ownership(&epoch.output_path) {
++        None => anyhow::ensure!(
++            legacy_registry_only_shape(&epoch.output_path),
++            "legacy compact/reuse output shape changed before claim: {}",
++            epoch.output_path.display()
++        ),
++        Some(owner) => anyhow::ensure!(
++            owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND
++                && owner.id == epoch.epoch.to_string()
++                && owner.state == "retry_ready"
++                && owner.pid.is_none()
++                && legacy_owned_retry_shape(&epoch.output_path),
++            "legacy compact/reuse retry ownership or output shape changed for epoch {}",
++            epoch.epoch
++        ),
++    }
++    write_ownership(
++        &epoch.output_path,
++        LEGACY_COMPACT_OWNERSHIP_KIND,
++        &epoch.epoch.to_string(),
++        "compact_reuse",
++        Some(
++            "reusing validated legacy registry sidecars in a one-pass no-access compact"
++                .to_string(),
++        ),
++    )?;
++    let progress_path = historical_progress_path(&config.state_root, epoch.epoch);
++    let log_path = config
++        .state_root
++        .join("logs")
++        .join(format!("epoch-{}-compact-reuse.log", epoch.epoch));
++    let args =
++        legacy_compact_reuse_args(config, input, &epoch.output_path, previous_car.as_deref());
++    let result = spawn_child(
++        config,
++        args,
++        ChildKind::HistoricalCompactReuse { epoch: epoch.epoch },
++        progress_path,
++        log_path,
++        None,
++    )
++    .await;
++    if let Err(error) = &result {
++        let _ = write_ownership(
++            &epoch.output_path,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            &epoch.epoch.to_string(),
++            "failed",
++            Some(format!("legacy compact/reuse spawn failed: {error:#}")),
+         );
++        let _ = set_ownership_pid(&epoch.output_path, None);
+     }
+     result
+ }
+@@ -4325,7 +4905,9 @@
+     let pid = child.id();
+     let owned_output = match &kind {
+         ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. } => None,
+-        ChildKind::HistoricalScan { epoch } | ChildKind::HistoricalFinalizer { epoch } => {
++        ChildKind::HistoricalScan { epoch }
++        | ChildKind::HistoricalCompactReuse { epoch }
++        | ChildKind::HistoricalFinalizer { epoch } => {
+             Some(config.archive_root.join(format!("epoch-{epoch}")))
+         }
+         ChildKind::LiveFinalizer { epoch, .. } => {
+@@ -4402,6 +4984,40 @@
+             None => {}
+         }
+     }
++    let legacy_compact_result = runtime
++        .legacy_compact
++        .as_mut()
++        .and_then(|child| child.child.try_wait().transpose());
++    match legacy_compact_result {
++        Some(Ok(status)) => {
++            let child = runtime
++                .legacy_compact
++                .take()
++                .expect("legacy compact child exists");
++            handle_child_exit(&state.config, runtime, child, status.success());
++        }
++        Some(Err(error)) => {
++            let child = runtime
++                .legacy_compact
++                .take()
++                .expect("legacy compact child exists");
++            let message = format!("poll {}: {error:#}", child.kind.key());
++            runtime.failures.insert(child.kind.key(), message.clone());
++            if let ChildKind::HistoricalCompactReuse { epoch } = child.kind {
++                let output = state.config.archive_root.join(format!("epoch-{epoch}"));
++                let _ = write_ownership(
++                    &output,
++                    LEGACY_COMPACT_OWNERSHIP_KIND,
++                    &epoch.to_string(),
++                    "failed",
++                    Some(message.clone()),
++                );
++                let _ = set_ownership_pid(&output, None);
++            }
++            record_error(&state.config, runtime, "child", message);
++        }
++        None => {}
++    }
+     let finalizer_result = runtime
+         .finalizer
+         .as_mut()
+@@ -4431,7 +5047,9 @@
+     let output = match &child.kind {
+         ChildKind::CarDownload { canonical_path, .. } => canonical_path.clone(),
+         ChildKind::CarPreflight { input_path, .. } => input_path.clone(),
+-        ChildKind::HistoricalScan { epoch } | ChildKind::HistoricalFinalizer { epoch } => {
++        ChildKind::HistoricalScan { epoch }
++        | ChildKind::HistoricalCompactReuse { epoch }
++        | ChildKind::HistoricalFinalizer { epoch } => {
+             config.archive_root.join(format!("epoch-{epoch}"))
+         }
+         ChildKind::LiveFinalizer { epoch, .. } => epoch
+@@ -4457,6 +5075,9 @@
+             .archive_root
+             .join(format!("epoch-{epoch}/{SCAN_MARKER}"))
+             .is_file(),
++        ChildKind::HistoricalCompactReuse { epoch } => {
++            legacy_compact_reader_complete(&config.archive_root.join(format!("epoch-{epoch}")))
++        }
+         ChildKind::HistoricalFinalizer { epoch } => historical_archive_strict_complete(
+             &config.archive_root.join(format!("epoch-{epoch}")),
+             !config.no_access,
+@@ -4497,6 +5118,7 @@
+             let state = match child.kind {
+                 ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. } => unreachable!(),
+                 ChildKind::HistoricalScan { .. } => "scan_ready",
++                ChildKind::HistoricalCompactReuse { .. } => "complete",
+                 ChildKind::HistoricalFinalizer { .. } => "complete",
+                 ChildKind::LiveFinalizer { phase, .. } => match phase {
+                     LiveFinalizerPhase::Registry => "registry_ready",
+@@ -5616,8 +6238,78 @@
+             format!("{SCAN_MARKER_MAGIC}\nregistry_keys=1\nreferences=1\ninclude_access=1\n"),
+         )
+         .unwrap();
++    }
++
++    fn write_legacy_registry_sidecars(output: &Path, with_v3: bool) {
++        fs::create_dir_all(output).unwrap();
++        let registry = vec![7u8; 64];
++        fs::write(output.join(REGISTRY_FILE), &registry).unwrap();
++        fs::write(output.join(REGISTRY_COUNTS_FILE), [1u8, 1]).unwrap();
++        fs::write(output.join(BLOCKHASH_REGISTRY_FILE), [9u8; 64]).unwrap();
++
++        let mut mphf = Vec::new();
++        mphf.extend_from_slice(REGISTRY_INDEX_MAGIC);
++        mphf.extend_from_slice(&REGISTRY_INDEX_VERSION.to_le_bytes());
++        mphf.extend_from_slice(&(REGISTRY_INDEX_HEADER_LEN as u16).to_le_bytes());
++        mphf.extend_from_slice(&2u64.to_le_bytes());
++        mphf.extend_from_slice(&[0u8; 25]);
++        fs::write(output.join(REGISTRY_INDEX_FILE), mphf).unwrap();
++
++        if with_v3 {
++            let mut v3 = Vec::new();
++            v3.extend_from_slice(BLOCKHASH_INDEX_V3_MAGIC);
++            v3.extend_from_slice(&BLOCKHASH_INDEX_V3_VERSION.to_le_bytes());
++            v3.extend_from_slice(&(BLOCKHASH_INDEX_V3_ROW_LEN as u16).to_le_bytes());
++            v3.extend_from_slice(&2u64.to_le_bytes());
++            v3.extend_from_slice(&vec![0u8; 2 * BLOCKHASH_INDEX_V3_ROW_LEN as usize]);
++            fs::write(output.join(BLOCKHASH_INDEX_V3_FILE), v3).unwrap();
++        }
+     }
+ 
++    fn write_valid_hot_index(output: &Path, rows: u64, blob_bytes: u64) {
++        fs::create_dir_all(output).unwrap();
++        fs::write(output.join(BLOCKS_FILE), vec![3u8; blob_bytes as usize]).unwrap();
++        let mut index = Vec::new();
++        index.extend_from_slice(HOT_BLOCK_INDEX_MAGIC);
++        index.extend_from_slice(&HOT_BLOCK_INDEX_VERSION.to_le_bytes());
++        index.extend_from_slice(&0u16.to_le_bytes());
++        index.extend_from_slice(&rows.to_le_bytes());
++        index.extend_from_slice(&blob_bytes.to_le_bytes());
++        index.extend_from_slice(&1i32.to_le_bytes());
++        index.extend_from_slice(&0u32.to_le_bytes());
++        index.extend_from_slice(&vec![0u8; rows as usize * HOT_BLOCK_INDEX_ROW_LEN as usize]);
++        fs::write(output.join(BLOCK_INDEX_FILE), index).unwrap();
++    }
++
++    fn write_legacy_reader_core(output: &Path) {
++        for name in [META_FILE, POH_FILE, SHREDDING_FILE] {
++            fs::write(output.join(name), b"complete").unwrap();
++        }
++        for name in [SIGNATURES_FILE, VOTE_HASH_REGISTRY_FILE] {
++            fs::write(output.join(name), b"").unwrap();
++        }
++        write_valid_hot_index(output, 2, 16);
++    }
++
++    async fn make_finished_child(
++        kind: ChildKind,
++        progress_path: PathBuf,
++        log_path: PathBuf,
++    ) -> ManagedChild {
++        let mut child = Command::new("/usr/bin/true").spawn().unwrap();
++        let pid = child.id();
++        let _ = child.wait().await.unwrap();
++        ManagedChild {
++            pid,
++            child,
++            kind,
++            started_unix_secs: unix_now(),
++            progress_path,
++            log_path,
++            _exclusive_lock: None,
++        }
++    }
++
+     fn test_epoch(root: &Path, epoch: u64, state: HistoricalState) -> EpochSnapshot {
+         EpochSnapshot {
+             epoch,
+@@ -5929,6 +6621,179 @@
+     }
+ 
+     #[test]
++    fn legacy_registry_only_shape_is_conservative_and_classifies_queued_without_preflight() {
++        let root = temp_root("legacy-compact-detect");
++        let mut config = test_config(&root);
++        config.preflight_car = true;
++        for path in [&config.car_root, &config.archive_root, &config.live_root] {
++            fs::create_dir_all(path).unwrap();
++        }
++        fs::write(config.car_root.join("epoch-700.car.zst"), b"car").unwrap();
++        let predecessor = config.archive_root.join("epoch-699");
++        write_legacy_registry_sidecars(&predecessor, false);
++        write_legacy_reader_core(&predecessor);
++        let output = config.archive_root.join("epoch-700");
++        write_legacy_registry_sidecars(&output, true);
++        // Known stale standalone PoH is safe because the builder truncates it.
++        fs::write(output.join(POH_FILE), b"stale").unwrap();
++
++        assert!(legacy_registry_only_shape(&output));
++        assert_eq!(
++            legacy_compact_reuse_status(&config, 700),
++            LegacyCompactReuseStatus::Ready
++        );
++        let queued = classify_epoch(&config, &RuntimeState::default(), 700, unix_now());
++        assert_eq!(queued.state, HistoricalState::Queued);
++        assert!(
++            queued
++                .message
++                .as_deref()
++                .unwrap()
++                .contains("one-pass compact/reuse")
++        );
++        assert!(acquisition_action(&config, &queued).is_none());
++        let preflight = queued
++            .artifacts
++            .iter()
++            .find(|artifact| artifact.kind == ArtifactKind::CarPreflight)
++            .unwrap();
++        assert_eq!(preflight.state, ArtifactState::NotApplicable);
++        assert!(preflight.message.as_deref().unwrap().contains("bypassed"));
++
++        // Epoch 863's partial reader core is intentionally outside the first
++        // migration shape even though all four reusable sidecars remain valid.
++        fs::write(output.join(BLOCKS_FILE), b"partial").unwrap();
++        assert!(!legacy_registry_only_shape(&output));
++        assert_eq!(
++            legacy_compact_reuse_status(&config, 700),
++            LegacyCompactReuseStatus::NotCandidate
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn legacy_compact_waits_for_complete_predecessor_and_uses_synthetic_epoch_hint() {
++        let root = temp_root("legacy-compact-dependency");
++        let config = test_config(&root);
++        fs::create_dir_all(&config.car_root).unwrap();
++        fs::create_dir_all(&config.archive_root).unwrap();
++        fs::write(config.car_root.join("epoch-700.car.zst"), b"car").unwrap();
++        let output = config.archive_root.join("epoch-700");
++        write_legacy_registry_sidecars(&output, false);
++        assert_eq!(
++            legacy_compact_reuse_status(&config, 700),
++            LegacyCompactReuseStatus::WaitingForPrevious
++        );
++
++        let predecessor = config.archive_root.join("epoch-699");
++        write_legacy_registry_sidecars(&predecessor, false);
++        fs::write(predecessor.join(POH_FILE), b"stale-only").unwrap();
++        assert!(!predecessor_seed_sidecars_usable(&config, 700));
++        write_legacy_reader_core(&predecessor);
++        assert!(predecessor_seed_sidecars_usable(&config, 700));
++        assert_eq!(
++            legacy_compact_reuse_status(&config, 700),
++            LegacyCompactReuseStatus::Ready
++        );
++        assert_eq!(
++            legacy_compact_previous_car(&config, 700),
++            Some(config.car_root.join("epoch-699.car.zst"))
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn legacy_compact_args_reuse_sidecars_in_place_and_force_no_access() {
++        let root = temp_root("legacy-compact-args");
++        let mut config = test_config(&root);
++        config.level = 7;
++        let input = config.car_root.join("epoch-700.car.zst");
++        let output = config.archive_root.join("epoch-700");
++        let previous = config.car_root.join("epoch-699.car.zst");
++        let args = legacy_compact_reuse_args(&config, &input, &output, Some(&previous));
++        let args = args
++            .iter()
++            .map(|arg| arg.to_string_lossy().into_owned())
++            .collect::<Vec<_>>();
++        assert_eq!(
++            args,
++            vec![
++                "build-archive-v2-hot-blocks",
++                input.to_str().unwrap(),
++                output.to_str().unwrap(),
++                "--registry-dir",
++                output.to_str().unwrap(),
++                "--resume",
++                "--no-access",
++                "--level",
++                "7",
++                "--previous-car",
++                previous.to_str().unwrap(),
++            ]
++        );
++    }
++
++    #[tokio::test]
++    async fn legacy_compact_exit_commits_only_valid_light_core_and_preserves_failure() {
++        let root = temp_root("legacy-compact-exit");
++        let config = test_config(&root);
++        fs::create_dir_all(config.state_root.join("logs")).unwrap();
++        let output = config.archive_root.join("epoch-700");
++        write_legacy_registry_sidecars(&output, false);
++        write_legacy_reader_core(&output);
++        write_ownership(
++            &output,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            "700",
++            "compact_reuse",
++            None,
++        )
++        .unwrap();
++        let log = config.state_root.join("logs/success.log");
++        fs::write(&log, b"").unwrap();
++        let child = make_finished_child(
++            ChildKind::HistoricalCompactReuse { epoch: 700 },
++            historical_progress_path(&config.state_root, 700),
++            log,
++        )
++        .await;
++        let mut runtime = RuntimeState::default();
++        handle_child_exit(&config, &mut runtime, child, true);
++        assert_eq!(read_ownership(&output).unwrap().state, "complete");
++        assert!(pipeline_owned_legacy_compact_complete(&output));
++
++        let failed_output = config.archive_root.join("epoch-701");
++        write_legacy_registry_sidecars(&failed_output, false);
++        let registry_before = fs::read(failed_output.join(REGISTRY_FILE)).unwrap();
++        fs::write(failed_output.join(BLOCKS_FILE), b"partial").unwrap();
++        write_ownership(
++            &failed_output,
++            LEGACY_COMPACT_OWNERSHIP_KIND,
++            "701",
++            "compact_reuse",
++            None,
++        )
++        .unwrap();
++        let log = config.state_root.join("logs/failure.log");
++        fs::write(&log, b"").unwrap();
++        let child = make_finished_child(
++            ChildKind::HistoricalCompactReuse { epoch: 701 },
++            historical_progress_path(&config.state_root, 701),
++            log,
++        )
++        .await;
++        handle_child_exit(&config, &mut runtime, child, false);
++        assert_eq!(read_ownership(&failed_output).unwrap().state, "failed");
++        assert_eq!(
++            fs::read(failed_output.join(REGISTRY_FILE)).unwrap(),
++            registry_before
++        );
++        assert!(failed_output.join(BLOCKS_FILE).is_file());
++        assert!(!config.archive_root.join(".pipeline-quarantine").exists());
++        fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
+     fn live_compact_output_is_packaged_but_not_historically_complete() {
+         let root = temp_root("classify-live-packaged");
+         let mut config = test_config(&root);
+

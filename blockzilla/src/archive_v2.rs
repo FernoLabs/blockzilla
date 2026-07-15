@@ -1,12 +1,14 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use bincode::Options;
 use blockzilla_format::{
-    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE,
+    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+    ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
-    ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
+    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_META_FILE,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_RAW_BLOCKS_FILE,
     ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
@@ -26,36 +28,47 @@ use blockzilla_format::{
     ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactBlockHeader, CompactInnerInstruction,
     CompactInnerInstructions, CompactLogStream, CompactMessageHeader, CompactMetaV1,
     CompactPohEntry, CompactPubkey, CompactReturnData, CompactReward, CompactShredding,
-    CompactTokenBalance, CompactTransactionError, KeyIndex, KeyStore, LogEvent,
-    OwnedCompactAddressTableLookup, OwnedCompactInstruction, OwnedCompactLegacyMessage,
-    OwnedCompactMessage, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
-    OwnedCompactV0Message, SplitCompactIndexRecord, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
-    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block,
-    WincodeArchiveV2BlockHeader, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
-    WincodeArchiveV2GenesisAccount, WincodeArchiveV2GenesisBuiltin,
-    WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams,
-    WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
-    WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
+    CompactTokenBalance, CompactTransactionError, KeyIndex, KeyStore, LIVE_PRE_HOT_BLOCK_VERSION,
+    LIVE_PUBKEY_RUN_HOT_FILE, LIVE_PUBKEY_RUN_RECORD_LEN, LIVE_PUBKEY_RUNS_DIR, LivePreHotBlock,
+    LivePreHotRecord, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactInstruction,
+    OwnedCompactLegacyMessage, OwnedCompactMessage, OwnedCompactRecentBlockhash,
+    OwnedCompactTransaction, OwnedCompactV0Message, SplitCompactIndexRecord,
+    WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
+    WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
+    WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+    WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block, WincodeArchiveV2BlockHeader,
+    WincodeArchiveV2Footer, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisAccount,
+    WincodeArchiveV2GenesisBuiltin, WincodeArchiveV2GenesisEpochSchedule,
+    WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams,
+    WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
     WincodeArchiveV2NoRegistryAddressTableLookup, WincodeArchiveV2NoRegistryBlock,
     WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryGenesis,
     WincodeArchiveV2NoRegistryGenesisAccount, WincodeArchiveV2NoRegistryGenesisBuiltin,
     WincodeArchiveV2NoRegistryInstruction, WincodeArchiveV2NoRegistryLegacyMessage,
-    WincodeArchiveV2NoRegistryMessage, WincodeArchiveV2NoRegistryMeta,
-    WincodeArchiveV2NoRegistryRecord, WincodeArchiveV2NoRegistryReturnData,
-    WincodeArchiveV2NoRegistryReward, WincodeArchiveV2NoRegistryRewards,
-    WincodeArchiveV2NoRegistryTokenBalance, WincodeArchiveV2NoRegistryTransaction,
-    WincodeArchiveV2NoRegistryTx, WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2Payload,
-    WincodeArchiveV2PohRecord, WincodeArchiveV2Record, WincodeArchiveV2Rewards,
-    WincodeArchiveV2ShreddingRecord, WincodeArchiveV2Transaction, WincodeLeb128FramedReader,
-    WincodeLeb128FramedWriter, archive_v2_get_block_index_path, archive_v2_hot_index_path,
+    WincodeArchiveV2NoRegistryLogs, WincodeArchiveV2NoRegistryMessage,
+    WincodeArchiveV2NoRegistryMeta, WincodeArchiveV2NoRegistryRecord,
+    WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward,
+    WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance,
+    WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2NoRegistryTx,
+    WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord,
+    WincodeArchiveV2Record, WincodeArchiveV2Rewards, WincodeArchiveV2ShreddingRecord,
+    WincodeArchiveV2Transaction, WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
+    archive_v2_get_block_index_path, archive_v2_hot_index_path,
     deserialize_archive_v2_hot_block_blob, encode_with_scratch,
-    program_logs::{ProgramLog, token_2022::Token2022Log},
+    live_producer::LivePubkeyCountRecord,
+    program_logs::{
+        ProgramLog,
+        system_program::{PubkeyOrString, SystemAddress, SystemProgramLog},
+        token_2022::Token2022Log,
+    },
     read_archive_v2_block_access_index, read_archive_v2_hot_block_index, wincode_leb128_config,
     write_archive_v2_block_access_index, write_archive_v2_get_block_index,
-    write_archive_v2_hot_block_index, write_registry,
+    write_archive_v2_hot_block_index, write_registry_iter, write_u32_varint,
 };
 use core::mem::MaybeUninit;
-use gxhash::{GxBuildHasher, HashMap as GxHashMap};
+use gxhash::{GxBuildHasher, HashMap as GxHashMap, gxhash128};
+use hashbrown::HashTable;
+use memmap2::{Mmap, MmapOptions};
 use of_car_reader::{
     CarBlockReader,
     confirmed_block::{Rewards, TransactionStatusMeta},
@@ -68,31 +81,38 @@ use of_car_reader::{
     node::{decode_entry_hash, is_block_node, is_entry_node},
     reader::CarPayloadRead,
     reconstruct::{
-        Cid36, RawBlockNode, RawEntryNode, RawNode, RawRewardsNode, RawTransactionNode,
-        StandaloneDataFrame, decode_raw_node,
+        Cid36, RawBlockNode, RawDataFrame, RawEntryNode, RawNode, RawRewardsNode,
+        RawTransactionNode, StandaloneDataFrame, decode_raw_node,
+        decode_raw_node_with_data_buffers,
     },
     versioned_transaction::{VersionedMessage, VersionedTransaction},
 };
 use prost::Message;
+use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
 use solana_vote_interface::{
     instruction::VoteInstruction,
     state::{TowerSync as SolanaTowerSync, VoteStateUpdate as SolanaVoteStateUpdate},
 };
 #[cfg(unix)]
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    cell::RefCell,
+    cmp::Ordering as CmpOrdering,
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
     fs::{File, OpenOptions},
+    hash::BuildHasher,
     io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tracing::{info, warn};
 use wincode::{
@@ -104,11 +124,35 @@ use wincode::{
 
 use crate::{
     BUFFER_SIZE, CarBenchInputFormat, ProgressTracker, genesis_epoch0,
-    split_compact::{build_registry_and_blockhash_for_input, load_blockhash_registry_plain},
+    split_compact::{
+        ExternalBlockhashOverrides, build_registry_and_blockhash_for_input,
+        load_blockhash_registry_plain, load_external_blockhash_overrides,
+    },
 };
+
+pub(crate) mod repair;
 
 const ARCHIVE_FILE: &str = "archive-v2.wincode";
 const ARCHIVE_NO_REGISTRY_FILE: &str = "archive-v2-no-registry.wincode";
+const ARCHIVE_PRE_HOT_FILE: &str = "archive-v2-pre-hot.zstd";
+const FIRST_SEEN_REGISTRY_MANIFEST_FILE: &str = ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE;
+const FIRST_SEEN_HOT_SEED_FILE: &str = ARCHIVE_V2_PUBKEY_HOT_SEED_FILE;
+const FIRST_SEEN_SEED_READ_BUFFER_MIN: usize = 64 << 10;
+const ARCHIVE_PRE_HOT_MAGIC: &[u8; 8] = b"BZPHOT01";
+const ARCHIVE_PRE_HOT_IO_BUFFER: usize = 8 << 20;
+const ARCHIVE_PRE_HOT_MAX_RECORD_BYTES: usize = 512 << 20;
+const DETAILED_TIMINGS_ENV: &str = "BLOCKZILLA_DETAILED_TIMINGS";
+const FIRST_SEEN_DECODE_WORKERS_MAX: usize = 8;
+const FIRST_SEEN_ZSTD_PREFETCH_MIB_MAX: usize = 64;
+const FIRST_SEEN_PARALLEL_MIN_TRANSACTIONS: usize = 64;
+const FIRST_SEEN_WORKER_SCRATCH_MAX_RETAINED_BYTES: usize = 32 << 20;
+const FIRST_SEEN_WORKER_TX_SCRATCH_INITIAL_BYTES: usize = 2 << 10;
+const FIRST_SEEN_WORKER_METADATA_SCRATCH_INITIAL_BYTES: usize = 8 << 10;
+const RAW_DATAFRAME_POOL_MAX_RETAINED_BYTES: usize = 256 << 20;
+const RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES: usize = 32 << 20;
+const RAW_DATAFRAME_POOL_MAX_BUFFERS_PER_CLASS: usize = 8_192;
+const RAW_DATAFRAME_POOL_MAX_CLASS_ZERO_BUFFERS: usize = 4_096;
+const RAW_DATAFRAME_POOL_LARGER_CLASS_PROBES: usize = 2;
 const ARCHIVE_ZSTD_BLOCKS_FILE: &str = "archive-v2-blocks.zstd";
 const ARCHIVE_ZSTD_INDEX_FILE: &str = "archive-v2-blocks.index";
 const ARCHIVE_ZSTD_META_FILE: &str = "archive-v2-meta.wincode";
@@ -123,10 +167,22 @@ const BLOCKHASH_REGISTRY_FILE: &str = ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE;
 const BLOCKHASH_INDEX_V3_FILE: &str = ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE;
 const PREV_BLOCKHASH_TAIL_FILE: &str = ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE;
 const ARCHIVE_INDEX_FILE: &str = "archive-v2.index";
-const ARCHIVE_FLAGS_LEB128: u32 = 1 << 0;
-const ARCHIVE_FLAGS_NO_REGISTRY: u32 = 1 << 1;
+const ARCHIVE_FLAGS_LEB128: u32 = WINCODE_ARCHIVE_V2_FLAG_LEB128;
+const ARCHIVE_FLAGS_NO_REGISTRY: u32 = WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY;
+const ARCHIVE_FLAGS_FIRST_SEEN_REGISTRY: u32 = WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY;
+const ARCHIVE_FLAGS_ALL_PUBKEY_REF_COUNTS: u32 = WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS;
 const ROLLING_BLOCKHASH_CAPACITY: usize = 300;
 const RECENT_BLOCKHASH_SLOT_WINDOW: u64 = 150;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LiveRegistrySource {
+    Auto,
+    Counts,
+    Runs,
+    Touches,
+    Scan,
+}
+
 const ARCHIVE_V2_INDEX_MAGIC: &[u8; 8] = b"BZV2IDX1";
 const ARCHIVE_V2_INDEX_VERSION: u16 = 1;
 const ARCHIVE_V2_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8 + 8;
@@ -136,11 +192,22 @@ const ARCHIVE_V2_ZSTD_INDEX_VERSION: u16 = 1;
 const ARCHIVE_V2_ZSTD_INDEX_FLAG_DICTIONARY: u32 = 1 << 0;
 const ARCHIVE_V2_INDEX_SCAN_BUFFER_SIZE: usize = 4 << 10;
 const BLOCKHASH_SCAN_BUFFER_SIZE: usize = 4 << 20;
+// The legacy CAR hot-block rewrite keeps one buffer for each output sidecar.
+// Using the process-wide 256 MiB buffer here reserved 1.25 GiB before access
+// output (1.5 GiB with it), even though all writes are sequential. 16 MiB is
+// large enough to amortize NAS writes while keeping parallel rewrite lanes
+// bounded.
+const HOT_BLOCK_OUTPUT_BUFFER_SIZE: usize = 16 << 20;
+const LIVE_FINALIZER_IO_BUFFER_SIZE: usize = 8 << 20;
+const LIVE_PUBKEY_RUN_READER_BUFFER_SIZE: usize = 64 << 10;
+const LIVE_FINALIZER_MAX_FRAME_SIZE: usize = 256 << 20;
+const LIVE_PUBKEY_RUN_MERGE_FAN_IN: usize = 64;
+const LIVE_REGISTRY_PREPARED_MARKER: &str = "archive-v2-live-registry-prepared.v1";
+const LIVE_REGISTRY_PREPARE_TEMP_DIR: &str = ".archive-v2-live-registry-prepare.tmp";
 const ZSTD_LONG_WINDOW_LOG_MAX: u32 = 31;
 const NODE_KIND_PREFIX_LEN: usize = 2;
 const BLOCKHASH_SCAN_PREFIX_LEN: usize = 96;
 const HOT_REUSABLE_BUFFER_RETAIN_LIMIT: usize = 64 << 20;
-const HOT_HEAP_TRIM_INTERVAL_BLOCKS: u32 = 32;
 const VOTE_INSTRUCTION_DECODE_LIMIT: u64 = 1232;
 const WINCODE_ARCHIVE_V2_RECORD_HEADER_TAG: u8 = 0;
 const WINCODE_ARCHIVE_V2_RECORD_BLOCK_TAG: u8 = 1;
@@ -148,21 +215,356 @@ const WINCODE_ARCHIVE_V2_RECORD_INDEX_TAG: u8 = 2;
 const WINCODE_ARCHIVE_V2_RECORD_FOOTER_TAG: u8 = 3;
 const WINCODE_ARCHIVE_V2_RECORD_GENESIS_TAG: u8 = 4;
 
-fn zstd_decoder_with_long_window<R: BufRead + 'static>(
+fn zstd_decoder_with_long_window<R: BufRead>(
     reader: R,
 ) -> Result<zstd::stream::read::Decoder<'static, R>> {
-    let dctx = Box::leak(Box::new(zstd::zstd_safe::DCtx::create()));
-    dctx.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
-        ZSTD_LONG_WINDOW_LOG_MAX,
-    ))
-    .map_err(|code| {
-        anyhow!(
-            "set zstd WindowLogMax={}: {}",
-            ZSTD_LONG_WINDOW_LOG_MAX,
-            zstd::zstd_safe::get_error_name(code)
-        )
-    })?;
-    Ok(zstd::stream::read::Decoder::with_context(reader, dctx))
+    let mut decoder = zstd::stream::read::Decoder::with_buffer(reader)
+        .context("create owned zstd stream decoder")?;
+    decoder
+        .window_log_max(ZSTD_LONG_WINDOW_LOG_MAX)
+        .with_context(|| format!("set zstd WindowLogMax={ZSTD_LONG_WINDOW_LOG_MAX}"))?;
+    Ok(decoder)
+}
+
+#[derive(Clone, Debug)]
+struct StoredIoError {
+    kind: ErrorKind,
+    message: Arc<str>,
+}
+
+impl StoredIoError {
+    fn new(kind: ErrorKind, message: impl Into<Arc<str>>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    fn to_io_error(&self) -> std::io::Error {
+        std::io::Error::new(self.kind, SharedIoError(Arc::clone(&self.message)))
+    }
+}
+
+impl From<std::io::Error> for StoredIoError {
+    fn from(error: std::io::Error) -> Self {
+        Self::new(error.kind(), Arc::<str>::from(error.to_string()))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SharedIoError(Arc<str>);
+
+impl std::fmt::Display for SharedIoError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SharedIoError {}
+
+enum ZstdPrefetchEvent {
+    Data { buffer: Box<[u8]>, len: usize },
+    Terminal(std::result::Result<(), StoredIoError>),
+}
+
+#[derive(Default)]
+struct ZstdPrefetchStats {
+    worker_bytes: AtomicU64,
+    worker_chunks: AtomicU64,
+    consumer_bytes: AtomicU64,
+    consumer_reads: AtomicU64,
+    worker_ready_wait_ns: AtomicU64,
+    worker_recycle_wait_ns: AtomicU64,
+    consumer_ready_wait_ns: AtomicU64,
+    consumer_recycle_wait_ns: AtomicU64,
+    #[cfg(test)]
+    worker_buffer_addresses: std::sync::Mutex<HashSet<usize>>,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct ZstdPrefetchStatsSnapshot {
+    worker_bytes: u64,
+    worker_chunks: u64,
+    consumer_bytes: u64,
+    consumer_reads: u64,
+    worker_ready_wait: Duration,
+    worker_recycle_wait: Duration,
+    consumer_ready_wait: Duration,
+    consumer_recycle_wait: Duration,
+}
+
+impl ZstdPrefetchStats {
+    fn snapshot(&self) -> ZstdPrefetchStatsSnapshot {
+        ZstdPrefetchStatsSnapshot {
+            worker_bytes: self.worker_bytes.load(Ordering::Relaxed),
+            worker_chunks: self.worker_chunks.load(Ordering::Relaxed),
+            consumer_bytes: self.consumer_bytes.load(Ordering::Relaxed),
+            consumer_reads: self.consumer_reads.load(Ordering::Relaxed),
+            worker_ready_wait: Duration::from_nanos(
+                self.worker_ready_wait_ns.load(Ordering::Relaxed),
+            ),
+            worker_recycle_wait: Duration::from_nanos(
+                self.worker_recycle_wait_ns.load(Ordering::Relaxed),
+            ),
+            consumer_ready_wait: Duration::from_nanos(
+                self.consumer_ready_wait_ns.load(Ordering::Relaxed),
+            ),
+            consumer_recycle_wait: Duration::from_nanos(
+                self.consumer_recycle_wait_ns.load(Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
+fn add_prefetch_wait(counter: &AtomicU64, elapsed: Duration) {
+    let nanoseconds = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+    counter.fetch_add(nanoseconds, Ordering::Relaxed);
+}
+
+struct ZstdPrefetchChunk {
+    buffer: Box<[u8]>,
+    len: usize,
+    offset: usize,
+}
+
+/// A two-buffer, allocation-stable bridge between sequential zstd decoding and
+/// the CAR parser. The worker is strictly ordered: there is only one decoder
+/// and chunks are delivered through a bounded FIFO channel.
+struct ZstdPrefetchReader {
+    ready_rx: Option<mpsc::Receiver<ZstdPrefetchEvent>>,
+    recycle_tx: Option<mpsc::SyncSender<Box<[u8]>>>,
+    current: Option<ZstdPrefetchChunk>,
+    terminal: Option<std::result::Result<(), StoredIoError>>,
+    worker: Option<thread::JoinHandle<()>>,
+    stats: Arc<ZstdPrefetchStats>,
+}
+
+impl ZstdPrefetchReader {
+    fn start<R: Read + Send + 'static>(
+        reader: R,
+        chunk_bytes: usize,
+    ) -> std::io::Result<(Self, Arc<ZstdPrefetchStats>)> {
+        if chunk_bytes == 0 {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "zstd prefetch chunk size must be non-zero",
+            ));
+        }
+
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel(2);
+        // These are the only chunk allocations for the lifetime of the
+        // prefetcher. Ownership rotates worker -> consumer -> worker.
+        recycle_tx
+            .send(vec![0_u8; chunk_bytes].into_boxed_slice())
+            .expect("fresh recycle channel must accept first buffer");
+        recycle_tx
+            .send(vec![0_u8; chunk_bytes].into_boxed_slice())
+            .expect("fresh recycle channel must accept second buffer");
+
+        let stats = Arc::new(ZstdPrefetchStats::default());
+        let worker_stats = Arc::clone(&stats);
+        let worker = thread::Builder::new()
+            .name("first-seen-zstd-prefetch".to_string())
+            .spawn(move || {
+                run_zstd_prefetch_worker(reader, ready_tx, recycle_rx, &worker_stats);
+            })?;
+        Ok((
+            Self {
+                ready_rx: Some(ready_rx),
+                recycle_tx: Some(recycle_tx),
+                current: None,
+                terminal: None,
+                worker: Some(worker),
+                stats: Arc::clone(&stats),
+            },
+            stats,
+        ))
+    }
+
+    fn join_worker(&mut self) -> std::result::Result<(), StoredIoError> {
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        worker.join().map_err(|_| {
+            StoredIoError::new(
+                ErrorKind::Other,
+                Arc::<str>::from("zstd prefetch worker panicked"),
+            )
+        })
+    }
+
+    fn recycle(&self, buffer: Box<[u8]>) {
+        let Some(recycle_tx) = self.recycle_tx.as_ref() else {
+            return;
+        };
+        let wait_started = Instant::now();
+        let _ = recycle_tx.send(buffer);
+        add_prefetch_wait(&self.stats.consumer_recycle_wait_ns, wait_started.elapsed());
+    }
+
+    fn terminal_read(&self) -> std::io::Result<usize> {
+        match self.terminal.as_ref() {
+            Some(Ok(())) => Ok(0),
+            Some(Err(error)) => Err(error.to_io_error()),
+            None => Err(std::io::Error::other(
+                "zstd prefetch reader has no terminal state",
+            )),
+        }
+    }
+}
+
+impl Read for ZstdPrefetchReader {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            if let Some(current) = self.current.as_mut() {
+                let available = current.len - current.offset;
+                let copied = available.min(output.len());
+                output[..copied]
+                    .copy_from_slice(&current.buffer[current.offset..current.offset + copied]);
+                current.offset += copied;
+                self.stats
+                    .consumer_bytes
+                    .fetch_add(copied as u64, Ordering::Relaxed);
+                self.stats.consumer_reads.fetch_add(1, Ordering::Relaxed);
+                if current.offset == current.len {
+                    let current = self.current.take().expect("current chunk exists");
+                    self.recycle(current.buffer);
+                }
+                return Ok(copied);
+            }
+
+            if self.terminal.is_some() {
+                return self.terminal_read();
+            }
+
+            let wait_started = Instant::now();
+            let event = self
+                .ready_rx
+                .as_ref()
+                .expect("active prefetch reader must have a ready receiver")
+                .recv();
+            add_prefetch_wait(&self.stats.consumer_ready_wait_ns, wait_started.elapsed());
+            match event {
+                Ok(ZstdPrefetchEvent::Data { buffer, len }) => {
+                    if len == 0 || len > buffer.len() {
+                        self.terminal = Some(Err(StoredIoError::new(
+                            ErrorKind::InvalidData,
+                            Arc::<str>::from("zstd prefetch worker returned an invalid chunk"),
+                        )));
+                        drop(buffer);
+                        self.recycle_tx.take();
+                        self.ready_rx.take();
+                        if let Err(join_error) = self.join_worker() {
+                            self.terminal = Some(Err(join_error));
+                        }
+                        continue;
+                    }
+                    self.current = Some(ZstdPrefetchChunk {
+                        buffer,
+                        len,
+                        offset: 0,
+                    });
+                }
+                Ok(ZstdPrefetchEvent::Terminal(terminal)) => {
+                    self.terminal = Some(terminal);
+                    if let Err(join_error) = self.join_worker() {
+                        self.terminal = Some(Err(join_error));
+                    }
+                }
+                Err(_) => {
+                    self.terminal = Some(Err(match self.join_worker() {
+                        Ok(()) => StoredIoError::new(
+                            ErrorKind::UnexpectedEof,
+                            Arc::<str>::from(
+                                "zstd prefetch worker disconnected without a terminal event",
+                            ),
+                        ),
+                        Err(error) => error,
+                    }));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ZstdPrefetchReader {
+    fn drop(&mut self) {
+        // Closing both directions before join wakes a worker blocked on either
+        // a ready send or a recycle receive. The worker may still be inside the
+        // underlying Read until that call returns.
+        self.current.take();
+        self.recycle_tx.take();
+        self.ready_rx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_zstd_prefetch_worker<R: Read>(
+    mut reader: R,
+    ready_tx: mpsc::SyncSender<ZstdPrefetchEvent>,
+    recycle_rx: mpsc::Receiver<Box<[u8]>>,
+    stats: &ZstdPrefetchStats,
+) {
+    loop {
+        let wait_started = Instant::now();
+        let Ok(mut buffer) = recycle_rx.recv() else {
+            return;
+        };
+        add_prefetch_wait(&stats.worker_recycle_wait_ns, wait_started.elapsed());
+        #[cfg(test)]
+        stats
+            .worker_buffer_addresses
+            .lock()
+            .expect("prefetch buffer address lock poisoned")
+            .insert(buffer.as_ptr() as usize);
+
+        let mut filled = 0;
+        let terminal = loop {
+            match reader.read(&mut buffer[filled..]) {
+                Ok(0) => break Some(Ok(())),
+                Ok(read) => {
+                    filled += read;
+                    if filled == buffer.len() {
+                        break None;
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => break Some(Err(StoredIoError::from(error))),
+            }
+        };
+
+        if filled != 0 {
+            let wait_started = Instant::now();
+            if ready_tx
+                .send(ZstdPrefetchEvent::Data {
+                    buffer,
+                    len: filled,
+                })
+                .is_err()
+            {
+                return;
+            }
+            add_prefetch_wait(&stats.worker_ready_wait_ns, wait_started.elapsed());
+            stats
+                .worker_bytes
+                .fetch_add(filled as u64, Ordering::Relaxed);
+            stats.worker_chunks.fetch_add(1, Ordering::Relaxed);
+        }
+
+        if let Some(terminal) = terminal {
+            let wait_started = Instant::now();
+            let _ = ready_tx.send(ZstdPrefetchEvent::Terminal(terminal));
+            add_prefetch_wait(&stats.worker_ready_wait_ns, wait_started.elapsed());
+            return;
+        }
+    }
 }
 
 pub(crate) fn build(
@@ -176,6 +578,7 @@ pub(crate) fn build(
 
     let previous_tail = load_or_build_previous_tail(output_dir, previous_car, resume)?;
     let genesis = genesis_epoch0::maybe_load_for_input(input)?;
+    let external_blockhashes = ExternalBlockhashOverrides::default();
 
     let registry_path = output_dir.join(REGISTRY_FILE);
     let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
@@ -201,6 +604,8 @@ pub(crate) fn build(
             &registry_path,
             Some(&registry_counts_path),
             &blockhash_registry_path,
+            &external_blockhashes,
+            None,
         )?;
     }
 
@@ -233,11 +638,12 @@ pub(crate) fn build(
     scanner.skip_header()?;
     let mut pending = PendingBlock::default();
     let mut footer = WincodeArchiveV2Footer::default();
-    let mut timings = ArchiveV2Timings::default();
+    let mut timings = ArchiveV2Timings::from_env();
     let mut progress = ProgressTracker::new("Archive V2 Write");
     let mut block_offset = 0u64;
     let mut block_id = 0u32;
     let mut block_scratch = Vec::with_capacity(8 << 20);
+    let mut metadata_zstd = ZstdReusableDecoder::new();
     let mut rolling_blockhashes = RollingBlockhashIndex::new(ROLLING_BLOCKHASH_CAPACITY);
     rolling_blockhashes.seed_previous_tail(&previous_tail)?;
     if let Some(genesis) = &genesis {
@@ -259,7 +665,7 @@ pub(crate) fn build(
         footer.car_payload_bytes += raw.payload_len as u64;
         footer.decoded_node_payload_bytes += raw.payload_len as u64;
 
-        let classify_started = Instant::now();
+        let classify_started = timings.detail_timer();
         match raw.node {
             RawNode::Transaction(tx) => {
                 footer.transactions += 1;
@@ -294,6 +700,11 @@ pub(crate) fn build(
                 footer.blocks += 1;
                 rolling_blockhashes.prune_for_slot(block.slot)?;
                 timings.classify += classify_started.elapsed();
+                let blockhash_index = block_id as usize + blockhash_id_offset as usize;
+                let previous_blockhash = blockhash_index
+                    .checked_sub(1)
+                    .and_then(|index| blockhashes.get(index))
+                    .copied();
                 let (record, tx_count, sidecar) = build_block_record(
                     &mut pending,
                     block,
@@ -302,8 +713,12 @@ pub(crate) fn build(
                     block_id.saturating_add(blockhash_id_offset),
                     &mut footer,
                     &mut timings,
+                    &external_blockhashes,
+                    previous_blockhash,
+                    &mut metadata_zstd,
+                    None,
+                    None,
                 )?;
-                let blockhash_index = block_id as usize + blockhash_id_offset as usize;
                 let expected_blockhash = blockhashes.get(blockhash_index).with_context(|| {
                     format!("missing blockhash registry entry for blockhash id {blockhash_index}")
                 })?;
@@ -313,7 +728,7 @@ pub(crate) fn build(
                     block_id,
                     pending.last_slot
                 );
-                let encode_started = Instant::now();
+                let encode_started = timings.detail_timer();
                 let record = WincodeArchiveV2Record::Block(record);
                 encode_with_scratch(&record, &mut block_scratch)?;
                 let block_len = u32::try_from(block_scratch.len())
@@ -344,6 +759,7 @@ pub(crate) fn build(
                 block_offset += block_len as u64;
                 block_id = block_id.wrapping_add(1);
                 progress.update_slot(pending.last_slot);
+                progress.update_input_bytes(footer.car_payload_bytes);
                 progress.update(1, tx_count as u64);
                 pending.clear();
                 continue;
@@ -354,7 +770,7 @@ pub(crate) fn build(
         timings.classify += classify_started.elapsed();
     }
 
-    let encode_started = Instant::now();
+    let encode_started = timings.detail_timer();
     writer.write(&WincodeArchiveV2Record::Footer(footer.clone()))?;
     timings.wincode_encode += encode_started.elapsed();
     writer.flush()?;
@@ -405,6 +821,7 @@ pub(crate) fn build_hot_blocks(
     output_dir: &Path,
     previous_car: Option<&Path>,
     registry_dir: Option<&Path>,
+    external_blockhashes_path: Option<&Path>,
     level: i32,
     max_blocks: Option<u64>,
     resume: bool,
@@ -416,6 +833,7 @@ pub(crate) fn build_hot_blocks(
     );
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
+    let external_blockhashes = load_external_blockhash_overrides(external_blockhashes_path)?;
 
     let previous_tail = load_or_build_previous_tail(output_dir, previous_car, resume)?;
     let genesis = genesis_epoch0::maybe_load_for_input(input)?;
@@ -453,6 +871,8 @@ pub(crate) fn build_hot_blocks(
             &registry_path,
             Some(&registry_counts_path),
             &blockhash_registry_path,
+            &external_blockhashes,
+            max_blocks,
         )?;
     }
 
@@ -478,34 +898,45 @@ pub(crate) fn build_hot_blocks(
 
     let blocks_file =
         File::create(&blocks_path).with_context(|| format!("create {}", blocks_path.display()))?;
-    let mut blocks_writer = BufWriter::with_capacity(BUFFER_SIZE, blocks_file);
+    let mut blocks_writer = BufWriter::with_capacity(HOT_BLOCK_OUTPUT_BUFFER_SIZE, blocks_file);
     let meta_file =
         File::create(&meta_path).with_context(|| format!("create {}", meta_path.display()))?;
-    let mut meta_writer =
-        WincodeLeb128FramedWriter::new(BufWriter::with_capacity(BUFFER_SIZE, meta_file));
+    let mut meta_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        HOT_BLOCK_OUTPUT_BUFFER_SIZE,
+        meta_file,
+    ));
     let signatures_file = File::create(&signatures_path)
         .with_context(|| format!("create {}", signatures_path.display()))?;
-    let mut signatures_writer = BufWriter::with_capacity(BUFFER_SIZE, signatures_file);
+    let mut signatures_writer =
+        BufWriter::with_capacity(HOT_BLOCK_OUTPUT_BUFFER_SIZE, signatures_file);
     let mut access_writer = if include_access {
         let access_file = File::create(&access_path)
             .with_context(|| format!("create {}", access_path.display()))?;
-        Some(BufWriter::with_capacity(BUFFER_SIZE, access_file))
+        Some(BufWriter::with_capacity(
+            HOT_BLOCK_OUTPUT_BUFFER_SIZE,
+            access_file,
+        ))
     } else {
         None
     };
     let poh_file =
         File::create(&poh_path).with_context(|| format!("create {}", poh_path.display()))?;
-    let mut poh_writer =
-        WincodeLeb128FramedWriter::new(BufWriter::with_capacity(BUFFER_SIZE, poh_file));
+    let mut poh_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        HOT_BLOCK_OUTPUT_BUFFER_SIZE,
+        poh_file,
+    ));
     let shredding_file = File::create(&shredding_path)
         .with_context(|| format!("create {}", shredding_path.display()))?;
-    let mut shredding_writer =
-        WincodeLeb128FramedWriter::new(BufWriter::with_capacity(BUFFER_SIZE, shredding_file));
+    let mut shredding_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        HOT_BLOCK_OUTPUT_BUFFER_SIZE,
+        shredding_file,
+    ));
     let mut compressor = zstd::bulk::Compressor::new(level).context("create zstd compressor")?;
     let mut block_bytes = Vec::new();
     let mut compressed_buf = Vec::new();
     let mut access_bytes = Vec::new();
     let mut access_signature_bytes = Vec::new();
+    let mut hot_block_buffers = HotBlockBuffers::default();
 
     write_hot_meta(
         &mut meta_writer,
@@ -525,7 +956,7 @@ pub(crate) fn build_hot_blocks(
     scanner.skip_header()?;
     let mut pending = PendingBlock::default();
     let mut footer = WincodeArchiveV2Footer::default();
-    let mut timings = ArchiveV2Timings::default();
+    let mut timings = ArchiveV2Timings::from_env();
     let mut progress = ProgressTracker::new("Archive V2 Hot Write");
     let mut block_id = 0u32;
     let mut rolling_blockhashes = RollingBlockhashIndex::new(ROLLING_BLOCKHASH_CAPACITY);
@@ -546,6 +977,7 @@ pub(crate) fn build_hot_blocks(
     let mut slot_to_block_id: GxHashMap<u64, u32> =
         GxHashMap::with_hasher(GxBuildHasher::default());
     let mut vote_hashes = VoteHashRegistryBuilder::default();
+    let mut metadata_zstd = ZstdReusableDecoder::new();
     let started = Instant::now();
 
     while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
@@ -553,7 +985,7 @@ pub(crate) fn build_hot_blocks(
         footer.car_payload_bytes += raw.payload_len as u64;
         footer.decoded_node_payload_bytes += raw.payload_len as u64;
 
-        let classify_started = Instant::now();
+        let classify_started = timings.detail_timer();
         match raw.node {
             RawNode::Transaction(tx) => {
                 footer.transactions += 1;
@@ -588,7 +1020,12 @@ pub(crate) fn build_hot_blocks(
                 footer.blocks += 1;
                 rolling_blockhashes.prune_for_slot(block.slot)?;
                 timings.classify += classify_started.elapsed();
-                let (record, tx_count, sidecar) = build_block_record(
+                let blockhash_index = block_id as usize + blockhash_id_offset as usize;
+                let previous_blockhash = blockhash_index
+                    .checked_sub(1)
+                    .and_then(|index| blockhashes.get(index))
+                    .copied();
+                let (mut record, tx_count, sidecar) = build_block_record(
                     &mut pending,
                     block,
                     &key_index,
@@ -596,9 +1033,13 @@ pub(crate) fn build_hot_blocks(
                     block_id.saturating_add(blockhash_id_offset),
                     &mut footer,
                     &mut timings,
+                    &external_blockhashes,
+                    previous_blockhash,
+                    &mut metadata_zstd,
+                    None,
+                    None,
                 )?;
                 let slot = pending.last_slot;
-                let blockhash_index = block_id as usize + blockhash_id_offset as usize;
                 let expected_blockhash = blockhashes.get(blockhash_index).with_context(|| {
                     format!("missing blockhash registry entry for blockhash id {blockhash_index}")
                 })?;
@@ -609,22 +1050,28 @@ pub(crate) fn build_hot_blocks(
                     slot
                 );
 
-                let encode_started = Instant::now();
+                let encode_started = timings.detail_timer();
                 vote_hashes.ensure_block(block_id);
-                let block_shredding = record.header.compact.shredding.clone();
+                let block_shredding = std::mem::take(&mut record.header.compact.shredding);
                 access_signature_bytes.clear();
+                let block_signature_bytes = if include_access {
+                    Some(&mut access_signature_bytes)
+                } else {
+                    None
+                };
                 let (hot_block, block_signature_count) = hot_block_from_archive_block(
                     record,
                     &known_program_ids,
                     &slot_to_block_id,
                     &mut vote_hashes,
-                    &mut signatures_writer,
-                    &mut access_signature_bytes,
+                    Some(&mut signatures_writer as &mut dyn Write),
+                    block_signature_bytes,
+                    &mut hot_block_buffers,
                     &mut timings,
                 )
                 .with_context(|| format!("slot {slot} hot block encode"))?;
                 block_bytes.clear();
-                let block_serialize_started = Instant::now();
+                let block_serialize_started = timings.detail_timer();
                 wincode::config::serialize_into(
                     &mut block_bytes,
                     &hot_block,
@@ -635,25 +1082,25 @@ pub(crate) fn build_hot_blocks(
                     .context("hot archive v2 block payload exceeds u32::MAX")?;
                 let compress_bound = zstd::zstd_safe::compress_bound(block_bytes.len());
                 if compressed_buf.capacity() < compress_bound {
-                    compressed_buf.reserve(compress_bound - compressed_buf.capacity());
+                    compressed_buf.reserve(compress_bound.saturating_sub(compressed_buf.len()));
                     timings.hot_zstd_buffer_reserves += 1;
                 }
                 timings.hot_zstd_buffer_capacity_max = timings
                     .hot_zstd_buffer_capacity_max
                     .max(compressed_buf.capacity());
-                let compress_started = Instant::now();
+                let compress_started = timings.detail_timer();
                 compressor
                     .compress_to_buffer(&block_bytes, &mut compressed_buf)
                     .with_context(|| format!("zstd compress hot block_id {block_id}"))?;
                 timings.hot_zstd_compress += compress_started.elapsed();
                 let compressed_len = u32::try_from(compressed_buf.len())
                     .context("compressed hot archive v2 block exceeds u32::MAX")?;
-                let write_started = Instant::now();
+                let write_started = timings.detail_timer();
                 blocks_writer
                     .write_all(&compressed_buf)
                     .with_context(|| format!("write {}", blocks_path.display()))?;
                 timings.hot_block_write += write_started.elapsed();
-                let poh_started = Instant::now();
+                let poh_started = timings.detail_timer();
                 poh_writer.write(&WincodeArchiveV2PohRecord {
                     block_id,
                     slot,
@@ -671,7 +1118,7 @@ pub(crate) fn build_hot_blocks(
                     access_bytes.clear();
                     let access_blob = build_archive_v2_block_access_blob(
                         &hot_block,
-                        &store,
+                        &store.keys,
                         &blockhashes,
                         &previous_tail,
                         &access_signature_bytes,
@@ -683,8 +1130,8 @@ pub(crate) fn build_hot_blocks(
                         &access_blob,
                         wincode_leb128_config(),
                     )?;
-                    let access_len = u32::try_from(access_bytes.len())
-                        .context("archive v2 block access payload exceeds u32::MAX")?;
+                    let access_len =
+                        checked_archive_v2_block_access_frame_len(access_bytes.len(), slot)?;
                     access_writer
                         .write_all(&access_bytes)
                         .with_context(|| format!("write {}", access_path.display()))?;
@@ -700,6 +1147,7 @@ pub(crate) fn build_hot_blocks(
                     access_file_bytes += access_len as u64;
                 }
                 timings.wincode_encode += encode_started.elapsed();
+                hot_block_buffers.recycle(hot_block);
 
                 rows.push(ArchiveV2HotBlockIndexRow {
                     block_id,
@@ -724,6 +1172,7 @@ pub(crate) fn build_hot_blocks(
                 slot_to_block_id.insert(slot, block_id);
                 block_id = block_id.wrapping_add(1);
                 progress.update_slot(slot);
+                progress.update_input_bytes(footer.car_payload_bytes);
                 progress.update(1, tx_count as u64);
                 pending.clear();
                 trim_hot_memory(
@@ -731,8 +1180,9 @@ pub(crate) fn build_hot_blocks(
                     &mut block_bytes,
                     &mut compressed_buf,
                     &mut access_bytes,
-                    &mut access_signature_bytes,
+                    include_access.then_some(&mut access_signature_bytes),
                 );
+                hot_block_buffers.trim();
                 if max_blocks.is_some_and(|limit| rows.len() as u64 >= limit) {
                     break;
                 }
@@ -845,26 +1295,4375 @@ pub(crate) fn build_hot_blocks(
     Ok(())
 }
 
-fn trim_hot_memory(
-    next_block_id: u32,
-    block_bytes: &mut Vec<u8>,
-    _compressed_buf: &mut Vec<u8>,
-    access_bytes: &mut Vec<u8>,
-    access_signature_bytes: &mut Vec<u8>,
-) {
-    trim_hot_reusable_buffer(block_bytes);
-    trim_hot_reusable_buffer(access_bytes);
-    trim_hot_reusable_buffer(access_signature_bytes);
+struct FirstSeenBlockWriteJob {
+    block_bytes: Vec<u8>,
+    block_id: u32,
+    slot: u64,
+    tx_count: u32,
+    first_tx_ordinal: u64,
+    first_signature_ordinal: u64,
+    signature_count: u32,
+}
 
-    if next_block_id.is_multiple_of(HOT_HEAP_TRIM_INTERVAL_BLOCKS) {
+#[derive(Default)]
+struct FirstSeenBlockWriteSummary {
+    rows: Vec<ArchiveV2HotBlockIndexRow>,
+    blob_offset: u64,
+    uncompressed_bytes: u64,
+    compressed_bytes: u64,
+    zstd_compress: Duration,
+    block_write: Duration,
+    zstd_buffer_reserves: u64,
+    zstd_buffer_capacity_max: usize,
+}
+
+/// A bounded, ordered compression stage for the first-seen builder.
+///
+/// The producer and worker own one encoded block buffer each. Once the first
+/// block is submitted, CAR decode/encoding can fill the other buffer while the
+/// worker compresses and writes. The worker is deliberately single-threaded:
+/// it owns one reusable zstd context, one compressed buffer, and the sequential
+/// output writer, so output bytes and index order remain deterministic.
+struct FirstSeenAsyncBlockWriter {
+    jobs: Option<mpsc::SyncSender<FirstSeenBlockWriteJob>>,
+    recycled: mpsc::Receiver<Vec<u8>>,
+    spare: Option<Vec<u8>>,
+    worker: Option<thread::JoinHandle<Result<FirstSeenBlockWriteSummary>>>,
+}
+
+impl FirstSeenAsyncBlockWriter {
+    fn start(
+        blocks_file: File,
+        blocks_path: PathBuf,
+        level: i32,
+        detailed_timings: bool,
+    ) -> Result<Self> {
+        // One queued job plus one buffer being processed bounds the stage to
+        // two uncompressed block buffers irrespective of CAR size.
+        let (jobs_tx, jobs_rx) = mpsc::sync_channel(1);
+        // This channel cannot block the worker if the producer exits early.
+        // It still holds at most the two buffers owned by this pipeline.
+        let (recycled_tx, recycled_rx) = mpsc::sync_channel(2);
+        let worker = thread::Builder::new()
+            .name("first-seen-zstd".to_owned())
+            .spawn(move || {
+                run_first_seen_block_writer(
+                    blocks_file,
+                    &blocks_path,
+                    level,
+                    detailed_timings,
+                    jobs_rx,
+                    recycled_tx,
+                )
+            })
+            .context("spawn first-seen zstd writer")?;
+        Ok(Self {
+            jobs: Some(jobs_tx),
+            recycled: recycled_rx,
+            spare: Some(Vec::new()),
+            worker: Some(worker),
+        })
+    }
+
+    fn submit(&mut self, job: FirstSeenBlockWriteJob) -> Result<Vec<u8>> {
+        let Some(jobs) = self.jobs.as_ref() else {
+            bail!("first-seen zstd writer is already closed")
+        };
+        if jobs.send(job).is_err() {
+            return Err(self.worker_stopped_error("submit first-seen block"));
+        }
+
+        let mut next = if let Some(spare) = self.spare.take() {
+            spare
+        } else {
+            match self.recycled.recv() {
+                Ok(buffer) => buffer,
+                Err(_) => {
+                    return Err(self.worker_stopped_error("wait for first-seen encoded buffer"));
+                }
+            }
+        };
+        next.clear();
+        Ok(next)
+    }
+
+    fn finish(mut self) -> Result<FirstSeenBlockWriteSummary> {
+        self.jobs.take();
+        self.join_worker()
+    }
+
+    fn join_worker(&mut self) -> Result<FirstSeenBlockWriteSummary> {
+        let worker = self
+            .worker
+            .take()
+            .context("first-seen zstd writer join handle is missing")?;
+        worker
+            .join()
+            .map_err(|_| anyhow!("first-seen zstd writer thread panicked"))?
+    }
+
+    fn worker_stopped_error(&mut self, operation: &'static str) -> anyhow::Error {
+        self.jobs.take();
+        match self.join_worker() {
+            Ok(_) => anyhow!("{operation}: first-seen zstd writer exited early"),
+            Err(error) => error.context(operation),
+        }
+    }
+}
+
+impl Drop for FirstSeenAsyncBlockWriter {
+    fn drop(&mut self) {
+        // Ensure an error in CAR decode or a sidecar writer cannot leave a
+        // detached compressor writing into an incomplete candidate archive.
+        self.jobs.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_first_seen_block_writer(
+    blocks_file: File,
+    blocks_path: &Path,
+    level: i32,
+    detailed_timings: bool,
+    jobs: mpsc::Receiver<FirstSeenBlockWriteJob>,
+    recycled: mpsc::SyncSender<Vec<u8>>,
+) -> Result<FirstSeenBlockWriteSummary> {
+    let mut writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, blocks_file);
+    let mut compressor =
+        zstd::bulk::Compressor::new(level).context("create first-seen zstd compressor")?;
+    let mut compressed = Vec::new();
+    let mut summary = FirstSeenBlockWriteSummary::default();
+
+    while let Ok(mut job) = jobs.recv() {
+        let result = (|| -> Result<()> {
+            let uncompressed_len = u32::try_from(job.block_bytes.len())
+                .context("first-seen hot archive block exceeds u32::MAX")?;
+            compressed.clear();
+            let compress_bound = zstd::zstd_safe::compress_bound(job.block_bytes.len());
+            if compressed.capacity() < compress_bound {
+                compressed.reserve(compress_bound.saturating_sub(compressed.len()));
+                summary.zstd_buffer_reserves += 1;
+            }
+            summary.zstd_buffer_capacity_max =
+                summary.zstd_buffer_capacity_max.max(compressed.capacity());
+
+            let compress_started = DetailTimer::start(detailed_timings);
+            compressor
+                .compress_to_buffer(&job.block_bytes, &mut compressed)
+                .with_context(|| format!("zstd compress first-seen block_id {}", job.block_id))?;
+            summary.zstd_compress += compress_started.elapsed();
+            let compressed_len = u32::try_from(compressed.len())
+                .context("compressed first-seen hot block exceeds u32::MAX")?;
+
+            let write_started = DetailTimer::start(detailed_timings);
+            writer
+                .write_all(&compressed)
+                .with_context(|| format!("write {}", blocks_path.display()))?;
+            summary.block_write += write_started.elapsed();
+
+            summary.rows.push(ArchiveV2HotBlockIndexRow {
+                block_id: job.block_id,
+                slot: job.slot,
+                compressed_offset: summary.blob_offset,
+                compressed_len,
+                uncompressed_len,
+                tx_count: job.tx_count,
+                first_tx_ordinal: job.first_tx_ordinal,
+                first_signature_ordinal: job.first_signature_ordinal,
+                signature_count: job.signature_count,
+            });
+            summary.blob_offset += u64::from(compressed_len);
+            summary.uncompressed_bytes += u64::from(uncompressed_len);
+            summary.compressed_bytes += u64::from(compressed_len);
+            Ok(())
+        })();
+
+        job.block_bytes.clear();
+        let _ = recycled.send(job.block_bytes);
+        result?;
+    }
+
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", blocks_path.display()))?;
+    Ok(summary)
+}
+
+/// Builds hot blocks in one current-epoch CAR pass by assigning final pubkey
+/// IDs in deterministic first-reference order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_hot_blocks_first_seen(
+    input: &Path,
+    output_dir: &Path,
+    previous_car: Option<&Path>,
+    external_blockhashes_path: Option<&Path>,
+    level: i32,
+    max_blocks: Option<u64>,
+    resume: bool,
+    include_access: bool,
+    seed_registry_path: Option<&Path>,
+    seed_key_limit: usize,
+    registry_capacity: usize,
+    decode_workers: usize,
+    car_zstd_prefetch_mib: usize,
+    scan_only: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        level >= 0,
+        "zstd compression level must be non-negative, got {level}"
+    );
+    anyhow::ensure!(
+        registry_capacity > 0,
+        "first-seen registry capacity must be non-zero"
+    );
+    anyhow::ensure!(
+        (1..=FIRST_SEEN_DECODE_WORKERS_MAX).contains(&decode_workers),
+        "first-seen decode workers must be in 1..={FIRST_SEEN_DECODE_WORKERS_MAX}, got {decode_workers}"
+    );
+    anyhow::ensure!(
+        car_zstd_prefetch_mib <= FIRST_SEEN_ZSTD_PREFETCH_MIB_MAX,
+        "CAR zstd prefetch must be in 0..={FIRST_SEEN_ZSTD_PREFETCH_MIB_MAX} MiB, got {car_zstd_prefetch_mib}"
+    );
+    anyhow::ensure!(
+        car_zstd_prefetch_mib == 0 || input_path_is_car_zstd(input),
+        "--car-zstd-prefetch-mib requires a local .car.zst input"
+    );
+    anyhow::ensure!(
+        !max_blocks.is_some_and(|limit| limit == 0),
+        "--max-blocks must be greater than zero for a first-seen build"
+    );
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))?;
+
+    let external_blockhashes = load_external_blockhash_overrides(external_blockhashes_path)?;
+    let genesis = genesis_epoch0::maybe_load_for_input(input)?;
+    anyhow::ensure!(
+        genesis.is_none(),
+        "experimental first-seen hot builder does not yet support epoch-0 genesis"
+    );
+
+    let registry_path = output_dir.join(REGISTRY_FILE);
+    let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
+    let registry_index_path = output_dir.join(REGISTRY_INDEX_FILE);
+    let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
+    let blocks_path = output_dir.join(ARCHIVE_V2_BLOCKS_FILE);
+    let index_path = output_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
+    let access_path = output_dir.join(ARCHIVE_V2_BLOCK_ACCESS_FILE);
+    let access_index_path = output_dir.join(ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE);
+    let meta_path = output_dir.join(ARCHIVE_V2_META_FILE);
+    let signatures_path = output_dir.join(ARCHIVE_V2_SIGNATURES_FILE);
+    let poh_path = output_dir.join(POH_FILE);
+    let shredding_path = output_dir.join(SHREDDING_FILE);
+    let vote_hash_registry_path = output_dir.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE);
+    let first_seen_manifest_path = output_dir.join(FIRST_SEEN_REGISTRY_MANIFEST_FILE);
+    let next_seed_path = output_dir.join(FIRST_SEEN_HOT_SEED_FILE);
+    let previous_tail_path = output_dir.join(PREV_BLOCKHASH_TAIL_FILE);
+    let scan_complete_path =
+        output_dir.join(crate::first_seen_finalization::FIRST_SEEN_SCAN_COMPLETE_FILE);
+
+    for path in [
+        &registry_path,
+        &registry_counts_path,
+        &registry_index_path,
+        &blockhash_registry_path,
+        &blocks_path,
+        &index_path,
+        &access_path,
+        &access_index_path,
+        &meta_path,
+        &signatures_path,
+        &poh_path,
+        &shredding_path,
+        &vote_hash_registry_path,
+        &first_seen_manifest_path,
+        &next_seed_path,
+        &previous_tail_path,
+        &scan_complete_path,
+    ] {
+        anyhow::ensure!(
+            !path.exists(),
+            "first-seen builds require a fresh candidate output directory; artifact already exists: {}",
+            path.display()
+        );
+    }
+
+    let previous_tail = load_or_build_previous_tail(output_dir, previous_car, resume)?;
+
+    let registry_tmp = pre_hot_tmp_path(&registry_path);
+    let registry_counts_tmp = pre_hot_tmp_path(&registry_counts_path);
+    let blockhash_tmp = pre_hot_tmp_path(&blockhash_registry_path);
+    let meta_tmp = pre_hot_tmp_path(&meta_path);
+    let first_seen_manifest_tmp = pre_hot_tmp_path(&first_seen_manifest_path);
+    let next_seed_tmp = pre_hot_tmp_path(&next_seed_path);
+    for path in [
+        &registry_tmp,
+        &registry_counts_tmp,
+        &blockhash_tmp,
+        &meta_tmp,
+        &first_seen_manifest_tmp,
+        &next_seed_tmp,
+    ] {
+        if path.exists() {
+            std::fs::remove_file(path)
+                .with_context(|| format!("remove stale first-seen temp {}", path.display()))?;
+        }
+    }
+
+    let mut registry = FirstSeenRegistry::new(registry_capacity, &registry_tmp)?;
+    seed_first_seen_registry(&mut registry, seed_registry_path, seed_key_limit)?;
+    let mut known_program_ids = KnownProgramIds::from_first_seen(&registry);
+    info!(
+        "Archive V2 first-seen registry initialized: capacity={} seeded_keys={} seed_hash={} seed_source={}",
+        registry.table_capacity(),
+        registry.seeded_keys,
+        registry.seed_digest(),
+        seed_registry_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "builtins-only".to_string())
+    );
+
+    let raw_key_index = KeyIndex::build(Vec::new());
+    let blockhash_file = File::create(&blockhash_tmp)
+        .with_context(|| format!("create {}", blockhash_tmp.display()))?;
+    let mut blockhash_writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, blockhash_file);
+    let blocks_file =
+        File::create(&blocks_path).with_context(|| format!("create {}", blocks_path.display()))?;
+    let meta_file =
+        File::create(&meta_tmp).with_context(|| format!("create {}", meta_tmp.display()))?;
+    let mut meta_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        meta_file,
+    ));
+    let signatures_file = File::create(&signatures_path)
+        .with_context(|| format!("create {}", signatures_path.display()))?;
+    let mut signatures_writer =
+        BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, signatures_file);
+    let mut access_writer = if include_access {
+        let access_file = File::create(&access_path)
+            .with_context(|| format!("create {}", access_path.display()))?;
+        Some(BufWriter::with_capacity(
+            ARCHIVE_PRE_HOT_IO_BUFFER,
+            access_file,
+        ))
+    } else {
+        None
+    };
+    let poh_file =
+        File::create(&poh_path).with_context(|| format!("create {}", poh_path.display()))?;
+    let mut poh_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        poh_file,
+    ));
+    let shredding_file = File::create(&shredding_path)
+        .with_context(|| format!("create {}", shredding_path.display()))?;
+    let mut shredding_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        shredding_file,
+    ));
+
+    write_hot_meta(
+        &mut meta_writer,
+        &ArchiveV2HotMetaRecord::Header(WincodeArchiveV2Header {
+            version: WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+            flags: ARCHIVE_FLAGS_LEB128
+                | ARCHIVE_FLAGS_FIRST_SEEN_REGISTRY
+                | ARCHIVE_FLAGS_ALL_PUBKEY_REF_COUNTS,
+        }),
+    )?;
+
+    let mut block_bytes = Vec::new();
+    let mut compressed_buf = Vec::new();
+    let mut access_bytes = Vec::new();
+    let mut first_seen_signatures = FirstSeenBlockSignatures::default();
+    let mut hot_block_buffers = HotBlockBuffers::default();
+    let mut first_seen_access_pubkeys = Vec::<ArchiveV2BlockAccessPubkey>::new();
+    let mut blockhashes = Vec::<[u8; 32]>::new();
+
+    let prefetch_bytes = car_zstd_prefetch_mib << 20;
+    let mut scanner = if prefetch_bytes == 0 {
+        RawCarScanner::open_with_buffer(input, BLOCKHASH_SCAN_BUFFER_SIZE)?
+    } else {
+        RawCarScanner::open_zstd_prefetch_with_buffer(
+            input,
+            BLOCKHASH_SCAN_BUFFER_SIZE,
+            prefetch_bytes,
+        )?
+    };
+    let zstd_prefetch_stats = scanner.zstd_prefetch_stats.clone();
+    scanner.skip_header()?;
+    let mut pending = PendingBlock::default();
+    let mut footer = WincodeArchiveV2Footer::default();
+    let mut timings = ArchiveV2Timings::from_env();
+    let mut parallel_tx_decoder = if decode_workers > 1 {
+        Some(FirstSeenTxDecodePool::new(decode_workers)?)
+    } else {
+        None
+    };
+    info!(
+        "Archive V2 first-seen async ordered zstd writer enabled (two-buffer pipeline, include_access={include_access})"
+    );
+    let mut blocks_writer = None::<BufWriter<File>>;
+    let mut compressor = None::<zstd::bulk::Compressor<'static>>;
+    let mut async_blocks_writer = Some(FirstSeenAsyncBlockWriter::start(
+        blocks_file,
+        blocks_path.clone(),
+        level,
+        timings.detailed,
+    )?);
+    let mut progress = ProgressTracker::new("Archive V2 FirstSeen Hot Write");
+    let mut block_id = 0u32;
+    let mut rolling_blockhashes = RollingBlockhashIndex::new(ROLLING_BLOCKHASH_CAPACITY);
+    rolling_blockhashes.seed_previous_tail(&previous_tail)?;
+    let mut last_blockhash = None;
+
+    let mut rows = Vec::new();
+    let mut access_rows = Vec::new();
+    let mut blob_offset = 0u64;
+    let mut access_offset = 0u64;
+    let mut uncompressed_bytes = 0u64;
+    let mut compressed_bytes = 0u64;
+    let mut access_file_bytes = 0u64;
+    let mut first_tx_ordinal = 0u64;
+    let mut first_signature_ordinal = 0u64;
+    let mut raw_pubkey_refs = 0u64;
+    let mut slot_to_block_id: GxHashMap<u64, u32> =
+        GxHashMap::with_hasher(GxBuildHasher::default());
+    let mut vote_hashes = VoteHashRegistryBuilder::default();
+    let mut metadata_zstd = ZstdReusableDecoder::new();
+    let started = Instant::now();
+
+    while let Some(raw) = scanner.next_node_timed_with_data_buffers(
+        &mut pending.raw_dataframe_payloads,
+        Some(&mut timings),
+    )? {
+        footer.car_entries += 1;
+        footer.car_payload_bytes += raw.payload_len as u64;
+        footer.decoded_node_payload_bytes += raw.payload_len as u64;
+
+        let classify_started = timings.detail_timer();
+        match raw.node {
+            RawNode::Transaction(tx) => {
+                footer.transactions += 1;
+                pending.transactions.push(PendingTx {
+                    tx,
+                    payload_len: raw.payload_len,
+                });
+            }
+            RawNode::Entry(entry) => {
+                footer.entries += 1;
+                pending.entries.push(PendingEntry {
+                    entry,
+                    payload_len: raw.payload_len,
+                });
+            }
+            RawNode::Rewards(rewards) => {
+                footer.rewards += 1;
+                anyhow::ensure!(
+                    pending.rewards.is_none(),
+                    "duplicate rewards node before block"
+                );
+                pending.rewards = Some(PendingRewards {
+                    rewards,
+                    payload_len: raw.payload_len,
+                });
+            }
+            RawNode::DataFrame(frame) => {
+                footer.dataframes += 1;
+                pending.insert_dataframe_recycling(frame)?;
+            }
+            RawNode::Block(block) => {
+                footer.blocks += 1;
+                rolling_blockhashes.prune_for_slot(block.slot)?;
+                timings.classify += classify_started.elapsed();
+                let previous_blockhash =
+                    last_blockhash.or_else(|| previous_tail.last().map(|previous| previous.hash));
+                let (mut record, tx_count, sidecar) = build_block_record(
+                    &mut pending,
+                    block,
+                    &raw_key_index,
+                    &rolling_blockhashes,
+                    block_id,
+                    &mut footer,
+                    &mut timings,
+                    &external_blockhashes,
+                    previous_blockhash,
+                    &mut metadata_zstd,
+                    parallel_tx_decoder.as_mut(),
+                    Some(&mut first_seen_signatures),
+                )?;
+                let slot = pending.last_slot;
+
+                let intern_started = timings.detail_timer();
+                first_seen_access_pubkeys.clear();
+                let intern_stats = crate::pre_hot::intern_block_pubkeys(&mut record, |key| {
+                    let id = registry.intern(key)?;
+                    if include_access {
+                        first_seen_access_pubkeys
+                            .push(ArchiveV2BlockAccessPubkey { id, pubkey: *key });
+                    }
+                    Ok(id)
+                })
+                .with_context(|| format!("slot {slot} intern first-seen pubkeys"))?;
+                anyhow::ensure!(
+                    intern_stats.raw_remaining == 0
+                        && intern_stats.rekeyed == intern_stats.raw_seen,
+                    "slot {slot} first-seen traversal left {} of {} pubkeys raw",
+                    intern_stats.raw_remaining,
+                    intern_stats.raw_seen
+                );
+                raw_pubkey_refs = raw_pubkey_refs
+                    .checked_add(intern_stats.raw_seen)
+                    .context("first-seen traversal reference count overflow")?;
+                if include_access {
+                    normalize_first_seen_access_pubkeys(&mut first_seen_access_pubkeys)
+                        .with_context(|| {
+                            format!("slot {slot} validate first-seen access pubkeys")
+                        })?;
+                }
+                timings.metadata_pubkey_compact += intern_started.elapsed();
+
+                known_program_ids.refresh_from_first_seen(&registry);
+                vote_hashes.ensure_block(block_id);
+                let block_shredding = std::mem::take(&mut record.header.compact.shredding);
+                let (hot_block, block_signature_count) = hot_block_from_first_seen_archive_block(
+                    record,
+                    &first_seen_signatures,
+                    &known_program_ids,
+                    &slot_to_block_id,
+                    &mut vote_hashes,
+                    Some(&mut signatures_writer as &mut dyn Write),
+                    &mut hot_block_buffers,
+                    &mut timings,
+                )
+                .with_context(|| format!("slot {slot} first-seen hot block encode"))?;
+                first_seen_signatures.record_block_write();
+
+                block_bytes.clear();
+                let serialize_started = timings.detail_timer();
+                wincode::config::serialize_into(
+                    &mut block_bytes,
+                    &hot_block,
+                    wincode_leb128_config(),
+                )?;
+                timings.hot_block_serialize += serialize_started.elapsed();
+                let uncompressed_len = u32::try_from(block_bytes.len())
+                    .context("first-seen hot archive block exceeds u32::MAX")?;
+                if let Some(async_writer) = async_blocks_writer.as_mut() {
+                    block_bytes = async_writer.submit(FirstSeenBlockWriteJob {
+                        block_bytes,
+                        block_id,
+                        slot,
+                        tx_count,
+                        first_tx_ordinal,
+                        first_signature_ordinal,
+                        signature_count: block_signature_count,
+                    })?;
+                } else {
+                    let compress_bound = zstd::zstd_safe::compress_bound(block_bytes.len());
+                    if compressed_buf.capacity() < compress_bound {
+                        compressed_buf.reserve(compress_bound.saturating_sub(compressed_buf.len()));
+                        timings.hot_zstd_buffer_reserves += 1;
+                    }
+                    timings.hot_zstd_buffer_capacity_max = timings
+                        .hot_zstd_buffer_capacity_max
+                        .max(compressed_buf.capacity());
+                    let compress_started = timings.detail_timer();
+                    compressor
+                        .as_mut()
+                        .context("missing synchronous first-seen zstd compressor")?
+                        .compress_to_buffer(&block_bytes, &mut compressed_buf)
+                        .with_context(|| format!("zstd compress first-seen block_id {block_id}"))?;
+                    timings.hot_zstd_compress += compress_started.elapsed();
+                    let compressed_len = u32::try_from(compressed_buf.len())
+                        .context("compressed first-seen hot block exceeds u32::MAX")?;
+                    let write_started = timings.detail_timer();
+                    blocks_writer
+                        .as_mut()
+                        .context("missing synchronous first-seen blocks writer")?
+                        .write_all(&compressed_buf)
+                        .with_context(|| format!("write {}", blocks_path.display()))?;
+                    timings.hot_block_write += write_started.elapsed();
+
+                    rows.push(ArchiveV2HotBlockIndexRow {
+                        block_id,
+                        slot,
+                        compressed_offset: blob_offset,
+                        compressed_len,
+                        uncompressed_len,
+                        tx_count,
+                        first_tx_ordinal,
+                        first_signature_ordinal,
+                        signature_count: block_signature_count,
+                    });
+                    blob_offset += u64::from(compressed_len);
+                    uncompressed_bytes += u64::from(uncompressed_len);
+                    compressed_bytes += u64::from(compressed_len);
+                }
+
+                let poh_started = timings.detail_timer();
+                poh_writer.write(&WincodeArchiveV2PohRecord {
+                    block_id,
+                    slot,
+                    entries: sidecar.poh_entries,
+                })?;
+                shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
+                    block_id,
+                    slot,
+                    shredding: block_shredding,
+                })?;
+                blockhash_writer
+                    .write_all(&sidecar.blockhash)
+                    .with_context(|| format!("write {}", blockhash_tmp.display()))?;
+                blockhashes.push(sidecar.blockhash);
+                timings.hot_poh_write += poh_started.elapsed();
+
+                if let Some(access_writer) = access_writer.as_mut() {
+                    access_bytes.clear();
+                    let access_blob = build_archive_v2_block_access_blob_with_pubkey_resolver(
+                        &hot_block,
+                        |id| {
+                            let index = first_seen_access_pubkeys
+                                .binary_search_by_key(&id, |entry| entry.id)
+                                .map_err(|_| {
+                                    anyhow!(
+                                        "pubkey registry id {id} is absent from this block's exact first-seen map"
+                                    )
+                                })?;
+                            Ok(first_seen_access_pubkeys[index].pubkey)
+                        },
+                        &blockhashes,
+                        &previous_tail,
+                        &first_seen_signatures.bytes,
+                        &vote_hashes.rows,
+                    )
+                    .with_context(|| format!("slot {slot} first-seen block access sidecar"))?;
+                    wincode::config::serialize_into(
+                        &mut access_bytes,
+                        &access_blob,
+                        wincode_leb128_config(),
+                    )?;
+                    let access_len =
+                        checked_archive_v2_block_access_frame_len(access_bytes.len(), slot)?;
+                    access_writer
+                        .write_all(&access_bytes)
+                        .with_context(|| format!("write {}", access_path.display()))?;
+                    access_rows.push(ArchiveV2BlockAccessIndexRow {
+                        block_id,
+                        slot,
+                        access_offset,
+                        access_len,
+                        tx_count,
+                        signature_count: block_signature_count,
+                    });
+                    access_offset += u64::from(access_len);
+                    access_file_bytes += u64::from(access_len);
+                }
+                hot_block_buffers.recycle(hot_block);
+
+                first_tx_ordinal += u64::from(tx_count);
+                first_signature_ordinal += u64::from(block_signature_count);
+
+                let current_block_id =
+                    i32::try_from(block_id).context("first-seen blockhash id exceeds i32::MAX")?;
+                rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
+                last_blockhash = Some(sidecar.blockhash);
+                slot_to_block_id.insert(slot, block_id);
+                block_id = block_id
+                    .checked_add(1)
+                    .context("first-seen hot block id overflow")?;
+                progress.update_slot(slot);
+                progress.update_input_bytes(footer.car_payload_bytes);
+                progress.update(1, u64::from(tx_count));
+                pending.clear_recycling_frame_data();
+                trim_hot_memory(
+                    block_id,
+                    &mut block_bytes,
+                    &mut compressed_buf,
+                    &mut access_bytes,
+                    None,
+                );
+                hot_block_buffers.trim();
+                if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
+                    break;
+                }
+                continue;
+            }
+            RawNode::Subset(_) => footer.subset_nodes_ignored += 1,
+            RawNode::Epoch(_) => footer.epoch_nodes_ignored += 1,
+        }
+        timings.classify += classify_started.elapsed();
+    }
+
+    // Closing the scanner first joins the optional decompression worker and
+    // releases both large prefetch buffers before peak-memory finalization.
+    drop(scanner);
+    if let Some(stats) = zstd_prefetch_stats {
+        let stats = stats.snapshot();
+        info!(
+            "Archive V2 first-seen CAR zstd prefetch: chunk_mib={} worker_bytes={} worker_chunks={} consumer_bytes={} consumer_reads={} worker_ready_wait_s={:.3} worker_recycle_wait_s={:.3} consumer_ready_wait_s={:.3} consumer_recycle_wait_s={:.3}",
+            car_zstd_prefetch_mib,
+            stats.worker_bytes,
+            stats.worker_chunks,
+            stats.consumer_bytes,
+            stats.consumer_reads,
+            stats.worker_ready_wait.as_secs_f64(),
+            stats.worker_recycle_wait.as_secs_f64(),
+            stats.consumer_ready_wait.as_secs_f64(),
+            stats.consumer_recycle_wait.as_secs_f64(),
+        );
+    }
+
+    // Release decoder threads and their retained metadata/zstd scratch before
+    // MPHF construction and other peak-memory finalization work.
+    drop(parallel_tx_decoder);
+
+    if let Some(async_writer) = async_blocks_writer.take() {
+        let summary = async_writer.finish()?;
+        rows = summary.rows;
+        blob_offset = summary.blob_offset;
+        uncompressed_bytes = summary.uncompressed_bytes;
+        compressed_bytes = summary.compressed_bytes;
+        timings.hot_zstd_compress += summary.zstd_compress;
+        timings.hot_block_write += summary.block_write;
+        timings.hot_zstd_buffer_reserves += summary.zstd_buffer_reserves;
+        timings.hot_zstd_buffer_capacity_max = timings
+            .hot_zstd_buffer_capacity_max
+            .max(summary.zstd_buffer_capacity_max);
+    }
+
+    anyhow::ensure!(
+        pending.transactions.is_empty()
+            && pending.entries.is_empty()
+            && pending.rewards.is_none()
+            && pending.dataframes.is_empty(),
+        "first-seen CAR scan ended with uncommitted trailing nodes"
+    );
+    anyhow::ensure!(
+        footer.blocks == rows.len() as u64,
+        "first-seen footer block count {} != written rows {}",
+        footer.blocks,
+        rows.len()
+    );
+    anyhow::ensure!(
+        footer.transactions == first_tx_ordinal,
+        "first-seen footer transaction count {} != written transactions {}",
+        footer.transactions,
+        first_tx_ordinal
+    );
+    anyhow::ensure!(
+        registry.references == raw_pubkey_refs,
+        "first-seen registry references {} != traversal references {}",
+        registry.references,
+        raw_pubkey_refs
+    );
+
+    if let Some(blocks_writer) = blocks_writer.as_mut() {
+        blocks_writer.flush()?;
+    }
+    signatures_writer.flush()?;
+    if let Some(access_writer) = access_writer.as_mut() {
+        access_writer.flush()?;
+    }
+    poh_writer.flush()?;
+    shredding_writer.flush()?;
+    blockhash_writer
+        .flush()
+        .with_context(|| format!("flush {}", blockhash_tmp.display()))?;
+    vote_hashes.write(&vote_hash_registry_path)?;
+    write_archive_v2_hot_block_index(&index_path, blob_offset, level, 0, &rows)?;
+    if include_access {
+        write_archive_v2_block_access_index(&access_index_path, access_offset, 0, &access_rows)?;
+    }
+    write_hot_meta(
+        &mut meta_writer,
+        &ArchiveV2HotMetaRecord::Footer(footer.clone()),
+    )?;
+    meta_writer.flush()?;
+    let completed_blocks = rows.len();
+    let raw_dataframe_pool_stats = pending.raw_dataframe_payloads.stats();
+    anyhow::ensure!(
+        raw_dataframe_pool_stats.current_buffers == 0
+            && raw_dataframe_pool_stats.current_capacity == 0,
+        "first-seen RawDataFrame payload pool still has {} live buffers with capacity {} after the final block",
+        raw_dataframe_pool_stats.current_buffers,
+        raw_dataframe_pool_stats.current_capacity,
+    );
+    drop(blocks_writer);
+    drop(signatures_writer);
+    drop(access_writer);
+    drop(poh_writer);
+    drop(shredding_writer);
+    drop(blockhash_writer);
+    drop(meta_writer);
+    drop(raw_key_index);
+    drop(compressor);
+    drop(block_bytes);
+    drop(compressed_buf);
+    drop(access_bytes);
+    let first_seen_signature_arena_stats = first_seen_signatures.stats;
+    anyhow::ensure!(
+        first_seen_signature_arena_stats.blocks == completed_blocks as u64
+            && first_seen_signature_arena_stats.transactions == first_tx_ordinal
+            && first_seen_signature_arena_stats.signatures == first_signature_ordinal,
+        "first-seen signature arena totals blocks={} txs={} signatures={} do not match archive totals blocks={} txs={} signatures={}",
+        first_seen_signature_arena_stats.blocks,
+        first_seen_signature_arena_stats.transactions,
+        first_seen_signature_arena_stats.signatures,
+        completed_blocks,
+        first_tx_ordinal,
+        first_signature_ordinal,
+    );
+    drop(first_seen_signatures);
+    drop(hot_block_buffers);
+    drop(first_seen_access_pubkeys);
+    drop(blockhashes);
+    drop(rolling_blockhashes);
+    drop(slot_to_block_id);
+    drop(vote_hashes);
+    drop(rows);
+    drop(access_rows);
+    drop(pending);
+    drop(footer);
+    trim_process_heap();
+
+    let registry_finalize_started = Instant::now();
+    let FirstSeenRegistryParts {
+        keys: registry_keys,
+        counts,
+        seed_hash,
+        seeded_keys,
+        references,
+        table_capacity,
+        observed_audit,
+        count_heap_bytes,
+        count_u16_chunks,
+        count_u32_chunks,
+    } = registry.into_parts()?;
+    anyhow::ensure!(
+        registry_keys == counts.len(),
+        "first-seen registry has {} keys but {} counts",
+        registry_keys,
+        counts.len(),
+    );
+    let counted_references = counts.iter().try_fold(0u64, |sum, count| {
+        sum.checked_add(u64::from(count))
+            .context("first-seen counted reference sum overflow")
+    })?;
+    anyhow::ensure!(
+        counted_references == references,
+        "first-seen registry counts sum {} does not match {} observed references",
+        counted_references,
+        references,
+    );
+    let verified_audit = verify_first_seen_reference_audit(&registry_tmp, &counts, observed_audit)?;
+    write_first_seen_registry_counts(&registry_counts_tmp, counts.iter())?;
+    std::fs::rename(&registry_tmp, &registry_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            registry_tmp.display(),
+            registry_path.display()
+        )
+    })?;
+    std::fs::rename(&registry_counts_tmp, &registry_counts_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            registry_counts_tmp.display(),
+            registry_counts_path.display()
+        )
+    })?;
+    std::fs::rename(&blockhash_tmp, &blockhash_registry_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            blockhash_tmp.display(),
+            blockhash_registry_path.display()
+        )
+    })?;
+    let registry_write_elapsed = registry_finalize_started.elapsed();
+    let next_seed_started = Instant::now();
+    let (next_seed_keys, next_seed_hash) =
+        write_first_seen_hot_seed(&next_seed_tmp, &registry_path, &counts, seed_key_limit)?;
+    std::fs::rename(&next_seed_tmp, &next_seed_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            next_seed_tmp.display(),
+            next_seed_path.display()
+        )
+    })?;
+    let next_seed_elapsed = next_seed_started.elapsed();
+    write_first_seen_manifest(
+        &first_seen_manifest_tmp,
+        input,
+        seed_registry_path,
+        &seed_hash,
+        seeded_keys,
+        &next_seed_hash,
+        next_seed_keys,
+        registry_keys,
+        references,
+        verified_audit,
+    )?;
+    drop(counts);
+    trim_process_heap();
+
+    let mphf_elapsed = if scan_only {
+        let marker = crate::first_seen_finalization::FirstSeenScanMarker::new(
+            registry_keys,
+            references,
+            include_access,
+        )?;
+        crate::first_seen_finalization::write_scan_complete_marker(output_dir, marker)?;
+        Duration::ZERO
+    } else {
+        let mphf_started = Instant::now();
+        let registry_store = KeyStore::load(&registry_path)
+            .with_context(|| format!("load {}", registry_path.display()))?;
+        let registry_index = KeyIndex::build_from_slice(&registry_store.keys);
+        write_registry_key_index_atomic(&registry_index, &registry_index_path)?;
+        drop(registry_index);
+        drop(registry_store);
+        trim_process_heap();
+        let mphf_elapsed = mphf_started.elapsed();
+        crate::first_seen_finalization::sync_candidate_files(output_dir)?;
+        std::fs::rename(&first_seen_manifest_tmp, &first_seen_manifest_path).with_context(
+            || {
+                format!(
+                    "rename {} to {}",
+                    first_seen_manifest_tmp.display(),
+                    first_seen_manifest_path.display()
+                )
+            },
+        )?;
+        crate::first_seen_finalization::sync_directory(output_dir)?;
+        std::fs::rename(&meta_tmp, &meta_path)
+            .with_context(|| format!("rename {} to {}", meta_tmp.display(), meta_path.display()))?;
+        crate::first_seen_finalization::sync_directory(output_dir)?;
+        mphf_elapsed
+    };
+
+    progress.final_report();
+    let elapsed = started.elapsed().as_secs_f64();
+    let ratio = if uncompressed_bytes > 0 {
+        compressed_bytes as f64 * 100.0 / uncompressed_bytes as f64
+    } else {
+        0.0
+    };
+    info!(
+        "Archive V2 first-seen hot {} complete in {:.2}s: blocks={} txs={} signatures={} keys={} seeded_keys={} seed_hash={} refs={} table_capacity={} count_heap_bytes={} count_u16_chunks={} count_u32_chunks={} level={} decode_workers={} car_zstd_prefetch_mib={} include_access={} uncompressed_bytes={} compressed_bytes={} access_bytes={} ratio_pct={:.2} registry_write_s={:.3} next_seed_keys={} next_seed_hash={} next_seed_s={:.3} mphf_s={:.3} output={}",
+        if scan_only { "scan" } else { "build" },
+        elapsed,
+        completed_blocks,
+        first_tx_ordinal,
+        first_signature_ordinal,
+        registry_keys,
+        seeded_keys,
+        seed_hash,
+        references,
+        table_capacity,
+        count_heap_bytes,
+        count_u16_chunks,
+        count_u32_chunks,
+        level,
+        decode_workers,
+        car_zstd_prefetch_mib,
+        include_access,
+        uncompressed_bytes,
+        compressed_bytes,
+        access_file_bytes,
+        ratio,
+        registry_write_elapsed.as_secs_f64(),
+        next_seed_keys,
+        next_seed_hash,
+        next_seed_elapsed.as_secs_f64(),
+        mphf_elapsed.as_secs_f64(),
+        output_dir.display()
+    );
+    info!(
+        "Archive V2 first-seen timings: scan_decode={:.3}s classify={:.3}s dataframe_assemble={:.3}s tx_decode_compact={:.3}s metadata_decode_compact={:.3}s parallel_decode_wall={:.3}s rewards_decode_compact={:.3}s pubkey_intern={:.3}s hot_message_build={:.3}s hot_message_encode={:.3}s hot_metadata_encode={:.3}s hot_signature_write={:.3}s hot_block_serialize={:.3}s hot_zstd_compress={:.3}s hot_block_write={:.3}s hot_poh_write={:.3}s",
+        timings.scan_decode_node.as_secs_f64(),
+        timings.classify.as_secs_f64(),
+        timings.dataframe_assemble.as_secs_f64(),
+        timings.tx_decode_compact.as_secs_f64(),
+        timings.metadata_decode_compact.as_secs_f64(),
+        timings.first_seen_parallel_decode_wall.as_secs_f64(),
+        timings.rewards_decode_compact.as_secs_f64(),
+        timings.metadata_pubkey_compact.as_secs_f64(),
+        timings.hot_message_build.as_secs_f64(),
+        timings.hot_message_encode.as_secs_f64(),
+        timings.hot_metadata_encode.as_secs_f64(),
+        timings.hot_signature_write.as_secs_f64(),
+        timings.hot_block_serialize.as_secs_f64(),
+        timings.hot_zstd_compress.as_secs_f64(),
+        timings.hot_block_write.as_secs_f64(),
+        timings.hot_poh_write.as_secs_f64(),
+    );
+    info!(
+        "Archive V2 first-seen RawDataFrame payload pool: retained_buffers={} retained_capacity={} current_buffers={} current_capacity={} peak_current_buffers={} peak_current_capacity={} takes={} reused_buffers={} fresh_buffers={} allocation_events={} growth_events={} discarded_buffers={} discarded_capacity={}",
+        raw_dataframe_pool_stats.retained_buffers,
+        raw_dataframe_pool_stats.retained_capacity,
+        raw_dataframe_pool_stats.current_buffers,
+        raw_dataframe_pool_stats.current_capacity,
+        raw_dataframe_pool_stats.peak_current_buffers,
+        raw_dataframe_pool_stats.peak_current_capacity,
+        raw_dataframe_pool_stats.takes,
+        raw_dataframe_pool_stats.reused_buffers,
+        raw_dataframe_pool_stats.fresh_buffers,
+        raw_dataframe_pool_stats.allocation_events,
+        raw_dataframe_pool_stats.growth_events,
+        raw_dataframe_pool_stats.discarded_buffers,
+        raw_dataframe_pool_stats.discarded_capacity,
+    );
+    info!(
+        "Archive V2 first-seen signature arena: blocks={} transactions={} signatures={} decoder_signature_ref_vec_allocations_avoided={} owned_signature_outer_vec_allocations_avoided={} owned_signature_inner_vec_allocations_avoided={} block_write_calls={} peak_counts_capacity={} peak_bytes_capacity={}",
+        first_seen_signature_arena_stats.blocks,
+        first_seen_signature_arena_stats.transactions,
+        first_seen_signature_arena_stats.signatures,
+        first_seen_signature_arena_stats.decoder_signature_ref_vec_allocations_avoided,
+        first_seen_signature_arena_stats.owned_signature_outer_vec_allocations_avoided,
+        first_seen_signature_arena_stats.owned_signature_inner_vec_allocations_avoided,
+        first_seen_signature_arena_stats.block_write_calls,
+        first_seen_signature_arena_stats.peak_counts_capacity,
+        first_seen_signature_arena_stats.peak_bytes_capacity,
+    );
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct PreHotSpoolStats {
+    records: u64,
+    blocks: u64,
+    txs: u64,
+    raw_pubkey_refs: u64,
+    uncompressed_bytes: u64,
+    compressed_bytes: u64,
+    max_uncompressed_record: usize,
+    max_compressed_record: usize,
+}
+
+struct PreHotRecordWriter<W: Write> {
+    writer: BufWriter<W>,
+    compressor: zstd::bulk::Compressor<'static>,
+    encoded: Vec<u8>,
+    compressed: Vec<u8>,
+    stats: PreHotSpoolStats,
+}
+
+impl<W: Write> PreHotRecordWriter<W> {
+    fn new(inner: W) -> Result<Self> {
+        let mut writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, inner);
+        writer.write_all(ARCHIVE_PRE_HOT_MAGIC)?;
+        writer.write_all(&LIVE_PRE_HOT_BLOCK_VERSION.to_le_bytes())?;
+        Ok(Self {
+            writer,
+            compressor: zstd::bulk::Compressor::new(1).context("create PreHot zstd compressor")?,
+            encoded: Vec::new(),
+            compressed: Vec::new(),
+            stats: PreHotSpoolStats::default(),
+        })
+    }
+
+    fn write(&mut self, record: &LivePreHotRecord) -> Result<()> {
+        self.encoded.clear();
+        wincode::config::serialize_into(&mut self.encoded, record, wincode_leb128_config())?;
+        anyhow::ensure!(
+            self.encoded.len() <= ARCHIVE_PRE_HOT_MAX_RECORD_BYTES,
+            "PreHot record is {} bytes, maximum is {}",
+            self.encoded.len(),
+            ARCHIVE_PRE_HOT_MAX_RECORD_BYTES
+        );
+        self.compressed.clear();
+        let compress_bound = zstd::zstd_safe::compress_bound(self.encoded.len());
+        if self.compressed.capacity() < compress_bound {
+            self.compressed
+                .reserve(compress_bound.saturating_sub(self.compressed.len()));
+        }
+        self.compressor
+            .compress_to_buffer(&self.encoded, &mut self.compressed)
+            .context("compress PreHot record")?;
+        let uncompressed_len =
+            u32::try_from(self.encoded.len()).context("PreHot record exceeds u32::MAX")?;
+        let compressed_len = u32::try_from(self.compressed.len())
+            .context("compressed PreHot record exceeds u32::MAX")?;
+        write_u32_varint(&mut self.writer, uncompressed_len)?;
+        write_u32_varint(&mut self.writer, compressed_len)?;
+        self.writer.write_all(&self.compressed)?;
+        self.stats.records = self.stats.records.saturating_add(1);
+        self.stats.uncompressed_bytes = self
+            .stats
+            .uncompressed_bytes
+            .saturating_add(u64::from(uncompressed_len));
+        self.stats.compressed_bytes = self
+            .stats
+            .compressed_bytes
+            .saturating_add(u64::from(compressed_len));
+        self.stats.max_uncompressed_record =
+            self.stats.max_uncompressed_record.max(self.encoded.len());
+        self.stats.max_compressed_record =
+            self.stats.max_compressed_record.max(self.compressed.len());
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<PreHotSpoolStats> {
+        self.writer.flush()?;
+        Ok(self.stats)
+    }
+}
+
+struct PreHotRecordReader<R: Read> {
+    reader: BufReader<R>,
+    decompressor: zstd::bulk::Decompressor<'static>,
+    compressed: Vec<u8>,
+    decoded: Vec<u8>,
+}
+
+impl<R: Read> PreHotRecordReader<R> {
+    fn new(inner: R) -> Result<Self> {
+        let mut reader = BufReader::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, inner);
+        let mut magic = [0u8; ARCHIVE_PRE_HOT_MAGIC.len()];
+        reader.read_exact(&mut magic)?;
+        anyhow::ensure!(
+            &magic == ARCHIVE_PRE_HOT_MAGIC,
+            "invalid PreHot magic {:?}",
+            magic
+        );
+        let mut version = [0u8; 2];
+        reader.read_exact(&mut version)?;
+        let version = u16::from_le_bytes(version);
+        anyhow::ensure!(
+            version == LIVE_PRE_HOT_BLOCK_VERSION,
+            "unsupported PreHot file version {version}"
+        );
+        Ok(Self {
+            reader,
+            decompressor: zstd::bulk::Decompressor::new()
+                .context("create PreHot zstd decompressor")?,
+            compressed: Vec::new(),
+            decoded: Vec::new(),
+        })
+    }
+
+    fn read(&mut self) -> Result<Option<LivePreHotRecord>> {
+        let Some(uncompressed_len) = read_pre_hot_u32_varint(&mut self.reader)? else {
+            return Ok(None);
+        };
+        let compressed_len = read_pre_hot_u32_varint(&mut self.reader)?
+            .context("truncated PreHot compressed-length prefix")?;
+        let uncompressed_len = uncompressed_len as usize;
+        let compressed_len = compressed_len as usize;
+        anyhow::ensure!(
+            uncompressed_len <= ARCHIVE_PRE_HOT_MAX_RECORD_BYTES,
+            "PreHot record length {uncompressed_len} exceeds maximum {}",
+            ARCHIVE_PRE_HOT_MAX_RECORD_BYTES
+        );
+        anyhow::ensure!(
+            compressed_len <= ARCHIVE_PRE_HOT_MAX_RECORD_BYTES,
+            "compressed PreHot record length {compressed_len} exceeds maximum {}",
+            ARCHIVE_PRE_HOT_MAX_RECORD_BYTES
+        );
+        self.compressed.resize(compressed_len, 0);
+        self.reader
+            .read_exact(&mut self.compressed)
+            .context("truncated PreHot compressed record")?;
+        self.decoded.clear();
+        if self.decoded.capacity() < uncompressed_len {
+            self.decoded.reserve(uncompressed_len);
+        }
+        let decoded_len = self
+            .decompressor
+            .decompress_to_buffer(&self.compressed, &mut self.decoded)
+            .context("decompress PreHot record")?;
+        anyhow::ensure!(
+            decoded_len == uncompressed_len && self.decoded.len() == uncompressed_len,
+            "PreHot decoded length mismatch: decoded={} buffer={} expected={}",
+            decoded_len,
+            self.decoded.len(),
+            uncompressed_len
+        );
+        let record = wincode::config::deserialize(&self.decoded, wincode_leb128_config())
+            .context("decode PreHot record")?;
+        Ok(Some(record))
+    }
+
+    fn trim(&mut self) {
+        trim_hot_reusable_buffer(&mut self.compressed);
+        trim_hot_reusable_buffer(&mut self.decoded);
+    }
+}
+
+fn read_pre_hot_u32_varint(reader: &mut impl Read) -> Result<Option<u32>> {
+    let mut value = 0u32;
+    for index in 0..5u32 {
+        let mut byte = [0u8; 1];
+        match reader.read_exact(&mut byte) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::UnexpectedEof && index == 0 => return Ok(None),
+            Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+                bail!("truncated PreHot varint after {index} bytes")
+            }
+            Err(err) => return Err(err.into()),
+        }
+        let byte = byte[0];
+        if index == 4 && byte > 0x0f {
+            bail!("PreHot u32 varint overflow")
+        }
+        value |= u32::from(byte & 0x7f) << (index * 7);
+        if byte & 0x80 == 0 {
+            return Ok(Some(value));
+        }
+    }
+    bail!("PreHot u32 varint overflow")
+}
+
+pub(crate) fn build_hot_blocks_pre_hot(
+    input: &Path,
+    output_dir: &Path,
+    previous_car: Option<&Path>,
+    registry_dir: Option<&Path>,
+    external_blockhashes_path: Option<&Path>,
+    level: i32,
+    max_blocks: Option<u64>,
+    resume: bool,
+    include_access: bool,
+    keep_pre_hot: bool,
+    pre_hot_dir: Option<&Path>,
+    pre_hot_registry_capacity: usize,
+    reuse_pre_hot: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        registry_dir.is_none(),
+        "--registry-dir is not supported with --pre-hot because the PreHot pass builds the registry while decoding CAR"
+    );
+    anyhow::ensure!(
+        level >= 0,
+        "zstd compression level must be non-negative, got {level}"
+    );
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))?;
+    let pre_hot_dir = pre_hot_dir.unwrap_or(output_dir);
+    std::fs::create_dir_all(pre_hot_dir)
+        .with_context(|| format!("create PreHot dir {}", pre_hot_dir.display()))?;
+    let started = Instant::now();
+    let external_blockhashes = load_external_blockhash_overrides(external_blockhashes_path)?;
+    let previous_tail = load_or_build_previous_tail(output_dir, previous_car, resume)?;
+    let genesis = genesis_epoch0::maybe_load_for_input(input)?;
+    let pre_hot_path = pre_hot_dir.join(ARCHIVE_PRE_HOT_FILE);
+    let registry_path = output_dir.join(REGISTRY_FILE);
+    let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
+    let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
+    let poh_path = output_dir.join(POH_FILE);
+
+    let can_resume_spool = reuse_pre_hot
+        && resume
+        && crate::file_nonempty(&pre_hot_path)
+        && crate::file_nonempty(&registry_path)
+        && crate::file_nonempty(&registry_counts_path)
+        && crate::file_nonempty(&blockhash_registry_path)
+        && crate::file_nonempty(&poh_path);
+    if reuse_pre_hot {
+        anyhow::ensure!(
+            can_resume_spool,
+            "--reuse-pre-hot requires a non-empty spool, registry/counts, blockhash registry, and PoH sidecar in {}",
+            output_dir.display()
+        );
+        info!("Reusing completed PreHot spool: {}", pre_hot_path.display());
+    } else {
+        build_pre_hot_spool(
+            input,
+            &pre_hot_path,
+            &registry_path,
+            &registry_counts_path,
+            &blockhash_registry_path,
+            &poh_path,
+            &previous_tail,
+            genesis.as_ref(),
+            &external_blockhashes,
+            max_blocks,
+            pre_hot_registry_capacity,
+        )?;
+    }
+
+    finalize_pre_hot_blocks(
+        &pre_hot_path,
+        output_dir,
+        &previous_tail,
+        genesis.as_ref(),
+        level,
+        include_access,
+        can_resume_spool,
+    )?;
+
+    if !keep_pre_hot {
+        std::fs::remove_file(&pre_hot_path)
+            .with_context(|| format!("remove completed PreHot spool {}", pre_hot_path.display()))?;
+    }
+    info!(
+        "Archive V2 PreHot one-shot complete in {:.2}s: input={} output={} spool_kept={}",
+        started.elapsed().as_secs_f64(),
+        input.display(),
+        output_dir.display(),
+        keep_pre_hot
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_pre_hot_spool(
+    input: &Path,
+    pre_hot_path: &Path,
+    registry_path: &Path,
+    registry_counts_path: &Path,
+    blockhash_registry_path: &Path,
+    poh_path: &Path,
+    previous_tail: &[PreviousBlockhash],
+    genesis: Option<&GenesisArchive>,
+    external_blockhashes: &ExternalBlockhashOverrides,
+    max_blocks: Option<u64>,
+    registry_capacity: usize,
+) -> Result<()> {
+    let started = Instant::now();
+    let pre_hot_tmp = pre_hot_tmp_path(pre_hot_path);
+    let registry_tmp = pre_hot_tmp_path(registry_path);
+    let registry_counts_tmp = pre_hot_tmp_path(registry_counts_path);
+    let blockhash_tmp = pre_hot_tmp_path(blockhash_registry_path);
+    let poh_tmp = pre_hot_tmp_path(poh_path);
+    for path in [
+        &pre_hot_tmp,
+        &registry_tmp,
+        &registry_counts_tmp,
+        &blockhash_tmp,
+        &poh_tmp,
+    ] {
+        if path.exists() {
+            std::fs::remove_file(path)
+                .with_context(|| format!("remove stale PreHot temp {}", path.display()))?;
+        }
+    }
+
+    let file =
+        File::create(&pre_hot_tmp).with_context(|| format!("create {}", pre_hot_tmp.display()))?;
+    let mut writer = PreHotRecordWriter::new(file)?;
+    writer.write(&LivePreHotRecord::Header(WincodeArchiveV2Header {
+        version: LIVE_PRE_HOT_BLOCK_VERSION,
+        flags: ARCHIVE_FLAGS_LEB128 | ARCHIVE_FLAGS_NO_REGISTRY,
+    }))?;
+
+    let blockhash_file = File::create(&blockhash_tmp)
+        .with_context(|| format!("create {}", blockhash_tmp.display()))?;
+    let mut blockhash_writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, blockhash_file);
+    let poh_file =
+        File::create(&poh_tmp).with_context(|| format!("create {}", poh_tmp.display()))?;
+    let mut poh_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        poh_file,
+    ));
+
+    let mut counter = ArchivePubkeyCounter::new(registry_capacity);
+    let mut blockhash_id_offset = 0u32;
+    let mut last_blockhash = None;
+    if let Some(genesis) = genesis {
+        blockhash_writer
+            .write_all(&genesis.genesis_hash)
+            .with_context(|| format!("write {}", blockhash_tmp.display()))?;
+        blockhash_id_offset = 1;
+        last_blockhash = Some(genesis.genesis_hash);
+        genesis_epoch0::add_pubkeys_to(genesis, |key| counter.add32(key));
+    }
+
+    let raw_key_index = KeyIndex::build(Vec::new());
+    let mut rolling_blockhashes = RollingBlockhashIndex::new(ROLLING_BLOCKHASH_CAPACITY);
+    rolling_blockhashes.seed_previous_tail(previous_tail)?;
+    if let Some(genesis) = genesis {
+        rolling_blockhashes.insert(genesis.genesis_hash, 0, 0)?;
+    }
+
+    let mut scanner = RawCarScanner::open_with_buffer(input, BLOCKHASH_SCAN_BUFFER_SIZE)?;
+    scanner.skip_header()?;
+    let mut pending = PendingBlock::default();
+    let mut footer = WincodeArchiveV2Footer::default();
+    let mut timings = ArchiveV2Timings::from_env();
+    let mut progress = ProgressTracker::new("Archive V2 PreHot Extract");
+    let mut block_id = 0u32;
+    let mut metadata_zstd = ZstdReusableDecoder::new();
+
+    while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
+        footer.car_entries += 1;
+        footer.car_payload_bytes += raw.payload_len as u64;
+        footer.decoded_node_payload_bytes += raw.payload_len as u64;
+
+        let classify_started = timings.detail_timer();
+        match raw.node {
+            RawNode::Transaction(tx) => {
+                footer.transactions += 1;
+                pending.transactions.push(PendingTx {
+                    tx,
+                    payload_len: raw.payload_len,
+                });
+            }
+            RawNode::Entry(entry) => {
+                footer.entries += 1;
+                pending.entries.push(PendingEntry {
+                    entry,
+                    payload_len: raw.payload_len,
+                });
+            }
+            RawNode::Rewards(rewards) => {
+                footer.rewards += 1;
+                anyhow::ensure!(
+                    pending.rewards.is_none(),
+                    "duplicate rewards node before block"
+                );
+                pending.rewards = Some(PendingRewards {
+                    rewards,
+                    payload_len: raw.payload_len,
+                });
+            }
+            RawNode::DataFrame(frame) => {
+                footer.dataframes += 1;
+                pending.dataframes.insert(frame.cid, frame);
+            }
+            RawNode::Block(block) => {
+                footer.blocks += 1;
+                timings.classify += classify_started.elapsed();
+                let archive_block_id = block_id.saturating_add(blockhash_id_offset);
+                let previous_blockhash = (archive_block_id > 0).then_some(last_blockhash).flatten();
+                rolling_blockhashes.prune_for_slot(block.slot)?;
+                let (record, tx_count, sidecar) = build_block_record(
+                    &mut pending,
+                    block,
+                    &raw_key_index,
+                    &rolling_blockhashes,
+                    archive_block_id,
+                    &mut footer,
+                    &mut timings,
+                    external_blockhashes,
+                    previous_blockhash,
+                    &mut metadata_zstd,
+                    None,
+                    None,
+                )?;
+                let slot = pending.last_slot;
+                crate::pre_hot::count_registry_pubkeys(&record, |key| counter.add32(key))
+                    .with_context(|| format!("slot {slot} count PreHot registry pubkeys"))?;
+                let raw_pubkey_refs = crate::pre_hot::count_all_raw_pubkey_refs(&record)
+                    .with_context(|| format!("slot {slot} count PreHot raw pubkeys"))?;
+                let raw_pubkey_refs_u32 = u32::try_from(raw_pubkey_refs)
+                    .context("PreHot block raw pubkey reference count exceeds u32::MAX")?;
+                writer.write(&LivePreHotRecord::Block(LivePreHotBlock::new(
+                    block_id,
+                    record,
+                    raw_pubkey_refs_u32,
+                )))?;
+                writer.stats.blocks = writer.stats.blocks.saturating_add(1);
+                writer.stats.txs = writer.stats.txs.saturating_add(u64::from(tx_count));
+                writer.stats.raw_pubkey_refs =
+                    writer.stats.raw_pubkey_refs.saturating_add(raw_pubkey_refs);
+                poh_writer.write(&WincodeArchiveV2PohRecord {
+                    block_id,
+                    slot,
+                    entries: sidecar.poh_entries,
+                })?;
+                blockhash_writer
+                    .write_all(&sidecar.blockhash)
+                    .with_context(|| {
+                        format!("write {} block_id {block_id}", blockhash_tmp.display())
+                    })?;
+                let current_block_id = i32::try_from(archive_block_id)
+                    .context("PreHot blockhash id exceeds i32::MAX")?;
+                rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
+                last_blockhash = Some(sidecar.blockhash);
+                block_id = block_id
+                    .checked_add(1)
+                    .context("PreHot block id overflow")?;
+                progress.update_slot(slot);
+                progress.update_input_bytes(footer.car_payload_bytes);
+                progress.update(1, u64::from(tx_count));
+                pending.clear();
+                if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
+                    break;
+                }
+                continue;
+            }
+            RawNode::Subset(_) => footer.subset_nodes_ignored += 1,
+            RawNode::Epoch(_) => footer.epoch_nodes_ignored += 1,
+        }
+        timings.classify += classify_started.elapsed();
+    }
+
+    anyhow::ensure!(
+        pending.transactions.is_empty()
+            && pending.entries.is_empty()
+            && pending.rewards.is_none()
+            && pending.dataframes.is_empty(),
+        "PreHot CAR scan ended with uncommitted trailing nodes"
+    );
+    writer.write(&LivePreHotRecord::Footer(footer.clone()))?;
+    let spool_stats = writer.finish()?;
+    poh_writer.flush()?;
+    blockhash_writer
+        .flush()
+        .with_context(|| format!("flush {}", blockhash_tmp.display()))?;
+
+    let registry_started = Instant::now();
+    let registry_keys = write_pre_hot_registry(counter, &registry_tmp, &registry_counts_tmp)?;
+    let registry_elapsed = registry_started.elapsed();
+
+    std::fs::rename(&registry_tmp, registry_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            registry_tmp.display(),
+            registry_path.display()
+        )
+    })?;
+    std::fs::rename(&registry_counts_tmp, registry_counts_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            registry_counts_tmp.display(),
+            registry_counts_path.display()
+        )
+    })?;
+    std::fs::rename(&blockhash_tmp, blockhash_registry_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            blockhash_tmp.display(),
+            blockhash_registry_path.display()
+        )
+    })?;
+    std::fs::rename(&poh_tmp, poh_path)
+        .with_context(|| format!("rename {} to {}", poh_tmp.display(), poh_path.display()))?;
+    std::fs::rename(&pre_hot_tmp, pre_hot_path).with_context(|| {
+        format!(
+            "rename {} to {}",
+            pre_hot_tmp.display(),
+            pre_hot_path.display()
+        )
+    })?;
+    progress.final_report();
+    info!(
+        "Archive V2 PreHot extract complete in {:.2}s: blocks={} txs={} keys={} raw_pubkey_refs={} spool_uncompressed={} spool_compressed={} ratio_pct={:.2} max_record_uncompressed={} max_record_compressed={} registry_sort_write={:.3}s path={}",
+        started.elapsed().as_secs_f64(),
+        spool_stats.blocks,
+        spool_stats.txs,
+        registry_keys,
+        spool_stats.raw_pubkey_refs,
+        spool_stats.uncompressed_bytes,
+        spool_stats.compressed_bytes,
+        if spool_stats.uncompressed_bytes == 0 {
+            0.0
+        } else {
+            spool_stats.compressed_bytes as f64 * 100.0 / spool_stats.uncompressed_bytes as f64
+        },
+        spool_stats.max_uncompressed_record,
+        spool_stats.max_compressed_record,
+        registry_elapsed.as_secs_f64(),
+        pre_hot_path.display()
+    );
+    info!(
+        "Archive V2 PreHot extract timings: scan_decode={:.3}s classify={:.3}s dataframe_assemble={:.3}s tx_decode_compact={:.3}s metadata_decode_compact={:.3}s rewards_decode_compact={:.3}s",
+        timings.scan_decode_node.as_secs_f64(),
+        timings.classify.as_secs_f64(),
+        timings.dataframe_assemble.as_secs_f64(),
+        timings.tx_decode_compact.as_secs_f64(),
+        timings.metadata_decode_compact.as_secs_f64(),
+        timings.rewards_decode_compact.as_secs_f64(),
+    );
+    Ok(())
+}
+
+fn pre_hot_tmp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("prehot");
+    path.with_file_name(format!("{name}.prehot.tmp"))
+}
+
+fn write_pre_hot_registry(
+    counter: ArchivePubkeyCounter,
+    registry_path: &Path,
+    registry_counts_path: &Path,
+) -> Result<usize> {
+    let mut items: Vec<([u8; 32], u32)> = counter.counts.into_iter().collect();
+    items.sort_unstable_by(|(left_key, left_count), (right_key, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    let missing_builtins = live_builtin_program_keys()
+        .iter()
+        .copied()
+        .filter(|builtin| !items.iter().any(|(key, _)| key == builtin))
+        .collect::<Vec<_>>();
+    write_registry_iter(
+        registry_path,
+        missing_builtins
+            .iter()
+            .copied()
+            .chain(items.iter().map(|(key, _)| *key)),
+    )?;
+    write_live_registry_counts(
+        registry_counts_path,
+        std::iter::repeat_n(0, missing_builtins.len()).chain(items.iter().map(|(_, count)| *count)),
+    )?;
+    Ok(missing_builtins.len() + items.len())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_pre_hot_blocks(
+    pre_hot_path: &Path,
+    output_dir: &Path,
+    previous_tail: &[PreviousBlockhash],
+    genesis: Option<&GenesisArchive>,
+    level: i32,
+    include_access: bool,
+    resume_registry_index: bool,
+) -> Result<()> {
+    let started = Instant::now();
+    let registry_path = output_dir.join(REGISTRY_FILE);
+    let registry_index_path = output_dir.join(REGISTRY_INDEX_FILE);
+    let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
+    let key_index = load_or_build_registry_key_index(
+        &registry_path,
+        &registry_index_path,
+        resume_registry_index,
+    )?;
+    let known_program_ids = KnownProgramIds::from_index(&key_index);
+    let access_store = if include_access {
+        Some(KeyStore::load(&registry_path)?)
+    } else {
+        None
+    };
+    let blockhashes = load_blockhash_registry_plain(&blockhash_registry_path)?;
+    let blockhash_id_offset = blockhash_id_offset_for_genesis(&genesis.cloned(), &blockhashes)?;
+
+    let blocks_path = output_dir.join(ARCHIVE_V2_BLOCKS_FILE);
+    let index_path = output_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
+    let access_path = output_dir.join(ARCHIVE_V2_BLOCK_ACCESS_FILE);
+    let access_index_path = output_dir.join(ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE);
+    let meta_path = output_dir.join(ARCHIVE_V2_META_FILE);
+    let signatures_path = output_dir.join(ARCHIVE_V2_SIGNATURES_FILE);
+    let shredding_path = output_dir.join(SHREDDING_FILE);
+    let vote_hash_registry_path = output_dir.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE);
+
+    let mut reader = PreHotRecordReader::new(
+        File::open(pre_hot_path).with_context(|| format!("open {}", pre_hot_path.display()))?,
+    )?;
+    let mut blocks_writer = BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        File::create(&blocks_path).with_context(|| format!("create {}", blocks_path.display()))?,
+    );
+    let mut meta_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        File::create(&meta_path).with_context(|| format!("create {}", meta_path.display()))?,
+    ));
+    let mut signatures_writer = BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        File::create(&signatures_path)
+            .with_context(|| format!("create {}", signatures_path.display()))?,
+    );
+    let mut shredding_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        ARCHIVE_PRE_HOT_IO_BUFFER,
+        File::create(&shredding_path)
+            .with_context(|| format!("create {}", shredding_path.display()))?,
+    ));
+    let mut access_writer = if include_access {
+        Some(BufWriter::with_capacity(
+            ARCHIVE_PRE_HOT_IO_BUFFER,
+            File::create(&access_path)
+                .with_context(|| format!("create {}", access_path.display()))?,
+        ))
+    } else {
+        None
+    };
+
+    write_hot_meta(
+        &mut meta_writer,
+        &ArchiveV2HotMetaRecord::Header(WincodeArchiveV2Header {
+            version: WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+            flags: ARCHIVE_FLAGS_LEB128,
+        }),
+    )?;
+    if let Some(genesis) = genesis {
+        write_hot_meta(
+            &mut meta_writer,
+            &ArchiveV2HotMetaRecord::Genesis(compact_genesis_record(genesis, &key_index)?),
+        )?;
+    }
+
+    let mut compressor = zstd::bulk::Compressor::new(level).context("create zstd compressor")?;
+    let mut block_bytes = Vec::new();
+    let mut compressed_buf = Vec::new();
+    let mut access_bytes = Vec::new();
+    let mut access_signature_bytes = Vec::new();
+    let mut hot_block_buffers = HotBlockBuffers::default();
+    let mut timings = ArchiveV2Timings::from_env();
+    let mut progress = ProgressTracker::new("Archive V2 PreHot Finalize");
+    let mut rows = Vec::new();
+    let mut access_rows = Vec::new();
+    let mut blob_offset = 0u64;
+    let mut access_offset = 0u64;
+    let mut uncompressed_bytes = 0u64;
+    let mut compressed_bytes = 0u64;
+    let mut access_file_bytes = 0u64;
+    let mut first_tx_ordinal = 0u64;
+    let mut first_signature_ordinal = 0u64;
+    let mut block_id = 0u32;
+    let mut saw_header = false;
+    let mut footer = None;
+    let mut raw_seen = 0u64;
+    let mut raw_rekeyed = 0u64;
+    let mut raw_remaining = 0u64;
+    let mut slot_to_block_id: GxHashMap<u64, u32> =
+        GxHashMap::with_hasher(GxBuildHasher::default());
+    let mut vote_hashes = VoteHashRegistryBuilder::default();
+
+    while let Some(record) = reader.read()? {
+        match record {
+            LivePreHotRecord::Header(header) => {
+                anyhow::ensure!(
+                    !saw_header && rows.is_empty(),
+                    "duplicate or late PreHot header"
+                );
+                anyhow::ensure!(
+                    header.version == LIVE_PRE_HOT_BLOCK_VERSION,
+                    "unsupported PreHot record version {}",
+                    header.version
+                );
+                saw_header = true;
+            }
+            LivePreHotRecord::Block(mut pre_hot) => {
+                anyhow::ensure!(saw_header, "PreHot block appeared before header");
+                anyhow::ensure!(footer.is_none(), "PreHot block appeared after footer");
+                anyhow::ensure!(
+                    pre_hot.version == LIVE_PRE_HOT_BLOCK_VERSION,
+                    "block_id {} has unsupported PreHot version {}",
+                    pre_hot.block_id,
+                    pre_hot.version
+                );
+                anyhow::ensure!(
+                    pre_hot.block_id == block_id,
+                    "PreHot block id {} is not contiguous; expected {}",
+                    pre_hot.block_id,
+                    block_id
+                );
+                let expected_archive_block_id = block_id.saturating_add(blockhash_id_offset);
+                anyhow::ensure!(
+                    pre_hot.block.header.compact.blockhash == expected_archive_block_id,
+                    "PreHot block_id {} blockhash id {} != expected {}",
+                    block_id,
+                    pre_hot.block.header.compact.blockhash,
+                    expected_archive_block_id
+                );
+                let slot = pre_hot.block.header.compact.slot;
+                let block_shredding = std::mem::take(&mut pre_hot.block.header.compact.shredding);
+                let rekey_started = timings.detail_timer();
+                let rekey = crate::pre_hot::rekey_block_pubkeys(&mut pre_hot.block, &key_index)
+                    .with_context(|| format!("slot {slot} rekey PreHot pubkeys"))?;
+                timings.metadata_pubkey_compact += rekey_started.elapsed();
+                anyhow::ensure!(
+                    rekey.raw_seen == u64::from(pre_hot.raw_pubkey_refs),
+                    "slot {} PreHot raw pubkey count changed: encoded={} visited={}",
+                    slot,
+                    pre_hot.raw_pubkey_refs,
+                    rekey.raw_seen
+                );
+                raw_seen = raw_seen.saturating_add(rekey.raw_seen);
+                raw_rekeyed = raw_rekeyed.saturating_add(rekey.rekeyed);
+                raw_remaining = raw_remaining.saturating_add(rekey.raw_remaining);
+
+                access_signature_bytes.clear();
+                let block_signature_bytes = if include_access {
+                    Some(&mut access_signature_bytes)
+                } else {
+                    None
+                };
+                vote_hashes.ensure_block(block_id);
+                let (hot_block, block_signature_count) = hot_block_from_archive_block(
+                    pre_hot.block,
+                    &known_program_ids,
+                    &slot_to_block_id,
+                    &mut vote_hashes,
+                    Some(&mut signatures_writer as &mut dyn Write),
+                    block_signature_bytes,
+                    &mut hot_block_buffers,
+                    &mut timings,
+                )
+                .with_context(|| format!("slot {slot} PreHot hot-block encode"))?;
+                let tx_count = hot_block.tx_count;
+
+                block_bytes.clear();
+                let serialize_started = timings.detail_timer();
+                wincode::config::serialize_into(
+                    &mut block_bytes,
+                    &hot_block,
+                    wincode_leb128_config(),
+                )?;
+                timings.hot_block_serialize += serialize_started.elapsed();
+                let uncompressed_len = u32::try_from(block_bytes.len())
+                    .context("PreHot finalized block exceeds u32::MAX")?;
+                let compress_bound = zstd::zstd_safe::compress_bound(block_bytes.len());
+                if compressed_buf.capacity() < compress_bound {
+                    compressed_buf.reserve(compress_bound.saturating_sub(compressed_buf.len()));
+                    timings.hot_zstd_buffer_reserves += 1;
+                }
+                timings.hot_zstd_buffer_capacity_max = timings
+                    .hot_zstd_buffer_capacity_max
+                    .max(compressed_buf.capacity());
+                let compress_started = timings.detail_timer();
+                compressor
+                    .compress_to_buffer(&block_bytes, &mut compressed_buf)
+                    .with_context(|| format!("compress finalized PreHot block_id {block_id}"))?;
+                timings.hot_zstd_compress += compress_started.elapsed();
+                let compressed_len = u32::try_from(compressed_buf.len())
+                    .context("compressed finalized PreHot block exceeds u32::MAX")?;
+                let write_started = timings.detail_timer();
+                blocks_writer.write_all(&compressed_buf)?;
+                timings.hot_block_write += write_started.elapsed();
+
+                shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
+                    block_id,
+                    slot,
+                    shredding: block_shredding,
+                })?;
+                if let (Some(access_writer), Some(store)) =
+                    (access_writer.as_mut(), access_store.as_ref())
+                {
+                    access_bytes.clear();
+                    let access_blob = build_archive_v2_block_access_blob(
+                        &hot_block,
+                        &store.keys,
+                        &blockhashes,
+                        previous_tail,
+                        &access_signature_bytes,
+                        &vote_hashes.rows,
+                    )?;
+                    wincode::config::serialize_into(
+                        &mut access_bytes,
+                        &access_blob,
+                        wincode_leb128_config(),
+                    )?;
+                    let access_len =
+                        checked_archive_v2_block_access_frame_len(access_bytes.len(), slot)?;
+                    access_writer.write_all(&access_bytes)?;
+                    access_rows.push(ArchiveV2BlockAccessIndexRow {
+                        block_id,
+                        slot,
+                        access_offset,
+                        access_len,
+                        tx_count,
+                        signature_count: block_signature_count,
+                    });
+                    access_offset += u64::from(access_len);
+                    access_file_bytes += u64::from(access_len);
+                }
+                hot_block_buffers.recycle(hot_block);
+
+                rows.push(ArchiveV2HotBlockIndexRow {
+                    block_id,
+                    slot,
+                    compressed_offset: blob_offset,
+                    compressed_len,
+                    uncompressed_len,
+                    tx_count,
+                    first_tx_ordinal,
+                    first_signature_ordinal,
+                    signature_count: block_signature_count,
+                });
+                blob_offset += u64::from(compressed_len);
+                uncompressed_bytes += u64::from(uncompressed_len);
+                compressed_bytes += u64::from(compressed_len);
+                first_tx_ordinal += u64::from(tx_count);
+                first_signature_ordinal += u64::from(block_signature_count);
+                slot_to_block_id.insert(slot, block_id);
+                block_id = block_id
+                    .checked_add(1)
+                    .context("PreHot block id overflow")?;
+                progress.update_slot(slot);
+                progress.update(1, u64::from(tx_count));
+                trim_hot_memory(
+                    block_id,
+                    &mut block_bytes,
+                    &mut compressed_buf,
+                    &mut access_bytes,
+                    include_access.then_some(&mut access_signature_bytes),
+                );
+                hot_block_buffers.trim();
+                reader.trim();
+            }
+            LivePreHotRecord::Footer(value) => {
+                anyhow::ensure!(saw_header, "PreHot footer appeared before header");
+                anyhow::ensure!(footer.is_none(), "duplicate PreHot footer");
+                footer = Some(value);
+            }
+        }
+    }
+
+    let footer = footer.context("PreHot stream is missing its footer")?;
+    anyhow::ensure!(
+        rows.len() + blockhash_id_offset as usize == blockhashes.len(),
+        "PreHot block count {} plus genesis offset {} != blockhash registry count {}",
+        rows.len(),
+        blockhash_id_offset,
+        blockhashes.len()
+    );
+    anyhow::ensure!(
+        footer.blocks == rows.len() as u64,
+        "PreHot footer block count {} != finalized rows {}",
+        footer.blocks,
+        rows.len()
+    );
+    anyhow::ensure!(
+        footer.transactions == first_tx_ordinal,
+        "PreHot footer transaction count {} != finalized transactions {}",
+        footer.transactions,
+        first_tx_ordinal
+    );
+
+    blocks_writer.flush()?;
+    signatures_writer.flush()?;
+    shredding_writer.flush()?;
+    if let Some(writer) = access_writer.as_mut() {
+        writer.flush()?;
+    }
+    vote_hashes.write(&vote_hash_registry_path)?;
+    write_archive_v2_hot_block_index(&index_path, blob_offset, level, 0, &rows)?;
+    if include_access {
+        write_archive_v2_block_access_index(&access_index_path, access_offset, 0, &access_rows)?;
+    }
+    write_hot_meta(&mut meta_writer, &ArchiveV2HotMetaRecord::Footer(footer))?;
+    meta_writer.flush()?;
+    progress.final_report();
+    info!(
+        "Archive V2 PreHot finalize complete in {:.2}s: blocks={} txs={} signatures={} uncompressed_bytes={} compressed_bytes={} access_bytes={} raw_seen={} rekeyed={} raw_remaining={} output={}",
+        started.elapsed().as_secs_f64(),
+        rows.len(),
+        first_tx_ordinal,
+        first_signature_ordinal,
+        uncompressed_bytes,
+        compressed_bytes,
+        access_file_bytes,
+        raw_seen,
+        raw_rekeyed,
+        raw_remaining,
+        output_dir.display()
+    );
+    info!(
+        "Archive V2 PreHot finalize timings: rekey={:.3}s hot_message_build={:.3}s hot_message_encode={:.3}s hot_metadata_encode={:.3}s hot_signature_write={:.3}s hot_block_serialize={:.3}s hot_zstd_compress={:.3}s hot_block_write={:.3}s",
+        timings.metadata_pubkey_compact.as_secs_f64(),
+        timings.hot_message_build.as_secs_f64(),
+        timings.hot_message_encode.as_secs_f64(),
+        timings.hot_metadata_encode.as_secs_f64(),
+        timings.hot_signature_write.as_secs_f64(),
+        timings.hot_block_serialize.as_secs_f64(),
+        timings.hot_zstd_compress.as_secs_f64(),
+        timings.hot_block_write.as_secs_f64(),
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LiveRegistryRunSnapshot {
+    files: usize,
+    bytes: u64,
+    fingerprint: [u8; 32],
+}
+
+fn snapshot_live_pubkey_runs(run_dir: &Path) -> Result<LiveRegistryRunSnapshot> {
+    let runs = collect_pubkey_run_paths(run_dir)?;
+    anyhow::ensure!(
+        !runs.is_empty(),
+        "live pubkey run sidecar missing or empty: {}",
+        run_dir.display()
+    );
+
+    let mut hasher = Sha256::new();
+    let mut bytes = 0u64;
+    for path in &runs {
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("stat pubkey run {}", path.display()))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("pubkey run name is not UTF-8: {}", path.display()))?;
+        let modified_nanos = metadata
+            .modified()
+            .with_context(|| format!("read pubkey run mtime {}", path.display()))?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(metadata.len().to_le_bytes());
+        hasher.update(modified_nanos.to_le_bytes());
+        bytes = bytes.saturating_add(metadata.len());
+    }
+
+    Ok(LiveRegistryRunSnapshot {
+        files: runs.len(),
+        bytes,
+        fingerprint: hasher.finalize().into(),
+    })
+}
+
+fn live_registry_marker_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| {
+        line.strip_prefix(name)
+            .and_then(|value| value.strip_prefix('='))
+    })
+}
+
+fn validate_prepared_live_registry(
+    output_dir: &Path,
+    marker_path: &Path,
+    source: LiveRegistryRunSnapshot,
+) -> Result<(u64, u64)> {
+    let marker = std::fs::read_to_string(marker_path)
+        .with_context(|| format!("read live registry marker {}", marker_path.display()))?;
+    anyhow::ensure!(
+        live_registry_marker_field(&marker, "version") == Some("1"),
+        "unsupported live registry marker version in {}",
+        marker_path.display()
+    );
+    let marker_files = live_registry_marker_field(&marker, "source_run_files")
+        .context("live registry marker is missing source_run_files")?
+        .parse::<usize>()
+        .context("invalid live registry marker source_run_files")?;
+    let marker_source_bytes = live_registry_marker_field(&marker, "source_run_bytes")
+        .context("live registry marker is missing source_run_bytes")?
+        .parse::<u64>()
+        .context("invalid live registry marker source_run_bytes")?;
+    let marker_fingerprint = live_registry_marker_field(&marker, "source_fingerprint")
+        .context("live registry marker is missing source_fingerprint")?;
+    anyhow::ensure!(
+        marker_files == source.files
+            && marker_source_bytes == source.bytes
+            && marker_fingerprint == hex32(&source.fingerprint),
+        "live pubkey runs changed after registry preparation: marker={} current_files={} current_bytes={} current_fingerprint={}",
+        marker_path.display(),
+        source.files,
+        source.bytes,
+        hex32(&source.fingerprint),
+    );
+
+    let registry_path = output_dir.join(REGISTRY_FILE);
+    let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
+    let registry_bytes = std::fs::metadata(&registry_path)
+        .with_context(|| format!("stat prepared registry {}", registry_path.display()))?
+        .len();
+    let registry_counts_bytes = std::fs::metadata(&registry_counts_path)
+        .with_context(|| {
+            format!(
+                "stat prepared registry counts {}",
+                registry_counts_path.display()
+            )
+        })?
+        .len();
+    anyhow::ensure!(
+        registry_bytes > 0 && registry_bytes % 32 == 0,
+        "prepared live registry has invalid byte length {}: {}",
+        registry_bytes,
+        registry_path.display()
+    );
+    anyhow::ensure!(
+        registry_counts_bytes > 0,
+        "prepared live registry counts is empty: {}",
+        registry_counts_path.display()
+    );
+    let marker_registry_bytes = live_registry_marker_field(&marker, "registry_bytes")
+        .context("live registry marker is missing registry_bytes")?
+        .parse::<u64>()
+        .context("invalid live registry marker registry_bytes")?;
+    let marker_registry_counts_bytes = live_registry_marker_field(&marker, "registry_counts_bytes")
+        .context("live registry marker is missing registry_counts_bytes")?
+        .parse::<u64>()
+        .context("invalid live registry marker registry_counts_bytes")?;
+    anyhow::ensure!(
+        registry_bytes == marker_registry_bytes
+            && registry_counts_bytes == marker_registry_counts_bytes,
+        "prepared live registry files do not match marker {}",
+        marker_path.display()
+    );
+    Ok((registry_bytes, registry_counts_bytes))
+}
+
+fn write_live_registry_prepared_marker(
+    output_dir: &Path,
+    marker_path: &Path,
+    source: LiveRegistryRunSnapshot,
+    registry_bytes: u64,
+    registry_counts_bytes: u64,
+) -> Result<()> {
+    let marker_tmp = output_dir.join(format!("{LIVE_REGISTRY_PREPARED_MARKER}.tmp"));
+    if marker_tmp.exists() {
+        std::fs::remove_file(&marker_tmp)
+            .with_context(|| format!("remove stale marker temp {}", marker_tmp.display()))?;
+    }
+    let mut file = File::create(&marker_tmp)
+        .with_context(|| format!("create live registry marker {}", marker_tmp.display()))?;
+    writeln!(file, "version=1")?;
+    writeln!(file, "source_run_files={}", source.files)?;
+    writeln!(file, "source_run_bytes={}", source.bytes)?;
+    writeln!(file, "source_fingerprint={}", hex32(&source.fingerprint))?;
+    writeln!(file, "registry_bytes={registry_bytes}")?;
+    writeln!(file, "registry_counts_bytes={registry_counts_bytes}")?;
+    file.sync_all()
+        .with_context(|| format!("sync live registry marker {}", marker_tmp.display()))?;
+    drop(file);
+    std::fs::rename(&marker_tmp, marker_path).with_context(|| {
+        format!(
+            "publish live registry marker {} -> {}",
+            marker_tmp.display(),
+            marker_path.display()
+        )
+    })?;
+    crate::first_seen_finalization::sync_directory(output_dir)?;
+    Ok(())
+}
+
+pub(crate) fn prepare_live_registry_from_runs(
+    capture_dir: &Path,
+    output_dir: &Path,
+    resume: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))?;
+    let run_dir = capture_dir.join("index").join(LIVE_PUBKEY_RUNS_DIR);
+    let source = snapshot_live_pubkey_runs(&run_dir)?;
+    let marker_path = output_dir.join(LIVE_REGISTRY_PREPARED_MARKER);
+
+    if resume && marker_path.is_file() {
+        let (registry_bytes, registry_counts_bytes) =
+            validate_prepared_live_registry(output_dir, &marker_path, source)?;
+        info!(
+            "Reusing prepared live registry: runs={} run_bytes={} registry_bytes={} counts_bytes={} output={}",
+            source.files,
+            source.bytes,
+            registry_bytes,
+            registry_counts_bytes,
+            output_dir.display()
+        );
+        return Ok(());
+    }
+
+    if marker_path.exists() {
+        std::fs::remove_file(&marker_path).with_context(|| {
+            format!(
+                "remove stale live registry marker {}",
+                marker_path.display()
+            )
+        })?;
+        crate::first_seen_finalization::sync_directory(output_dir)?;
+    }
+    let marker_tmp = output_dir.join(format!("{LIVE_REGISTRY_PREPARED_MARKER}.tmp"));
+    if marker_tmp.exists() {
+        std::fs::remove_file(&marker_tmp)
+            .with_context(|| format!("remove stale marker temp {}", marker_tmp.display()))?;
+    }
+
+    let prepare_dir = output_dir.join(LIVE_REGISTRY_PREPARE_TEMP_DIR);
+    if prepare_dir.exists() {
+        std::fs::remove_dir_all(&prepare_dir)
+            .with_context(|| format!("remove stale prepare dir {}", prepare_dir.display()))?;
+    }
+    std::fs::create_dir_all(&prepare_dir)
+        .with_context(|| format!("create prepare dir {}", prepare_dir.display()))?;
+    let registry_candidate = prepare_dir.join(REGISTRY_FILE);
+    let counts_candidate = prepare_dir.join(REGISTRY_COUNTS_FILE);
+    build_live_pubkey_registry_from_runs(
+        &run_dir,
+        &registry_candidate,
+        &counts_candidate,
+        &prepare_dir.join("sort"),
+    )?;
+
+    let registry_bytes = std::fs::metadata(&registry_candidate)
+        .with_context(|| format!("stat registry candidate {}", registry_candidate.display()))?
+        .len();
+    let registry_counts_bytes = std::fs::metadata(&counts_candidate)
+        .with_context(|| format!("stat counts candidate {}", counts_candidate.display()))?
+        .len();
+    anyhow::ensure!(
+        registry_bytes > 0 && registry_bytes % 32 == 0,
+        "live registry candidate has invalid byte length {registry_bytes}"
+    );
+    anyhow::ensure!(
+        registry_counts_bytes > 0,
+        "live registry counts candidate is empty"
+    );
+    for path in [&registry_candidate, &counts_candidate] {
+        File::open(path)
+            .with_context(|| format!("open candidate for sync {}", path.display()))?
+            .sync_all()
+            .with_context(|| format!("sync candidate {}", path.display()))?;
+    }
+
+    let registry_path = output_dir.join(REGISTRY_FILE);
+    let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
+    std::fs::rename(&registry_candidate, &registry_path).with_context(|| {
+        format!(
+            "publish live registry {} -> {}",
+            registry_candidate.display(),
+            registry_path.display()
+        )
+    })?;
+    std::fs::rename(&counts_candidate, &registry_counts_path).with_context(|| {
+        format!(
+            "publish live registry counts {} -> {}",
+            counts_candidate.display(),
+            registry_counts_path.display()
+        )
+    })?;
+    std::fs::remove_dir(&prepare_dir)
+        .with_context(|| format!("remove empty prepare dir {}", prepare_dir.display()))?;
+    crate::first_seen_finalization::sync_directory(output_dir)?;
+    write_live_registry_prepared_marker(
+        output_dir,
+        &marker_path,
+        source,
+        registry_bytes,
+        registry_counts_bytes,
+    )?;
+    info!(
+        "Prepared live registry stage complete: runs={} run_bytes={} registry_bytes={} counts_bytes={} marker={}",
+        source.files,
+        source.bytes,
+        registry_bytes,
+        registry_counts_bytes,
+        marker_path.display()
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveFinalizationSidecars {
+    Canonical,
+    DegradedRepair,
+}
+
+struct LiveHotBuildReport {
+    blocks: u64,
+    transactions: u64,
+    signatures: u64,
+    compressed_bytes: u64,
+    uncompressed_bytes: u64,
+}
+
+pub(crate) fn build_hot_blocks_from_live_capture(
+    capture_dir: &Path,
+    output_dir: &Path,
+    level: i32,
+    max_blocks: Option<u64>,
+    resume: bool,
+    registry_source: LiveRegistrySource,
+) -> Result<()> {
+    build_hot_blocks_from_live_capture_inner(
+        capture_dir,
+        output_dir,
+        level,
+        max_blocks,
+        resume,
+        registry_source,
+        LiveFinalizationSidecars::Canonical,
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn build_degraded_hot_blocks_from_repair(
+    materialized_dir: &Path,
+    output_dir: &Path,
+    level: i32,
+    max_blocks: Option<u64>,
+) -> Result<()> {
+    let receipt = repair::validate_materialized_for_hot(materialized_dir)?;
+    let Some(stage) = repair::begin_degraded_hot_stage(materialized_dir, output_dir, &receipt)?
+    else {
+        info!(
+            "Degraded repair hot archive already complete: {}",
+            output_dir.display()
+        );
+        return Ok(());
+    };
+    let report = build_hot_blocks_from_live_capture_inner(
+        materialized_dir,
+        &stage.path,
+        level,
+        max_blocks,
+        false,
+        LiveRegistrySource::Runs,
+        LiveFinalizationSidecars::DegradedRepair,
+    )?;
+    if max_blocks.is_some() {
+        info!(
+            "Degraded repair hot smoke build left hidden and unpublished: blocks={} stage={}",
+            report.blocks,
+            stage.path.display()
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        report.blocks == receipt.produced_blocks,
+        "degraded hot block count {} != materialized {}",
+        report.blocks,
+        receipt.produced_blocks
+    );
+    repair::publish_degraded_hot_stage(
+        materialized_dir,
+        output_dir,
+        stage,
+        &receipt,
+        repair::DegradedHotStats {
+            blocks: report.blocks,
+            transactions: report.transactions,
+            signatures: report.signatures,
+            compressed_bytes: report.compressed_bytes,
+            uncompressed_bytes: report.uncompressed_bytes,
+            zstd_level: level,
+        },
+    )
+}
+
+fn build_hot_blocks_from_live_capture_inner(
+    capture_dir: &Path,
+    output_dir: &Path,
+    level: i32,
+    max_blocks: Option<u64>,
+    resume: bool,
+    registry_source: LiveRegistrySource,
+    sidecars: LiveFinalizationSidecars,
+) -> Result<LiveHotBuildReport> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))?;
+
+    let live_blocks_path = capture_dir
+        .join("blocks")
+        .join("live-no-registry-blocks.bin");
+    let live_pubkey_counts_path = capture_dir.join("index").join("pubkey-counts.bin");
+    let live_pubkey_touches_path = capture_dir.join("index").join("pubkey-touches.bin");
+    let live_pubkey_runs_dir = capture_dir.join("index").join(LIVE_PUBKEY_RUNS_DIR);
+    let live_blockhash_registry_path = capture_dir.join("index").join(BLOCKHASH_REGISTRY_FILE);
+    let live_signatures_path = capture_dir.join("index").join(ARCHIVE_V2_SIGNATURES_FILE);
+    let live_poh_path = capture_dir.join("poh").join(POH_FILE);
+    anyhow::ensure!(
+        crate::file_nonempty(&live_blocks_path),
+        "live block file missing or empty: {}",
+        live_blocks_path.display()
+    );
+    anyhow::ensure!(
+        crate::file_nonempty(&live_blockhash_registry_path),
+        "live blockhash registry missing or empty: {}",
+        live_blockhash_registry_path.display()
+    );
+    let live_blockhash_bytes = std::fs::metadata(&live_blockhash_registry_path)
+        .with_context(|| format!("stat {}", live_blockhash_registry_path.display()))?
+        .len();
+    anyhow::ensure!(
+        live_blockhash_bytes % 32 == 0,
+        "live blockhash registry has invalid byte length {}: {}",
+        live_blockhash_bytes,
+        live_blockhash_registry_path.display()
+    );
+    let live_block_count = live_blockhash_bytes / 32;
+    anyhow::ensure!(
+        max_blocks.is_some() || live_block_count <= crate::SLOTS_PER_EPOCH,
+        "live capture contains {} blockhash rows, exceeding one epoch's {} slots",
+        live_block_count,
+        crate::SLOTS_PER_EPOCH
+    );
+    if sidecars == LiveFinalizationSidecars::Canonical {
+        anyhow::ensure!(
+            crate::file_nonempty(&live_poh_path),
+            "live PoH sidecar missing or empty: {}",
+            live_poh_path.display()
+        );
+    }
+
+    let registry_path = output_dir.join(REGISTRY_FILE);
+    let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
+    if resume
+        && !matches!(registry_source, LiveRegistrySource::Runs)
+        && crate::file_nonempty(&registry_path)
+        && crate::file_nonempty(&registry_counts_path)
+    {
+        info!(
+            "Reusing existing live pubkey registry: {}",
+            registry_path.display()
+        );
+    } else {
+        let registry_source = if max_blocks.is_some()
+            && matches!(
+                registry_source,
+                LiveRegistrySource::Auto | LiveRegistrySource::Counts | LiveRegistrySource::Touches
+            ) {
+            warn!(
+                "Bounded live finalization ignores unbounded whole-capture registry sidecars and scans only the selected block prefix; pass --registry-source runs with a bounded run directory to use the low-memory merge path"
+            );
+            LiveRegistrySource::Scan
+        } else {
+            registry_source
+        };
+        match registry_source {
+            LiveRegistrySource::Scan => build_live_no_registry_pubkey_registry(
+                &live_blocks_path,
+                &registry_path,
+                &registry_counts_path,
+                max_blocks,
+            )?,
+            LiveRegistrySource::Counts => build_live_pubkey_registry_from_counts(
+                &live_pubkey_counts_path,
+                &registry_path,
+                &registry_counts_path,
+            )?,
+            LiveRegistrySource::Runs => {
+                prepare_live_registry_from_runs(capture_dir, output_dir, resume)?
+            }
+            LiveRegistrySource::Touches => build_live_pubkey_registry_from_touches(
+                &live_pubkey_touches_path,
+                &registry_path,
+                &registry_counts_path,
+                &output_dir.join(".pubkey-touch-sort"),
+            )?,
+            LiveRegistrySource::Auto => match preferred_auto_live_registry_source(
+                &live_pubkey_counts_path,
+                &live_pubkey_runs_dir,
+                &live_pubkey_touches_path,
+            )? {
+                LiveRegistrySource::Runs => {
+                    prepare_live_registry_from_runs(capture_dir, output_dir, resume)?;
+                }
+                LiveRegistrySource::Counts => {
+                    build_live_pubkey_registry_from_counts(
+                        &live_pubkey_counts_path,
+                        &registry_path,
+                        &registry_counts_path,
+                    )?;
+                }
+                LiveRegistrySource::Touches => {
+                    build_live_pubkey_registry_from_touches(
+                        &live_pubkey_touches_path,
+                        &registry_path,
+                        &registry_counts_path,
+                        &output_dir.join(".pubkey-touch-sort"),
+                    )?;
+                }
+                LiveRegistrySource::Scan => {
+                    warn!(
+                        "Live pubkey-count/run/touch sidecars missing or empty; falling back to block scan: counts={} runs={} touches={}",
+                        live_pubkey_counts_path.display(),
+                        live_pubkey_runs_dir.display(),
+                        live_pubkey_touches_path.display()
+                    );
+                    build_live_no_registry_pubkey_registry(
+                        &live_blocks_path,
+                        &registry_path,
+                        &registry_counts_path,
+                        max_blocks,
+                    )?;
+                }
+                LiveRegistrySource::Auto => unreachable!("auto source selection returned auto"),
+            },
+        }
+    }
+
+    let blockhash_registry_path = output_dir.join(BLOCKHASH_REGISTRY_FILE);
+    if !(resume && crate::file_nonempty(&blockhash_registry_path)) {
+        if let Some(limit) = max_blocks {
+            copy_file_prefix(
+                &live_blockhash_registry_path,
+                &blockhash_registry_path,
+                limit
+                    .checked_mul(32)
+                    .context("live blockhash prefix length overflow")?,
+            )?;
+        } else {
+            link_or_copy_registry_sidecar(&live_blockhash_registry_path, &blockhash_registry_path)?;
+        }
+    }
+    let poh_path = output_dir.join(POH_FILE);
+    if sidecars == LiveFinalizationSidecars::Canonical {
+        if !(resume && crate::file_nonempty(&poh_path)) {
+            if let Some(limit) = max_blocks {
+                copy_live_poh_prefix(&live_poh_path, &poh_path, limit)?;
+            } else {
+                link_or_copy_registry_sidecar(&live_poh_path, &poh_path)?;
+            }
+        }
+    } else {
+        anyhow::ensure!(
+            !poh_path.exists(),
+            "degraded repair finalization refuses canonical PoH output {}",
+            poh_path.display()
+        );
+    }
+
+    let registry_index_path = output_dir.join(REGISTRY_INDEX_FILE);
+    let key_index = load_or_build_registry_key_index(&registry_path, &registry_index_path, resume)?;
+    let known_program_ids = KnownProgramIds::from_index(&key_index);
+    let blockhashes = load_blockhash_registry_plain(&blockhash_registry_path)?;
+
+    let blocks_path = output_dir.join(ARCHIVE_V2_BLOCKS_FILE);
+    let index_path = output_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
+    let meta_path = output_dir.join(ARCHIVE_V2_META_FILE);
+    let meta_tmp = crate::first_seen_finalization::first_seen_temp_path(&meta_path);
+    let signatures_path = output_dir.join(ARCHIVE_V2_SIGNATURES_FILE);
+    let shredding_path = output_dir.join(SHREDDING_FILE);
+    let vote_hash_registry_path = output_dir.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE);
+
+    let input_file = File::open(&live_blocks_path)
+        .with_context(|| format!("open {}", live_blocks_path.display()))?;
+    let mut reader = WincodeLeb128FramedReader::new(BufReader::with_capacity(
+        LIVE_FINALIZER_IO_BUFFER_SIZE,
+        input_file,
+    ));
+    let blocks_file =
+        File::create(&blocks_path).with_context(|| format!("create {}", blocks_path.display()))?;
+    let mut blocks_writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, blocks_file);
+    if meta_tmp.exists() {
+        std::fs::remove_file(&meta_tmp)
+            .with_context(|| format!("remove stale live metadata temp {}", meta_tmp.display()))?;
+    }
+    let meta_file =
+        File::create(&meta_tmp).with_context(|| format!("create {}", meta_tmp.display()))?;
+    let mut meta_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        LIVE_FINALIZER_IO_BUFFER_SIZE,
+        meta_file,
+    ));
+    let mut reused_live_signatures = false;
+    let mut signatures_writer =
+        if max_blocks.is_none() && crate::file_nonempty(&live_signatures_path) {
+            link_or_copy_registry_sidecar(&live_signatures_path, &signatures_path)?;
+            reused_live_signatures = true;
+            None
+        } else {
+            let signatures_file = File::create(&signatures_path)
+                .with_context(|| format!("create {}", signatures_path.display()))?;
+            Some(BufWriter::with_capacity(
+                LIVE_FINALIZER_IO_BUFFER_SIZE,
+                signatures_file,
+            ))
+        };
+    let mut shredding_writer = if sidecars == LiveFinalizationSidecars::Canonical {
+        let shredding_file = File::create(&shredding_path)
+            .with_context(|| format!("create {}", shredding_path.display()))?;
+        Some(WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+            LIVE_FINALIZER_IO_BUFFER_SIZE,
+            shredding_file,
+        )))
+    } else {
+        anyhow::ensure!(
+            !shredding_path.exists(),
+            "degraded repair finalization refuses canonical shredding output {}",
+            shredding_path.display()
+        );
+        None
+    };
+
+    write_hot_meta(
+        &mut meta_writer,
+        &ArchiveV2HotMetaRecord::Header(WincodeArchiveV2Header {
+            version: WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+            flags: ARCHIVE_FLAGS_LEB128,
+        }),
+    )?;
+
+    let mut compressor = zstd::bulk::Compressor::new(level).context("create zstd compressor")?;
+    let mut rolling_blockhashes = RollingBlockhashIndex::new(ROLLING_BLOCKHASH_CAPACITY);
+    let mut progress = ProgressTracker::new("Archive V2 Live Hot Write");
+    let mut timings = ArchiveV2Timings::from_env();
+    let mut rows = Vec::new();
+    let mut slot_to_block_id: GxHashMap<u64, u32> =
+        GxHashMap::with_hasher(GxBuildHasher::default());
+    let mut vote_hashes = VoteHashRegistryBuilder::default();
+    let mut footer = WincodeArchiveV2Footer::default();
+    let mut block_bytes = Vec::new();
+    let mut compressed_buf = Vec::new();
+    let mut hot_block_buffers = HotBlockBuffers::default();
+    let mut blob_offset = 0u64;
+    let mut uncompressed_bytes = 0u64;
+    let mut compressed_bytes = 0u64;
+    let mut first_tx_ordinal = 0u64;
+    let mut first_signature_ordinal = 0u64;
+    let mut nonce_recent_blockhashes = 0u64;
+    let mut block_id = 0u32;
+    let started = Instant::now();
+
+    let read_signature_counts_only = signatures_writer.is_none();
+    while let Some((_len, block)) = if read_signature_counts_only {
+        read_live_no_registry_block_signature_counts(&mut reader)?
+            .map(|(len, block)| (len, LiveFinalizerBlock::SignatureCounts(block)))
+    } else {
+        read_live_no_registry_block(&mut reader)?
+            .map(|(len, block)| (len, LiveFinalizerBlock::Full(block)))
+    } {
+        let slot = block.slot();
+        anyhow::ensure!(
+            block.blockhash_id() == block_id,
+            "live block slot {} has blockhash id {}, expected {}",
+            slot,
+            block.blockhash_id(),
+            block_id
+        );
+        let current_blockhash = *blockhashes.get(block_id as usize).with_context(|| {
+            format!("missing live blockhash registry row for block_id {block_id}")
+        })?;
+
+        rolling_blockhashes.prune_for_slot(slot)?;
+        let (hot_block, block_signature_count) = hot_block_from_live_finalizer_block(
+            block,
+            &key_index,
+            &rolling_blockhashes,
+            block_id,
+            &mut nonce_recent_blockhashes,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut vote_hashes,
+            signatures_writer
+                .as_mut()
+                .map(|writer| writer as &mut dyn Write),
+            None,
+            &mut hot_block_buffers,
+            &mut timings,
+        )
+        .with_context(|| format!("slot {slot} live hot block encode"))?;
+        let tx_count = hot_block.tx_count;
+
+        block_bytes.clear();
+        let serialize_started = timings.detail_timer();
+        wincode::config::serialize_into(&mut block_bytes, &hot_block, wincode_leb128_config())?;
+        timings.hot_block_serialize += serialize_started.elapsed();
+        hot_block_buffers.recycle(hot_block);
+        let uncompressed_len =
+            u32::try_from(block_bytes.len()).context("hot live block payload exceeds u32::MAX")?;
+        let compress_bound = zstd::zstd_safe::compress_bound(block_bytes.len());
+        if compressed_buf.capacity() < compress_bound {
+            compressed_buf.reserve(compress_bound.saturating_sub(compressed_buf.len()));
+            timings.hot_zstd_buffer_reserves += 1;
+        }
+        timings.hot_zstd_buffer_capacity_max = timings
+            .hot_zstd_buffer_capacity_max
+            .max(compressed_buf.capacity());
+        let compress_started = timings.detail_timer();
+        compressor
+            .compress_to_buffer(&block_bytes, &mut compressed_buf)
+            .with_context(|| format!("zstd compress live hot block_id {block_id}"))?;
+        timings.hot_zstd_compress += compress_started.elapsed();
+        let compressed_len = u32::try_from(compressed_buf.len())
+            .context("compressed live hot block exceeds u32::MAX")?;
+        let write_started = timings.detail_timer();
+        blocks_writer
+            .write_all(&compressed_buf)
+            .with_context(|| format!("write {}", blocks_path.display()))?;
+        timings.hot_block_write += write_started.elapsed();
+        if let Some(shredding_writer) = shredding_writer.as_mut() {
+            let shredding_started = timings.detail_timer();
+            shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
+                block_id,
+                slot,
+                shredding: Vec::new(),
+            })?;
+            timings.hot_poh_write += shredding_started.elapsed();
+        }
+
+        rows.push(ArchiveV2HotBlockIndexRow {
+            block_id,
+            slot,
+            compressed_offset: blob_offset,
+            compressed_len,
+            uncompressed_len,
+            tx_count,
+            first_tx_ordinal,
+            first_signature_ordinal,
+            signature_count: block_signature_count,
+        });
+        blob_offset += compressed_len as u64;
+        uncompressed_bytes += uncompressed_len as u64;
+        compressed_bytes += compressed_len as u64;
+        first_tx_ordinal += tx_count as u64;
+        first_signature_ordinal += block_signature_count as u64;
+        footer.blocks += 1;
+        footer.transactions += tx_count as u64;
+
+        rolling_blockhashes.insert(current_blockhash, block_id as i32, slot)?;
+        slot_to_block_id.insert(slot, block_id);
+        block_id = block_id.wrapping_add(1);
+        progress.update_slot(slot);
+        progress.update(1, tx_count as u64);
+        trim_hot_memory(
+            block_id,
+            &mut block_bytes,
+            &mut compressed_buf,
+            &mut Vec::new(),
+            None,
+        );
+        hot_block_buffers.trim();
+        if max_blocks.is_some_and(|limit| rows.len() as u64 >= limit) {
+            break;
+        }
+    }
+
+    if max_blocks.is_none() {
+        anyhow::ensure!(
+            block_id as usize == blockhashes.len(),
+            "live blockhash registry count {} does not match live blocks {}",
+            blockhashes.len(),
+            block_id
+        );
+    }
+
+    footer.nonce_recent_blockhashes += nonce_recent_blockhashes;
+    blocks_writer
+        .flush()
+        .with_context(|| format!("flush {}", blocks_path.display()))?;
+    if let Some(writer) = signatures_writer.as_mut() {
+        writer
+            .flush()
+            .with_context(|| format!("flush {}", signatures_path.display()))?;
+    } else if reused_live_signatures {
+        let expected_signature_bytes = first_signature_ordinal
+            .checked_mul(64)
+            .context("signature byte count overflow")?;
+        let actual_signature_bytes = std::fs::metadata(&signatures_path)
+            .with_context(|| format!("stat {}", signatures_path.display()))?
+            .len();
+        anyhow::ensure!(
+            actual_signature_bytes == expected_signature_bytes,
+            "live signature sidecar byte length {} does not match expected {} signatures bytes {}",
+            actual_signature_bytes,
+            first_signature_ordinal,
+            expected_signature_bytes
+        );
+    }
+    if let Some(shredding_writer) = shredding_writer.as_mut() {
+        shredding_writer.flush()?;
+    }
+    vote_hashes.write(&vote_hash_registry_path)?;
+    write_archive_v2_hot_block_index(&index_path, blob_offset, level, 0, &rows)?;
+    write_hot_meta(
+        &mut meta_writer,
+        &ArchiveV2HotMetaRecord::Footer(footer.clone()),
+    )?;
+    meta_writer.flush()?;
+    drop(meta_writer);
+    // Metadata is the publication marker for readers and the pipeline. Make every candidate
+    // sidecar durable first, then atomically reveal metadata last. A killed live finalizer can
+    // therefore leave only an unmistakable partial directory, never a false completed epoch.
+    crate::first_seen_finalization::sync_candidate_files(output_dir)?;
+    std::fs::rename(&meta_tmp, &meta_path)
+        .with_context(|| format!("rename {} to {}", meta_tmp.display(), meta_path.display()))?;
+    crate::first_seen_finalization::sync_directory(output_dir)?;
+    progress.final_report();
+    let ratio = if uncompressed_bytes > 0 {
+        compressed_bytes as f64 * 100.0 / uncompressed_bytes as f64
+    } else {
+        0.0
+    };
+    let poh_display = if sidecars == LiveFinalizationSidecars::Canonical {
+        poh_path.display().to_string()
+    } else {
+        "omitted_noncanonical".to_string()
+    };
+    let shredding_display = if sidecars == LiveFinalizationSidecars::Canonical {
+        shredding_path.display().to_string()
+    } else {
+        "omitted_noncanonical".to_string()
+    };
+    info!(
+        "Archive V2 live hot-block build complete in {:.2}s: blocks={} txs={} signatures={} level={} max_blocks={:?} uncompressed_bytes={} compressed_bytes={} ratio_pct={:.2} nonce_recent_blockhashes={} blocks_file={} index={} meta={} signatures={} vote_hash_registry={} poh={} shredding={}",
+        started.elapsed().as_secs_f64(),
+        rows.len(),
+        first_tx_ordinal,
+        first_signature_ordinal,
+        level,
+        max_blocks,
+        uncompressed_bytes,
+        compressed_bytes,
+        ratio,
+        nonce_recent_blockhashes,
+        blocks_path.display(),
+        index_path.display(),
+        meta_path.display(),
+        signatures_path.display(),
+        vote_hash_registry_path.display(),
+        poh_display,
+        shredding_display
+    );
+    info!(
+        "Archive V2 live hot timings: optimize_no_registry_total={:.3}s tx_decode_compact={:.3}s metadata_decode_compact={:.3}s metadata_logs_decode_compact={:.3}s metadata_pubkey_compact={:.3}s rewards_decode_compact={:.3}s hot_message_build={:.3}s hot_message_encode={:.3}s hot_metadata_encode={:.3}s hot_signature_write={:.3}s hot_block_serialize={:.3}s hot_zstd_compress={:.3}s hot_block_write={:.3}s hot_shredding_write={:.3}s zstd_buffer_reserves={} zstd_buffer_capacity_max={}",
+        (timings.tx_decode_compact
+            + timings.metadata_decode_compact
+            + timings.rewards_decode_compact)
+            .as_secs_f64(),
+        timings.tx_decode_compact.as_secs_f64(),
+        timings.metadata_decode_compact.as_secs_f64(),
+        timings.metadata_logs_decode_compact.as_secs_f64(),
+        timings.metadata_pubkey_compact.as_secs_f64(),
+        timings.rewards_decode_compact.as_secs_f64(),
+        timings.hot_message_build.as_secs_f64(),
+        timings.hot_message_encode.as_secs_f64(),
+        timings.hot_metadata_encode.as_secs_f64(),
+        timings.hot_signature_write.as_secs_f64(),
+        timings.hot_block_serialize.as_secs_f64(),
+        timings.hot_zstd_compress.as_secs_f64(),
+        timings.hot_block_write.as_secs_f64(),
+        timings.hot_poh_write.as_secs_f64(),
+        timings.hot_zstd_buffer_reserves,
+        timings.hot_zstd_buffer_capacity_max,
+    );
+    Ok(LiveHotBuildReport {
+        blocks: rows.len() as u64,
+        transactions: first_tx_ordinal,
+        signatures: first_signature_ordinal,
+        compressed_bytes,
+        uncompressed_bytes,
+    })
+}
+
+fn build_live_no_registry_pubkey_registry(
+    input: &Path,
+    registry_path: &Path,
+    registry_counts_path: &Path,
+    max_blocks: Option<u64>,
+) -> Result<()> {
+    info!("Building live pubkey registry from {}", input.display());
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let mut reader = WincodeLeb128FramedReader::new(BufReader::with_capacity(
+        LIVE_FINALIZER_IO_BUFFER_SIZE,
+        file,
+    ));
+    let mut counter = ArchivePubkeyCounter::new(8_000_000);
+    let mut progress = ProgressTracker::new("Live Archive V2 Registry");
+    let started = Instant::now();
+    let mut blocks = 0u64;
+    let mut txs = 0u64;
+
+    while let Some((_len, block)) = read_live_no_registry_block(&mut reader)? {
+        let tx_count = count_no_registry_block_pubkeys(&block, &mut counter)
+            .with_context(|| format!("slot {} count pubkeys", block.header.compact.slot))?;
+        blocks += 1;
+        txs += tx_count;
+        progress.update_slot(block.header.compact.slot);
+        progress.update(1, tx_count);
+        if max_blocks.is_some_and(|limit| blocks >= limit) {
+            break;
+        }
+    }
+
+    progress.final_report();
+    let mut items: Vec<([u8; 32], u32)> = counter.counts.into_iter().collect();
+    items.sort_unstable_by(|(left_key, left_count), (right_key, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_key.cmp(right_key))
+    });
+
+    const BUILTIN_PROGRAM_KEYS: &[Pubkey] = &[solana_pubkey::pubkey!(
+        "ComputeBudget111111111111111111111111111111"
+    )];
+    let missing_builtins = BUILTIN_PROGRAM_KEYS
+        .iter()
+        .map(|key| key.to_bytes())
+        .filter(|builtin| !items.iter().any(|(key, _)| key == builtin))
+        .collect::<Vec<_>>();
+    let registry_len = missing_builtins.len() + items.len();
+
+    write_registry_iter(
+        registry_path,
+        missing_builtins
+            .iter()
+            .copied()
+            .chain(items.iter().map(|(key, _)| *key)),
+    )
+    .with_context(|| format!("write {}", registry_path.display()))?;
+    write_live_registry_counts(
+        registry_counts_path,
+        std::iter::repeat(0)
+            .take(missing_builtins.len())
+            .chain(items.iter().map(|(_, count)| *count)),
+    )
+    .with_context(|| format!("write {}", registry_counts_path.display()))?;
+    info!(
+        "Live pubkey registry built in {:.2}s: blocks={} txs={} keys={} registry={} counts={}",
+        started.elapsed().as_secs_f64(),
+        blocks,
+        txs,
+        registry_len,
+        registry_path.display(),
+        registry_counts_path.display()
+    );
+    Ok(())
+}
+
+fn build_live_pubkey_registry_from_counts(
+    input: &Path,
+    registry_path: &Path,
+    registry_counts_path: &Path,
+) -> Result<()> {
+    info!(
+        "Building live pubkey registry from counts {}",
+        input.display()
+    );
+    anyhow::ensure!(
+        crate::file_nonempty(input),
+        "live pubkey-count sidecar missing or empty: {}",
+        input.display()
+    );
+
+    let started = Instant::now();
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let mut reader = WincodeLeb128FramedReader::new(BufReader::with_capacity(
+        LIVE_FINALIZER_IO_BUFFER_SIZE,
+        file,
+    ));
+    let mut counts = GxHashMap::<[u8; 32], u32>::with_hasher(GxBuildHasher::default());
+    let mut records = 0u64;
+    while let Some((_len, record)) = reader.read::<LivePubkeyCountRecord>()? {
+        records += 1;
+        let count = u32::try_from(record.count).unwrap_or(u32::MAX);
+        counts
+            .entry(record.pubkey)
+            .and_modify(|existing| *existing = existing.saturating_add(count))
+            .or_insert(count);
+    }
+    let mut items = counts.into_iter().collect::<Vec<_>>();
+    items.sort_unstable_by(|(left_key, left_count), (right_key, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_key.cmp(right_key))
+    });
+
+    const BUILTIN_PROGRAM_KEYS: &[Pubkey] = &[solana_pubkey::pubkey!(
+        "ComputeBudget111111111111111111111111111111"
+    )];
+    let missing_builtins = BUILTIN_PROGRAM_KEYS
+        .iter()
+        .map(|key| key.to_bytes())
+        .filter(|builtin| !items.iter().any(|(key, _)| key == builtin))
+        .collect::<Vec<_>>();
+    let registry_len = missing_builtins.len() + items.len();
+
+    write_registry_iter(
+        registry_path,
+        missing_builtins
+            .iter()
+            .copied()
+            .chain(items.iter().map(|(key, _)| *key)),
+    )
+    .with_context(|| format!("write {}", registry_path.display()))?;
+    write_live_registry_counts(
+        registry_counts_path,
+        std::iter::repeat(0)
+            .take(missing_builtins.len())
+            .chain(items.iter().map(|(_, count)| *count)),
+    )
+    .with_context(|| format!("write {}", registry_counts_path.display()))?;
+
+    info!(
+        "Live pubkey registry built from counts in {:.2}s: records={} keys={} registry={} counts={}",
+        started.elapsed().as_secs_f64(),
+        records,
+        registry_len,
+        registry_path.display(),
+        registry_counts_path.display()
+    );
+    Ok(())
+}
+
+fn build_live_pubkey_registry_from_runs(
+    run_dir: &Path,
+    registry_path: &Path,
+    registry_counts_path: &Path,
+    temp_dir: &Path,
+) -> Result<()> {
+    info!(
+        "Building live pubkey registry from sorted runs {}",
+        run_dir.display()
+    );
+    let runs = collect_pubkey_run_paths(run_dir)?;
+    anyhow::ensure!(
+        !runs.is_empty(),
+        "live pubkey run sidecar missing or empty: {}",
+        run_dir.display()
+    );
+
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(temp_dir)
+            .with_context(|| format!("remove {}", temp_dir.display()))?;
+    }
+    let freq_run_dir = temp_dir.join("freq-runs");
+    std::fs::create_dir_all(&freq_run_dir)
+        .with_context(|| format!("create {}", freq_run_dir.display()))?;
+
+    let started = Instant::now();
+    let bounded_key_runs = reduce_key_runs_to_fan_in(
+        &runs,
+        &temp_dir.join("key-merge-passes"),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+    )?;
+    let merge_report = merge_key_runs_to_frequency_runs(&bounded_key_runs, &freq_run_dir)?;
+    let bounded_frequency_runs = reduce_frequency_runs_to_fan_in(
+        &merge_report.frequency_runs,
+        &temp_dir.join("frequency-merge-passes"),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+    )?;
+    write_registry_from_frequency_runs(
+        &bounded_frequency_runs,
+        registry_path,
+        registry_counts_path,
+        &merge_report.missing_builtins,
+    )?;
+    std::fs::remove_dir_all(temp_dir).with_context(|| format!("remove {}", temp_dir.display()))?;
+
+    info!(
+        "Live pubkey registry built from sorted runs in {:.2}s: unique_keys={} key_runs={} frequency_runs={} registry={} counts={}",
+        started.elapsed().as_secs_f64(),
+        merge_report.unique_keys,
+        runs.len(),
+        merge_report.frequency_runs.len(),
+        registry_path.display(),
+        registry_counts_path.display()
+    );
+    Ok(())
+}
+
+fn collect_pubkey_run_paths(run_dir: &Path) -> Result<Vec<PathBuf>> {
+    if !run_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut runs = Vec::new();
+    for entry in
+        std::fs::read_dir(run_dir).with_context(|| format!("read {}", run_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == LIVE_PUBKEY_RUN_HOT_FILE || (name.starts_with("run-") && name.ends_with(".bin"))
+        {
+            let bytes = entry
+                .metadata()
+                .with_context(|| format!("stat {}", path.display()))?
+                .len();
+            anyhow::ensure!(
+                bytes % LIVE_PUBKEY_RUN_RECORD_LEN as u64 == 0,
+                "pubkey run {} has non-record-aligned length {}",
+                path.display(),
+                bytes
+            );
+            if bytes > 0 {
+                runs.push(path);
+            }
+        }
+    }
+    runs.sort();
+    Ok(runs)
+}
+
+fn pubkey_run_dir_nonempty(run_dir: &Path) -> Result<bool> {
+    Ok(!collect_pubkey_run_paths(run_dir)?.is_empty())
+}
+
+fn preferred_auto_live_registry_source(
+    counts_path: &Path,
+    runs_dir: &Path,
+    touches_path: &Path,
+) -> Result<LiveRegistrySource> {
+    if pubkey_run_dir_nonempty(runs_dir)? {
+        Ok(LiveRegistrySource::Runs)
+    } else if crate::file_nonempty(counts_path) {
+        Ok(LiveRegistrySource::Counts)
+    } else if crate::file_nonempty(touches_path) {
+        Ok(LiveRegistrySource::Touches)
+    } else {
+        Ok(LiveRegistrySource::Scan)
+    }
+}
+
+const PUBKEY_TOUCH_SORT_CHUNK_KEYS: usize = 1_000_000;
+const PUBKEY_COUNT_SORT_CHUNK_RECORDS: usize = 1_000_000;
+
+#[derive(Clone, Copy)]
+struct PubkeyCountRecord {
+    key: [u8; 32],
+    count: u32,
+}
+
+fn build_live_pubkey_registry_from_touches(
+    input: &Path,
+    registry_path: &Path,
+    registry_counts_path: &Path,
+    temp_dir: &Path,
+) -> Result<()> {
+    info!(
+        "Building live pubkey registry from touch log {}",
+        input.display()
+    );
+    anyhow::ensure!(
+        crate::file_nonempty(input),
+        "live pubkey-touch sidecar missing or empty: {}",
+        input.display()
+    );
+    let bytes = std::fs::metadata(input)
+        .with_context(|| format!("stat {}", input.display()))?
+        .len();
+    anyhow::ensure!(
+        bytes % 32 == 0,
+        "pubkey touch log length {} is not a multiple of 32: {}",
+        bytes,
+        input.display()
+    );
+
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(temp_dir)
+            .with_context(|| format!("remove {}", temp_dir.display()))?;
+    }
+    let key_run_dir = temp_dir.join("key-runs");
+    let freq_run_dir = temp_dir.join("freq-runs");
+    std::fs::create_dir_all(&key_run_dir)
+        .with_context(|| format!("create {}", key_run_dir.display()))?;
+    std::fs::create_dir_all(&freq_run_dir)
+        .with_context(|| format!("create {}", freq_run_dir.display()))?;
+
+    let started = Instant::now();
+    let (key_runs, touch_count) = spill_pubkey_touch_key_runs(input, &key_run_dir)?;
+    let merge_started = Instant::now();
+    let bounded_key_runs = reduce_key_runs_to_fan_in(
+        &key_runs,
+        &temp_dir.join("key-merge-passes"),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+    )?;
+    let merge_report = merge_key_runs_to_frequency_runs(&bounded_key_runs, &freq_run_dir)?;
+    let bounded_frequency_runs = reduce_frequency_runs_to_fan_in(
+        &merge_report.frequency_runs,
+        &temp_dir.join("frequency-merge-passes"),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+    )?;
+    write_registry_from_frequency_runs(
+        &bounded_frequency_runs,
+        registry_path,
+        registry_counts_path,
+        &merge_report.missing_builtins,
+    )?;
+    std::fs::remove_dir_all(temp_dir).with_context(|| format!("remove {}", temp_dir.display()))?;
+
+    info!(
+        "Live pubkey registry built from touches in {:.2}s: touches={} unique_keys={} key_runs={} frequency_runs={} key_merge_s={:.2} registry={} counts={}",
+        started.elapsed().as_secs_f64(),
+        touch_count,
+        merge_report.unique_keys,
+        key_runs.len(),
+        merge_report.frequency_runs.len(),
+        merge_started.elapsed().as_secs_f64(),
+        registry_path.display(),
+        registry_counts_path.display()
+    );
+    Ok(())
+}
+
+fn spill_pubkey_touch_key_runs(input: &Path, run_dir: &Path) -> Result<(Vec<PathBuf>, u64)> {
+    let file = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let total_touches = file
+        .metadata()
+        .with_context(|| format!("stat {}", input.display()))?
+        .len()
+        / 32;
+    let mut reader = BufReader::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
+    let mut keys = Vec::<[u8; 32]>::with_capacity(PUBKEY_TOUCH_SORT_CHUNK_KEYS);
+    let mut runs = Vec::new();
+    let mut remaining = total_touches;
+    let mut run_index = 0usize;
+
+    while remaining > 0 {
+        keys.clear();
+        let take = remaining.min(PUBKEY_TOUCH_SORT_CHUNK_KEYS as u64) as usize;
+        for _ in 0..take {
+            let mut key = [0u8; 32];
+            reader
+                .read_exact(&mut key)
+                .with_context(|| format!("read pubkey touch from {}", input.display()))?;
+            keys.push(key);
+        }
+        keys.sort_unstable();
+        let path = run_dir.join(format!("key-run-{run_index:05}.bin"));
+        write_sorted_key_count_run(&path, &keys)?;
+        runs.push(path);
+        run_index += 1;
+        remaining -= take as u64;
+    }
+
+    Ok((runs, total_touches))
+}
+
+fn write_sorted_key_count_run(path: &Path, keys: &[[u8; 32]]) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
+    let mut index = 0usize;
+    while index < keys.len() {
+        let key = keys[index];
+        let mut count = 1u32;
+        index += 1;
+        while index < keys.len() && keys[index] == key {
+            count = count.saturating_add(1);
+            index += 1;
+        }
+        write_pubkey_count_record(&mut writer, PubkeyCountRecord { key, count })?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    Ok(())
+}
+
+fn validate_live_run_merge_fan_in(fan_in: usize) -> Result<()> {
+    anyhow::ensure!(
+        fan_in >= 2,
+        "live pubkey run merge fan-in must be at least 2"
+    );
+    anyhow::ensure!(
+        fan_in <= LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+        "live pubkey run merge fan-in {fan_in} exceeds cursor cap {}",
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN
+    );
+    Ok(())
+}
+
+fn reduce_key_runs_to_fan_in(
+    key_runs: &[PathBuf],
+    merge_root: &Path,
+    fan_in: usize,
+) -> Result<Vec<PathBuf>> {
+    validate_live_run_merge_fan_in(fan_in)?;
+    if key_runs.len() <= fan_in {
+        return Ok(key_runs.to_vec());
+    }
+    if merge_root.exists() {
+        std::fs::remove_dir_all(merge_root)
+            .with_context(|| format!("remove stale key merge root {}", merge_root.display()))?;
+    }
+    std::fs::create_dir_all(merge_root)
+        .with_context(|| format!("create key merge root {}", merge_root.display()))?;
+
+    let mut current = key_runs.to_vec();
+    let mut pass = 0usize;
+    while current.len() > fan_in {
+        let pass_dir = merge_root.join(format!("pass-{pass:03}"));
+        std::fs::create_dir_all(&pass_dir)
+            .with_context(|| format!("create key merge pass {}", pass_dir.display()))?;
+        let mut next = Vec::with_capacity(current.len().div_ceil(fan_in));
+        for (group_index, group) in current.chunks(fan_in).enumerate() {
+            let output = pass_dir.join(format!("key-run-{group_index:06}.bin"));
+            merge_key_run_group(group, &output)?;
+            next.push(output);
+        }
+        current = next;
+        pass += 1;
+    }
+    Ok(current)
+}
+
+fn merge_key_run_group(key_runs: &[PathBuf], output: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !key_runs.is_empty() && key_runs.len() <= LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+        "key-run merge group size {} exceeds cursor cap {}",
+        key_runs.len(),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN
+    );
+    let mut cursors = Vec::with_capacity(key_runs.len());
+    let mut heap = BinaryHeap::<KeyRunHeapItem>::new();
+    for path in key_runs {
+        let cursor = PubkeyCountRunCursor::open(path)?;
+        if let Some(record) = cursor.current {
+            let run_index = cursors.len();
+            heap.push(KeyRunHeapItem {
+                key: record.key,
+                run_index,
+            });
+        }
+        cursors.push(cursor);
+    }
+
+    let file = File::create(output).with_context(|| format!("create {}", output.display()))?;
+    let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
+    while let Some(item) = heap.pop() {
+        let key = item.key;
+        let mut count = take_current_and_advance(&mut cursors, item.run_index, &mut heap)?
+            .context("key-run heap pointed at empty cursor")?
+            .count;
+        while heap.peek().is_some_and(|next| next.key == key) {
+            let next = heap.pop().expect("heap peeked Some");
+            let record = take_current_and_advance(&mut cursors, next.run_index, &mut heap)?
+                .context("key-run heap pointed at empty cursor")?;
+            count = count.saturating_add(record.count);
+        }
+        write_pubkey_count_record(&mut writer, PubkeyCountRecord { key, count })?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", output.display()))?;
+    Ok(())
+}
+
+fn reduce_frequency_runs_to_fan_in(
+    frequency_runs: &[PathBuf],
+    merge_root: &Path,
+    fan_in: usize,
+) -> Result<Vec<PathBuf>> {
+    validate_live_run_merge_fan_in(fan_in)?;
+    if frequency_runs.len() <= fan_in {
+        return Ok(frequency_runs.to_vec());
+    }
+    if merge_root.exists() {
+        std::fs::remove_dir_all(merge_root).with_context(|| {
+            format!("remove stale frequency merge root {}", merge_root.display())
+        })?;
+    }
+    std::fs::create_dir_all(merge_root)
+        .with_context(|| format!("create frequency merge root {}", merge_root.display()))?;
+
+    let mut current = frequency_runs.to_vec();
+    let mut pass = 0usize;
+    while current.len() > fan_in {
+        let pass_dir = merge_root.join(format!("pass-{pass:03}"));
+        std::fs::create_dir_all(&pass_dir)
+            .with_context(|| format!("create frequency merge pass {}", pass_dir.display()))?;
+        let mut next = Vec::with_capacity(current.len().div_ceil(fan_in));
+        for (group_index, group) in current.chunks(fan_in).enumerate() {
+            let output = pass_dir.join(format!("freq-run-{group_index:06}.bin"));
+            merge_frequency_run_group(group, &output)?;
+            next.push(output);
+        }
+        current = next;
+        pass += 1;
+    }
+    Ok(current)
+}
+
+fn merge_frequency_run_group(frequency_runs: &[PathBuf], output: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !frequency_runs.is_empty() && frequency_runs.len() <= LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+        "frequency-run merge group size {} exceeds cursor cap {}",
+        frequency_runs.len(),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN
+    );
+    let mut cursors = Vec::with_capacity(frequency_runs.len());
+    let mut heap = BinaryHeap::<FrequencyRunHeapItem>::new();
+    for path in frequency_runs {
+        let cursor = PubkeyCountRunCursor::open(path)?;
+        if let Some(record) = cursor.current {
+            let run_index = cursors.len();
+            heap.push(FrequencyRunHeapItem {
+                count: record.count,
+                key: record.key,
+                run_index,
+            });
+        }
+        cursors.push(cursor);
+    }
+
+    let file = File::create(output).with_context(|| format!("create {}", output.display()))?;
+    let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
+    while let Some(item) = heap.pop() {
+        write_pubkey_count_record(
+            &mut writer,
+            PubkeyCountRecord {
+                key: item.key,
+                count: item.count,
+            },
+        )?;
+        let cursor = cursors
+            .get_mut(item.run_index)
+            .ok_or_else(|| anyhow!("invalid frequency-run cursor index {}", item.run_index))?;
+        cursor.advance()?;
+        if let Some(next) = cursor.current {
+            heap.push(FrequencyRunHeapItem {
+                count: next.count,
+                key: next.key,
+                run_index: item.run_index,
+            });
+        }
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", output.display()))?;
+    Ok(())
+}
+
+struct TouchMergeReport {
+    frequency_runs: Vec<PathBuf>,
+    missing_builtins: Vec<[u8; 32]>,
+    unique_keys: u64,
+}
+
+fn merge_key_runs_to_frequency_runs(
+    key_runs: &[PathBuf],
+    freq_run_dir: &Path,
+) -> Result<TouchMergeReport> {
+    merge_key_runs_to_frequency_runs_with_chunk_records(
+        key_runs,
+        freq_run_dir,
+        PUBKEY_COUNT_SORT_CHUNK_RECORDS,
+    )
+}
+
+fn merge_key_runs_to_frequency_runs_with_chunk_records(
+    key_runs: &[PathBuf],
+    freq_run_dir: &Path,
+    frequency_chunk_records: usize,
+) -> Result<TouchMergeReport> {
+    anyhow::ensure!(
+        !key_runs.is_empty() && key_runs.len() <= LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+        "key-to-frequency merge input count {} exceeds cursor cap {}",
+        key_runs.len(),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN
+    );
+    anyhow::ensure!(
+        frequency_chunk_records > 0,
+        "frequency chunk record count must be positive"
+    );
+    let mut cursors = Vec::with_capacity(key_runs.len());
+    let mut heap = BinaryHeap::<KeyRunHeapItem>::new();
+    for path in key_runs {
+        let cursor = PubkeyCountRunCursor::open(path)?;
+        if let Some(record) = cursor.current {
+            let run_index = cursors.len();
+            heap.push(KeyRunHeapItem {
+                key: record.key,
+                run_index,
+            });
+        }
+        cursors.push(cursor);
+    }
+
+    let builtin_keys = live_builtin_program_keys();
+    let mut builtin_seen = vec![false; builtin_keys.len()];
+    let mut frequency_chunk = Vec::<PubkeyCountRecord>::with_capacity(frequency_chunk_records);
+    let mut frequency_runs = Vec::new();
+    let mut unique_keys = 0u64;
+
+    while let Some(item) = heap.pop() {
+        let key = item.key;
+        let mut count = take_current_and_advance(&mut cursors, item.run_index, &mut heap)?
+            .context("key-run heap pointed at empty cursor")?
+            .count;
+
+        while heap.peek().is_some_and(|next| next.key == key) {
+            let next = heap.pop().expect("heap peeked Some");
+            let record = take_current_and_advance(&mut cursors, next.run_index, &mut heap)?
+                .context("key-run heap pointed at empty cursor")?;
+            count = count.saturating_add(record.count);
+        }
+
+        for (index, builtin) in builtin_keys.iter().enumerate() {
+            if key == *builtin {
+                builtin_seen[index] = true;
+            }
+        }
+        frequency_chunk.push(PubkeyCountRecord { key, count });
+        unique_keys += 1;
+        if frequency_chunk.len() >= frequency_chunk_records {
+            spill_frequency_run(freq_run_dir, &mut frequency_runs, &mut frequency_chunk)?;
+        }
+    }
+    if !frequency_chunk.is_empty() {
+        spill_frequency_run(freq_run_dir, &mut frequency_runs, &mut frequency_chunk)?;
+    }
+
+    let missing_builtins = builtin_keys
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| (!builtin_seen[index]).then_some(*key))
+        .collect::<Vec<_>>();
+
+    Ok(TouchMergeReport {
+        frequency_runs,
+        missing_builtins,
+        unique_keys,
+    })
+}
+
+fn take_current_and_advance(
+    cursors: &mut [PubkeyCountRunCursor],
+    run_index: usize,
+    heap: &mut BinaryHeap<KeyRunHeapItem>,
+) -> Result<Option<PubkeyCountRecord>> {
+    let cursor = cursors
+        .get_mut(run_index)
+        .ok_or_else(|| anyhow!("invalid key-run cursor index {run_index}"))?;
+    let record = cursor.current.take();
+    cursor.advance()?;
+    if let Some(next) = cursor.current {
+        heap.push(KeyRunHeapItem {
+            key: next.key,
+            run_index,
+        });
+    }
+    Ok(record)
+}
+
+fn spill_frequency_run(
+    freq_run_dir: &Path,
+    frequency_runs: &mut Vec<PathBuf>,
+    chunk: &mut Vec<PubkeyCountRecord>,
+) -> Result<()> {
+    chunk.sort_unstable_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    let path = freq_run_dir.join(format!("freq-run-{:05}.bin", frequency_runs.len()));
+    let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
+    let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
+    for record in chunk.drain(..) {
+        write_pubkey_count_record(&mut writer, record)?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    frequency_runs.push(path);
+    Ok(())
+}
+
+fn write_registry_from_frequency_runs(
+    frequency_runs: &[PathBuf],
+    registry_path: &Path,
+    registry_counts_path: &Path,
+    missing_builtins: &[[u8; 32]],
+) -> Result<()> {
+    anyhow::ensure!(
+        !frequency_runs.is_empty() && frequency_runs.len() <= LIVE_PUBKEY_RUN_MERGE_FAN_IN,
+        "final frequency-run input count {} exceeds cursor cap {}",
+        frequency_runs.len(),
+        LIVE_PUBKEY_RUN_MERGE_FAN_IN
+    );
+    let mut cursors = Vec::with_capacity(frequency_runs.len());
+    let mut heap = BinaryHeap::<FrequencyRunHeapItem>::new();
+    for path in frequency_runs {
+        let cursor = PubkeyCountRunCursor::open(path)?;
+        if let Some(record) = cursor.current {
+            let run_index = cursors.len();
+            heap.push(FrequencyRunHeapItem {
+                count: record.count,
+                key: record.key,
+                run_index,
+            });
+        }
+        cursors.push(cursor);
+    }
+
+    let registry_file = File::create(registry_path)
+        .with_context(|| format!("create {}", registry_path.display()))?;
+    let mut registry_writer =
+        BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, registry_file);
+    let counts_file = File::create(registry_counts_path)
+        .with_context(|| format!("create {}", registry_counts_path.display()))?;
+    let mut counts_writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, counts_file);
+
+    for builtin in missing_builtins {
+        registry_writer.write_all(builtin)?;
+        blockzilla_format::framed::write_u32_varint(&mut counts_writer, 0)?;
+    }
+
+    while let Some(item) = heap.pop() {
+        registry_writer.write_all(&item.key)?;
+        blockzilla_format::framed::write_u32_varint(&mut counts_writer, item.count)?;
+        let cursor = cursors
+            .get_mut(item.run_index)
+            .ok_or_else(|| anyhow!("invalid frequency-run cursor index {}", item.run_index))?;
+        cursor.advance()?;
+        if let Some(next) = cursor.current {
+            heap.push(FrequencyRunHeapItem {
+                count: next.count,
+                key: next.key,
+                run_index: item.run_index,
+            });
+        }
+    }
+
+    registry_writer
+        .flush()
+        .with_context(|| format!("flush {}", registry_path.display()))?;
+    counts_writer
+        .flush()
+        .with_context(|| format!("flush {}", registry_counts_path.display()))?;
+    Ok(())
+}
+
+struct PubkeyCountRunCursor {
+    reader: BufReader<File>,
+    current: Option<PubkeyCountRecord>,
+}
+
+impl PubkeyCountRunCursor {
+    fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let mut cursor = Self {
+            reader: BufReader::with_capacity(LIVE_PUBKEY_RUN_READER_BUFFER_SIZE, file),
+            current: None,
+        };
+        cursor.advance()?;
+        Ok(cursor)
+    }
+
+    fn advance(&mut self) -> Result<()> {
+        self.current = read_pubkey_count_record(&mut self.reader)?;
+        Ok(())
+    }
+}
+
+fn write_pubkey_count_record(writer: &mut impl Write, record: PubkeyCountRecord) -> Result<()> {
+    writer.write_all(&record.key)?;
+    writer.write_all(&record.count.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_pubkey_count_record(reader: &mut impl Read) -> Result<Option<PubkeyCountRecord>> {
+    let mut key = [0u8; 32];
+    let read = reader.read(&mut key)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if read < key.len() {
+        reader.read_exact(&mut key[read..])?;
+    }
+    let mut count_bytes = [0u8; 4];
+    reader.read_exact(&mut count_bytes)?;
+    Ok(Some(PubkeyCountRecord {
+        key,
+        count: u32::from_le_bytes(count_bytes),
+    }))
+}
+
+#[derive(Eq, PartialEq)]
+struct KeyRunHeapItem {
+    key: [u8; 32],
+    run_index: usize,
+}
+
+impl Ord for KeyRunHeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.run_index.cmp(&self.run_index))
+    }
+}
+
+impl PartialOrd for KeyRunHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Eq, PartialEq)]
+struct FrequencyRunHeapItem {
+    count: u32,
+    key: [u8; 32],
+    run_index: usize,
+}
+
+impl Ord for FrequencyRunHeapItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.count
+            .cmp(&other.count)
+            .then_with(|| other.key.cmp(&self.key))
+            .then_with(|| other.run_index.cmp(&self.run_index))
+    }
+}
+
+impl PartialOrd for FrequencyRunHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn live_builtin_program_keys() -> &'static [[u8; 32]] {
+    const BUILTIN_PROGRAM_KEYS: [[u8; 32]; 1] =
+        [solana_pubkey::pubkey!("ComputeBudget111111111111111111111111111111").to_bytes()];
+    &BUILTIN_PROGRAM_KEYS
+}
+
+#[cfg(test)]
+mod live_touch_registry_tests {
+    use super::*;
+
+    #[test]
+    fn auto_live_registry_source_prefers_bounded_runs() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "blockzilla-auto-live-registry-test-{}-{unique}",
+            std::process::id()
+        ));
+        let runs_dir = dir.join(LIVE_PUBKEY_RUNS_DIR);
+        let counts_path = dir.join("pubkey-counts.bin");
+        let touches_path = dir.join("pubkey-touches.bin");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::write(&counts_path, [1u8]).unwrap();
+        std::fs::write(&touches_path, [2u8]).unwrap();
+        let run_path = runs_dir.join("run-000000.bin");
+        let mut run = File::create(&run_path).unwrap();
+        write_pubkey_count_record(
+            &mut run,
+            PubkeyCountRecord {
+                key: [3u8; 32],
+                count: 1,
+            },
+        )
+        .unwrap();
+        drop(run);
+
+        assert_eq!(
+            preferred_auto_live_registry_source(&counts_path, &runs_dir, &touches_path).unwrap(),
+            LiveRegistrySource::Runs
+        );
+        std::fs::remove_file(&run_path).unwrap();
+        assert_eq!(
+            preferred_auto_live_registry_source(&counts_path, &runs_dir, &touches_path).unwrap(),
+            LiveRegistrySource::Counts
+        );
+        std::fs::remove_file(&counts_path).unwrap();
+        assert_eq!(
+            preferred_auto_live_registry_source(&counts_path, &runs_dir, &touches_path).unwrap(),
+            LiveRegistrySource::Touches
+        );
+        std::fs::remove_file(&touches_path).unwrap();
+        assert_eq!(
+            preferred_auto_live_registry_source(&counts_path, &runs_dir, &touches_path).unwrap(),
+            LiveRegistrySource::Scan
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn touch_log_registry_builds_frequency_order() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "blockzilla-touch-registry-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let touches_path = dir.join("pubkey-touches.bin");
+        let registry_path = dir.join("registry.bin");
+        let counts_path = dir.join("registry_counts.bin");
+        let temp_dir = dir.join("sort");
+
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+        let key_c = [3u8; 32];
+        {
+            let mut file = File::create(&touches_path).unwrap();
+            for key in [key_a, key_b, key_b, key_c, key_a, key_b] {
+                file.write_all(&key).unwrap();
+            }
+        }
+
+        build_live_pubkey_registry_from_touches(
+            &touches_path,
+            &registry_path,
+            &counts_path,
+            &temp_dir,
+        )
+        .unwrap();
+
+        let registry = std::fs::read(&registry_path).unwrap();
+        let keys = registry
+            .chunks_exact(32)
+            .map(|chunk| {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(chunk);
+                key
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys[0], live_builtin_program_keys()[0]);
+        assert_eq!(keys[1], key_b);
+        assert_eq!(keys[2], key_a);
+        assert_eq!(keys[3], key_c);
+
+        let mut counts_reader = BufReader::new(File::open(&counts_path).unwrap());
+        let mut counts = Vec::new();
+        while let Some(count) =
+            blockzilla_format::framed::read_u32_varint(&mut counts_reader).unwrap()
+        {
+            counts.push(count);
+        }
+        assert_eq!(counts, vec![0, 3, 2, 1]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pubkey_runs_registry_builds_frequency_order() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "blockzilla-run-registry-test-{}-{unique}",
+            std::process::id()
+        ));
+        let run_dir = dir.join(LIVE_PUBKEY_RUNS_DIR);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let registry_path = dir.join("registry.bin");
+        let counts_path = dir.join("registry_counts.bin");
+        let temp_dir = dir.join("merge");
+
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+        let key_c = [3u8; 32];
+        {
+            let mut file = File::create(run_dir.join("run-000000.bin")).unwrap();
+            write_pubkey_count_record(
+                &mut file,
+                PubkeyCountRecord {
+                    key: key_a,
+                    count: 1,
+                },
+            )
+            .unwrap();
+            write_pubkey_count_record(
+                &mut file,
+                PubkeyCountRecord {
+                    key: key_b,
+                    count: 2,
+                },
+            )
+            .unwrap();
+        }
+        {
+            let mut file = File::create(run_dir.join("run-000001.bin")).unwrap();
+            write_pubkey_count_record(
+                &mut file,
+                PubkeyCountRecord {
+                    key: key_a,
+                    count: 2,
+                },
+            )
+            .unwrap();
+            write_pubkey_count_record(
+                &mut file,
+                PubkeyCountRecord {
+                    key: key_c,
+                    count: 1,
+                },
+            )
+            .unwrap();
+        }
+        {
+            let mut file = File::create(run_dir.join(LIVE_PUBKEY_RUN_HOT_FILE)).unwrap();
+            write_pubkey_count_record(
+                &mut file,
+                PubkeyCountRecord {
+                    key: key_b,
+                    count: 2,
+                },
+            )
+            .unwrap();
+        }
+
+        build_live_pubkey_registry_from_runs(&run_dir, &registry_path, &counts_path, &temp_dir)
+            .unwrap();
+
+        let registry = std::fs::read(&registry_path).unwrap();
+        let keys = registry
+            .chunks_exact(32)
+            .map(|chunk| {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(chunk);
+                key
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys[0], live_builtin_program_keys()[0]);
+        assert_eq!(keys[1], key_b);
+        assert_eq!(keys[2], key_a);
+        assert_eq!(keys[3], key_c);
+
+        let mut counts_reader = BufReader::new(File::open(&counts_path).unwrap());
+        let mut counts = Vec::new();
+        while let Some(count) =
+            blockzilla_format::framed::read_u32_varint(&mut counts_reader).unwrap()
+        {
+            counts.push(count);
+        }
+        assert_eq!(counts, vec![0, 4, 3, 1]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn multi_pass_run_merges_preserve_counts_and_frequency_order() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "blockzilla-multi-pass-run-merge-test-{}-{unique}",
+            std::process::id()
+        ));
+        let run_dir = dir.join("runs");
+        let frequency_dir = dir.join("frequency");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::create_dir_all(&frequency_dir).unwrap();
+
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+        let key_c = [3u8; 32];
+        let key_d = [4u8; 32];
+        let key_e = [5u8; 32];
+        let input_runs = [
+            vec![(key_a, 1), (key_c, 1)],
+            vec![(key_a, 2), (key_b, 5)],
+            vec![(key_c, 4), (key_d, 2)],
+            vec![(key_e, 3)],
+            vec![(key_b, 1), (key_d, 4)],
+        ];
+        let mut run_paths = Vec::new();
+        for (index, records) in input_runs.iter().enumerate() {
+            let path = run_dir.join(format!("run-{index:06}.bin"));
+            let mut file = File::create(&path).unwrap();
+            for &(key, count) in records {
+                write_pubkey_count_record(&mut file, PubkeyCountRecord { key, count }).unwrap();
+            }
+            run_paths.push(path);
+        }
+
+        let bounded_key_runs =
+            reduce_key_runs_to_fan_in(&run_paths, &dir.join("key-passes"), 2).unwrap();
+        assert_eq!(bounded_key_runs.len(), 2);
+        let report = merge_key_runs_to_frequency_runs_with_chunk_records(
+            &bounded_key_runs,
+            &frequency_dir,
+            2,
+        )
+        .unwrap();
+        assert_eq!(report.unique_keys, 5);
+        assert_eq!(report.frequency_runs.len(), 3);
+
+        let bounded_frequency_runs = reduce_frequency_runs_to_fan_in(
+            &report.frequency_runs,
+            &dir.join("frequency-passes"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(bounded_frequency_runs.len(), 2);
+        let registry_path = dir.join("registry.bin");
+        let counts_path = dir.join("registry_counts.bin");
+        write_registry_from_frequency_runs(
+            &bounded_frequency_runs,
+            &registry_path,
+            &counts_path,
+            &report.missing_builtins,
+        )
+        .unwrap();
+
+        let registry = std::fs::read(&registry_path).unwrap();
+        let keys = registry
+            .chunks_exact(32)
+            .map(|chunk| {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(chunk);
+                key
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                live_builtin_program_keys()[0],
+                key_b,
+                key_d,
+                key_c,
+                key_a,
+                key_e,
+            ]
+        );
+        let mut counts_reader = BufReader::new(File::open(&counts_path).unwrap());
+        let mut counts = Vec::new();
+        while let Some(count) =
+            blockzilla_format::framed::read_u32_varint(&mut counts_reader).unwrap()
+        {
+            counts.push(count);
+        }
+        assert_eq!(counts, vec![0, 6, 6, 5, 3, 3]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prepared_live_registry_is_marked_reusable_and_rejects_corrupt_output() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "blockzilla-prepare-live-registry-test-{}-{unique}",
+            std::process::id()
+        ));
+        let capture_dir = dir.join("capture");
+        let run_dir = capture_dir.join("index").join(LIVE_PUBKEY_RUNS_DIR);
+        let output_dir = dir.join("output");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+        let mut run = File::create(run_dir.join("run-000000.bin")).unwrap();
+        write_pubkey_count_record(
+            &mut run,
+            PubkeyCountRecord {
+                key: key_a,
+                count: 2,
+            },
+        )
+        .unwrap();
+        write_pubkey_count_record(
+            &mut run,
+            PubkeyCountRecord {
+                key: key_b,
+                count: 3,
+            },
+        )
+        .unwrap();
+        drop(run);
+
+        prepare_live_registry_from_runs(&capture_dir, &output_dir, true).unwrap();
+        let registry_path = output_dir.join(REGISTRY_FILE);
+        let marker_path = output_dir.join(LIVE_REGISTRY_PREPARED_MARKER);
+        let expected_registry = std::fs::read(&registry_path).unwrap();
+        assert!(marker_path.is_file());
+        assert!(!output_dir.join(LIVE_REGISTRY_PREPARE_TEMP_DIR).exists());
+
+        prepare_live_registry_from_runs(&capture_dir, &output_dir, true).unwrap();
+        assert_eq!(std::fs::read(&registry_path).unwrap(), expected_registry);
+
+        std::fs::write(&registry_path, [0u8]).unwrap();
+        let error = prepare_live_registry_from_runs(&capture_dir, &output_dir, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("prepared live registry has invalid byte length")
+        );
+
+        prepare_live_registry_from_runs(&capture_dir, &output_dir, false).unwrap();
+        assert_eq!(std::fs::read(&registry_path).unwrap(), expected_registry);
+        assert!(marker_path.is_file());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+fn write_live_registry_counts<I>(path: &Path, counts: I) -> Result<()>
+where
+    I: IntoIterator<Item = u32>,
+{
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
+    for count in counts {
+        blockzilla_format::framed::write_u32_varint(&mut writer, count)?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    Ok(())
+}
+
+fn write_first_seen_registry_counts<I>(path: &Path, counts: I) -> Result<()>
+where
+    I: IntoIterator<Item = u32>,
+{
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, file);
+    for count in counts {
+        blockzilla_format::framed::write_u32_varint(&mut writer, count)?;
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    Ok(())
+}
+
+fn read_live_no_registry_block<R: Read>(
+    reader: &mut WincodeLeb128FramedReader<R>,
+) -> Result<Option<(usize, WincodeArchiveV2NoRegistryBlock)>> {
+    reader.read_bytes_with_limit(LIVE_FINALIZER_MAX_FRAME_SIZE, |bytes| {
+        match wincode::config::deserialize::<WincodeArchiveV2NoRegistryBlock, _>(
+            bytes,
+            wincode_leb128_config(),
+        ) {
+            Ok(block) => Ok(block),
+            Err(current_err) => {
+                let legacy: LiveNoRegistryBlockLegacy = wincode::config::deserialize(
+                    bytes,
+                    wincode_leb128_config(),
+                )
+                .with_context(|| {
+                    format!("decode live no-registry block failed; current error: {current_err}")
+                })?;
+                Ok(legacy.into_current())
+            }
+        }
+    })
+}
+
+fn read_live_no_registry_block_signature_counts<R: Read>(
+    reader: &mut WincodeLeb128FramedReader<R>,
+) -> Result<Option<(usize, LiveNoRegistryBlockSignatureCounts)>> {
+    reader.read_bytes_with_limit(LIVE_FINALIZER_MAX_FRAME_SIZE, |bytes| {
+        match wincode::config::deserialize::<LiveNoRegistryBlockSignatureCounts, _>(
+            bytes,
+            wincode_leb128_config(),
+        ) {
+            Ok(block) => Ok(block),
+            Err(current_err) => {
+                let legacy: LiveNoRegistryBlockLegacy = wincode::config::deserialize(
+                    bytes,
+                    wincode_leb128_config(),
+                )
+                .with_context(|| {
+                    format!(
+                        "decode live no-registry signature-count block failed; current error: {current_err}"
+                    )
+                })?;
+                live_signature_counts_from_full_block(legacy.into_current())
+            }
+        }
+    })
+}
+
+enum LiveFinalizerBlock {
+    Full(WincodeArchiveV2NoRegistryBlock),
+    SignatureCounts(LiveNoRegistryBlockSignatureCounts),
+}
+
+impl LiveFinalizerBlock {
+    fn slot(&self) -> u64 {
+        match self {
+            Self::Full(block) => block.header.compact.slot,
+            Self::SignatureCounts(block) => block.header.compact.slot,
+        }
+    }
+
+    fn blockhash_id(&self) -> u32 {
+        match self {
+            Self::Full(block) => block.header.compact.blockhash,
+            Self::SignatureCounts(block) => block.header.compact.blockhash,
+        }
+    }
+}
+
+#[derive(Debug, SchemaRead)]
+struct LiveNoRegistryBlockSignatureCounts {
+    header: WincodeArchiveV2NoRegistryBlockHeader,
+    txs: Vec<LiveNoRegistryTransactionSignatureCounts>,
+}
+
+#[derive(Debug, SchemaRead)]
+struct LiveNoRegistryTransactionSignatureCounts {
+    tx_index: u32,
+    tx: WincodeArchiveV2Payload<LiveNoRegistryTxSignatureCounts>,
+    metadata: Option<WincodeArchiveV2Payload<WincodeArchiveV2NoRegistryMeta>>,
+}
+
+#[derive(Debug, SchemaRead)]
+struct LiveNoRegistryTxSignatureCounts {
+    signatures: LiveSignatureCount,
+    message: WincodeArchiveV2NoRegistryMessage,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveSignatureCount {
+    count: u8,
+}
+
+unsafe impl<'de, C: Config> SchemaRead<'de, C> for LiveSignatureCount {
+    type Dst = Self;
+
+    fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
+        let len = <C::LengthEncoding as SeqLen<C>>::read(reader.by_ref())?;
+        let count = u8::try_from(len)
+            .map_err(|_| wincode::ReadError::InvalidValue("signature count exceeds u8::MAX"))?;
+        for _ in 0..len {
+            let signature_len = <C::LengthEncoding as SeqLen<C>>::read(reader.by_ref())?;
+            reader.take_scoped(signature_len)?;
+        }
+        dst.write(Self { count });
+        Ok(())
+    }
+}
+
+fn live_signature_counts_from_full_block(
+    block: WincodeArchiveV2NoRegistryBlock,
+) -> Result<LiveNoRegistryBlockSignatureCounts> {
+    Ok(LiveNoRegistryBlockSignatureCounts {
+        header: block.header,
+        txs: block
+            .txs
+            .into_iter()
+            .map(live_signature_count_transaction_from_full)
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn live_signature_count_transaction_from_full(
+    transaction: WincodeArchiveV2NoRegistryTransaction,
+) -> Result<LiveNoRegistryTransactionSignatureCounts> {
+    Ok(LiveNoRegistryTransactionSignatureCounts {
+        tx_index: transaction.tx_index,
+        tx: map_live_signature_count_payload(transaction.tx)?,
+        metadata: transaction.metadata,
+    })
+}
+
+fn map_live_signature_count_payload(
+    payload: WincodeArchiveV2Payload<WincodeArchiveV2NoRegistryTx>,
+) -> Result<WincodeArchiveV2Payload<LiveNoRegistryTxSignatureCounts>> {
+    Ok(match payload {
+        WincodeArchiveV2Payload::Decoded { source_len, value } => {
+            WincodeArchiveV2Payload::Decoded {
+                source_len,
+                value: LiveNoRegistryTxSignatureCounts {
+                    signatures: LiveSignatureCount {
+                        count: u8::try_from(value.signatures.len())
+                            .context("signature count exceeds u8::MAX")?,
+                    },
+                    message: value.message,
+                },
+            }
+        }
+        WincodeArchiveV2Payload::Raw { bytes, error } => {
+            WincodeArchiveV2Payload::Raw { bytes, error }
+        }
+    })
+}
+
+#[derive(Debug, SchemaRead)]
+struct LiveNoRegistryBlockLegacy {
+    header: WincodeArchiveV2NoRegistryBlockHeader,
+    txs: Vec<LiveNoRegistryTransactionLegacy>,
+}
+
+#[derive(Debug, SchemaRead)]
+struct LiveNoRegistryTransactionLegacy {
+    tx_index: u32,
+    tx: WincodeArchiveV2Payload<WincodeArchiveV2NoRegistryTx>,
+    metadata: Option<WincodeArchiveV2Payload<LiveNoRegistryMetaLegacy>>,
+}
+
+#[derive(Debug, SchemaRead)]
+struct LiveNoRegistryMetaLegacy {
+    err: Option<CompactTransactionError>,
+    fee: u64,
+    pre_balances: Vec<u64>,
+    post_balances: Vec<u64>,
+    inner_instructions: Option<Vec<CompactInnerInstructions>>,
+    logs: Option<Vec<String>>,
+    pre_token_balances: Vec<WincodeArchiveV2NoRegistryTokenBalance>,
+    post_token_balances: Vec<WincodeArchiveV2NoRegistryTokenBalance>,
+    rewards: Vec<WincodeArchiveV2NoRegistryReward>,
+    loaded_writable_addresses: Vec<[u8; 32]>,
+    loaded_readonly_addresses: Vec<[u8; 32]>,
+    return_data: Option<WincodeArchiveV2NoRegistryReturnData>,
+    compute_units_consumed: Option<u64>,
+    cost_units: Option<u64>,
+}
+
+impl LiveNoRegistryBlockLegacy {
+    fn into_current(self) -> WincodeArchiveV2NoRegistryBlock {
+        WincodeArchiveV2NoRegistryBlock {
+            header: self.header,
+            txs: self
+                .txs
+                .into_iter()
+                .map(LiveNoRegistryTransactionLegacy::into_current)
+                .collect(),
+        }
+    }
+}
+
+impl LiveNoRegistryTransactionLegacy {
+    fn into_current(self) -> WincodeArchiveV2NoRegistryTransaction {
+        WincodeArchiveV2NoRegistryTransaction {
+            tx_index: self.tx_index,
+            tx: self.tx,
+            metadata: self.metadata.map(|metadata| match metadata {
+                WincodeArchiveV2Payload::Decoded { source_len, value } => {
+                    WincodeArchiveV2Payload::Decoded {
+                        source_len,
+                        value: value.into_current(),
+                    }
+                }
+                WincodeArchiveV2Payload::Raw { bytes, error } => {
+                    WincodeArchiveV2Payload::Raw { bytes, error }
+                }
+            }),
+        }
+    }
+}
+
+impl LiveNoRegistryMetaLegacy {
+    fn into_current(self) -> WincodeArchiveV2NoRegistryMeta {
+        WincodeArchiveV2NoRegistryMeta {
+            err: self.err,
+            fee: self.fee,
+            pre_balances: self.pre_balances,
+            post_balances: self.post_balances,
+            inner_instructions: self.inner_instructions,
+            logs: self.logs.map(WincodeArchiveV2NoRegistryLogs::Raw),
+            pre_token_balances: self.pre_token_balances,
+            post_token_balances: self.post_token_balances,
+            rewards: self.rewards,
+            loaded_writable_addresses: self.loaded_writable_addresses,
+            loaded_readonly_addresses: self.loaded_readonly_addresses,
+            return_data: self.return_data,
+            compute_units_consumed: self.compute_units_consumed,
+            cost_units: self.cost_units,
+        }
+    }
+}
+
+fn trim_hot_memory(
+    _next_block_id: u32,
+    block_bytes: &mut Vec<u8>,
+    compressed_buf: &mut Vec<u8>,
+    access_bytes: &mut Vec<u8>,
+    access_signature_bytes: Option<&mut Vec<u8>>,
+) {
+    let mut released = release_hot_reusable_buffer(block_bytes);
+    released |= release_hot_reusable_buffer(compressed_buf);
+    released |= release_hot_reusable_buffer(access_bytes);
+    if let Some(access_signature_bytes) = access_signature_bytes {
+        released |= release_hot_reusable_buffer(access_signature_bytes);
+    }
+
+    if released {
         trim_process_heap();
     }
 }
 
 fn trim_hot_reusable_buffer(buf: &mut Vec<u8>) {
+    let _ = release_hot_reusable_buffer(buf);
+}
+
+fn release_hot_reusable_buffer(buf: &mut Vec<u8>) -> bool {
     buf.clear();
     if buf.capacity() > HOT_REUSABLE_BUFFER_RETAIN_LIMIT {
         *buf = Vec::with_capacity(HOT_REUSABLE_BUFFER_RETAIN_LIMIT);
+        true
+    } else {
+        false
+    }
+}
+
+fn trim_hot_reusable_vec<T>(buf: &mut Vec<T>) {
+    buf.clear();
+    let retain_limit = HOT_REUSABLE_BUFFER_RETAIN_LIMIT / std::mem::size_of::<T>().max(1);
+    if buf.capacity() > retain_limit {
+        *buf = Vec::with_capacity(retain_limit);
     }
 }
 
@@ -940,6 +5739,76 @@ fn link_or_copy_registry_sidecar(source: &Path, target: &Path) -> Result<()> {
     }
 }
 
+fn copy_file_prefix(source: &Path, target: &Path, bytes: u64) -> Result<()> {
+    if source == target {
+        anyhow::ensure!(
+            std::fs::metadata(source)
+                .with_context(|| format!("stat {}", source.display()))?
+                .len()
+                == bytes,
+            "cannot truncate live sidecar in place: {}",
+            source.display()
+        );
+        return Ok(());
+    }
+    if target.exists() {
+        std::fs::remove_file(target).with_context(|| format!("remove {}", target.display()))?;
+    }
+    let source_file = File::open(source).with_context(|| format!("open {}", source.display()))?;
+    let target_file =
+        File::create(target).with_context(|| format!("create {}", target.display()))?;
+    let mut reader =
+        BufReader::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, source_file).take(bytes);
+    let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, target_file);
+    let copied = std::io::copy(&mut reader, &mut writer)
+        .with_context(|| format!("copy prefix {} to {}", source.display(), target.display()))?;
+    anyhow::ensure!(
+        copied == bytes,
+        "live sidecar {} ended after {} bytes, expected at least {}",
+        source.display(),
+        copied,
+        bytes
+    );
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", target.display()))?;
+    Ok(())
+}
+
+fn copy_live_poh_prefix(source: &Path, target: &Path, records: u64) -> Result<()> {
+    if target.exists() {
+        std::fs::remove_file(target).with_context(|| format!("remove {}", target.display()))?;
+    }
+    let source_file = File::open(source).with_context(|| format!("open {}", source.display()))?;
+    let target_file =
+        File::create(target).with_context(|| format!("create {}", target.display()))?;
+    let mut reader = WincodeLeb128FramedReader::new(BufReader::with_capacity(
+        LIVE_FINALIZER_IO_BUFFER_SIZE,
+        source_file,
+    ));
+    let mut writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
+        LIVE_FINALIZER_IO_BUFFER_SIZE,
+        target_file,
+    ));
+    let mut copied = 0u64;
+    while copied < records {
+        let Some((_len, record)) = reader.read::<WincodeArchiveV2PohRecord>()? else {
+            break;
+        };
+        writer.write(&record)?;
+        copied += 1;
+    }
+    anyhow::ensure!(
+        copied == records,
+        "live PoH sidecar {} ended after {} records, expected at least {}",
+        source.display(),
+        copied,
+        records
+    );
+    writer.flush()?;
+    Ok(())
+}
+
 fn load_or_build_registry_key_index(
     registry_path: &Path,
     registry_index_path: &Path,
@@ -981,10 +5850,11 @@ fn load_or_build_registry_key_index(
         "Building missing Archive V2 registry MPHF index in-process: {}",
         registry_index_path.display()
     );
-    let store = KeyStore::load(registry_path)
-        .with_context(|| format!("load registry {}", registry_path.display()))?;
-    let index = KeyIndex::build_from_slice(&store.keys);
-    write_registry_key_index_atomic(&index, registry_index_path)?;
+    let registry = MappedRegistryKeys::open(registry_path)?;
+    let index = KeyIndex::build_from_slice_low_memory(registry.keys());
+    write_registry_key_index_atomic_checked(&index, registry_index_path, || {
+        registry.ensure_unchanged()
+    })?;
     info!(
         "Built Archive V2 registry MPHF index in {:.2}s: keys={} path={}",
         started.elapsed().as_secs_f64(),
@@ -1005,18 +5875,148 @@ fn registry_key_count(registry_path: &Path) -> Result<usize> {
         registry_path.display()
     );
     let keys = len / 32;
+    anyhow::ensure!(
+        keys <= u64::from(u32::MAX),
+        "registry key count {keys} exceeds compact ID space"
+    );
     usize::try_from(keys).context("registry key count exceeds usize")
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegistryFileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl RegistryFileStamp {
+    fn read(file: &File) -> Result<Self> {
+        let metadata = file.metadata().context("stat open registry")?;
+        Ok(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
+    }
+}
+
+struct MappedRegistryKeys {
+    path: PathBuf,
+    file: File,
+    mmap: Option<Mmap>,
+    stamp: RegistryFileStamp,
+}
+
+impl MappedRegistryKeys {
+    fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path)
+            .with_context(|| format!("open registry for mmap {}", path.display()))?;
+        let stamp = RegistryFileStamp::read(&file)
+            .with_context(|| format!("stat registry before mmap {}", path.display()))?;
+        anyhow::ensure!(
+            stamp.len % 32 == 0,
+            "invalid registry size {} (not multiple of 32): {}",
+            stamp.len,
+            path.display()
+        );
+        let key_count = stamp.len / 32;
+        anyhow::ensure!(
+            key_count <= u64::from(u32::MAX),
+            "registry key count {key_count} exceeds compact ID space"
+        );
+        usize::try_from(key_count).context("registry key count exceeds usize")?;
+
+        let mmap = if stamp.len == 0 {
+            None
+        } else {
+            let len = usize::try_from(stamp.len).context("registry mmap length exceeds usize")?;
+            // SAFETY: the mapping is read-only, `file` stays open for the life of
+            // the mapping, and the pipeline treats a scan-complete registry as
+            // immutable under its exclusive finalizer lock. We verify the open
+            // file and its path identity again before publishing the index.
+            Some(
+                unsafe { MmapOptions::new().len(len).map(&file) }
+                    .with_context(|| format!("mmap registry {}", path.display()))?,
+            )
+        };
+        let mapped = Self {
+            path: path.to_path_buf(),
+            file,
+            mmap,
+            stamp,
+        };
+        mapped.ensure_unchanged()?;
+        Ok(mapped)
+    }
+
+    fn keys(&self) -> &[[u8; 32]] {
+        let bytes = self.mmap.as_deref().unwrap_or(&[]);
+        debug_assert_eq!(bytes.len() % 32, 0);
+        // SAFETY: `[u8; 32]` has alignment 1, the byte length was validated as
+        // a multiple of 32, and the returned slice cannot outlive `self.mmap`.
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<[u8; 32]>(), bytes.len() / 32) }
+    }
+
+    fn ensure_unchanged(&self) -> Result<()> {
+        let open_stamp = RegistryFileStamp::read(&self.file)
+            .with_context(|| format!("restat open registry {}", self.path.display()))?;
+        anyhow::ensure!(
+            open_stamp == self.stamp,
+            "registry changed while building MPHF: {}",
+            self.path.display()
+        );
+        let current_file = File::open(&self.path)
+            .with_context(|| format!("reopen registry after MPHF build {}", self.path.display()))?;
+        let current_stamp = RegistryFileStamp::read(&current_file)
+            .with_context(|| format!("restat registry path {}", self.path.display()))?;
+        anyhow::ensure!(
+            current_stamp == self.stamp,
+            "registry path was replaced while building MPHF: {}",
+            self.path.display()
+        );
+        Ok(())
+    }
+}
+
 fn write_registry_key_index_atomic(index: &KeyIndex, path: &Path) -> Result<()> {
+    write_registry_key_index_atomic_checked(index, path, || Ok(()))
+}
+
+fn write_registry_key_index_atomic_checked<F>(
+    index: &KeyIndex,
+    path: &Path,
+    validate_before_publish: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
     let tmp_path = path.with_extension("mphf.tmp");
     if crate::file_nonempty(&tmp_path) {
         std::fs::remove_file(&tmp_path)
             .with_context(|| format!("remove {}", tmp_path.display()))?;
     }
     index.write(&tmp_path)?;
+    File::open(&tmp_path)
+        .with_context(|| format!("open {} for sync", tmp_path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync {}", tmp_path.display()))?;
+    validate_before_publish()?;
     std::fs::rename(&tmp_path, path)
         .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)
+        .with_context(|| format!("open {} for sync", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("sync {}", parent.display()))?;
     Ok(())
 }
 
@@ -1130,7 +6130,7 @@ impl VoteHashRegistryBuilder {
 
     fn write(&self, path: &Path) -> Result<()> {
         let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
-        let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
+        let mut writer = BufWriter::with_capacity(LIVE_FINALIZER_IO_BUFFER_SIZE, file);
         for row in &self.rows {
             let flags =
                 u8::from(row.bank_hash.is_some()) | (u8::from(row.block_id_hash.is_some()) << 1);
@@ -1168,13 +6168,119 @@ fn load_vote_hash_registry(path: &Path) -> Result<Vec<VoteHashRegistryRow>> {
     Ok(rows)
 }
 
+#[derive(Default)]
+struct HotBlockBuffers {
+    tx_rows: Vec<ArchiveV2HotTxRow>,
+    message_bytes: Vec<u8>,
+    metadata_bytes: Vec<u8>,
+    hot_instructions: Vec<ArchiveV2HotInstruction>,
+}
+
+impl HotBlockBuffers {
+    fn take(&mut self) -> (Vec<ArchiveV2HotTxRow>, Vec<u8>, Vec<u8>) {
+        (
+            std::mem::take(&mut self.tx_rows),
+            std::mem::take(&mut self.message_bytes),
+            std::mem::take(&mut self.metadata_bytes),
+        )
+    }
+
+    fn recycle(&mut self, mut block: ArchiveV2HotBlockBlob) {
+        block.tx_rows.clear();
+        block.message_bytes.clear();
+        block.metadata_bytes.clear();
+        self.tx_rows = block.tx_rows;
+        self.message_bytes = block.message_bytes;
+        self.metadata_bytes = block.metadata_bytes;
+    }
+
+    fn recycle_message_instructions(&mut self, message: ArchiveV2HotMessagePayload) {
+        debug_assert!(self.hot_instructions.is_empty());
+        self.hot_instructions = match message {
+            ArchiveV2HotMessagePayload::Legacy(message) => message.instructions,
+            ArchiveV2HotMessagePayload::V0(message) => message.instructions,
+        };
+        self.hot_instructions.clear();
+    }
+
+    fn trim(&mut self) {
+        trim_hot_reusable_buffer(&mut self.message_bytes);
+        trim_hot_reusable_buffer(&mut self.metadata_bytes);
+        trim_hot_reusable_vec(&mut self.tx_rows);
+        trim_hot_reusable_vec(&mut self.hot_instructions);
+    }
+}
+
+#[inline]
+fn reserve_total_capacity<T>(values: &mut Vec<T>, desired_len: usize) {
+    values.reserve(desired_len.saturating_sub(values.len()));
+}
+
 fn hot_block_from_archive_block(
     block: WincodeArchiveV2Block,
     known_program_ids: &KnownProgramIds,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
-    signatures_writer: &mut impl Write,
-    block_signature_bytes: &mut Vec<u8>,
+    signatures_writer: Option<&mut dyn Write>,
+    block_signature_bytes: Option<&mut Vec<u8>>,
+    buffers: &mut HotBlockBuffers,
+    timings: &mut ArchiveV2Timings,
+) -> Result<(ArchiveV2HotBlockBlob, u32)> {
+    hot_block_from_archive_block_with_signatures(
+        block,
+        HotBlockSignatureSource::Owned,
+        known_program_ids,
+        slot_to_block_id,
+        vote_hashes,
+        signatures_writer,
+        block_signature_bytes,
+        buffers,
+        timings,
+    )
+}
+
+fn hot_block_from_first_seen_archive_block(
+    block: WincodeArchiveV2Block,
+    signatures: &FirstSeenBlockSignatures,
+    known_program_ids: &KnownProgramIds,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+    signatures_writer: Option<&mut dyn Write>,
+    buffers: &mut HotBlockBuffers,
+    timings: &mut ArchiveV2Timings,
+) -> Result<(ArchiveV2HotBlockBlob, u32)> {
+    hot_block_from_archive_block_with_signatures(
+        block,
+        HotBlockSignatureSource::FirstSeen {
+            counts: &signatures.counts,
+            bytes: &signatures.bytes,
+        },
+        known_program_ids,
+        slot_to_block_id,
+        vote_hashes,
+        signatures_writer,
+        None,
+        buffers,
+        timings,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum HotBlockSignatureSource<'a> {
+    Owned,
+    FirstSeen { counts: &'a [u8], bytes: &'a [u8] },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hot_block_from_archive_block_with_signatures(
+    block: WincodeArchiveV2Block,
+    signature_source: HotBlockSignatureSource<'_>,
+    known_program_ids: &KnownProgramIds,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+    mut signatures_writer: Option<&mut dyn Write>,
+    mut block_signature_bytes: Option<&mut Vec<u8>>,
+    buffers: &mut HotBlockBuffers,
     timings: &mut ArchiveV2Timings,
 ) -> Result<(ArchiveV2HotBlockBlob, u32)> {
     let compact = block.header.compact;
@@ -1192,11 +6298,36 @@ fn hot_block_from_archive_block(
         rewards,
     };
 
-    let mut tx_rows = Vec::with_capacity(block.txs.len());
-    let mut message_bytes = Vec::new();
-    let mut metadata_bytes = Vec::new();
+    if let HotBlockSignatureSource::FirstSeen { counts, bytes } = signature_source {
+        anyhow::ensure!(
+            counts.len() == block.txs.len(),
+            "slot {} collected {} signature counts for {} hot transactions",
+            header.slot,
+            counts.len(),
+            block.txs.len(),
+        );
+        let signature_count = counts.iter().try_fold(0usize, |total, count| {
+            total
+                .checked_add(usize::from(*count))
+                .context("first-seen block signature count overflow")
+        })?;
+        let expected_bytes = signature_count
+            .checked_mul(FIRST_SEEN_SIGNATURE_BYTES)
+            .context("first-seen block signature byte length overflow")?;
+        anyhow::ensure!(
+            bytes.len() == expected_bytes,
+            "slot {} collected {} signature bytes, expected {} for {} signatures",
+            header.slot,
+            bytes.len(),
+            expected_bytes,
+            signature_count,
+        );
+    }
+
+    let (mut tx_rows, mut message_bytes, mut metadata_bytes) = buffers.take();
+    reserve_total_capacity(&mut tx_rows, block.txs.len());
     let mut block_signature_count = 0u32;
-    for transaction in block.txs {
+    for (tx_position, transaction) in block.txs.into_iter().enumerate() {
         let WincodeArchiveV2Transaction {
             tx_index,
             tx,
@@ -1208,34 +6339,66 @@ fn hot_block_from_archive_block(
                 tx_index
             );
         };
+        let OwnedCompactTransaction {
+            signatures,
+            message,
+        } = tx;
         let message_offset = u32::try_from(message_bytes.len())
             .context("hot message byte region exceeds u32::MAX")?;
-        let message_build_started = Instant::now();
-        let (message, mut flags) =
-            hot_message_from_owned(tx.message, known_program_ids, slot_to_block_id, vote_hashes)?;
+        let message_build_started = timings.detail_timer();
+        let (message, mut flags) = hot_message_from_owned_with_instruction_scratch(
+            message,
+            &mut buffers.hot_instructions,
+            known_program_ids,
+            slot_to_block_id,
+            vote_hashes,
+        )?;
         timings.hot_message_build += message_build_started.elapsed();
-        let message_encode_started = Instant::now();
+        let message_encode_started = timings.detail_timer();
         let before_message_len = message_bytes.len();
-        wincode::config::serialize_into(&mut message_bytes, &message, wincode_leb128_config())?;
+        let message_encode_result =
+            wincode::config::serialize_into(&mut message_bytes, &message, wincode_leb128_config());
+        buffers.recycle_message_instructions(message);
+        message_encode_result?;
         let message_len = u32::try_from(message_bytes.len() - before_message_len)
             .context("hot message payload exceeds u32::MAX")?;
         timings.hot_message_encode += message_encode_started.elapsed();
 
-        let signature_count =
-            u8::try_from(tx.signatures.len()).context("signature count exceeds u8::MAX")?;
-        let signature_write_started = Instant::now();
-        for (signature_index, signature) in tx.signatures.iter().enumerate() {
-            anyhow::ensure!(
-                signature.len() == 64,
-                "tx_index {} signature#{} is {} bytes, expected 64",
-                tx_index,
-                signature_index,
-                signature.len()
-            );
-            signatures_writer.write_all(signature)?;
-            block_signature_bytes.extend_from_slice(signature);
-        }
-        timings.hot_signature_write += signature_write_started.elapsed();
+        let signature_count = match signature_source {
+            HotBlockSignatureSource::Owned => {
+                let signature_count =
+                    u8::try_from(signatures.len()).context("signature count exceeds u8::MAX")?;
+                let signature_write_started = timings.detail_timer();
+                for (signature_index, signature) in signatures.iter().enumerate() {
+                    anyhow::ensure!(
+                        signature.len() == FIRST_SEEN_SIGNATURE_BYTES,
+                        "tx_index {} signature#{} is {} bytes, expected {}",
+                        tx_index,
+                        signature_index,
+                        signature.len(),
+                        FIRST_SEEN_SIGNATURE_BYTES,
+                    );
+                    if let Some(writer) = signatures_writer.as_deref_mut() {
+                        writer.write_all(signature)?;
+                    }
+                    if let Some(bytes) = block_signature_bytes.as_deref_mut() {
+                        bytes.extend_from_slice(signature);
+                    }
+                }
+                timings.hot_signature_write += signature_write_started.elapsed();
+                signature_count
+            }
+            HotBlockSignatureSource::FirstSeen { counts, .. } => {
+                anyhow::ensure!(
+                    signatures.is_empty(),
+                    "slot {} tx#{} retained {} owned signatures in first-seen mode",
+                    header.slot,
+                    tx_position,
+                    signatures.len(),
+                );
+                counts[tx_position]
+            }
+        };
         block_signature_count = block_signature_count
             .checked_add(u32::from(signature_count))
             .context("block signature count overflow")?;
@@ -1245,7 +6408,7 @@ fn hot_block_from_archive_block(
         let mut metadata_len = 0u32;
         if let Some(metadata) = metadata {
             flags |= ARCHIVE_V2_TX_FLAG_HAS_METADATA;
-            let metadata_encode_started = Instant::now();
+            let metadata_encode_started = timings.detail_timer();
             match metadata {
                 WincodeArchiveV2Payload::Decoded { value, .. } => {
                     flags |= hot_metadata_flags(&value);
@@ -1280,6 +6443,19 @@ fn hot_block_from_archive_block(
         });
     }
 
+    if let HotBlockSignatureSource::FirstSeen { bytes, .. } = signature_source {
+        let signature_write_started = timings.detail_timer();
+        if !bytes.is_empty() {
+            if let Some(writer) = signatures_writer.as_deref_mut() {
+                writer.write_all(bytes)?;
+            }
+            if let Some(block_bytes) = block_signature_bytes.as_deref_mut() {
+                block_bytes.extend_from_slice(bytes);
+            }
+        }
+        timings.hot_signature_write += signature_write_started.elapsed();
+    }
+
     let tx_count = u32::try_from(tx_rows.len()).context("hot block tx count exceeds u32::MAX")?;
     Ok((
         ArchiveV2HotBlockBlob {
@@ -1293,9 +6469,438 @@ fn hot_block_from_archive_block(
     ))
 }
 
+fn hot_block_from_live_no_registry_block(
+    block: WincodeArchiveV2NoRegistryBlock,
+    key_index: &KeyIndex,
+    rolling_blockhashes: &RollingBlockhashIndex,
+    block_id: u32,
+    nonce_recent_blockhashes: &mut u64,
+    known_program_ids: &KnownProgramIds,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+    mut signatures_writer: Option<&mut dyn Write>,
+    mut block_signature_bytes: Option<&mut Vec<u8>>,
+    buffers: &mut HotBlockBuffers,
+    timings: &mut ArchiveV2Timings,
+) -> Result<(ArchiveV2HotBlockBlob, u32)> {
+    let WincodeArchiveV2NoRegistryBlock { header, txs } = block;
+    let slot = header.compact.slot;
+    let rewards_decode_started = timings.detail_timer();
+    let rewards = header
+        .rewards
+        .as_ref()
+        .map(|rewards| {
+            optimize_no_registry_rewards(rewards, key_index).and_then(hot_rewards_from_archive)
+        })
+        .transpose()?;
+    timings.rewards_decode_compact += rewards_decode_started.elapsed();
+
+    let mut compact = header.compact;
+    compact.blockhash = block_id;
+    compact.previous_blockhash = block_id.saturating_sub(1);
+    let header = ArchiveV2HotBlockHeader {
+        slot: compact.slot,
+        parent_slot: compact.parent_slot,
+        blockhash_id: compact.blockhash,
+        previous_blockhash_id: compact.previous_blockhash,
+        block_time: compact.block_time,
+        block_height: compact.block_height,
+        rewards,
+    };
+
+    vote_hashes.ensure_block(block_id);
+    let tx_capacity = txs.len();
+    let (mut tx_rows, mut message_bytes, mut metadata_bytes) = buffers.take();
+    tx_rows.clear();
+    message_bytes.clear();
+    metadata_bytes.clear();
+    reserve_total_capacity(&mut tx_rows, tx_capacity);
+
+    let mut block_signature_count = 0u32;
+    for (tx_position, transaction) in txs.into_iter().enumerate() {
+        let WincodeArchiveV2NoRegistryTransaction {
+            tx_index,
+            tx,
+            metadata,
+        } = transaction;
+        let tx_decode_started = timings.detail_timer();
+        let WincodeArchiveV2Payload::Decoded { value: tx, .. } = tx else {
+            bail!("slot {slot} tx#{tx_position} raw transaction payload");
+        };
+        let tx = optimize_no_registry_tx(
+            slot,
+            tx_position,
+            tx,
+            key_index,
+            rolling_blockhashes,
+            nonce_recent_blockhashes,
+        )?;
+        timings.tx_decode_compact += tx_decode_started.elapsed();
+
+        let metadata_decode_started = timings.detail_timer();
+        let metadata = metadata
+            .map(|payload| -> Result<CompactMetaV1> {
+                match payload {
+                    WincodeArchiveV2Payload::Decoded { value, .. } => optimize_no_registry_meta(
+                        slot,
+                        tx_position,
+                        value,
+                        key_index,
+                        Some(timings),
+                    ),
+                    WincodeArchiveV2Payload::Raw { error, .. } => {
+                        bail!("slot {slot} tx#{tx_position} raw metadata payload: {error}");
+                    }
+                }
+            })
+            .transpose()?;
+        timings.metadata_decode_compact += metadata_decode_started.elapsed();
+
+        let message_offset = u32::try_from(message_bytes.len())
+            .context("hot message byte region exceeds u32::MAX")?;
+        let message_build_started = timings.detail_timer();
+        let (message, mut flags) =
+            hot_message_from_owned(tx.message, known_program_ids, slot_to_block_id, vote_hashes)?;
+        timings.hot_message_build += message_build_started.elapsed();
+        let message_encode_started = timings.detail_timer();
+        let before_message_len = message_bytes.len();
+        wincode::config::serialize_into(&mut message_bytes, &message, wincode_leb128_config())?;
+        let message_len = u32::try_from(message_bytes.len() - before_message_len)
+            .context("hot message payload exceeds u32::MAX")?;
+        timings.hot_message_encode += message_encode_started.elapsed();
+
+        let signature_count =
+            u8::try_from(tx.signatures.len()).context("signature count exceeds u8::MAX")?;
+        let signature_write_started = timings.detail_timer();
+        if signatures_writer.is_some() || block_signature_bytes.is_some() {
+            for (signature_index, signature) in tx.signatures.iter().enumerate() {
+                anyhow::ensure!(
+                    signature.len() == 64,
+                    "tx_index {} signature#{} is {} bytes, expected 64",
+                    tx_index,
+                    signature_index,
+                    signature.len()
+                );
+                if let Some(writer) = signatures_writer.as_deref_mut() {
+                    writer.write_all(signature)?;
+                }
+                if let Some(bytes) = block_signature_bytes.as_deref_mut() {
+                    bytes.extend_from_slice(signature);
+                }
+            }
+        }
+        timings.hot_signature_write += signature_write_started.elapsed();
+        block_signature_count = block_signature_count
+            .checked_add(u32::from(signature_count))
+            .context("block signature count overflow")?;
+
+        let metadata_offset = u32::try_from(metadata_bytes.len())
+            .context("hot metadata byte region exceeds u32::MAX")?;
+        let mut metadata_len = 0u32;
+        if let Some(metadata) = metadata {
+            flags |= ARCHIVE_V2_TX_FLAG_HAS_METADATA;
+            flags |= hot_metadata_flags(&metadata);
+            let metadata_encode_started = timings.detail_timer();
+            let before_metadata_len = metadata_bytes.len();
+            wincode::config::serialize_into(
+                &mut metadata_bytes,
+                &metadata,
+                wincode_leb128_config(),
+            )?;
+            metadata_len = u32::try_from(metadata_bytes.len() - before_metadata_len)
+                .context("hot metadata payload exceeds u32::MAX")?;
+            timings.hot_metadata_encode += metadata_encode_started.elapsed();
+        }
+
+        tx_rows.push(ArchiveV2HotTxRow {
+            tx_index,
+            flags,
+            message_offset,
+            message_len,
+            metadata_offset,
+            metadata_len,
+            signature_count,
+            reserved: [0; 3],
+        });
+    }
+
+    let tx_count = u32::try_from(tx_rows.len()).context("hot block tx count exceeds u32::MAX")?;
+    Ok((
+        ArchiveV2HotBlockBlob {
+            header,
+            tx_count,
+            tx_rows,
+            message_bytes,
+            metadata_bytes,
+        },
+        block_signature_count,
+    ))
+}
+
+fn hot_block_from_live_finalizer_block(
+    block: LiveFinalizerBlock,
+    key_index: &KeyIndex,
+    rolling_blockhashes: &RollingBlockhashIndex,
+    block_id: u32,
+    nonce_recent_blockhashes: &mut u64,
+    known_program_ids: &KnownProgramIds,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+    signatures_writer: Option<&mut dyn Write>,
+    block_signature_bytes: Option<&mut Vec<u8>>,
+    buffers: &mut HotBlockBuffers,
+    timings: &mut ArchiveV2Timings,
+) -> Result<(ArchiveV2HotBlockBlob, u32)> {
+    match block {
+        LiveFinalizerBlock::Full(block) => hot_block_from_live_no_registry_block(
+            block,
+            key_index,
+            rolling_blockhashes,
+            block_id,
+            nonce_recent_blockhashes,
+            known_program_ids,
+            slot_to_block_id,
+            vote_hashes,
+            signatures_writer,
+            block_signature_bytes,
+            buffers,
+            timings,
+        ),
+        LiveFinalizerBlock::SignatureCounts(block) => {
+            anyhow::ensure!(
+                signatures_writer.is_none() && block_signature_bytes.is_none(),
+                "signature-count live decode cannot rewrite signature sidecars"
+            );
+            hot_block_from_live_no_registry_block_signature_counts(
+                block,
+                key_index,
+                rolling_blockhashes,
+                block_id,
+                nonce_recent_blockhashes,
+                known_program_ids,
+                slot_to_block_id,
+                vote_hashes,
+                buffers,
+                timings,
+            )
+        }
+    }
+}
+
+fn hot_block_from_live_no_registry_block_signature_counts(
+    block: LiveNoRegistryBlockSignatureCounts,
+    key_index: &KeyIndex,
+    rolling_blockhashes: &RollingBlockhashIndex,
+    block_id: u32,
+    nonce_recent_blockhashes: &mut u64,
+    known_program_ids: &KnownProgramIds,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+    buffers: &mut HotBlockBuffers,
+    timings: &mut ArchiveV2Timings,
+) -> Result<(ArchiveV2HotBlockBlob, u32)> {
+    let LiveNoRegistryBlockSignatureCounts { header, txs } = block;
+    let slot = header.compact.slot;
+    let rewards_decode_started = timings.detail_timer();
+    let rewards = header
+        .rewards
+        .as_ref()
+        .map(|rewards| {
+            optimize_no_registry_rewards(rewards, key_index).and_then(hot_rewards_from_archive)
+        })
+        .transpose()?;
+    timings.rewards_decode_compact += rewards_decode_started.elapsed();
+
+    let mut compact = header.compact;
+    compact.blockhash = block_id;
+    compact.previous_blockhash = block_id.saturating_sub(1);
+    let header = ArchiveV2HotBlockHeader {
+        slot: compact.slot,
+        parent_slot: compact.parent_slot,
+        blockhash_id: compact.blockhash,
+        previous_blockhash_id: compact.previous_blockhash,
+        block_time: compact.block_time,
+        block_height: compact.block_height,
+        rewards,
+    };
+
+    vote_hashes.ensure_block(block_id);
+    let tx_capacity = txs.len();
+    let (mut tx_rows, mut message_bytes, mut metadata_bytes) = buffers.take();
+    tx_rows.clear();
+    message_bytes.clear();
+    metadata_bytes.clear();
+    reserve_total_capacity(&mut tx_rows, tx_capacity);
+
+    let mut block_signature_count = 0u32;
+    for (tx_position, transaction) in txs.into_iter().enumerate() {
+        let LiveNoRegistryTransactionSignatureCounts {
+            tx_index,
+            tx,
+            metadata,
+        } = transaction;
+        let tx_decode_started = timings.detail_timer();
+        let WincodeArchiveV2Payload::Decoded { value: tx, .. } = tx else {
+            bail!("slot {slot} tx#{tx_position} raw transaction payload");
+        };
+        let message = optimize_no_registry_message(
+            slot,
+            tx_position,
+            tx.message,
+            key_index,
+            rolling_blockhashes,
+            nonce_recent_blockhashes,
+        )?;
+        timings.tx_decode_compact += tx_decode_started.elapsed();
+
+        let metadata_decode_started = timings.detail_timer();
+        let metadata = metadata
+            .map(|payload| -> Result<CompactMetaV1> {
+                match payload {
+                    WincodeArchiveV2Payload::Decoded { value, .. } => optimize_no_registry_meta(
+                        slot,
+                        tx_position,
+                        value,
+                        key_index,
+                        Some(timings),
+                    ),
+                    WincodeArchiveV2Payload::Raw { error, .. } => {
+                        bail!("slot {slot} tx#{tx_position} raw metadata payload: {error}");
+                    }
+                }
+            })
+            .transpose()?;
+        timings.metadata_decode_compact += metadata_decode_started.elapsed();
+
+        let message_offset = u32::try_from(message_bytes.len())
+            .context("hot message byte region exceeds u32::MAX")?;
+        let message_build_started = timings.detail_timer();
+        let (message, mut flags) =
+            hot_message_from_owned(message, known_program_ids, slot_to_block_id, vote_hashes)?;
+        timings.hot_message_build += message_build_started.elapsed();
+        let message_encode_started = timings.detail_timer();
+        let before_message_len = message_bytes.len();
+        wincode::config::serialize_into(&mut message_bytes, &message, wincode_leb128_config())?;
+        let message_len = u32::try_from(message_bytes.len() - before_message_len)
+            .context("hot message payload exceeds u32::MAX")?;
+        timings.hot_message_encode += message_encode_started.elapsed();
+
+        let signature_count = tx.signatures.count;
+        block_signature_count = block_signature_count
+            .checked_add(u32::from(signature_count))
+            .context("block signature count overflow")?;
+
+        let metadata_offset = u32::try_from(metadata_bytes.len())
+            .context("hot metadata byte region exceeds u32::MAX")?;
+        let mut metadata_len = 0u32;
+        if let Some(metadata) = metadata {
+            flags |= ARCHIVE_V2_TX_FLAG_HAS_METADATA;
+            flags |= hot_metadata_flags(&metadata);
+            let metadata_encode_started = timings.detail_timer();
+            let before_metadata_len = metadata_bytes.len();
+            wincode::config::serialize_into(
+                &mut metadata_bytes,
+                &metadata,
+                wincode_leb128_config(),
+            )?;
+            metadata_len = u32::try_from(metadata_bytes.len() - before_metadata_len)
+                .context("hot metadata payload exceeds u32::MAX")?;
+            timings.hot_metadata_encode += metadata_encode_started.elapsed();
+        }
+
+        tx_rows.push(ArchiveV2HotTxRow {
+            tx_index,
+            flags,
+            message_offset,
+            message_len,
+            metadata_offset,
+            metadata_len,
+            signature_count,
+            reserved: [0; 3],
+        });
+    }
+
+    let tx_count = u32::try_from(tx_rows.len()).context("hot block tx count exceeds u32::MAX")?;
+    Ok((
+        ArchiveV2HotBlockBlob {
+            header,
+            tx_count,
+            tx_rows,
+            message_bytes,
+            metadata_bytes,
+        },
+        block_signature_count,
+    ))
+}
+
+fn normalize_first_seen_access_pubkeys(
+    entries: &mut Vec<ArchiveV2BlockAccessPubkey>,
+) -> Result<()> {
+    entries.sort_unstable_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.pubkey.cmp(&right.pubkey))
+    });
+    let mut unique_len = 0usize;
+    for index in 0..entries.len() {
+        let entry = entries[index];
+        if unique_len > 0 && entries[unique_len - 1].id == entry.id {
+            anyhow::ensure!(
+                entries[unique_len - 1].pubkey == entry.pubkey,
+                "first-seen ID {} aliases two pubkeys within one block: existing={} incoming={}",
+                entry.id,
+                hex32(&entries[unique_len - 1].pubkey),
+                hex32(&entry.pubkey),
+            );
+            continue;
+        }
+        entries[unique_len] = entry;
+        unique_len += 1;
+    }
+    entries.truncate(unique_len);
+    Ok(())
+}
+
+fn checked_archive_v2_block_access_frame_len(frame_bytes: usize, slot: u64) -> Result<u32> {
+    let frame_bytes_u64 = u64::try_from(frame_bytes).context("block-access size exceeds u64")?;
+    anyhow::ensure!(
+        frame_bytes_u64 <= ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+        "slot {slot} block-access payload is {frame_bytes_u64} bytes, exceeding the shared {} byte limit",
+        ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES
+    );
+    u32::try_from(frame_bytes).context("block-access payload exceeds u32::MAX")
+}
+
 fn build_archive_v2_block_access_blob(
     block: &ArchiveV2HotBlockBlob,
-    store: &KeyStore,
+    registry_keys: &[[u8; 32]],
+    blockhashes: &[[u8; 32]],
+    previous_tail: &[PreviousBlockhash],
+    block_signature_bytes: &[u8],
+    vote_hash_rows: &[VoteHashRegistryRow],
+) -> Result<ArchiveV2BlockAccessBlob> {
+    build_archive_v2_block_access_blob_with_pubkey_resolver(
+        block,
+        |id| {
+            registry_keys
+                .get(
+                    id.checked_sub(1)
+                        .context("pubkey registry ID zero is reserved")?
+                        as usize,
+                )
+                .copied()
+                .with_context(|| format!("pubkey registry id {id} is outside loaded registry"))
+        },
+        blockhashes,
+        previous_tail,
+        block_signature_bytes,
+        vote_hash_rows,
+    )
+}
+
+fn build_archive_v2_block_access_blob_with_pubkey_resolver(
+    block: &ArchiveV2HotBlockBlob,
+    mut resolve_pubkey: impl FnMut(u32) -> Result<[u8; 32]>,
     blockhashes: &[[u8; 32]],
     previous_tail: &[PreviousBlockhash],
     block_signature_bytes: &[u8],
@@ -1378,9 +6983,7 @@ fn build_archive_v2_block_access_blob(
     let pubkeys = pubkey_ids
         .into_iter()
         .map(|id| {
-            let pubkey = *store
-                .get(id)
-                .with_context(|| format!("pubkey registry id {id} is outside loaded registry"))?;
+            let pubkey = resolve_pubkey(id)?;
             Ok(ArchiveV2BlockAccessPubkey { id, pubkey })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1603,8 +7206,8 @@ fn collect_access_log_refs(logs: &CompactLogStream, pubkey_ids: &mut Vec<u32>) {
                     collect_access_pubkey_id(*program, pubkey_ids);
                 }
             }
-            LogEvent::System(_)
-            | LogEvent::LogTruncated
+            LogEvent::System(log) => collect_access_system_log_refs(log, pubkey_ids),
+            LogEvent::LogTruncated
             | LogEvent::StakeMergingAccounts
             | LogEvent::ProgramLogError { .. }
             | LogEvent::ProgramAccountNotWritable
@@ -1640,6 +7243,67 @@ fn collect_access_program_log_refs(log: &ProgramLog, pubkey_ids: &mut Vec<u32>) 
             }
             _ => {}
         }
+    }
+}
+
+fn collect_access_system_log_refs(log: &SystemProgramLog, pubkey_ids: &mut Vec<u32>) {
+    match log {
+        SystemProgramLog::CreateAddressMismatch {
+            provided_addr,
+            derived_addr,
+        }
+        | SystemProgramLog::TransferFromAddressMismatch {
+            provided_addr,
+            derived_addr,
+        } => {
+            collect_access_pubkey_id(*provided_addr, pubkey_ids);
+            collect_access_pubkey_or_string_ref(*derived_addr, pubkey_ids);
+        }
+        SystemProgramLog::CreateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AllocateAlreadyInUse { addr }
+        | SystemProgramLog::AllocateToMustSign { addr }
+        | SystemProgramLog::AllocateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AssignAccountMustSign { addr }
+        | SystemProgramLog::CreateAccountAccountAlreadyInUse { addr } => {
+            collect_access_system_address_refs(*addr, pubkey_ids);
+        }
+        SystemProgramLog::TransferFromMustSign { from } => {
+            collect_access_pubkey_id(*from, pubkey_ids);
+        }
+        SystemProgramLog::NonceAccountMustBeWriteable { account, .. }
+        | SystemProgramLog::NonceAccountMustBeSigner { account, .. }
+        | SystemProgramLog::NonceAccountMustSign { account, .. }
+        | SystemProgramLog::NonceAccountStateInvalid { account, .. } => {
+            collect_access_pubkey_or_string_ref(*account, pubkey_ids);
+        }
+        SystemProgramLog::Instruction(_)
+        | SystemProgramLog::AllocateRequestedTooLarge { .. }
+        | SystemProgramLog::CreateAccountDataSizeLimitedInInnerInstructions { .. }
+        | SystemProgramLog::TransferFromMustNotCarryData
+        | SystemProgramLog::TransferInsufficient { .. }
+        | SystemProgramLog::AdvanceNonceRecentBlockhashesEmpty
+        | SystemProgramLog::InitializeNonceRecentBlockhashesEmpty
+        | SystemProgramLog::AuthorizeNonceAccount { .. }
+        | SystemProgramLog::NonceInsufficientLamports { .. }
+        | SystemProgramLog::NonceCanOnlyAdvanceOncePerSlot { .. } => {}
+    }
+}
+
+fn collect_access_system_address_refs(address: SystemAddress, pubkey_ids: &mut Vec<u32>) {
+    match address {
+        SystemAddress::Pubkey(pubkey) => collect_access_pubkey_or_string_ref(pubkey, pubkey_ids),
+        SystemAddress::Debug { address, base } => {
+            collect_access_pubkey_or_string_ref(address, pubkey_ids);
+            if let Some(base) = base {
+                collect_access_pubkey_or_string_ref(base, pubkey_ids);
+            }
+        }
+    }
+}
+
+fn collect_access_pubkey_or_string_ref(value: PubkeyOrString, pubkey_ids: &mut Vec<u32>) {
+    if let PubkeyOrString::Pubkey(pubkey) = value {
+        collect_access_pubkey_id(pubkey, pubkey_ids);
     }
 }
 
@@ -1714,15 +7378,38 @@ fn hot_message_from_owned(
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
 ) -> Result<(ArchiveV2HotMessagePayload, u32)> {
+    hot_message_from_owned_with_instruction_scratch(
+        message,
+        &mut Vec::new(),
+        known_program_ids,
+        slot_to_block_id,
+        vote_hashes,
+    )
+}
+
+fn hot_message_from_owned_with_instruction_scratch(
+    message: OwnedCompactMessage,
+    instruction_scratch: &mut Vec<ArchiveV2HotInstruction>,
+    known_program_ids: &KnownProgramIds,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+) -> Result<(ArchiveV2HotMessagePayload, u32)> {
     match message {
         OwnedCompactMessage::Legacy(message) => {
-            let (instructions, has_compact_vote) = hot_instructions_from_owned(
+            let has_compact_vote = match hot_instructions_from_owned_into(
                 message.instructions,
                 &message.account_keys,
                 known_program_ids,
                 slot_to_block_id,
                 vote_hashes,
-            )?;
+                instruction_scratch,
+            ) {
+                Ok(has_compact_vote) => has_compact_vote,
+                Err(error) => {
+                    instruction_scratch.clear();
+                    return Err(error);
+                }
+            };
             let flags = if has_compact_vote {
                 ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX
             } else {
@@ -1733,19 +7420,26 @@ fn hot_message_from_owned(
                     header: message.header,
                     account_keys: message.account_keys,
                     recent_blockhash: message.recent_blockhash,
-                    instructions,
+                    instructions: std::mem::take(instruction_scratch),
                 }),
                 flags,
             ))
         }
         OwnedCompactMessage::V0(message) => {
-            let (instructions, has_compact_vote) = hot_instructions_from_owned(
+            let has_compact_vote = match hot_instructions_from_owned_into(
                 message.instructions,
                 &message.account_keys,
                 known_program_ids,
                 slot_to_block_id,
                 vote_hashes,
-            )?;
+                instruction_scratch,
+            ) {
+                Ok(has_compact_vote) => has_compact_vote,
+                Err(error) => {
+                    instruction_scratch.clear();
+                    return Err(error);
+                }
+            };
             let mut flags = ARCHIVE_V2_TX_FLAG_MESSAGE_V0;
             if has_compact_vote {
                 flags |= ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX;
@@ -1755,7 +7449,7 @@ fn hot_message_from_owned(
                     header: message.header,
                     account_keys: message.account_keys,
                     recent_blockhash: message.recent_blockhash,
-                    instructions,
+                    instructions: std::mem::take(instruction_scratch),
                     address_table_lookups: message.address_table_lookups,
                 }),
                 flags,
@@ -1764,15 +7458,17 @@ fn hot_message_from_owned(
     }
 }
 
-fn hot_instructions_from_owned(
+fn hot_instructions_from_owned_into(
     instructions: Vec<OwnedCompactInstruction>,
     account_keys: &[CompactPubkey],
     known_program_ids: &KnownProgramIds,
     slot_to_block_id: &GxHashMap<u64, u32>,
     vote_hashes: &mut VoteHashRegistryBuilder,
-) -> Result<(Vec<ArchiveV2HotInstruction>, bool)> {
+    out: &mut Vec<ArchiveV2HotInstruction>,
+) -> Result<bool> {
+    out.clear();
+    reserve_total_capacity(out, instructions.len());
     let mut has_compact_vote = false;
-    let mut out = Vec::with_capacity(instructions.len());
     for instruction in instructions {
         let program_id =
             resolve_static_program_compact_id(account_keys, instruction.program_id_index);
@@ -1806,7 +7502,7 @@ fn hot_instructions_from_owned(
             data,
         });
     }
-    Ok((out, has_compact_vote))
+    Ok(has_compact_vote)
 }
 
 fn resolve_static_program_compact_id(
@@ -1832,6 +7528,30 @@ impl KnownProgramIds {
             vote: index.lookup(&vote_program_id_bytes()),
             compute_budget: index.lookup(&compute_budget_program_id_bytes()),
             system: index.lookup(&system_program_id_bytes()),
+        }
+    }
+
+    fn from_first_seen(registry: &FirstSeenRegistry) -> Self {
+        Self {
+            vote: registry.lookup(&vote_program_id_bytes()),
+            compute_budget: registry.lookup(&compute_budget_program_id_bytes()),
+            system: registry.lookup(&system_program_id_bytes()),
+        }
+    }
+
+    /// First-seen IDs are append-only, so an ID that has been discovered never
+    /// needs another registry lookup. Missing programs are refreshed after the
+    /// current block has been interned so instructions in that same block keep
+    /// the historical parsing behavior.
+    fn refresh_from_first_seen(&mut self, registry: &FirstSeenRegistry) {
+        if self.vote.is_none() {
+            self.vote = registry.lookup(&vote_program_id_bytes());
+        }
+        if self.compute_budget.is_none() {
+            self.compute_budget = registry.lookup(&compute_budget_program_id_bytes());
+        }
+        if self.system.is_none() {
+            self.system = registry.lookup(&system_program_id_bytes());
         }
     }
 
@@ -2577,18 +8297,19 @@ fn build_no_registry_from_scanner<R: Read>(
     scanner.skip_header()?;
     let mut pending = PendingBlock::default();
     let mut footer = WincodeArchiveV2Footer::default();
-    let mut timings = ArchiveV2Timings::default();
+    let mut timings = ArchiveV2Timings::from_env();
     let mut progress = ProgressTracker::new("Archive V2 NoRegistry Write");
     let mut block_offset = 0u64;
     let mut block_id = 0u32;
     let mut block_scratch = Vec::with_capacity(8 << 20);
+    let mut metadata_zstd = ZstdReusableDecoder::new();
 
     while let Some(raw) = scanner.next_node_timed(Some(&mut timings))? {
         footer.car_entries += 1;
         footer.car_payload_bytes += raw.payload_len as u64;
         footer.decoded_node_payload_bytes += raw.payload_len as u64;
 
-        let classify_started = Instant::now();
+        let classify_started = timings.detail_timer();
         match raw.node {
             RawNode::Transaction(tx) => {
                 footer.transactions += 1;
@@ -2628,8 +8349,9 @@ fn build_no_registry_from_scanner<R: Read>(
                     block_id.saturating_add(blockhash_id_offset),
                     &mut footer,
                     &mut timings,
+                    &mut metadata_zstd,
                 )?;
-                let encode_started = Instant::now();
+                let encode_started = timings.detail_timer();
                 let record = WincodeArchiveV2NoRegistryRecord::Block(record);
                 encode_with_scratch(&record, &mut block_scratch)?;
                 let block_len = u32::try_from(block_scratch.len())
@@ -2664,6 +8386,7 @@ fn build_no_registry_from_scanner<R: Read>(
                 block_offset += block_len as u64;
                 block_id = block_id.wrapping_add(1);
                 progress.update_slot(pending.last_slot);
+                progress.update_input_bytes(footer.car_payload_bytes);
                 progress.update(1, tx_count as u64);
                 pending.clear();
                 continue;
@@ -2674,7 +8397,7 @@ fn build_no_registry_from_scanner<R: Read>(
         timings.classify += classify_started.elapsed();
     }
 
-    let encode_started = Instant::now();
+    let encode_started = timings.detail_timer();
     writer.write(&WincodeArchiveV2NoRegistryRecord::Footer(footer.clone()))?;
     timings.wincode_encode += encode_started.elapsed();
     writer.flush()?;
@@ -2723,9 +8446,15 @@ fn build_no_registry_from_scanner<R: Read>(
     Ok(())
 }
 
-pub(crate) fn build_registries(input: &Path, output_dir: &Path, force: bool) -> Result<()> {
+pub(crate) fn build_registries(
+    input: &Path,
+    output_dir: &Path,
+    external_blockhashes_path: Option<&Path>,
+    force: bool,
+) -> Result<()> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
+    let external_blockhashes = load_external_blockhash_overrides(external_blockhashes_path)?;
 
     let registry_path = output_dir.join(REGISTRY_FILE);
     let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
@@ -2749,6 +8478,8 @@ pub(crate) fn build_registries(input: &Path, output_dir: &Path, force: bool) -> 
         &registry_path,
         Some(&registry_counts_path),
         &blockhash_registry_path,
+        &external_blockhashes,
+        None,
     )?;
     info!(
         "Archive V2 registries built: registry={} registry_counts={} blockhash_registry={}",
@@ -2786,13 +8517,12 @@ pub(crate) fn build_registry_index(
         output_path.display()
     );
     let load_started = Instant::now();
-    let store = KeyStore::load(registry_path)
-        .with_context(|| format!("load registry {}", registry_path.display()))?;
+    let registry = MappedRegistryKeys::open(registry_path)?;
     let load_elapsed = load_started.elapsed();
     let build_started = Instant::now();
-    let index = KeyIndex::build(store.keys);
+    let index = KeyIndex::build_from_slice_low_memory(registry.keys());
     let build_elapsed = build_started.elapsed();
-    write_registry_key_index_atomic(&index, &output_path)?;
+    write_registry_key_index_atomic_checked(&index, &output_path, || registry.ensure_unchanged())?;
     info!(
         "Archive V2 registry MPHF index built in {:.2}s: keys={} load={:.2}s build={:.2}s output={}",
         started.elapsed().as_secs_f64(),
@@ -2804,8 +8534,15 @@ pub(crate) fn build_registry_index(
     Ok(())
 }
 
-pub(crate) fn build_blockhash_registry(input: &Path, output_dir: &Path, force: bool) -> Result<()> {
-    build_blockhash_registry_with_tail(input, output_dir, force, 0).map(|_| ())
+pub(crate) fn build_blockhash_registry(
+    input: &Path,
+    output_dir: &Path,
+    external_blockhashes_path: Option<&Path>,
+    force: bool,
+) -> Result<()> {
+    let external_blockhashes = load_external_blockhash_overrides(external_blockhashes_path)?;
+    build_blockhash_registry_with_tail(input, output_dir, force, 0, &external_blockhashes)
+        .map(|_| ())
 }
 
 fn build_blockhash_registry_with_tail(
@@ -2813,6 +8550,7 @@ fn build_blockhash_registry_with_tail(
     output_dir: &Path,
     force: bool,
     tail_len: usize,
+    external_blockhashes: &ExternalBlockhashOverrides,
 ) -> Result<Vec<PreviousBlockhash>> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
@@ -2892,8 +8630,24 @@ fn build_blockhash_registry_with_tail(
         } else if is_block_node(raw.prefix) {
             let (slot, block_time) = decode_block_slot_time(raw.prefix)
                 .with_context(|| format!("block #{blocks} decode block slot/time"))?;
-            let blockhash = latest_entry_hash
-                .ok_or_else(|| anyhow!("slot {slot} block #{blocks} has no latest Entry hash"))?;
+            let blockhash = if let Some(blockhash) = latest_entry_hash {
+                anyhow::ensure!(
+                    !external_blockhashes.contains_key(&slot),
+                    "slot {slot} has an Entry hash and must not use an external blockhash override"
+                );
+                blockhash
+            } else {
+                let override_entry = external_blockhashes.get(&slot).ok_or_else(|| {
+                    anyhow!("slot {slot} block #{blocks} has no latest Entry hash and no external blockhash override")
+                })?;
+                info!(
+                    "Using external blockhash override for PoH-gap slot {} source={} blockhash={}",
+                    slot,
+                    override_entry.source,
+                    Pubkey::new_from_array(override_entry.hash)
+                );
+                override_entry.hash
+            };
             if let Some(writer) = blockhash_writer.as_mut() {
                 writer
                     .write_all(&blockhash)
@@ -2915,6 +8669,7 @@ fn build_blockhash_registry_with_tail(
 
             blocks += 1;
             progress.update_slot(slot);
+            progress.update_input_bytes(car_payload_bytes);
             progress.update(1, 0);
         } else {
             skipped_nodes += 1;
@@ -3154,7 +8909,7 @@ fn copy_required_sidecar(input_dir: &Path, output_dir: &Path, file_name: &str) -
     Ok(dest)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PreviousBlockhash {
     hash: [u8; 32],
     slot: u64,
@@ -3180,60 +8935,24 @@ fn load_or_build_previous_tail(
 
     if let Some(previous_epoch) = parse_epoch_from_path(previous_car) {
         if let Some(sidecar_dir) = find_previous_epoch_sidecar_dir(output_dir, previous_epoch)? {
-            let tail = read_blockhash_tail_from_sidecars(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY)
-                .with_context(|| {
-                    format!(
-                        "read previous blockhash tail from sidecars {}",
+            match read_blockhash_tail_from_sidecars(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY) {
+                Ok(tail) => {
+                    write_prev_blockhash_tail(output_dir, &tail)?;
+                    info!(
+                        "Loaded previous blockhash tail from sidecars: epoch={} tail={} dir={}",
+                        previous_epoch,
+                        tail.len(),
                         sidecar_dir.display()
-                    )
-                })?;
-            write_prev_blockhash_tail(output_dir, &tail)?;
-            info!(
-                "Loaded previous blockhash tail from sidecars: epoch={} tail={} dir={}",
-                previous_epoch,
-                tail.len(),
-                sidecar_dir.display()
-            );
-            return Ok(tail);
-        }
-
-        if let Some(sidecar_dir) = default_previous_epoch_sidecar_dir(output_dir, previous_epoch) {
-            let tail = if has_blockhash_seed_sidecars(&sidecar_dir) {
-                read_blockhash_tail_from_sidecars(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY)
-                    .with_context(|| {
-                        format!(
-                            "read previous blockhash tail from sidecars {}",
-                            sidecar_dir.display()
-                        )
-                    })?
-            } else if crate::file_nonempty(&sidecar_dir.join(BLOCKHASH_REGISTRY_FILE)) {
-                info!(
-                    "Previous epoch has blockhash registry without slot sidecar; loading registry tail without slots: {}",
-                    sidecar_dir.display()
-                );
-                read_blockhash_tail_from_registry_only(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY)
-                    .with_context(|| {
-                        format!(
-                            "read previous blockhash tail from registry {}",
-                            sidecar_dir.display()
-                        )
-                    })?
-            } else {
-                build_blockhash_registry_with_tail(
-                    previous_car,
-                    &sidecar_dir,
-                    false,
-                    ROLLING_BLOCKHASH_CAPACITY,
-                )?
-            };
-            write_prev_blockhash_tail(output_dir, &tail)?;
-            info!(
-                "Loaded previous blockhash tail from built sidecars: epoch={} tail={} dir={}",
-                previous_epoch,
-                tail.len(),
-                sidecar_dir.display()
-            );
-            return Ok(tail);
+                    );
+                    return Ok(tail);
+                }
+                Err(error) => warn!(
+                    "Previous epoch sidecars are incomplete or invalid; falling back to CAR: epoch={} dir={} error={:#}",
+                    previous_epoch,
+                    sidecar_dir.display(),
+                    error
+                ),
+            }
         }
     }
 
@@ -3263,6 +8982,11 @@ fn find_previous_epoch_sidecar_dir(
         return Ok(None);
     };
     let marker = format!("epoch-{previous_epoch}");
+    let canonical = parent.join(&marker);
+    if has_blockhash_seed_sidecars(&canonical) {
+        return Ok(Some(canonical));
+    }
+
     let mut candidates = Vec::new();
     for entry in
         std::fs::read_dir(parent).with_context(|| format!("read dir {}", parent.display()))?
@@ -3274,16 +8998,15 @@ fn find_previous_epoch_sidecar_dir(
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !matches_epoch_dir_name(&name, &marker) {
+        if name == marker || !matches_epoch_dir_name(&name, &marker) {
             continue;
         }
-        if has_blockhash_seed_sidecars(&path) {
-            let has_hot_index = crate::file_nonempty(&path.join(ARCHIVE_V2_BLOCK_INDEX_FILE));
-            candidates.push((has_hot_index, name.to_string(), path));
+        if has_completed_fuzzy_blockhash_seed_sidecars(&path) {
+            candidates.push((name.to_string(), path));
         }
     }
-    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    Ok(candidates.pop().map(|(_, _, path)| path))
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(candidates.pop().map(|(_, path)| path))
 }
 
 fn matches_epoch_dir_name(name: &str, marker: &str) -> bool {
@@ -3293,16 +9016,89 @@ fn matches_epoch_dir_name(name: &str, marker: &str) -> bool {
     rest.is_empty() || rest.starts_with('-')
 }
 
-fn default_previous_epoch_sidecar_dir(output_dir: &Path, previous_epoch: u64) -> Option<PathBuf> {
-    output_dir
-        .parent()
-        .map(|parent| parent.join(format!("epoch-{previous_epoch}")))
-}
-
 fn has_blockhash_seed_sidecars(sidecar_dir: &Path) -> bool {
     crate::file_nonempty(&sidecar_dir.join(BLOCKHASH_REGISTRY_FILE))
         && (crate::file_nonempty(&sidecar_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE))
             || crate::file_nonempty(&sidecar_dir.join(POH_FILE)))
+}
+
+fn has_completed_fuzzy_blockhash_seed_sidecars(sidecar_dir: &Path) -> bool {
+    has_blockhash_seed_sidecars(sidecar_dir)
+        && crate::file_nonempty(&sidecar_dir.join(ARCHIVE_V2_META_FILE))
+        && crate::file_nonempty(&sidecar_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE))
+}
+
+#[cfg(test)]
+mod previous_tail_selection_tests {
+    use super::*;
+
+    fn write_required_sidecars(path: &Path, completion_meta: bool) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join(BLOCKHASH_REGISTRY_FILE), [1]).unwrap();
+        std::fs::write(path.join(ARCHIVE_V2_BLOCK_INDEX_FILE), [1]).unwrap();
+        if completion_meta {
+            std::fs::write(path.join(ARCHIVE_V2_META_FILE), [1]).unwrap();
+        }
+    }
+
+    #[test]
+    fn canonical_sidecars_win_and_fuzzy_candidates_require_completion() {
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-previous-tail-selection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = root.join("epoch-855-candidate");
+        let canonical = root.join("epoch-854");
+        let completed_fuzzy = root.join("epoch-854-complete");
+        let incomplete_fuzzy = root.join("epoch-854-zz-incomplete");
+        std::fs::create_dir_all(&output).unwrap();
+        write_required_sidecars(&canonical, false);
+        write_required_sidecars(&completed_fuzzy, true);
+        write_required_sidecars(&incomplete_fuzzy, false);
+
+        assert_eq!(
+            find_previous_epoch_sidecar_dir(&output, 854).unwrap(),
+            Some(canonical.clone())
+        );
+
+        std::fs::remove_file(canonical.join(ARCHIVE_V2_BLOCK_INDEX_FILE)).unwrap();
+        assert_eq!(
+            find_previous_epoch_sidecar_dir(&output, 854).unwrap(),
+            Some(completed_fuzzy.clone())
+        );
+
+        std::fs::remove_file(completed_fuzzy.join(ARCHIVE_V2_META_FILE)).unwrap();
+        assert_eq!(find_previous_epoch_sidecar_dir(&output, 854).unwrap(), None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_canonical_sidecars_fall_back_to_previous_car() {
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-previous-tail-fallback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = root.join("epoch-823");
+        let invalid_canonical = root.join("epoch-822");
+        std::fs::create_dir_all(&output).unwrap();
+        write_required_sidecars(&invalid_canonical, false);
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/old-faithful/car-reader/benches/fixtures/epoch-822-biggest.car");
+
+        let tail = load_or_build_previous_tail(&output, Some(&fixture), true).unwrap();
+        assert!(!tail.is_empty());
+        assert!(output.join(PREV_BLOCKHASH_TAIL_FILE).is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn read_blockhash_tail_from_sidecars(
@@ -3378,22 +9174,6 @@ fn read_blockhash_tail_from_poh_sidecar(
             Ok(PreviousBlockhash { hash, slot })
         })
         .collect()
-}
-
-fn read_blockhash_tail_from_registry_only(
-    sidecar_dir: &Path,
-    max_entries: usize,
-) -> Result<Vec<PreviousBlockhash>> {
-    let blockhashes = load_blockhash_registry_plain(&sidecar_dir.join(BLOCKHASH_REGISTRY_FILE))?;
-    let start = blockhashes.len().saturating_sub(max_entries);
-    let mut tail = Vec::with_capacity(blockhashes.len() - start);
-    for hash in &blockhashes[start..] {
-        tail.push(PreviousBlockhash {
-            hash: *hash,
-            slot: 0,
-        });
-    }
-    Ok(tail)
 }
 
 fn infer_blockhash_registry_offset(blockhash_count: usize, block_count: usize) -> Result<usize> {
@@ -3569,26 +9349,31 @@ fn build_no_registry_pubkey_registry(input: &Path, registry_path: &Path) -> Resu
             .cmp(left_count)
             .then_with(|| left_key.cmp(right_key))
     });
-    let mut keys: Vec<[u8; 32]> = items.into_iter().map(|(key, _)| key).collect();
 
     const BUILTIN_PROGRAM_KEYS: &[Pubkey] = &[solana_pubkey::pubkey!(
         "ComputeBudget111111111111111111111111111111"
     )];
-    for builtin in BUILTIN_PROGRAM_KEYS {
-        let builtin = builtin.to_bytes();
-        if !keys.iter().any(|value| value == &builtin) {
-            keys.insert(0, builtin);
-        }
-    }
+    let missing_builtins = BUILTIN_PROGRAM_KEYS
+        .iter()
+        .map(|key| key.to_bytes())
+        .filter(|builtin| !items.iter().any(|(key, _)| key == builtin))
+        .collect::<Vec<_>>();
+    let registry_len = missing_builtins.len() + items.len();
 
-    write_registry(registry_path, &keys)
-        .with_context(|| format!("write {}", registry_path.display()))?;
+    write_registry_iter(
+        registry_path,
+        missing_builtins
+            .iter()
+            .copied()
+            .chain(items.iter().map(|(key, _)| *key)),
+    )
+    .with_context(|| format!("write {}", registry_path.display()))?;
     info!(
         "Archive V2 pubkey registry built in {:.2}s: blocks={} txs={} keys={} path={}",
         started.elapsed().as_secs_f64(),
         blocks,
         txs,
-        keys.len(),
+        registry_len,
         registry_path.display()
     );
     Ok(())
@@ -3786,7 +9571,9 @@ fn optimize_no_registry_transaction(
                     WincodeArchiveV2Payload::Decoded { source_len, value } => {
                         Ok(WincodeArchiveV2Payload::Decoded {
                             source_len,
-                            value: optimize_no_registry_meta(slot, tx_index, value, key_index)?,
+                            value: optimize_no_registry_meta(
+                                slot, tx_index, value, key_index, None,
+                            )?,
                         })
                     }
                     WincodeArchiveV2Payload::Raw { error, .. } => {
@@ -3812,7 +9599,30 @@ fn optimize_no_registry_tx(
     rolling_blockhashes: &RollingBlockhashIndex,
     nonce_recent_blockhashes: &mut u64,
 ) -> Result<OwnedCompactTransaction> {
-    let message = match tx.message {
+    let message = optimize_no_registry_message(
+        slot,
+        tx_index,
+        tx.message,
+        key_index,
+        rolling_blockhashes,
+        nonce_recent_blockhashes,
+    )?;
+
+    Ok(OwnedCompactTransaction {
+        signatures: tx.signatures,
+        message,
+    })
+}
+
+fn optimize_no_registry_message(
+    slot: u64,
+    tx_index: usize,
+    message: WincodeArchiveV2NoRegistryMessage,
+    key_index: &KeyIndex,
+    rolling_blockhashes: &RollingBlockhashIndex,
+    nonce_recent_blockhashes: &mut u64,
+) -> Result<OwnedCompactMessage> {
+    Ok(match message {
         WincodeArchiveV2NoRegistryMessage::Legacy(message) => {
             OwnedCompactMessage::Legacy(OwnedCompactLegacyMessage {
                 header: message.header,
@@ -3862,11 +9672,6 @@ fn optimize_no_registry_tx(
                     .collect::<Result<Vec<_>>>()?,
             })
         }
-    };
-
-    Ok(OwnedCompactTransaction {
-        signatures: tx.signatures,
-        message,
     })
 }
 
@@ -3896,57 +9701,286 @@ fn optimize_no_registry_meta(
     _tx_index: usize,
     meta: WincodeArchiveV2NoRegistryMeta,
     key_index: &KeyIndex,
+    mut timings: Option<&mut ArchiveV2Timings>,
 ) -> Result<blockzilla_format::CompactMetaV1> {
+    let logs_started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
+    let logs = meta
+        .logs
+        .map(|logs| decode_no_registry_logs(logs, _slot, _tx_index, key_index))
+        .transpose()?
+        .map(|logs| logs);
+    if let Some(timings) = timings.as_mut() {
+        timings.metadata_logs_decode_compact += logs_started.elapsed();
+    }
+
+    let pubkey_started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
+    let pre_token_balances = meta
+        .pre_token_balances
+        .into_iter()
+        .map(|balance| optimize_no_registry_token_balance(balance, key_index))
+        .collect::<Result<Vec<_>>>()?;
+    let post_token_balances = meta
+        .post_token_balances
+        .into_iter()
+        .map(|balance| optimize_no_registry_token_balance(balance, key_index))
+        .collect::<Result<Vec<_>>>()?;
+    let rewards = meta
+        .rewards
+        .into_iter()
+        .map(|reward| optimize_no_registry_reward(&reward, key_index))
+        .collect::<Result<Vec<_>>>()?;
+    let loaded_writable_addresses = meta
+        .loaded_writable_addresses
+        .into_iter()
+        .map(|key| compact_required(key_index, &key, "loaded writable address"))
+        .collect::<Result<Vec<_>>>()?;
+    let loaded_readonly_addresses = meta
+        .loaded_readonly_addresses
+        .into_iter()
+        .map(|key| compact_required(key_index, &key, "loaded readonly address"))
+        .collect::<Result<Vec<_>>>()?;
+    let return_data = meta
+        .return_data
+        .map(|return_data| {
+            Ok::<CompactReturnData, anyhow::Error>(CompactReturnData {
+                program_id: compact_required(
+                    key_index,
+                    &return_data.program_id,
+                    "return data program id",
+                )?,
+                data: return_data.data,
+            })
+        })
+        .transpose()?;
+    if let Some(timings) = timings.as_mut() {
+        timings.metadata_pubkey_compact += pubkey_started.elapsed();
+    }
+
     Ok(blockzilla_format::CompactMetaV1 {
         err: meta.err,
         fee: meta.fee,
         pre_balances: meta.pre_balances,
         post_balances: meta.post_balances,
         inner_instructions: meta.inner_instructions,
-        logs: meta
-            .logs
-            .map(|logs| blockzilla_format::parse_logs(&logs, key_index)),
-        pre_token_balances: meta
-            .pre_token_balances
-            .into_iter()
-            .map(|balance| optimize_no_registry_token_balance(balance, key_index))
-            .collect::<Result<Vec<_>>>()?,
-        post_token_balances: meta
-            .post_token_balances
-            .into_iter()
-            .map(|balance| optimize_no_registry_token_balance(balance, key_index))
-            .collect::<Result<Vec<_>>>()?,
-        rewards: meta
-            .rewards
-            .into_iter()
-            .map(|reward| optimize_no_registry_reward(&reward, key_index))
-            .collect::<Result<Vec<_>>>()?,
-        loaded_writable_addresses: meta
-            .loaded_writable_addresses
-            .into_iter()
-            .map(|key| compact_required(key_index, &key, "loaded writable address"))
-            .collect::<Result<Vec<_>>>()?,
-        loaded_readonly_addresses: meta
-            .loaded_readonly_addresses
-            .into_iter()
-            .map(|key| compact_required(key_index, &key, "loaded readonly address"))
-            .collect::<Result<Vec<_>>>()?,
-        return_data: meta
-            .return_data
-            .map(|return_data| {
-                Ok::<CompactReturnData, anyhow::Error>(CompactReturnData {
-                    program_id: compact_required(
-                        key_index,
-                        &return_data.program_id,
-                        "return data program id",
-                    )?,
-                    data: return_data.data,
-                })
-            })
-            .transpose()?,
+        logs,
+        pre_token_balances,
+        post_token_balances,
+        rewards,
+        loaded_writable_addresses,
+        loaded_readonly_addresses,
+        return_data,
         compute_units_consumed: meta.compute_units_consumed,
         cost_units: meta.cost_units,
     })
+}
+
+fn decode_no_registry_logs(
+    logs: WincodeArchiveV2NoRegistryLogs,
+    slot: u64,
+    tx_index: usize,
+    key_index: &KeyIndex,
+) -> Result<CompactLogStream> {
+    match logs {
+        WincodeArchiveV2NoRegistryLogs::Raw(logs) => {
+            Ok(blockzilla_format::parse_logs(&logs, key_index))
+        }
+        WincodeArchiveV2NoRegistryLogs::WincodeZstd {
+            uncompressed_len,
+            bytes,
+        } => {
+            let decoded = zstd::stream::decode_all(bytes.as_slice())
+                .with_context(|| format!("slot {slot} tx#{tx_index} live log zstd"))?;
+            if decoded.len() as u64 != uncompressed_len {
+                bail!(
+                    "slot {slot} tx#{tx_index} live log zstd decoded length {} != expected {uncompressed_len}",
+                    decoded.len()
+                );
+            }
+            let logs: Vec<String> = wincode::config::deserialize(&decoded, wincode_leb128_config())
+                .with_context(|| format!("slot {slot} tx#{tx_index} live log strings"))?;
+            Ok(blockzilla_format::parse_logs(&logs, key_index))
+        }
+        WincodeArchiveV2NoRegistryLogs::Compact(logs) => Ok(rekey_compact_logs(logs, key_index)),
+    }
+}
+
+fn rekey_compact_logs(mut logs: CompactLogStream, key_index: &KeyIndex) -> CompactLogStream {
+    for event in &mut logs.events {
+        rekey_log_event(event, key_index);
+    }
+    logs
+}
+
+fn rekey_log_event(event: &mut LogEvent, key_index: &KeyIndex) {
+    match event {
+        LogEvent::LoaderUpgradedProgram { program }
+        | LogEvent::Invoke { program, .. }
+        | LogEvent::BpfInvoke { program }
+        | LogEvent::Consumed { program, .. }
+        | LogEvent::Success { program }
+        | LogEvent::BpfSuccess { program }
+        | LogEvent::Failure { program, .. }
+        | LogEvent::BpfFailure { program, .. }
+        | LogEvent::FailureCustomProgramError { program, .. }
+        | LogEvent::BpfFailureCustomProgramError { program, .. }
+        | LogEvent::FailureInvalidAccountData { program }
+        | LogEvent::BpfFailureInvalidAccountData { program }
+        | LogEvent::FailureInvalidProgramArgument { program }
+        | LogEvent::BpfFailureInvalidProgramArgument { program }
+        | LogEvent::Return { program, .. } => {
+            rekey_compact_pubkey(program, key_index);
+        }
+        LogEvent::ProgramIdLog { program, log } => {
+            rekey_compact_pubkey(program, key_index);
+            rekey_program_log(log, key_index);
+        }
+        LogEvent::LoaderFinalizedAccount { account }
+        | LogEvent::RuntimeWritablePrivilegeEscalated { account }
+        | LogEvent::RuntimeSignerPrivilegeEscalated { account }
+        | LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { account } => {
+            rekey_compact_pubkey(account, key_index);
+        }
+        LogEvent::ProgramNotDeployed { program } | LogEvent::ProgramNotCached { program } => {
+            if let Some(program) = program {
+                rekey_compact_pubkey(program, key_index);
+            }
+        }
+        LogEvent::System(log) => rekey_system_program_log(log, key_index),
+        LogEvent::ProgramLog(log) | LogEvent::ProgramPlainLog(log) => {
+            rekey_program_log(log, key_index);
+        }
+        LogEvent::ProgramLogError { .. }
+        | LogEvent::ProgramAccountNotWritable
+        | LogEvent::ProgramIdMismatch
+        | LogEvent::ProgramNotUpgradeable
+        | LogEvent::ProgramAndProgramDataAccountMismatch
+        | LogEvent::ProgramWasExtendedInThisBlockAlready
+        | LogEvent::BpfConsumed { .. }
+        | LogEvent::FailedToComplete { .. }
+        | LogEvent::CustomProgramError { .. }
+        | LogEvent::Data { .. }
+        | LogEvent::Consumption { .. }
+        | LogEvent::CbRequestUnits { .. }
+        | LogEvent::UnknownProgram { .. }
+        | LogEvent::UnknownAccount { .. }
+        | LogEvent::VerifyEd25519
+        | LogEvent::VerifySecp256k1
+        | LogEvent::LogTruncated
+        | LogEvent::StakeMergingAccounts
+        | LogEvent::CloseContextState
+        | LogEvent::Plain { .. }
+        | LogEvent::Unparsed { .. } => {}
+    }
+}
+
+fn rekey_program_log(log: &mut ProgramLog, key_index: &KeyIndex) {
+    match log {
+        ProgramLog::Token2022(log) => rekey_token_2022_log(log, key_index),
+        ProgramLog::Empty
+        | ProgramLog::Token(_)
+        | ProgramLog::Ata(_)
+        | ProgramLog::AddressLookupTable(_)
+        | ProgramLog::LoaderV3(_)
+        | ProgramLog::LoaderV4(_)
+        | ProgramLog::Memo(_)
+        | ProgramLog::Record(_)
+        | ProgramLog::TransferHook(_)
+        | ProgramLog::AccountCompression(_)
+        | ProgramLog::Stake(_)
+        | ProgramLog::ZkElgamalProof(_)
+        | ProgramLog::AnchorInstruction { .. }
+        | ProgramLog::AnchorErrorOccurred { .. }
+        | ProgramLog::AnchorErrorThrown { .. }
+        | ProgramLog::Unknown(_) => {}
+        #[cfg(feature = "known-program-logs")]
+        ProgramLog::Known(_) => {}
+    }
+}
+
+fn rekey_token_2022_log(log: &mut Token2022Log, key_index: &KeyIndex) {
+    match log {
+        Token2022Log::ErrorHarvestingFrom { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom2 { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom3 { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom4 { account_key, .. } => {
+            rekey_compact_pubkey(account_key, key_index);
+        }
+        Token2022Log::Error(_)
+        | Token2022Log::Static(_)
+        | Token2022Log::CalculatedFee { .. }
+        | Token2022Log::AccountNeedsResizePlusBytesDebug { .. }
+        | Token2022Log::AccountNeedsResizePlusBytesDebug2 { .. } => {}
+    }
+}
+
+fn rekey_system_program_log(log: &mut SystemProgramLog, key_index: &KeyIndex) {
+    match log {
+        SystemProgramLog::CreateAddressMismatch {
+            provided_addr,
+            derived_addr,
+        }
+        | SystemProgramLog::TransferFromAddressMismatch {
+            provided_addr,
+            derived_addr,
+        } => {
+            rekey_compact_pubkey(provided_addr, key_index);
+            rekey_pubkey_or_string(derived_addr, key_index);
+        }
+        SystemProgramLog::CreateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AllocateAlreadyInUse { addr }
+        | SystemProgramLog::AllocateToMustSign { addr }
+        | SystemProgramLog::AllocateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AssignAccountMustSign { addr }
+        | SystemProgramLog::CreateAccountAccountAlreadyInUse { addr } => {
+            rekey_system_address(addr, key_index);
+        }
+        SystemProgramLog::TransferFromMustSign { from } => {
+            rekey_compact_pubkey(from, key_index);
+        }
+        SystemProgramLog::NonceAccountMustBeWriteable { account, .. }
+        | SystemProgramLog::NonceAccountMustBeSigner { account, .. }
+        | SystemProgramLog::NonceAccountMustSign { account, .. }
+        | SystemProgramLog::NonceAccountStateInvalid { account, .. } => {
+            rekey_pubkey_or_string(account, key_index);
+        }
+        SystemProgramLog::Instruction(_)
+        | SystemProgramLog::AllocateRequestedTooLarge { .. }
+        | SystemProgramLog::CreateAccountDataSizeLimitedInInnerInstructions { .. }
+        | SystemProgramLog::TransferFromMustNotCarryData
+        | SystemProgramLog::TransferInsufficient { .. }
+        | SystemProgramLog::AdvanceNonceRecentBlockhashesEmpty
+        | SystemProgramLog::InitializeNonceRecentBlockhashesEmpty
+        | SystemProgramLog::AuthorizeNonceAccount { .. }
+        | SystemProgramLog::NonceInsufficientLamports { .. }
+        | SystemProgramLog::NonceCanOnlyAdvanceOncePerSlot { .. } => {}
+    }
+}
+
+fn rekey_system_address(address: &mut SystemAddress, key_index: &KeyIndex) {
+    match address {
+        SystemAddress::Pubkey(pubkey) => rekey_pubkey_or_string(pubkey, key_index),
+        SystemAddress::Debug { address, base } => {
+            rekey_pubkey_or_string(address, key_index);
+            if let Some(base) = base {
+                rekey_pubkey_or_string(base, key_index);
+            }
+        }
+    }
+}
+
+fn rekey_pubkey_or_string(value: &mut PubkeyOrString, key_index: &KeyIndex) {
+    if let PubkeyOrString::Pubkey(pubkey) = value {
+        rekey_compact_pubkey(pubkey, key_index);
+    }
+}
+
+fn rekey_compact_pubkey(pubkey: &mut CompactPubkey, key_index: &KeyIndex) {
+    let CompactPubkey::Raw(raw) = pubkey else {
+        return;
+    };
+    if let Some(id) = key_index.lookup(raw) {
+        *pubkey = CompactPubkey::id(id);
+    }
 }
 
 fn optimize_no_registry_token_balance(
@@ -4415,6 +10449,948 @@ impl ArchivePubkeyCounter {
     fn add32(&mut self, key: &[u8; 32]) {
         let count = self.counts.entry(*key).or_insert(0);
         *count = count.saturating_add(1);
+    }
+}
+
+const FIRST_SEEN_HASH_DOMAIN: u64 = 0x425a_4653_4931;
+const FIRST_SEEN_COUNT_CHUNK_LEN: usize = 128;
+const FIRST_SEEN_DIRECT_COUNT_IDS: usize = 65_536;
+
+enum FirstSeenPromotedCountChunk {
+    U16(Box<[u16; FIRST_SEEN_COUNT_CHUNK_LEN]>),
+    U32(Box<[u32; FIRST_SEEN_COUNT_CHUNK_LEN]>),
+}
+
+/// Exact adaptive counters. The hot 65,536-ID prefix stays in a direct u32
+/// array; later IDs cost one byte until their 128-ID chunk promotes to u16/u32.
+struct FirstSeenCounts {
+    direct: Vec<u32>,
+    direct_limit: usize,
+    base: Vec<u8>,
+    promoted: Vec<Option<FirstSeenPromotedCountChunk>>,
+    u16_chunks: usize,
+    u32_chunks: usize,
+}
+
+impl FirstSeenCounts {
+    fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_direct_limit(capacity, FIRST_SEEN_DIRECT_COUNT_IDS)
+    }
+
+    fn with_capacity_and_direct_limit(capacity: usize, direct_limit: usize) -> Self {
+        let direct_capacity = capacity.min(direct_limit);
+        let adaptive_capacity = capacity.saturating_sub(direct_capacity);
+        Self {
+            direct: Vec::with_capacity(direct_capacity),
+            direct_limit,
+            base: Vec::with_capacity(adaptive_capacity),
+            promoted: Vec::with_capacity(adaptive_capacity.div_ceil(FIRST_SEEN_COUNT_CHUNK_LEN)),
+            u16_chunks: 0,
+            u32_chunks: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.direct.len() + self.base.len()
+    }
+
+    fn push(&mut self, count: u8) {
+        if self.direct.len() < self.direct_limit {
+            self.direct.push(u32::from(count));
+            return;
+        }
+        let index = self.base.len();
+        let chunk_index = index / FIRST_SEEN_COUNT_CHUNK_LEN;
+        let chunk_offset = index % FIRST_SEEN_COUNT_CHUNK_LEN;
+        if chunk_offset == 0 {
+            self.promoted.push(None);
+        }
+        self.base.push(count);
+        if let Some(promoted) = self.promoted[chunk_index].as_mut() {
+            match promoted {
+                FirstSeenPromotedCountChunk::U16(values) => {
+                    values[chunk_offset] = u16::from(count);
+                }
+                FirstSeenPromotedCountChunk::U32(values) => {
+                    values[chunk_offset] = u32::from(count);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> u32 {
+        if index < self.direct.len() {
+            return self.direct[index];
+        }
+        let index = index - self.direct.len();
+        let chunk_index = index / FIRST_SEEN_COUNT_CHUNK_LEN;
+        let chunk_offset = index % FIRST_SEEN_COUNT_CHUNK_LEN;
+        match self.promoted[chunk_index].as_ref() {
+            Some(FirstSeenPromotedCountChunk::U16(values)) => u32::from(values[chunk_offset]),
+            Some(FirstSeenPromotedCountChunk::U32(values)) => values[chunk_offset],
+            None => u32::from(self.base[index]),
+        }
+    }
+
+    #[inline]
+    fn increment(&mut self, index: usize) -> Result<u32> {
+        if index < self.direct.len() {
+            self.direct[index] = self.direct[index]
+                .checked_add(1)
+                .context("first-seen direct reference count overflow")?;
+            return Ok(self.direct[index]);
+        }
+        let index = index - self.direct.len();
+        let chunk_index = index / FIRST_SEEN_COUNT_CHUNK_LEN;
+        let chunk_offset = index % FIRST_SEEN_COUNT_CHUNK_LEN;
+        if self.promoted[chunk_index].is_none() {
+            let count = &mut self.base[index];
+            if *count < u8::MAX {
+                *count += 1;
+                return Ok(u32::from(*count));
+            }
+
+            let chunk_start = chunk_index * FIRST_SEEN_COUNT_CHUNK_LEN;
+            let chunk_end = self
+                .base
+                .len()
+                .min(chunk_start + FIRST_SEEN_COUNT_CHUNK_LEN);
+            let mut values = Box::new([0u16; FIRST_SEEN_COUNT_CHUNK_LEN]);
+            for (target, &source) in values.iter_mut().zip(&self.base[chunk_start..chunk_end]) {
+                *target = u16::from(source);
+            }
+            values[chunk_offset] = u16::from(u8::MAX) + 1;
+            self.promoted[chunk_index] = Some(FirstSeenPromotedCountChunk::U16(values));
+            self.u16_chunks += 1;
+            return Ok(u32::from(u8::MAX) + 1);
+        }
+
+        let promoted = &mut self.promoted[chunk_index];
+        match promoted.as_mut().expect("promoted count chunk exists") {
+            FirstSeenPromotedCountChunk::U16(values) if values[chunk_offset] < u16::MAX => {
+                values[chunk_offset] += 1;
+                Ok(u32::from(values[chunk_offset]))
+            }
+            FirstSeenPromotedCountChunk::U16(_) => {
+                let Some(FirstSeenPromotedCountChunk::U16(values)) = promoted.take() else {
+                    unreachable!()
+                };
+                let mut widened = Box::new([0u32; FIRST_SEEN_COUNT_CHUNK_LEN]);
+                for (target, source) in widened.iter_mut().zip(values.iter()) {
+                    *target = u32::from(*source);
+                }
+                widened[chunk_offset] = u32::from(u16::MAX) + 1;
+                *promoted = Some(FirstSeenPromotedCountChunk::U32(widened));
+                self.u16_chunks -= 1;
+                self.u32_chunks += 1;
+                Ok(u32::from(u16::MAX) + 1)
+            }
+            FirstSeenPromotedCountChunk::U32(values) => {
+                values[chunk_offset] = values[chunk_offset]
+                    .checked_add(1)
+                    .context("first-seen adaptive reference count overflow")?;
+                Ok(values[chunk_offset])
+            }
+        }
+    }
+
+    fn iter(&self) -> FirstSeenCountsIter<'_> {
+        FirstSeenCountsIter {
+            counts: self,
+            index: 0,
+        }
+    }
+
+    fn estimated_heap_bytes(&self) -> usize {
+        self.direct.capacity() * std::mem::size_of::<u32>()
+            + self.base.capacity()
+            + self.promoted.capacity() * std::mem::size_of::<Option<FirstSeenPromotedCountChunk>>()
+            + self.u16_chunks * FIRST_SEEN_COUNT_CHUNK_LEN * std::mem::size_of::<u16>()
+            + self.u32_chunks * FIRST_SEEN_COUNT_CHUNK_LEN * std::mem::size_of::<u32>()
+    }
+
+    #[cfg(test)]
+    fn set_for_test(&mut self, index: usize, value: u32) {
+        assert!(index < self.len());
+        if index < self.direct.len() {
+            self.direct[index] = value;
+            return;
+        }
+        let index = index - self.direct.len();
+        let chunk_index = index / FIRST_SEEN_COUNT_CHUNK_LEN;
+        let chunk_offset = index % FIRST_SEEN_COUNT_CHUNK_LEN;
+        let chunk_start = chunk_index * FIRST_SEEN_COUNT_CHUNK_LEN;
+        let chunk_end = self
+            .base
+            .len()
+            .min(chunk_start + FIRST_SEEN_COUNT_CHUNK_LEN);
+        let mut exact = [0u32; FIRST_SEEN_COUNT_CHUNK_LEN];
+        for (offset, target) in exact[..chunk_end - chunk_start].iter_mut().enumerate() {
+            *target = self.get(chunk_start + offset);
+        }
+        exact[chunk_offset] = value;
+
+        let was_u16 = matches!(
+            self.promoted[chunk_index].as_ref(),
+            Some(FirstSeenPromotedCountChunk::U16(_))
+        );
+        let was_u32 = matches!(
+            self.promoted[chunk_index].as_ref(),
+            Some(FirstSeenPromotedCountChunk::U32(_))
+        );
+        if was_u16 {
+            self.u16_chunks -= 1;
+        } else if was_u32 {
+            self.u32_chunks -= 1;
+        }
+
+        if exact.iter().all(|&count| count <= u32::from(u8::MAX)) {
+            for (offset, &count) in exact[..chunk_end - chunk_start].iter().enumerate() {
+                self.base[chunk_start + offset] = count as u8;
+            }
+            self.promoted[chunk_index] = None;
+        } else if exact.iter().all(|&count| count <= u32::from(u16::MAX)) {
+            let mut values = Box::new([0u16; FIRST_SEEN_COUNT_CHUNK_LEN]);
+            for (target, source) in values.iter_mut().zip(exact) {
+                *target = source as u16;
+            }
+            self.promoted[chunk_index] = Some(FirstSeenPromotedCountChunk::U16(values));
+            self.u16_chunks += 1;
+        } else {
+            self.promoted[chunk_index] = Some(FirstSeenPromotedCountChunk::U32(Box::new(exact)));
+            self.u32_chunks += 1;
+        }
+    }
+}
+
+struct FirstSeenCountsIter<'a> {
+    counts: &'a FirstSeenCounts,
+    index: usize,
+}
+
+impl Iterator for FirstSeenCountsIter<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == self.counts.len() {
+            return None;
+        }
+        let count = self.counts.get(self.index);
+        self.index += 1;
+        Some(count)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.counts.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for FirstSeenCountsIter<'_> {}
+
+/// Low-memory mutable pubkey interner for the one-pass hot builder.
+///
+/// The table stores zero-based IDs and compares keyed 128-bit fingerprints.
+/// Full keys are streamed once to disk. A whole-reference checksum is verified
+/// against that exact registry before any completion marker is published, so a
+/// fingerprint alias makes the candidate fail and requires reprocessing (or an
+/// exact-key fallback).
+struct FirstSeenRegistry {
+    table: HashTable<u32>,
+    overflow_table: Option<HashTable<u32>>,
+    fingerprints: Vec<u128>,
+    counts: FirstSeenCounts,
+    key_writer: BufWriter<File>,
+    hash_seed: i64,
+    seed_keys: Vec<[u8; 32]>,
+    seed_hasher: Sha256,
+    seeded_keys: usize,
+    references: u64,
+    observed_audit: FirstSeenReferenceAudit,
+}
+
+impl FirstSeenRegistry {
+    fn new(capacity: usize, registry_path: &Path) -> Result<Self> {
+        let hash_seed =
+            std::collections::hash_map::RandomState::new().hash_one(FIRST_SEEN_HASH_DOMAIN) as i64;
+        let key_file = File::create(registry_path)
+            .with_context(|| format!("create {}", registry_path.display()))?;
+        Ok(Self {
+            // Half the expected unique-key hint selects the Swiss-table plateau
+            // below the old monolithic allocation. For the normal 34M hint the
+            // primary accepts 29,360,128 rows (~160 MiB); overflow is lazy.
+            table: HashTable::with_capacity(capacity.div_ceil(2)),
+            overflow_table: None,
+            fingerprints: Vec::with_capacity(capacity),
+            counts: FirstSeenCounts::with_capacity(capacity),
+            key_writer: BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, key_file),
+            hash_seed,
+            seed_keys: Vec::with_capacity(FIRST_SEEN_SEED_READ_BUFFER_MIN / 32),
+            seed_hasher: Sha256::new(),
+            seeded_keys: 0,
+            references: 0,
+            observed_audit: FirstSeenReferenceAudit::default(),
+        })
+    }
+
+    #[inline]
+    fn fingerprint(&self, key: &[u8; 32]) -> u128 {
+        gxhash128(key, self.hash_seed)
+    }
+
+    #[inline]
+    fn table_hash(fingerprint: u128) -> u64 {
+        fingerprint as u64
+    }
+
+    #[inline]
+    fn lookup(&self, key: &[u8; 32]) -> Option<u32> {
+        self.lookup_fingerprint(self.fingerprint(key))
+    }
+
+    #[inline]
+    fn lookup_fingerprint(&self, fingerprint: u128) -> Option<u32> {
+        let hash = Self::table_hash(fingerprint);
+        self.table
+            .find(hash, |candidate| {
+                self.fingerprints[*candidate as usize] == fingerprint
+            })
+            .or_else(|| {
+                self.overflow_table.as_ref()?.find(hash, |candidate| {
+                    self.fingerprints[*candidate as usize] == fingerprint
+                })
+            })
+            .map(|zero_based| zero_based.saturating_add(1))
+    }
+
+    fn table_capacity(&self) -> usize {
+        self.table.capacity() + self.overflow_table.as_ref().map_or(0, HashTable::capacity)
+    }
+
+    fn seed(&mut self, key: [u8; 32]) -> Result<u32> {
+        let fingerprint = self.fingerprint(&key);
+        self.seed_with_fingerprint(key, fingerprint)
+    }
+
+    fn seed_with_fingerprint(&mut self, key: [u8; 32], fingerprint: u128) -> Result<u32> {
+        if let Some(id) = self.lookup_fingerprint(fingerprint) {
+            let existing = self
+                .seed_keys
+                .get(id as usize - 1)
+                .with_context(|| format!("seed fingerprint matched non-seed first-seen id {id}"))?;
+            anyhow::ensure!(
+                *existing == key,
+                "first-seen 128-bit fingerprint collision while seeding id {id}: existing={} incoming={}",
+                hex32(existing),
+                hex32(&key),
+            );
+            return Ok(id);
+        }
+        let id = self.insert_new(key, fingerprint, 0)?;
+        self.seed_keys.push(key);
+        self.seed_hasher.update(key);
+        self.seeded_keys = self.fingerprints.len();
+        Ok(id)
+    }
+
+    #[inline]
+    fn intern(&mut self, key: &[u8; 32]) -> Result<u32> {
+        let fingerprint = self.fingerprint(key);
+        self.intern_with_fingerprint(key, fingerprint)
+    }
+
+    fn intern_with_fingerprint(&mut self, key: &[u8; 32], fingerprint: u128) -> Result<u32> {
+        self.references = self
+            .references
+            .checked_add(1)
+            .context("first-seen reference count overflow")?;
+        self.observed_audit.add(key);
+        if let Some(zero_based) = self.lookup_fingerprint(fingerprint) {
+            let zero_based = zero_based - 1;
+            self.counts
+                .increment(zero_based as usize)
+                .with_context(|| {
+                    format!(
+                        "first-seen reference count overflow for id {}",
+                        zero_based + 1
+                    )
+                })?;
+            return Ok(zero_based + 1);
+        }
+        self.insert_new(*key, fingerprint, 1)
+    }
+
+    fn insert_new(&mut self, key: [u8; 32], fingerprint: u128, count: u32) -> Result<u32> {
+        let zero_based = u32::try_from(self.fingerprints.len())
+            .context("first-seen registry exhausted the u32 compact-ID space")?;
+        let id = zero_based
+            .checked_add(1)
+            .context("first-seen registry exhausted the one-based u32 compact-ID space")?;
+        let use_primary = self.overflow_table.is_none() && self.table.len() < self.table.capacity();
+        if !use_primary {
+            let fingerprints = &self.fingerprints;
+            self.overflow_table
+                .get_or_insert_with(HashTable::new)
+                .try_reserve(1, |candidate| {
+                    Self::table_hash(fingerprints[*candidate as usize])
+                })
+                .map_err(|error| anyhow!("reserve first-seen overflow table: {error:?}"))?;
+        }
+        self.key_writer
+            .write_all(&key)
+            .context("append first-seen registry key")?;
+        let hash = Self::table_hash(fingerprint);
+        self.fingerprints.push(fingerprint);
+        self.counts.push(
+            u8::try_from(count).expect("new first-seen count is always a seed zero or first one"),
+        );
+        let fingerprints = &self.fingerprints;
+        if use_primary {
+            self.table.insert_unique(hash, zero_based, |candidate| {
+                Self::table_hash(fingerprints[*candidate as usize])
+            });
+        } else {
+            let overflow = self
+                .overflow_table
+                .as_mut()
+                .expect("overflow table reserved before first insertion");
+            overflow.insert_unique(hash, zero_based, |candidate| {
+                Self::table_hash(fingerprints[*candidate as usize])
+            });
+        }
+        Ok(id)
+    }
+
+    fn seed_digest(&self) -> String {
+        let digest = self.seed_hasher.clone().finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&digest);
+        hex32(&bytes)
+    }
+
+    fn into_parts(mut self) -> Result<FirstSeenRegistryParts> {
+        self.key_writer
+            .flush()
+            .context("flush first-seen registry keys")?;
+        let keys = self.fingerprints.len();
+        let seed_hash = self.seed_digest();
+        let seeded_keys = self.seeded_keys;
+        let references = self.references;
+        let table_capacity = self.table_capacity();
+        let observed_audit = self.observed_audit;
+        let count_heap_bytes = self.counts.estimated_heap_bytes();
+        let count_u16_chunks = self.counts.u16_chunks;
+        let count_u32_chunks = self.counts.u32_chunks;
+        Ok(FirstSeenRegistryParts {
+            keys,
+            counts: self.counts,
+            seed_hash,
+            seeded_keys,
+            references,
+            table_capacity,
+            observed_audit,
+            count_heap_bytes,
+            count_u16_chunks,
+            count_u32_chunks,
+        })
+    }
+}
+
+struct FirstSeenRegistryParts {
+    keys: usize,
+    counts: FirstSeenCounts,
+    seed_hash: String,
+    seeded_keys: usize,
+    references: u64,
+    table_capacity: usize,
+    observed_audit: FirstSeenReferenceAudit,
+    count_heap_bytes: usize,
+    count_u16_chunks: usize,
+    count_u32_chunks: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FirstSeenReferenceAudit {
+    low: u128,
+    high: u128,
+}
+
+impl FirstSeenReferenceAudit {
+    #[inline]
+    fn add(&mut self, key: &[u8; 32]) {
+        let low = u128::from_le_bytes(key[..16].try_into().unwrap());
+        let high = u128::from_le_bytes(key[16..].try_into().unwrap());
+        self.low = self.low.wrapping_add(low);
+        self.high = self.high.wrapping_add(high);
+    }
+
+    #[inline]
+    fn add_counted(&mut self, key: &[u8; 32], count: u32) {
+        let count = u128::from(count);
+        let low = u128::from_le_bytes(key[..16].try_into().unwrap());
+        let high = u128::from_le_bytes(key[16..].try_into().unwrap());
+        self.low = self.low.wrapping_add(low.wrapping_mul(count));
+        self.high = self.high.wrapping_add(high.wrapping_mul(count));
+    }
+}
+
+fn seed_first_seen_registry(
+    registry: &mut FirstSeenRegistry,
+    seed_registry_path: Option<&Path>,
+    seed_key_limit: usize,
+) -> Result<()> {
+    for key in live_builtin_program_keys() {
+        registry.seed(*key)?;
+    }
+    let Some(path) = seed_registry_path else {
+        return Ok(());
+    };
+    let file =
+        File::open(path).with_context(|| format!("open seed registry {}", path.display()))?;
+    let bytes = file
+        .metadata()
+        .with_context(|| format!("stat seed registry {}", path.display()))?
+        .len();
+    anyhow::ensure!(
+        bytes.is_multiple_of(32),
+        "seed registry {} length {} is not divisible by 32",
+        path.display(),
+        bytes
+    );
+    let available = usize::try_from(bytes / 32).context("seed registry key count exceeds usize")?;
+    let take = available.min(seed_key_limit);
+    registry.seed_keys.reserve(take);
+    let mut reader = BufReader::with_capacity(first_seen_seed_reader_capacity(take), file);
+    for index in 0..take {
+        let mut key = [0u8; 32];
+        reader
+            .read_exact(&mut key)
+            .with_context(|| format!("read seed registry {} key {index}", path.display()))?;
+        registry.seed(key)?;
+    }
+    Ok(())
+}
+
+fn first_seen_seed_reader_capacity(keys: usize) -> usize {
+    keys.saturating_mul(32)
+        .clamp(FIRST_SEEN_SEED_READ_BUFFER_MIN, ARCHIVE_PRE_HOT_IO_BUFFER)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FirstSeenHotSeedCandidate {
+    key: [u8; 32],
+    count: u32,
+}
+
+impl Ord for FirstSeenHotSeedCandidate {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // BinaryHeap keeps the greatest item at the top. Reverse count ordering
+        // makes the lowest-frequency (and then lexicographically greatest) key
+        // the eviction candidate.
+        other
+            .count
+            .cmp(&self.count)
+            .then_with(|| self.key.cmp(&other.key))
+    }
+}
+
+impl PartialOrd for FirstSeenHotSeedCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn first_seen_hot_seed_better(
+    candidate: &FirstSeenHotSeedCandidate,
+    worst: &FirstSeenHotSeedCandidate,
+) -> bool {
+    candidate.count > worst.count || (candidate.count == worst.count && candidate.key < worst.key)
+}
+
+fn write_first_seen_hot_seed(
+    path: &Path,
+    registry_path: &Path,
+    counts: &FirstSeenCounts,
+    limit: usize,
+) -> Result<(usize, String)> {
+    let registry_bytes = std::fs::metadata(registry_path)
+        .with_context(|| format!("stat {}", registry_path.display()))?
+        .len();
+    anyhow::ensure!(
+        registry_bytes.is_multiple_of(32),
+        "hot-seed registry length {} is not divisible by 32: {}",
+        registry_bytes,
+        registry_path.display(),
+    );
+    let registry_keys = usize::try_from(registry_bytes / 32)
+        .context("hot-seed registry key count exceeds usize")?;
+    anyhow::ensure!(
+        registry_keys == counts.len(),
+        "hot-seed registry has {} keys but counts has {} rows",
+        registry_keys,
+        counts.len(),
+    );
+    let take = limit.min(registry_keys);
+    let registry_file =
+        File::open(registry_path).with_context(|| format!("open {}", registry_path.display()))?;
+    let mut reader = BufReader::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, registry_file);
+    let mut selected = BinaryHeap::<FirstSeenHotSeedCandidate>::with_capacity(take);
+    for count in counts.iter() {
+        let mut key = [0u8; 32];
+        reader
+            .read_exact(&mut key)
+            .with_context(|| format!("read {}", registry_path.display()))?;
+        if take == 0 {
+            continue;
+        }
+        let candidate = FirstSeenHotSeedCandidate { key, count };
+        if selected.len() < take {
+            selected.push(candidate);
+        } else if first_seen_hot_seed_better(&candidate, selected.peek().unwrap()) {
+            selected.pop();
+            selected.push(candidate);
+        }
+    }
+    let mut selected = selected.into_vec();
+    selected.sort_unstable_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, file);
+    let mut hasher = Sha256::new();
+    for candidate in selected {
+        writer
+            .write_all(&candidate.key)
+            .with_context(|| format!("write {}", path.display()))?;
+        hasher.update(candidate.key);
+    }
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    let digest = hasher.finalize();
+    let mut digest_bytes = [0u8; 32];
+    digest_bytes.copy_from_slice(&digest);
+    Ok((take, hex32(&digest_bytes)))
+}
+
+fn verify_first_seen_reference_audit(
+    registry_path: &Path,
+    counts: &FirstSeenCounts,
+    observed: FirstSeenReferenceAudit,
+) -> Result<FirstSeenReferenceAudit> {
+    let file = File::open(registry_path)
+        .with_context(|| format!("open first-seen audit registry {}", registry_path.display()))?;
+    let mut reader = BufReader::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, file);
+    let mut expected = FirstSeenReferenceAudit::default();
+    for (id, count) in counts.iter().enumerate() {
+        let mut key = [0u8; 32];
+        reader.read_exact(&mut key).with_context(|| {
+            format!(
+                "read first-seen audit registry {} id {}",
+                registry_path.display(),
+                id + 1,
+            )
+        })?;
+        expected.add_counted(&key, count);
+    }
+    let mut trailing = [0u8; 1];
+    anyhow::ensure!(
+        reader.read(&mut trailing)? == 0,
+        "first-seen audit registry {} has more keys than {} counts",
+        registry_path.display(),
+        counts.len(),
+    );
+    anyhow::ensure!(
+        observed == expected,
+        "first-seen fingerprint collision audit failed: observed_low={:032x} expected_low={:032x} observed_high={:032x} expected_high={:032x}",
+        observed.low,
+        expected.low,
+        observed.high,
+        expected.high,
+    );
+    Ok(expected)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_first_seen_manifest(
+    path: &Path,
+    input: &Path,
+    seed_source: Option<&Path>,
+    seed_hash: &str,
+    seeded_keys: usize,
+    next_seed_hash: &str,
+    next_seed_keys: usize,
+    registry_keys: usize,
+    references: u64,
+    reference_audit: FirstSeenReferenceAudit,
+) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut writer = BufWriter::with_capacity(64 << 10, file);
+    writeln!(writer, "version=1")?;
+    writeln!(writer, "registry_order=first_seen_v1")?;
+    writeln!(writer, "count_semantics=all_compact_pubkey_refs_v1")?;
+    writeln!(writer, "fingerprint=gxhash128_random_seed_full_key_v1")?;
+    writeln!(writer, "reference_audit=wrapping_u128_halves_le_v1")?;
+    writeln!(writer, "input={}", input.display())?;
+    writeln!(
+        writer,
+        "seed_source={}",
+        seed_source
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "builtins-only".to_string())
+    )?;
+    writeln!(writer, "assigned_seed_sha256={seed_hash}")?;
+    writeln!(writer, "seeded_keys={seeded_keys}")?;
+    writeln!(writer, "next_seed_file={FIRST_SEEN_HOT_SEED_FILE}")?;
+    writeln!(writer, "next_seed_file_sha256={next_seed_hash}")?;
+    writeln!(writer, "next_seed_keys={next_seed_keys}")?;
+    writeln!(writer, "registry_keys={registry_keys}")?;
+    writeln!(writer, "references={references}")?;
+    writeln!(writer, "reference_audit_low={:032x}", reference_audit.low)?;
+    writeln!(writer, "reference_audit_high={:032x}", reference_audit.high)?;
+    writer
+        .flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod first_seen_registry_tests {
+    use super::*;
+
+    fn temp_file(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-{label}-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn assigns_stable_one_based_ids_and_aligned_counts() {
+        let path = temp_file("registry");
+        let mut registry = FirstSeenRegistry::new(8, &path).unwrap();
+        assert_eq!(registry.seed([9; 32]).unwrap(), 1);
+        assert_eq!(registry.intern(&[1; 32]).unwrap(), 2);
+        assert_eq!(registry.intern(&[9; 32]).unwrap(), 1);
+        assert_eq!(registry.intern(&[1; 32]).unwrap(), 2);
+        assert_eq!(registry.intern(&[2; 32]).unwrap(), 3);
+        assert_eq!(registry.lookup(&[9; 32]), Some(1));
+        assert_eq!(registry.lookup(&[3; 32]), None);
+
+        let parts = registry.into_parts().unwrap();
+        assert_eq!(parts.keys, 3);
+        assert_eq!(parts.counts.iter().collect::<Vec<_>>(), vec![1, 2, 1]);
+        assert_eq!(parts.seeded_keys, 1);
+        assert_eq!(parts.references, 4);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            [[9u8; 32], [1u8; 32], [2u8; 32]].concat()
+        );
+        verify_first_seen_reference_audit(&path, &parts.counts, parts.observed_audit).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn injected_fingerprint_alias_is_rejected_by_post_scan_audit() {
+        let path = temp_file("collision-audit");
+        let mut registry = FirstSeenRegistry::new(8, &path).unwrap();
+        let fingerprint = 0x1234_u128;
+        assert_eq!(
+            registry
+                .intern_with_fingerprint(&[1u8; 32], fingerprint)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            registry
+                .intern_with_fingerprint(&[2u8; 32], fingerprint)
+                .unwrap(),
+            1
+        );
+        let parts = registry.into_parts().unwrap();
+        let error = verify_first_seen_reference_audit(&path, &parts.counts, parts.observed_audit)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fingerprint collision audit failed")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn injected_seed_fingerprint_alias_fails_immediately() {
+        let path = temp_file("seed-collision");
+        let mut registry = FirstSeenRegistry::new(8, &path).unwrap();
+        let fingerprint = 0x5678_u128;
+        registry
+            .seed_with_fingerprint([1u8; 32], fingerprint)
+            .unwrap();
+        let error = registry
+            .seed_with_fingerprint([2u8; 32], fingerprint)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fingerprint collision while seeding")
+        );
+        drop(registry);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn per_key_reference_count_overflow_is_an_error() {
+        let path = temp_file("count-overflow");
+        let mut registry = FirstSeenRegistry::new(8, &path).unwrap();
+        registry.intern(&[1u8; 32]).unwrap();
+        registry.counts.set_for_test(0, u32::MAX);
+        let error = registry.intern(&[1u8; 32]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("reference count overflow for id 1")
+        );
+        drop(registry);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reference_audit_covers_both_key_halves() {
+        let mut base = FirstSeenReferenceAudit::default();
+        base.add(&[0u8; 32]);
+        let mut low_changed = [0u8; 32];
+        low_changed[0] = 1;
+        let mut low = FirstSeenReferenceAudit::default();
+        low.add(&low_changed);
+        let mut high_changed = [0u8; 32];
+        high_changed[16] = 1;
+        let mut high = FirstSeenReferenceAudit::default();
+        high.add(&high_changed);
+        assert_ne!(base, low);
+        assert_ne!(base, high);
+        assert_ne!(low, high);
+    }
+
+    #[test]
+    fn overflow_table_preserves_first_seen_ids_and_counts() {
+        let path = temp_file("table-overflow");
+        let mut registry = FirstSeenRegistry::new(1, &path).unwrap();
+        let primary_capacity = registry.table.capacity();
+        let mut keys = Vec::new();
+        for index in 0..=primary_capacity {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            keys.push(key);
+            assert_eq!(registry.intern(&key).unwrap(), index as u32 + 1);
+        }
+        assert!(registry.overflow_table.is_some());
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(registry.lookup(key), Some(index as u32 + 1));
+        }
+        assert_eq!(
+            registry.intern(keys.last().unwrap()).unwrap(),
+            keys.len() as u32
+        );
+        let parts = registry.into_parts().unwrap();
+        assert_eq!(parts.counts.get(parts.counts.len() - 1), 2);
+        verify_first_seen_reference_audit(&path, &parts.counts, parts.observed_audit).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn block_local_access_pubkeys_deduplicate_and_reject_aliases() {
+        let mut entries = vec![
+            ArchiveV2BlockAccessPubkey {
+                id: 2,
+                pubkey: [2u8; 32],
+            },
+            ArchiveV2BlockAccessPubkey {
+                id: 1,
+                pubkey: [1u8; 32],
+            },
+            ArchiveV2BlockAccessPubkey {
+                id: 2,
+                pubkey: [2u8; 32],
+            },
+        ];
+        normalize_first_seen_access_pubkeys(&mut entries).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[1].id, 2);
+
+        entries.push(ArchiveV2BlockAccessPubkey {
+            id: 2,
+            pubkey: [3u8; 32],
+        });
+        let error = normalize_first_seen_access_pubkeys(&mut entries).unwrap_err();
+        assert!(error.to_string().contains("aliases two pubkeys"));
+    }
+
+    #[test]
+    fn adaptive_counts_promote_without_losing_neighbor_values() {
+        let mut counts = FirstSeenCounts::with_capacity_and_direct_limit(4, 0);
+        counts.push(1);
+        for _ in 1..u8::MAX {
+            counts.increment(0).unwrap();
+        }
+        assert_eq!(counts.get(0), u32::from(u8::MAX));
+        assert_eq!(counts.u16_chunks, 0);
+        counts.increment(0).unwrap();
+        assert_eq!(counts.get(0), u32::from(u8::MAX) + 1);
+        assert_eq!(counts.u16_chunks, 1);
+
+        // Sequential IDs can still enter the final chunk after it promoted.
+        counts.push(7);
+        assert_eq!(counts.get(1), 7);
+        counts.set_for_test(0, u32::from(u16::MAX));
+        counts.increment(0).unwrap();
+        assert_eq!(counts.get(0), u32::from(u16::MAX) + 1);
+        assert_eq!(counts.get(1), 7);
+        assert_eq!(counts.u16_chunks, 0);
+        assert_eq!(counts.u32_chunks, 1);
+    }
+
+    #[test]
+    fn hot_seed_selects_frequency_head_with_key_tie_break() {
+        let path = temp_file("seed");
+        let registry_path = temp_file("seed-registry");
+        let keys = vec![[3u8; 32], [2u8; 32], [1u8; 32], [4u8; 32]];
+        let mut counts = FirstSeenCounts::with_capacity(4);
+        for count in [1, 9, 9, 2] {
+            counts.push(count);
+        }
+        std::fs::write(&registry_path, keys.concat()).unwrap();
+        let (written, hash) = write_first_seen_hot_seed(&path, &registry_path, &counts, 2).unwrap();
+        assert_eq!(written, 2);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            [[1u8; 32], [2u8; 32]].concat()
+        );
+        assert_eq!(hash.len(), 64);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(registry_path).unwrap();
+    }
+
+    #[test]
+    fn seed_reader_capacity_tracks_requested_prefix_and_is_bounded() {
+        assert_eq!(
+            first_seen_seed_reader_capacity(0),
+            FIRST_SEEN_SEED_READ_BUFFER_MIN
+        );
+        assert_eq!(first_seen_seed_reader_capacity(65_536), 2 << 20);
+        assert_eq!(
+            first_seen_seed_reader_capacity(usize::MAX),
+            ARCHIVE_PRE_HOT_IO_BUFFER
+        );
     }
 }
 
@@ -5338,7 +12314,9 @@ impl HotBlockAccountBenchStats {
 
 #[derive(Debug, SchemaRead)]
 struct CompactMetaLoadedAddressView {
-    _err: Option<SkipBytes>,
+    // CompactTransactionError is an inline tagged enum. Treating it as a byte
+    // sequence misaligns every following field for failed transactions.
+    _err: Option<CompactTransactionError>,
     _fee: SkipU64,
     _pre_balances: Vec<SkipU64>,
     _post_balances: Vec<SkipU64>,
@@ -6027,6 +13005,37 @@ pub(crate) fn build_block_access_sidecar(
     dict: Option<&Path>,
     max_blocks: Option<u64>,
 ) -> Result<()> {
+    build_block_access_sidecar_inner(input, output_dir, index, dict, max_blocks, None)
+}
+
+fn build_block_access_sidecar_with_previous_tail(
+    input: &Path,
+    output_dir: &Path,
+    index: &Path,
+    previous_tail: &[PreviousBlockhash],
+) -> Result<()> {
+    anyhow::ensure!(
+        !previous_tail.is_empty(),
+        "explicit previous blockhash tail must not be empty"
+    );
+    build_block_access_sidecar_inner(
+        input,
+        Some(output_dir),
+        Some(index),
+        None,
+        None,
+        Some(previous_tail),
+    )
+}
+
+fn build_block_access_sidecar_inner(
+    input: &Path,
+    output_dir: Option<&Path>,
+    index: Option<&Path>,
+    dict: Option<&Path>,
+    max_blocks: Option<u64>,
+    previous_tail_override: Option<&[PreviousBlockhash]>,
+) -> Result<()> {
     let input_dir = input.parent().unwrap_or_else(|| Path::new("."));
     let output_dir = output_dir.unwrap_or(input_dir);
     std::fs::create_dir_all(output_dir)
@@ -6058,7 +13067,13 @@ pub(crate) fn build_block_access_sidecar(
             input_dir.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE).display()
         )
     })?;
-    let previous_tail = read_prev_blockhash_tail(input_dir)?.unwrap_or_default();
+    let loaded_previous_tail;
+    let previous_tail = if let Some(previous_tail) = previous_tail_override {
+        previous_tail
+    } else {
+        loaded_previous_tail = read_prev_blockhash_tail(input_dir)?.unwrap_or_default();
+        &loaded_previous_tail
+    };
     let mut signatures_file =
         File::open(input_dir.join(ARCHIVE_V2_SIGNATURES_FILE)).with_context(|| {
             format!(
@@ -6176,9 +13191,9 @@ pub(crate) fn build_block_access_sidecar(
 
         let access_blob = build_archive_v2_block_access_blob(
             &block,
-            &store,
+            &store.keys,
             &blockhashes,
-            &previous_tail,
+            previous_tail,
             &signature_bytes,
             &vote_hash_rows,
         )
@@ -6190,8 +13205,7 @@ pub(crate) fn build_block_access_sidecar(
         })?;
         access_bytes.clear();
         wincode::config::serialize_into(&mut access_bytes, &access_blob, wincode_leb128_config())?;
-        let access_len = u32::try_from(access_bytes.len())
-            .context("archive v2 block access payload exceeds u32::MAX")?;
+        let access_len = checked_archive_v2_block_access_frame_len(access_bytes.len(), row.slot)?;
         access_writer
             .write_all(&access_bytes)
             .with_context(|| format!("write {}", access_path.display()))?;
@@ -10145,8 +17159,58 @@ struct ArchiveV2BlockSidecar {
 fn block_sidecar_from_entries(
     slot: u64,
     entries: &[PendingEntry],
+    external_blockhashes: &ExternalBlockhashOverrides,
+    previous_blockhash: Option<[u8; 32]>,
 ) -> Result<ArchiveV2BlockSidecar> {
-    anyhow::ensure!(!entries.is_empty(), "slot {slot} block has no PoH entries");
+    if entries.is_empty() {
+        let override_entry = external_blockhashes.get(&slot).ok_or_else(|| {
+            anyhow!("slot {slot} block has no PoH entries and no external blockhash override")
+        })?;
+        if let (Some(ticks), Some(hashes_per_tick), Some(previous_blockhash)) = (
+            override_entry.reconstruct_ticks,
+            override_entry.hashes_per_tick,
+            previous_blockhash,
+        ) {
+            let poh_entries =
+                reconstruct_tick_only_poh(slot, previous_blockhash, ticks, hashes_per_tick)?;
+            let reconstructed_blockhash = poh_entries
+                .last()
+                .map(|entry| entry.hash)
+                .context("reconstructed PoH had no entries")?;
+            anyhow::ensure!(
+                reconstructed_blockhash == override_entry.hash,
+                "slot {slot} reconstructed tick-only PoH ended at {} but override blockhash is {}",
+                Pubkey::new_from_array(reconstructed_blockhash),
+                Pubkey::new_from_array(override_entry.hash)
+            );
+            info!(
+                "Reconstructed tick-only PoH for gap slot {} ticks={} hashes_per_tick={} source={} blockhash={}",
+                slot,
+                ticks,
+                hashes_per_tick,
+                override_entry.source,
+                Pubkey::new_from_array(override_entry.hash)
+            );
+            return Ok(ArchiveV2BlockSidecar {
+                poh_entries,
+                blockhash: override_entry.hash,
+            });
+        }
+        info!(
+            "Using external blockhash override for PoH-gap slot {} source={} blockhash={}",
+            slot,
+            override_entry.source,
+            Pubkey::new_from_array(override_entry.hash)
+        );
+        return Ok(ArchiveV2BlockSidecar {
+            poh_entries: Vec::new(),
+            blockhash: override_entry.hash,
+        });
+    }
+    anyhow::ensure!(
+        !external_blockhashes.contains_key(&slot),
+        "slot {slot} has PoH entries and must not use an external blockhash override"
+    );
     let poh_entries = entries
         .iter()
         .map(|entry| CompactPohEntry {
@@ -10163,6 +17227,36 @@ fn block_sidecar_from_entries(
         poh_entries,
         blockhash,
     })
+}
+
+fn reconstruct_tick_only_poh(
+    slot: u64,
+    previous_blockhash: [u8; 32],
+    ticks: u32,
+    hashes_per_tick: u64,
+) -> Result<Vec<CompactPohEntry>> {
+    anyhow::ensure!(
+        ticks > 0,
+        "slot {slot} reconstructed PoH ticks must be non-zero"
+    );
+    anyhow::ensure!(
+        hashes_per_tick > 0,
+        "slot {slot} reconstructed PoH hashes_per_tick must be non-zero"
+    );
+    let mut hash = previous_blockhash;
+    let mut entries = Vec::with_capacity(ticks as usize);
+    for _ in 0..ticks {
+        for _ in 0..hashes_per_tick {
+            let digest = Sha256::digest(hash);
+            hash.copy_from_slice(&digest);
+        }
+        entries.push(CompactPohEntry {
+            num_hashes: hashes_per_tick,
+            hash,
+            tx_count: 0,
+        });
+    }
+    Ok(entries)
 }
 
 fn decode_block_slot_time(payload: &[u8]) -> Result<(u64, Option<i64>)> {
@@ -10220,14 +17314,38 @@ fn build_block_record(
     block_id: u32,
     footer: &mut WincodeArchiveV2Footer,
     timings: &mut ArchiveV2Timings,
+    external_blockhashes: &ExternalBlockhashOverrides,
+    previous_blockhash: Option<[u8; 32]>,
+    zstd: &mut ZstdReusableDecoder,
+    parallel_tx_decoder: Option<&mut FirstSeenTxDecodePool>,
+    mut first_seen_signatures: Option<&mut FirstSeenBlockSignatures>,
 ) -> Result<(WincodeArchiveV2Block, u32, ArchiveV2BlockSidecar)> {
     pending.last_slot = block.slot;
     let entries = ordered_entries(pending, &block)?;
-    let sidecar = block_sidecar_from_entries(block.slot, entries)?;
+    let sidecar = block_sidecar_from_entries(
+        block.slot,
+        entries,
+        external_blockhashes,
+        previous_blockhash,
+    )?;
     validate_ordered_transactions(pending, entries, block.slot)?;
     let ordered_txs = &pending.transactions;
-    let mut zstd = ZstdReusableDecoder::new();
-    let rewards = block_rewards(pending, &block, key_index, &mut zstd, footer, timings)?;
+    let rewards = block_rewards(pending, &block, key_index, zstd, footer, timings)?;
+    if let Some(signatures) = first_seen_signatures.as_deref_mut() {
+        signatures.collect_block(ordered_txs, &pending.dataframes, block.slot)?;
+    }
+    let first_seen_signature_counts = first_seen_signatures
+        .as_deref()
+        .map(|signatures| signatures.counts.as_slice());
+    if let Some(signature_counts) = first_seen_signature_counts {
+        anyhow::ensure!(
+            signature_counts.len() == ordered_txs.len(),
+            "slot {} collected {} signature counts for {} transactions",
+            block.slot,
+            signature_counts.len(),
+            ordered_txs.len(),
+        );
+    }
 
     let compact_header = CompactBlockHeader {
         slot: block.slot,
@@ -10248,52 +17366,80 @@ fn build_block_record(
         rewards: None,
     };
 
-    let mut txs = Vec::with_capacity(ordered_txs.len());
-    let mut tx_bytes = Vec::new();
-    let mut metadata_bytes = Vec::new();
-    let mut reassemble_visited = HashSet::new();
-    for (tx_index, pending_tx) in ordered_txs.iter().enumerate() {
-        let assemble_started = Instant::now();
-        pending_tx
-            .tx
-            .transaction_bytes_into(&pending.dataframes, &mut tx_bytes, &mut reassemble_visited)
+    let txs = if let Some(decoder) =
+        parallel_tx_decoder.filter(|_| ordered_txs.len() >= FIRST_SEEN_PARALLEL_MIN_TRANSACTIONS)
+    {
+        let signature_counts = first_seen_signature_counts
+            .context("parallel first-seen decode requires collected signature counts")?;
+        decoder.decode_block_transactions(
+            ordered_txs,
+            &pending.dataframes,
+            signature_counts,
+            block.slot,
+            key_index,
+            rolling_blockhashes,
+            footer,
+            timings,
+        )?
+    } else {
+        let mut txs = Vec::with_capacity(ordered_txs.len());
+        let scratch = &mut pending.record_scratch;
+        for (tx_index, pending_tx) in ordered_txs.iter().enumerate() {
+            let assemble_started = timings.detail_timer();
+            let (tx_bytes, tx_scratch_capacity) = dataframe_bytes_for_decode(
+                &pending_tx.tx.data,
+                &pending.dataframes,
+                &mut scratch.tx_bytes,
+                &mut scratch.reassemble_visited,
+            )
             .with_context(|| {
                 format!(
                     "slot {} tx#{tx_index} reassemble transaction bytes",
                     block.slot
                 )
             })?;
-        timings.dataframe_assemble += assemble_started.elapsed();
-        footer.tx_source_bytes += tx_bytes.len() as u64;
-        timings.tx_reassembled += 1;
-        timings.tx_scratch_max = timings.tx_scratch_max.max(tx_bytes.capacity());
-        let tx_started = Instant::now();
-        let value = wincode::deserialize::<VersionedTransaction<'_>>(&tx_bytes)
-            .map_err(|err| anyhow!("{err}"))
-            .and_then(|versioned| {
-                to_owned_compact_transaction(
+            timings.dataframe_assemble += assemble_started.elapsed();
+            footer.tx_source_bytes += tx_bytes.len() as u64;
+            timings.tx_reassembled += 1;
+            timings.tx_scratch_max = timings.tx_scratch_max.max(tx_scratch_capacity);
+            let tx_started = timings.detail_timer();
+            let value = if let Some(signature_counts) = first_seen_signature_counts {
+                decode_first_seen_compact_transaction(
                     block.slot,
                     tx_index,
-                    &versioned,
+                    tx_bytes,
+                    signature_counts[tx_index],
                     key_index,
                     rolling_blockhashes,
                     &mut footer.nonce_recent_blockhashes,
                 )
-            })
+            } else {
+                wincode::deserialize::<VersionedTransaction<'_>>(tx_bytes)
+                    .map_err(|err| anyhow!("{err}"))
+                    .and_then(|versioned| {
+                        to_owned_compact_transaction(
+                            block.slot,
+                            tx_index,
+                            versioned,
+                            key_index,
+                            rolling_blockhashes,
+                            &mut footer.nonce_recent_blockhashes,
+                        )
+                    })
+            }
             .with_context(|| format!("slot {} tx#{tx_index} transaction", block.slot))?;
-        let tx = WincodeArchiveV2Payload::Decoded {
-            source_len: tx_bytes.len() as u64,
-            value,
-        };
-        timings.tx_decode_compact += tx_started.elapsed();
+            let tx = WincodeArchiveV2Payload::Decoded {
+                source_len: tx_bytes.len() as u64,
+                value,
+            };
+            timings.tx_decode_compact += tx_started.elapsed();
 
-        let assemble_started = Instant::now();
-        pending_tx
-            .tx
-            .metadata_bytes_into(
+            let assemble_started = timings.detail_timer();
+            let (metadata_bytes, metadata_scratch_capacity) = dataframe_bytes_for_decode(
+                &pending_tx.tx.metadata,
                 &pending.dataframes,
-                &mut metadata_bytes,
-                &mut reassemble_visited,
+                &mut scratch.metadata_bytes,
+                &mut scratch.reassemble_visited,
             )
             .with_context(|| {
                 format!(
@@ -10301,32 +17447,35 @@ fn build_block_record(
                     block.slot
                 )
             })?;
-        timings.dataframe_assemble += assemble_started.elapsed();
-        footer.metadata_source_bytes += metadata_bytes.len() as u64;
-        timings.metadata_reassembled += 1;
-        timings.metadata_scratch_max = timings.metadata_scratch_max.max(metadata_bytes.capacity());
-        let metadata = if metadata_bytes.is_empty() {
-            None
-        } else {
-            let metadata_started = Instant::now();
-            let payload = decode_metadata_payload(
-                block.slot,
-                tx_index,
-                &metadata_bytes,
-                key_index,
-                &mut zstd,
-                timings,
-            )?;
-            timings.metadata_decode_compact += metadata_started.elapsed();
-            Some(payload)
-        };
+            timings.dataframe_assemble += assemble_started.elapsed();
+            footer.metadata_source_bytes += metadata_bytes.len() as u64;
+            timings.metadata_reassembled += 1;
+            timings.metadata_scratch_max =
+                timings.metadata_scratch_max.max(metadata_scratch_capacity);
+            let metadata = if metadata_bytes.is_empty() {
+                None
+            } else {
+                let metadata_started = timings.detail_timer();
+                let payload = decode_metadata_payload(
+                    block.slot,
+                    tx_index,
+                    metadata_bytes,
+                    key_index,
+                    zstd,
+                    timings,
+                )?;
+                timings.metadata_decode_compact += metadata_started.elapsed();
+                Some(payload)
+            };
 
-        txs.push(WincodeArchiveV2Transaction {
-            tx_index: pending_tx.tx.index.unwrap_or(tx_index as u64) as u32,
-            tx,
-            metadata,
-        });
-    }
+            txs.push(WincodeArchiveV2Transaction {
+                tx_index: pending_tx.tx.index.unwrap_or(tx_index as u64) as u32,
+                tx,
+                metadata,
+            });
+        }
+        txs
+    };
 
     Ok((
         WincodeArchiveV2Block {
@@ -10347,14 +17496,19 @@ fn build_no_registry_block_record(
     block_id: u32,
     footer: &mut WincodeArchiveV2Footer,
     timings: &mut ArchiveV2Timings,
+    zstd: &mut ZstdReusableDecoder,
 ) -> Result<(WincodeArchiveV2NoRegistryBlock, u32, ArchiveV2BlockSidecar)> {
     pending.last_slot = block.slot;
     let entries = ordered_entries(pending, &block)?;
-    let sidecar = block_sidecar_from_entries(block.slot, entries)?;
+    let sidecar = block_sidecar_from_entries(
+        block.slot,
+        entries,
+        &ExternalBlockhashOverrides::default(),
+        None,
+    )?;
     validate_ordered_transactions(pending, entries, block.slot)?;
     let ordered_txs = &pending.transactions;
-    let mut zstd = ZstdReusableDecoder::new();
-    let rewards = block_rewards_no_registry(pending, &block, &mut zstd, footer, timings)?;
+    let rewards = block_rewards_no_registry(pending, &block, zstd, footer, timings)?;
 
     let compact_header = CompactBlockHeader {
         slot: block.slot,
@@ -10380,7 +17534,7 @@ fn build_no_registry_block_record(
     let mut metadata_bytes = Vec::new();
     let mut reassemble_visited = HashSet::new();
     for (tx_index, pending_tx) in ordered_txs.iter().enumerate() {
-        let assemble_started = Instant::now();
+        let assemble_started = timings.detail_timer();
         pending_tx
             .tx
             .transaction_bytes_into(&pending.dataframes, &mut tx_bytes, &mut reassemble_visited)
@@ -10394,10 +17548,10 @@ fn build_no_registry_block_record(
         footer.tx_source_bytes += tx_bytes.len() as u64;
         timings.tx_reassembled += 1;
         timings.tx_scratch_max = timings.tx_scratch_max.max(tx_bytes.capacity());
-        let tx_started = Instant::now();
+        let tx_started = timings.detail_timer();
         let value = wincode::deserialize::<VersionedTransaction<'_>>(&tx_bytes)
             .map_err(|err| anyhow!("{err}"))
-            .map(|versioned| to_no_registry_transaction(&versioned))
+            .map(to_no_registry_transaction)
             .with_context(|| format!("slot {} tx#{tx_index} transaction", block.slot))?;
         let tx = WincodeArchiveV2Payload::Decoded {
             source_len: tx_bytes.len() as u64,
@@ -10405,7 +17559,7 @@ fn build_no_registry_block_record(
         };
         timings.tx_decode_compact += tx_started.elapsed();
 
-        let assemble_started = Instant::now();
+        let assemble_started = timings.detail_timer();
         pending_tx
             .tx
             .metadata_bytes_into(
@@ -10426,12 +17580,12 @@ fn build_no_registry_block_record(
         let metadata = if metadata_bytes.is_empty() {
             None
         } else {
-            let metadata_started = Instant::now();
+            let metadata_started = timings.detail_timer();
             let payload = decode_no_registry_metadata_payload(
                 block.slot,
                 tx_index,
                 &metadata_bytes,
-                &mut zstd,
+                zstd,
                 timings,
             )?;
             timings.metadata_decode_compact += metadata_started.elapsed();
@@ -10461,13 +17615,92 @@ fn build_no_registry_block_record(
 fn to_owned_compact_transaction(
     slot: u64,
     tx_index: usize,
-    vtx: &VersionedTransaction<'_>,
+    vtx: VersionedTransaction<'_>,
     key_index: &KeyIndex,
     rolling_blockhashes: &RollingBlockhashIndex,
     nonce_recent_blockhashes: &mut u64,
 ) -> Result<OwnedCompactTransaction> {
-    let signatures = vtx.signatures.iter().map(|sig| sig.to_vec()).collect();
-    let message = match &vtx.message {
+    let VersionedTransaction {
+        signatures,
+        message,
+    } = vtx;
+    let signatures = signatures
+        .into_iter()
+        .map(|signature| signature.to_vec())
+        .collect();
+    let message = to_owned_compact_message(
+        slot,
+        tx_index,
+        message,
+        key_index,
+        rolling_blockhashes,
+        nonce_recent_blockhashes,
+    )?;
+
+    Ok(OwnedCompactTransaction {
+        signatures,
+        message,
+    })
+}
+
+fn decode_first_seen_compact_transaction(
+    slot: u64,
+    tx_index: usize,
+    transaction_bytes: &[u8],
+    expected_signature_count: u8,
+    key_index: &KeyIndex,
+    rolling_blockhashes: &RollingBlockhashIndex,
+    nonce_recent_blockhashes: &mut u64,
+) -> Result<OwnedCompactTransaction> {
+    let (decoded_signature_count, prefix_len) =
+        solana_short_vec::decode_shortu16_len(transaction_bytes)
+            .map_err(|()| anyhow!("invalid transaction signature ShortU16 prefix"))?;
+    let decoded_signature_count = u8::try_from(decoded_signature_count)
+        .context("transaction signature count exceeds hot-row u8 maximum")?;
+    anyhow::ensure!(
+        decoded_signature_count == expected_signature_count,
+        "decoded signature count {} does not match collected count {}",
+        decoded_signature_count,
+        expected_signature_count,
+    );
+    let signature_bytes_len = usize::from(decoded_signature_count)
+        .checked_mul(FIRST_SEEN_SIGNATURE_BYTES)
+        .context("transaction signature byte length overflow")?;
+    let message_offset = prefix_len
+        .checked_add(signature_bytes_len)
+        .context("transaction message offset overflow")?;
+    anyhow::ensure!(
+        message_offset <= transaction_bytes.len(),
+        "truncated transaction signatures: have {} bytes after prefix, expected {}",
+        transaction_bytes.len().saturating_sub(prefix_len),
+        signature_bytes_len,
+    );
+    let message =
+        wincode::deserialize::<VersionedMessage<'_>>(&transaction_bytes[message_offset..])
+            .map_err(|error| anyhow!("{error}"))?;
+    let message = to_owned_compact_message(
+        slot,
+        tx_index,
+        message,
+        key_index,
+        rolling_blockhashes,
+        nonce_recent_blockhashes,
+    )?;
+    Ok(OwnedCompactTransaction {
+        signatures: Vec::new(),
+        message,
+    })
+}
+
+fn to_owned_compact_message(
+    slot: u64,
+    tx_index: usize,
+    message: VersionedMessage<'_>,
+    key_index: &KeyIndex,
+    rolling_blockhashes: &RollingBlockhashIndex,
+    nonce_recent_blockhashes: &mut u64,
+) -> Result<OwnedCompactMessage> {
+    Ok(match message {
         VersionedMessage::Legacy(message) => {
             OwnedCompactMessage::Legacy(OwnedCompactLegacyMessage {
                 header: CompactMessageHeader {
@@ -10477,7 +17710,7 @@ fn to_owned_compact_transaction(
                 },
                 account_keys: message
                     .account_keys
-                    .iter()
+                    .into_iter()
                     .map(|key| key_index.compact(key))
                     .collect(),
                 recent_blockhash: resolve_recent_blockhash(
@@ -10487,7 +17720,11 @@ fn to_owned_compact_transaction(
                     tx_index,
                     nonce_recent_blockhashes,
                 )?,
-                instructions: message.instructions.iter().map(owned_instruction).collect(),
+                instructions: message
+                    .instructions
+                    .into_iter()
+                    .map(owned_instruction)
+                    .collect(),
             })
         }
         VersionedMessage::V0(message) => OwnedCompactMessage::V0(OwnedCompactV0Message {
@@ -10498,7 +17735,7 @@ fn to_owned_compact_transaction(
             },
             account_keys: message
                 .account_keys
-                .iter()
+                .into_iter()
                 .map(|key| key_index.compact(key))
                 .collect(),
             recent_blockhash: resolve_recent_blockhash(
@@ -10508,38 +17745,41 @@ fn to_owned_compact_transaction(
                 tx_index,
                 nonce_recent_blockhashes,
             )?,
-            instructions: message.instructions.iter().map(owned_instruction).collect(),
+            instructions: message
+                .instructions
+                .into_iter()
+                .map(owned_instruction)
+                .collect(),
             address_table_lookups: message
                 .address_table_lookups
-                .iter()
+                .into_iter()
                 .map(|lookup| OwnedCompactAddressTableLookup {
                     account_key: key_index.compact(lookup.account_key),
-                    writable_indexes: lookup.writable_indexes.clone(),
-                    readonly_indexes: lookup.readonly_indexes.clone(),
+                    writable_indexes: lookup.writable_indexes,
+                    readonly_indexes: lookup.readonly_indexes,
                 })
                 .collect(),
         }),
-    };
-
-    Ok(OwnedCompactTransaction {
-        signatures,
-        message,
     })
 }
 
 fn owned_instruction(
-    instruction: &of_car_reader::versioned_transaction::CompiledInstruction,
+    instruction: of_car_reader::versioned_transaction::CompiledInstruction,
 ) -> OwnedCompactInstruction {
     OwnedCompactInstruction {
         program_id_index: instruction.program_id_index,
-        accounts: instruction.accounts.clone(),
-        data: instruction.data.clone(),
+        accounts: instruction.accounts,
+        data: instruction.data,
     }
 }
 
-fn to_no_registry_transaction(vtx: &VersionedTransaction<'_>) -> WincodeArchiveV2NoRegistryTx {
-    let signatures = vtx.signatures.iter().map(|sig| sig.to_vec()).collect();
-    let message = match &vtx.message {
+fn to_no_registry_transaction(vtx: VersionedTransaction<'_>) -> WincodeArchiveV2NoRegistryTx {
+    let signatures = vtx
+        .signatures
+        .into_iter()
+        .map(|signature| signature.to_vec())
+        .collect();
+    let message = match vtx.message {
         VersionedMessage::Legacy(message) => {
             WincodeArchiveV2NoRegistryMessage::Legacy(WincodeArchiveV2NoRegistryLegacyMessage {
                 header: CompactMessageHeader {
@@ -10547,11 +17787,11 @@ fn to_no_registry_transaction(vtx: &VersionedTransaction<'_>) -> WincodeArchiveV
                     num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
                     num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
                 },
-                account_keys: message.account_keys.iter().map(|key| **key).collect(),
+                account_keys: message.account_keys.into_iter().map(|key| *key).collect(),
                 recent_blockhash: *message.recent_blockhash,
                 instructions: message
                     .instructions
-                    .iter()
+                    .into_iter()
                     .map(no_registry_instruction)
                     .collect(),
             })
@@ -10563,20 +17803,20 @@ fn to_no_registry_transaction(vtx: &VersionedTransaction<'_>) -> WincodeArchiveV
                     num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
                     num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
                 },
-                account_keys: message.account_keys.iter().map(|key| **key).collect(),
+                account_keys: message.account_keys.into_iter().map(|key| *key).collect(),
                 recent_blockhash: *message.recent_blockhash,
                 instructions: message
                     .instructions
-                    .iter()
+                    .into_iter()
                     .map(no_registry_instruction)
                     .collect(),
                 address_table_lookups: message
                     .address_table_lookups
-                    .iter()
+                    .into_iter()
                     .map(|lookup| WincodeArchiveV2NoRegistryAddressTableLookup {
                         account_key: *lookup.account_key,
-                        writable_indexes: lookup.writable_indexes.clone(),
-                        readonly_indexes: lookup.readonly_indexes.clone(),
+                        writable_indexes: lookup.writable_indexes,
+                        readonly_indexes: lookup.readonly_indexes,
                     })
                     .collect(),
             })
@@ -10590,12 +17830,12 @@ fn to_no_registry_transaction(vtx: &VersionedTransaction<'_>) -> WincodeArchiveV
 }
 
 fn no_registry_instruction(
-    instruction: &of_car_reader::versioned_transaction::CompiledInstruction,
+    instruction: of_car_reader::versioned_transaction::CompiledInstruction,
 ) -> WincodeArchiveV2NoRegistryInstruction {
     WincodeArchiveV2NoRegistryInstruction {
         program_id_index: instruction.program_id_index,
-        accounts: instruction.accounts.clone(),
-        data: instruction.data.clone(),
+        accounts: instruction.accounts,
+        data: instruction.data,
     }
 }
 
@@ -10706,7 +17946,9 @@ fn no_registry_meta_from_proto(
     let logs = if meta.log_messages_none {
         None
     } else {
-        Some(meta.log_messages.clone())
+        Some(WincodeArchiveV2NoRegistryLogs::Raw(
+            meta.log_messages.clone(),
+        ))
     };
     let pre_token_balances = meta
         .pre_token_balances
@@ -10781,7 +18023,7 @@ fn block_rewards(
     let Some(rewards_ref) = block.rewards.as_ref() else {
         return Ok(None);
     };
-    let assemble_started = Instant::now();
+    let assemble_started = timings.detail_timer();
     let bytes = if let Some(cid) = rewards_ref.cid {
         let rewards = pending
             .rewards
@@ -10797,7 +18039,7 @@ fn block_rewards(
     timings.dataframe_assemble += assemble_started.elapsed();
     footer.rewards_source_bytes += bytes.len() as u64;
 
-    let rewards_started = Instant::now();
+    let rewards_started = timings.detail_timer();
     let mut decoded = Rewards::default();
     match decode_rewards_from_frame(&bytes, &mut decoded, zstd).map(|()| decoded) {
         Ok(decoded) => {
@@ -10845,7 +18087,7 @@ fn block_rewards_no_registry(
     let Some(rewards_ref) = block.rewards.as_ref() else {
         return Ok(None);
     };
-    let assemble_started = Instant::now();
+    let assemble_started = timings.detail_timer();
     let bytes = if let Some(cid) = rewards_ref.cid {
         let rewards = pending
             .rewards
@@ -10861,7 +18103,7 @@ fn block_rewards_no_registry(
     timings.dataframe_assemble += assemble_started.elapsed();
     footer.rewards_source_bytes += bytes.len() as u64;
 
-    let rewards_started = Instant::now();
+    let rewards_started = timings.detail_timer();
     let mut decoded = Rewards::default();
     match decode_rewards_from_frame(&bytes, &mut decoded, zstd).map(|()| decoded) {
         Ok(decoded) => {
@@ -11037,7 +18279,7 @@ impl NoRegistryMetaVisitor {
         let logs = if self.log_messages_none {
             None
         } else {
-            Some(self.log_messages)
+            Some(WincodeArchiveV2NoRegistryLogs::Raw(self.log_messages))
         };
         let return_data = if self.return_data_none {
             None
@@ -11495,6 +18737,85 @@ pub(crate) fn inspect_car_order(input: &Path, max_blocks: Option<u64>) -> Result
     Ok(())
 }
 
+pub(crate) fn find_poh_gaps(input: &Path, output: Option<&Path>) -> Result<()> {
+    let mut scanner = RawCarScanner::open(input)?;
+    scanner.skip_header()?;
+
+    let mut writer: Box<dyn Write> = if let Some(path) = output {
+        Box::new(BufWriter::with_capacity(
+            BUFFER_SIZE,
+            File::create(path).with_context(|| format!("create {}", path.display()))?,
+        ))
+    } else {
+        Box::new(BufWriter::with_capacity(BUFFER_SIZE, std::io::stdout()))
+    };
+    writeln!(
+        writer,
+        "slot\tblock_index\ttx_count\tentry_count\tprevious_blockhash"
+    )?;
+
+    let mut pending_txs = 0u64;
+    let mut pending_entries = Vec::<[u8; 32]>::new();
+    let mut last_blockhash: Option<[u8; 32]> = None;
+    let mut blocks = 0u64;
+    let mut gaps = 0u64;
+    let mut tx_gaps = 0u64;
+    let started = Instant::now();
+
+    while let Some(raw) = scanner.next_node_timed(None)? {
+        match raw.node {
+            RawNode::Transaction(_) => pending_txs += 1,
+            RawNode::Entry(entry) => pending_entries.push(entry.hash),
+            RawNode::Block(block) => {
+                if block.entries.is_empty() {
+                    gaps += 1;
+                    if pending_txs > 0 {
+                        tx_gaps += 1;
+                    }
+                    let previous_blockhash = last_blockhash
+                        .map(|hash| Pubkey::new_from_array(hash).to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    writeln!(
+                        writer,
+                        "{}\t{}\t{}\t{}\t{}",
+                        block.slot,
+                        blocks,
+                        pending_txs,
+                        block.entries.len(),
+                        previous_blockhash
+                    )?;
+                } else if let Some(blockhash) = pending_entries.last().copied() {
+                    last_blockhash = Some(blockhash);
+                } else {
+                    warn!(
+                        "slot {} block has {} entry refs but no pending entry nodes while scanning PoH gaps",
+                        block.slot,
+                        block.entries.len()
+                    );
+                }
+
+                pending_txs = 0;
+                pending_entries.clear();
+                blocks += 1;
+            }
+            RawNode::Rewards(_)
+            | RawNode::DataFrame(_)
+            | RawNode::Subset(_)
+            | RawNode::Epoch(_) => {}
+        }
+    }
+    writer.flush()?;
+    info!(
+        "PoH gap scan complete in {:.2}s: blocks={} gaps={} gaps_with_txs={} input={}",
+        started.elapsed().as_secs_f64(),
+        blocks,
+        gaps,
+        tx_gaps,
+        input.display()
+    );
+    Ok(())
+}
+
 struct PendingEntryOrder {
     cid: Cid36,
     tx_cids: Vec<Cid36>,
@@ -11531,12 +18852,264 @@ struct CarOrderStats {
 }
 
 #[derive(Default)]
+struct BlockRecordScratch {
+    tx_bytes: Vec<u8>,
+    metadata_bytes: Vec<u8>,
+    reassemble_visited: HashSet<Cid36>,
+}
+
+/// Return the frame payload in place when it has no continuations. The CAR
+/// scanner already owns these bytes for the lifetime of the pending block, so
+/// copying them into a second reusable `Vec` does no useful work. Frames with
+/// any continuation retain the exact recursive reassembly behavior.
+#[inline]
+fn dataframe_bytes_for_decode<'a>(
+    frame: &'a RawDataFrame,
+    dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+    scratch: &'a mut Vec<u8>,
+    visited: &mut HashSet<Cid36>,
+) -> Result<(&'a [u8], usize)> {
+    if frame.next.is_empty() {
+        scratch.clear();
+        visited.clear();
+        return Ok((&frame.data, scratch.capacity()));
+    }
+
+    frame.reassemble_bytes_into(dataframes, scratch, visited)?;
+    let scratch_capacity = scratch.capacity();
+    Ok((scratch.as_slice(), scratch_capacity))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RawDataFramePayloadPoolStats {
+    retained_buffers: usize,
+    retained_capacity: usize,
+    current_buffers: usize,
+    current_capacity: usize,
+    peak_current_buffers: usize,
+    peak_current_capacity: usize,
+    takes: u64,
+    reused_buffers: u64,
+    fresh_buffers: u64,
+    allocation_events: u64,
+    growth_events: u64,
+    discarded_buffers: u64,
+    discarded_capacity: u64,
+}
+
+#[derive(Clone, Copy)]
+struct RawDataFramePayloadPoolLimits {
+    max_retained_capacity: usize,
+    max_buffer_capacity: usize,
+    max_buffers_per_class: usize,
+    max_class_zero_buffers: usize,
+}
+
+const RAW_DATAFRAME_PAYLOAD_POOL_LIMITS: RawDataFramePayloadPoolLimits =
+    RawDataFramePayloadPoolLimits {
+        max_retained_capacity: RAW_DATAFRAME_POOL_MAX_RETAINED_BYTES,
+        max_buffer_capacity: RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES,
+        max_buffers_per_class: RAW_DATAFRAME_POOL_MAX_BUFFERS_PER_CLASS,
+        max_class_zero_buffers: RAW_DATAFRAME_POOL_MAX_CLASS_ZERO_BUFFERS,
+    };
+
+struct RawDataFramePayloadPool {
+    // Class zero is reserved for zero-capacity buffers. Positive class N owns
+    // buffers with capacity in [2^(N-1), 2^N), while requests are rounded up
+    // to a power-of-two lower bound. Every buffer popped from the requested
+    // class (or a larger one) is therefore guaranteed to fit.
+    free_by_capacity: Vec<Vec<Vec<u8>>>,
+    stats: RawDataFramePayloadPoolStats,
+}
+
+impl Default for RawDataFramePayloadPool {
+    fn default() -> Self {
+        Self {
+            free_by_capacity: (0..=usize::BITS + 1).map(|_| Vec::new()).collect(),
+            stats: RawDataFramePayloadPoolStats::default(),
+        }
+    }
+}
+
+impl RawDataFramePayloadPool {
+    fn take(&mut self, required: usize) -> Vec<u8> {
+        self.stats.takes += 1;
+        let class = raw_dataframe_required_capacity_class(required);
+        let last_probe = class
+            .saturating_add(RAW_DATAFRAME_POOL_LARGER_CLASS_PROBES)
+            .min(self.free_by_capacity.len() - 1);
+        let mut reusable_class = None;
+        for candidate_class in class..=last_probe {
+            let Some(buffer) = self.free_by_capacity[candidate_class].last() else {
+                continue;
+            };
+            debug_assert!(
+                buffer.capacity() >= required,
+                "payload-pool class {candidate_class} capacity {} cannot satisfy {required}",
+                buffer.capacity(),
+            );
+            reusable_class = Some(candidate_class);
+            break;
+        }
+
+        let mut buffer = if let Some(reusable_class) = reusable_class {
+            let buffer = self.free_by_capacity[reusable_class]
+                .pop()
+                .expect("RawDataFrame payload pool selected an empty capacity class");
+            self.stats.reused_buffers += 1;
+            debug_assert!(self.stats.retained_buffers >= 1);
+            self.stats.retained_buffers = self
+                .stats
+                .retained_buffers
+                .checked_sub(1)
+                .expect("RawDataFrame payload pool retained-buffer accounting underflow");
+            debug_assert!(self.stats.retained_capacity >= buffer.capacity());
+            self.stats.retained_capacity = self
+                .stats
+                .retained_capacity
+                .checked_sub(buffer.capacity())
+                .expect("RawDataFrame payload pool retained-capacity accounting underflow");
+            buffer
+        } else {
+            self.stats.fresh_buffers += 1;
+            let allocation_capacity = if required > RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES {
+                required
+            } else {
+                raw_dataframe_class_allocation_capacity(class, required)
+            };
+            if allocation_capacity != 0 {
+                self.stats.allocation_events += 1;
+            }
+            Vec::with_capacity(allocation_capacity)
+        };
+
+        buffer.clear();
+        if buffer.capacity() < required {
+            let target = if required > RAW_DATAFRAME_POOL_MAX_BUFFER_BYTES {
+                required
+            } else {
+                raw_dataframe_class_allocation_capacity(class, required)
+            };
+            buffer.reserve(target);
+            self.stats.allocation_events += 1;
+            self.stats.growth_events += 1;
+        }
+        self.stats.current_buffers = self
+            .stats
+            .current_buffers
+            .checked_add(1)
+            .expect("RawDataFrame payload pool current-buffer accounting overflow");
+        self.stats.current_capacity = self
+            .stats
+            .current_capacity
+            .checked_add(buffer.capacity())
+            .expect("RawDataFrame payload pool current-capacity accounting overflow");
+        self.stats.peak_current_buffers = self
+            .stats
+            .peak_current_buffers
+            .max(self.stats.current_buffers);
+        self.stats.peak_current_capacity = self
+            .stats
+            .peak_current_capacity
+            .max(self.stats.current_capacity);
+        buffer
+    }
+
+    fn recycle(&mut self, buffer: Vec<u8>) {
+        self.recycle_with_limits(buffer, RAW_DATAFRAME_PAYLOAD_POOL_LIMITS);
+    }
+
+    fn recycle_with_limits(&mut self, mut buffer: Vec<u8>, limits: RawDataFramePayloadPoolLimits) {
+        buffer.clear();
+        let capacity = buffer.capacity();
+        debug_assert!(self.stats.current_buffers >= 1);
+        self.stats.current_buffers = self
+            .stats
+            .current_buffers
+            .checked_sub(1)
+            .expect("RawDataFrame payload pool current-buffer accounting underflow");
+        debug_assert!(self.stats.current_capacity >= capacity);
+        self.stats.current_capacity = self
+            .stats
+            .current_capacity
+            .checked_sub(capacity)
+            .expect("RawDataFrame payload pool current-capacity accounting underflow");
+
+        let class = raw_dataframe_recycled_capacity_class(capacity);
+        let class_limit = if class == 0 {
+            limits.max_class_zero_buffers
+        } else {
+            limits.max_buffers_per_class
+        };
+        let retained_capacity = self.stats.retained_capacity.checked_add(capacity);
+        let retain = capacity <= limits.max_buffer_capacity
+            && self.free_by_capacity[class].len() < class_limit
+            && retained_capacity.is_some_and(|total| total <= limits.max_retained_capacity);
+        if !retain {
+            self.stats.discarded_buffers = self
+                .stats
+                .discarded_buffers
+                .checked_add(1)
+                .expect("RawDataFrame payload pool discarded-buffer accounting overflow");
+            self.stats.discarded_capacity = self
+                .stats
+                .discarded_capacity
+                .checked_add(capacity as u64)
+                .expect("RawDataFrame payload pool discarded-capacity accounting overflow");
+            return;
+        }
+
+        self.stats.retained_buffers = self
+            .stats
+            .retained_buffers
+            .checked_add(1)
+            .expect("RawDataFrame payload pool retained-buffer accounting overflow");
+        self.stats.retained_capacity = retained_capacity
+            .expect("RawDataFrame payload pool retained-capacity accounting overflow");
+        self.free_by_capacity[class].push(buffer);
+    }
+
+    fn stats(&self) -> RawDataFramePayloadPoolStats {
+        self.stats
+    }
+}
+
+#[inline]
+fn raw_dataframe_required_capacity_class(required: usize) -> usize {
+    if required == 0 {
+        0
+    } else {
+        1 + (usize::BITS - (required - 1).leading_zeros()) as usize
+    }
+}
+
+#[inline]
+fn raw_dataframe_recycled_capacity_class(capacity: usize) -> usize {
+    if capacity == 0 {
+        0
+    } else {
+        1 + (usize::BITS - 1 - capacity.leading_zeros()) as usize
+    }
+}
+
+#[inline]
+fn raw_dataframe_class_allocation_capacity(class: usize, required: usize) -> usize {
+    if class == 0 {
+        0
+    } else {
+        1usize.checked_shl((class - 1) as u32).unwrap_or(required)
+    }
+}
+
+#[derive(Default)]
 struct PendingBlock {
     transactions: Vec<PendingTx>,
     entries: Vec<PendingEntry>,
     rewards: Option<PendingRewards>,
     dataframes: HashMap<Cid36, StandaloneDataFrame>,
     last_slot: u64,
+    record_scratch: BlockRecordScratch,
+    raw_dataframe_payloads: RawDataFramePayloadPool,
 }
 
 impl PendingBlock {
@@ -11545,6 +19118,52 @@ impl PendingBlock {
         self.entries.clear();
         self.rewards = None;
         self.dataframes.clear();
+    }
+
+    fn pending_slot_hint(&self) -> Option<u64> {
+        self.transactions
+            .last()
+            .map(|pending| pending.tx.slot)
+            .or_else(|| self.rewards.as_ref().map(|pending| pending.rewards.slot))
+    }
+
+    fn insert_dataframe_recycling(&mut self, frame: StandaloneDataFrame) -> Result<()> {
+        let slot_hint = self.pending_slot_hint();
+        let cid = frame.cid;
+        let location = frame.location;
+        match self.dataframes.entry(cid) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(frame);
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                self.raw_dataframe_payloads.recycle(frame.frame.data);
+                let slot = slot_hint
+                    .map(|slot| slot.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                anyhow::bail!(
+                    "duplicate standalone dataframe CID {cid} while collecting slot {slot} at CAR entry {} offset {}",
+                    location.entry_index,
+                    location.car_offset,
+                )
+            }
+        }
+    }
+
+    fn clear_recycling_frame_data(&mut self) {
+        for pending_tx in self.transactions.drain(..) {
+            let RawTransactionNode { data, metadata, .. } = pending_tx.tx;
+            self.raw_dataframe_payloads.recycle(data.data);
+            self.raw_dataframe_payloads.recycle(metadata.data);
+        }
+        self.entries.clear();
+        if let Some(pending_rewards) = self.rewards.take() {
+            self.raw_dataframe_payloads
+                .recycle(pending_rewards.rewards.data.data);
+        }
+        for (_, frame) in self.dataframes.drain() {
+            self.raw_dataframe_payloads.recycle(frame.frame.data);
+        }
     }
 }
 
@@ -11566,6 +19185,234 @@ struct PendingRewards {
     payload_len: usize,
 }
 
+const FIRST_SEEN_SIGNATURE_BYTES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FirstSeenSignatureArenaStats {
+    blocks: u64,
+    transactions: u64,
+    signatures: u64,
+    decoder_signature_ref_vec_allocations_avoided: u64,
+    owned_signature_outer_vec_allocations_avoided: u64,
+    owned_signature_inner_vec_allocations_avoided: u64,
+    block_write_calls: u64,
+    peak_counts_capacity: usize,
+    peak_bytes_capacity: usize,
+}
+
+#[derive(Default)]
+struct FirstSeenBlockSignatures {
+    counts: Vec<u8>,
+    bytes: Vec<u8>,
+    visited: HashSet<Cid36>,
+    stats: FirstSeenSignatureArenaStats,
+}
+
+impl FirstSeenBlockSignatures {
+    fn collect_block(
+        &mut self,
+        transactions: &[PendingTx],
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        slot: u64,
+    ) -> Result<()> {
+        self.counts.clear();
+        self.bytes.clear();
+        reserve_total_capacity(&mut self.counts, transactions.len());
+        self.bytes.reserve(
+            transactions
+                .len()
+                .saturating_mul(FIRST_SEEN_SIGNATURE_BYTES)
+                .saturating_sub(self.bytes.len()),
+        );
+
+        let mut signatures = 0u64;
+        let mut nonempty_transactions = 0u64;
+        for (tx_index, pending_tx) in transactions.iter().enumerate() {
+            self.visited.clear();
+            let output_start = self.bytes.len();
+            let count = collect_first_seen_transaction_signatures(
+                &pending_tx.tx.data,
+                dataframes,
+                &mut self.visited,
+                &mut self.bytes,
+            )
+            .with_context(|| format!("slot {slot} tx#{tx_index} collect signatures"))?;
+            let expected_len = usize::from(count)
+                .checked_mul(FIRST_SEEN_SIGNATURE_BYTES)
+                .context("first-seen transaction signature byte length overflow")?;
+            anyhow::ensure!(
+                self.bytes.len().saturating_sub(output_start) == expected_len,
+                "slot {slot} tx#{tx_index} collected {} signature bytes, expected {expected_len}",
+                self.bytes.len().saturating_sub(output_start),
+            );
+            self.counts.push(count);
+            signatures = signatures
+                .checked_add(u64::from(count))
+                .context("first-seen signature count overflow")?;
+            nonempty_transactions += u64::from(count != 0);
+        }
+
+        self.stats.blocks = self.stats.blocks.saturating_add(1);
+        self.stats.transactions = self
+            .stats
+            .transactions
+            .saturating_add(transactions.len() as u64);
+        self.stats.signatures = self.stats.signatures.saturating_add(signatures);
+        self.stats.decoder_signature_ref_vec_allocations_avoided = self
+            .stats
+            .decoder_signature_ref_vec_allocations_avoided
+            .saturating_add(nonempty_transactions);
+        self.stats.owned_signature_outer_vec_allocations_avoided = self
+            .stats
+            .owned_signature_outer_vec_allocations_avoided
+            .saturating_add(nonempty_transactions);
+        self.stats.owned_signature_inner_vec_allocations_avoided = self
+            .stats
+            .owned_signature_inner_vec_allocations_avoided
+            .saturating_add(signatures);
+        self.stats.peak_counts_capacity =
+            self.stats.peak_counts_capacity.max(self.counts.capacity());
+        self.stats.peak_bytes_capacity = self.stats.peak_bytes_capacity.max(self.bytes.capacity());
+        Ok(())
+    }
+
+    fn record_block_write(&mut self) {
+        if !self.bytes.is_empty() {
+            self.stats.block_write_calls = self.stats.block_write_calls.saturating_add(1);
+        }
+    }
+}
+
+struct FirstSeenSignatureCollector<'a> {
+    output: &'a mut Vec<u8>,
+    prefix: [u8; 3],
+    prefix_len: usize,
+    count: Option<u8>,
+    remaining_signature_bytes: usize,
+}
+
+impl<'a> FirstSeenSignatureCollector<'a> {
+    fn new(output: &'a mut Vec<u8>) -> Self {
+        Self {
+            output,
+            prefix: [0; 3],
+            prefix_len: 0,
+            count: None,
+            remaining_signature_bytes: 0,
+        }
+    }
+
+    fn consume(&mut self, chunk: &[u8]) -> Result<bool> {
+        let mut offset = 0usize;
+        while self.count.is_none() && offset < chunk.len() {
+            anyhow::ensure!(
+                self.prefix_len < self.prefix.len(),
+                "transaction signature ShortU16 prefix exceeds three bytes"
+            );
+            let byte = chunk[offset];
+            self.prefix[self.prefix_len] = byte;
+            self.prefix_len += 1;
+            offset += 1;
+            if byte & 0x80 == 0 || self.prefix_len == self.prefix.len() {
+                let (count, encoded_len) =
+                    solana_short_vec::decode_shortu16_len(&self.prefix[..self.prefix_len])
+                        .map_err(|()| anyhow!("invalid transaction signature ShortU16 prefix"))?;
+                anyhow::ensure!(
+                    encoded_len == self.prefix_len,
+                    "transaction signature ShortU16 consumed {encoded_len} bytes, collected {}",
+                    self.prefix_len,
+                );
+                let count = u8::try_from(count)
+                    .context("transaction signature count exceeds hot-row u8 maximum")?;
+                self.remaining_signature_bytes = usize::from(count)
+                    .checked_mul(FIRST_SEEN_SIGNATURE_BYTES)
+                    .context("transaction signature byte length overflow")?;
+                self.count = Some(count);
+            }
+        }
+
+        if self.count.is_some() && self.remaining_signature_bytes != 0 && offset < chunk.len() {
+            let copied = self
+                .remaining_signature_bytes
+                .min(chunk.len().saturating_sub(offset));
+            self.output
+                .extend_from_slice(&chunk[offset..offset + copied]);
+            self.remaining_signature_bytes -= copied;
+        }
+        Ok(self.count.is_some() && self.remaining_signature_bytes == 0)
+    }
+
+    fn finish(self) -> Result<u8> {
+        let count = self
+            .count
+            .context("truncated transaction signature ShortU16 prefix")?;
+        anyhow::ensure!(
+            self.remaining_signature_bytes == 0,
+            "truncated transaction signatures: {} bytes missing",
+            self.remaining_signature_bytes,
+        );
+        Ok(count)
+    }
+}
+
+fn collect_first_seen_transaction_signatures(
+    frame: &RawDataFrame,
+    dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+    visited: &mut HashSet<Cid36>,
+    output: &mut Vec<u8>,
+) -> Result<u8> {
+    let output_start = output.len();
+    let mut collector = FirstSeenSignatureCollector::new(output);
+    let collected = visit_first_seen_dataframe_chunks(frame, dataframes, visited, &mut |chunk| {
+        collector.consume(chunk)
+    });
+    match collected.and_then(|_| collector.finish()) {
+        Ok(count) => Ok(count),
+        Err(error) => {
+            output.truncate(output_start);
+            Err(error)
+        }
+    }
+}
+
+fn visit_first_seen_dataframe_chunks(
+    frame: &RawDataFrame,
+    dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+    visited: &mut HashSet<Cid36>,
+    visitor: &mut impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<bool> {
+    if visitor(&frame.data)? {
+        return Ok(true);
+    }
+    for next in &frame.next {
+        if let Some(inline) = next.inline_raw_bytes() {
+            if visitor(inline)? {
+                return Ok(true);
+            }
+            continue;
+        }
+
+        let cid = next.cid.with_context(|| {
+            format!(
+                "unsupported dataframe CID reference with {} normalized bytes",
+                next.normalized_bytes().len()
+            )
+        })?;
+        anyhow::ensure!(visited.insert(cid), "dataframe cycle at {cid}");
+        let continuation = dataframes
+            .get(&cid)
+            .with_context(|| format!("missing dataframe {cid}"));
+        let result = continuation.and_then(|continuation| {
+            visit_first_seen_dataframe_chunks(&continuation.frame, dataframes, visited, visitor)
+        });
+        visited.remove(&cid);
+        if result? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 struct RawNodeWithLen {
     node: RawNode,
     payload_len: usize,
@@ -11580,6 +19427,7 @@ struct RawPrefix<'a> {
 struct RawCarScanner<R: Read> {
     reader: CarBlockReader<R>,
     scratch: Vec<u8>,
+    zstd_prefetch_stats: Option<Arc<ZstdPrefetchStats>>,
 }
 
 impl RawCarScanner<Box<dyn Read>> {
@@ -11617,6 +19465,36 @@ impl RawCarScanner<Box<dyn Read>> {
         Ok(RawCarScanner {
             reader: CarBlockReader::with_capacity(input, io_buf_bytes),
             scratch: Vec::new(),
+            zstd_prefetch_stats: None,
+        })
+    }
+
+    fn open_zstd_prefetch_with_buffer(
+        path: &Path,
+        io_buf_bytes: usize,
+        prefetch_bytes: usize,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            input_path_is_car_zstd(path),
+            "zstd prefetch requires a local .car.zst input"
+        );
+        let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let reader = BufReader::with_capacity(io_buf_bytes, file);
+        let decoder = zstd_decoder_with_long_window(reader)
+            .with_context(|| format!("zstd decode {}", path.display()))?;
+        let (prefetch_reader, stats) = ZstdPrefetchReader::start(decoder, prefetch_bytes)
+            .with_context(|| {
+                format!(
+                    "start ordered zstd prefetch for {} with {} bytes per buffer",
+                    path.display(),
+                    prefetch_bytes
+                )
+            })?;
+        let input: Box<dyn Read> = Box::new(prefetch_reader);
+        Ok(RawCarScanner {
+            reader: CarBlockReader::with_capacity(input, io_buf_bytes),
+            scratch: Vec::new(),
+            zstd_prefetch_stats: Some(stats),
         })
     }
 
@@ -11650,6 +19528,7 @@ impl RawCarScanner<Box<dyn Read>> {
         Ok(RawCarScanner {
             reader: CarBlockReader::with_capacity(input, BUFFER_SIZE),
             scratch: Vec::new(),
+            zstd_prefetch_stats: None,
         })
     }
 }
@@ -11688,7 +19567,7 @@ impl<R: Read> RawCarScanner<R> {
         &mut self,
         timings: Option<&mut ArchiveV2Timings>,
     ) -> Result<Option<RawNodeWithLen>> {
-        let started = Instant::now();
+        let started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
         let Some(entry) = self
             .reader
             .read_entry_payload_with_scratch(&mut self.scratch)
@@ -11711,6 +19590,40 @@ impl<R: Read> RawCarScanner<R> {
             payload_len: entry.payload_len,
         }))
     }
+
+    fn next_node_timed_with_data_buffers(
+        &mut self,
+        pool: &mut RawDataFramePayloadPool,
+        timings: Option<&mut ArchiveV2Timings>,
+    ) -> Result<Option<RawNodeWithLen>> {
+        let started = ArchiveV2Timings::optional_detail_timer(timings.as_deref());
+        let Some(entry) = self
+            .reader
+            .read_entry_payload_with_scratch(&mut self.scratch)
+            .map_err(|err| anyhow!("{err}"))?
+        else {
+            return Ok(None);
+        };
+        let node = decode_raw_node_with_data_buffers(
+            entry.location,
+            entry.cid,
+            entry.payload,
+            &mut |required| pool.take(required),
+        )
+        .with_context(|| {
+            format!(
+                "decode node at entry {} offset {}",
+                entry.location.entry_index, entry.location.car_offset
+            )
+        })?;
+        if let Some(timings) = timings {
+            timings.scan_decode_node += started.elapsed();
+        }
+        Ok(Some(RawNodeWithLen {
+            node,
+            payload_len: entry.payload_len,
+        }))
+    }
 }
 
 fn input_label_is_zstd(label: &str) -> bool {
@@ -11718,13 +19631,50 @@ fn input_label_is_zstd(label: &str) -> bool {
     without_query.to_ascii_lowercase().ends_with(".zst")
 }
 
+fn input_path_is_car_zstd(path: &Path) -> bool {
+    const SUFFIX: &str = ".car.zst";
+    if path.to_str().is_some_and(|label| label.contains("://")) {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.get(name.len().checked_sub(SUFFIX.len())?..))
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(SUFFIX))
+}
+
+fn detailed_timings_enabled_from_value(value: Option<&str>) -> bool {
+    matches!(value, Some("1"))
+}
+
+fn detailed_timings_enabled() -> bool {
+    detailed_timings_enabled_from_value(std::env::var(DETAILED_TIMINGS_ENV).ok().as_deref())
+}
+
+struct DetailTimer(Option<Instant>);
+
+impl DetailTimer {
+    #[inline]
+    fn start(enabled: bool) -> Self {
+        Self(enabled.then(Instant::now))
+    }
+
+    #[inline]
+    fn elapsed(&self) -> Duration {
+        self.0.as_ref().map_or(Duration::ZERO, Instant::elapsed)
+    }
+}
+
 #[derive(Default)]
 struct ArchiveV2Timings {
+    detailed: bool,
     scan_decode_node: Duration,
     classify: Duration,
     dataframe_assemble: Duration,
     tx_decode_compact: Duration,
     metadata_decode_compact: Duration,
+    first_seen_parallel_decode_wall: Duration,
+    metadata_logs_decode_compact: Duration,
+    metadata_pubkey_compact: Duration,
     rewards_decode_compact: Duration,
     wincode_encode: Duration,
     hot_message_build: Duration,
@@ -11745,10 +19695,1083 @@ struct ArchiveV2Timings {
     hot_zstd_buffer_capacity_max: usize,
 }
 
+impl ArchiveV2Timings {
+    fn from_env() -> Self {
+        Self {
+            detailed: detailed_timings_enabled(),
+            ..Self::default()
+        }
+    }
+
+    #[inline]
+    fn detail_timer(&self) -> DetailTimer {
+        DetailTimer::start(self.detailed)
+    }
+
+    #[inline]
+    fn optional_detail_timer(timings: Option<&Self>) -> DetailTimer {
+        DetailTimer::start(timings.is_some_and(|timings| timings.detailed))
+    }
+}
+
+#[derive(Default)]
+struct FirstSeenTxDecodeStats {
+    timings: ArchiveV2Timings,
+    tx_source_bytes: u64,
+    metadata_source_bytes: u64,
+    nonce_recent_blockhashes: u64,
+}
+
+struct FirstSeenTxWorkerScratch {
+    generation: u64,
+    record: BlockRecordScratch,
+    metadata_zstd: ZstdReusableDecoder,
+    stats: FirstSeenTxDecodeStats,
+}
+
+impl Default for FirstSeenTxWorkerScratch {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            record: BlockRecordScratch {
+                tx_bytes: Vec::with_capacity(FIRST_SEEN_WORKER_TX_SCRATCH_INITIAL_BYTES),
+                metadata_bytes: Vec::with_capacity(
+                    FIRST_SEEN_WORKER_METADATA_SCRATCH_INITIAL_BYTES,
+                ),
+                reassemble_visited: HashSet::with_capacity(8),
+            },
+            metadata_zstd: ZstdReusableDecoder::new(),
+            stats: FirstSeenTxDecodeStats::default(),
+        }
+    }
+}
+
+impl FirstSeenTxWorkerScratch {
+    fn prepare(&mut self, generation: u64, detailed_timings: bool) {
+        if self.generation == generation {
+            return;
+        }
+        self.generation = generation;
+        self.stats = FirstSeenTxDecodeStats::default();
+        self.stats.timings.detailed = detailed_timings;
+    }
+
+    fn take_stats(&mut self, generation: u64) -> FirstSeenTxDecodeStats {
+        let stats = if self.generation == generation {
+            std::mem::take(&mut self.stats)
+        } else {
+            FirstSeenTxDecodeStats::default()
+        };
+        self.trim_oversized_buffers();
+        stats
+    }
+
+    fn trim_oversized_buffers(&mut self) {
+        if self.record.tx_bytes.capacity() > FIRST_SEEN_WORKER_SCRATCH_MAX_RETAINED_BYTES {
+            self.record.tx_bytes = Vec::with_capacity(FIRST_SEEN_WORKER_TX_SCRATCH_INITIAL_BYTES);
+        }
+        if self.record.metadata_bytes.capacity() > FIRST_SEEN_WORKER_SCRATCH_MAX_RETAINED_BYTES {
+            self.record.metadata_bytes =
+                Vec::with_capacity(FIRST_SEEN_WORKER_METADATA_SCRATCH_INITIAL_BYTES);
+        }
+        self.metadata_zstd.trim_oversized_output();
+    }
+}
+
+thread_local! {
+    static FIRST_SEEN_TX_WORKER_SCRATCH: RefCell<FirstSeenTxWorkerScratch> =
+        RefCell::new(FirstSeenTxWorkerScratch::default());
+}
+
+struct FirstSeenTxDecodePool {
+    pool: rayon::ThreadPool,
+    generation: u64,
+}
+
+impl FirstSeenTxDecodePool {
+    fn new(workers: usize) -> Result<Self> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|index| format!("first-seen-decode-{index}"))
+            .build()
+            .context("create first-seen transaction decode pool")?;
+        info!("Archive V2 first-seen parallel transaction decode enabled: workers={workers}");
+        Ok(Self {
+            pool,
+            generation: 0,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_block_transactions(
+        &mut self,
+        transactions: &[PendingTx],
+        dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+        signature_counts: &[u8],
+        slot: u64,
+        key_index: &KeyIndex,
+        rolling_blockhashes: &RollingBlockhashIndex,
+        footer: &mut WincodeArchiveV2Footer,
+        timings: &mut ArchiveV2Timings,
+    ) -> Result<Vec<WincodeArchiveV2Transaction>> {
+        anyhow::ensure!(
+            signature_counts.len() == transactions.len(),
+            "slot {slot} collected {} signature counts for {} transactions",
+            signature_counts.len(),
+            transactions.len(),
+        );
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .context("first-seen decode generation overflow")?;
+        let generation = self.generation;
+        let detailed_timings = timings.detailed;
+        let wall_started = timings.detail_timer();
+
+        // Indexed collection preserves transaction order. If several malformed
+        // transactions fail concurrently, Rayon does not define which error is
+        // returned; the candidate build still aborts before completion/promotion.
+        let decoded = self.pool.install(|| {
+            transactions
+                .par_iter()
+                .enumerate()
+                .map(|(tx_index, transaction)| {
+                    FIRST_SEEN_TX_WORKER_SCRATCH.with(|scratch| {
+                        let mut scratch = scratch.borrow_mut();
+                        scratch.prepare(generation, detailed_timings);
+                        decode_first_seen_transaction(
+                            transaction,
+                            dataframes,
+                            signature_counts[tx_index],
+                            slot,
+                            tx_index,
+                            key_index,
+                            rolling_blockhashes,
+                            &mut scratch,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        timings.first_seen_parallel_decode_wall += wall_started.elapsed();
+
+        let worker_stats = self.pool.broadcast(|_| {
+            FIRST_SEEN_TX_WORKER_SCRATCH.with(|scratch| scratch.borrow_mut().take_stats(generation))
+        });
+        for stats in worker_stats {
+            merge_first_seen_tx_decode_stats(stats, footer, timings);
+        }
+        Ok(decoded)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_first_seen_transaction(
+    pending_tx: &PendingTx,
+    dataframes: &HashMap<Cid36, StandaloneDataFrame>,
+    expected_signature_count: u8,
+    slot: u64,
+    tx_index: usize,
+    key_index: &KeyIndex,
+    rolling_blockhashes: &RollingBlockhashIndex,
+    worker: &mut FirstSeenTxWorkerScratch,
+) -> Result<WincodeArchiveV2Transaction> {
+    let FirstSeenTxWorkerScratch {
+        record,
+        metadata_zstd,
+        stats,
+        ..
+    } = worker;
+
+    let assemble_started = stats.timings.detail_timer();
+    let (tx_bytes, tx_scratch_capacity) = dataframe_bytes_for_decode(
+        &pending_tx.tx.data,
+        dataframes,
+        &mut record.tx_bytes,
+        &mut record.reassemble_visited,
+    )
+    .with_context(|| format!("slot {slot} tx#{tx_index} reassemble transaction bytes"))?;
+    stats.timings.dataframe_assemble += assemble_started.elapsed();
+    stats.tx_source_bytes += tx_bytes.len() as u64;
+    stats.timings.tx_reassembled += 1;
+    stats.timings.tx_scratch_max = stats.timings.tx_scratch_max.max(tx_scratch_capacity);
+
+    let tx_started = stats.timings.detail_timer();
+    let value = decode_first_seen_compact_transaction(
+        slot,
+        tx_index,
+        tx_bytes,
+        expected_signature_count,
+        key_index,
+        rolling_blockhashes,
+        &mut stats.nonce_recent_blockhashes,
+    )
+    .with_context(|| format!("slot {slot} tx#{tx_index} transaction"))?;
+    let tx = WincodeArchiveV2Payload::Decoded {
+        source_len: tx_bytes.len() as u64,
+        value,
+    };
+    stats.timings.tx_decode_compact += tx_started.elapsed();
+
+    let assemble_started = stats.timings.detail_timer();
+    let (metadata_bytes, metadata_scratch_capacity) = dataframe_bytes_for_decode(
+        &pending_tx.tx.metadata,
+        dataframes,
+        &mut record.metadata_bytes,
+        &mut record.reassemble_visited,
+    )
+    .with_context(|| format!("slot {slot} tx#{tx_index} reassemble metadata bytes"))?;
+    stats.timings.dataframe_assemble += assemble_started.elapsed();
+    stats.metadata_source_bytes += metadata_bytes.len() as u64;
+    stats.timings.metadata_reassembled += 1;
+    stats.timings.metadata_scratch_max = stats
+        .timings
+        .metadata_scratch_max
+        .max(metadata_scratch_capacity);
+    let metadata = if metadata_bytes.is_empty() {
+        None
+    } else {
+        let metadata_started = stats.timings.detail_timer();
+        let payload = decode_metadata_payload(
+            slot,
+            tx_index,
+            metadata_bytes,
+            key_index,
+            metadata_zstd,
+            &mut stats.timings,
+        )?;
+        stats.timings.metadata_decode_compact += metadata_started.elapsed();
+        Some(payload)
+    };
+
+    Ok(WincodeArchiveV2Transaction {
+        tx_index: pending_tx.tx.index.unwrap_or(tx_index as u64) as u32,
+        tx,
+        metadata,
+    })
+}
+
+fn merge_first_seen_tx_decode_stats(
+    stats: FirstSeenTxDecodeStats,
+    footer: &mut WincodeArchiveV2Footer,
+    timings: &mut ArchiveV2Timings,
+) {
+    footer.tx_source_bytes += stats.tx_source_bytes;
+    footer.metadata_source_bytes += stats.metadata_source_bytes;
+    footer.nonce_recent_blockhashes += stats.nonce_recent_blockhashes;
+
+    timings.dataframe_assemble += stats.timings.dataframe_assemble;
+    timings.tx_decode_compact += stats.timings.tx_decode_compact;
+    timings.metadata_decode_compact += stats.timings.metadata_decode_compact;
+    timings.metadata_logs_decode_compact += stats.timings.metadata_logs_decode_compact;
+    timings.metadata_pubkey_compact += stats.timings.metadata_pubkey_compact;
+    timings.tx_reassembled += stats.timings.tx_reassembled;
+    timings.metadata_reassembled += stats.timings.metadata_reassembled;
+    timings.metadata_protobuf_visit += stats.timings.metadata_protobuf_visit;
+    timings.metadata_owned_fallback += stats.timings.metadata_owned_fallback;
+    timings.tx_scratch_max = timings.tx_scratch_max.max(stats.timings.tx_scratch_max);
+    timings.metadata_scratch_max = timings
+        .metadata_scratch_max
+        .max(stats.timings.metadata_scratch_max);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use of_car_reader::reconstruct::{NodeLocation, RawCidRef, RawDataFrame};
+    use of_car_reader::versioned_transaction::{
+        CompiledInstruction, MessageAddressTableLookup, MessageHeader, V0Message,
+    };
     use solana_vote_interface::state::Lockout;
+
+    #[test]
+    fn block_access_frame_limit_is_shared_and_inclusive() {
+        let limit = usize::try_from(ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES).unwrap();
+        assert_eq!(
+            checked_archive_v2_block_access_frame_len(limit, 42).unwrap(),
+            u32::try_from(limit).unwrap()
+        );
+        let error = checked_archive_v2_block_access_frame_len(limit + 1, 43).unwrap_err();
+        assert!(error.to_string().contains("exceeding the shared"));
+    }
+
+    struct ScriptedTerminalReader {
+        bytes: Vec<u8>,
+        offset: usize,
+        max_read: usize,
+        interrupt_once: bool,
+        terminal_error: Option<ErrorKind>,
+    }
+
+    impl Read for ScriptedTerminalReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupt_once {
+                self.interrupt_once = false;
+                return Err(std::io::Error::new(
+                    ErrorKind::Interrupted,
+                    "scripted interrupt",
+                ));
+            }
+            if self.offset < self.bytes.len() {
+                let read = output
+                    .len()
+                    .min(self.max_read)
+                    .min(self.bytes.len() - self.offset);
+                output[..read].copy_from_slice(&self.bytes[self.offset..self.offset + read]);
+                self.offset += read;
+                return Ok(read);
+            }
+            match self.terminal_error {
+                Some(kind) => Err(std::io::Error::new(kind, "scripted terminal error")),
+                None => Ok(0),
+            }
+        }
+    }
+
+    struct PanicReader;
+
+    impl Read for PanicReader {
+        fn read(&mut self, _output: &mut [u8]) -> std::io::Result<usize> {
+            panic!("intentional prefetch worker panic")
+        }
+    }
+
+    struct DropObservedReader {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Read for DropObservedReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            output.fill(0x5a);
+            Ok(output.len())
+        }
+    }
+
+    impl Drop for DropObservedReader {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    fn encode_zstd_frame_with_window(payload: &[u8], window_log: u32) -> Vec<u8> {
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        encoder.include_contentsize(false).unwrap();
+        encoder.window_log(window_log).unwrap();
+        encoder.write_all(payload).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn owned_long_window_decoder_reads_concatenated_frames() {
+        const TEST_WINDOW_LOG: u32 = 23;
+        let first = (0..1_048_579)
+            .map(|index| ((index * 31 + index / 251) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let second = b"second concatenated zstd frame".repeat(257);
+        let first_frame = encode_zstd_frame_with_window(&first, TEST_WINDOW_LOG);
+        let second_frame = zstd::stream::encode_all(second.as_slice(), 1).unwrap();
+        let mut compressed = first_frame.clone();
+        compressed.extend_from_slice(&second_frame);
+
+        // Verify the first frame actually requires the declared long window,
+        // so this test exercises the decoder limit rather than only roundtrip.
+        let mut too_small =
+            zstd::stream::read::Decoder::with_buffer(BufReader::new(first_frame.as_slice()))
+                .unwrap();
+        too_small.window_log_max(TEST_WINDOW_LOG - 1).unwrap();
+        let mut ignored = Vec::new();
+        assert!(too_small.read_to_end(&mut ignored).is_err());
+
+        let reader = BufReader::with_capacity(17, compressed.as_slice());
+        let mut decoder = zstd_decoder_with_long_window(reader).unwrap();
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).unwrap();
+
+        let mut expected = first;
+        expected.extend_from_slice(&second);
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn owned_long_window_decoder_can_borrow_and_drop_repeatedly() {
+        let expected = b"owned decoder drop regression".repeat(32);
+        let compressed = zstd::stream::encode_all(expected.as_slice(), 1).unwrap();
+
+        for _ in 0..128 {
+            // A borrowed reader proves the decoder context is owned independently
+            // rather than requiring the input reader itself to be `'static`.
+            let reader = BufReader::with_capacity(11, compressed.as_slice());
+            let mut decoder = zstd_decoder_with_long_window(reader).unwrap();
+            let mut decoded = Vec::new();
+            decoder.read_to_end(&mut decoded).unwrap();
+            assert_eq!(decoded, expected);
+        }
+    }
+
+    #[test]
+    fn zstd_prefetch_partial_reads_are_exact_and_reuse_two_buffers() {
+        let expected = (0..257)
+            .map(|index| ((index * 31 + index / 7) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let (mut reader, stats) =
+            ZstdPrefetchReader::start(std::io::Cursor::new(expected.clone()), 13).unwrap();
+
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+        let mut decoded = Vec::new();
+        let mut scratch = [0_u8; 19];
+        let read_sizes = [1, 7, 2, 19, 3, 11, 5];
+        for size in read_sizes.into_iter().cycle() {
+            let read = reader.read(&mut scratch[..size]).unwrap();
+            if read == 0 {
+                break;
+            }
+            assert!(read <= size);
+            decoded.extend_from_slice(&scratch[..read]);
+        }
+
+        assert_eq!(decoded, expected);
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.worker_bytes, expected.len() as u64);
+        assert_eq!(snapshot.consumer_bytes, expected.len() as u64);
+        assert_eq!(snapshot.worker_chunks, 20);
+        let addresses = stats
+            .worker_buffer_addresses
+            .lock()
+            .expect("prefetch buffer address lock poisoned");
+        assert_eq!(
+            addresses.len(),
+            2,
+            "only the two startup buffers may appear"
+        );
+    }
+
+    #[test]
+    fn zstd_prefetch_retries_interrupted_and_returns_bytes_before_error() {
+        let expected = b"bytes must be observable before the terminal read error".repeat(3);
+        let source = ScriptedTerminalReader {
+            bytes: expected.clone(),
+            offset: 0,
+            max_read: 5,
+            interrupt_once: true,
+            terminal_error: Some(ErrorKind::InvalidData),
+        };
+        let (mut reader, _stats) = ZstdPrefetchReader::start(source, 256).unwrap();
+        let mut decoded = Vec::new();
+        let error = reader
+            .read_to_end(&mut decoded)
+            .expect_err("scripted terminal error must be preserved");
+        assert_eq!(decoded, expected);
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("scripted terminal error"));
+    }
+
+    #[test]
+    fn zstd_prefetch_worker_panic_is_not_reported_as_eof() {
+        let (mut reader, _stats) = ZstdPrefetchReader::start(PanicReader, 32).unwrap();
+        let error = reader
+            .read(&mut [0_u8; 1])
+            .expect_err("worker panic must be a read error");
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert!(error.to_string().contains("worker panicked"));
+    }
+
+    #[test]
+    fn zstd_prefetch_drop_closes_channels_before_join() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source = DropObservedReader {
+            dropped: Arc::clone(&dropped),
+        };
+        let (reader, _stats) = ZstdPrefetchReader::start(source, 32).unwrap();
+        // The worker can be blocked sending its second chunk. Drop must close
+        // the ready receiver before joining it.
+        drop(reader);
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn zstd_prefetch_preserves_truncated_stream_prefix_and_error() {
+        let payload = (0..1_048_579)
+            .map(|index| ((index * 17 + index / 251) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        encoder.include_checksum(true).unwrap();
+        encoder.write_all(&payload).unwrap();
+        let mut compressed = encoder.finish().unwrap();
+        compressed.truncate(compressed.len() - 2);
+
+        let mut synchronous = zstd_decoder_with_long_window(BufReader::with_capacity(
+            17,
+            std::io::Cursor::new(compressed.clone()),
+        ))
+        .unwrap();
+        let mut synchronous_prefix = Vec::new();
+        synchronous
+            .read_to_end(&mut synchronous_prefix)
+            .expect_err("truncated synchronous decoder must fail");
+
+        let decoder = zstd_decoder_with_long_window(BufReader::with_capacity(
+            17,
+            std::io::Cursor::new(compressed),
+        ))
+        .unwrap();
+        let (mut prefetched, _stats) = ZstdPrefetchReader::start(decoder, 32 << 10).unwrap();
+        let mut prefetched_prefix = Vec::new();
+        prefetched
+            .read_to_end(&mut prefetched_prefix)
+            .expect_err("truncated prefetched decoder must fail");
+
+        assert!(!synchronous_prefix.is_empty());
+        assert_eq!(prefetched_prefix, synchronous_prefix);
+    }
+
+    #[test]
+    fn detailed_timings_require_exact_opt_in_value() {
+        assert!(!detailed_timings_enabled_from_value(None));
+        assert!(detailed_timings_enabled_from_value(Some("1")));
+        for value in ["", "0", "true", "TRUE", "yes", " 1", "1 "] {
+            assert!(
+                !detailed_timings_enabled_from_value(Some(value)),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mmap_registry_index_round_trips_ids() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-mmap-registry-index-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let registry_path = root.join(REGISTRY_FILE);
+        let index_path = root.join(REGISTRY_INDEX_FILE);
+        let keys = (0u64..2_048)
+            .map(|value| {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&value.to_le_bytes());
+                key[8..16].copy_from_slice(&value.wrapping_mul(31).to_be_bytes());
+                key
+            })
+            .collect::<Vec<_>>();
+        write_registry_iter(&registry_path, keys.iter().copied()).unwrap();
+
+        build_registry_index(&registry_path, Some(&index_path), true).unwrap();
+        let index = KeyIndex::load(&index_path).unwrap();
+        for (position, key) in keys.iter().enumerate() {
+            assert_eq!(index.lookup(key), Some(position as u32 + 1));
+        }
+        assert_eq!(index.lookup(&[0xff; 32]), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mapped_registry_detects_path_replacement() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-mmap-registry-replace-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let registry_path = root.join(REGISTRY_FILE);
+        let replacement_path = root.join("registry.replacement");
+        std::fs::write(&registry_path, [1u8; 64]).unwrap();
+        let registry = MappedRegistryKeys::open(&registry_path).unwrap();
+        assert_eq!(registry.keys(), &[[1u8; 32], [1u8; 32]]);
+
+        std::fs::write(&replacement_path, [2u8; 64]).unwrap();
+        std::fs::rename(&replacement_path, &registry_path).unwrap();
+        let error = registry
+            .ensure_unchanged()
+            .expect_err("replaced registry path must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("registry path was replaced while building MPHF"),
+            "unexpected error: {error:#}"
+        );
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_seen_decode_workers_are_bounded() {
+        for workers in [0, FIRST_SEEN_DECODE_WORKERS_MAX + 1] {
+            let error = build_hot_blocks_first_seen(
+                Path::new("unused-input.car"),
+                Path::new("unused-output"),
+                None,
+                None,
+                1,
+                None,
+                false,
+                false,
+                None,
+                65_536,
+                1,
+                workers,
+                0,
+                false,
+            )
+            .expect_err("out-of-range decode workers must fail before filesystem access");
+            assert!(
+                error
+                    .to_string()
+                    .contains("first-seen decode workers must be in 1..=8"),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_seen_zstd_prefetch_is_bounded_and_local_car_zst_only() {
+        for (input, prefetch_mib, expected) in [
+            (
+                "unused-input.car",
+                FIRST_SEEN_ZSTD_PREFETCH_MIB_MAX + 1,
+                "CAR zstd prefetch must be in 0..=64 MiB",
+            ),
+            ("unused-input.car", 1, "requires a local .car.zst input"),
+            (
+                "https://example.invalid/epoch-822.car.zst",
+                1,
+                "requires a local .car.zst input",
+            ),
+        ] {
+            let error = build_hot_blocks_first_seen(
+                Path::new(input),
+                Path::new("unused-output"),
+                None,
+                None,
+                1,
+                None,
+                false,
+                false,
+                None,
+                65_536,
+                1,
+                1,
+                prefetch_mib,
+                false,
+            )
+            .expect_err("invalid prefetch setting must fail before filesystem access");
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error for {input}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_first_seen_fixture_is_byte_identical_to_one_worker() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/old-faithful/car-reader/benches/fixtures/epoch-822-biggest.car");
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-parallel-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let one_worker = root.join("workers-1");
+        let four_workers = root.join("workers-4");
+        let _ = std::fs::remove_dir_all(&root);
+
+        for (output, workers) in [(&one_worker, 1), (&four_workers, 4)] {
+            build_hot_blocks_first_seen(
+                &fixture,
+                output,
+                None,
+                None,
+                1,
+                Some(1),
+                false,
+                true,
+                None,
+                65_536,
+                100_000,
+                workers,
+                0,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("workers={workers} fixture build failed: {error:#}"));
+        }
+
+        let artifact_names = |dir: &Path| {
+            let mut names = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .into_string()
+                        .expect("fixture artifact name must be UTF-8")
+                })
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names
+        };
+        let expected_names = artifact_names(&one_worker);
+        assert_eq!(artifact_names(&four_workers), expected_names);
+        for name in expected_names {
+            assert_eq!(
+                std::fs::read(one_worker.join(&name)).unwrap(),
+                std::fs::read(four_workers.join(&name)).unwrap(),
+                "first-seen artifact differs with four decode workers: {name}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn first_seen_scan_only_defers_mphf_and_metadata_until_finalizer() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/old-faithful/car-reader/benches/fixtures/epoch-822-biggest.car");
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-deferred-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let lock_path = root.with_extension("lock");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&lock_path);
+
+        build_hot_blocks_first_seen(
+            &fixture,
+            &root,
+            None,
+            None,
+            1,
+            Some(1),
+            false,
+            false,
+            None,
+            65_536,
+            100_000,
+            1,
+            0,
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            root.join(crate::first_seen_finalization::FIRST_SEEN_SCAN_COMPLETE_FILE)
+                .is_file()
+        );
+        assert!(!root.join(REGISTRY_INDEX_FILE).exists());
+        assert!(!root.join(ARCHIVE_V2_META_FILE).exists());
+        assert!(pre_hot_tmp_path(&root.join(ARCHIVE_V2_META_FILE)).is_file());
+        assert!(pre_hot_tmp_path(&root.join(FIRST_SEEN_REGISTRY_MANIFEST_FILE)).is_file());
+
+        crate::first_seen_finalization::finalize_first_seen_scan(&root, Some(&lock_path)).unwrap();
+        assert!(root.join(REGISTRY_INDEX_FILE).is_file());
+        assert!(root.join(FIRST_SEEN_REGISTRY_MANIFEST_FILE).is_file());
+        assert!(root.join(ARCHIVE_V2_META_FILE).is_file());
+        assert!(
+            !root
+                .join(crate::first_seen_finalization::FIRST_SEEN_SCAN_COMPLETE_FILE)
+                .exists()
+        );
+
+        // A completed candidate is an idempotent no-op for retrying supervisors.
+        crate::first_seen_finalization::finalize_first_seen_scan(&root, Some(&lock_path)).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_file(lock_path).unwrap();
+    }
+
+    #[test]
+    fn prefetched_epoch_822_first_seen_fixture_is_byte_identical() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/old-faithful/car-reader/benches/fixtures/epoch-822-biggest.car");
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-prefetch-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let compressed_fixture = root.join("epoch-822-biggest.car.zst");
+        let no_prefetch = root.join("prefetch-0");
+        let prefetch_16 = root.join("prefetch-16");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture_bytes = std::fs::read(&fixture).unwrap();
+        let compressed = zstd::stream::encode_all(fixture_bytes.as_slice(), 1).unwrap();
+        std::fs::write(&compressed_fixture, compressed).unwrap();
+
+        for (output, prefetch_mib) in [(&no_prefetch, 0), (&prefetch_16, 16)] {
+            build_hot_blocks_first_seen(
+                &compressed_fixture,
+                output,
+                None,
+                None,
+                1,
+                Some(1),
+                false,
+                false,
+                None,
+                65_536,
+                100_000,
+                4,
+                prefetch_mib,
+                false,
+            )
+            .unwrap_or_else(|error| {
+                panic!("prefetch_mib={prefetch_mib} fixture build failed: {error:#}")
+            });
+        }
+
+        let artifact_names = |dir: &Path| {
+            let mut names = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .into_string()
+                        .expect("fixture artifact name must be UTF-8")
+                })
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names
+        };
+        let expected_names = artifact_names(&no_prefetch);
+        assert_eq!(artifact_names(&prefetch_16), expected_names);
+        for name in expected_names {
+            assert_eq!(
+                std::fs::read(no_prefetch.join(&name)).unwrap(),
+                std::fs::read(prefetch_16.join(&name)).unwrap(),
+                "first-seen artifact differs with 16 MiB zstd prefetch: {name}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn async_first_seen_block_writer_matches_ordered_sync_bytes_and_rows() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+        let path = std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-zstd-test-{}-{}.zstd",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_file(&path);
+        let level = 3;
+        let payloads = [
+            (0..32_769)
+                .map(|index| (index as u8).wrapping_mul(31))
+                .collect::<Vec<_>>(),
+            vec![0x5a; 131_071],
+            (0..777_777)
+                .map(|index| ((index * 17 + index / 251) & 0xff) as u8)
+                .collect::<Vec<_>>(),
+            b"final-small-block".repeat(97),
+        ];
+
+        let mut expected_bytes = Vec::new();
+        let mut expected_rows = Vec::new();
+        let mut expected_compressor = zstd::bulk::Compressor::new(level).unwrap();
+        let mut expected_compressed = Vec::new();
+        let mut expected_offset = 0u64;
+        let mut first_tx_ordinal = 0u64;
+        let mut first_signature_ordinal = 0u64;
+        for (index, payload) in payloads.iter().enumerate() {
+            expected_compressed.clear();
+            let compress_bound = zstd::zstd_safe::compress_bound(payload.len());
+            if expected_compressed.capacity() < compress_bound {
+                expected_compressed
+                    .reserve(compress_bound.saturating_sub(expected_compressed.len()));
+            }
+            expected_compressor
+                .compress_to_buffer(payload, &mut expected_compressed)
+                .unwrap();
+            let compressed_len = u32::try_from(expected_compressed.len()).unwrap();
+            expected_bytes.extend_from_slice(&expected_compressed);
+            expected_rows.push(ArchiveV2HotBlockIndexRow {
+                block_id: index as u32,
+                slot: 10_000 + index as u64 * 3,
+                compressed_offset: expected_offset,
+                compressed_len,
+                uncompressed_len: u32::try_from(payload.len()).unwrap(),
+                tx_count: index as u32 + 1,
+                first_tx_ordinal,
+                first_signature_ordinal,
+                signature_count: index as u32 + 2,
+            });
+            expected_offset += u64::from(compressed_len);
+            first_tx_ordinal += index as u64 + 1;
+            first_signature_ordinal += index as u64 + 2;
+        }
+
+        let file = File::create(&path).unwrap();
+        let mut pipeline =
+            FirstSeenAsyncBlockWriter::start(file, path.clone(), level, true).unwrap();
+        let mut block_bytes = Vec::new();
+        first_tx_ordinal = 0;
+        first_signature_ordinal = 0;
+        for (index, payload) in payloads.iter().enumerate() {
+            block_bytes.clear();
+            block_bytes.extend_from_slice(payload);
+            block_bytes = pipeline
+                .submit(FirstSeenBlockWriteJob {
+                    block_bytes,
+                    block_id: index as u32,
+                    slot: 10_000 + index as u64 * 3,
+                    tx_count: index as u32 + 1,
+                    first_tx_ordinal,
+                    first_signature_ordinal,
+                    signature_count: index as u32 + 2,
+                })
+                .unwrap();
+            first_tx_ordinal += index as u64 + 1;
+            first_signature_ordinal += index as u64 + 2;
+        }
+        let summary = pipeline.finish().unwrap();
+        let actual_bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(actual_bytes, expected_bytes);
+        assert_eq!(summary.blob_offset, expected_offset);
+        assert_eq!(summary.compressed_bytes, expected_offset);
+        assert_eq!(
+            summary.uncompressed_bytes,
+            payloads
+                .iter()
+                .map(|payload| payload.len() as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(summary.rows.len(), expected_rows.len());
+        for (actual, expected) in summary.rows.iter().zip(&expected_rows) {
+            assert_eq!(actual.block_id, expected.block_id);
+            assert_eq!(actual.slot, expected.slot);
+            assert_eq!(actual.compressed_offset, expected.compressed_offset);
+            assert_eq!(actual.compressed_len, expected.compressed_len);
+            assert_eq!(actual.uncompressed_len, expected.uncompressed_len);
+            assert_eq!(actual.tx_count, expected.tx_count);
+            assert_eq!(actual.first_tx_ordinal, expected.first_tx_ordinal);
+            assert_eq!(
+                actual.first_signature_ordinal,
+                expected.first_signature_ordinal
+            );
+            assert_eq!(actual.signature_count, expected.signature_count);
+        }
+    }
+
+    #[test]
+    fn async_first_seen_block_writer_propagates_flush_error() {
+        let read_only = File::open(std::env::current_exe().unwrap()).unwrap();
+        let mut pipeline = FirstSeenAsyncBlockWriter::start(
+            read_only,
+            PathBuf::from("read-only-test-output"),
+            1,
+            false,
+        )
+        .unwrap();
+        let mut block_bytes = Vec::with_capacity(4096);
+        block_bytes.extend_from_slice(&[0x44; 4096]);
+        let _recycled = pipeline
+            .submit(FirstSeenBlockWriteJob {
+                block_bytes,
+                block_id: 0,
+                slot: 42,
+                tx_count: 1,
+                first_tx_ordinal: 0,
+                first_signature_ordinal: 0,
+                signature_count: 1,
+            })
+            .unwrap();
+        let error = match pipeline.finish() {
+            Ok(_) => panic!("read-only output unexpectedly accepted a write"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("flush read-only-test-output"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn compressed_pre_hot_record_stream_roundtrips() {
+        let mut bytes = Vec::new();
+        let mut writer = PreHotRecordWriter::new(&mut bytes).unwrap();
+        writer
+            .write(&LivePreHotRecord::Header(WincodeArchiveV2Header {
+                version: LIVE_PRE_HOT_BLOCK_VERSION,
+                flags: ARCHIVE_FLAGS_LEB128 | ARCHIVE_FLAGS_NO_REGISTRY,
+            }))
+            .unwrap();
+        writer
+            .write(&LivePreHotRecord::Block(LivePreHotBlock::new(
+                0,
+                empty_archive_v2_block(42),
+                0,
+            )))
+            .unwrap();
+        writer
+            .write(&LivePreHotRecord::Footer(WincodeArchiveV2Footer {
+                blocks: 1,
+                ..WincodeArchiveV2Footer::default()
+            }))
+            .unwrap();
+        let stats = writer.finish().unwrap();
+        assert_eq!(stats.records, 3);
+
+        let mut reader = PreHotRecordReader::new(std::io::Cursor::new(bytes)).unwrap();
+        assert!(matches!(
+            reader.read().unwrap(),
+            Some(LivePreHotRecord::Header(_))
+        ));
+        let Some(LivePreHotRecord::Block(block)) = reader.read().unwrap() else {
+            panic!("expected PreHot block")
+        };
+        assert_eq!(block.block_id, 0);
+        assert_eq!(block.block.header.compact.slot, 42);
+        assert!(matches!(
+            reader.read().unwrap(),
+            Some(LivePreHotRecord::Footer(_))
+        ));
+        assert!(reader.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn access_collector_includes_nested_system_log_pubkeys() {
+        let logs = CompactLogStream {
+            events: vec![
+                LogEvent::System(SystemProgramLog::CreateAddressMismatch {
+                    provided_addr: CompactPubkey::id(1),
+                    derived_addr: PubkeyOrString::Pubkey(CompactPubkey::id(2)),
+                }),
+                LogEvent::System(SystemProgramLog::AllocateAccountAlreadyInUse {
+                    addr: SystemAddress::Debug {
+                        address: PubkeyOrString::Pubkey(CompactPubkey::id(3)),
+                        base: Some(PubkeyOrString::Pubkey(CompactPubkey::id(4))),
+                    },
+                }),
+                LogEvent::System(SystemProgramLog::NonceAccountMustBeSigner {
+                    action: blockzilla_format::program_logs::system_program::NonceAction::Advance,
+                    account: PubkeyOrString::Pubkey(CompactPubkey::id(5)),
+                }),
+                LogEvent::System(SystemProgramLog::TransferFromMustSign {
+                    from: CompactPubkey::id(6),
+                }),
+            ],
+            strings: blockzilla_format::StringTable::default(),
+            data: blockzilla_format::DataTable::default(),
+        };
+        let mut ids = Vec::new();
+        collect_access_log_refs(&logs, &mut ids);
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6]);
+    }
 
     fn hex_to_vec(hex: &str) -> Vec<u8> {
         assert_eq!(hex.len() % 2, 0);
@@ -12076,6 +21099,359 @@ mod tests {
     }
 
     #[test]
+    fn owned_compact_transaction_moves_v0_instruction_and_lookup_buffers() {
+        let signature = [0x11; 64];
+        let account_key = [0x22; 32];
+        let lookup_key = [0x33; 32];
+        let recent_blockhash = [0x44; 32];
+        let instruction = CompiledInstruction {
+            program_id_index: 0,
+            accounts: vec![1, 3, 5, 7],
+            data: vec![2, 4, 6, 8, 10],
+        };
+        let instruction_accounts_ptr = instruction.accounts.as_ptr();
+        let instruction_data_ptr = instruction.data.as_ptr();
+        let lookup = MessageAddressTableLookup {
+            account_key: &lookup_key,
+            writable_indexes: vec![9, 11, 13],
+            readonly_indexes: vec![10, 12],
+        };
+        let writable_indexes_ptr = lookup.writable_indexes.as_ptr();
+        let readonly_indexes_ptr = lookup.readonly_indexes.as_ptr();
+        let transaction = VersionedTransaction {
+            signatures: vec![&signature],
+            message: VersionedMessage::V0(V0Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                account_keys: vec![&account_key],
+                recent_blockhash: &recent_blockhash,
+                instructions: vec![instruction],
+                address_table_lookups: vec![lookup],
+            }),
+        };
+
+        let key_index = KeyIndex::build(Vec::new());
+        let rolling = RollingBlockhashIndex::new(300);
+        let mut nonce_recent_blockhashes = 0;
+        let compact = to_owned_compact_transaction(
+            42,
+            7,
+            transaction,
+            &key_index,
+            &rolling,
+            &mut nonce_recent_blockhashes,
+        )
+        .unwrap();
+
+        assert_eq!(compact.signatures, vec![signature.to_vec()]);
+        assert_eq!(nonce_recent_blockhashes, 1);
+        let OwnedCompactMessage::V0(message) = compact.message else {
+            panic!("expected v0 message")
+        };
+        assert_eq!(message.header.num_required_signatures, 1);
+        assert_eq!(message.header.num_readonly_unsigned_accounts, 1);
+        assert_eq!(message.account_keys, vec![CompactPubkey::raw(account_key)]);
+        match message.recent_blockhash {
+            OwnedCompactRecentBlockhash::Nonce(nonce) => assert_eq!(nonce, recent_blockhash),
+            OwnedCompactRecentBlockhash::Id(_) => panic!("unexpected recent blockhash id"),
+        }
+        assert_eq!(message.instructions.len(), 1);
+        assert_eq!(message.instructions[0].program_id_index, 0);
+        assert_eq!(message.instructions[0].accounts, vec![1, 3, 5, 7]);
+        assert_eq!(message.instructions[0].data, vec![2, 4, 6, 8, 10]);
+        assert_eq!(
+            message.instructions[0].accounts.as_ptr(),
+            instruction_accounts_ptr
+        );
+        assert_eq!(message.instructions[0].data.as_ptr(), instruction_data_ptr);
+        assert_eq!(message.address_table_lookups.len(), 1);
+        assert_eq!(
+            message.address_table_lookups[0].account_key,
+            CompactPubkey::raw(lookup_key)
+        );
+        assert_eq!(
+            message.address_table_lookups[0].writable_indexes,
+            vec![9, 11, 13]
+        );
+        assert_eq!(
+            message.address_table_lookups[0].readonly_indexes,
+            vec![10, 12]
+        );
+        assert_eq!(
+            message.address_table_lookups[0].writable_indexes.as_ptr(),
+            writable_indexes_ptr
+        );
+        assert_eq!(
+            message.address_table_lookups[0].readonly_indexes.as_ptr(),
+            readonly_indexes_ptr
+        );
+    }
+
+    fn test_shortu16(value: u16) -> Vec<u8> {
+        let mut remaining = value;
+        let mut encoded = Vec::with_capacity(3);
+        loop {
+            let byte = (remaining & 0x7f) as u8;
+            remaining >>= 7;
+            encoded.push(byte | u8::from(remaining != 0) * 0x80);
+            if remaining == 0 {
+                return encoded;
+            }
+        }
+    }
+
+    fn test_legacy_transaction_bytes(signature_count: u16) -> Vec<u8> {
+        let mut bytes = test_shortu16(signature_count);
+        for signature_index in 0..signature_count {
+            bytes.extend(std::iter::repeat_n(
+                signature_index as u8,
+                FIRST_SEEN_SIGNATURE_BYTES,
+            ));
+        }
+
+        let required_signatures = u8::try_from(signature_count.min(127)).unwrap();
+        bytes.extend_from_slice(&[required_signatures, 0, 0]);
+        bytes.extend_from_slice(&test_shortu16(u16::from(required_signatures)));
+        for account_index in 0..required_signatures {
+            bytes.extend_from_slice(&[account_index.wrapping_add(0x40); 32]);
+        }
+        bytes.extend_from_slice(&[0x63; 32]);
+        bytes.push(0);
+        bytes
+    }
+
+    #[test]
+    fn first_seen_direct_message_decode_matches_full_transaction_decode() {
+        let transaction_bytes = test_legacy_transaction_bytes(2);
+        let key_index = KeyIndex::build(Vec::new());
+        let rolling = RollingBlockhashIndex::new(300);
+        let mut direct_nonce_recent_blockhashes = 0;
+        let direct = decode_first_seen_compact_transaction(
+            42,
+            7,
+            &transaction_bytes,
+            2,
+            &key_index,
+            &rolling,
+            &mut direct_nonce_recent_blockhashes,
+        )
+        .unwrap();
+
+        let decoded = wincode::deserialize::<VersionedTransaction<'_>>(&transaction_bytes).unwrap();
+        let mut full_nonce_recent_blockhashes = 0;
+        let full = to_owned_compact_transaction(
+            42,
+            7,
+            decoded,
+            &key_index,
+            &rolling,
+            &mut full_nonce_recent_blockhashes,
+        )
+        .unwrap();
+
+        assert!(direct.signatures.is_empty());
+        assert_eq!(full.signatures, vec![vec![0; 64], vec![1; 64]]);
+        assert_eq!(direct_nonce_recent_blockhashes, 1);
+        assert_eq!(full_nonce_recent_blockhashes, 1);
+        assert_eq!(
+            wincode::config::serialize(&direct.message, wincode_leb128_config()).unwrap(),
+            wincode::config::serialize(&full.message, wincode_leb128_config()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn first_seen_direct_message_decode_validates_shortu16_boundaries_and_truncation() {
+        let key_index = KeyIndex::build(Vec::new());
+        let rolling = RollingBlockhashIndex::new(300);
+        let mut nonce_recent_blockhashes = 0;
+        let accepted_255 = decode_first_seen_compact_transaction(
+            42,
+            7,
+            &test_legacy_transaction_bytes(255),
+            255,
+            &key_index,
+            &rolling,
+            &mut nonce_recent_blockhashes,
+        )
+        .unwrap();
+        let OwnedCompactMessage::Legacy(message) = accepted_255.message else {
+            panic!("expected legacy message")
+        };
+        assert_eq!(message.header.num_required_signatures, 127);
+        assert_eq!(message.account_keys.len(), 127);
+
+        for (transaction_bytes, expected_count, expected_error) in [
+            (
+                test_legacy_transaction_bytes(256),
+                0,
+                "signature count exceeds hot-row u8 maximum",
+            ),
+            (
+                vec![0x80],
+                0,
+                "invalid transaction signature ShortU16 prefix",
+            ),
+            (
+                vec![0x80, 0x00],
+                0,
+                "invalid transaction signature ShortU16 prefix",
+            ),
+            (
+                std::iter::once(1)
+                    .chain(std::iter::repeat_n(0, 63))
+                    .collect(),
+                1,
+                "truncated transaction signatures",
+            ),
+            (
+                test_legacy_transaction_bytes(2),
+                1,
+                "decoded signature count 2 does not match collected count 1",
+            ),
+        ] {
+            let error = decode_first_seen_compact_transaction(
+                42,
+                7,
+                &transaction_bytes,
+                expected_count,
+                &key_index,
+                &rolling,
+                &mut nonce_recent_blockhashes,
+            )
+            .expect_err("invalid first-seen transaction prefix must fail");
+            assert!(
+                error.to_string().contains(expected_error),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_registry_transaction_moves_v0_instruction_and_lookup_buffers() {
+        let signature = [0x51; 64];
+        let account_key = [0x52; 32];
+        let lookup_key = [0x53; 32];
+        let recent_blockhash = [0x54; 32];
+        let instruction = CompiledInstruction {
+            program_id_index: 2,
+            accounts: vec![21, 23],
+            data: vec![22, 24, 26],
+        };
+        let instruction_accounts_ptr = instruction.accounts.as_ptr();
+        let instruction_data_ptr = instruction.data.as_ptr();
+        let lookup = MessageAddressTableLookup {
+            account_key: &lookup_key,
+            writable_indexes: vec![31, 33],
+            readonly_indexes: vec![32, 34, 36],
+        };
+        let writable_indexes_ptr = lookup.writable_indexes.as_ptr();
+        let readonly_indexes_ptr = lookup.readonly_indexes.as_ptr();
+        let transaction = VersionedTransaction {
+            signatures: vec![&signature],
+            message: VersionedMessage::V0(V0Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 2,
+                },
+                account_keys: vec![&account_key],
+                recent_blockhash: &recent_blockhash,
+                instructions: vec![instruction],
+                address_table_lookups: vec![lookup],
+            }),
+        };
+
+        let no_registry = to_no_registry_transaction(transaction);
+        assert_eq!(no_registry.signatures, vec![signature.to_vec()]);
+        let WincodeArchiveV2NoRegistryMessage::V0(message) = no_registry.message else {
+            panic!("expected no-registry v0 message")
+        };
+        assert_eq!(message.header.num_required_signatures, 1);
+        assert_eq!(message.header.num_readonly_unsigned_accounts, 2);
+        assert_eq!(message.account_keys, vec![account_key]);
+        assert_eq!(message.recent_blockhash, recent_blockhash);
+        assert_eq!(message.instructions.len(), 1);
+        assert_eq!(message.instructions[0].program_id_index, 2);
+        assert_eq!(message.instructions[0].accounts, vec![21, 23]);
+        assert_eq!(message.instructions[0].data, vec![22, 24, 26]);
+        assert_eq!(
+            message.instructions[0].accounts.as_ptr(),
+            instruction_accounts_ptr
+        );
+        assert_eq!(message.instructions[0].data.as_ptr(), instruction_data_ptr);
+        assert_eq!(message.address_table_lookups.len(), 1);
+        assert_eq!(message.address_table_lookups[0].account_key, lookup_key);
+        assert_eq!(
+            message.address_table_lookups[0].writable_indexes,
+            vec![31, 33]
+        );
+        assert_eq!(
+            message.address_table_lookups[0].readonly_indexes,
+            vec![32, 34, 36]
+        );
+        assert_eq!(
+            message.address_table_lookups[0].writable_indexes.as_ptr(),
+            writable_indexes_ptr
+        );
+        assert_eq!(
+            message.address_table_lookups[0].readonly_indexes.as_ptr(),
+            readonly_indexes_ptr
+        );
+    }
+
+    #[test]
+    fn rekey_log_event_rewrites_nested_raw_pubkeys() {
+        let system_provided = [1u8; 32];
+        let system_derived = [2u8; 32];
+        let token_account = [3u8; 32];
+        let program = [4u8; 32];
+        let key_index = KeyIndex::build(vec![
+            system_provided,
+            system_derived,
+            token_account,
+            program,
+        ]);
+
+        let mut system_event = LogEvent::System(SystemProgramLog::CreateAddressMismatch {
+            provided_addr: CompactPubkey::raw(system_provided),
+            derived_addr: PubkeyOrString::Pubkey(CompactPubkey::raw(system_derived)),
+        });
+        rekey_log_event(&mut system_event, &key_index);
+        match system_event {
+            LogEvent::System(SystemProgramLog::CreateAddressMismatch {
+                provided_addr,
+                derived_addr,
+            }) => {
+                assert_eq!(provided_addr, CompactPubkey::id(1));
+                assert_eq!(derived_addr, PubkeyOrString::Pubkey(CompactPubkey::id(2)));
+            }
+            other => panic!("unexpected system event: {other:?}"),
+        }
+
+        let mut program_event = LogEvent::ProgramIdLog {
+            program: CompactPubkey::raw(program),
+            log: ProgramLog::Token2022(Token2022Log::ErrorHarvestingFrom {
+                account_key: CompactPubkey::raw(token_account),
+                error: 0,
+            }),
+        };
+        rekey_log_event(&mut program_event, &key_index);
+        match program_event {
+            LogEvent::ProgramIdLog {
+                program,
+                log: ProgramLog::Token2022(Token2022Log::ErrorHarvestingFrom { account_key, .. }),
+            } => {
+                assert_eq!(program, CompactPubkey::id(4));
+                assert_eq!(account_key, CompactPubkey::id(3));
+            }
+            other => panic!("unexpected program event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn hot_vote_parser_compacts_canonical_solana_vote_instructions() {
         let root = 1_000u64;
         let last_slot = root + 31;
@@ -12372,6 +21748,904 @@ mod tests {
         assert_eq!(vote_hashes.block_id_refs, 1);
         assert_eq!(vote_hashes.block_id_raw, 1);
         assert_eq!(vote_hashes.block_id_conflict_raw, 1);
+    }
+
+    #[test]
+    fn reserve_total_capacity_grows_from_a_partially_sized_buffer() {
+        let mut values = Vec::<u8>::with_capacity(8);
+        reserve_total_capacity(&mut values, 12);
+        assert!(values.capacity() >= 12);
+    }
+
+    #[test]
+    fn hot_instruction_scratch_reuses_pointer_and_capacity_across_messages() {
+        fn message(v0: bool, instruction_count: usize, seed: u8) -> OwnedCompactMessage {
+            let instructions = (0..instruction_count)
+                .map(|index| OwnedCompactInstruction {
+                    program_id_index: 0,
+                    accounts: vec![index as u8],
+                    data: vec![seed, index as u8],
+                })
+                .collect();
+            let header = CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            };
+            let account_keys = vec![CompactPubkey::raw([seed; 32])];
+            let recent_blockhash = OwnedCompactRecentBlockhash::Nonce([seed; 32]);
+            if v0 {
+                OwnedCompactMessage::V0(OwnedCompactV0Message {
+                    header,
+                    account_keys,
+                    recent_blockhash,
+                    instructions,
+                    address_table_lookups: Vec::new(),
+                })
+            } else {
+                OwnedCompactMessage::Legacy(OwnedCompactLegacyMessage {
+                    header,
+                    account_keys,
+                    recent_blockhash,
+                    instructions,
+                })
+            }
+        }
+
+        fn instructions(message: &ArchiveV2HotMessagePayload) -> &Vec<ArchiveV2HotInstruction> {
+            match message {
+                ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
+                ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+            }
+        }
+
+        let known_program_ids = KnownProgramIds {
+            vote: None,
+            compute_budget: None,
+            system: None,
+        };
+        let slot_to_block_id = GxHashMap::with_hasher(GxBuildHasher::default());
+        let mut buffers = HotBlockBuffers::default();
+
+        let (first, first_flags) = hot_message_from_owned_with_instruction_scratch(
+            message(false, 4, 0x51),
+            &mut buffers.hot_instructions,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut VoteHashRegistryBuilder::default(),
+        )
+        .unwrap();
+        assert_eq!(first_flags, 0);
+        assert_eq!(instructions(&first).len(), 4);
+        let pointer = instructions(&first).as_ptr();
+        let capacity = instructions(&first).capacity();
+        assert!(capacity >= 4);
+        assert!(
+            !wincode::config::serialize(&first, wincode_leb128_config())
+                .unwrap()
+                .is_empty()
+        );
+        buffers.recycle_message_instructions(first);
+        assert_eq!(buffers.hot_instructions.as_ptr(), pointer);
+        assert_eq!(buffers.hot_instructions.capacity(), capacity);
+        assert!(buffers.hot_instructions.is_empty());
+
+        let (second, second_flags) = hot_message_from_owned_with_instruction_scratch(
+            message(true, 2, 0x52),
+            &mut buffers.hot_instructions,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut VoteHashRegistryBuilder::default(),
+        )
+        .unwrap();
+        assert_eq!(second_flags, ARCHIVE_V2_TX_FLAG_MESSAGE_V0);
+        assert_eq!(instructions(&second).len(), 2);
+        assert_eq!(instructions(&second).as_ptr(), pointer);
+        assert_eq!(instructions(&second).capacity(), capacity);
+        assert!(
+            !wincode::config::serialize(&second, wincode_leb128_config())
+                .unwrap()
+                .is_empty()
+        );
+        buffers.recycle_message_instructions(second);
+        assert_eq!(buffers.hot_instructions.as_ptr(), pointer);
+        assert_eq!(buffers.hot_instructions.capacity(), capacity);
+        assert!(buffers.hot_instructions.is_empty());
+    }
+
+    #[test]
+    fn raw_dataframe_payload_pool_reuses_without_growth_within_size_class() {
+        assert_eq!(raw_dataframe_required_capacity_class(0), 0);
+        assert_eq!(raw_dataframe_required_capacity_class(1), 1);
+        assert_eq!(raw_dataframe_required_capacity_class(2), 2);
+        assert_eq!(raw_dataframe_required_capacity_class(3), 3);
+        assert_eq!(raw_dataframe_required_capacity_class(4), 3);
+        assert_eq!(raw_dataframe_required_capacity_class(5), 4);
+
+        let mut pool = RawDataFramePayloadPool::default();
+        let mut first = pool.take(3);
+        first.extend_from_slice(&[1, 2, 3]);
+        pool.recycle(first);
+        let second = pool.take(4);
+        assert!(second.capacity() >= 4);
+        pool.recycle(second);
+
+        let stats = pool.stats();
+        assert_eq!(stats.takes, 2);
+        assert_eq!(stats.fresh_buffers, 1);
+        assert_eq!(stats.reused_buffers, 1);
+        assert_eq!(stats.allocation_events, 1);
+        assert_eq!(stats.growth_events, 0);
+        assert_eq!(stats.current_buffers, 0);
+        assert_eq!(stats.current_capacity, 0);
+        assert_eq!(stats.retained_buffers, 1);
+        assert!(stats.retained_capacity >= 4);
+        assert_eq!(stats.peak_current_buffers, 1);
+    }
+
+    #[test]
+    fn raw_dataframe_payload_pool_does_not_accumulate_across_varied_rounds() {
+        let lengths: Vec<usize> = (0..512).map(|index| (index * 37 % 1_500) + 1).collect();
+        let mut pool = RawDataFramePayloadPool::default();
+
+        for _ in 0..64 {
+            let buffers: Vec<Vec<u8>> = lengths
+                .iter()
+                .map(|&required| pool.take(required))
+                .collect();
+            for buffer in buffers {
+                pool.recycle(buffer);
+            }
+        }
+
+        let stats = pool.stats();
+        assert_eq!(stats.current_buffers, 0);
+        assert_eq!(stats.current_capacity, 0);
+        assert_eq!(stats.peak_current_buffers, lengths.len());
+        assert_eq!(stats.retained_buffers, lengths.len());
+        assert_eq!(stats.retained_capacity, stats.peak_current_capacity);
+        assert_eq!(stats.fresh_buffers, lengths.len() as u64);
+        assert_eq!(stats.growth_events, 0);
+        assert_eq!(stats.discarded_buffers, 0);
+        assert_eq!(stats.reused_buffers, (lengths.len() * 63) as u64,);
+    }
+
+    #[test]
+    fn raw_dataframe_payload_pool_enforces_retention_limits() {
+        let limits = RawDataFramePayloadPoolLimits {
+            max_retained_capacity: 16,
+            max_buffer_capacity: 8,
+            max_buffers_per_class: 1,
+            max_class_zero_buffers: 1,
+        };
+        let mut pool = RawDataFramePayloadPool::default();
+        let first = pool.take(5);
+        let second = pool.take(5);
+        let oversized = pool.take(33);
+        let zero_a = pool.take(0);
+        let zero_b = pool.take(0);
+
+        pool.recycle_with_limits(first, limits);
+        pool.recycle_with_limits(second, limits);
+        pool.recycle_with_limits(oversized, limits);
+        pool.recycle_with_limits(zero_a, limits);
+        pool.recycle_with_limits(zero_b, limits);
+
+        let stats = pool.stats();
+        assert_eq!(stats.current_buffers, 0);
+        assert_eq!(stats.current_capacity, 0);
+        assert_eq!(stats.retained_buffers, 2);
+        assert_eq!(stats.retained_capacity, 8);
+        assert_eq!(stats.discarded_buffers, 3);
+        assert_eq!(stats.discarded_capacity, 72);
+    }
+
+    #[test]
+    fn pending_block_recycles_all_dataframe_payloads_and_duplicate_cids() {
+        fn take_payload(
+            pool: &mut RawDataFramePayloadPool,
+            len: usize,
+            byte: u8,
+        ) -> (Vec<u8>, *const u8) {
+            let mut buffer = pool.take(len);
+            buffer.resize(len, byte);
+            let pointer = buffer.as_ptr();
+            (buffer, pointer)
+        }
+
+        fn raw_frame(data: Vec<u8>) -> RawDataFrame {
+            RawDataFrame {
+                hash: None,
+                hash_was_negative: false,
+                index: None,
+                total: None,
+                data,
+                next: Vec::new(),
+            }
+        }
+
+        let mut pending = PendingBlock::default();
+        let (tx_data, tx_data_ptr) = take_payload(&mut pending.raw_dataframe_payloads, 2, 0x12);
+        let (metadata_data, metadata_ptr) =
+            take_payload(&mut pending.raw_dataframe_payloads, 5, 0x15);
+        let (rewards_data, rewards_ptr) =
+            take_payload(&mut pending.raw_dataframe_payloads, 9, 0x19);
+        let (old_standalone_data, old_standalone_ptr) =
+            take_payload(&mut pending.raw_dataframe_payloads, 17, 0x21);
+        let (new_standalone_data, new_standalone_ptr) =
+            take_payload(&mut pending.raw_dataframe_payloads, 33, 0x33);
+
+        let location = NodeLocation {
+            entry_index: 1,
+            car_offset: 2,
+        };
+        pending.transactions.push(PendingTx {
+            tx: RawTransactionNode {
+                location,
+                cid: Cid36::from_car_bytes([1; 36]),
+                slot: 42,
+                index: Some(0),
+                data: raw_frame(tx_data),
+                metadata: raw_frame(metadata_data),
+            },
+            payload_len: 0,
+        });
+        pending.rewards = Some(PendingRewards {
+            rewards: RawRewardsNode {
+                location,
+                cid: Cid36::from_car_bytes([2; 36]),
+                slot: 42,
+                data: raw_frame(rewards_data),
+            },
+            payload_len: 0,
+        });
+
+        let duplicate_cid = Cid36::from_car_bytes([3; 36]);
+        pending
+            .insert_dataframe_recycling(StandaloneDataFrame {
+                location,
+                cid: duplicate_cid,
+                frame: raw_frame(old_standalone_data),
+            })
+            .unwrap();
+        let duplicate_error = pending
+            .insert_dataframe_recycling(StandaloneDataFrame {
+                location,
+                cid: duplicate_cid,
+                frame: raw_frame(new_standalone_data),
+            })
+            .expect_err("duplicate standalone dataframe CID must fail");
+        assert!(
+            duplicate_error
+                .to_string()
+                .contains("duplicate standalone dataframe CID")
+        );
+        assert_eq!(pending.dataframes.len(), 1);
+        assert_eq!(
+            pending.dataframes[&duplicate_cid].frame.data,
+            vec![0x21; 17]
+        );
+
+        pending.clear_recycling_frame_data();
+        assert!(pending.transactions.is_empty());
+        assert!(pending.entries.is_empty());
+        assert!(pending.rewards.is_none());
+        assert!(pending.dataframes.is_empty());
+        let recycled = pending.raw_dataframe_payloads.stats();
+        assert_eq!(recycled.current_buffers, 0);
+        assert_eq!(recycled.current_capacity, 0);
+        assert_eq!(recycled.retained_buffers, 5);
+        assert_eq!(recycled.fresh_buffers, 5);
+        assert_eq!(recycled.reused_buffers, 0);
+        assert_eq!(recycled.peak_current_buffers, 5);
+
+        let expected = [
+            (2, tx_data_ptr),
+            (5, metadata_ptr),
+            (9, rewards_ptr),
+            (17, old_standalone_ptr),
+            (33, new_standalone_ptr),
+        ];
+        let mut taken = Vec::new();
+        for (len, pointer) in expected {
+            let buffer = pending.raw_dataframe_payloads.take(len);
+            assert_eq!(buffer.as_ptr(), pointer);
+            taken.push(buffer);
+        }
+        for buffer in taken {
+            pending.raw_dataframe_payloads.recycle(buffer);
+        }
+        let reused = pending.raw_dataframe_payloads.stats();
+        assert_eq!(reused.takes, 10);
+        assert_eq!(reused.reused_buffers, 5);
+        assert_eq!(reused.fresh_buffers, 5);
+        assert_eq!(reused.current_buffers, 0);
+        assert_eq!(reused.retained_buffers, 5);
+    }
+
+    #[test]
+    fn pending_block_clear_retains_record_scratch_allocations() {
+        let mut pending = PendingBlock::default();
+        pending.record_scratch.tx_bytes.reserve(1_024);
+        pending.record_scratch.metadata_bytes.reserve(2_048);
+        pending.record_scratch.reassemble_visited.reserve(32);
+        let capacities = (
+            pending.record_scratch.tx_bytes.capacity(),
+            pending.record_scratch.metadata_bytes.capacity(),
+            pending.record_scratch.reassemble_visited.capacity(),
+        );
+
+        pending.clear();
+
+        assert_eq!(pending.record_scratch.tx_bytes.capacity(), capacities.0);
+        assert_eq!(
+            pending.record_scratch.metadata_bytes.capacity(),
+            capacities.1
+        );
+        assert_eq!(
+            pending.record_scratch.reassemble_visited.capacity(),
+            capacities.2
+        );
+    }
+
+    #[test]
+    fn dataframe_decode_bytes_borrows_direct_and_reassembles_continuations() {
+        let direct = signature_raw_frame(vec![1, 2, 3, 4], Vec::new());
+        let direct_pointer = direct.data.as_ptr();
+        let mut scratch = Vec::with_capacity(128);
+        scratch.extend_from_slice(&[0xaa; 32]);
+        let direct_scratch_capacity = scratch.capacity();
+        let mut visited = HashSet::from([Cid36::from_car_bytes([0x71; 36])]);
+
+        let (bytes, reported_capacity) =
+            dataframe_bytes_for_decode(&direct, &HashMap::new(), &mut scratch, &mut visited)
+                .unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4]);
+        assert_eq!(
+            bytes.as_ptr(),
+            direct_pointer,
+            "direct frame must be borrowed"
+        );
+        assert_eq!(reported_capacity, direct_scratch_capacity);
+        assert!(scratch.is_empty());
+        assert!(visited.is_empty());
+
+        let continuation_cid = Cid36::from_car_bytes([0x72; 36]);
+        let location = NodeLocation {
+            entry_index: 7,
+            car_offset: 11,
+        };
+        let dataframes = HashMap::from([(
+            continuation_cid,
+            StandaloneDataFrame {
+                location,
+                cid: continuation_cid,
+                frame: signature_raw_frame(vec![5, 6, 7], Vec::new()),
+            },
+        )]);
+        let continued = signature_raw_frame(
+            vec![1, 2, 3, 4],
+            vec![RawCidRef::from_car_cid(continuation_cid)],
+        );
+        scratch.extend_from_slice(&[0xbb; 16]);
+        visited.insert(Cid36::from_car_bytes([0x73; 36]));
+
+        let (bytes, reported_capacity) =
+            dataframe_bytes_for_decode(&continued, &dataframes, &mut scratch, &mut visited)
+                .unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7]);
+        let assembled_pointer = bytes.as_ptr();
+        assert_eq!(reported_capacity, scratch.capacity());
+        assert_eq!(assembled_pointer, scratch.as_ptr());
+        assert!(visited.is_empty());
+    }
+
+    fn signature_raw_frame(data: Vec<u8>, next: Vec<RawCidRef>) -> RawDataFrame {
+        RawDataFrame {
+            hash: None,
+            hash_was_negative: false,
+            index: None,
+            total: None,
+            data,
+            next,
+        }
+    }
+
+    fn raw_cid_ref_from_serialized_parts(
+        cid: Option<Cid36>,
+        normalized_bytes: &[u8],
+        cbor_bytes: &[u8],
+        tagged: bool,
+    ) -> RawCidRef {
+        #[derive(serde::Serialize)]
+        struct SerializedRawCidRef<'a> {
+            cid: Option<Cid36>,
+            normalized_bytes: &'a [u8],
+            cbor_bytes: &'a [u8],
+            tagged: bool,
+        }
+
+        let encoded = postcard::to_allocvec(&SerializedRawCidRef {
+            cid,
+            normalized_bytes,
+            cbor_bytes,
+            tagged,
+        })
+        .unwrap();
+        postcard::from_bytes(&encoded).unwrap()
+    }
+
+    fn inline_identity_raw_cid(bytes: &[u8]) -> RawCidRef {
+        assert!(bytes.len() < 128);
+        let mut normalized = vec![1, 0x55, 0, bytes.len() as u8];
+        normalized.extend_from_slice(bytes);
+        let mut cbor = vec![0];
+        cbor.extend_from_slice(&normalized);
+        raw_cid_ref_from_serialized_parts(None, &normalized, &cbor, true)
+    }
+
+    #[test]
+    fn first_seen_signature_collector_validates_shortu16_and_reuses_arena() {
+        let dataframes = HashMap::new();
+        for (prefix, count) in [(vec![0], 0u8), (vec![2], 2), (vec![0x80, 0x01], 128)] {
+            let signature_bytes = (0..usize::from(count) * FIRST_SEEN_SIGNATURE_BYTES)
+                .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
+                .collect::<Vec<_>>();
+            let mut transaction_bytes = prefix;
+            transaction_bytes.extend_from_slice(&signature_bytes);
+            transaction_bytes.extend_from_slice(b"message bytes must not be copied");
+            let frame = signature_raw_frame(transaction_bytes, Vec::new());
+            let mut visited = HashSet::new();
+            let mut output = vec![0xee];
+            let decoded = collect_first_seen_transaction_signatures(
+                &frame,
+                &dataframes,
+                &mut visited,
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(decoded, count);
+            assert_eq!(&output[1..], signature_bytes);
+            assert!(visited.is_empty());
+        }
+
+        for (prefix, expected_error) in [
+            (vec![0x80], "truncated transaction signature ShortU16"),
+            (vec![0x80, 0x00], "invalid transaction signature ShortU16"),
+            (
+                vec![0xff, 0xff, 0x04],
+                "invalid transaction signature ShortU16",
+            ),
+            (
+                vec![0x80, 0x80, 0x01],
+                "signature count exceeds hot-row u8 maximum",
+            ),
+        ] {
+            let frame = signature_raw_frame(prefix, Vec::new());
+            let mut visited = HashSet::new();
+            let mut output = vec![0xdd];
+            let error = collect_first_seen_transaction_signatures(
+                &frame,
+                &dataframes,
+                &mut visited,
+                &mut output,
+            )
+            .expect_err("malformed or unsupported signature count must fail");
+            assert!(
+                error.to_string().contains(expected_error),
+                "unexpected error: {error:#}"
+            );
+            assert_eq!(output, vec![0xdd], "failed collection must roll back");
+        }
+
+        let location = NodeLocation {
+            entry_index: 1,
+            car_offset: 2,
+        };
+        let transaction = |index: u8, count: u8| PendingTx {
+            tx: RawTransactionNode {
+                location,
+                cid: Cid36::from_car_bytes([index; 36]),
+                slot: 42,
+                index: Some(u64::from(index)),
+                data: signature_raw_frame(
+                    std::iter::once(count)
+                        .chain(std::iter::repeat_n(
+                            index,
+                            usize::from(count) * FIRST_SEEN_SIGNATURE_BYTES,
+                        ))
+                        .collect(),
+                    Vec::new(),
+                ),
+                metadata: signature_raw_frame(Vec::new(), Vec::new()),
+            },
+            payload_len: 0,
+        };
+        let transactions = vec![transaction(1, 1), transaction(2, 0)];
+        let mut arena = FirstSeenBlockSignatures::default();
+        arena.collect_block(&transactions, &dataframes, 42).unwrap();
+        let counts_pointer = arena.counts.as_ptr();
+        let bytes_pointer = arena.bytes.as_ptr();
+        let capacities = (arena.counts.capacity(), arena.bytes.capacity());
+        arena.collect_block(&transactions, &dataframes, 42).unwrap();
+        assert_eq!(arena.counts, vec![1, 0]);
+        assert_eq!(arena.bytes, vec![1; FIRST_SEEN_SIGNATURE_BYTES]);
+        assert_eq!(arena.counts.as_ptr(), counts_pointer);
+        assert_eq!(arena.bytes.as_ptr(), bytes_pointer);
+        assert_eq!(
+            (arena.counts.capacity(), arena.bytes.capacity()),
+            capacities
+        );
+        assert_eq!(arena.stats.blocks, 2);
+        assert_eq!(arena.stats.transactions, 4);
+        assert_eq!(arena.stats.signatures, 2);
+        assert_eq!(arena.stats.decoder_signature_ref_vec_allocations_avoided, 2);
+        assert_eq!(arena.stats.owned_signature_outer_vec_allocations_avoided, 2);
+        assert_eq!(arena.stats.owned_signature_inner_vec_allocations_avoided, 2);
+    }
+
+    #[test]
+    fn first_seen_signature_collector_streams_cid_and_inline_chunks() {
+        let signature = (0..FIRST_SEEN_SIGNATURE_BYTES)
+            .map(|index| (index * 3) as u8)
+            .collect::<Vec<_>>();
+        let continuation_cid = Cid36::from_car_bytes([0x31; 36]);
+        let location = NodeLocation {
+            entry_index: 3,
+            car_offset: 4,
+        };
+        let continuation = StandaloneDataFrame {
+            location,
+            cid: continuation_cid,
+            frame: signature_raw_frame(
+                signature[11..28].to_vec(),
+                vec![inline_identity_raw_cid(&signature[28..])],
+            ),
+        };
+        let dataframes = HashMap::from([(continuation_cid, continuation)]);
+        let mut root_bytes = vec![1];
+        root_bytes.extend_from_slice(&signature[..11]);
+        let root = signature_raw_frame(root_bytes, vec![RawCidRef::from_car_cid(continuation_cid)]);
+        let mut visited = HashSet::new();
+        let mut output = Vec::new();
+        assert_eq!(
+            collect_first_seen_transaction_signatures(
+                &root,
+                &dataframes,
+                &mut visited,
+                &mut output,
+            )
+            .unwrap(),
+            1,
+        );
+        assert_eq!(output, signature);
+        assert!(visited.is_empty());
+
+        let split_prefix_cid = Cid36::from_car_bytes([0x32; 36]);
+        let split_signature_bytes = (0..128 * FIRST_SEEN_SIGNATURE_BYTES)
+            .map(|index| (index.wrapping_mul(11) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let mut continuation_bytes = vec![0x01];
+        continuation_bytes.extend_from_slice(&split_signature_bytes);
+        let split_dataframes = HashMap::from([(
+            split_prefix_cid,
+            StandaloneDataFrame {
+                location,
+                cid: split_prefix_cid,
+                frame: signature_raw_frame(continuation_bytes, Vec::new()),
+            },
+        )]);
+        let split_root =
+            signature_raw_frame(vec![0x80], vec![RawCidRef::from_car_cid(split_prefix_cid)]);
+        output.clear();
+        assert_eq!(
+            collect_first_seen_transaction_signatures(
+                &split_root,
+                &split_dataframes,
+                &mut visited,
+                &mut output,
+            )
+            .unwrap(),
+            128,
+        );
+        assert_eq!(output, split_signature_bytes);
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn first_seen_signature_collector_rejects_missing_malformed_and_cycles() {
+        let location = NodeLocation {
+            entry_index: 5,
+            car_offset: 6,
+        };
+        let missing_cid = Cid36::from_car_bytes([0x41; 36]);
+        let cycle_cid = Cid36::from_car_bytes([0x42; 36]);
+        let cycle = StandaloneDataFrame {
+            location,
+            cid: cycle_cid,
+            frame: signature_raw_frame(Vec::new(), vec![RawCidRef::from_car_cid(cycle_cid)]),
+        };
+        let malformed =
+            raw_cid_ref_from_serialized_parts(None, &[0xff, 0x01], &[0, 0xff, 0x01], false);
+        let scenarios = [
+            (
+                signature_raw_frame(vec![1], vec![RawCidRef::from_car_cid(missing_cid)]),
+                HashMap::new(),
+                "missing dataframe",
+            ),
+            (
+                signature_raw_frame(vec![1], vec![malformed]),
+                HashMap::new(),
+                "unsupported dataframe CID reference",
+            ),
+            (
+                signature_raw_frame(vec![1], vec![RawCidRef::from_car_cid(cycle_cid)]),
+                HashMap::from([(cycle_cid, cycle)]),
+                "dataframe cycle",
+            ),
+        ];
+
+        for (root, dataframes, expected_error) in scenarios {
+            let mut visited = HashSet::new();
+            let mut output = vec![0xcc];
+            let error = collect_first_seen_transaction_signatures(
+                &root,
+                &dataframes,
+                &mut visited,
+                &mut output,
+            )
+            .expect_err("invalid dataframe chain must fail");
+            assert!(
+                error.to_string().contains(expected_error),
+                "unexpected error: {error:#}"
+            );
+            assert_eq!(output, vec![0xcc]);
+            assert!(visited.is_empty());
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn signature_test_sets() -> Vec<Vec<Vec<u8>>> {
+        vec![
+            vec![vec![0x71; 64], vec![0x72; 64]],
+            Vec::new(),
+            vec![vec![0x73; 64]],
+        ]
+    }
+
+    fn signature_test_block(owned_signatures: bool) -> WincodeArchiveV2Block {
+        let mut block = empty_archive_v2_block(99);
+        block.txs = signature_test_sets()
+            .into_iter()
+            .enumerate()
+            .map(|(tx_index, signatures)| {
+                let signature_count = signatures.len() as u8;
+                WincodeArchiveV2Transaction {
+                    tx_index: tx_index as u32,
+                    tx: WincodeArchiveV2Payload::Decoded {
+                        source_len: 100,
+                        value: OwnedCompactTransaction {
+                            signatures: if owned_signatures {
+                                signatures
+                            } else {
+                                Vec::new()
+                            },
+                            message: OwnedCompactMessage::Legacy(OwnedCompactLegacyMessage {
+                                header: CompactMessageHeader {
+                                    num_required_signatures: signature_count,
+                                    num_readonly_signed_accounts: 0,
+                                    num_readonly_unsigned_accounts: 0,
+                                },
+                                account_keys: (0..signature_count)
+                                    .map(|index| CompactPubkey::raw([index.wrapping_add(1); 32]))
+                                    .collect(),
+                                recent_blockhash: OwnedCompactRecentBlockhash::Nonce(
+                                    [tx_index as u8; 32],
+                                ),
+                                instructions: Vec::new(),
+                            }),
+                        },
+                    },
+                    metadata: None,
+                }
+            })
+            .collect();
+        block
+    }
+
+    fn signature_test_arena() -> FirstSeenBlockSignatures {
+        let signatures = signature_test_sets();
+        FirstSeenBlockSignatures {
+            counts: signatures
+                .iter()
+                .map(|signatures| signatures.len() as u8)
+                .collect(),
+            bytes: signatures
+                .iter()
+                .flatten()
+                .flat_map(|signature| signature.iter().copied())
+                .collect(),
+            ..FirstSeenBlockSignatures::default()
+        }
+    }
+
+    #[test]
+    fn first_seen_flat_signatures_match_owned_hot_output_with_one_write() {
+        let known_program_ids = KnownProgramIds {
+            vote: None,
+            compute_budget: None,
+            system: None,
+        };
+        let slot_to_block_id = GxHashMap::with_hasher(GxBuildHasher::default());
+
+        let mut owned_writer = CountingWriter::default();
+        let mut owned_block_bytes = Vec::new();
+        let (owned_hot, owned_count) = hot_block_from_archive_block(
+            signature_test_block(true),
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut VoteHashRegistryBuilder::default(),
+            Some(&mut owned_writer),
+            Some(&mut owned_block_bytes),
+            &mut HotBlockBuffers::default(),
+            &mut ArchiveV2Timings::default(),
+        )
+        .unwrap();
+
+        let arena = signature_test_arena();
+        let mut first_seen_writer = CountingWriter::default();
+        let (first_seen_hot, first_seen_count) = hot_block_from_first_seen_archive_block(
+            signature_test_block(false),
+            &arena,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut VoteHashRegistryBuilder::default(),
+            Some(&mut first_seen_writer),
+            &mut HotBlockBuffers::default(),
+            &mut ArchiveV2Timings::default(),
+        )
+        .unwrap();
+
+        assert_eq!(owned_count, 3);
+        assert_eq!(first_seen_count, owned_count);
+        assert_eq!(owned_writer.bytes, arena.bytes);
+        assert_eq!(owned_block_bytes, arena.bytes);
+        assert_eq!(first_seen_writer.bytes, arena.bytes);
+        assert_eq!(owned_writer.writes, 3);
+        assert_eq!(first_seen_writer.writes, 1);
+        assert_eq!(
+            wincode::config::serialize(&first_seen_hot, wincode_leb128_config()).unwrap(),
+            wincode::config::serialize(&owned_hot, wincode_leb128_config()).unwrap(),
+        );
+        assert_eq!(
+            first_seen_hot
+                .tx_rows
+                .iter()
+                .map(|row| row.signature_count)
+                .collect::<Vec<_>>(),
+            vec![2, 0, 1],
+        );
+    }
+
+    #[test]
+    fn first_seen_flat_signature_errors_do_not_write_partial_output() {
+        let known_program_ids = KnownProgramIds {
+            vote: None,
+            compute_budget: None,
+            system: None,
+        };
+        let slot_to_block_id = GxHashMap::with_hasher(GxBuildHasher::default());
+        let mut truncated_arena = signature_test_arena();
+        truncated_arena.bytes.pop();
+        let mut writer = CountingWriter::default();
+        let error = hot_block_from_first_seen_archive_block(
+            signature_test_block(false),
+            &truncated_arena,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut VoteHashRegistryBuilder::default(),
+            Some(&mut writer),
+            &mut HotBlockBuffers::default(),
+            &mut ArchiveV2Timings::default(),
+        )
+        .expect_err("signature byte/count mismatch must fail");
+        assert!(error.to_string().contains("collected 191 signature bytes"));
+        assert_eq!(writer.writes, 0);
+        assert!(writer.bytes.is_empty());
+
+        let mut late_failure_block = signature_test_block(false);
+        late_failure_block.txs[2].tx = WincodeArchiveV2Payload::Raw {
+            bytes: vec![0xff],
+            error: "scripted late transaction failure".to_owned(),
+        };
+        let arena = signature_test_arena();
+        let mut writer = CountingWriter::default();
+        let error = hot_block_from_first_seen_archive_block(
+            late_failure_block,
+            &arena,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut VoteHashRegistryBuilder::default(),
+            Some(&mut writer),
+            &mut HotBlockBuffers::default(),
+            &mut ArchiveV2Timings::default(),
+        )
+        .expect_err("late transaction failure must abort the block");
+        assert!(error.to_string().contains("raw transaction at tx_index 2"));
+        assert_eq!(writer.writes, 0);
+        assert!(writer.bytes.is_empty());
+
+        let mut malformed_owned_block = signature_test_block(true);
+        let WincodeArchiveV2Payload::Decoded { value, .. } = &mut malformed_owned_block.txs[0].tx
+        else {
+            unreachable!()
+        };
+        value.signatures[0].pop();
+        let error = hot_block_from_archive_block(
+            malformed_owned_block,
+            &known_program_ids,
+            &slot_to_block_id,
+            &mut VoteHashRegistryBuilder::default(),
+            None,
+            None,
+            &mut HotBlockBuffers::default(),
+            &mut ArchiveV2Timings::default(),
+        )
+        .expect_err("owned signatures must be validated without an output sink");
+        assert!(error.to_string().contains("is 63 bytes, expected 64"));
+    }
+
+    #[test]
+    fn known_program_ids_refresh_after_first_seen_interning() {
+        let registry_path = std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-program-ids-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut registry = FirstSeenRegistry::new(32, &registry_path).unwrap();
+        registry.seed(compute_budget_program_id_bytes()).unwrap();
+        let mut known = KnownProgramIds::from_first_seen(&registry);
+        assert!(known.compute_budget.is_some());
+        assert!(known.system.is_none());
+        assert!(known.vote.is_none());
+
+        let system_id = registry.intern(&system_program_id_bytes()).unwrap();
+        known.refresh_from_first_seen(&registry);
+        assert_eq!(known.system, Some(system_id));
+        assert!(known.vote.is_none());
+
+        let vote_id = registry.intern(&vote_program_id_bytes()).unwrap();
+        known.refresh_from_first_seen(&registry);
+        assert_eq!(known.vote, Some(vote_id));
+
+        let stable = known;
+        registry.intern(&[7u8; 32]).unwrap();
+        known.refresh_from_first_seen(&registry);
+        assert_eq!(known.vote, stable.vote);
+        assert_eq!(known.compute_budget, stable.compute_budget);
+        assert_eq!(known.system, stable.system);
+        drop(registry);
+        std::fs::remove_file(registry_path).unwrap();
     }
 
     fn test_hex_bytes(hex: &str) -> Vec<u8> {

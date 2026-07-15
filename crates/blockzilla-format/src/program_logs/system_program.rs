@@ -3,7 +3,7 @@ use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::log::{StrId, StringTable};
-use crate::{CompactPubkey, KeyIndex, KeyStore};
+use crate::{CompactPubkey, KeyStore, PubkeyCompactor};
 
 /// System Program id
 pub const STR_ID: &str = "11111111111111111111111111111111";
@@ -183,7 +183,21 @@ impl SystemInstructionLog {
 
 #[inline]
 fn parse_u64_commas(s: &str) -> Option<u64> {
-    s.trim().replace(',', "").parse().ok()
+    let mut out = 0u64;
+    let mut saw_digit = false;
+
+    for b in s.trim().bytes() {
+        match b {
+            b'0'..=b'9' => {
+                saw_digit = true;
+                out = out.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+            }
+            b',' => {}
+            _ => return None,
+        }
+    }
+
+    saw_digit.then_some(out)
 }
 
 #[inline]
@@ -232,7 +246,7 @@ fn parse_between<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<&'a st
 /// Parse the `Address { ... }` debug shape that system program prints in logs.
 #[inline]
 fn parse_system_address(
-    index: &KeyIndex,
+    index: &impl PubkeyCompactor,
     st: &mut StringTable,
     addr_txt: &str,
 ) -> Option<SystemAddress> {
@@ -261,7 +275,7 @@ fn parse_system_address(
 
 #[inline]
 fn parse_address_base(
-    index: &KeyIndex,
+    index: &impl PubkeyCompactor,
     st: &mut StringTable,
     base_txt: &str,
 ) -> Option<Option<PubkeyOrString>> {
@@ -275,7 +289,11 @@ fn parse_address_base(
 
 /// Try to resolve a pubkey text into the registry. If missing, store the raw text in StringTable.
 #[inline]
-fn parse_pubkey_or_string(index: &KeyIndex, st: &mut StringTable, s: &str) -> PubkeyOrString {
+fn parse_pubkey_or_string(
+    index: &impl PubkeyCompactor,
+    st: &mut StringTable,
+    s: &str,
+) -> PubkeyOrString {
     let s = s.trim();
     if let Some(id) = index.compact_str(s) {
         PubkeyOrString::Pubkey(id)
@@ -287,7 +305,7 @@ fn parse_pubkey_or_string(index: &KeyIndex, st: &mut StringTable, s: &str) -> Pu
 #[inline]
 fn parse_nonce_account_log(
     text: &str,
-    index: &KeyIndex,
+    index: &impl PubkeyCompactor,
     st: &mut StringTable,
 ) -> Option<SystemProgramLog> {
     let (action, rest) = parse_nonce_action_rest(text)?;
@@ -415,7 +433,7 @@ fn has_known_nonce_binary_form(text: &str) -> bool {
 impl SystemProgramLog {
     /// `text` is the payload after "Program log: " or after "Program <id> log: "
     #[inline]
-    pub fn parse(text: &str, index: &KeyIndex, st: &mut StringTable) -> Option<Self> {
+    pub fn parse(text: &str, index: &impl PubkeyCompactor, st: &mut StringTable) -> Option<Self> {
         let text = text.trim();
 
         if let Some(nonce) = parse_nonce_account_log(text, index, st) {

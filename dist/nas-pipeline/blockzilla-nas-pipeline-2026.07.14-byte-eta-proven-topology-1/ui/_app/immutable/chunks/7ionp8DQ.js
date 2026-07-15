@@ -1,0 +1,1 @@
+import{b0 as o,V as t,a_ as c}from"./Bb083L3C.js";function f(e){throw new Error("https://svelte.dev/e/lifecycle_outside_component")}function u(e){t===null&&f(),o(()=>{const n=c(e);if(typeof n=="function")return n})}export{u as o};

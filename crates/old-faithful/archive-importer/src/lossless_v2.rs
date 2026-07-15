@@ -559,13 +559,7 @@ mod tests {
     }
 
     fn cid_ref(cid: of_car_reader::reconstruct::Cid36) -> of_car_reader::reconstruct::RawCidRef {
-        let cbor_bytes = cid.cbor_bytes();
-        of_car_reader::reconstruct::RawCidRef {
-            cid: Some(cid),
-            normalized_bytes: cid.car_bytes().to_vec(),
-            cbor_bytes: cbor_bytes.to_vec(),
-            tagged: true,
-        }
+        of_car_reader::reconstruct::RawCidRef::from_car_cid(cid)
     }
 
     fn encode_dataframe(data: &[u8]) -> Vec<u8> {
@@ -686,7 +680,8 @@ mod tests {
             e.tag(minicbor::data::Tag::new(42))
                 .expect("vec encoder is infallible");
         }
-        e.bytes(&cid.cbor_bytes).expect("vec encoder is infallible");
+        e.bytes(cid.cbor_bytes())
+            .expect("vec encoder is infallible");
     }
 
     fn minimal_legacy_transaction() -> Vec<u8> {
