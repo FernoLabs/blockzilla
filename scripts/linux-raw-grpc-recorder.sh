@@ -102,6 +102,7 @@ GENERATION_RECEIPT_DIR=${BLOCKZILLA_RAW_CACHE_RECEIPT_DIR:-$CACHE_ROOT/receipts}
 GENERATION_MONITORING_DIR=$CACHE_ROOT/monitoring
 GENERATION_ROTATION_MARKER=$CACHE_ROOT/.rotation
 GENERATION_ROTATION_LOCK=$CACHE_ROOT/.rotation.lock
+GENERATION_RETENTION_LOCK=$CACHE_ROOT/.retention.lock
 B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 REPLAY_RECOVERY_FILE=$GENERATION_MONITORING_DIR/replay-recovery-floor.json
 REPLAY_GAP_DIR=$ACTIVE_GENERATION_DIR/replay-gaps
@@ -767,15 +768,17 @@ write_alert_delivery_state() {
   fi
 }
 
-alert_flock_lock_fd() {
+flock_lock_fd() {
+  flock_fd=$1
+  flock_wait_secs=$2
   if command -v flock >/dev/null 2>&1; then
-    flock -w 20 9
+    flock -w "$flock_wait_secs" "$flock_fd"
     return $?
   fi
   # macOS does not ship the flock CLI, but Python exposes the same
   # kernel-released advisory lock. The inherited descriptor keeps the lock
   # owned by this shell after the helper exits.
-  "$GENERATION_PYTHON_BIN" - 9 20 <<'PY'
+  "$GENERATION_PYTHON_BIN" - "$flock_fd" "$flock_wait_secs" <<'PY'
 import fcntl
 import sys
 import time
@@ -794,17 +797,49 @@ while True:
 PY
 }
 
-alert_flock_unlock_fd() {
+flock_unlock_fd() {
+  flock_fd=$1
   if command -v flock >/dev/null 2>&1; then
-    flock -u 9
+    flock -u "$flock_fd"
     return $?
   fi
-  "$GENERATION_PYTHON_BIN" - 9 <<'PY'
+  "$GENERATION_PYTHON_BIN" - "$flock_fd" <<'PY'
 import fcntl
 import sys
 
 fcntl.flock(int(sys.argv[1]), fcntl.LOCK_UN)
 PY
+}
+
+validate_private_lock_fd_path() {
+  lock_fd=$1
+  lock_path=$2
+  "$GENERATION_PYTHON_BIN" - "$lock_fd" "$lock_path" <<'PY'
+import os
+import stat
+import sys
+
+descriptor = int(sys.argv[1])
+path = sys.argv[2]
+opened = os.fstat(descriptor)
+linked = os.lstat(path)
+if not stat.S_ISREG(linked.st_mode):
+    raise SystemExit("cache retention lock is not a regular file")
+if (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino):
+    raise SystemExit("cache retention lock changed while it was opened")
+if opened.st_uid not in {0, os.geteuid()}:
+    raise SystemExit("cache retention lock has an untrusted owner")
+if stat.S_IMODE(opened.st_mode) & 0o077:
+    raise SystemExit("cache retention lock must be private")
+PY
+}
+
+alert_flock_lock_fd() {
+  flock_lock_fd 9 20
+}
+
+alert_flock_unlock_fd() {
+  flock_unlock_fd 9
 }
 
 acquire_alert_lock() {
@@ -2375,6 +2410,43 @@ with_generation_rotation_lock() {
   return "$rotation_lock_status"
 }
 
+with_generation_retention_lock() {
+  if [ -L "$GENERATION_RETENTION_LOCK" ] \
+    || { [ -e "$GENERATION_RETENTION_LOCK" ] && [ ! -f "$GENERATION_RETENTION_LOCK" ]; }
+  then
+    echo "cache retention lock is not a regular file" >&2
+    return 1
+  fi
+  (umask 077; : >> "$GENERATION_RETENTION_LOCK") || return 1
+  exec 8<> "$GENERATION_RETENTION_LOCK" || return 1
+  if ! validate_private_lock_fd_path 8 "$GENERATION_RETENTION_LOCK"; then
+    exec 8>&-
+    return 1
+  fi
+  if ! flock_lock_fd 8 20; then
+    exec 8>&-
+    # Contention with ACK-authorized local GC is expected. Treat it like an
+    # in-progress rotation so the worker retries without raising an upload
+    # failure incident.
+    return 75
+  fi
+  if ! validate_private_lock_fd_path 8 "$GENERATION_RETENTION_LOCK"; then
+    flock_unlock_fd 8 || true
+    exec 8>&-
+    return 1
+  fi
+  if "$@"; then
+    retention_lock_status=0
+  else
+    retention_lock_status=$?
+  fi
+  if ! flock_unlock_fd 8; then
+    retention_lock_status=1
+  fi
+  exec 8>&-
+  return "$retention_lock_status"
+}
+
 generation_id_from_verify_report() {
   verify_report=$1
   verified_last_slot=$(sed -n \
@@ -3141,7 +3213,7 @@ object_store_retry_seconds() {
   fi
 }
 
-upload_one_generation() {
+upload_one_generation_unlocked() {
   # A rotation marker means the old generation may be visible but the rename
   # transaction is not yet committed. Recovery owns it until the marker clears.
   [ ! -e "$GENERATION_ROTATION_MARKER" ] || return 75
@@ -3206,6 +3278,14 @@ upload_one_generation() {
   fi
   commit_uploaded_generation "$upload_dir" "$upload_id" \
     "$upload_prefix" "$upload_receipt"
+}
+
+upload_one_generation() {
+  # ACK-authorized local GC uses this same cache-root lock before it renames or
+  # deletes a sealed generation. Hold it from FIFO selection through receipt
+  # verification and remote commit so the chosen directory cannot disappear
+  # beneath the uploader.
+  with_generation_retention_lock upload_one_generation_unlocked
 }
 
 terminate_generation_upload_worker() {

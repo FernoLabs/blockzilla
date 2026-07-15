@@ -1104,6 +1104,38 @@ pub struct DurableCumulativeAck {
     local_binding: PhysicalLocalSpoolBinding,
 }
 
+/// Unforgeable in-process authority to retire a local raw-storage generation.
+///
+/// The only constructor lives on [`CumulativeAckWal`]: callers cannot promote a network ACK (or a
+/// deserialized retention checkpoint) into deletion authority.  The cloned frame retains both the
+/// signed cumulative prefix and the exact physical WAL frame that was verified before the ACK WAL
+/// crossed its fsync boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableGcAuthorization {
+    stored: StoredCumulativeAckFrame,
+}
+
+impl DurableGcAuthorization {
+    pub fn ack(&self) -> &CumulativePrimaryAck {
+        &self.stored.ack
+    }
+
+    pub(crate) fn local_metadata(&self) -> &IngressRecordMeta {
+        &self.stored.local_binding.metadata
+    }
+
+    pub(crate) fn local_location(&self) -> SpoolLocation {
+        self.stored.local_binding.location
+    }
+
+    pub(crate) fn matches_replication_witness(&self, witness: &DurableReplicationWitness) -> bool {
+        self.stored.ack.stream == witness.stream
+            && self.stored.ack.through_sequence == witness.through_sequence
+            && self.stored.ack.through_content_digest == witness.through_content_digest
+            && self.stored.local_binding == witness.local_binding
+    }
+}
+
 impl DurableCumulativeAck {
     pub fn ack(&self) -> &CumulativePrimaryAck {
         self.ack.ack()
@@ -1274,6 +1306,25 @@ impl CumulativeAckWal {
             .latest_stream_acks
             .get(stream)
             .map(|stored| &stored.ack)
+    }
+
+    /// Return deletion authority only from an ACK frame recovered from (or fsynced into) this
+    /// locked WAL.  Keeping the wrapper's fields private prevents ordinary protocol values from
+    /// being used as local-GC capabilities.
+    pub fn durable_gc_authorization(
+        &self,
+        stream: &ReplicationStreamId,
+    ) -> AnyResult<Option<DurableGcAuthorization>> {
+        ensure!(
+            !self.poisoned,
+            "cumulative ACK WAL is poisoned; reopen it before requesting GC authority"
+        );
+        Ok(self
+            .state
+            .latest_stream_acks
+            .get(stream)
+            .cloned()
+            .map(|stored| DurableGcAuthorization { stored }))
     }
 
     /// Persist an already-authenticated ACK and bind it to the exact local prefix-tail frame.

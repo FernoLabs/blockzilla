@@ -67,10 +67,15 @@ cargo run -p blockzilla-live-producer -- replicate-grpc-raw \
 
 A network response alone cannot make replica data eligible for garbage
 collection: the exact signed ACK must first be verified and synced into the
-local cumulative-ACK WAL. Production sender/receiver services and ACK-driven
-oldest-generation GC are not deployed yet, so the current `capture-grpc`
-process must not be replaced until the private route, key material, replay,
-archive-writer recovery, and power-loss rollout tests are complete. See
+local cumulative-ACK WAL. `replicate-grpc-raw` then retires covered sealed
+generations oldest-first through a fsynced intent. It publishes an exact
+retained-boundary anchor when the successor continues the same logical stream;
+an independently replayable legacy base-zero successor needs no anchor. It
+never accepts an upload receipt, heartbeat, or byte watermark as deletion
+authority. Production sender/receiver services are not deployed yet, so the
+current `capture-grpc` process must not be replaced until the private route, key
+material, replay, archive-writer recovery, and power-loss rollout tests are
+complete. See
 [`docs/live-ingest-redundancy.md`](../../docs/live-ingest-redundancy.md) for the
 protocol and rollout sequence.
 

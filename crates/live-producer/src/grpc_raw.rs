@@ -48,7 +48,8 @@ use crate::{
     },
     grpc_relay::{YellowstoneBlockRelay, YellowstoneBlockRelayLimits, YellowstoneRelayAuth},
     ingest::{
-        CommitmentEvidence, ContentDigest, DurableCumulativeAck, DurableReplicationWitness,
+        CommitmentEvidence, ContentDigest, CumulativeAckWal, CumulativePrimaryAck,
+        DurableCumulativeAck, DurableGcAuthorization, DurableReplicationWitness,
         DurableSpoolRecord, IngressRecordMeta, LockedSpoolAudit, LogicalKey, ObservationId,
         REPLICATION_PROTOCOL_VERSION, RawReplicationRecord, ReplicationOffer, ReplicationStreamId,
         SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolRecord, SpoolWriter,
@@ -82,6 +83,15 @@ const RELAY_SHUTDOWN_GRACE_SECS: u64 = 5;
 const MAX_HANDOFF_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_IDENTITY_FILE_BYTES: u64 = 64 * 1024;
 const MAX_REPLICATION_GENERATION_SCAN: usize = 4096;
+const RETENTION_LOCK_FILE: &str = ".retention.lock";
+const RETENTION_ANCHOR_FILE: &str = ".retention-anchor.v1";
+const RETENTION_GC_INTENT_FILE: &str = ".retention-gc-intent.v1";
+const RETENTION_TRASH_PREFIX: &str = ".retention-trash-";
+const RETENTION_FRAME_VERSION: u16 = 1;
+const RETENTION_FRAME_COMMIT: &[u8; 4] = b"CMIT";
+const RETENTION_ANCHOR_MAGIC: &[u8; 8] = b"BZRA0001";
+const RETENTION_INTENT_MAGIC: &[u8; 8] = b"BZRI0001";
+const MAX_RETENTION_FRAME_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogOutcome<T> {
@@ -959,6 +969,59 @@ pub struct GrpcRawPreparedReplicationGeneration {
     pub sealed: bool,
 }
 
+/// Result of one bounded retention pass.  A pass deliberately retires at most one sealed
+/// generation so a caller can interleave GC with replication and monitoring work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrpcRawLocalGcOutcome {
+    Busy,
+    NothingToRetire,
+    NoDurableAck,
+    AckDoesNotCoverOldest {
+        oldest_through_sequence: u64,
+        durable_through_sequence: u64,
+    },
+    Retired {
+        generation: PathBuf,
+        through_sequence: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrpcRawRetentionWitness {
+    generation_id: String,
+    identity: GrpcRawIdentityFile,
+    handoff: GrpcRawHandoffRecord,
+    physical_metadata: IngressRecordMeta,
+    location: SpoolLocation,
+    compressed_payload_sha256: String,
+    logical_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrpcRawRetentionAnchor {
+    schema_version: u32,
+    authorization_ack: CumulativePrimaryAck,
+    authorization_local_witness: GrpcRawRetentionWitness,
+    retired_tail: GrpcRawRetentionWitness,
+    first_retained_seed: GrpcRawRetentionWitness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrpcRawRetentionGcIntent {
+    schema_version: u32,
+    previous_anchor_sha256: Option<String>,
+    candidate_id: String,
+    trash_name: String,
+    authorization_ack: CumulativePrimaryAck,
+    authorization_local_witness: GrpcRawRetentionWitness,
+    retired_tail: GrpcRawRetentionWitness,
+    first_retained_seed: GrpcRawRetentionWitness,
+    next_anchor: Option<GrpcRawRetentionAnchor>,
+}
+
 /// Discover the bounded hot-generation queue oldest-first, followed by the live active tail.
 /// Discovery fails during an unfinished rotation and rejects aliases/duplicate physical WAL
 /// identities. Adjacent generations may intentionally share one logical replication stream.
@@ -968,6 +1031,12 @@ pub fn discover_grpc_raw_replication_generations(
     let cache_root = cache_root.as_ref();
     ensure_real_directory(cache_root, "raw gRPC hot-generation root")?;
     let _rotation_guard = HotRotationGuard::acquire(cache_root, HotRotationLockMode::Shared)?;
+    discover_grpc_raw_replication_generations_locked(cache_root)
+}
+
+fn discover_grpc_raw_replication_generations_locked(
+    cache_root: &Path,
+) -> Result<Vec<GrpcRawReplicationGeneration>> {
     ensure!(
         !path_entry_exists(&cache_root.join(HOT_ROTATION_MARKER))?,
         "raw gRPC generation rotation is in progress; retry after supervisor recovery"
@@ -1038,8 +1107,17 @@ pub fn open_grpc_raw_replication_generation_cursors(
     let cache_root = cache_root.as_ref();
     ensure_real_directory(cache_root, "raw gRPC hot-generation root")?;
     let _rotation_guard = HotRotationGuard::acquire(cache_root, HotRotationLockMode::Shared)?;
-    let generations = discover_grpc_raw_replication_generations(cache_root)?;
-    validate_grpc_raw_replication_generation_chain(&generations, limits)?;
+    ensure!(
+        !path_entry_exists(&cache_root.join(RETENTION_GC_INTENT_FILE))?,
+        "raw gRPC retention GC recovery is required before opening replication cursors"
+    );
+    let generations = discover_grpc_raw_replication_generations_locked(cache_root)?;
+    let retention_anchor = read_retention_anchor(cache_root)?;
+    validate_grpc_raw_replication_generation_chain(
+        &generations,
+        limits,
+        retention_anchor.as_ref(),
+    )?;
     generations
         .into_iter()
         .map(|generation| {
@@ -1057,6 +1135,7 @@ pub fn open_grpc_raw_replication_generation_cursors(
 fn validate_grpc_raw_replication_generation_chain(
     generations: &[GrpcRawReplicationGeneration],
     limits: GrpcRawCommittedReadLimits,
+    retention_anchor: Option<&GrpcRawRetentionAnchor>,
 ) -> Result<()> {
     let limits = limits.validate()?;
     let mut seen_logical_streams = std::collections::HashSet::with_capacity(generations.len());
@@ -1096,13 +1175,35 @@ fn validate_grpc_raw_replication_generation_chain(
                 );
             }
             None => {
-                ensure_initial_logical_generation(&identity)?;
+                ensure_first_retained_logical_generation(
+                    generation,
+                    &identity,
+                    limits,
+                    retention_anchor,
+                )?;
                 seen_logical_streams.insert(stream);
             }
         }
         previous = Some((generation, identity));
     }
     Ok(())
+}
+
+fn ensure_first_retained_logical_generation(
+    generation: &GrpcRawReplicationGeneration,
+    identity: &GrpcRawIdentityFile,
+    limits: GrpcRawCommittedReadLimits,
+    retention_anchor: Option<&GrpcRawRetentionAnchor>,
+) -> Result<()> {
+    if identity.replication_sequence_base() == 0
+        && identity.replication_stream_id() == identity.physical_stream_id()
+    {
+        return Ok(());
+    }
+    let anchor = retention_anchor.context(
+        "first retained raw gRPC logical stream generation lacks a durable retention anchor",
+    )?;
+    validate_retention_anchor_for_first_generation(anchor, generation, identity, limits)
 }
 
 fn ensure_initial_logical_generation(identity: &GrpcRawIdentityFile) -> Result<()> {
@@ -1216,6 +1317,862 @@ fn read_grpc_raw_boundary_spool_record(
         "raw gRPC generation boundary WAL/handoff identity mismatch"
     );
     Ok(stored)
+}
+
+/// Retire at most one oldest sealed generation after an exact ACK-WAL/local-WAL audit.
+///
+/// The caller must open `ack_wal` before entering this function.  The remaining lock order is the
+/// retention mutation lock followed by the rotation lock, preventing either the shell uploader or
+/// a hot rotation from observing the rename/checkpoint transaction half-complete.
+pub fn gc_one_acknowledged_grpc_raw_generation(
+    cache_root: impl AsRef<Path>,
+    ack_wal: &CumulativeAckWal,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<GrpcRawLocalGcOutcome> {
+    let cache_root = cache_root.as_ref();
+    let limits = limits.validate()?;
+    ensure_real_directory(cache_root, "raw gRPC hot-generation root")?;
+    let Some(_mutation_guard) = RetentionMutationGuard::try_acquire(cache_root)? else {
+        return Ok(GrpcRawLocalGcOutcome::Busy);
+    };
+    let _rotation_guard = HotRotationGuard::acquire(cache_root, HotRotationLockMode::Exclusive)?;
+    recover_retention_gc_intent(cache_root, limits)?;
+
+    let generations = discover_grpc_raw_replication_generations_locked(cache_root)?;
+    let current_anchor = read_retention_anchor(cache_root)?;
+    validate_grpc_raw_replication_generation_chain(&generations, limits, current_anchor.as_ref())?;
+    if generations.len() < 2 || !generations[0].sealed {
+        return Ok(GrpcRawLocalGcOutcome::NothingToRetire);
+    }
+
+    let candidate = &generations[0];
+    let successor = &generations[1];
+    let candidate_identity = read_identity(&candidate.path.join(IDENTITY_FILE))?;
+    let successor_identity = read_identity(&successor.path.join(IDENTITY_FILE))?;
+    let stream = candidate_identity.replication_stream_id();
+    let same_logical_stream = successor_identity.replication_stream_id() == stream;
+    if same_logical_stream {
+        validate_grpc_raw_replication_generation_boundary(
+            &candidate.path,
+            &candidate_identity,
+            &successor.path,
+            &successor_identity,
+            limits,
+        )?;
+    } else {
+        // Legacy recorders created an independent base-zero logical stream for every physical
+        // generation. Such a successor is independently replayable and needs no retention
+        // anchor. Refuse every other cross-stream transition.
+        ensure_initial_logical_generation(&successor_identity)?;
+    }
+    let candidate_snapshot = complete_handoff_snapshot(&candidate.path.join(HANDOFF_JOURNAL_FILE))?;
+    ensure!(
+        candidate_snapshot.complete_offset == candidate_snapshot.snapshot_len,
+        "sealed raw gRPC GC candidate has a partial handoff tail"
+    );
+    let candidate_tail = candidate_snapshot
+        .state
+        .last
+        .as_ref()
+        .context("cannot retire an empty sealed raw gRPC generation")?;
+    let candidate_tail_sequence =
+        candidate_identity.replication_sequence(candidate_tail.frame_id)?;
+    let Some(authorization) = ack_wal.durable_gc_authorization(&stream)? else {
+        return Ok(GrpcRawLocalGcOutcome::NoDurableAck);
+    };
+    if authorization.ack().through_sequence < candidate_tail_sequence {
+        return Ok(GrpcRawLocalGcOutcome::AckDoesNotCoverOldest {
+            oldest_through_sequence: candidate_tail_sequence,
+            durable_through_sequence: authorization.ack().through_sequence,
+        });
+    }
+
+    // Prove that the ACK WAL's physical binding still resolves to exactly one checksummed frame in
+    // this queue.  The signed logical prefix alone is intentionally insufficient deletion proof.
+    let authorization_local_witness =
+        find_authorization_local_witness(&generations, &authorization, limits)?;
+    let retired_tail =
+        retention_witness(&candidate.path, &candidate_identity, candidate_tail, limits)?;
+    let successor_snapshot = complete_handoff_snapshot(&successor.path.join(HANDOFF_JOURNAL_FILE))?;
+    let successor_seed = successor_snapshot
+        .state
+        .first
+        .as_ref()
+        .context("raw gRPC retained successor is empty")?;
+    let first_retained_seed =
+        retention_witness(&successor.path, &successor_identity, successor_seed, limits)?;
+    ensure!(
+        successor_seed.frame_id == 0,
+        "raw gRPC retained successor does not begin at physical frame zero"
+    );
+
+    let authorization_ack = authorization.ack().clone();
+    let next_anchor = if same_logical_stream {
+        ensure_retention_boundary_witnesses_match(&retired_tail, &first_retained_seed)?;
+        let anchor = GrpcRawRetentionAnchor {
+            schema_version: 1,
+            authorization_ack: authorization_ack.clone(),
+            authorization_local_witness: authorization_local_witness.clone(),
+            retired_tail: retired_tail.clone(),
+            first_retained_seed: first_retained_seed.clone(),
+        };
+        validate_retention_anchor_shape(&anchor)?;
+        Some(anchor)
+    } else {
+        ensure!(
+            first_retained_seed.logical_sequence == 0,
+            "independent raw gRPC retained successor does not begin at logical sequence zero"
+        );
+        None
+    };
+    let candidate_id = generation_id(&candidate.path)?;
+    ensure!(
+        valid_hot_generation_id(&candidate_id),
+        "raw gRPC GC candidate has an invalid generation id"
+    );
+    let trash_name = format!("{RETENTION_TRASH_PREFIX}{candidate_id}");
+    let sealed_root = cache_root.join(HOT_SEALED_DIR);
+    let trash_path = sealed_root.join(&trash_name);
+    ensure!(
+        !path_entry_exists(&trash_path)?,
+        "raw gRPC retention trash already exists: {}",
+        trash_path.display()
+    );
+    let previous_anchor_sha256 =
+        read_retention_anchor_frame(cache_root)?.map(|(_, encoded)| sha256_hex(&encoded));
+    let intent = GrpcRawRetentionGcIntent {
+        schema_version: 1,
+        previous_anchor_sha256,
+        candidate_id: candidate_id.clone(),
+        trash_name,
+        authorization_ack,
+        authorization_local_witness,
+        retired_tail,
+        first_retained_seed,
+        next_anchor,
+    };
+    validate_retention_gc_intent_shape(&intent)?;
+    write_retention_frame_atomic(
+        cache_root,
+        RETENTION_GC_INTENT_FILE,
+        RETENTION_INTENT_MAGIC,
+        &intent,
+    )?;
+
+    fs::rename(&candidate.path, &trash_path).with_context(|| {
+        format!(
+            "move acknowledged raw gRPC generation {} to private retention trash",
+            candidate.path.display()
+        )
+    })?;
+    // Candidate and trash share one parent. A single parent fsync therefore makes the rename
+    // indivisible across a crash; there is no source/destination directory durability window.
+    sync_directory(&sealed_root)?;
+    apply_retention_anchor_state(cache_root, intent.next_anchor.as_ref())?;
+    remove_retention_trash(&trash_path)?;
+    remove_retention_intent(cache_root)?;
+
+    Ok(GrpcRawLocalGcOutcome::Retired {
+        generation: candidate.path.clone(),
+        through_sequence: candidate_tail_sequence,
+    })
+}
+
+fn find_authorization_local_witness(
+    generations: &[GrpcRawReplicationGeneration],
+    authorization: &DurableGcAuthorization,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<GrpcRawRetentionWitness> {
+    let metadata = authorization.local_metadata();
+    let mut found = None;
+    for generation in generations {
+        let identity = read_identity(&generation.path.join(IDENTITY_FILE))?;
+        if identity.physical_stream_id().journal_id != metadata.observation.journal_id
+            || identity.cluster_id != metadata.cluster_id
+            || identity.origin_node_id != metadata.observation.origin_node_id
+            || identity.source_id != metadata.source_id
+        {
+            continue;
+        }
+        ensure!(found.is_none(), "ACK WAL physical binding is ambiguous");
+        let row = read_complete_handoff_row(
+            &generation.path.join(HANDOFF_JOURNAL_FILE),
+            metadata.observation.sequence,
+        )?;
+        let stored =
+            read_grpc_raw_boundary_spool_record(&generation.path, &identity, &row, limits)?;
+        ensure!(
+            stored.metadata == *metadata && row.location() == authorization.local_location(),
+            "ACK WAL physical binding does not match its checksummed local frame"
+        );
+        let durable = DurableSpoolRecord::from_verified_committed_read(
+            row.location(),
+            stored.metadata.clone(),
+        );
+        let witness = DurableReplicationWitness::from_verified_mapping(
+            &durable,
+            identity.replication_stream_id(),
+            identity.replication_sequence(row.frame_id)?,
+            stored.metadata.content_digest,
+        )?;
+        ensure!(
+            authorization.matches_replication_witness(&witness),
+            "ACK WAL authority does not match the resolved logical/physical witness"
+        );
+        found = Some(retention_witness_from_record(
+            &generation.path,
+            &identity,
+            &row,
+            &stored,
+        )?);
+    }
+    found.context("ACK WAL physical binding is not present in the retained generation queue")
+}
+
+fn retention_witness(
+    generation_dir: &Path,
+    identity: &GrpcRawIdentityFile,
+    row: &GrpcRawHandoffRecord,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<GrpcRawRetentionWitness> {
+    let stored = read_grpc_raw_boundary_spool_record(generation_dir, identity, row, limits)?;
+    retention_witness_from_record(generation_dir, identity, row, &stored)
+}
+
+fn retention_witness_from_record(
+    generation_dir: &Path,
+    identity: &GrpcRawIdentityFile,
+    row: &GrpcRawHandoffRecord,
+    stored: &SpoolRecord,
+) -> Result<GrpcRawRetentionWitness> {
+    Ok(GrpcRawRetentionWitness {
+        generation_id: generation_id(generation_dir)?,
+        identity: identity.clone(),
+        handoff: row.clone(),
+        physical_metadata: stored.metadata.clone(),
+        location: row.location(),
+        compressed_payload_sha256: sha256_hex(&stored.payload),
+        logical_sequence: identity.replication_sequence(row.frame_id)?,
+    })
+}
+
+fn generation_id(path: &Path) -> Result<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .context("raw gRPC generation path has no UTF-8 final component")
+}
+
+fn read_complete_handoff_row(path: &Path, requested_frame_id: u64) -> Result<GrpcRawHandoffRecord> {
+    let file = open_regular_readonly_nofollow(path, "raw gRPC handoff journal")?;
+    let snapshot_len = file.metadata()?.len();
+    let mut reader = BufReader::new(file.take(snapshot_len));
+    let mut line = Vec::new();
+    let mut sequence = 0u64;
+    loop {
+        line.clear();
+        let bytes = (&mut reader)
+            .take(MAX_HANDOFF_RECORD_BYTES + 1)
+            .read_until(b'\n', &mut line)?;
+        if bytes == 0 || !line.ends_with(b"\n") {
+            break;
+        }
+        ensure!(
+            bytes as u64 <= MAX_HANDOFF_RECORD_BYTES,
+            "raw gRPC handoff row exceeds retention read bound"
+        );
+        let payload = &line[..line.len() - 1];
+        if payload.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let row: GrpcRawHandoffRecord = serde_json::from_slice(payload)
+            .with_context(|| format!("decode raw gRPC handoff frame {sequence}"))?;
+        validate_handoff_sequence(&row, sequence)?;
+        if row.frame_id == requested_frame_id {
+            return Ok(row);
+        }
+        sequence = sequence
+            .checked_add(1)
+            .context("raw gRPC handoff sequence exhausted")?;
+    }
+    Err(anyhow!(
+        "raw gRPC handoff frame {requested_frame_id} is not newline-committed"
+    ))
+}
+
+fn validate_retention_anchor_for_first_generation(
+    anchor: &GrpcRawRetentionAnchor,
+    generation: &GrpcRawReplicationGeneration,
+    identity: &GrpcRawIdentityFile,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<()> {
+    validate_retention_anchor_shape(anchor)?;
+    ensure!(
+        anchor.first_retained_seed.identity == *identity,
+        "raw gRPC retention anchor names a different first-retained physical identity"
+    );
+    let snapshot = complete_handoff_snapshot(&generation.path.join(HANDOFF_JOURNAL_FILE))?;
+    let seed = snapshot
+        .state
+        .first
+        .as_ref()
+        .context("retention-anchored raw gRPC generation is empty")?;
+    let current = retention_witness(&generation.path, identity, seed, limits)?;
+    ensure!(
+        retention_witnesses_equal_ignoring_path(&anchor.first_retained_seed, &current),
+        "raw gRPC retention anchor does not exactly bind the first retained seed"
+    );
+    Ok(())
+}
+
+fn validate_retention_anchor_shape(anchor: &GrpcRawRetentionAnchor) -> Result<()> {
+    ensure!(
+        anchor.schema_version == 1,
+        "unsupported raw gRPC retention anchor schema"
+    );
+    for witness in [
+        &anchor.authorization_local_witness,
+        &anchor.retired_tail,
+        &anchor.first_retained_seed,
+    ] {
+        validate_retention_witness_shape(witness)?;
+    }
+    validate_retention_gc_proof(
+        &anchor.authorization_ack,
+        &anchor.authorization_local_witness,
+        &anchor.retired_tail,
+    )?;
+    ensure_retention_boundary_witnesses_match(&anchor.retired_tail, &anchor.first_retained_seed)
+}
+
+fn validate_retention_gc_proof(
+    ack: &CumulativePrimaryAck,
+    authorization: &GrpcRawRetentionWitness,
+    retired_tail: &GrpcRawRetentionWitness,
+) -> Result<()> {
+    ensure!(
+        ack.protocol_version == REPLICATION_PROTOCOL_VERSION
+            && ack.primary_term > 0
+            && ack.durable_lsn > 0
+            && ack.disposition.authorizes_replica_gc()
+            && !ack.primary_id.trim().is_empty()
+            && !ack.signing_key_id.trim().is_empty()
+            && ack.signature.len() == 64,
+        "raw gRPC retention anchor contains invalid durable ACK evidence"
+    );
+    ack.signing_bytes()
+        .map_err(|_| anyhow!("raw gRPC retention anchor ACK has invalid signable fields"))?;
+    ensure!(
+        authorization.identity.replication_stream_id() == ack.stream
+            && authorization.logical_sequence == ack.through_sequence
+            && authorization.physical_metadata.content_digest == ack.through_content_digest,
+        "raw gRPC retention anchor ACK does not bind its persisted local witness"
+    );
+    ensure!(
+        retired_tail.identity.replication_stream_id() == ack.stream
+            && ack.through_sequence >= retired_tail.logical_sequence,
+        "raw gRPC retention anchor ACK does not cover its retired tail"
+    );
+    Ok(())
+}
+
+fn validate_retention_gc_intent_shape(intent: &GrpcRawRetentionGcIntent) -> Result<()> {
+    ensure!(
+        intent.schema_version == 1,
+        "unsupported raw gRPC retention GC intent schema"
+    );
+    ensure!(
+        valid_hot_generation_id(&intent.candidate_id)
+            && intent.trash_name == format!("{RETENTION_TRASH_PREFIX}{}", intent.candidate_id),
+        "raw gRPC retention GC intent has unsafe path components"
+    );
+    for witness in [
+        &intent.authorization_local_witness,
+        &intent.retired_tail,
+        &intent.first_retained_seed,
+    ] {
+        validate_retention_witness_shape(witness)?;
+    }
+    validate_retention_gc_proof(
+        &intent.authorization_ack,
+        &intent.authorization_local_witness,
+        &intent.retired_tail,
+    )?;
+    ensure!(
+        intent.retired_tail.generation_id == intent.candidate_id
+            && intent.first_retained_seed.handoff.frame_id == 0,
+        "raw gRPC retention GC intent does not bind its candidate/successor boundary"
+    );
+    match intent.next_anchor.as_ref() {
+        Some(anchor) => {
+            validate_retention_anchor_shape(anchor)?;
+            ensure!(
+                anchor.authorization_ack == intent.authorization_ack
+                    && anchor.authorization_local_witness == intent.authorization_local_witness
+                    && anchor.retired_tail == intent.retired_tail
+                    && anchor.first_retained_seed == intent.first_retained_seed,
+                "raw gRPC retention GC intent anchor differs from its retirement proof"
+            );
+        }
+        None => {
+            ensure!(
+                intent.retired_tail.identity.replication_stream_id()
+                    != intent.first_retained_seed.identity.replication_stream_id(),
+                "same-stream raw gRPC retention GC intent is missing its successor anchor"
+            );
+            ensure_initial_logical_generation(&intent.first_retained_seed.identity)?;
+            ensure!(
+                intent.first_retained_seed.logical_sequence == 0,
+                "independent raw gRPC successor does not begin at logical sequence zero"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_retention_witness_shape(witness: &GrpcRawRetentionWitness) -> Result<()> {
+    ensure!(
+        (witness.generation_id == HOT_ACTIVE_DIR
+            || valid_hot_generation_id(&witness.generation_id))
+            && witness.identity.physical_stream_id().cluster_id
+                == witness.physical_metadata.cluster_id
+            && witness.identity.physical_stream_id().origin_node_id
+                == witness.physical_metadata.observation.origin_node_id
+            && witness.identity.physical_stream_id().source_id
+                == witness.physical_metadata.source_id
+            && witness.identity.physical_stream_id().journal_id
+                == witness.physical_metadata.observation.journal_id
+            && witness.handoff.frame_id == witness.physical_metadata.observation.sequence
+            && witness.location == witness.handoff.location()
+            && witness.handoff.compressed_len == witness.physical_metadata.payload_len
+            && witness.logical_sequence
+                == witness
+                    .identity
+                    .replication_sequence(witness.handoff.frame_id)?,
+        "raw gRPC retention witness has an inconsistent physical/logical binding"
+    );
+    ensure!(
+        witness.compressed_payload_sha256.len() == 64
+            && witness
+                .compressed_payload_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "raw gRPC retention witness has an invalid compressed payload digest"
+    );
+    Ok(())
+}
+
+fn ensure_retention_boundary_witnesses_match(
+    retired: &GrpcRawRetentionWitness,
+    retained: &GrpcRawRetentionWitness,
+) -> Result<()> {
+    ensure!(
+        retained.handoff.frame_id == 0
+            && retired.identity.replication_stream_id()
+                == retained.identity.replication_stream_id()
+            && retired.logical_sequence == retained.logical_sequence
+            && retained.identity.replication_sequence_base() == retired.logical_sequence
+            && retired.physical_metadata.cluster_id == retained.physical_metadata.cluster_id
+            && retired.physical_metadata.source_id == retained.physical_metadata.source_id
+            && retired.physical_metadata.logical_key == retained.physical_metadata.logical_key
+            && retired.physical_metadata.payload_format_version
+                == retained.physical_metadata.payload_format_version
+            && retired.physical_metadata.content_digest
+                == retained.physical_metadata.content_digest
+            && retired.physical_metadata.payload_len == retained.physical_metadata.payload_len
+            && retired.compressed_payload_sha256 == retained.compressed_payload_sha256
+            && retired.handoff.slot == retained.handoff.slot
+            && retired.handoff.parent_slot == retained.handoff.parent_slot
+            && retired.handoff.epoch == retained.handoff.epoch
+            && retired.handoff.epoch_slot_index == retained.handoff.epoch_slot_index
+            && retired.handoff.compressed_len == retained.handoff.compressed_len
+            && retired.handoff.uncompressed_len == retained.handoff.uncompressed_len
+            && retired
+                .handoff
+                .protobuf_sha256
+                .eq_ignore_ascii_case(&retained.handoff.protobuf_sha256)
+            && retired.handoff.blockhash == retained.handoff.blockhash,
+        "raw gRPC retention anchor boundary witnesses do not exactly overlap"
+    );
+    Ok(())
+}
+
+fn retention_witnesses_equal_ignoring_path(
+    left: &GrpcRawRetentionWitness,
+    right: &GrpcRawRetentionWitness,
+) -> bool {
+    left.identity == right.identity
+        && left.handoff == right.handoff
+        && left.physical_metadata == right.physical_metadata
+        && left.location == right.location
+        && left.compressed_payload_sha256 == right.compressed_payload_sha256
+        && left.logical_sequence == right.logical_sequence
+}
+
+fn read_retention_anchor(cache_root: &Path) -> Result<Option<GrpcRawRetentionAnchor>> {
+    read_retention_anchor_frame(cache_root).map(|stored| stored.map(|(anchor, _)| anchor))
+}
+
+fn read_retention_anchor_frame(
+    cache_root: &Path,
+) -> Result<Option<(GrpcRawRetentionAnchor, Vec<u8>)>> {
+    read_retention_frame_optional(
+        &cache_root.join(RETENTION_ANCHOR_FILE),
+        RETENTION_ANCHOR_MAGIC,
+    )
+}
+
+fn encode_retention_frame<T: Serialize>(magic: &[u8; 8], value: &T) -> Result<Vec<u8>> {
+    let payload = serde_json::to_vec(value).context("encode raw gRPC retention frame")?;
+    ensure!(
+        payload.len() as u64 <= MAX_RETENTION_FRAME_BYTES,
+        "raw gRPC retention payload exceeds {MAX_RETENTION_FRAME_BYTES} bytes"
+    );
+    let length = u32::try_from(payload.len()).context("raw gRPC retention payload exceeds u32")?;
+    let mut header = Vec::with_capacity(14);
+    header.extend_from_slice(magic);
+    header.extend_from_slice(&RETENTION_FRAME_VERSION.to_le_bytes());
+    header.extend_from_slice(&length.to_le_bytes());
+    let header_digest = Sha256::digest(&header);
+    let payload_digest = Sha256::digest(&payload);
+    let mut encoded = Vec::with_capacity(header.len() + 32 + payload.len() + 32 + 4);
+    encoded.extend_from_slice(&header);
+    encoded.extend_from_slice(&header_digest);
+    encoded.extend_from_slice(&payload);
+    encoded.extend_from_slice(&payload_digest);
+    encoded.extend_from_slice(RETENTION_FRAME_COMMIT);
+    Ok(encoded)
+}
+
+fn read_retention_frame_optional<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    magic: &[u8; 8],
+) -> Result<Option<(T, Vec<u8>)>> {
+    if !path_entry_exists(path)? {
+        return Ok(None);
+    }
+    let mut file = open_regular_readonly_nofollow(path, "raw gRPC retention frame")?;
+    let length = file.metadata()?.len();
+    ensure!(
+        length >= 82 && length <= MAX_RETENTION_FRAME_BYTES + 82,
+        "raw gRPC retention frame length is invalid: {}",
+        path.display()
+    );
+    let mut encoded = Vec::with_capacity(length as usize);
+    file.read_to_end(&mut encoded)?;
+    ensure!(
+        encoded.len() as u64 == length,
+        "raw gRPC retention frame changed while read"
+    );
+    ensure!(
+        &encoded[..8] == magic,
+        "raw gRPC retention frame magic mismatch"
+    );
+    let version = u16::from_le_bytes(encoded[8..10].try_into().unwrap());
+    ensure!(
+        version == RETENTION_FRAME_VERSION,
+        "unsupported raw gRPC retention frame version"
+    );
+    let payload_len = u32::from_le_bytes(encoded[10..14].try_into().unwrap()) as usize;
+    let expected_len = 14usize
+        .checked_add(32)
+        .and_then(|length| length.checked_add(payload_len))
+        .and_then(|length| length.checked_add(32 + 4))
+        .context("raw gRPC retention frame length overflow")?;
+    ensure!(
+        encoded.len() == expected_len,
+        "raw gRPC retention frame is truncated or has trailing bytes"
+    );
+    ensure!(
+        encoded[14..46] == Sha256::digest(&encoded[..14])[..],
+        "raw gRPC retention frame header checksum mismatch"
+    );
+    let payload_end = 46 + payload_len;
+    ensure!(
+        encoded[payload_end..payload_end + 32] == Sha256::digest(&encoded[46..payload_end])[..],
+        "raw gRPC retention frame payload checksum mismatch"
+    );
+    ensure!(
+        &encoded[payload_end + 32..] == RETENTION_FRAME_COMMIT,
+        "raw gRPC retention frame lacks its commit marker"
+    );
+    let value = serde_json::from_slice(&encoded[46..payload_end])
+        .context("decode raw gRPC retention frame")?;
+    Ok(Some((value, encoded)))
+}
+
+fn write_retention_frame_atomic<T: Serialize>(
+    cache_root: &Path,
+    file_name: &str,
+    magic: &[u8; 8],
+    value: &T,
+) -> Result<()> {
+    let encoded = encode_retention_frame(magic, value)?;
+    let path = cache_root.join(file_name);
+    let temporary = cache_root.join(format!("{file_name}.tmp"));
+    if path_entry_exists(&temporary)? {
+        let metadata = fs::symlink_metadata(&temporary)?;
+        ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "raw gRPC retention temporary is not a regular file"
+        );
+        fs::remove_file(&temporary)?;
+        sync_directory(cache_root)?;
+    }
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let mut file = options.open(&temporary)?;
+        file.write_all(&encoded)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        sync_directory(cache_root)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        let _ = sync_directory(cache_root);
+    }
+    result.with_context(|| format!("publish raw gRPC retention frame {}", path.display()))
+}
+
+fn remove_retention_intent(cache_root: &Path) -> Result<()> {
+    fs::remove_file(cache_root.join(RETENTION_GC_INTENT_FILE))?;
+    sync_directory(cache_root)
+}
+
+fn remove_retention_trash(trash: &Path) -> Result<()> {
+    ensure_real_directory(trash, "raw gRPC retention trash")?;
+    let parent = trash
+        .parent()
+        .context("raw gRPC retention trash has no parent directory")?;
+    fs::remove_dir_all(trash)
+        .with_context(|| format!("remove raw gRPC retention trash {}", trash.display()))?;
+    sync_directory(parent)
+}
+
+fn apply_retention_anchor_state(
+    cache_root: &Path,
+    next_anchor: Option<&GrpcRawRetentionAnchor>,
+) -> Result<()> {
+    match next_anchor {
+        Some(anchor) => {
+            validate_retention_anchor_shape(anchor)?;
+            write_retention_frame_atomic(
+                cache_root,
+                RETENTION_ANCHOR_FILE,
+                RETENTION_ANCHOR_MAGIC,
+                anchor,
+            )
+        }
+        None => {
+            let anchor_path = cache_root.join(RETENTION_ANCHOR_FILE);
+            if !path_entry_exists(&anchor_path)? {
+                return Ok(());
+            }
+            // Parse and checksum the old anchor before removing it. This rejects a substituted
+            // symlink or corrupt file instead of turning cleanup into a blind unlink.
+            ensure!(
+                read_retention_anchor_frame(cache_root)?.is_some(),
+                "raw gRPC retention anchor disappeared before removal"
+            );
+            fs::remove_file(&anchor_path).with_context(|| {
+                format!(
+                    "remove obsolete raw gRPC retention anchor {}",
+                    anchor_path.display()
+                )
+            })?;
+            sync_directory(cache_root)
+        }
+    }
+}
+
+fn recover_retention_gc_intent(
+    cache_root: &Path,
+    limits: GrpcRawCommittedReadLimits,
+) -> Result<()> {
+    let Some((intent, _)): Option<(GrpcRawRetentionGcIntent, Vec<u8>)> =
+        read_retention_frame_optional(
+            &cache_root.join(RETENTION_GC_INTENT_FILE),
+            RETENTION_INTENT_MAGIC,
+        )?
+    else {
+        ensure_no_untracked_retention_trash(cache_root, None)?;
+        return Ok(());
+    };
+    validate_retention_gc_intent_shape(&intent)?;
+    ensure_no_untracked_retention_trash(cache_root, Some(&intent.trash_name))?;
+    let sealed_root = cache_root.join(HOT_SEALED_DIR);
+    let candidate = sealed_root.join(&intent.candidate_id);
+    let trash = sealed_root.join(&intent.trash_name);
+    let candidate_exists = path_entry_exists(&candidate)?;
+    let trash_exists = path_entry_exists(&trash)?;
+    ensure!(
+        !(candidate_exists && trash_exists),
+        "raw gRPC retention recovery found both candidate and trash"
+    );
+
+    let current_anchor_hash =
+        read_retention_anchor_frame(cache_root)?.map(|(_, encoded)| sha256_hex(&encoded));
+    let next_anchor_hash = intent
+        .next_anchor
+        .as_ref()
+        .map(|anchor| {
+            encode_retention_frame(RETENTION_ANCHOR_MAGIC, anchor)
+                .map(|encoded| sha256_hex(&encoded))
+        })
+        .transpose()?;
+
+    let successor_path =
+        find_retention_witness_generation(cache_root, &intent.first_retained_seed)?;
+    let successor = GrpcRawReplicationGeneration {
+        path: successor_path.clone(),
+        sealed: successor_path.parent() == Some(sealed_root.as_path()),
+    };
+    let successor_identity = read_identity(&successor_path.join(IDENTITY_FILE))?;
+    let successor_snapshot = complete_handoff_snapshot(&successor_path.join(HANDOFF_JOURNAL_FILE))?;
+    let successor_seed = successor_snapshot
+        .state
+        .first
+        .as_ref()
+        .context("raw gRPC retention recovery successor is empty")?;
+    let current_successor_seed =
+        retention_witness(&successor_path, &successor_identity, successor_seed, limits)?;
+    ensure!(
+        retention_witnesses_equal_ignoring_path(
+            &intent.first_retained_seed,
+            &current_successor_seed,
+        ),
+        "raw gRPC retention recovery successor differs from its synced intent"
+    );
+    if let Some(anchor) = intent.next_anchor.as_ref() {
+        validate_retention_anchor_for_first_generation(
+            anchor,
+            &successor,
+            &successor_identity,
+            limits,
+        )?;
+    } else {
+        ensure_initial_logical_generation(&successor_identity)?;
+    }
+
+    if trash_exists {
+        ensure!(
+            current_anchor_hash == intent.previous_anchor_sha256
+                || current_anchor_hash == next_anchor_hash,
+            "raw gRPC retention recovery found an unrelated anchor"
+        );
+    }
+    let deletion_state_is_durable = trash_exists && current_anchor_hash == next_anchor_hash;
+    if candidate_exists || (trash_exists && !deletion_state_is_durable) {
+        let retained_candidate = if candidate_exists { &candidate } else { &trash };
+        let candidate_identity = read_identity(&retained_candidate.join(IDENTITY_FILE))?;
+        ensure!(
+            candidate_identity == intent.retired_tail.identity,
+            "raw gRPC retention recovery candidate identity differs from its synced intent"
+        );
+        let candidate_snapshot =
+            complete_handoff_snapshot(&retained_candidate.join(HANDOFF_JOURNAL_FILE))?;
+        ensure!(
+            candidate_snapshot.complete_offset == candidate_snapshot.snapshot_len,
+            "raw gRPC retention recovery candidate has a partial handoff tail"
+        );
+        let candidate_tail = candidate_snapshot
+            .state
+            .last
+            .as_ref()
+            .context("raw gRPC retention recovery candidate is empty")?;
+        let current_candidate_tail = retention_witness(
+            retained_candidate,
+            &candidate_identity,
+            candidate_tail,
+            limits,
+        )?;
+        ensure!(
+            retention_witnesses_equal_ignoring_path(&intent.retired_tail, &current_candidate_tail,),
+            "raw gRPC retention recovery candidate differs from its synced intent"
+        );
+    }
+
+    if candidate_exists {
+        ensure!(
+            !trash_exists && current_anchor_hash == intent.previous_anchor_sha256,
+            "raw gRPC retention recovery found an impossible pre-rename state"
+        );
+        remove_retention_intent(cache_root)?;
+        return Ok(());
+    }
+
+    if trash_exists {
+        if current_anchor_hash != next_anchor_hash {
+            apply_retention_anchor_state(cache_root, intent.next_anchor.as_ref())?;
+        }
+        remove_retention_trash(&trash)?;
+        remove_retention_intent(cache_root)?;
+        return Ok(());
+    }
+
+    ensure!(
+        current_anchor_hash == next_anchor_hash,
+        "raw gRPC retention recovery lost both candidate and trash before publishing its anchor"
+    );
+    remove_retention_intent(cache_root)
+}
+
+fn ensure_no_untracked_retention_trash(
+    cache_root: &Path,
+    expected_name: Option<&str>,
+) -> Result<()> {
+    let sealed_root = cache_root.join(HOT_SEALED_DIR);
+    for entry in fs::read_dir(&sealed_root)
+        .with_context(|| format!("list raw gRPC sealed root {}", sealed_root.display()))?
+    {
+        let entry = entry.context("read raw gRPC sealed root entry")?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow!("raw gRPC cache entry name is not UTF-8"))?;
+        if name.starts_with(RETENTION_TRASH_PREFIX) {
+            ensure!(
+                expected_name == Some(name.as_str()),
+                "untracked raw gRPC retention trash requires manual recovery: {name}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn find_retention_witness_generation(
+    cache_root: &Path,
+    witness: &GrpcRawRetentionWitness,
+) -> Result<PathBuf> {
+    let expected = &witness.identity;
+    let mut matches = Vec::new();
+    let active = cache_root.join(HOT_ACTIVE_DIR);
+    if read_identity_if_present(&active.join(IDENTITY_FILE))?.as_ref() == Some(expected) {
+        matches.push(active);
+    }
+    for entry in fs::read_dir(cache_root.join(HOT_SEALED_DIR))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !valid_hot_generation_id(name) {
+            continue;
+        }
+        let path = entry.path();
+        if read_identity_if_present(&path.join(IDENTITY_FILE))?.as_ref() == Some(expected) {
+            matches.push(path);
+        }
+    }
+    ensure!(
+        matches.len() == 1,
+        "raw gRPC retention anchor resolves to {} retained physical generations",
+        matches.len()
+    );
+    Ok(matches.remove(0))
 }
 
 impl GrpcRawCommittedBatch {
@@ -3846,6 +4803,75 @@ enum HotRotationLockMode {
 }
 
 #[derive(Debug)]
+struct RetentionMutationGuard {
+    _file: File,
+}
+
+impl RetentionMutationGuard {
+    fn try_acquire(cache_root: &Path) -> Result<Option<Self>> {
+        ensure_real_directory(cache_root, "hot generation root")?;
+        let path = cache_root.join(RETENTION_LOCK_FILE);
+        let existed = path_entry_exists(&path)?;
+        if existed {
+            let metadata = fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+                "raw gRPC retention lock is not a regular file"
+            );
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open raw gRPC retention lock {}", path.display()))?;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.file_type().is_file(),
+            "raw gRPC retention lock is not a file"
+        );
+        #[cfg(unix)]
+        {
+            let linked = fs::symlink_metadata(&path)?;
+            ensure!(
+                metadata.dev() == linked.dev() && metadata.ino() == linked.ino(),
+                "raw gRPC retention lock changed while opened"
+            );
+            let effective_uid = unsafe { libc::geteuid() };
+            ensure!(
+                (metadata.uid() == effective_uid || metadata.uid() == 0)
+                    && metadata.mode() & 0o077 == 0
+                    && metadata.nlink() == 1,
+                "raw gRPC retention lock ownership or permissions are unsafe"
+            );
+            // SAFETY: the guard owns this descriptor for the complete mutation transaction.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
+                return Err(error).context("acquire raw gRPC retention mutation lock");
+            }
+        }
+        #[cfg(not(unix))]
+        if let Err(error) = file.try_lock() {
+            if error.kind() == ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error).context("acquire raw gRPC retention mutation lock");
+        }
+        if !existed {
+            sync_directory(cache_root)?;
+        }
+        Ok(Some(Self { _file: file }))
+    }
+}
+
+#[derive(Debug)]
 struct HotRotationGuard {
     _file: File,
 }
@@ -3982,6 +5008,10 @@ fn validate_hot_generation_config(config: &GrpcRawRecordConfig) -> Result<()> {
     ensure!(
         !path_entry_exists(&root.join(HOT_ROTATION_MARKER))?,
         "hot generation rotation marker must be recovered by the supervisor before startup"
+    );
+    ensure!(
+        !path_entry_exists(&root.join(RETENTION_GC_INTENT_FILE))?,
+        "raw gRPC retention GC intent must be recovered before recorder startup"
     );
     for entry in fs::read_dir(root)
         .with_context(|| format!("list hot generation root {}", root.display()))?
@@ -5860,6 +6890,51 @@ mod tests {
         )
     }
 
+    fn commit_test_cumulative_ack(
+        ack_wal: &mut CumulativeAckWal,
+        batch: GrpcRawCommittedBatch,
+        durable_lsn: u64,
+    ) {
+        let stream = batch.records.first().unwrap().stream.clone();
+        let mut rolling_chain = crate::ingest::cumulative_chain_seed(&stream).unwrap();
+        for record in &batch.records {
+            rolling_chain =
+                crate::ingest::cumulative_chain_next(&stream, rolling_chain, &record.record.offer)
+                    .unwrap();
+        }
+        let tail = batch.records.last().unwrap();
+        let ack = CumulativePrimaryAck {
+            protocol_version: REPLICATION_PROTOCOL_VERSION,
+            stream: stream.clone(),
+            primary_id: "primary-a".to_string(),
+            primary_term: 1,
+            through_sequence: tail.record.offer.record.sequence,
+            through_content_digest: tail.record.offer.content_digest,
+            rolling_chain_digest: rolling_chain,
+            disposition: crate::ingest::ReceiptDisposition::DurablyStored,
+            durable_lsn,
+            signing_key_id: "receipt-key".to_string(),
+            signature: vec![7; 64],
+        };
+        let verified = crate::ingest::verify_cumulative_ack(
+            ack,
+            crate::ingest::ExpectedCumulativeAck {
+                stream: &stream,
+                primary_id: "primary-a",
+                minimum_primary_term: 1,
+                through_sequence: tail.record.offer.record.sequence,
+                through_content_digest: tail.record.offer.content_digest,
+                rolling_chain_digest: rolling_chain,
+            },
+            &AcceptCumulativeSignature,
+        )
+        .unwrap();
+        let (_transport, advance) = batch.into_transport_parts().unwrap();
+        ack_wal
+            .commit_verified_replication(verified, advance.durable_replication_witness())
+            .unwrap();
+    }
+
     #[test]
     fn generation_cap_preflight_stops_before_mutation_and_matches_written_size() {
         let root = temp_dir("generation-cap-preflight");
@@ -6178,6 +7253,521 @@ mod tests {
         assert_eq!(active_verification.records_verified, 2);
         assert_eq!(active_verification.first_slot, Some(source_tail.slot));
         assert_eq!(active_verification.last_slot, Some(source_tail.slot + 1));
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn ack_gc_retires_only_a_fully_covered_oldest_generation_and_restarts_from_anchor() {
+        let cache_root = temp_dir("ack-generation-gc");
+        let active = cache_root.join(HOT_ACTIVE_DIR);
+        let sealed_root = cache_root.join(HOT_SEALED_DIR);
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir(&sealed_root).unwrap();
+        fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+        let mut config = test_config(active.clone());
+        config.hot_generation_root = Some(cache_root.clone());
+        config.max_generation_bytes = minimum_generation_bytes(&config).unwrap();
+        validate_hot_generation_config(&config).unwrap();
+
+        let mut identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            active.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = active.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let mut predecessor_tail = None;
+        for frame_id in 0..3 {
+            let row = append_fixture(
+                &mut spool,
+                &identity,
+                &complete_poh_update(8_000 + frame_id),
+                frame_id,
+            );
+            append_handoff_record(&journal, &row).unwrap();
+            predecessor_tail = Some(row);
+        }
+        let predecessor_tail = predecessor_tail.unwrap();
+        hot_rotate_generation(
+            &config,
+            &cache_root,
+            &mut identity,
+            &mut spool,
+            &predecessor_tail,
+        )
+        .unwrap();
+        let predecessor = sealed_root.join(format!("slot-{:020}", predecessor_tail.slot));
+        assert!(predecessor.is_dir());
+
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let ack_path = cache_root.join("cumulative-acks.wal");
+        let mut ack_wal = CumulativeAckWal::open(&ack_path).unwrap();
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::NoDurableAck
+        );
+        assert!(predecessor.is_dir());
+
+        // A durable ACK for a prefix inside the oldest generation cannot retire its unacknowledged
+        // tail, even though it has valid signature and physical-WAL evidence.
+        let first_prefix = GrpcRawCommittedCursor::open(&predecessor, limits, 0)
+            .unwrap()
+            .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        commit_test_cumulative_ack(&mut ack_wal, first_prefix, 2);
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::AckDoesNotCoverOldest {
+                oldest_through_sequence: 2,
+                durable_through_sequence: 1,
+            }
+        );
+        assert!(predecessor.is_dir());
+
+        // The exact predecessor tail ACK authorizes one oldest-first retirement transaction.
+        let complete_prefix = GrpcRawCommittedCursor::open(&predecessor, limits, 0)
+            .unwrap()
+            .read_batch(3, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        commit_test_cumulative_ack(&mut ack_wal, complete_prefix, 3);
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::Retired {
+                generation: predecessor.clone(),
+                through_sequence: 2,
+            }
+        );
+        assert!(!predecessor.exists());
+        assert!(cache_root.join(RETENTION_ANCHOR_FILE).is_file());
+        assert!(!cache_root.join(RETENTION_GC_INTENT_FILE).exists());
+        assert!(fs::read_dir(&sealed_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RETENTION_TRASH_PREFIX)
+        }));
+
+        // The successor starts at logical sequence two rather than zero. Its exact retained seed
+        // and physical identity are pinned by the synced anchor, so restart remains fail-closed
+        // without retaining the large predecessor directory.
+        let prepared = open_grpc_raw_replication_generation_cursors(&cache_root, limits).unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert!(!prepared[0].sealed);
+        assert_eq!(prepared[0].cursor.next_replication_sequence(), 2);
+        drop(prepared);
+
+        let anchor_path = cache_root.join(RETENTION_ANCHOR_FILE);
+        let mut corrupt = fs::read(&anchor_path).unwrap();
+        corrupt[50] ^= 0x01;
+        fs::write(&anchor_path, corrupt).unwrap();
+        assert!(
+            open_grpc_raw_replication_generation_cursors(&cache_root, limits)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum mismatch")
+        );
+
+        drop(ack_wal);
+        drop(spool);
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn ack_gc_retires_multiple_same_stream_generations_oldest_first() {
+        let cache_root = temp_dir("ack-generation-gc-repeated");
+        let active = cache_root.join(HOT_ACTIVE_DIR);
+        let sealed_root = cache_root.join(HOT_SEALED_DIR);
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir(&sealed_root).unwrap();
+        fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+        let mut config = test_config(active.clone());
+        config.hot_generation_root = Some(cache_root.clone());
+        config.max_generation_bytes = minimum_generation_bytes(&config).unwrap();
+
+        let mut identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            active.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = active.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+
+        let first_a = append_fixture(&mut spool, &identity, &complete_poh_update(8_200), 0);
+        append_handoff_record(&journal, &first_a).unwrap();
+        let tail_a = append_fixture(&mut spool, &identity, &complete_poh_update(8_201), 1);
+        append_handoff_record(&journal, &tail_a).unwrap();
+        hot_rotate_generation(&config, &cache_root, &mut identity, &mut spool, &tail_a).unwrap();
+        let generation_a = sealed_root.join(format!("slot-{:020}", tail_a.slot));
+
+        // The seeded frame zero overlaps A's tail. Only frame one extends the logical stream.
+        let tail_b = append_fixture(&mut spool, &identity, &complete_poh_update(8_202), 1);
+        append_handoff_record(&journal, &tail_b).unwrap();
+        hot_rotate_generation(&config, &cache_root, &mut identity, &mut spool, &tail_b).unwrap();
+        let generation_b = sealed_root.join(format!("slot-{:020}", tail_b.slot));
+
+        let tail_c = append_fixture(&mut spool, &identity, &complete_poh_update(8_203), 1);
+        append_handoff_record(&journal, &tail_c).unwrap();
+
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let batch_a = GrpcRawCommittedCursor::open(&generation_a, limits, 0)
+            .unwrap()
+            .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        let batch_b = GrpcRawCommittedCursor::open(&generation_b, limits, 1)
+            .unwrap()
+            .read_batch(1, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        let batch_c = GrpcRawCommittedCursor::open(&active, limits, 1)
+            .unwrap()
+            .read_batch(1, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        let stream = batch_a.records.first().unwrap().stream.clone();
+        let mut rolling_chain = crate::ingest::cumulative_chain_seed(&stream).unwrap();
+        for record in batch_a
+            .records
+            .iter()
+            .chain(batch_b.records.iter())
+            .chain(batch_c.records.iter())
+        {
+            rolling_chain =
+                crate::ingest::cumulative_chain_next(&stream, rolling_chain, &record.record.offer)
+                    .unwrap();
+        }
+        let tail = batch_c.records.last().unwrap();
+        assert_eq!(tail.record.offer.record.sequence, 3);
+        let ack = CumulativePrimaryAck {
+            protocol_version: REPLICATION_PROTOCOL_VERSION,
+            stream: stream.clone(),
+            primary_id: "primary-a".to_string(),
+            primary_term: 1,
+            through_sequence: 3,
+            through_content_digest: tail.record.offer.content_digest,
+            rolling_chain_digest: rolling_chain,
+            disposition: crate::ingest::ReceiptDisposition::DurablyStored,
+            durable_lsn: 4,
+            signing_key_id: "receipt-key".to_string(),
+            signature: vec![7; 64],
+        };
+        let verified = crate::ingest::verify_cumulative_ack(
+            ack,
+            crate::ingest::ExpectedCumulativeAck {
+                stream: &stream,
+                primary_id: "primary-a",
+                minimum_primary_term: 1,
+                through_sequence: 3,
+                through_content_digest: tail.record.offer.content_digest,
+                rolling_chain_digest: rolling_chain,
+            },
+            &AcceptCumulativeSignature,
+        )
+        .unwrap();
+        let (_transport, advance) = batch_c.into_transport_parts().unwrap();
+        let mut ack_wal = CumulativeAckWal::open(cache_root.join("cumulative-acks.wal")).unwrap();
+        ack_wal
+            .commit_verified_replication(verified, advance.durable_replication_witness())
+            .unwrap();
+
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::Retired {
+                generation: generation_a.clone(),
+                through_sequence: 1,
+            }
+        );
+        let first_anchor = fs::read(cache_root.join(RETENTION_ANCHOR_FILE)).unwrap();
+        assert!(!generation_a.exists());
+        let prepared = open_grpc_raw_replication_generation_cursors(&cache_root, limits).unwrap();
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared[0].cursor.next_replication_sequence(), 1);
+        drop(prepared);
+
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::Retired {
+                generation: generation_b.clone(),
+                through_sequence: 2,
+            }
+        );
+        assert!(!generation_b.exists());
+        assert_ne!(
+            fs::read(cache_root.join(RETENTION_ANCHOR_FILE)).unwrap(),
+            first_anchor
+        );
+        let prepared = open_grpc_raw_replication_generation_cursors(&cache_root, limits).unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].cursor.next_replication_sequence(), 2);
+        drop(prepared);
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::NothingToRetire
+        );
+
+        drop(ack_wal);
+        drop(spool);
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn ack_gc_retires_a_legacy_stream_before_an_independent_base_zero_successor() {
+        let cache_root = temp_dir("ack-generation-gc-legacy-boundary");
+        let active = cache_root.join(HOT_ACTIVE_DIR);
+        let sealed_root = cache_root.join(HOT_SEALED_DIR);
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir(&sealed_root).unwrap();
+        fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+        let mut config = test_config(active.clone());
+        config.hot_generation_root = Some(cache_root.clone());
+
+        let identity_a = load_or_create_identity(&config).unwrap();
+        let mut spool_a = SpoolWriter::open(
+            active.join(WAL_ROOT_DIR),
+            identity_a.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = active.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let first_a = append_fixture(&mut spool_a, &identity_a, &complete_poh_update(8_300), 0);
+        append_handoff_record(&journal, &first_a).unwrap();
+        let tail_a = append_fixture(&mut spool_a, &identity_a, &complete_poh_update(8_301), 1);
+        append_handoff_record(&journal, &tail_a).unwrap();
+        drop(spool_a);
+
+        let generation_a = sealed_root.join(format!("slot-{:020}", tail_a.slot));
+        fs::rename(&active, &generation_a).unwrap();
+        sync_directory(&cache_root).unwrap();
+        fs::create_dir(&active).unwrap();
+        sync_directory(&cache_root).unwrap();
+
+        // This reproduces the legacy recorder: each physical generation started a new logical
+        // journal at sequence zero instead of persisting an overlap anchor.
+        let identity_b = load_or_create_identity(&config).unwrap();
+        assert_ne!(
+            identity_a.replication_stream_id(),
+            identity_b.replication_stream_id()
+        );
+        let mut spool_b = SpoolWriter::open(
+            active.join(WAL_ROOT_DIR),
+            identity_b.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        recover_handoff_journal(&journal).unwrap();
+        let first_b = append_fixture(&mut spool_b, &identity_b, &complete_poh_update(8_302), 0);
+        append_handoff_record(&journal, &first_b).unwrap();
+
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let prefix = GrpcRawCommittedCursor::open(&generation_a, limits, 0)
+            .unwrap()
+            .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        let mut ack_wal = CumulativeAckWal::open(cache_root.join("cumulative-acks.wal")).unwrap();
+        commit_test_cumulative_ack(&mut ack_wal, prefix, 2);
+
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::Retired {
+                generation: generation_a.clone(),
+                through_sequence: 1,
+            }
+        );
+        assert!(!generation_a.exists());
+        assert!(!cache_root.join(RETENTION_ANCHOR_FILE).exists());
+        assert!(!cache_root.join(RETENTION_GC_INTENT_FILE).exists());
+        assert!(fs::read_dir(&sealed_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RETENTION_TRASH_PREFIX)
+        }));
+        let prepared = open_grpc_raw_replication_generation_cursors(&cache_root, limits).unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].cursor.next_replication_sequence(), 0);
+
+        drop(prepared);
+        drop(ack_wal);
+        drop(spool_b);
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+
+    #[test]
+    fn ack_gc_recovers_a_synced_intent_after_the_oldest_generation_was_renamed() {
+        let cache_root = temp_dir("ack-generation-gc-recovery");
+        let active = cache_root.join(HOT_ACTIVE_DIR);
+        let sealed_root = cache_root.join(HOT_SEALED_DIR);
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir(&sealed_root).unwrap();
+        fs::create_dir(cache_root.join(HOT_RECEIPTS_DIR)).unwrap();
+        let mut config = test_config(active.clone());
+        config.hot_generation_root = Some(cache_root.clone());
+        config.max_generation_bytes = minimum_generation_bytes(&config).unwrap();
+        let mut identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            active.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = active.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let mut tail = None;
+        for frame_id in 0..2 {
+            let row = append_fixture(
+                &mut spool,
+                &identity,
+                &complete_poh_update(8_100 + frame_id),
+                frame_id,
+            );
+            append_handoff_record(&journal, &row).unwrap();
+            tail = Some(row);
+        }
+        let tail = tail.unwrap();
+        hot_rotate_generation(&config, &cache_root, &mut identity, &mut spool, &tail).unwrap();
+        let candidate_path = sealed_root.join(format!("slot-{:020}", tail.slot));
+        let limits = GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_record_bytes,
+            max_uncompressed_record_bytes: config.max_record_bytes,
+        };
+        let mut ack_wal = CumulativeAckWal::open(cache_root.join("cumulative-acks.wal")).unwrap();
+        let prefix = GrpcRawCommittedCursor::open(&candidate_path, limits, 0)
+            .unwrap()
+            .read_batch(2, config.max_record_bytes, config.max_record_bytes)
+            .unwrap();
+        commit_test_cumulative_ack(&mut ack_wal, prefix, 2);
+
+        // Reproduce the durable state immediately after the GC rename and before anchor
+        // publication. Recovery must use the already-synced intent to publish the exact successor
+        // boundary before it removes the private trash.
+        let generations = discover_grpc_raw_replication_generations(&cache_root).unwrap();
+        let candidate = &generations[0];
+        let successor = &generations[1];
+        let candidate_identity = read_identity(&candidate.path.join(IDENTITY_FILE)).unwrap();
+        let successor_identity = read_identity(&successor.path.join(IDENTITY_FILE)).unwrap();
+        let candidate_snapshot =
+            complete_handoff_snapshot(&candidate.path.join(HANDOFF_JOURNAL_FILE)).unwrap();
+        let candidate_tail = candidate_snapshot.state.last.as_ref().unwrap();
+        let authorization = ack_wal
+            .durable_gc_authorization(&candidate_identity.replication_stream_id())
+            .unwrap()
+            .unwrap();
+        let authorization_local_witness =
+            find_authorization_local_witness(&generations, &authorization, limits).unwrap();
+        let retired_tail =
+            retention_witness(&candidate.path, &candidate_identity, candidate_tail, limits)
+                .unwrap();
+        let successor_snapshot =
+            complete_handoff_snapshot(&successor.path.join(HANDOFF_JOURNAL_FILE)).unwrap();
+        let first_retained_seed = retention_witness(
+            &successor.path,
+            &successor_identity,
+            successor_snapshot.state.first.as_ref().unwrap(),
+            limits,
+        )
+        .unwrap();
+        let next_anchor = GrpcRawRetentionAnchor {
+            schema_version: 1,
+            authorization_ack: authorization.ack().clone(),
+            authorization_local_witness,
+            retired_tail,
+            first_retained_seed,
+        };
+        let candidate_id = generation_id(&candidate.path).unwrap();
+        let trash_name = format!("{RETENTION_TRASH_PREFIX}{candidate_id}");
+        let intent = GrpcRawRetentionGcIntent {
+            schema_version: 1,
+            previous_anchor_sha256: None,
+            candidate_id,
+            trash_name: trash_name.clone(),
+            authorization_ack: next_anchor.authorization_ack.clone(),
+            authorization_local_witness: next_anchor.authorization_local_witness.clone(),
+            retired_tail: next_anchor.retired_tail.clone(),
+            first_retained_seed: next_anchor.first_retained_seed.clone(),
+            next_anchor: Some(next_anchor),
+        };
+        write_retention_frame_atomic(
+            &cache_root,
+            RETENTION_GC_INTENT_FILE,
+            RETENTION_INTENT_MAGIC,
+            &intent,
+        )
+        .unwrap();
+        let trash_path = sealed_root.join(&trash_name);
+        fs::rename(&candidate_path, &trash_path).unwrap();
+        sync_directory(&sealed_root).unwrap();
+
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::NothingToRetire
+        );
+        assert!(!trash_path.exists());
+        assert!(!cache_root.join(RETENTION_GC_INTENT_FILE).exists());
+        assert!(cache_root.join(RETENTION_ANCHOR_FILE).is_file());
+        assert!(open_grpc_raw_replication_generation_cursors(&cache_root, limits).is_ok());
+
+        // A crash during recursive removal may leave only the expected trash directory after the
+        // successor anchor is already durable. Recovery must resume deletion from the synced
+        // intent; files that were intentionally removed cannot be required again.
+        write_retention_frame_atomic(
+            &cache_root,
+            RETENTION_GC_INTENT_FILE,
+            RETENTION_INTENT_MAGIC,
+            &intent,
+        )
+        .unwrap();
+        fs::create_dir(&trash_path).unwrap();
+        sync_directory(&sealed_root).unwrap();
+        assert_eq!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits).unwrap(),
+            GrpcRawLocalGcOutcome::NothingToRetire
+        );
+        assert!(!trash_path.exists());
+        assert!(!cache_root.join(RETENTION_GC_INTENT_FILE).exists());
+
+        let orphan = sealed_root.join(format!(
+            "{RETENTION_TRASH_PREFIX}slot-{:020}",
+            tail.slot + 1
+        ));
+        fs::create_dir(&orphan).unwrap();
+        assert!(
+            gc_one_acknowledged_grpc_raw_generation(&cache_root, &ack_wal, limits)
+                .unwrap_err()
+                .to_string()
+                .contains("untracked raw gRPC retention trash")
+        );
+        fs::remove_dir(&orphan).unwrap();
+
+        drop(ack_wal);
+        drop(spool);
         fs::remove_dir_all(cache_root).unwrap();
     }
 
@@ -7366,7 +8956,11 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(error.to_string().contains("base-zero physical anchor"));
+        assert!(
+            error
+                .to_string()
+                .contains("lacks a durable retention anchor")
+        );
 
         let marker = cache_root.join(HOT_ROTATION_MARKER);
         File::create(&marker).unwrap().sync_all().unwrap();

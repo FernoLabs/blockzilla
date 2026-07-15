@@ -162,13 +162,20 @@ therefore undercount interrupted or orphan uploads. Production retention also
 requires a paginated reconciliation of actual objects below the dedicated
 prefix.
 
-The signed ACK producer, verifier, durable ACK journal, and whole-generation
-audit are implemented and locally tested. Local eviction and remote pruning
-remain locked because production GC is not wired. The existing remote planner
-remains dry-run only. The eventual apply order is oldest acknowledged spool
-first: `_COMMITTED`, manifest, then payloads, followed by a synced completion
-receipt. An interrupted prune must resume idempotently and can never make a
-partial old generation look committed.
+The signed ACK producer, verifier, durable ACK journal, whole-generation audit,
+and local oldest-first GC transaction are implemented and locally tested. The
+local transaction writes a checksummed, fsynced intent before a same-directory
+candidate-to-trash rename. It publishes a checksummed retained-boundary anchor
+when the successor continues the same logical stream, or durably removes an
+obsolete anchor when the successor is an independent legacy base-zero stream,
+before removing private trash. Crash recovery resumes even if recursive trash
+removal was interrupted, so a missing base generation cannot become an
+implicit skip. It is wired into the Hetzner replication command but is not in
+the current production Compose deployment. Remote R2 pruning remains locked
+and the existing remote planner remains dry-run only. Its eventual apply order
+is oldest acknowledged spool first: `_COMMITTED`, manifest, then payloads,
+followed by a synced completion receipt. An interrupted prune must resume
+idempotently and can never make a partial old generation look committed.
 
 ## Current and target status
 
@@ -183,9 +190,13 @@ Current:
 - the Hetzner replication sender and its durable verified-ACK journal are also
   implemented and locally tested, including stable logical sequences across
   unique physical storage generations;
+- the sender performs crash-recoverable, oldest-first local generation cleanup
+  only from that fsynced ACK journal; the R2 uploader and local GC share one
+  generation-mutation lock;
 - the sender/receiver services, private route, mTLS material, Blockzilla
-  historical reader, ACK-driven GC, and production deployment are not complete;
-- therefore local and remote durable-copy deletion must remain disabled.
+  historical reader, and production deployment are not complete;
+- therefore the current production recorder still has no local ACK cleanup,
+  and remote durable-copy deletion remains disabled everywhere.
 
 Target:
 

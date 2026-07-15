@@ -15,8 +15,9 @@ use blockzilla_live_producer::{
         inspect_capture, probe_grpc, watch_grpc_epoch_boundaries,
     },
     grpc_raw::{
-        GrpcRawCommittedCursor, GrpcRawCommittedReadLimits, GrpcRawMaterializeConfig,
-        GrpcRawRecordConfig, inspect_grpc_raw_blocks, materialize_grpc_raw_blocks,
+        GrpcRawCommittedCursor, GrpcRawCommittedReadLimits, GrpcRawLocalGcOutcome,
+        GrpcRawMaterializeConfig, GrpcRawRecordConfig, gc_one_acknowledged_grpc_raw_generation,
+        inspect_grpc_raw_blocks, materialize_grpc_raw_blocks,
         open_grpc_raw_replication_generation_cursors, record_grpc_raw_blocks,
         seed_grpc_raw_generation, verify_grpc_raw_poh,
     },
@@ -1054,6 +1055,8 @@ impl ReplicationRetryBackoff {
 }
 
 async fn replicate_grpc_raw(args: ReplicateGrpcRawArgs) -> Result<()> {
+    const MAX_ACK_GC_GENERATIONS_PER_PASS: usize = 64;
+
     anyhow::ensure!(
         args.poll_interval_ms > 0,
         "--poll-interval-ms must be non-zero"
@@ -1091,6 +1094,73 @@ async fn replicate_grpc_raw(args: ReplicateGrpcRawArgs) -> Result<()> {
             break;
         }
 
+        // Retire ACK-covered sealed generations before opening any source cursor. The ACK WAL is
+        // the outer lock/authority; GC then takes the uploader mutation lock and rotation lock in
+        // that fixed order. R2 receipts, disk pressure, and heartbeats never enter this path.
+        let (gc_batch_was_full, gc_was_busy) = {
+            let ack_wal = CumulativeAckWal::open(&upstream.cumulative_ack_wal_file)
+                .context("open cumulative ACK WAL for local generation retention")?;
+            let mut retired_generation_count = 0usize;
+            let mut busy = false;
+            for _ in 0..MAX_ACK_GC_GENERATIONS_PER_PASS {
+                match gc_one_acknowledged_grpc_raw_generation(
+                    &args.cache_root,
+                    &ack_wal,
+                    read_limits,
+                )
+                .context("retire oldest Blockzilla-acknowledged raw gRPC generation")?
+                {
+                    GrpcRawLocalGcOutcome::Retired {
+                        generation,
+                        through_sequence,
+                    } => {
+                        retired_generation_count += 1;
+                        tracing::info!(
+                            generation = %generation.display(),
+                            through_sequence,
+                            "retired oldest raw gRPC generation after durable Blockzilla ACK"
+                        );
+                    }
+                    GrpcRawLocalGcOutcome::Busy => {
+                        busy = true;
+                        tracing::debug!(
+                            "raw gRPC retention is busy with an object-store upload; retrying later"
+                        );
+                        break;
+                    }
+                    GrpcRawLocalGcOutcome::AckDoesNotCoverOldest {
+                        oldest_through_sequence,
+                        durable_through_sequence,
+                    } => {
+                        tracing::debug!(
+                            oldest_through_sequence,
+                            durable_through_sequence,
+                            "oldest raw gRPC generation is awaiting Blockzilla ACK"
+                        );
+                        break;
+                    }
+                    GrpcRawLocalGcOutcome::NoDurableAck => {
+                        tracing::debug!(
+                            "raw gRPC generations are awaiting the first Blockzilla ACK"
+                        );
+                        break;
+                    }
+                    GrpcRawLocalGcOutcome::NothingToRetire => break,
+                }
+            }
+            (
+                retired_generation_count == MAX_ACK_GC_GENERATIONS_PER_PASS,
+                busy,
+            )
+        };
+        if gc_batch_was_full {
+            // Never strand an ACK-covered generation merely because one maintenance batch hit
+            // its fairness cap. Re-enter GC before attaching to the active cursor, which may stay
+            // open indefinitely on a healthy live stream.
+            tokio::task::yield_now().await;
+            continue 'replication;
+        }
+
         // Discovery and cursor opening share one rotation lock. Keeping each cursor alive pins
         // its exact stream identity even if the active pathname rotates while older generations
         // are still draining.
@@ -1116,6 +1186,15 @@ async fn replicate_grpc_raw(args: ReplicateGrpcRawArgs) -> Result<()> {
         completed_sealed_generations.retain(|stream| present_sealed_generations.contains(stream));
 
         for generation in prepared {
+            if !generation.discovered_sealed && gc_was_busy {
+                // Sealed generations may still be read and ACKed while the uploader owns the
+                // mutation lock. Do not attach indefinitely to the active tail until GC gets a
+                // chance to consume those ACKs after the uploader releases it.
+                if replication_wait_or_shutdown(poll_interval, &mut shutdown).await {
+                    break 'replication;
+                }
+                continue 'replication;
+            }
             if generation.discovered_sealed {
                 if let Some(through_sequence) = locally_durable_through.get(&generation.stream) {
                     if generation
@@ -1160,6 +1239,10 @@ async fn replicate_grpc_raw(args: ReplicateGrpcRawArgs) -> Result<()> {
             {
                 ReplicateGenerationOutcome::SealedCaughtUp => {
                     completed_sealed_generations.insert(generation.physical_stream);
+                    // The ACK that made this generation caught up was just fsynced. Re-enter the
+                    // oldest-first GC pass immediately instead of draining all later generations
+                    // and then polling the active tail forever.
+                    continue 'replication;
                 }
                 ReplicateGenerationOutcome::Shutdown => break 'replication,
             }

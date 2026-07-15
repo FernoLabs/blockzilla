@@ -203,6 +203,7 @@ GENERATION_RECEIPT_DIR=$CACHE_ROOT/receipts
 GENERATION_MONITORING_DIR=$CACHE_ROOT/monitoring
 GENERATION_ROTATION_MARKER=$CACHE_ROOT/.rotation
 GENERATION_ROTATION_LOCK=$CACHE_ROOT/.rotation.lock
+GENERATION_RETENTION_LOCK=$CACHE_ROOT/.retention.lock
 B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 REPLAY_RECOVERY_FILE=$GENERATION_MONITORING_DIR/replay-recovery-floor.json
 REPLAY_GAP_DIR=$ACTIVE_GENERATION_DIR/replay-gaps
@@ -629,6 +630,81 @@ mock_uploader_calls=$fixture_root/uploader-calls
 : > "$mock_uploader_calls"
 MOCK_UPLOADER_CALL_LOG=$mock_uploader_calls
 export MOCK_UPLOADER_CALL_LOG
+
+# The upload path never follows a retention-lock symlink or mutates its target.
+retention_lock_target=$fixture_root/retention-lock-target
+printf '%s\n' keep > "$retention_lock_target"
+ln -s "$retention_lock_target" "$GENERATION_RETENTION_LOCK"
+retention_lock_calls_before=$(grep -c '^command=upload-generation$' \
+  "$mock_uploader_calls" || true)
+if upload_one_generation; then
+  echo "upload accepted a symlink retention lock" >&2
+  exit 1
+fi
+test "$(cat "$retention_lock_target")" = keep
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls" || true)" \
+  -eq "$retention_lock_calls_before"
+rm -f "$GENERATION_RETENTION_LOCK"
+
+# An existing lock must already be private. The uploader never repairs or
+# silently trusts a group/world-accessible coordination inode.
+: > "$GENERATION_RETENTION_LOCK"
+chmod 0644 "$GENERATION_RETENTION_LOCK"
+if upload_one_generation; then
+  echo "upload accepted a non-private retention lock" >&2
+  exit 1
+fi
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls" || true)" \
+  -eq "$retention_lock_calls_before"
+rm -f "$GENERATION_RETENTION_LOCK"
+
+# Selection and upload wait behind the same exclusive cache-root lock that the
+# Rust ACK-GC uses while renaming or deleting sealed generations.
+MOCK_UPLOAD_RESULT=failure
+export MOCK_UPLOAD_RESULT
+retention_holder_ready=$fixture_root/retention-holder-ready
+"$GENERATION_PYTHON_BIN" - "$GENERATION_RETENTION_LOCK" \
+  "$retention_holder_ready" <<'PY' &
+import fcntl
+import os
+import sys
+import time
+
+descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(descriptor, fcntl.LOCK_EX)
+with open(sys.argv[2], "w", encoding="ascii") as marker:
+    marker.write("ready\n")
+time.sleep(1)
+os.close(descriptor)
+PY
+retention_holder_pid=$!
+for _ in $(seq 1 100); do
+  [ -s "$retention_holder_ready" ] && break
+  sleep 0.01
+done
+test -s "$retention_holder_ready"
+retention_blocked_started=$fixture_root/retention-blocked-started
+(
+  printf '%s\n' started > "$retention_blocked_started"
+  upload_one_generation
+) &
+retention_blocked_pid=$!
+for _ in $(seq 1 100); do
+  [ -s "$retention_blocked_started" ] && break
+  sleep 0.01
+done
+test -s "$retention_blocked_started"
+sleep 0.2
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls" || true)" \
+  -eq "$retention_lock_calls_before"
+wait "$retention_holder_pid"
+set +e
+wait "$retention_blocked_pid"
+retention_blocked_status=$?
+set -e
+test "$retention_blocked_status" -eq 1
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls")" \
+  -eq $((retention_lock_calls_before + 1))
 
 # The account-usage worker must retain the uploader's typed capacity status so
 # it selects the same slow backoff as the generation worker.

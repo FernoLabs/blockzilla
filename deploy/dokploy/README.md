@@ -48,9 +48,10 @@ the block enters the bounded RAM fan-out ring. A normal generation is capped at
    published only after all remote verification succeeds. It proves the R2 copy,
    not Blockzilla synchronization. Local or remote deletion additionally
    requires a valid signed Blockzilla durable ACK for the exact generation.
-   The signed receiver/sender protocol is implemented and locally tested, but
-   production GC is not wired; both cleanup paths remain locked and capture
-   pauses at the hard local floor.
+   The signed receiver/sender protocol and crash-recoverable local ACK cleanup
+   are implemented and locally tested. They are not present in the current
+   production Compose deployment; production local cleanup and all remote
+   cleanup therefore remain locked, and capture pauses at the hard local floor.
 
 Routine R2 publication performs conditional PUT plus metadata HEAD, but no
 payload GET. Re-downloading every generation during upload previously consumed
@@ -91,7 +92,7 @@ Yellowstone reader is still missing. Until the receiver route and sender are
 deployed, Blockzilla must remain stopped rather than silently starting a second
 paid full-block subscription.
 
-The current recorder/backup layer:
+The current production recorder/backup layer:
 
 - it can alert when the Yellowstone feed stalls, the recorder restarts, the
   cache is invalid, a pressure-triggered R2 spill fails, or the hard
@@ -101,12 +102,13 @@ The current recorder/backup layer:
   only to restore a primary backlog;
 - it can create and verify R2 upload receipts, but those receipts have no local
   or remote deletion authority;
-- Blockzilla's durable raw receiver and Hetzner sender are not deployed, and no
-  worker consumes the durable ACK WAL for GC, so both local eviction and remote
-  pruning remain locked.
+- Blockzilla's durable raw receiver and Hetzner sender are not deployed, so no
+  production worker consumes the durable ACK WAL. The tested sender now owns
+  local oldest-first ACK cleanup, but production local eviction and remote
+  pruning remain locked until that sender/receiver route is deployed.
 
-The next deployment step adds ACK-driven retention without changing the
-WAL-first hot path.
+The next deployment step activates the implemented ACK-driven local retention
+without changing the WAL-first hot path.
 Blockzilla fsyncs the exact raw WAL and cursor, then signs a cumulative
 sequence/digest-chain receipt. Hetzner verifies and fsyncs that ACK before a
 whole generation becomes eligible for local or R2 cleanup. The bounded RAM ring
@@ -225,7 +227,7 @@ BLOCKZILLA_R2_RETENTION_CHECK_INTERVAL_SECS=3600
 
 The retention trigger/target values currently drive planning and alerts only.
 Setting `BLOCKZILLA_R2_RETENTION_ENABLED=true` must not enable deletion while the
-signed Blockzilla ACK implementation is absent.
+signed ACK-to-R2 manifest/prune apply path is absent.
 
 ### Private downstream relay contract
 
@@ -303,8 +305,9 @@ Wait for at least one complete rotation. A healthy local-only check requires:
   its safety copy, manifest, and commit hashes/ETags were verified;
 - crossing the spill-start watermark may copy a generation to R2 but must not
   remove its local directory without a signed Blockzilla ACK;
-- before the ACK implementation is deployed, pressure reaches the hard floor
-  and pauses capture rather than deleting a local or remote generation;
+- before the ACK sender/receiver and local GC are deployed, pressure reaches the
+  hard floor and pauses capture rather than deleting a local or remote
+  generation;
 - the remote prefix is
   `live-grpc-backup/v1/<cluster>/<origin>/slot-<20-digit-slot>/`;
 - after signed ACK cleanup is deployed, a valid ACK can return free space above
