@@ -1,3 +1,4 @@
+use super::ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES;
 use anyhow::{Context, Result};
 use std::{
     fs::File,
@@ -17,6 +18,8 @@ pub const ARCHIVE_V2_SHREDDING_FILE: &str = "shredding.wincode";
 pub const ARCHIVE_V2_PUBKEY_REGISTRY_FILE: &str = "registry.bin";
 pub const ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE: &str = "registry_counts.bin";
 pub const ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE: &str = "registry.mphf";
+pub const ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE: &str = "registry-first-seen.manifest";
+pub const ARCHIVE_V2_PUBKEY_HOT_SEED_FILE: &str = "registry-hot-seed.bin";
 pub const ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
 pub const ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE: &str = "blockhash_index_v3.bin";
 pub const ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE: &str = "prev_blockhash_tail.bin";
@@ -194,6 +197,15 @@ pub fn write_archive_v2_block_access_index(
     flags: u32,
     rows: &[ArchiveV2BlockAccessIndexRow],
 ) -> Result<()> {
+    for row in rows {
+        anyhow::ensure!(
+            u64::from(row.access_len) <= ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+            "block-access index row {} advertises {} bytes, exceeding the shared {} byte limit",
+            row.block_id,
+            row.access_len,
+            ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES
+        );
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create output dir {}", parent.display()))?;
@@ -232,6 +244,14 @@ pub fn write_archive_v2_get_block_index(
     path: &Path,
     rows: &[ArchiveV2GetBlockIndexRow],
 ) -> Result<()> {
+    for (slot_offset, row) in rows.iter().enumerate() {
+        anyhow::ensure!(
+            u64::from(row.access_len) <= ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+            "get-block index row {slot_offset} advertises {} access bytes, exceeding the shared {} byte limit",
+            row.access_len,
+            ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES
+        );
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create output dir {}", parent.display()))?;
@@ -363,14 +383,23 @@ pub fn read_archive_v2_block_access_index(path: &Path) -> Result<ArchiveV2BlockA
         reader
             .read_exact(&mut row_buf)
             .with_context(|| format!("read row from {}", path.display()))?;
-        rows.push(ArchiveV2BlockAccessIndexRow {
+        let row = ArchiveV2BlockAccessIndexRow {
             block_id: u32::from_le_bytes(row_buf[0..4].try_into().unwrap()),
             slot: u64::from_le_bytes(row_buf[4..12].try_into().unwrap()),
             access_offset: u64::from_le_bytes(row_buf[12..20].try_into().unwrap()),
             access_len: u32::from_le_bytes(row_buf[20..24].try_into().unwrap()),
             tx_count: u32::from_le_bytes(row_buf[24..28].try_into().unwrap()),
             signature_count: u32::from_le_bytes(row_buf[28..32].try_into().unwrap()),
-        });
+        };
+        anyhow::ensure!(
+            u64::from(row.access_len) <= ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+            "{} block-access row {} advertises {} bytes, exceeding the shared {} byte limit",
+            path.display(),
+            row.block_id,
+            row.access_len,
+            ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES
+        );
+        rows.push(row);
     }
     Ok(ArchiveV2BlockAccessIndex {
         blob_file_bytes,
@@ -397,16 +426,24 @@ pub fn read_archive_v2_get_block_index(path: &Path) -> Result<ArchiveV2GetBlockI
 
     let mut rows = Vec::with_capacity(row_count_usize);
     let mut row_buf = [0u8; ARCHIVE_V2_GET_BLOCK_INDEX_ROW_LEN];
-    for _ in 0..row_count_usize {
+    for slot_offset in 0..row_count_usize {
         reader
             .read_exact(&mut row_buf)
             .with_context(|| format!("read row from {}", path.display()))?;
-        rows.push(ArchiveV2GetBlockIndexRow {
+        let row = ArchiveV2GetBlockIndexRow {
             block_offset: u64::from_le_bytes(row_buf[0..8].try_into().unwrap()),
             block_len: u32::from_le_bytes(row_buf[8..12].try_into().unwrap()),
             access_offset: u64::from_le_bytes(row_buf[12..20].try_into().unwrap()),
             access_len: u32::from_le_bytes(row_buf[20..24].try_into().unwrap()),
-        });
+        };
+        anyhow::ensure!(
+            u64::from(row.access_len) <= ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+            "{} get-block row {slot_offset} advertises {} access bytes, exceeding the shared {} byte limit",
+            path.display(),
+            row.access_len,
+            ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES
+        );
+        rows.push(row);
     }
     Ok(ArchiveV2GetBlockIndex { rows })
 }
@@ -550,6 +587,79 @@ mod tests {
             assert_eq!(actual.access_offset, expected.access_offset);
             assert_eq!(actual.access_len, expected.access_len);
         }
+    }
+
+    #[test]
+    fn archive_v2_access_indexes_reject_frames_above_shared_limit() {
+        let oversized = u32::try_from(ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES)
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
+        let access_path = std::env::temp_dir().join(format!(
+            "blockzilla-access-index-oversized-{}-{}.index",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let access_row = ArchiveV2BlockAccessIndexRow {
+            block_id: 7,
+            slot: 42,
+            access_offset: 0,
+            access_len: oversized,
+            tx_count: 0,
+            signature_count: 0,
+        };
+        let error = write_archive_v2_block_access_index(
+            &access_path,
+            u64::from(oversized),
+            0,
+            &[access_row],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeding the shared"));
+        assert!(!access_path.exists());
+        let mut encoded_access_index = Vec::new();
+        encoded_access_index.extend_from_slice(ARCHIVE_V2_BLOCK_ACCESS_INDEX_MAGIC);
+        encoded_access_index
+            .extend_from_slice(&ARCHIVE_V2_BLOCK_ACCESS_INDEX_VERSION.to_le_bytes());
+        encoded_access_index.extend_from_slice(&0u16.to_le_bytes());
+        encoded_access_index.extend_from_slice(&1u64.to_le_bytes());
+        encoded_access_index.extend_from_slice(&u64::from(oversized).to_le_bytes());
+        encoded_access_index.extend_from_slice(&0u32.to_le_bytes());
+        encoded_access_index.extend_from_slice(&access_row.block_id.to_le_bytes());
+        encoded_access_index.extend_from_slice(&access_row.slot.to_le_bytes());
+        encoded_access_index.extend_from_slice(&access_row.access_offset.to_le_bytes());
+        encoded_access_index.extend_from_slice(&access_row.access_len.to_le_bytes());
+        encoded_access_index.extend_from_slice(&access_row.tx_count.to_le_bytes());
+        encoded_access_index.extend_from_slice(&access_row.signature_count.to_le_bytes());
+        std::fs::write(&access_path, encoded_access_index).unwrap();
+        let error = read_archive_v2_block_access_index(&access_path).unwrap_err();
+        assert!(error.to_string().contains("exceeding the shared"));
+        std::fs::remove_file(&access_path).unwrap();
+
+        let get_block_path = std::env::temp_dir().join(format!(
+            "blockzilla-get-block-index-oversized-{}-{}.index",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let get_block_row = ArchiveV2GetBlockIndexRow {
+            block_offset: 0,
+            block_len: 1,
+            access_offset: 0,
+            access_len: oversized,
+        };
+        let error =
+            write_archive_v2_get_block_index(&get_block_path, &[get_block_row]).unwrap_err();
+        assert!(error.to_string().contains("exceeding the shared"));
+        assert!(!get_block_path.exists());
+        let mut encoded_get_block_index = Vec::new();
+        encoded_get_block_index.extend_from_slice(&get_block_row.block_offset.to_le_bytes());
+        encoded_get_block_index.extend_from_slice(&get_block_row.block_len.to_le_bytes());
+        encoded_get_block_index.extend_from_slice(&get_block_row.access_offset.to_le_bytes());
+        encoded_get_block_index.extend_from_slice(&get_block_row.access_len.to_le_bytes());
+        std::fs::write(&get_block_path, encoded_get_block_index).unwrap();
+        let error = read_archive_v2_get_block_index(&get_block_path).unwrap_err();
+        assert!(error.to_string().contains("exceeding the shared"));
+        std::fs::remove_file(&get_block_path).unwrap();
     }
 
     fn unique_suffix() -> u128 {

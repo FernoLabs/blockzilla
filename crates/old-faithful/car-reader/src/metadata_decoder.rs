@@ -246,9 +246,12 @@ pub struct ZstdReusableDecoder {
     decoder: FrameDecoder,
     len: usize,
     out: Vec<u8>,
+    #[cfg(test)]
+    growth_events: usize,
 }
 
 const INITIAL_ZSTD_OUTPUT_BYTES: usize = 128 * 1024;
+const ZSTD_OUTPUT_TRIM_THRESHOLD_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(any(feature = "zstd-native", feature = "zstd-wasm"))]
 const MAX_ZSTD_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 
@@ -265,13 +268,43 @@ impl ZstdReusableDecoder {
             dctx: zstd::zstd_safe::DCtx::create(),
             #[cfg(all(feature = "zstd-wasm", not(feature = "zstd-native")))]
             decoder: FrameDecoder::new(),
-            out: vec![0; INITIAL_ZSTD_OUTPUT_BYTES],
+            // `zstd-safe::WriteBuf for Vec<u8>` writes into spare capacity and
+            // sets the initialized length after a successful native decode.
+            // Keeping the length at zero avoids needlessly zero-filling this
+            // reusable output allocation.
+            out: Vec::with_capacity(INITIAL_ZSTD_OUTPUT_BYTES),
             len: 0,
+            #[cfg(test)]
+            growth_events: 0,
         }
     }
     #[inline]
     pub fn output(&self) -> &[u8] {
         &self.out[..self.len]
+    }
+
+    /// Release an unusually large output allocation after finishing a unit of work.
+    ///
+    /// Normal-sized buffers remain allocated for reuse. If the retained allocation exceeds
+    /// 32 MiB, this restores the decoder to its initial 128 KiB output buffer and returns `true`.
+    /// Callers can use the return value for optional trim accounting.
+    #[inline]
+    pub fn trim_oversized_output(&mut self) -> bool {
+        if self.out.capacity() <= ZSTD_OUTPUT_TRIM_THRESHOLD_BYTES {
+            return false;
+        }
+
+        self.out = Vec::with_capacity(INITIAL_ZSTD_OUTPUT_BYTES);
+        self.len = 0;
+        #[cfg(feature = "zstd-native")]
+        {
+            self.dctx = zstd::zstd_safe::DCtx::create();
+        }
+        #[cfg(all(feature = "zstd-wasm", not(feature = "zstd-native")))]
+        {
+            self.decoder = FrameDecoder::new();
+        }
+        true
     }
 
     /// If `input` is zstd, decompress into the internal buffer and return Ok(true).
@@ -296,10 +329,12 @@ impl ZstdReusableDecoder {
                 Err(code) => {
                     let name = zstd_safe::get_error_name(code);
                     if name.contains("Destination buffer is too small")
-                        && self.out.len() < MAX_ZSTD_OUTPUT_BYTES
+                        && grow_zstd_output_buffer(&mut self.out)
                     {
-                        let next_len = self.out.len().saturating_mul(2).min(MAX_ZSTD_OUTPUT_BYTES);
-                        self.out.resize(next_len, 0);
+                        #[cfg(test)]
+                        {
+                            self.growth_events += 1;
+                        }
                         self.dctx = zstd::zstd_safe::DCtx::create();
                         continue;
                     }
@@ -309,7 +344,7 @@ impl ZstdReusableDecoder {
                         format!(
                             "zstd decode failed: {name} (raw={code}) input {} buffer {}",
                             input.len(),
-                            self.out.len()
+                            self.out.capacity()
                         ),
                     ));
                 }
@@ -321,8 +356,7 @@ impl ZstdReusableDecoder {
     fn decompress_zstd_frame(&mut self, input: &[u8]) -> Result<(), std::io::Error> {
         self.out.clear();
         if self.out.capacity() < INITIAL_ZSTD_OUTPUT_BYTES {
-            self.out
-                .reserve(INITIAL_ZSTD_OUTPUT_BYTES - self.out.capacity());
+            reserve_zstd_output_capacity(&mut self.out, INITIAL_ZSTD_OUTPUT_BYTES);
         }
 
         loop {
@@ -334,14 +368,12 @@ impl ZstdReusableDecoder {
                 Err(FrameDecoderError::TargetTooSmall)
                     if self.out.capacity() < MAX_ZSTD_OUTPUT_BYTES =>
                 {
-                    let next_capacity = self
-                        .out
-                        .capacity()
-                        .max(INITIAL_ZSTD_OUTPUT_BYTES)
-                        .saturating_mul(2)
-                        .min(MAX_ZSTD_OUTPUT_BYTES);
-                    self.out.reserve(next_capacity - self.out.capacity());
-                    self.out.clear();
+                    let grew = grow_zstd_output_buffer(&mut self.out);
+                    debug_assert!(grew, "zstd output below maximum must grow");
+                    #[cfg(test)]
+                    {
+                        self.growth_events += usize::from(grew);
+                    }
                     self.decoder = FrameDecoder::new();
                 }
                 Err(err) => {
@@ -367,6 +399,36 @@ impl ZstdReusableDecoder {
             "of-car-reader was built without a zstd backend; enable zstd-native or zstd-wasm",
         ))
     }
+}
+
+#[cfg(any(feature = "zstd-native", feature = "zstd-wasm"))]
+#[inline]
+fn reserve_zstd_output_capacity(output: &mut Vec<u8>, target_capacity: usize) {
+    if output.capacity() >= target_capacity {
+        return;
+    }
+
+    output.clear();
+    // `reserve_exact` takes an additional length, not a capacity delta.
+    // With an empty vector, requesting the target guarantees that much total
+    // writable capacity without initializing it.
+    output.reserve_exact(target_capacity);
+}
+
+#[cfg(any(feature = "zstd-native", feature = "zstd-wasm"))]
+#[inline]
+fn grow_zstd_output_buffer(output: &mut Vec<u8>) -> bool {
+    let current_capacity = output.capacity();
+    if current_capacity >= MAX_ZSTD_OUTPUT_BYTES {
+        return false;
+    }
+
+    let next_capacity = current_capacity
+        .max(INITIAL_ZSTD_OUTPUT_BYTES)
+        .saturating_mul(2)
+        .min(MAX_ZSTD_OUTPUT_BYTES);
+    reserve_zstd_output_capacity(output, next_capacity);
+    output.capacity() > current_capacity
 }
 
 /// Decode TransactionStatusMeta from a "frame" (possibly zstd-compressed; possibly empty).
@@ -1108,6 +1170,113 @@ pub const fn slot_uses_protobuf_metadata(slot: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zstd_output_trim_preserves_normal_reuse() {
+        let mut decoder = ZstdReusableDecoder::new();
+        decoder.out.extend_from_slice(b"old");
+        decoder.len = 3;
+        let allocation = decoder.out.as_ptr();
+        let capacity = decoder.out.capacity();
+
+        assert!(!decoder.trim_oversized_output());
+        assert_eq!(decoder.out.as_ptr(), allocation);
+        assert_eq!(decoder.out.capacity(), capacity);
+        assert_eq!(decoder.output(), b"old");
+    }
+
+    #[test]
+    fn zstd_output_trim_only_trims_above_threshold() {
+        let mut decoder = ZstdReusableDecoder::new();
+        decoder.out = Vec::with_capacity(ZSTD_OUTPUT_TRIM_THRESHOLD_BYTES);
+        let allocation = decoder.out.as_ptr();
+
+        assert!(!decoder.trim_oversized_output());
+        assert_eq!(decoder.out.as_ptr(), allocation);
+        assert_eq!(decoder.out.capacity(), ZSTD_OUTPUT_TRIM_THRESHOLD_BYTES);
+
+        decoder.out = Vec::with_capacity(ZSTD_OUTPUT_TRIM_THRESHOLD_BYTES + 1);
+        assert!(decoder.trim_oversized_output());
+        assert!(decoder.out.is_empty());
+        assert_eq!(decoder.out.capacity(), INITIAL_ZSTD_OUTPUT_BYTES);
+        assert!(decoder.output().is_empty());
+    }
+
+    #[cfg(any(feature = "zstd-native", feature = "zstd-wasm"))]
+    #[test]
+    fn zstd_decoder_decodes_after_oversized_output_trim() {
+        const EXPECTED: &[u8] = b"decoder works after trim";
+        const COMPRESSED: &[u8] = &[
+            40, 181, 47, 253, 4, 72, 193, 0, 0, 100, 101, 99, 111, 100, 101, 114, 32, 119, 111,
+            114, 107, 115, 32, 97, 102, 116, 101, 114, 32, 116, 114, 105, 109, 172, 96, 239, 190,
+        ];
+        let mut decoder = ZstdReusableDecoder::new();
+        decoder.out = Vec::with_capacity(ZSTD_OUTPUT_TRIM_THRESHOLD_BYTES + 1);
+
+        assert!(decoder.trim_oversized_output());
+        assert!(decoder.decompress_if_zstd(COMPRESSED).unwrap());
+        assert_eq!(decoder.output(), EXPECTED);
+    }
+
+    #[cfg(feature = "zstd-native")]
+    fn deterministic_incompressible_bytes(len: usize) -> Vec<u8> {
+        let mut state = 0xd1b5_4a32_d192_ed03u64;
+        let mut bytes = Vec::with_capacity(len);
+        for _ in 0..len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.push((state >> 24) as u8);
+        }
+        bytes
+    }
+
+    #[cfg(feature = "zstd-native")]
+    #[test]
+    fn native_zstd_decoder_grows_after_empty_frame() {
+        let empty = zstd::bulk::compress(&[], 1).unwrap();
+        let large = deterministic_incompressible_bytes(INITIAL_ZSTD_OUTPUT_BYTES * 3 + 17);
+        let compressed_large = zstd::bulk::compress(&large, 1).unwrap();
+        let mut decoder = ZstdReusableDecoder::new();
+
+        assert!(decoder.decompress_if_zstd(&empty).unwrap());
+        assert!(decoder.output().is_empty());
+        assert_eq!(decoder.out.len(), 0);
+
+        let growth_events = decoder.growth_events;
+        assert!(decoder.decompress_if_zstd(&compressed_large).unwrap());
+        assert_eq!(decoder.output(), large);
+        let growth_events = decoder.growth_events - growth_events;
+        assert!(growth_events > 0);
+        assert!(
+            growth_events <= 2,
+            "unexpected growth retries: {growth_events}"
+        );
+    }
+
+    #[cfg(feature = "zstd-native")]
+    #[test]
+    fn native_zstd_decoder_grows_from_capacity_after_small_frame() {
+        let small = zstd::bulk::compress(b"small decoded frame", 1).unwrap();
+        let mut decoder = ZstdReusableDecoder::new();
+
+        assert!(decoder.decompress_if_zstd(&small).unwrap());
+        assert_eq!(decoder.output(), b"small decoded frame");
+        let starting_capacity = decoder.out.capacity();
+        let large = deterministic_incompressible_bytes(starting_capacity * 2 + 17);
+        let compressed_large = zstd::bulk::compress(&large, 1).unwrap();
+
+        let growth_events = decoder.growth_events;
+        assert!(decoder.decompress_if_zstd(&compressed_large).unwrap());
+        assert_eq!(decoder.output(), large);
+        let growth_events = decoder.growth_events - growth_events;
+        assert!(growth_events > 0);
+        assert!(
+            growth_events <= 2,
+            "unexpected growth retries: {growth_events}"
+        );
+        assert!(decoder.out.capacity() >= decoder.output().len());
+    }
 
     #[test]
     fn borrowed_protobuf_decode_reuses_input_for_strings_and_bytes() {

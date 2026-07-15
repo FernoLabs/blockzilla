@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use blockzilla_format::{
     ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
+    ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
+    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
     ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
     ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE, ArchiveV2BlockAccessBlob, ArchiveV2BlockAccessBlockhash,
     ArchiveV2BlockAccessIndexRow, ArchiveV2BlockAccessPubkey, ArchiveV2BlockAccessVoteHash,
@@ -249,6 +250,14 @@ fn main() -> Result<()> {
             &new_access,
             wincode_leb128_config(),
         )?;
+        anyhow::ensure!(
+            u64::try_from(new_access_bytes.len()).context("new access payload size exceeds u64")?
+                <= ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES,
+            "new access payload for block_id {} is {} bytes, exceeding the shared {} byte limit",
+            hot_row.block_id,
+            new_access_bytes.len(),
+            ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES
+        );
         let access_len =
             u32::try_from(new_access_bytes.len()).context("new access payload exceeds u32::MAX")?;
         output_access

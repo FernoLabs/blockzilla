@@ -16,6 +16,7 @@ use crate::CompactPubkey;
 const KEY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
 const KEY_INDEX_VERSION: u16 = 2;
 const KEY_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8;
+const REGISTRY_IO_BUFFER_SIZE: usize = 8 << 20;
 
 pub struct KeyIndex {
     /// Minimal perfect hash over all pubkeys
@@ -35,6 +36,53 @@ pub struct KeyIndex {
     ids: HashMap<[u8; 32], u32>,
 }
 
+pub trait PubkeyCompactor {
+    fn compact_str(&self, k: &str) -> Option<CompactPubkey>;
+}
+
+pub struct RawPubkeyCompactor;
+
+impl PubkeyCompactor for RawPubkeyCompactor {
+    #[inline]
+    fn compact_str(&self, k: &str) -> Option<CompactPubkey> {
+        let bytes = known_raw_pubkey(k).or_else(|| decode_pubkey_base58_32(k))?;
+        Some(CompactPubkey::raw(bytes))
+    }
+}
+
+#[inline]
+fn decode_pubkey_base58_32(k: &str) -> Option<[u8; 32]> {
+    let mut bytes = [0u8; 32];
+    five8::decode_32(k, &mut bytes).ok()?;
+    Some(bytes)
+}
+
+#[inline]
+fn known_raw_pubkey(k: &str) -> Option<[u8; 32]> {
+    let pk = match k {
+        "11111111111111111111111111111111" => {
+            solana_pubkey::pubkey!("11111111111111111111111111111111")
+        }
+        "ComputeBudget111111111111111111111111111111" => {
+            solana_pubkey::pubkey!("ComputeBudget111111111111111111111111111111")
+        }
+        "Vote111111111111111111111111111111111111111" => {
+            solana_pubkey::pubkey!("Vote111111111111111111111111111111111111111")
+        }
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" => {
+            solana_pubkey::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        }
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" => {
+            solana_pubkey::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+        }
+        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => {
+            solana_pubkey::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+        }
+        _ => return None,
+    };
+    Some(pk.to_bytes())
+}
+
 impl KeyIndex {
     /// Build index over keys in file order.
     ///
@@ -49,24 +97,9 @@ impl KeyIndex {
     pub fn build_from_slice(keys_in_file_order: &[[u8; 32]]) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let n = keys_in_file_order.len();
-
             // MPHF build
             let mphf: fmph::GOFunction = keys_in_file_order.into();
-
-            let mut values = vec![0u32; n];
-            let mut tags = vec![0u64; n];
-
-            for (i, k) in keys_in_file_order.iter().enumerate() {
-                let id = i as u32 + 1;
-
-                let idx = mphf.get_or_panic(k) as usize;
-                debug_assert!(idx < n);
-                values[idx] = id;
-                tags[idx] = key_tag(k);
-            }
-
-            Self { mphf, values, tags }
+            Self::from_mphf_and_keys(mphf, keys_in_file_order)
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -79,6 +112,41 @@ impl KeyIndex {
                 .collect();
             Self { ids }
         }
+    }
+
+    /// Build an index without caching one `u64` hash per key during MPHF
+    /// construction. This is slower than [`Self::build_from_slice`], but avoids
+    /// an 8-byte-per-key peak allocation and is intended for full-epoch
+    /// registries that are already backed by immutable storage.
+    pub fn build_from_slice_low_memory(keys_in_file_order: &[[u8; 32]]) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let conf = fmph::GOBuildConf::with_ct(fmph::GOConf::default(), 0);
+            let mphf = fmph::GOFunction::from_slice_with_conf(keys_in_file_order, conf);
+            Self::from_mphf_and_keys(mphf, keys_in_file_order)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::build_from_slice(keys_in_file_order)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn from_mphf_and_keys(mphf: fmph::GOFunction, keys_in_file_order: &[[u8; 32]]) -> Self {
+        let n = keys_in_file_order.len();
+        let mut values = vec![0u32; n];
+        let mut tags = vec![0u64; n];
+
+        for (i, k) in keys_in_file_order.iter().enumerate() {
+            let id = i as u32 + 1;
+            let idx = mphf.get_or_panic(k) as usize;
+            debug_assert!(idx < n);
+            values[idx] = id;
+            tags[idx] = key_tag(k);
+        }
+
+        Self { mphf, values, tags }
     }
 
     #[inline]
@@ -102,7 +170,7 @@ impl KeyIndex {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn write(&self, path: &Path) -> Result<()> {
         let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
-        let mut writer = BufWriter::with_capacity(64 << 20, file);
+        let mut writer = BufWriter::with_capacity(REGISTRY_IO_BUFFER_SIZE, file);
         writer.write_all(KEY_INDEX_MAGIC)?;
         writer.write_all(&KEY_INDEX_VERSION.to_le_bytes())?;
         writer.write_all(&(KEY_INDEX_HEADER_LEN as u16).to_le_bytes())?;
@@ -125,7 +193,7 @@ impl KeyIndex {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let mut reader = BufReader::with_capacity(64 << 20, file);
+        let mut reader = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, file);
 
         let mut magic = [0u8; 8];
         reader.read_exact(&mut magic)?;
@@ -213,6 +281,13 @@ impl KeyIndex {
     }
 }
 
+impl PubkeyCompactor for KeyIndex {
+    #[inline]
+    fn compact_str(&self, k: &str) -> Option<CompactPubkey> {
+        KeyIndex::compact_str(self, k)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn key_tag(key: &[u8; 32]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -276,7 +351,7 @@ impl KeyStore {
         );
 
         let n = len_bytes / 32;
-        let mut r = BufReader::with_capacity(64 << 20, f);
+        let mut r = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, f);
 
         let mut keys = Vec::with_capacity(n);
         for _ in 0..n {
@@ -291,11 +366,19 @@ impl KeyStore {
 
 /// Write registry.bin (raw 32-byte pubkeys, no header)
 pub fn write_registry(path: &Path, keys: &[[u8; 32]]) -> Result<()> {
+    write_registry_iter(path, keys.iter().copied())
+}
+
+/// Write registry.bin from a streaming key source.
+pub fn write_registry_iter<I>(path: &Path, keys: I) -> Result<()>
+where
+    I: IntoIterator<Item = [u8; 32]>,
+{
     let f = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
-    let mut w = BufWriter::with_capacity(64 << 20, f);
+    let mut w = BufWriter::with_capacity(REGISTRY_IO_BUFFER_SIZE, f);
 
     for k in keys {
-        w.write_all(k).context("write pubkey")?;
+        w.write_all(&k).context("write pubkey")?;
     }
 
     w.flush().context("flush registry")?;
@@ -344,5 +427,50 @@ mod tests {
         assert_eq!(loaded.lookup(&second), Some(2));
         assert_eq!(loaded.lookup(&third), Some(3));
         assert_eq!(loaded.lookup(&missing), None);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn low_memory_key_index_is_deterministic_and_format_compatible() {
+        let keys = (0u64..10_000)
+            .map(|value| {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&value.to_le_bytes());
+                key[8..16].copy_from_slice(&value.wrapping_mul(17).to_be_bytes());
+                key
+            })
+            .collect::<Vec<_>>();
+        let default = KeyIndex::build_from_slice(&keys);
+        let low_memory_a = KeyIndex::build_from_slice_low_memory(&keys);
+        let low_memory_b = KeyIndex::build_from_slice_low_memory(&keys);
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-low-memory-key-index-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let default_path = root.join("default.mphf");
+        let low_a_path = root.join("low-a.mphf");
+        let low_b_path = root.join("low-b.mphf");
+        default.write(&default_path).unwrap();
+        low_memory_a.write(&low_a_path).unwrap();
+        low_memory_b.write(&low_b_path).unwrap();
+
+        let default_bytes = std::fs::read(&default_path).unwrap();
+        let low_a_bytes = std::fs::read(&low_a_path).unwrap();
+        let low_b_bytes = std::fs::read(&low_b_path).unwrap();
+        assert_eq!(low_a_bytes, low_b_bytes);
+        assert_eq!(low_a_bytes, default_bytes);
+
+        let loaded = KeyIndex::load(&low_a_path).unwrap();
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(loaded.lookup(key), Some(index as u32 + 1));
+        }
+        assert_eq!(loaded.lookup(&[0xff; 32]), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

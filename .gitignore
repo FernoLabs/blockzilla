@@ -12,6 +12,13 @@
 /personal/
 /piggy-analysis/
 /local-slices/
+.env
+.env.*
+*.env
+yellowstone-x-token
+telegram-bot-token
+!.env.example
+!**/.env.example
 account-index-local/
 account-index-local-merged/
 touched-accounts/
@@ -31,6 +38,7 @@ Thumbs.db
 solana-prog/
 
 # Generated outputs
+/tmp/
 /.wrangler/
 **/.wrangler/
 /flamegraph.svg

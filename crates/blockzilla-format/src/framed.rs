@@ -149,4 +149,49 @@ impl<R: Read> WincodeLeb128FramedReader<R> {
         self.reader.read_exact(&mut self.buf)?;
         Ok(Some((len, self.buf.clone())))
     }
+
+    #[inline]
+    pub fn read_bytes_with<T>(
+        &mut self,
+        f: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<Option<(usize, T)>> {
+        self.read_bytes_with_limit(usize::MAX, f)
+    }
+
+    /// Read and decode a frame only when its declared length is within the
+    /// caller's memory budget. The check happens before resizing the scratch
+    /// buffer, so a corrupt length prefix cannot trigger a huge allocation.
+    #[inline]
+    pub fn read_bytes_with_limit<T>(
+        &mut self,
+        max_len: usize,
+        f: impl FnOnce(&[u8]) -> Result<T>,
+    ) -> Result<Option<(usize, T)>> {
+        let Some(len) = read_u32_varint(&mut self.reader)? else {
+            return Ok(None);
+        };
+        let len = len as usize;
+        anyhow::ensure!(
+            len <= max_len,
+            "wincode frame length {len} exceeds configured limit {max_len}"
+        );
+        self.buf.resize(len, 0);
+        self.reader.read_exact(&mut self.buf)?;
+        let value = f(&self.buf)?;
+        Ok(Some((len, value)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limited_frame_rejects_declared_length_before_allocating_or_reading_payload() {
+        let mut prefix = Vec::new();
+        write_u32_varint(&mut prefix, 256).unwrap();
+        let mut reader = WincodeLeb128FramedReader::new(prefix.as_slice());
+        let error = reader.read_bytes_with_limit(32, |_| Ok(())).unwrap_err();
+        assert!(error.to_string().contains("exceeds configured limit"));
+    }
 }

@@ -398,18 +398,26 @@ name = "blockzilla"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bincode",
  "blockzilla-format",
  "blockzilla-log-parser",
+ "bs58",
  "clap 4.6.1",
  "data-encoding",
  "gxhash",
+ "hashbrown 0.15.5",
+ "libc",
+ "memmap2",
  "minicbor",
  "of-car-reader",
  "postcard",
  "prost",
+ "rayon",
  "reqwest",
  "serde",
+ "serde_json",
+ "sha2",
  "solana-pubkey",
  "solana-short-vec",
  "solana-vote-interface",
@@ -426,6 +434,7 @@ dependencies = [
  "anyhow",
  "blockzilla-log-parser",
  "data-encoding",
+ "five8",
  "gxhash",
  "heapless 0.9.3",
  "of-car-reader",
@@ -474,9 +483,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
+ "blockzilla-format",
  "clap 4.6.1",
+ "futures-util",
+ "libc",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tower-http",
@@ -488,24 +503,29 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
+ "base64",
  "blockzilla-format",
- "bs58",
  "clap 4.6.1",
+ "five8",
  "futures",
  "gxhash",
  "hashbrown 0.17.1",
+ "libc",
+ "of-car-reader",
  "prost",
  "reqwest",
  "rustc-hash",
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "wincode",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",
+ "zstd",
 ]
 
 [[package]]
@@ -1607,6 +1627,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -1699,6 +1721,12 @@ dependencies = [
  "http-body",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
 name = "httparse"
@@ -2318,6 +2346,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
 name = "minicbor"
 version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2555,6 +2593,7 @@ dependencies = [
  "criterion 0.8.2",
  "minicbor",
  "pb-rs",
+ "postcard",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
@@ -3390,12 +3429,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -4650,6 +4691,11 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
  "pin-project-lite",
  "tokio",
  "tokio-util",
