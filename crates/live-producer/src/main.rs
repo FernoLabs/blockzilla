@@ -15,8 +15,9 @@ use blockzilla_live_producer::{
         inspect_capture, probe_grpc, watch_grpc_epoch_boundaries,
     },
     grpc_raw::{
-        GrpcRawRecordConfig, inspect_grpc_raw_blocks, record_grpc_raw_blocks,
-        seed_grpc_raw_generation, verify_grpc_raw_poh,
+        GrpcRawMaterializeConfig, GrpcRawRecordConfig, inspect_grpc_raw_blocks,
+        materialize_grpc_raw_blocks, record_grpc_raw_blocks, seed_grpc_raw_generation,
+        verify_grpc_raw_poh,
     },
     ingest::IngestConfig,
     rpc::{
@@ -51,6 +52,8 @@ enum Command {
     VerifyGrpcRawPoh(VerifyGrpcRawPohArgs),
     /// Seed an empty rolling generation with a stopped, verified generation's durable tail.
     SeedGrpcRawGeneration(SeedGrpcRawGenerationArgs),
+    /// Materialize one committed epoch slice from a stopped raw spool into a staged capture.
+    MaterializeGrpcRaw(MaterializeGrpcRawArgs),
     SyncRpcEpoch(SyncRpcEpochArgs),
     WatchEpochsGrpc(WatchEpochsGrpcArgs),
     PlanEpochBackfill(PlanEpochBackfillArgs),
@@ -103,6 +106,18 @@ struct CaptureGrpcArgs {
 
     #[arg(long, default_value_t = 60)]
     timeout_secs: u64,
+
+    /// Maximum time allowed to establish the Yellowstone transport.
+    #[arg(long, default_value_t = 30)]
+    connect_timeout_secs: u64,
+
+    /// Maximum time allowed to open the bidirectional Yellowstone subscription.
+    #[arg(long, default_value_t = 30)]
+    subscribe_timeout_secs: u64,
+
+    /// Reconnect after this many seconds without a fully flushed block append.
+    #[arg(long, default_value_t = 120)]
+    idle_timeout_secs: u64,
 
     #[arg(long)]
     from_slot: Option<u64>,
@@ -200,6 +215,24 @@ struct RecordGrpcRawArgs {
 
     #[arg(long, default_value = "grpc-raw")]
     source_id: String,
+
+    /// Opt-in internal Yellowstone relay listener. Requires --relay-x-token-file.
+    #[arg(long)]
+    relay_bind: Option<std::net::SocketAddr>,
+
+    /// Dedicated downstream x-token file; never falls back to the upstream token/environment.
+    #[arg(long)]
+    relay_x_token_file: Option<std::path::PathBuf>,
+
+    #[arg(long, default_value_t = 128)]
+    relay_max_records: usize,
+
+    /// Retained protobuf byte cap; must be at least --max-record-bytes.
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    relay_max_encoded_bytes: usize,
+
+    #[arg(long, default_value_t = 4)]
+    relay_max_clients: usize,
 }
 
 #[derive(Debug, Args)]
@@ -238,6 +271,31 @@ struct SeedGrpcRawGenerationArgs {
 
     #[arg(long, default_value_t = 128 * 1024 * 1024)]
     max_record_bytes: u64,
+}
+
+#[derive(Debug, Args)]
+struct MaterializeGrpcRawArgs {
+    /// Stopped raw-recorder directory or a filesystem snapshot of it.
+    #[arg(long)]
+    input_dir: std::path::PathBuf,
+
+    /// New capture directory. Neither it nor its deterministic staging sibling may exist.
+    #[arg(long)]
+    archive_dir: std::path::PathBuf,
+
+    /// Epoch to select from the immutable raw spool snapshot.
+    #[arg(long)]
+    epoch: u64,
+
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    max_record_bytes: u64,
+
+    /// Previous registry.bin used only as a bounded hot-key cache for pubkey runs.
+    #[arg(long)]
+    pubkey_hot_registry: Option<std::path::PathBuf>,
+
+    #[arg(long, default_value_t = 1000)]
+    pubkey_hot_count: usize,
 }
 
 #[derive(Debug, Args)]
@@ -568,6 +626,9 @@ impl From<CaptureGrpcArgs> for GrpcCaptureConfig {
             archive_dir: value.archive_dir,
             max_blocks: value.max_blocks,
             timeout_secs: value.timeout_secs,
+            connect_timeout_secs: value.connect_timeout_secs,
+            subscribe_timeout_secs: value.subscribe_timeout_secs,
+            idle_timeout_secs: value.idle_timeout_secs,
             from_slot: value.from_slot,
             slots_per_epoch: value.slots_per_epoch,
             stop_at_epoch_boundary: value.stop_at_epoch_boundary,
@@ -602,6 +663,11 @@ impl From<RecordGrpcRawArgs> for GrpcRawRecordConfig {
             cluster_id: value.cluster_id,
             origin_node_id: value.origin_node_id,
             source_id: value.source_id,
+            relay_bind: value.relay_bind,
+            relay_x_token_file: value.relay_x_token_file,
+            relay_max_records: value.relay_max_records,
+            relay_max_encoded_bytes: value.relay_max_encoded_bytes,
+            relay_max_clients: value.relay_max_clients,
         }
     }
 }
@@ -808,6 +874,17 @@ async fn main() -> Result<()> {
         Command::SeedGrpcRawGeneration(args) => {
             let report =
                 seed_grpc_raw_generation(args.source_dir, args.target_dir, args.max_record_bytes)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::MaterializeGrpcRaw(args) => {
+            let report = materialize_grpc_raw_blocks(GrpcRawMaterializeConfig {
+                input_dir: args.input_dir,
+                archive_dir: args.archive_dir,
+                epoch: args.epoch,
+                max_record_bytes: args.max_record_bytes,
+                pubkey_hot_registry_path: args.pubkey_hot_registry,
+                pubkey_hot_count: args.pubkey_hot_count,
+            })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::SyncRpcEpoch(args) => {

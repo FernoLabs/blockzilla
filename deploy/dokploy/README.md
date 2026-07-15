@@ -1,13 +1,27 @@
-# Raw Yellowstone backup on Dokploy
+# Sole Yellowstone recorder and relay on Dokploy
 
-This deployment keeps a live, PoH-capable shadow capture of confirmed
-Yellowstone block envelopes. It has no inbound port and does not build the
-Blockzilla archive or indexes in the recorder container.
+This deployment is the single paid Yellowstone source for Blockzilla. Hetzner
+records every confirmed full-block envelope into a durable WAL, publishes
+bounded immutable generations to Cloudflare R2, and serves the same durably
+accepted stream to authenticated downstream consumers. Blockzilla indexers and
+other products must subscribe to the Hetzner relay; they must not open their own
+Triton full-block subscriptions.
+
+The first relay API remains Yellowstone-compatible and emits the exact full
+block envelope. The compacter consumes that stream once and produces the
+Blockzilla compact representation as a versioned derivative. The compact
+archive is not the recovery source: the raw WAL and R2 generations remain able
+to rebuild it after a schema change.
+
+The relay remains private and token-authenticated. Do not expose an anonymous
+Yellowstone endpoint. Until the relay command and private network route have
+passed the fan-out/replay tests, keep all duplicate paid consumers disabled and
+do not top up Triton.
 
 The Hetzner host uses an exact, preallocated **3 GiB disk-first cache**. This is
-the deployed interim tier: every accepted block is fsynced locally, and sealed
-generations remain on Hetzner while there is comfortable headroom. A normal
-generation is capped at 384 MiB and follows this lifecycle:
+the final durability order, not an interim fallback: every accepted block and
+handoff row are fsynced locally before the block enters the bounded RAM fan-out
+ring. A normal generation is capped at 384 MiB and follows this lifecycle:
 
 1. The Rust recorder durably appends to `/data/grpc-cache/active`.
 2. At the generation byte limit, the Rust recorder keeps the same Yellowstone
@@ -19,71 +33,82 @@ generation is capped at 384 MiB and follows this lifecycle:
    cap-crossing block is then fsynced as successor frame one before polling the
    stream again, and only the audited predecessor becomes visible under
    `sealed/`.
-4. With healthy headroom, nothing is uploaded and the sealed generations remain
-   local. When free space falls below the larger of 25% of the filesystem or
-   `MIN_FREE + MAX_GENERATION`, the uploader drains the oldest generation first.
-5. The uploader writes generation files to the versioned Backblaze bucket, then
-   `manifest.json`, then `_COMMITTED` last. The manifest pins every file's exact
-   Backblaze version ID, and the commit pins the manifest version ID. A bounded
-   Native-API version listing checks the pinned IDs, lengths, hashes, account,
-   and bucket without downloading payloads.
-6. A synced local receipt pins the exact manifest and commit version IDs and is
-   published only after all remote verification succeeds. The supervisor checks
-   that receipt and its predecessor chain before removing the sealed local
-   generation. FIFO draining continues until free space reaches the larger of
-   35% or `MIN_FREE + 2*MAX_GENERATION`, then B2 uploads stop again.
+4. An audited sealed generation may be copied to R2 as an overflow safety copy.
+   The verified generation remains local. A successful R2 upload and receipt do
+   not prove that Blockzilla consumed the data and do not authorize local
+   eviction.
+5. The uploader writes generation files to the dedicated R2 prefix, then
+   `manifest.json`, then `_COMMITTED` last. Every single PUT is conditional on
+   the key being absent and binds Content-MD5 plus SHA-256 metadata. Exact HEAD
+   verification detects either an identical retry or an immutable-key
+   collision; R2 bucket versioning is not assumed.
+6. A synced local upload receipt pins the manifest and commit hashes/ETags and is
+   published only after all remote verification succeeds. It proves the R2 copy,
+   not Blockzilla synchronization. Local or remote deletion additionally
+   requires a valid signed Blockzilla durable ACK for the exact generation.
+   Until that ACK producer and verifier exist, both cleanup paths remain locked
+   and capture pauses at the hard local floor.
 
-Routine publication intentionally performs no object `HEAD` or `GET`.
-Re-downloading every generation during upload consumed about twice the ingest
-volume and can exhaust Backblaze's separate daily download cap even while
-storage remains below 10 GB. Exact-version payloads are fully downloaded and
-rehashed during a restore or future Blockzilla pull; the standalone
-`upload-file` audit command also retains full readback verification.
+Routine R2 publication performs conditional PUT plus metadata HEAD, but no
+payload GET. Re-downloading every generation during upload previously consumed
+about twice the ingest volume and exhausted Backblaze's separate daily download
+cap. Payloads are downloaded and fully rehashed only during replay/restore.
 
 At the measured 5–6 GiB/hour input rate, 3 GiB is only 30–36 minutes of
-theoretical storage. On the exact 3 GiB filesystem, spill starts below 768 MiB
-free and drains until at least 1.125 GiB is free. Once spill is required, a B2
-outage leaves only the space between that trigger and the 384 MiB hard floor,
-so intervention time is measured in minutes. If remote uploads fail, the
-recorder retains every unverified generation, alerts once, and pauses at the
-hard floor.
+theoretical storage. The 768 MiB and 1.125 GiB watermarks can trigger and monitor
+R2 safety-copy work, but an R2 commit alone must not reclaim local space. Before
+signed ACK cleanup is deployed, a sustained Blockzilla outage therefore ends at
+the 384 MiB hard floor: the recorder keeps every durable generation, alerts
+once, and pauses without polling another block.
 
-Backblaze retention is separate from the 3 GiB host limit. This deployment has
-no lifecycle deletion: once disk pressure begins spilling, the remote archive,
-including noncurrent versions, grows by approximately the incoming stream
-volume. A 10 GB cap is therefore an emergency tier, not indefinite retention;
-when it is exhausted, verified remote objects remain but new spill commits fail
-closed and local capture eventually pauses. The account-wide
-usage monitor counts every upload version in every bucket plus unfinished
-large-file parts. It warns at 8,000,000,000 bytes and escalates at
-9,500,000,000 bytes before the decimal 10 GB free allowance. These alerts never
-stop uploads or delete remote data.
+R2 retention is separate from the 3 GiB host limit. The dedicated
+`blockzilla-live-grpc` bucket has a 1 TB safety budget. Its role is overflow and
+disaster recovery, not a six-day history service for every subscriber. The
+receipt-ledger monitor warns at 800 GB and becomes critical at 950 GB. At that
+point capture pauses if signed ACKs do not expose enough safe cleanup; byte
+pressure never evicts unacknowledged data.
+
+Cleanup may remove only whole, verified, oldest generations beneath this
+recorder's exact prefix after a valid signed Blockzilla durable ACK binds their
+exact observation chain, manifest, and predecessor. `_COMMITTED` is removed
+first so an interrupted remote prune cannot advertise a partial generation. A
+heartbeat, unsigned slot, upload receipt, disk watermark, or R2 watermark can
+alert but can never delete backup data.
 
 ## Current scope
 
-This is an independent capture of the same Yellowstone gRPC source. It resumes
-from its own last durable slot inclusively and checks the exact overlap block.
-It does **not** yet implement the authenticated Blockzilla primary/replica
-request, transfer, acknowledgement, or delete protocol. Consequently:
+This recorder resumes from its own last durable slot inclusively and checks the
+exact overlap block. It is the only component permitted to use the paid Triton
+token. The authenticated live relay is implemented, but Blockzilla's durable
+raw receiver, signed ACK, and historical Yellowstone reader are not deployed;
+until they are, Blockzilla must remain stopped rather than silently starting a
+second paid full-block subscription.
+
+The current recorder/backup layer:
 
 - it can alert when the Yellowstone feed stalls, the recorder restarts, the
-  cache is invalid, a pressure-triggered Backblaze spill fails, or the hard
+  cache is invalid, a pressure-triggered R2 spill fails, or the hard
   local floor is reached;
-- it cannot yet know that the primary Blockzilla node disconnected or request a
-  slot range on behalf of that primary;
-- a Backblaze commit is the only local generation deletion authority today.
+- it cannot yet serve a downstream cursor older than the local live ring;
+  the target recovery endpoint is Blockzilla's durable raw history, with R2 used
+  only to restore a primary backlog;
+- it can create and verify R2 upload receipts, but those receipts have no local
+  or remote deletion authority;
+- Blockzilla's durable raw receiver and signed ACK producer/verifier are not
+  deployed, so both local eviction and remote pruning remain locked.
 
-The proposed **500 MB memory-first + Blockzilla sync-event** tier is not
-implemented. There is no signed Blockzilla durable ACK to authorize dropping an
-in-memory window, and waiting for a missed ping before the first disk write
-would lose that window on a recorder crash. Until that protocol exists, every
-block is written to local disk first; the 768 MiB container limit is a runtime
-limit, not a 500 MB retention buffer.
+The target adds ACK-driven retention without changing the WAL-first hot path.
+Blockzilla fsyncs the exact raw WAL and cursor, then signs a cumulative
+sequence/digest-chain receipt. Hetzner verifies and fsyncs that ACK before a
+whole generation becomes eligible for local or R2 cleanup. The bounded RAM ring
+remains fan-out only and may evict entries freely because their WAL records are
+already durable.
 
-The optional primary-sync heartbeat remains disabled until the real sync
-process writes one. The agreed pull/ACK design is documented in
-[`docs/live-grpc-b2-sync.md`](../../docs/live-grpc-b2-sync.md); a generic ping is
-not treated as synchronization or deletion authority.
+The optional primary-sync heartbeat remains disabled until the real relay
+consumer writes one. The single-source gateway and durable receipt design is
+documented in
+[`docs/live-grpc-single-source.md`](../../docs/live-grpc-single-source.md); a
+generic ping is not treated as synchronization or deletion authority.
 
 ## Host cache
 
@@ -123,26 +148,33 @@ Create a Compose application from this repository and select
 `docker-compose.dokploy.yml`. Copy the non-secret settings from
 `.env.example` into Dokploy's Environment panel.
 
-Create three Compose **File** mounts under **Advanced → Mounts**:
+Create five Compose **File** mounts under **Advanced → Mounts**:
 
 | Dokploy file name | Local example | Container secret |
 | --- | --- | --- |
 | `yellowstone-x-token` | `yellowstone-x-token.example` | `/run/secrets/grpc_x_token` |
+| `yellowstone-relay-x-token` | a new downstream-only token | `/run/secrets/grpc_relay_x_token` |
 | `telegram-bot-token` | `telegram-bot-token.example` | `/run/secrets/telegram_bot_token` |
+| `cloudflare-r2.env` | `cloudflare-r2-credentials.example` | `/run/secrets/r2_credentials` |
 | `backblaze-blockzilla.env` | `backblaze-credentials.example` | `/run/secrets/backblaze_credentials` |
 
 Keep these host-file settings:
 
 ```dotenv
 BLOCKZILLA_GRPC_X_TOKEN_HOST_FILE=../files/yellowstone-x-token
+BLOCKZILLA_RAW_RELAY_X_TOKEN_HOST_FILE=../files/yellowstone-relay-x-token
 BLOCKZILLA_TELEGRAM_BOT_TOKEN_HOST_FILE=../files/telegram-bot-token
+BLOCKZILLA_R2_CREDENTIALS_HOST_FILE=../files/cloudflare-r2.env
 BLOCKZILLA_B2_CREDENTIALS_HOST_FILE=../files/backblaze-blockzilla.env
 ```
 
-The Backblaze file is parsed as literal allowlisted `KEY=value` data and is
-never sourced as shell. Prefer a bucket-scoped application key. The uploader
-does not delete committed remote objects; its only S3 `DELETE` is a best-effort
-abort of an incomplete multipart upload.
+Credential files are parsed as literal allowlisted `KEY=value` data and are
+never sourced as shell. The R2 token should have Object Read & Write access only
+to the `blockzilla-live-grpc` bucket; application code is further confined to
+`live-grpc-backup/v1`. The ordinary uploader never deletes committed objects.
+Retention remains dry-run-only until the signed Blockzilla ACK verifier exists;
+its eventual apply path may delete only ACK-covered, validated whole generations
+below that prefix.
 
 The bounded-cache settings are:
 
@@ -159,21 +191,62 @@ BLOCKZILLA_RAW_B2_SPILL_RECOVERY_PERCENT=35
 BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES=805306368
 BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES=134217728
 BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS=100
-BLOCKZILLA_B2_REMOTE_PREFIX=grpc-raw/v1
-BLOCKZILLA_B2_USAGE_ALERT_ENABLED=true
-BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES=10000000000
-BLOCKZILLA_B2_USAGE_WARNING_BYTES=8000000000
-BLOCKZILLA_B2_USAGE_CRITICAL_BYTES=9500000000
-BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES=500000000
-BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS=3600
-BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS=21600
-BLOCKZILLA_B2_CAP_RETRY_SECS=3600
+BLOCKZILLA_RAW_OBJECT_STORE=r2
+BLOCKZILLA_RAW_OBJECT_STORE_CREDENTIALS_FILE=/run/secrets/r2_credentials
+BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX=live-grpc-backup/v1
+BLOCKZILLA_R2_USAGE_ALERT_ENABLED=true
+BLOCKZILLA_R2_USAGE_WARNING_BYTES=800000000000
+BLOCKZILLA_R2_USAGE_CRITICAL_BYTES=950000000000
+BLOCKZILLA_R2_USAGE_RECOVERY_HYSTERESIS_BYTES=50000000000
+BLOCKZILLA_R2_USAGE_CHECK_INTERVAL_SECS=3600
+BLOCKZILLA_R2_RETENTION_ENABLED=false
+BLOCKZILLA_R2_RETENTION_TRIGGER_BYTES=950000000000
+BLOCKZILLA_R2_RETENTION_TARGET_BYTES=900000000000
+BLOCKZILLA_R2_RETENTION_MINIMUM_AGE_SECS=86400
+BLOCKZILLA_R2_RETENTION_MINIMUM_RETAINED_GENERATIONS=2
+BLOCKZILLA_R2_RETENTION_CHECK_INTERVAL_SECS=3600
 ```
 
-The account-wide usage scan is deliberately hourly because it lists every
-stored object version and therefore consumes Class C transactions as the
-archive grows. A typed Backblaze cap failure also switches upload retries to
-the hourly interval instead of the ordinary one-minute retry loop.
+The retention trigger/target values currently drive planning and alerts only.
+Setting `BLOCKZILLA_R2_RETENTION_ENABLED=true` must not enable deletion while the
+signed Blockzilla ACK implementation is absent.
+
+### Private downstream relay contract
+
+The Rust relay is opt-in. An empty `BLOCKZILLA_RAW_RELAY_BIND` means the
+supervisor must omit every relay argument. A non-empty bind maps one-for-one to
+this exact `record-grpc-raw` CLI contract:
+
+```text
+--relay-bind "$BLOCKZILLA_RAW_RELAY_BIND"
+--relay-x-token-file "$BLOCKZILLA_RAW_RELAY_X_TOKEN_FILE"
+--relay-max-records "$BLOCKZILLA_RAW_RELAY_MAX_RECORDS"
+--relay-max-encoded-bytes "$BLOCKZILLA_RAW_RELAY_MAX_ENCODED_BYTES"
+--relay-max-clients "$BLOCKZILLA_RAW_RELAY_MAX_CLIENTS"
+```
+
+For this Compose deployment, enable it with
+`BLOCKZILLA_RAW_RELAY_BIND=0.0.0.0:10001`. Consumers on the private Compose
+network connect to `http://raw-recorder:10001`; no host port is published. The
+downstream token comes only from `/run/secrets/grpc_relay_x_token`. It must be a
+non-empty regular file (not a symlink), at most 4096 bytes, with visible ASCII
+and at most one trailing LF/CRLF. The paid upstream token and its environment
+variable are never a fallback.
+
+Defaults retain at most 128 exact full-block updates and 128 MiB for at most
+four clients. The byte cap must remain at least as large as
+`BLOCKZILLA_RAW_MAX_RECORD_BYTES`, so every accepted WAL record is publishable.
+The relay preloads that bounded tail from the verified active WAL,
+then assigns a process-local sequence beginning at zero. It enables zstd
+responses when a client advertises zstd support. `from_slot` works only inside
+the retained in-memory ring; an older request fails explicitly so a consumer
+can switch to Blockzilla's historical raw service. R2 is a restore source for
+Blockzilla, not a normal subscriber endpoint. A block becomes visible only after
+both its WAL frame and handoff row have been fsynced, and relay publication
+failure stops the recorder.
+
+The R2 usage check is deliberately hourly and follows only the validated local
+receipt chain in `blockzilla-live-grpc`; it does not itself authorize deletion.
 
 The replay headroom lets a reconnect outrun an upstream replay floor that moves
 during the TLS/gRPC handshake. The immutable schema-2 gap record distinguishes
@@ -210,16 +283,16 @@ find /data/grpc-cache/receipts -maxdepth 1 -name 'slot-*.json' -print
 Wait for at least one complete rotation. A healthy local-only check requires:
 
 - the active journal continues growing after rotation from its seeded overlap;
-- sealed generations remain local and no B2 generation receipt appears while
-  free space is at or above the spill-start watermark;
-- after pressure crosses the watermark, a generation receipt containing
-  manifest and commit version IDs appears only after the Backblaze commit;
-- the corresponding oldest sealed directory disappears only after receipt
-  validation, and draining stops at the recovery watermark;
+- each sealed generation remains local; an optional R2 receipt proves only that
+  its safety copy, manifest, and commit hashes/ETags were verified;
+- crossing the spill-start watermark may copy a generation to R2 but must not
+  remove its local directory without a signed Blockzilla ACK;
+- before the ACK implementation is deployed, pressure reaches the hard floor
+  and pauses capture rather than deleting a local or remote generation;
 - the remote prefix is
-  `grpc-raw/v1/<cluster>/<origin>/slot-<20-digit-slot>/`;
-- free space returns above the spill recovery watermark and remains bounded by
-  the 3 GiB filesystem;
+  `live-grpc-backup/v1/<cluster>/<origin>/slot-<20-digit-slot>/`;
+- after signed ACK cleanup is deployed, a valid ACK can return free space above
+  the recovery watermark; before then no cleanup-based recovery is expected;
 - the container remains healthy and no upload/backlog incident is active.
 
 Do not retire another recorder based only on a healthy badge. Compare at least
@@ -270,9 +343,9 @@ not shown. Example:
 ```text
 Blockzilla backup - CRITICAL
 Backup storage problem
-Status: Backblaze Class C limit reached. Backup is paused; saved data is safe.
+Status: Cloudflare R2 upload failed. Backup is paused; saved data is safe.
 Storage: 402 MB free. 6 backup batches waiting locally.
-Action: Raise the Backblaze Class C limit or wait for the daily reset.
+Action: Check R2 credentials or service status; automatic retry is on.
 ```
 
 | Alert | Meaning | Response |
@@ -281,8 +354,8 @@ Action: Raise the Backblaze Class C limit or wait for the daily reset.
 | gRPC reconnect not verified | The provider did not replay the last saved slot, so reconnect coverage is uncertain. | Compare the range with another source and repair any gaps. |
 | Missing gRPC slots | A confirmed provider-history range is absent from the backup. | Repair that range from another source if needed. |
 | Backup disk unavailable | Hetzner cannot use or inspect the backup disk, so recording is paused. | Check the Hetzner volume mount. |
-| Backup storage problem | Backblaze upload is blocked or Hetzner space is too low. | Follow the single action shown in the alert. |
-| Backblaze storage filling up | Account storage reached 8 GB and becomes critical at 9.5 GB of the 10 GB limit. | Increase the Backblaze storage limit before it is full. |
+| Backup storage problem | Cloudflare R2 upload is blocked or Hetzner space is too low. | Follow the single action shown in the alert. |
+| Cloudflare R2 safety storage filling up | This recorder's verified safety copies reached 800 GB and become critical at 950 GB. | If Blockzilla has not signed the oldest spool, nothing is deleted; restore sync or expand the budget. |
 | Blockzilla confirmation missing | Active only when a confirmation source is configured. | Check the Blockzilla connection. |
 
 Because the notifier runs inside this container, it cannot report total host
@@ -292,5 +365,4 @@ Keep an external Dokploy or host uptime alert for those failures.
 Relevant platform references: [Dokploy Compose persistence](https://docs.dokploy.com/docs/core/docker-compose),
 [Dokploy mounts API](https://docs.dokploy.com/docs/api/mounts),
 [Telegram `sendMessage`](https://core.telegram.org/bots/api#sendmessage), and
-[Backblaze S3-compatible API](https://www.backblaze.com/apidocs/introduction-to-the-s3-compatible-api),
-plus the [Backblaze Native API](https://www.backblaze.com/apidocs/introduction-to-the-native-api).
+[Cloudflare R2 S3 compatibility](https://developers.cloudflare.com/r2/api/s3/api/).

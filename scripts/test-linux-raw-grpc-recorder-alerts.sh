@@ -8,11 +8,13 @@ trap 'rm -rf "$fixture_root"' EXIT
 
 export BLOCKZILLA_RAW_OUTPUT_DIR=$fixture_root/output
 export BLOCKZILLA_RAW_STATE_DIR=$fixture_root/state
+export BLOCKZILLA_RAW_OBJECT_STORE=backblaze
 export BLOCKZILLA_TELEGRAM_ENABLED=true
 export BLOCKZILLA_TELEGRAM_BOT_TOKEN_FILE=$repo_root/deploy/dokploy/telegram-bot-token.example
 export BLOCKZILLA_TELEGRAM_CHAT_ID=-1001234567890
 export BLOCKZILLA_TELEGRAM_CURL_BIN=/usr/bin/true
 export BLOCKZILLA_TELEGRAM_ALERT_COOLDOWN_SECS=900
+export BLOCKZILLA_RAW_UPSTREAM_BLOCKED_BACKOFF_SECS=3600
 
 # Load definitions without entering the supervisor's command dispatch or main loop.
 eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
@@ -748,6 +750,81 @@ grep -q 'Backblaze upload finished, but Hetzner space did not increase' \
 grep -q ' ERROR$' "$(alert_file generation_backlog delivered)"
 discard_alert generation_backlog
 
+# A verified R2 upload still cannot delete the local copy without Blockzilla's
+# ACK. The upload completes, cleanup fails closed, and one plain alert explains
+# why Hetzner storage remains pinned.
+blocked_ack_upload_log=$fixture_root/blocked-ack-uploads
+blocked_ack_message=$fixture_root/blocked-ack-message
+blocked_ack_receipts=$fixture_root/blocked-ack-receipts
+: > "$blocked_ack_upload_log"
+mkdir -p "$blocked_ack_receipts"
+(
+  OBJECT_STORE=r2
+  OBJECT_STORE_HUMAN_NAME='Cloudflare R2'
+  GENERATION_RECEIPT_DIR=$blocked_ack_receipts
+  validate_data_volume() { return 0; }
+  sealed_generation_count() { printf '%s\n' 3; }
+  available_bytes() { printf '%s\n' 200; }
+  filesystem_capacity_bytes() { printf '%s\n' 1000; }
+  upload_one_generation() {
+    printf '%s\n' upload >> "$blocked_ack_upload_log"
+    return 0
+  }
+  evict_first_committed_generation() {
+    GENERATION_EVICTION_PERFORMED=false
+    GENERATION_EVICTION_BLOCKED_REASON=blockzilla_ack_unavailable
+    GENERATION_RETAINED_COUNT=4
+    return "$BLOCKZILLA_ACK_UNAVAILABLE_STATUS"
+  }
+  telegram_send() { printf '%s\n' "$1" > "$blocked_ack_message"; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+test "$(wc -l < "$blocked_ack_upload_log" | tr -d ' ')" -eq 1
+grep -q '^Status: Blockzilla has not confirmed these blocks\. Hetzner cleanup is paused; saved data is safe\.$' \
+  "$blocked_ack_message"
+grep -q '^Storage: <1 MB free\. 4 backup batches kept locally until Blockzilla confirms them\.$' \
+  "$blocked_ack_message"
+grep -q '^Action: Nothing was deleted\. Restore Blockzilla sync or add Hetzner disk space\. Cloudflare R2 uploads continue\.$' \
+  "$blocked_ack_message"
+assert_simple_storage_message "$blocked_ack_message"
+discard_alert generation_backlog
+
+# When every batch is already in R2, the hard-floor alert reports the retained
+# local count (not a misleading zero upload backlog), says nothing was deleted,
+# and directs the operator to add disk while Blockzilla confirmation is absent.
+blocked_ack_full_message=$fixture_root/blocked-ack-full-message
+(
+  OBJECT_STORE=r2
+  OBJECT_STORE_HUMAN_NAME='Cloudflare R2'
+  GENERATION_RECEIPT_DIR=$blocked_ack_receipts
+  validate_data_volume() { return 0; }
+  sealed_generation_count() { printf '%s\n' 0; }
+  available_bytes() { printf '%s\n' 50; }
+  filesystem_capacity_bytes() { printf '%s\n' 1000; }
+  upload_one_generation() {
+    printf '%s\n' upload >> "$blocked_ack_upload_log"
+    return 0
+  }
+  evict_first_committed_generation() {
+    GENERATION_EVICTION_PERFORMED=false
+    GENERATION_EVICTION_BLOCKED_REASON=blockzilla_ack_unavailable
+    GENERATION_RETAINED_COUNT=4
+    return "$BLOCKZILLA_ACK_UNAVAILABLE_STATUS"
+  }
+  telegram_send() { printf '%s\n' "$1" > "$blocked_ack_full_message"; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+test "$(wc -l < "$blocked_ack_upload_log" | tr -d ' ')" -eq 1
+grep -q '^Blockzilla backup - CRITICAL$' "$blocked_ack_full_message"
+grep -q '^Storage: <1 MB free\. 4 backup batches kept locally until Blockzilla confirms them\. Backup recording is paused\.$' \
+  "$blocked_ack_full_message"
+grep -q '^Action: Nothing was deleted\. Restore Blockzilla sync or add Hetzner disk space\. Cloudflare R2 uploads continue\.$' \
+  "$blocked_ack_full_message"
+assert_simple_storage_message "$blocked_ack_full_message"
+discard_alert generation_backlog
+
 # Typed capacity statuses produce precise operator actions. Unknown failures
 # remain generic and cannot be promoted from an untyped provider response.
 generation_upload_failure_details 20
@@ -804,6 +881,114 @@ if grep -Eq '402427904|402653184|3221225472' "$production_spill_message"; then
   exit 1
 fi
 discard_alert generation_backlog
+
+# R2 upload failures retain the disk/backlog incident, use provider-correct
+# wording, and keep byte counts in short decimal GB/MB form.
+r2_spill_message=$fixture_root/r2-spill-message
+(
+  OBJECT_STORE=r2
+  OBJECT_STORE_HUMAN_NAME='Cloudflare R2'
+  MIN_FREE_BYTES=402653184
+  MAX_GENERATION_BYTES=402653184
+  GENERATION_SPILL_START_PERCENT=25
+  GENERATION_SPILL_RECOVERY_PERCENT=35
+  validate_data_volume() { return 0; }
+  sealed_generation_count() { printf '%s\n' 3; }
+  available_bytes() { printf '%s\n' 1500000000; }
+  filesystem_capacity_bytes() { printf '%s\n' 10000000000; }
+  upload_one_generation() { return 21; }
+  telegram_send() { printf '%s\n' "$1" > "$r2_spill_message"; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+grep -q '^Status: Cloudflare R2 upload failed\. Hetzner still has room for recording; saved data is safe\.$' \
+  "$r2_spill_message"
+grep -q '^Storage: 1\.5 GB free\. 3 backup batches waiting locally\.$' \
+  "$r2_spill_message"
+grep -q '^Action: Check Cloudflare R2 and the recorder logs\. Automatic retry is on\.$' \
+  "$r2_spill_message"
+assert_simple_storage_message "$r2_spill_message"
+if grep -Eq 'Backblaze|1500000000|10000000000|402653184' "$r2_spill_message"; then
+  echo "R2 spill alert exposed the wrong provider or raw byte values" >&2
+  exit 1
+fi
+discard_alert generation_backlog
+
+# The uploader-validated R2 total uses one incident: one warning near budget,
+# one escalation when cleanup cannot safely run, and one recovery.
+saved_object_store=$OBJECT_STORE
+saved_object_store_human_name=$OBJECT_STORE_HUMAN_NAME
+OBJECT_STORE=r2
+OBJECT_STORE_HUMAN_NAME='Cloudflare R2'
+R2_USAGE_WARNING_BYTES=100000000000
+R2_RETENTION_TRIGGER_BYTES=120000000000
+R2_USAGE_RECOVERY_HYSTERESIS_BYTES=10000000000
+R2_USAGE_WARNING_RECOVERY_BYTES=90000000000
+test "$(human_decimal_gigabytes 0)" = '0 GB'
+test "$(human_decimal_gigabytes 1500000000)" = '1.5 GB'
+r2_usage_send_count=0
+r2_usage_last_message=$fixture_root/r2-usage-last-message
+telegram_send() {
+  r2_usage_send_count=$((r2_usage_send_count + 1))
+  printf '%s\n' "$1" > "$r2_usage_last_message"
+}
+discard_alert r2_usage
+update_r2_usage_alerts 101000000000
+test "$r2_usage_send_count" -eq 1
+grep -q '^Storage: 101 GB retained in Cloudflare R2\.$' \
+  "$r2_usage_last_message"
+assert_simple_storage_message "$r2_usage_last_message"
+update_r2_usage_alerts 110000000000
+test "$r2_usage_send_count" -eq 1
+r2_retention_critical_alert \
+  'Status: Blockzilla has not signed the oldest backup; R2 cleanup is paused.' \
+  120000000000
+test "$r2_usage_send_count" -eq 2
+grep -q '^Storage: 120 GB retained in Cloudflare R2\.$' \
+  "$r2_usage_last_message"
+assert_simple_storage_message "$r2_usage_last_message"
+# Repeated hourly checks refresh the same incident but do not send reminders.
+r2_retention_critical_alert \
+  'Status: Blockzilla has not signed the oldest backup; R2 cleanup is paused.' \
+  121000000000
+test "$r2_usage_send_count" -eq 2
+test -e "$(alert_file r2_usage active)"
+update_r2_usage_alerts 89000000000
+test "$r2_usage_send_count" -eq 3
+test ! -e "$(alert_file r2_usage active)"
+grep -q '^Storage: 89 GB retained in Cloudflare R2\.$' \
+  "$r2_usage_last_message"
+assert_simple_storage_message "$r2_usage_last_message"
+
+# A trigger-level worker pass cannot turn the unsigned heartbeat into DELETE
+# authority. It raises the same critical incident once and remains quiet on the
+# next hourly pass.
+R2_RETENTION_ENABLED=true
+R2_RETENTION_TRIGGER_BYTES=120000000000
+discard_alert r2_usage
+r2_worker_send_log=$fixture_root/r2-worker-sends
+: > "$r2_worker_send_log"
+telegram_send() {
+  printf '%s\n' sent >> "$r2_worker_send_log"
+  printf '%s\n' "$1" > "$r2_usage_last_message"
+}
+run_r2_usage_pass() (
+  r2_receipt_ledger_bytes() { printf '%s\n' 121000000000; }
+  validate_data_volume() { return 0; }
+  sleep() { exit 0; }
+  r2_usage_worker
+)
+run_r2_usage_pass
+test "$(wc -l < "$r2_worker_send_log" | tr -d ' ')" -eq 1
+grep -q '^Status: Blockzilla has not signed the oldest backup; R2 cleanup is paused\.$' \
+  "$r2_usage_last_message"
+assert_simple_storage_message "$r2_usage_last_message"
+run_r2_usage_pass
+test "$(wc -l < "$r2_worker_send_log" | tr -d ' ')" -eq 1
+test -e "$(alert_file r2_usage active)"
+discard_alert r2_usage
+OBJECT_STORE=$saved_object_store
+OBJECT_STORE_HUMAN_NAME=$saved_object_store_human_name
 
 # One correlated incident opens once, escalates only at the hard floor, and
 # sends one recovery after high-water headroom returns.
@@ -996,10 +1181,17 @@ discard_alert generation_backlog
 
 # If the worker is dead, the disk monitor immediately owns the same-key
 # fail-safe CRITICAL instead of allowing capture to pause silently.
-update_disk_alerts 50
+(
+  retained_sealed_generation_count() { printf '%s\n' 3; }
+  update_disk_alerts 50
+)
 test ! -e "$(alert_file disk_space active)"
 test -e "$(alert_file generation_backlog active)"
 grep -q ' CRITICAL$' "$(alert_file generation_backlog delivered)"
+grep -q '3 backup batches are kept locally' \
+  "$(alert_file generation_backlog active)"
+grep -q '^Action: Nothing is deleted without Blockzilla confirmation\. Add Hetzner disk space and restore Blockzilla sync\.$' \
+  "$(alert_file generation_backlog active)"
 
 # Restoring local headroom above the recovery watermark proves a generic local
 # hard-floor incident recovered, even with retained generations and no B2
@@ -1038,6 +1230,67 @@ MIN_FREE_BYTES=$saved_min_free_bytes
 MAX_GENERATION_BYTES=$saved_max_generation_bytes
 GENERATION_SPILL_START_PERCENT=$saved_spill_start_percent
 GENERATION_SPILL_RECOVERY_PERCENT=$saved_spill_recovery_percent
+
+# Auth/credit rejection is one durable incident with an hour-scale retry. It
+# never shares the provider replay-floor path, and handshake-only exits cannot
+# announce recovery.
+auth_report=$fixture_root/raw-auth-report.json
+cat > "$auth_report" <<'JSON'
+{
+  "frames_written": 0,
+  "outcome": "retryable",
+  "retry_reason": "permission_denied",
+  "action_required": true,
+  "replay_unavailable": false
+}
+JSON
+raw_child_report_requires_upstream_action "$auth_report"
+test "$(raw_child_report_backoff_seconds "$auth_report")" -eq 3600
+test "$(raw_child_report_backoff_seconds "$auth_report")" -gt "$RESTART_DELAY_SECS"
+UPSTREAM_BLOCKED_BACKOFF_SECS=7200
+test "$(raw_child_report_backoff_seconds "$auth_report")" -eq 7200
+UPSTREAM_BLOCKED_BACKOFF_SECS=3600
+
+replay_report=$fixture_root/raw-replay-report.json
+cat > "$replay_report" <<'JSON'
+{
+  "frames_written": 0,
+  "outcome": "retryable",
+  "retry_reason": "replay_unavailable",
+  "action_required": false,
+  "replay_unavailable": true
+}
+JSON
+if raw_child_report_requires_upstream_action "$replay_report"; then
+  echo "provider replay floor was classified as auth" >&2
+  exit 1
+fi
+test "$(raw_child_report_backoff_seconds "$replay_report")" -eq "$RESTART_DELAY_SECS"
+
+saved_upstream_sender_definition=$(declare -f telegram_send)
+saved_upstream_journal_size_definition=$(declare -f journal_size)
+upstream_send_log=$fixture_root/upstream-telegram-sends
+: > "$upstream_send_log"
+telegram_send() { printf '%s\n' "$1" >> "$upstream_send_log"; }
+journal_size() { wc -c < "$JOURNAL_FILE" | tr -d ' '; }
+discard_alert upstream_access_blocked
+mkdir -p "$(dirname "$JOURNAL_FILE")"
+printf '%s\n' '{"slot":100}' > "$JOURNAL_FILE"
+raise_upstream_access_blocked_alert
+raise_upstream_access_blocked_alert
+test "$(grep -c '^Blockzilla backup - ' "$upstream_send_log")" -eq 1
+grep -q '^gRPC provider access blocked$' \
+  "$(alert_file upstream_access_blocked active)"
+grep -q '^Status: Upstream gRPC access or credit is blocked\. No new blocks can be recorded\.$' \
+  "$(alert_file upstream_access_blocked active)"
+clear_upstream_access_blocked_after_progress
+test -e "$(alert_file upstream_access_blocked active)"
+printf '%s\n' '{"slot":101}' >> "$JOURNAL_FILE"
+clear_upstream_access_blocked_after_progress
+test ! -e "$(alert_file upstream_access_blocked active)"
+test "$(grep -c '^Blockzilla backup - ' "$upstream_send_log")" -eq 2
+eval "$saved_upstream_sender_definition"
+eval "$saved_upstream_journal_size_definition"
 
 # Disabling Telegram must not disable the runtime fail-closed volume guard.
 TELEGRAM_ENABLED=false

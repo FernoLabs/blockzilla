@@ -173,6 +173,28 @@ cargo run --release -p blockzilla-live-producer -- verify-grpc-raw-poh \
   --output-dir /path/with/free-space/mac-bridge
 ```
 
+The same process can opt into a private Yellowstone-compatible relay without
+opening another upstream connection:
+
+```bash
+cargo run --release -p blockzilla-live-producer -- record-grpc-raw \
+  --endpoint https://example.mainnet.rpcpool.com \
+  --output-dir /path/with/free-space/active \
+  --relay-bind 0.0.0.0:10001 \
+  --relay-x-token-file /run/secrets/grpc_relay_x_token \
+  --relay-max-records 128 \
+  --relay-max-encoded-bytes 134217728 \
+  --relay-max-clients 4
+```
+
+`--relay-bind` and `--relay-x-token-file` must be supplied together; omitting
+both disables the relay. The downstream token file is independent of
+`BLOCKZILLA_GRPC_X_TOKEN`. The listener is reserved before the upstream
+transport opens, its bounded ring is preloaded from the verified active WAL,
+and an update is published only after both the WAL and handoff journal fsyncs
+succeed. `from_slot` is limited to the retained ring and zstd responses are
+enabled for clients that advertise support.
+
 Each confirmed block update is retained as one independently decompressible
 zstd level-1 record in the checksummed segmented WAL. The WAL is synced before
 `raw-blocks.jsonl` advances; restart recovers an incomplete WAL tail,
@@ -230,6 +252,15 @@ BLOCKZILLA_GRPC_X_TOKEN=... \
 cargo run -p blockzilla-live-producer -- inspect-capture \
   --archive-dir blockzilla-live
 ```
+
+`capture-grpc` keeps Yellowstone's bidirectional request side open and answers application-level
+pings. `--connect-timeout-secs` and `--subscribe-timeout-secs` bound setup, while
+`--idle-timeout-secs` measures time since the last fully flushed block append; ping-only traffic
+does not reset it. Before returning a non-boundary report, the capture flushes its block artifacts,
+indexes, derived pubkey state, and journal. JSON reports use `outcome: "retryable"` with a stable
+`retry_reason`; `permission_denied` and `unauthenticated` additionally set `action_required: true`
+so a supervisor can alert once and use a longer retry delay. Only `outcome: "epoch_boundary"` with
+`stopped_at_epoch_boundary: true` closes a capture.
 
 The capture writes wincode/LEB128 framed records:
 

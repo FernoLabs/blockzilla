@@ -2,6 +2,12 @@
 
 Date: 2026-07-14
 
+> Historical design. The active 2026-07-15 direction replaces independent
+> paid Yellowstone consumers with the Hetzner single-source relay and
+> Cloudflare R2 described in
+> [`live-grpc-single-source.md`](live-grpc-single-source.md). Keep this document
+> only for the earlier B2 receipt/ACK rationale.
+
 ## Decision
 
 Use Backblaze B2 as an outbound-only durable mailbox between the Hetzner
@@ -11,12 +17,11 @@ B2 only as a pressure spill; a future Blockzilla puller will accept only
 immutable committed generations and publish a signed durable receipt for the
 exact generation it accepted.
 
-The proposed 500 MB memory-first window is **not implemented**. Memory may later
-cache recent metadata and payloads, but today every block remains protected by
-the existing per-record WAL sync before any cursor advances. There is not yet a
-signed Blockzilla durable ACK that can authorize forgetting a memory-only slot;
-waiting for a missed ping before the first disk write would lose the critical
-pre-failure window if the recorder itself crashed.
+Memory is a live-delivery cache only. Every block is protected by the existing
+per-record local WAL sync before any cursor advances. This WAL-first boundary is
+the final design, not an interim step: waiting for a missed ping before the
+first disk write would lose the critical pre-failure window if the recorder
+itself crashed.
 
 ```mermaid
 flowchart LR
@@ -54,14 +59,12 @@ SHA-256, Backblaze's returned version ID and content ETag, then prefix-scoped
 Native `b2_list_file_versions` metadata for the exact account, bucket, key,
 file ID, length, MD5, SHA-1, and SHA-256. It deliberately issues no S3 HEAD or
 GET for a new generation. Full payload hashing still happens when Blockzilla or
-an operator restores the exact versions. Only after the exact remote commit and
-local receipt verify does the recorder remove that sealed local copy. B2 has no
+an operator restores the exact versions. The verified remote commit proves only
+that a second copy exists; it does not authorize local deletion. B2 has no
 automatic lifecycle deletion.
 
 Blockzilla does not currently pull or acknowledge those generations. Therefore
-today's local removal means only “B2 accepted an exact version-pinned copy whose
-remote metadata and ETag were verified,” not “Blockzilla processed this
-generation.”
+local and remote generation deletion remain locked.
 
 ## Three independent watermarks
 
@@ -172,24 +175,18 @@ Blockzilla ACK nor cache cleanup deletes B2 objects or hidden versions. A 10 GB
 account cap therefore limits how much pressure spill can be accepted; it is not
 indefinite capacity.
 
-The exact 3 GiB Hetzner cache cannot require a Blockzilla ACK for every local
-eviction while also promising continuous capture: at the current rate it fills
-in roughly 25–30 minutes. The deployed interim policy is:
+The final retention policy is:
 
-- normally retain all sealed generations locally while free space remains at or
-  above the spill-start watermark;
-- under cache pressure, upload and evict only the oldest whole generation after
-  a fully verified B2 commit and durable local B2 receipt;
-- stop spilling once the recovery watermark is restored;
-- Blockzilla can later catch up from each committed B2 copy once its puller is
-  implemented;
-- if B2 itself is unavailable, never evict the unverified local generation and
-  pause capture at the hard disk floor.
+- fsync every observation to the Hetzner WAL immediately;
+- upload immutable whole generations to object storage as an additional copy;
+- retain local and remote generations until Blockzilla returns a verified,
+  signed durable-raw ACK covering the exact generation;
+- delete oldest fully acknowledged whole generations only;
+- if Blockzilla is behind and storage reaches its hard floor, pause capture and
+  alert instead of deleting unacknowledged data.
 
-The later 500 MB memory window, sync-event promotion to disk, and signed
-Blockzilla ACK deletion watermark still require an authenticated protocol and
-crash-safety design. They are not active configuration knobs in this recorder.
-If strict “local delete only after Blockzilla ACK” is selected later, the
+The signed Blockzilla ACK watermark still requires an authenticated protocol
+and crash-safety tests. Until it exists, no process has deletion authority. The
 documented consequence is that capture must pause when all durable tiers fill.
 
 ## Monitoring and Telegram incidents
@@ -261,9 +258,9 @@ generation is committed to B2.
 
 ## Implementation sequence
 
-1. Keep the deployed disk-first pressure spill, exact B2 verification, and
-   account-wide capacity alerts. This preserves today's live backup without
-   treating a healthy sealed backlog as an incident.
+1. Keep WAL-first capture, exact object-store verification, and capacity alerts.
+   Keep all deletion paths locked until a signed Blockzilla durable-raw ACK is
+   available.
 2. Add generation sequence/coverage metadata plus 100-record/60-second rotation.
 3. Add exact-version B2 download, staging, verification, and durable raw landing
    on the NAS. Do not emit canonical-archive ACKs yet.
@@ -274,6 +271,5 @@ generation is committed to B2.
 6. Run disconnect, lost-ACK, expired-key, fork, corrupted-object, disk-full,
    `kill -9`, and power-loss tests before any ACK affects retention policy.
 
-Only after those ACK and crash tests should a bounded 500 MB memory cache be
-considered as a latency optimization; it must never be presented as durable
-backup before a signed Blockzilla receipt or local WAL fsync exists.
+RAM remains a bounded latency/fan-out cache only; the local WAL is always the
+first durability boundary.

@@ -41,6 +41,24 @@ services:
       BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS: "${BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS:-100}"
       BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN: "/usr/local/bin/blockzilla-s3-upload"
       BLOCKZILLA_RAW_CACHE_RECEIPT_DIR: "${BLOCKZILLA_RAW_CACHE_RECEIPT_DIR:-/data/grpc-cache/receipts}"
+      BLOCKZILLA_RAW_OBJECT_STORE: "${BLOCKZILLA_RAW_OBJECT_STORE:-r2}"
+      BLOCKZILLA_RAW_OBJECT_STORE_CREDENTIALS_FILE: "${BLOCKZILLA_RAW_OBJECT_STORE_CREDENTIALS_FILE:-/run/secrets/r2_credentials}"
+      BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX: "${BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX:-live-grpc-backup/v1}"
+      BLOCKZILLA_R2_USAGE_ALERT_ENABLED: "${BLOCKZILLA_R2_USAGE_ALERT_ENABLED:-true}"
+      BLOCKZILLA_R2_USAGE_WARNING_BYTES: "${BLOCKZILLA_R2_USAGE_WARNING_BYTES:-800000000000}"
+      BLOCKZILLA_R2_USAGE_CRITICAL_BYTES: "${BLOCKZILLA_R2_USAGE_CRITICAL_BYTES:-950000000000}"
+      BLOCKZILLA_R2_USAGE_RECOVERY_HYSTERESIS_BYTES: "${BLOCKZILLA_R2_USAGE_RECOVERY_HYSTERESIS_BYTES:-50000000000}"
+      BLOCKZILLA_R2_USAGE_CHECK_INTERVAL_SECS: "${BLOCKZILLA_R2_USAGE_CHECK_INTERVAL_SECS:-3600}"
+      # Never enable destructive R2 retention without the signed Blockzilla
+      # generation-ACK verifier. Byte pressure or a heartbeat is insufficient.
+      BLOCKZILLA_R2_RETENTION_ENABLED: "${BLOCKZILLA_R2_RETENTION_ENABLED:-false}"
+      BLOCKZILLA_R2_RETENTION_TRIGGER_BYTES: "${BLOCKZILLA_R2_RETENTION_TRIGGER_BYTES:-950000000000}"
+      BLOCKZILLA_R2_RETENTION_TARGET_BYTES: "${BLOCKZILLA_R2_RETENTION_TARGET_BYTES:-900000000000}"
+      BLOCKZILLA_R2_RETENTION_MINIMUM_AGE_SECS: "${BLOCKZILLA_R2_RETENTION_MINIMUM_AGE_SECS:-86400}"
+      BLOCKZILLA_R2_RETENTION_MINIMUM_RETAINED_GENERATIONS: "${BLOCKZILLA_R2_RETENTION_MINIMUM_RETAINED_GENERATIONS:-2}"
+      BLOCKZILLA_R2_RETENTION_CHECK_INTERVAL_SECS: "${BLOCKZILLA_R2_RETENTION_CHECK_INTERVAL_SECS:-3600}"
+      # Legacy Backblaze settings remain available for an explicit
+      # BLOCKZILLA_RAW_OBJECT_STORE=backblaze rollback.
       BLOCKZILLA_B2_CREDENTIALS_FILE: "/run/secrets/backblaze_credentials"
       BLOCKZILLA_B2_REMOTE_PREFIX: "${BLOCKZILLA_B2_REMOTE_PREFIX:-grpc-raw/v1}"
       BLOCKZILLA_B2_USAGE_ALERT_ENABLED: "${BLOCKZILLA_B2_USAGE_ALERT_ENABLED:-true}"
@@ -55,7 +73,14 @@ services:
       BLOCKZILLA_RAW_VOLUME_MARKER: "${BLOCKZILLA_RAW_VOLUME_MARKER:-/data/.blockzilla-raw-volume}"
       BLOCKZILLA_RAW_CLUSTER_ID: "${BLOCKZILLA_RAW_CLUSTER_ID:-solana-mainnet}"
       BLOCKZILLA_RAW_ORIGIN_NODE_ID: "${BLOCKZILLA_RAW_ORIGIN_NODE_ID:-hetzner-dokploy-01}"
-      BLOCKZILLA_RAW_SOURCE_ID: "${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-backup}"
+      BLOCKZILLA_RAW_SOURCE_ID: "${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-primary}"
+      # Empty bind keeps the downstream relay disabled. The supervisor must add the matching
+      # record-grpc-raw CLI flags only when this is non-empty.
+      BLOCKZILLA_RAW_RELAY_BIND: "${BLOCKZILLA_RAW_RELAY_BIND:-}"
+      BLOCKZILLA_RAW_RELAY_X_TOKEN_FILE: "/run/secrets/grpc_relay_x_token"
+      BLOCKZILLA_RAW_RELAY_MAX_RECORDS: "${BLOCKZILLA_RAW_RELAY_MAX_RECORDS:-128}"
+      BLOCKZILLA_RAW_RELAY_MAX_ENCODED_BYTES: "${BLOCKZILLA_RAW_RELAY_MAX_ENCODED_BYTES:-134217728}"
+      BLOCKZILLA_RAW_RELAY_MAX_CLIENTS: "${BLOCKZILLA_RAW_RELAY_MAX_CLIENTS:-4}"
       BLOCKZILLA_RAW_STALE_AFTER_SECS: "${BLOCKZILLA_RAW_STALE_AFTER_SECS:-180}"
       BLOCKZILLA_RAW_STARTUP_GRACE_SECS: "${BLOCKZILLA_RAW_STARTUP_GRACE_SECS:-300}"
       BLOCKZILLA_TELEGRAM_ENABLED: "${BLOCKZILLA_TELEGRAM_ENABLED:-true}"
@@ -77,10 +102,16 @@ services:
           nocopy: true
     secrets:
       - grpc_x_token
+      - grpc_relay_x_token
       - telegram_bot_token
+      - r2_credentials
       - backblaze_credentials
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=4m,mode=1777,uid=10001,gid=10001
+
+    # Docker-network metadata only: there is deliberately no host `ports` publication.
+    expose:
+      - "10001"
 
     read_only: true
     user: "10001:10001"
@@ -122,7 +153,13 @@ secrets:
   grpc_x_token:
     # Dokploy persists application files beside the generated Compose checkout.
     file: ${BLOCKZILLA_GRPC_X_TOKEN_HOST_FILE:-../files/yellowstone-x-token}
+  grpc_relay_x_token:
+    # /dev/null keeps a disabled relay deployable without reusing the upstream credential. Set
+    # the host-file variable before enabling BLOCKZILLA_RAW_RELAY_BIND.
+    file: ${BLOCKZILLA_RAW_RELAY_X_TOKEN_HOST_FILE:-/dev/null}
   telegram_bot_token:
     file: ${BLOCKZILLA_TELEGRAM_BOT_TOKEN_HOST_FILE:-../files/telegram-bot-token}
+  r2_credentials:
+    file: ${BLOCKZILLA_R2_CREDENTIALS_HOST_FILE:-../files/cloudflare-r2.env}
   backblaze_credentials:
     file: ${BLOCKZILLA_B2_CREDENTIALS_HOST_FILE:-../files/backblaze-blockzilla.env}

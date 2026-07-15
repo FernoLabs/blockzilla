@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     env,
     fs::{self, File, OpenOptions},
+    future::Future,
     io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     net::IpAddr,
     path::{Path, PathBuf},
@@ -27,20 +28,20 @@ use blockzilla_format::{
     parse_logs_with_compactor, parse_logs_with_compactor_and_stats, read_u32_varint,
     wincode_leb128_config,
 };
-use futures::StreamExt;
+use futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use gxhash::{GxBuildHasher, HashMap as GxHashMap};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
+use tokio::time::{Instant as TokioInstant, sleep_until, timeout};
 use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient};
 use yellowstone_grpc_proto::prelude::{
     CommitmentLevel, Message as GrpcMessage, Reward as GrpcReward, Rewards as GrpcRewards,
     SlotStatus, SubscribeRequest, SubscribeRequestFilterBlocks, SubscribeRequestFilterBlocksMeta,
-    SubscribeRequestFilterEntry, SubscribeRequestFilterSlots, SubscribeUpdateBlock,
-    TokenBalance as GrpcTokenBalance, Transaction as GrpcTransaction,
+    SubscribeRequestFilterEntry, SubscribeRequestFilterSlots, SubscribeRequestPing,
+    SubscribeUpdateBlock, TokenBalance as GrpcTokenBalance, Transaction as GrpcTransaction,
     TransactionStatusMeta as GrpcTransactionStatusMeta, subscribe_update::UpdateOneof,
 };
-use yellowstone_grpc_proto::tonic::codec::CompressionEncoding;
+use yellowstone_grpc_proto::tonic::{Code, Status, codec::CompressionEncoding};
 
 use crate::{
     epoch::{EpochBoundaryEvent, EpochBoundaryTracker, EpochSlot, OLD_FAITHFUL_SLOTS_PER_EPOCH},
@@ -49,6 +50,9 @@ use crate::{
 };
 
 type LivePubkeyCounts = GxHashMap<[u8; 32], u32>;
+
+const CAPTURE_SUBSCRIBE_REQUEST_CHANNEL_CAPACITY: usize = 8;
+const CAPTURE_SUBSCRIBE_PING_ID: i32 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrpcRawBlockStorage {
@@ -99,6 +103,12 @@ pub struct GrpcCaptureConfig {
     pub archive_dir: PathBuf,
     pub max_blocks: usize,
     pub timeout_secs: u64,
+    #[serde(default = "default_capture_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_capture_subscribe_timeout_secs")]
+    pub subscribe_timeout_secs: u64,
+    #[serde(default = "default_capture_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
     pub from_slot: Option<u64>,
     pub slots_per_epoch: u64,
     pub stop_at_epoch_boundary: bool,
@@ -106,6 +116,41 @@ pub struct GrpcCaptureConfig {
     pub pubkey_index_mode: GrpcPubkeyIndexMode,
     pub pubkey_hot_registry_path: Option<PathBuf>,
     pub pubkey_hot_count: usize,
+}
+
+const fn default_capture_connect_timeout_secs() -> u64 {
+    30
+}
+
+const fn default_capture_subscribe_timeout_secs() -> u64 {
+    30
+}
+
+const fn default_capture_idle_timeout_secs() -> u64 {
+    120
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcCaptureOutcome {
+    EpochBoundary,
+    Retryable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcCaptureRetryReason {
+    ConnectTimeout,
+    ConnectError,
+    SubscribeTimeout,
+    SubscribeError,
+    TotalTimeout,
+    IdleTimeout,
+    StreamEof,
+    StreamError,
+    PermissionDenied,
+    Unauthenticated,
+    MaxBlocks,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +188,9 @@ pub struct GrpcCaptureReport {
     pub first_epoch: Option<u64>,
     pub last_epoch: Option<u64>,
     pub stopped_at_epoch_boundary: bool,
+    pub outcome: GrpcCaptureOutcome,
+    pub retry_reason: Option<GrpcCaptureRetryReason>,
+    pub action_required: bool,
     pub elapsed_ms: u128,
     pub processing_ms: u128,
     pub block_bytes_written: u64,
@@ -287,6 +335,44 @@ struct GrpcCapturedBlockJournal {
     entries_count: u64,
     updated_account_count: u64,
     missing: Vec<LiveBlockMissingField>,
+}
+
+/// Bounded-memory archive writer used by the stopped-spool raw materializer.
+///
+/// Unlike [`capture_grpc_blocks`], this writer never owns a network connection and never appends
+/// to a published capture. Its caller writes into a fresh staging directory and atomically
+/// publishes that directory only after [`Self::finish`] succeeds. The raw protobuf WAL remains the
+/// source of truth, so this path intentionally does not duplicate `grpc-raw-blocks.bin`.
+pub(crate) struct GrpcRawArchiveWriter {
+    epoch: u64,
+    block_writer: WincodeLeb128FramedWriter<BufWriter<File>>,
+    poh_writer: WincodeLeb128FramedWriter<BufWriter<File>>,
+    block_index_writer: WincodeLeb128FramedWriter<BufWriter<File>>,
+    blockhash_writer: BufWriter<File>,
+    signatures_writer: BufWriter<File>,
+    signature_index_writer: WincodeLeb128FramedWriter<BufWriter<File>>,
+    pubkey_run_writer: PubkeyRunWriter,
+    journal_writer: BufWriter<File>,
+    block_offset: u64,
+    signature_ordinal: u64,
+    block_scratch: Vec<u8>,
+    pubkey_run_block_keys: Vec<[u8; 32]>,
+    report: GrpcRawArchiveWriteReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GrpcRawArchiveWriteReport {
+    pub(crate) epoch: u64,
+    pub(crate) blocks_written: u64,
+    pub(crate) transactions_written: u64,
+    pub(crate) entries_written: u64,
+    pub(crate) first_slot: Option<u64>,
+    pub(crate) last_slot: Option<u64>,
+    pub(crate) normalized_block_bytes: u64,
+    pub(crate) pubkey_run_files: usize,
+    pub(crate) pubkey_run_records: u64,
+    pub(crate) pubkey_hot_keys: usize,
+    pub(crate) pubkey_hot_records: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +700,463 @@ pub async fn watch_grpc_epoch_boundaries(
     Ok(report)
 }
 
+impl GrpcRawArchiveWriter {
+    pub(crate) fn create(
+        archive_dir: &Path,
+        epoch: u64,
+        pubkey_hot_registry_path: Option<&Path>,
+        pubkey_hot_count: usize,
+    ) -> Result<Self> {
+        let layout = ProducerLayout::create(archive_dir)?;
+        let block_path = layout.blocks_dir.join("live-no-registry-blocks.bin");
+        let poh_path = layout.poh_dir.join("poh.wincode");
+        let block_index_path = layout.index_dir.join("block-index.bin");
+        let blockhash_registry_path = layout.index_dir.join("blockhash_registry.bin");
+        let signatures_path = layout.index_dir.join("signatures.bin");
+        let signature_index_path = layout.index_dir.join("signature-index.bin");
+        let pubkey_runs_dir = layout.index_dir.join(LIVE_PUBKEY_RUNS_DIR);
+        let journal_path = layout.journal_dir.join("grpc-blocks.jsonl");
+
+        let mut block_index_writer = WincodeLeb128FramedWriter::new(BufWriter::new(
+            create_new_capture_file(&block_index_path)?,
+        ));
+        block_index_writer.write(&SplitCompactIndexHeader { version: 1 })?;
+
+        Ok(Self {
+            epoch,
+            block_writer: WincodeLeb128FramedWriter::new(BufWriter::new(create_new_capture_file(
+                &block_path,
+            )?)),
+            poh_writer: WincodeLeb128FramedWriter::new(BufWriter::new(create_new_capture_file(
+                &poh_path,
+            )?)),
+            block_index_writer,
+            blockhash_writer: BufWriter::new(create_new_capture_file(&blockhash_registry_path)?),
+            signatures_writer: BufWriter::new(create_new_capture_file(&signatures_path)?),
+            signature_index_writer: WincodeLeb128FramedWriter::new(BufWriter::new(
+                create_new_capture_file(&signature_index_path)?,
+            )),
+            pubkey_run_writer: PubkeyRunWriter::open(
+                &pubkey_runs_dir,
+                pubkey_hot_registry_path,
+                pubkey_hot_count,
+            )?,
+            journal_writer: BufWriter::new(create_new_capture_file(&journal_path)?),
+            block_offset: 0,
+            signature_ordinal: 0,
+            block_scratch: Vec::with_capacity(2 * 1024 * 1024),
+            pubkey_run_block_keys: Vec::new(),
+            report: GrpcRawArchiveWriteReport {
+                epoch,
+                blocks_written: 0,
+                transactions_written: 0,
+                entries_written: 0,
+                first_slot: None,
+                last_slot: None,
+                normalized_block_bytes: 0,
+                pubkey_run_files: 0,
+                pubkey_run_records: 0,
+                pubkey_hot_keys: 0,
+                pubkey_hot_records: 0,
+            },
+        })
+    }
+
+    pub(crate) fn write_block(
+        &mut self,
+        block: &SubscribeUpdateBlock,
+        epoch: u64,
+        epoch_slot_index: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            epoch == self.epoch,
+            "raw materializer received epoch {}, expected {}",
+            epoch,
+            self.epoch
+        );
+        let block_id = u32::try_from(self.report.blocks_written)
+            .context("raw materialized block count exceeds u32::MAX")?;
+        let converted = convert_grpc_block(block, block_id).with_context(|| {
+            format!(
+                "convert raw gRPC block slot {} block_id {}",
+                block.slot, block_id
+            )
+        })?;
+        encode_with_scratch(&converted.block, &mut self.block_scratch)
+            .context("wincode encode raw materialized block")?;
+        let block_len = u32::try_from(self.block_scratch.len())
+            .context("raw materialized block exceeds u32::MAX")?;
+        let tx_count = u32::try_from(converted.transaction_count)
+            .context("raw materialized transaction count exceeds u32::MAX")?;
+
+        self.poh_writer.write(&WincodeArchiveV2PohRecord {
+            block_id,
+            slot: block.slot,
+            entries: converted.poh_entries,
+        })?;
+        self.block_writer.write_bytes(&self.block_scratch)?;
+        self.block_index_writer.write(&SplitCompactIndexRecord {
+            slot: block.slot,
+            block_id,
+            block_offset: self.block_offset,
+            block_len,
+            runtime_offset: 0,
+            runtime_len: 0,
+            tx_count,
+        })?;
+        self.blockhash_writer.write_all(&converted.blockhash)?;
+
+        self.pubkey_run_block_keys.clear();
+        visit_pubkeys_from_block(&converted.block, |pubkey| {
+            self.pubkey_run_block_keys.push(pubkey);
+            Ok(())
+        })?;
+        self.pubkey_run_writer
+            .push_block_keys(&mut self.pubkey_run_block_keys)?;
+        write_signatures(
+            &converted.block,
+            block_id,
+            block.slot,
+            &mut self.signature_ordinal,
+            &mut self.signatures_writer,
+            &mut self.signature_index_writer,
+        )?;
+
+        let journal = GrpcCapturedBlockJournal {
+            slot: block.slot,
+            epoch,
+            epoch_slot_index,
+            block_id,
+            parent_slot: block.parent_slot,
+            transactions: block.transactions.len(),
+            entries: block.entries.len(),
+            executed_transaction_count: block.executed_transaction_count,
+            entries_count: block.entries_count,
+            updated_account_count: block.updated_account_count,
+            missing: converted.missing,
+        };
+        serde_json::to_writer(&mut self.journal_writer, &journal)?;
+        self.journal_writer.write_all(b"\n")?;
+
+        self.block_offset = self
+            .block_offset
+            .checked_add(frame_len_u64(block_len))
+            .context("raw materialized block offset overflow")?;
+        self.report.first_slot.get_or_insert(block.slot);
+        self.report.last_slot = Some(block.slot);
+        self.report.blocks_written = self
+            .report
+            .blocks_written
+            .checked_add(1)
+            .context("raw materialized block count overflow")?;
+        self.report.transactions_written = self
+            .report
+            .transactions_written
+            .checked_add(block.transactions.len() as u64)
+            .context("raw materialized transaction count overflow")?;
+        self.report.entries_written = self
+            .report
+            .entries_written
+            .checked_add(block.entries.len() as u64)
+            .context("raw materialized entry count overflow")?;
+        self.report.normalized_block_bytes = self
+            .report
+            .normalized_block_bytes
+            .checked_add(u64::from(block_len))
+            .context("raw materialized block byte count overflow")?;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<GrpcRawArchiveWriteReport> {
+        self.block_writer.flush()?;
+        self.poh_writer.flush()?;
+        self.block_index_writer.flush()?;
+        self.blockhash_writer.flush()?;
+        self.signatures_writer.flush()?;
+        self.signature_index_writer.flush()?;
+        let run_report = self.pubkey_run_writer.finish()?;
+        self.journal_writer.flush()?;
+        self.report.pubkey_run_files = run_report.run_files;
+        self.report.pubkey_run_records = run_report.run_records;
+        self.report.pubkey_hot_keys = run_report.hot_keys;
+        self.report.pubkey_hot_records = run_report.hot_records;
+        Ok(self.report)
+    }
+}
+
+fn create_new_capture_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create new capture file {}", path.display()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureAwaitOutcome<T> {
+    Completed(T),
+    TotalTimeout,
+    StageTimeout,
+}
+
+async fn await_capture_stage<F>(
+    future: F,
+    total_deadline: TokioInstant,
+    stage_deadline: TokioInstant,
+) -> CaptureAwaitOutcome<F::Output>
+where
+    F: Future,
+{
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        output = &mut future => CaptureAwaitOutcome::Completed(output),
+        _ = sleep_until(total_deadline) => CaptureAwaitOutcome::TotalTimeout,
+        _ = sleep_until(stage_deadline) => CaptureAwaitOutcome::StageTimeout,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureReadOutcome<T> {
+    Item(T),
+    StreamEof,
+    TotalTimeout,
+    IdleTimeout,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CaptureReadWatchdog {
+    total_deadline: TokioInstant,
+    idle_timeout: Duration,
+    idle_deadline: TokioInstant,
+}
+
+impl CaptureReadWatchdog {
+    fn new(total_deadline: TokioInstant, idle_timeout_secs: u64) -> Result<Self> {
+        let idle_timeout =
+            capture_timeout_duration(idle_timeout_secs, "gRPC capture idle timeout")?;
+        Self::with_idle_timeout(total_deadline, idle_timeout)
+    }
+
+    fn with_idle_timeout(total_deadline: TokioInstant, idle_timeout: Duration) -> Result<Self> {
+        anyhow::ensure!(
+            !idle_timeout.is_zero(),
+            "gRPC capture idle timeout must be non-zero"
+        );
+        let idle_deadline = TokioInstant::now()
+            .checked_add(idle_timeout)
+            .context("gRPC capture idle timeout is too large")?;
+        Ok(Self {
+            total_deadline,
+            idle_timeout,
+            idle_deadline,
+        })
+    }
+
+    async fn next<S>(&self, stream: &mut S) -> CaptureReadOutcome<S::Item>
+    where
+        S: Stream + Unpin,
+    {
+        tokio::select! {
+            biased;
+            item = stream.next() => match item {
+                Some(item) => CaptureReadOutcome::Item(item),
+                None => CaptureReadOutcome::StreamEof,
+            },
+            _ = sleep_until(self.total_deadline) => CaptureReadOutcome::TotalTimeout,
+            _ = sleep_until(self.idle_deadline) => CaptureReadOutcome::IdleTimeout,
+        }
+    }
+
+    async fn wait<F>(&self, future: F) -> CaptureReadOutcome<F::Output>
+    where
+        F: Future,
+    {
+        tokio::pin!(future);
+        tokio::select! {
+            biased;
+            output = &mut future => CaptureReadOutcome::Item(output),
+            _ = sleep_until(self.total_deadline) => CaptureReadOutcome::TotalTimeout,
+            _ = sleep_until(self.idle_deadline) => CaptureReadOutcome::IdleTimeout,
+        }
+    }
+
+    fn reset_after_durable_append(&mut self) -> Result<()> {
+        self.idle_deadline = TokioInstant::now()
+            .checked_add(self.idle_timeout)
+            .context("gRPC capture idle timeout is too large")?;
+        Ok(())
+    }
+}
+
+fn classify_capture_read_outcome<T>(
+    outcome: CaptureReadOutcome<T>,
+) -> std::result::Result<T, CaptureRetry> {
+    match outcome {
+        CaptureReadOutcome::Item(item) => Ok(item),
+        CaptureReadOutcome::StreamEof => Err(CaptureRetry::new(GrpcCaptureRetryReason::StreamEof)),
+        CaptureReadOutcome::TotalTimeout => {
+            Err(CaptureRetry::new(GrpcCaptureRetryReason::TotalTimeout))
+        }
+        CaptureReadOutcome::IdleTimeout => {
+            Err(CaptureRetry::new(GrpcCaptureRetryReason::IdleTimeout))
+        }
+    }
+}
+
+fn capture_timeout_duration(seconds: u64, description: &str) -> Result<Duration> {
+    anyhow::ensure!(seconds > 0, "{description} must be non-zero");
+    Ok(Duration::from_secs(seconds))
+}
+
+fn capture_deadline_after(
+    now: TokioInstant,
+    seconds: u64,
+    description: &str,
+) -> Result<TokioInstant> {
+    now.checked_add(capture_timeout_duration(seconds, description)?)
+        .with_context(|| format!("{description} is too large"))
+}
+
+fn capture_subscribe_ping_request() -> SubscribeRequest {
+    SubscribeRequest {
+        ping: Some(SubscribeRequestPing {
+            id: CAPTURE_SUBSCRIBE_PING_ID,
+        }),
+        ..Default::default()
+    }
+}
+
+async fn reply_to_capture_ping(
+    watchdog: &CaptureReadWatchdog,
+    request_sink: &mut mpsc::Sender<SubscribeRequest>,
+) -> CaptureReadOutcome<std::result::Result<(), mpsc::SendError>> {
+    watchdog
+        .wait(request_sink.send(capture_subscribe_ping_request()))
+        .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureRetry {
+    reason: GrpcCaptureRetryReason,
+    action_required: bool,
+}
+
+impl CaptureRetry {
+    const fn new(reason: GrpcCaptureRetryReason) -> Self {
+        Self {
+            reason,
+            action_required: false,
+        }
+    }
+}
+
+fn classify_capture_status(status: &Status, fallback: GrpcCaptureRetryReason) -> CaptureRetry {
+    match status.code() {
+        Code::PermissionDenied => CaptureRetry {
+            reason: GrpcCaptureRetryReason::PermissionDenied,
+            action_required: true,
+        },
+        Code::Unauthenticated => CaptureRetry {
+            reason: GrpcCaptureRetryReason::Unauthenticated,
+            action_required: true,
+        },
+        _ => CaptureRetry::new(fallback),
+    }
+}
+
+fn classify_capture_error(error: &anyhow::Error, fallback: GrpcCaptureRetryReason) -> CaptureRetry {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Status>())
+        .map_or_else(
+            || CaptureRetry::new(fallback),
+            |status| classify_capture_status(status, fallback),
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureSessionExit {
+    EpochBoundary,
+    Retry(CaptureRetry),
+}
+
+fn apply_capture_session_exit(report: &mut GrpcCaptureReport, exit: CaptureSessionExit) {
+    match exit {
+        CaptureSessionExit::EpochBoundary => {
+            report.stopped_at_epoch_boundary = true;
+            report.outcome = GrpcCaptureOutcome::EpochBoundary;
+            report.retry_reason = None;
+            report.action_required = false;
+        }
+        CaptureSessionExit::Retry(retry) => {
+            report.stopped_at_epoch_boundary = false;
+            report.outcome = GrpcCaptureOutcome::Retryable;
+            report.retry_reason = Some(retry.reason);
+            report.action_required = retry.action_required;
+        }
+    }
+}
+
+type CaptureFramedFileWriter = WincodeLeb128FramedWriter<BufWriter<File>>;
+
+struct GrpcCaptureWriters {
+    block: CaptureFramedFileWriter,
+    raw_blocks: Option<CaptureFramedFileWriter>,
+    failed_raw_blocks: Option<CaptureFramedFileWriter>,
+    failed_raw_blocks_journal: Option<BufWriter<File>>,
+    poh: CaptureFramedFileWriter,
+    block_index: CaptureFramedFileWriter,
+    blockhash: BufWriter<File>,
+    signatures: BufWriter<File>,
+    signature_index: CaptureFramedFileWriter,
+    pubkey_touches: Option<BufWriter<File>>,
+    pubkey_runs: Option<PubkeyRunWriter>,
+    pubkey_counts: Option<LivePubkeyCounts>,
+    journal: BufWriter<File>,
+}
+
+impl GrpcCaptureWriters {
+    /// Make every append-only block artifact visible before advancing the journal flush boundary.
+    fn flush_block_boundary(&mut self) -> Result<()> {
+        self.block.flush()?;
+        if let Some(writer) = self.raw_blocks.as_mut() {
+            writer.flush()?;
+        }
+        self.poh.flush()?;
+        self.block_index.flush()?;
+        self.blockhash.flush()?;
+        self.signatures.flush()?;
+        self.signature_index.flush()?;
+        if let Some(writer) = self.pubkey_touches.as_mut() {
+            writer.flush()?;
+        }
+        // The journal is the resume cursor and is deliberately flushed last.
+        self.journal.flush()?;
+        Ok(())
+    }
+
+    fn finish(&mut self, report: &mut GrpcCaptureReport) -> Result<()> {
+        if let Some(writer) = self.failed_raw_blocks.as_mut() {
+            writer.flush()?;
+        }
+        if let Some(writer) = self.failed_raw_blocks_journal.as_mut() {
+            writer.flush()?;
+        }
+        if let Some(writer) = self.pubkey_runs.as_mut() {
+            let run_report = writer.finish()?;
+            report.pubkey_run_files = run_report.run_files;
+            report.pubkey_run_records = run_report.run_records;
+            report.pubkey_hot_keys = run_report.hot_keys;
+            report.pubkey_hot_records = run_report.hot_records;
+        }
+        if let Some(pubkey_counts) = self.pubkey_counts.as_ref() {
+            write_pubkey_counts(&report.pubkey_counts_path, pubkey_counts)?;
+        }
+        self.flush_block_boundary()
+    }
+}
+
 pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptureReport> {
     let layout = ProducerLayout::create(&config.archive_dir)?;
     let block_path = layout.blocks_dir.join("live-no-registry-blocks.bin");
@@ -646,12 +1189,12 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
     let mut signature_ordinal = signature_bytes_before / 64;
     let pubkey_touch_bytes_before = file_len(&pubkey_touches_path)?;
     let pubkey_run_bytes_before = dir_file_len(&pubkey_runs_dir)?;
-    let mut pubkey_counts = if config.pubkey_index_mode.writes_counts() {
+    let pubkey_counts = if config.pubkey_index_mode.writes_counts() {
         Some(read_pubkey_counts(&pubkey_counts_path)?)
     } else {
         None
     };
-    let mut pubkey_run_writer = if config.pubkey_index_mode.writes_runs() {
+    let pubkey_run_writer = if config.pubkey_index_mode.writes_runs() {
         Some(PubkeyRunWriter::open(
             &pubkey_runs_dir,
             config.pubkey_hot_registry_path.as_deref(),
@@ -747,44 +1290,30 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
         .open(&journal_path)
         .with_context(|| format!("open {}", journal_path.display()))?;
 
-    let mut block_writer = WincodeLeb128FramedWriter::new(BufWriter::new(block_file));
-    let mut raw_blocks_writer = raw_blocks_file
-        .map(BufWriter::new)
-        .map(WincodeLeb128FramedWriter::new);
-    let mut failed_raw_blocks_writer = failed_raw_blocks_file
-        .map(BufWriter::new)
-        .map(WincodeLeb128FramedWriter::new);
-    let mut failed_raw_blocks_journal_writer = failed_raw_blocks_journal_file.map(BufWriter::new);
-    let mut poh_writer = WincodeLeb128FramedWriter::new(BufWriter::new(poh_file));
-    let mut block_index_writer = WincodeLeb128FramedWriter::new(BufWriter::new(block_index_file));
-    let mut blockhash_writer = BufWriter::new(blockhash_file);
-    let mut signatures_writer = BufWriter::new(signatures_file);
-    let mut signature_index_writer =
-        WincodeLeb128FramedWriter::new(BufWriter::new(signature_index_file));
-    let mut pubkey_touches_writer = pubkey_touches_file.map(BufWriter::new);
-    let mut journal_writer = BufWriter::new(journal_file);
-
-    let mut client = connect_grpc(&config.endpoint).await?;
-    let request = SubscribeRequest {
-        blocks: HashMap::from([(
-            "blocks".to_string(),
-            SubscribeRequestFilterBlocks {
-                include_transactions: Some(true),
-                include_accounts: Some(false),
-                include_entries: Some(true),
-                ..Default::default()
-            },
-        )]),
-        commitment: Some(CommitmentLevel::Confirmed as i32),
-        from_slot: config.from_slot,
-        ..Default::default()
+    let mut writers = GrpcCaptureWriters {
+        block: WincodeLeb128FramedWriter::new(BufWriter::new(block_file)),
+        raw_blocks: raw_blocks_file
+            .map(BufWriter::new)
+            .map(WincodeLeb128FramedWriter::new),
+        failed_raw_blocks: failed_raw_blocks_file
+            .map(BufWriter::new)
+            .map(WincodeLeb128FramedWriter::new),
+        failed_raw_blocks_journal: failed_raw_blocks_journal_file.map(BufWriter::new),
+        poh: WincodeLeb128FramedWriter::new(BufWriter::new(poh_file)),
+        block_index: WincodeLeb128FramedWriter::new(BufWriter::new(block_index_file)),
+        blockhash: BufWriter::new(blockhash_file),
+        signatures: BufWriter::new(signatures_file),
+        signature_index: WincodeLeb128FramedWriter::new(BufWriter::new(signature_index_file)),
+        pubkey_touches: pubkey_touches_file.map(BufWriter::new),
+        pubkey_runs: pubkey_run_writer,
+        pubkey_counts,
+        journal: BufWriter::new(journal_file),
     };
-    let mut stream = client.subscribe_once(request).await?;
 
     let started_at = Instant::now();
     let mut last_progress_write = None;
     let mut report = GrpcCaptureReport {
-        endpoint: config.endpoint,
+        endpoint: config.endpoint.clone(),
         archive_dir: layout.archive_dir,
         blocks_seen: 0,
         blocks_written: 0,
@@ -795,6 +1324,9 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
         first_epoch: None,
         last_epoch: None,
         stopped_at_epoch_boundary: false,
+        outcome: GrpcCaptureOutcome::Retryable,
+        retry_reason: None,
+        action_required: false,
         elapsed_ms: 0,
         processing_ms: 0,
         block_bytes_written: 0,
@@ -828,17 +1360,172 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
         pubkey_hot_records: 0,
     };
 
-    let deadline = Duration::from_secs(config.timeout_secs);
+    let watchdog_started_at = TokioInstant::now();
+    let total_deadline = capture_deadline_after(
+        watchdog_started_at,
+        config.timeout_secs,
+        "gRPC capture total timeout",
+    )?;
+    let connect_deadline = capture_deadline_after(
+        watchdog_started_at,
+        config.connect_timeout_secs,
+        "gRPC capture connect timeout",
+    )?;
     let max_blocks = config.max_blocks.max(1);
     let mut processing_duration = Duration::ZERO;
     let mut block_scratch = Vec::with_capacity(2 * 1024 * 1024);
     let mut pubkey_run_block_keys = Vec::new();
-    let read_blocks = async {
-        while report.blocks_written < max_blocks {
-            let Some(update) = stream.next().await else {
-                break;
+    let session_result: Result<CaptureSessionExit> = async {
+        let mut client = match await_capture_stage(
+            connect_grpc(&config.endpoint),
+            total_deadline,
+            connect_deadline,
+        )
+        .await
+        {
+            CaptureAwaitOutcome::Completed(Ok(client)) => client,
+            CaptureAwaitOutcome::Completed(Err(error)) => {
+                return Ok(CaptureSessionExit::Retry(classify_capture_error(
+                    &error,
+                    GrpcCaptureRetryReason::ConnectError,
+                )));
+            }
+            CaptureAwaitOutcome::TotalTimeout => {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::TotalTimeout,
+                )));
+            }
+            CaptureAwaitOutcome::StageTimeout => {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::ConnectTimeout,
+                )));
+            }
+        };
+
+        let request = SubscribeRequest {
+            blocks: HashMap::from([(
+                "blocks".to_string(),
+                SubscribeRequestFilterBlocks {
+                    include_transactions: Some(true),
+                    include_accounts: Some(false),
+                    include_entries: Some(true),
+                    ..Default::default()
+                },
+            )]),
+            commitment: Some(CommitmentLevel::Confirmed as i32),
+            from_slot: config.from_slot,
+            ..Default::default()
+        };
+        let subscribe_deadline = capture_deadline_after(
+            TokioInstant::now(),
+            config.subscribe_timeout_secs,
+            "gRPC capture subscribe timeout",
+        )?;
+        // Keep the request side alive for the full response stream. Yellowstone's application
+        // pings require replies on this same bidirectional subscription.
+        let (mut request_sink, request_stream) =
+            mpsc::channel::<SubscribeRequest>(CAPTURE_SUBSCRIBE_REQUEST_CHANNEL_CAPACITY);
+        match await_capture_stage(
+            request_sink.send(request),
+            total_deadline,
+            subscribe_deadline,
+        )
+        .await
+        {
+            CaptureAwaitOutcome::Completed(Ok(())) => {}
+            CaptureAwaitOutcome::Completed(Err(_)) => {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::SubscribeError,
+                )));
+            }
+            CaptureAwaitOutcome::TotalTimeout => {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::TotalTimeout,
+                )));
+            }
+            CaptureAwaitOutcome::StageTimeout => {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::SubscribeTimeout,
+                )));
+            }
+        }
+        let response = match await_capture_stage(
+            client.geyser.subscribe(request_stream),
+            total_deadline,
+            subscribe_deadline,
+        )
+        .await
+        {
+            CaptureAwaitOutcome::Completed(Ok(response)) => response,
+            CaptureAwaitOutcome::Completed(Err(status)) => {
+                return Ok(CaptureSessionExit::Retry(classify_capture_status(
+                    &status,
+                    GrpcCaptureRetryReason::SubscribeError,
+                )));
+            }
+            CaptureAwaitOutcome::TotalTimeout => {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::TotalTimeout,
+                )));
+            }
+            CaptureAwaitOutcome::StageTimeout => {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::SubscribeTimeout,
+                )));
+            }
+        };
+        let mut stream = response.into_inner();
+        let mut read_watchdog = CaptureReadWatchdog::new(total_deadline, config.idle_timeout_secs)?;
+        let mut request_side_open = true;
+
+        loop {
+            if report.blocks_written >= max_blocks {
+                return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                    GrpcCaptureRetryReason::MaxBlocks,
+                )));
+            }
+            let stream_item =
+                match classify_capture_read_outcome(read_watchdog.next(&mut stream).await) {
+                    Ok(stream_item) => stream_item,
+                    Err(retry) => return Ok(CaptureSessionExit::Retry(retry)),
+                };
+            let update = match stream_item {
+                Ok(update) => update,
+                Err(status) => {
+                    return Ok(CaptureSessionExit::Retry(classify_capture_status(
+                        &status,
+                        GrpcCaptureRetryReason::StreamError,
+                    )));
+                }
             };
-            let update = update?;
+            if matches!(update.update_oneof.as_ref(), Some(UpdateOneof::Ping(_))) {
+                if request_side_open {
+                    match reply_to_capture_ping(&read_watchdog, &mut request_sink).await {
+                        CaptureReadOutcome::Item(Ok(())) => {}
+                        CaptureReadOutcome::Item(Err(_)) | CaptureReadOutcome::StreamEof => {
+                            // A terminal Status can already be queued on the response side. Keep
+                            // draining it so auth failures retain their action-required class.
+                            request_side_open = false;
+                            tracing::warn!(
+                                "gRPC capture request side closed; draining response stream"
+                            );
+                        }
+                        CaptureReadOutcome::TotalTimeout => {
+                            return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                                GrpcCaptureRetryReason::TotalTimeout,
+                            )));
+                        }
+                        CaptureReadOutcome::IdleTimeout => {
+                            return Ok(CaptureSessionExit::Retry(CaptureRetry::new(
+                                GrpcCaptureRetryReason::IdleTimeout,
+                            )));
+                        }
+                    }
+                }
+                // Pings prove transport liveness, not block durability. They deliberately do not
+                // move the idle deadline.
+                continue;
+            }
             let Some(UpdateOneof::Block(block)) = update.update_oneof else {
                 continue;
             };
@@ -849,8 +1536,7 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
                 && let Some(existing_epoch) = capture_epoch
                 && epoch_slot.epoch != existing_epoch
             {
-                report.stopped_at_epoch_boundary = true;
-                break;
+                return Ok(CaptureSessionExit::EpochBoundary);
             }
             capture_epoch.get_or_insert(epoch_slot.epoch);
 
@@ -864,11 +1550,11 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
             let converted = match convert_grpc_block(&block, block_id) {
                 Ok(converted) => converted,
                 Err(err) => {
-                    if let Some(writer) = failed_raw_blocks_writer.as_mut() {
+                    if let Some(writer) = writers.failed_raw_blocks.as_mut() {
                         writer.write_bytes(&raw_block_bytes)?;
                         writer.flush()?;
                     }
-                    if let Some(writer) = failed_raw_blocks_journal_writer.as_mut() {
+                    if let Some(writer) = writers.failed_raw_blocks_journal.as_mut() {
                         serde_json::to_writer(
                             &mut *writer,
                             &serde_json::json!({
@@ -897,16 +1583,16 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
             let tx_count = u32::try_from(converted.transaction_count)
                 .context("transaction count exceeds u32::MAX")?;
 
-            poh_writer.write(&WincodeArchiveV2PohRecord {
+            writers.poh.write(&WincodeArchiveV2PohRecord {
                 block_id,
                 slot: block.slot,
                 entries: converted.poh_entries,
             })?;
-            if let Some(writer) = raw_blocks_writer.as_mut() {
+            if let Some(writer) = writers.raw_blocks.as_mut() {
                 writer.write_bytes(&raw_block_bytes)?;
             }
-            block_writer.write_bytes(&block_scratch)?;
-            block_index_writer.write(&SplitCompactIndexRecord {
+            writers.block.write_bytes(&block_scratch)?;
+            writers.block_index.write(&SplitCompactIndexRecord {
                 slot: block.slot,
                 block_id,
                 block_offset,
@@ -915,12 +1601,12 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
                 runtime_len: 0,
                 tx_count,
             })?;
-            blockhash_writer.write_all(&converted.blockhash)?;
+            writers.blockhash.write_all(&converted.blockhash)?;
             index_pubkeys_from_block(
                 &converted.block,
-                pubkey_counts.as_mut(),
-                pubkey_touches_writer.as_mut(),
-                pubkey_run_writer.as_mut(),
+                writers.pubkey_counts.as_mut(),
+                writers.pubkey_touches.as_mut(),
+                writers.pubkey_runs.as_mut(),
                 &mut pubkey_run_block_keys,
             )?;
             write_signatures(
@@ -928,8 +1614,8 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
                 block_id,
                 block.slot,
                 &mut signature_ordinal,
-                &mut signatures_writer,
-                &mut signature_index_writer,
+                &mut writers.signatures,
+                &mut writers.signature_index,
             )?;
             block_offset = block_offset
                 .checked_add(frame_len_u64(block_len))
@@ -948,8 +1634,14 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
                 updated_account_count: block.updated_account_count,
                 missing: converted.missing,
             };
-            serde_json::to_writer(&mut journal_writer, &journal)?;
-            journal_writer.write_all(b"\n")?;
+            serde_json::to_writer(&mut writers.journal, &journal)?;
+            writers.journal.write_all(b"\n")?;
+
+            // Only a completely flushed block/index/journal boundary proves useful ingest
+            // progress. Resetting sooner would let buffered writes or ping-only traffic mask a
+            // stalled capture from its supervisor.
+            writers.flush_block_boundary()?;
+            read_watchdog.reset_after_durable_append()?;
             processing_duration += processing_started_at.elapsed();
 
             report.first_slot.get_or_insert(block.slot);
@@ -963,9 +1655,6 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
             if last_progress_write
                 .is_none_or(|last: Instant| now.duration_since(last) >= Duration::from_secs(3))
             {
-                // Keep the append-only journal close to the status snapshot so a dashboard never
-                // advertises progress that is still trapped in this process's userspace buffer.
-                journal_writer.flush()?;
                 let _ = write_grpc_capture_progress(
                     &progress_path,
                     &report,
@@ -977,36 +1666,16 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
                 last_progress_write = Some(now);
             }
         }
+    }
+    .await;
 
-        block_writer.flush()?;
-        if let Some(writer) = raw_blocks_writer.as_mut() {
-            writer.flush()?;
-        }
-        poh_writer.flush()?;
-        block_index_writer.flush()?;
-        blockhash_writer.flush()?;
-        signatures_writer.flush()?;
-        signature_index_writer.flush()?;
-        if let Some(writer) = pubkey_touches_writer.as_mut() {
-            writer.flush()?;
-        }
-        if let Some(writer) = pubkey_run_writer.as_mut() {
-            let run_report = writer.finish()?;
-            report.pubkey_run_files = run_report.run_files;
-            report.pubkey_run_records = run_report.run_records;
-            report.pubkey_hot_keys = run_report.hot_keys;
-            report.pubkey_hot_records = run_report.hot_records;
-        }
-        journal_writer.flush()?;
-        if let Some(pubkey_counts) = pubkey_counts.as_ref() {
-            write_pubkey_counts(&report.pubkey_counts_path, pubkey_counts)?;
-        }
-        Ok::<_, anyhow::Error>(())
-    };
-
-    timeout(deadline, read_blocks)
-        .await
-        .map_err(|_| anyhow!("timed out waiting for gRPC block updates"))??;
+    // Every graceful retry path reaches this point. Finish derived indexes and flush the block
+    // artifacts, block index, and append-only journal before exposing a retryable JSON outcome.
+    writers
+        .finish(&mut report)
+        .context("flush gRPC capture before returning")?;
+    let session_exit = session_result?;
+    apply_capture_session_exit(&mut report, session_exit);
 
     let elapsed = started_at.elapsed();
     report.elapsed_ms = elapsed.as_millis();
@@ -1027,7 +1696,7 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
         file_len(&report.pubkey_touches_path)?.saturating_sub(pubkey_touch_bytes_before);
     report.pubkey_run_bytes_written =
         dir_file_len(&report.pubkey_runs_dir)?.saturating_sub(pubkey_run_bytes_before);
-    report.pubkey_count_records = pubkey_counts.as_ref().map_or(0, GxHashMap::len);
+    report.pubkey_count_records = writers.pubkey_counts.as_ref().map_or(0, GxHashMap::len);
     let total_bytes = report.block_bytes_written
         + report.raw_block_bytes_written
         + report.poh_bytes_written
@@ -1044,10 +1713,10 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
     report.blocks_per_sec = report.blocks_written as f64 / elapsed_secs;
     report.processing_blocks_per_sec = report.blocks_written as f64 / processing_secs;
 
-    let final_state = if report.stopped_at_epoch_boundary {
-        "closed"
-    } else {
-        "stopped"
+    let final_state = match (report.outcome, report.action_required) {
+        (GrpcCaptureOutcome::EpochBoundary, _) => "closed",
+        (GrpcCaptureOutcome::Retryable, true) => "action_required",
+        (GrpcCaptureOutcome::Retryable, false) => "retryable",
     };
     let _ = write_grpc_capture_progress(
         &progress_path,
@@ -1161,6 +1830,15 @@ fn read_existing_capture_epoch(journal_path: &Path) -> Result<Option<u64>> {
 mod capture_epoch_tests {
     use super::*;
 
+    fn ping_update() -> yellowstone_grpc_proto::prelude::SubscribeUpdate {
+        yellowstone_grpc_proto::prelude::SubscribeUpdate {
+            update_oneof: Some(UpdateOneof::Ping(
+                yellowstone_grpc_proto::prelude::SubscribeUpdatePing {},
+            )),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn resumed_capture_keeps_epoch_from_existing_journal() {
         let unique = std::time::SystemTime::now()
@@ -1185,6 +1863,137 @@ mod capture_epoch_tests {
 
         assert_eq!(read_existing_capture_epoch(&path).unwrap(), Some(1000));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn silent_stream_becomes_idle_retry_without_external_signal() {
+        let total_deadline = TokioInstant::now() + Duration::from_secs(1);
+        let watchdog =
+            CaptureReadWatchdog::with_idle_timeout(total_deadline, Duration::from_millis(20))
+                .unwrap();
+        let mut stream = futures::stream::pending::<
+            std::result::Result<yellowstone_grpc_proto::prelude::SubscribeUpdate, Status>,
+        >();
+
+        let retry = classify_capture_read_outcome(watchdog.next(&mut stream).await).unwrap_err();
+        assert_eq!(retry.reason, GrpcCaptureRetryReason::IdleTimeout);
+        assert!(!retry.action_required);
+    }
+
+    #[tokio::test]
+    async fn ping_replies_do_not_reset_durable_idle_timeout() {
+        let total_deadline = TokioInstant::now() + Duration::from_secs(1);
+        let watchdog =
+            CaptureReadWatchdog::with_idle_timeout(total_deadline, Duration::from_millis(40))
+                .unwrap();
+        let (mut update_sender, mut update_receiver) = futures::channel::mpsc::channel::<
+            std::result::Result<yellowstone_grpc_proto::prelude::SubscribeUpdate, Status>,
+        >(8);
+        let (mut request_sender, mut request_receiver) =
+            futures::channel::mpsc::channel::<SubscribeRequest>(8);
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                update_sender.send(Ok(ping_update())).await.unwrap();
+            }
+            // Keep the response side open past the idle deadline. EOF must not win this test.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let mut pings_replied = 0;
+        loop {
+            let stream_item =
+                match classify_capture_read_outcome(watchdog.next(&mut update_receiver).await) {
+                    Ok(stream_item) => stream_item,
+                    Err(retry) => {
+                        assert_eq!(retry.reason, GrpcCaptureRetryReason::IdleTimeout);
+                        break;
+                    }
+                };
+            let update = stream_item.unwrap();
+            assert!(matches!(update.update_oneof, Some(UpdateOneof::Ping(_))));
+            assert!(matches!(
+                reply_to_capture_ping(&watchdog, &mut request_sender).await,
+                CaptureReadOutcome::Item(Ok(()))
+            ));
+            let reply = request_receiver.next().await.unwrap();
+            assert_eq!(reply.ping.unwrap().id, CAPTURE_SUBSCRIBE_PING_ID);
+            pings_replied += 1;
+        }
+        assert_eq!(pings_replied, 3);
+    }
+
+    #[tokio::test]
+    async fn durable_append_reset_extends_the_idle_deadline() {
+        let total_deadline = TokioInstant::now() + Duration::from_secs(1);
+        let mut watchdog =
+            CaptureReadWatchdog::with_idle_timeout(total_deadline, Duration::from_millis(40))
+                .unwrap();
+        let initial_deadline = watchdog.idle_deadline;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        watchdog.reset_after_durable_append().unwrap();
+        assert!(watchdog.idle_deadline > initial_deadline);
+
+        let reset_at = TokioInstant::now();
+        let mut stream = futures::stream::pending::<
+            std::result::Result<yellowstone_grpc_proto::prelude::SubscribeUpdate, Status>,
+        >();
+        let retry = classify_capture_read_outcome(watchdog.next(&mut stream).await).unwrap_err();
+        assert_eq!(retry.reason, GrpcCaptureRetryReason::IdleTimeout);
+        assert!(reset_at.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[tokio::test]
+    async fn response_eof_is_an_explicit_retry() {
+        let total_deadline = TokioInstant::now() + Duration::from_secs(1);
+        let watchdog =
+            CaptureReadWatchdog::with_idle_timeout(total_deadline, Duration::from_millis(50))
+                .unwrap();
+        let mut stream = futures::stream::empty::<
+            std::result::Result<yellowstone_grpc_proto::prelude::SubscribeUpdate, Status>,
+        >();
+
+        let retry = classify_capture_read_outcome(watchdog.next(&mut stream).await).unwrap_err();
+        assert_eq!(retry.reason, GrpcCaptureRetryReason::StreamEof);
+        assert!(!retry.action_required);
+    }
+
+    #[test]
+    fn auth_statuses_are_retryable_and_action_required() {
+        assert_eq!(
+            serde_json::to_string(&GrpcCaptureOutcome::Retryable).unwrap(),
+            "\"retryable\""
+        );
+        assert_eq!(
+            serde_json::to_string(&GrpcCaptureRetryReason::PermissionDenied).unwrap(),
+            "\"permission_denied\""
+        );
+        for (status, reason) in [
+            (
+                Status::permission_denied("bad token"),
+                GrpcCaptureRetryReason::PermissionDenied,
+            ),
+            (
+                Status::unauthenticated("expired token"),
+                GrpcCaptureRetryReason::Unauthenticated,
+            ),
+        ] {
+            let retry = classify_capture_status(&status, GrpcCaptureRetryReason::StreamError);
+            assert_eq!(retry.reason, reason);
+            assert!(retry.action_required);
+        }
+
+        let retry = classify_capture_status(
+            &Status::unavailable("temporary"),
+            GrpcCaptureRetryReason::StreamError,
+        );
+        assert_eq!(retry.reason, GrpcCaptureRetryReason::StreamError);
+        assert!(!retry.action_required);
+
+        let wrapped: anyhow::Error = Status::permission_denied("bad token").into();
+        assert!(
+            classify_capture_error(&wrapped, GrpcCaptureRetryReason::ConnectError).action_required
+        );
     }
 }
 

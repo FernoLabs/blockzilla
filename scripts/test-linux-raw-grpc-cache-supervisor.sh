@@ -7,10 +7,194 @@ fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/blockzilla-cache-test.XXXXXX")
 trap 'rm -rf "$fixture_root"' EXIT
 
 export BLOCKZILLA_RAW_CACHE_MODE=b2-generations
+export BLOCKZILLA_RAW_OBJECT_STORE=backblaze
 export BLOCKZILLA_TELEGRAM_ENABLED=false
+
+# Provider selection resolves R2 through generic aliases and keeps the existing
+# Backblaze variables as the default-provider compatibility path.
+r2_config=$(
+  BLOCKZILLA_RAW_OBJECT_STORE=r2 \
+  BLOCKZILLA_RAW_OBJECT_STORE_CREDENTIALS_FILE=/run/secrets/test-r2 \
+  BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX=r2-live/v1 \
+  BLOCKZILLA_B2_CREDENTIALS_FILE=/should/not/use-b2-creds \
+  BLOCKZILLA_B2_REMOTE_PREFIX=should/not/use-b2-prefix \
+    sh -s -- "$supervisor" <<'SH'
+supervisor=$1
+eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
+validate_object_store
+printf '%s|%s|%s|%s\n' "$OBJECT_STORE" "$OBJECT_STORE_HUMAN_NAME" \
+  "$GENERATION_CREDENTIALS_FILE" "$GENERATION_REMOTE_PREFIX"
+SH
+)
+test "$r2_config" = 'r2|Cloudflare R2|/run/secrets/test-r2|r2-live/v1'
+
+r2_default_config=$(
+  BLOCKZILLA_RAW_OBJECT_STORE=r2 \
+    sh -s -- "$supervisor" <<'SH'
+supervisor=$1
+eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  "$GENERATION_CREDENTIALS_FILE" "$GENERATION_REMOTE_PREFIX" \
+  "$R2_USAGE_ALERT_ENABLED" "$R2_RETENTION_ENABLED" \
+  "$R2_RETENTION_TRIGGER_BYTES" "$R2_RETENTION_TARGET_BYTES" \
+  "$R2_RETENTION_MINIMUM_AGE_SECS" \
+  "$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS" \
+  "$R2_RETENTION_CHECK_INTERVAL_SECS"
+SH
+)
+test "$r2_default_config" = '/run/secrets/r2_credentials|live-grpc-backup/v1|true|false|950000000000|900000000000|86400|2|3600'
+
+backblaze_legacy_config=$(
+  BLOCKZILLA_B2_CREDENTIALS_FILE=/run/secrets/legacy-b2 \
+  BLOCKZILLA_B2_REMOTE_PREFIX=legacy-grpc/v1 \
+    sh -s -- "$supervisor" <<'SH'
+supervisor=$1
+eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
+printf '%s|%s|%s\n' "$OBJECT_STORE" "$GENERATION_CREDENTIALS_FILE" \
+  "$GENERATION_REMOTE_PREFIX"
+SH
+)
+test "$backblaze_legacy_config" = 'backblaze|/run/secrets/legacy-b2|legacy-grpc/v1'
+
+if BLOCKZILLA_RAW_OBJECT_STORE=unknown sh -s -- "$supervisor" <<'SH'
+supervisor=$1
+eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
+validate_object_store
+SH
+then
+  echo "unknown raw object store was accepted" >&2
+  exit 1
+fi
+if BLOCKZILLA_RAW_OBJECT_STORE=r2 \
+  BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX=../unsafe \
+  sh -s -- "$supervisor" <<'SH'
+supervisor=$1
+eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
+validate_object_store
+SH
+then
+  echo "unsafe R2 object prefix was accepted" >&2
+  exit 1
+fi
+
+# Retention limits are validated as one coherent 1 TB rolling-window policy.
+for invalid_retention_case in trigger_not_above_target trigger_over_budget \
+  zero_target one_generation
+do
+  case "$invalid_retention_case" in
+    trigger_not_above_target)
+      invalid_retention_env='R2_RETENTION_TRIGGER_BYTES=900000000000 R2_RETENTION_TARGET_BYTES=900000000000'
+      ;;
+    trigger_over_budget)
+      invalid_retention_env='R2_RETENTION_TRIGGER_BYTES=1000000000001'
+      ;;
+    zero_target)
+      invalid_retention_env='R2_RETENTION_TARGET_BYTES=0'
+      ;;
+    one_generation)
+      invalid_retention_env='R2_RETENTION_MINIMUM_RETAINED_GENERATIONS=1'
+      ;;
+  esac
+  if sh -s -- "$supervisor" "$invalid_retention_env" <<'SH'
+supervisor=$1
+invalid_retention_env=$2
+eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
+OBJECT_STORE=r2
+CACHE_MODE=b2-generations
+eval "$invalid_retention_env"
+validate_r2_retention_config
+SH
+  then
+    echo "invalid R2 retention case was accepted: $invalid_retention_case" >&2
+    exit 1
+  fi
+done
 
 # Load definitions without entering command dispatch or the main loop.
 eval "$(sed '/^if \[ "${1:-}" = --healthcheck \]; then/,$d' "$supervisor")"
+
+# The relay handoff is opt-in. Its token remains a file argument and is never
+# read into or printed by the supervisor shell.
+test -z "$RAW_RELAY_BIND"
+test "$RAW_RELAY_X_TOKEN_FILE" = /run/secrets/grpc_relay_x_token
+test "$RAW_RELAY_MAX_RECORDS" -eq 128
+test "$RAW_RELAY_MAX_ENCODED_BYTES" -eq 134217728
+test "$RAW_RELAY_MAX_CLIENTS" -eq 4
+relay_child=$fixture_root/mock-relay-child
+cat > "$relay_child" <<'SH'
+#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "${MOCK_RELAY_ARG_LOG:?}"
+SH
+chmod +x "$relay_child"
+relay_args=$fixture_root/relay-args
+relay_report=$fixture_root/relay-report
+relay_token=$fixture_root/relay-token
+printf '%s\n' 'relay-secret-must-not-appear' > "$relay_token"
+BIN=$relay_child
+CHILD_REPORT_FILE=$relay_report
+MOCK_RELAY_ARG_LOG=$relay_args
+export MOCK_RELAY_ARG_LOG
+RAW_RELAY_BIND=
+RAW_RELAY_X_TOKEN_FILE=$fixture_root/missing-is-allowed-while-disabled
+validate_raw_relay_config
+start_raw_recorder_child record-grpc-raw --endpoint fixture
+wait "$RAW_RECORDER_CHILD_PID"
+relay_expected=$fixture_root/relay-expected
+printf '%s\n' record-grpc-raw --endpoint fixture > "$relay_expected"
+if ! cmp -s "$relay_expected" "$relay_args"; then
+  echo "empty relay bind changed recorder arguments" >&2
+  exit 1
+fi
+
+RAW_RELAY_BIND=127.0.0.1:50051
+RAW_RELAY_X_TOKEN_FILE=$relay_token
+RAW_RELAY_MAX_RECORDS=128
+RAW_RELAY_MAX_ENCODED_BYTES=134217728
+RAW_RELAY_MAX_CLIENTS=4
+validate_raw_relay_config
+start_raw_recorder_child record-grpc-raw --endpoint fixture
+wait "$RAW_RECORDER_CHILD_PID"
+printf '%s\n' \
+  record-grpc-raw --endpoint fixture \
+  --relay-bind 127.0.0.1:50051 \
+  --relay-x-token-file "$relay_token" \
+  --relay-max-records 128 \
+  --relay-max-encoded-bytes 134217728 \
+  --relay-max-clients 4 > "$relay_expected"
+cmp -s "$relay_expected" "$relay_args"
+if grep -q 'relay-secret-must-not-appear' "$relay_args" "$relay_report"; then
+  echo "relay token content escaped into process output" >&2
+  exit 1
+fi
+
+RAW_RELAY_X_TOKEN_FILE=$fixture_root/missing-relay-token
+if validate_raw_relay_config >/dev/null 2>&1; then
+  echo "enabled relay accepted a missing token file" >&2
+  exit 1
+fi
+: > "$fixture_root/empty-relay-token"
+RAW_RELAY_X_TOKEN_FILE=$fixture_root/empty-relay-token
+if validate_raw_relay_config >/dev/null 2>&1; then
+  echo "enabled relay accepted an empty token file" >&2
+  exit 1
+fi
+ln -s "$relay_token" "$fixture_root/symlink-relay-token"
+RAW_RELAY_X_TOKEN_FILE=$fixture_root/symlink-relay-token
+if validate_raw_relay_config >/dev/null 2>&1; then
+  echo "enabled relay accepted a symlink token file" >&2
+  exit 1
+fi
+RAW_RELAY_X_TOKEN_FILE=$relay_token
+RAW_RELAY_MAX_CLIENTS=0
+if validate_raw_relay_config >/dev/null 2>&1; then
+  echo "enabled relay accepted a zero client limit" >&2
+  exit 1
+fi
+RAW_RELAY_BIND=
+RAW_RELAY_X_TOKEN_FILE=/run/secrets/grpc_relay_x_token
+RAW_RELAY_MAX_CLIENTS=4
+unset MOCK_RELAY_ARG_LOG
 
 CACHE_ROOT=$fixture_root/cache
 ACTIVE_GENERATION_DIR=$CACHE_ROOT/active
@@ -272,6 +456,8 @@ reset_rotation_fixture
 rm -rf "$ACTIVE_GENERATION_DIR"
 upload_id=slot-00000000000000000200
 upload_dir=$SEALED_GENERATION_DIR/$upload_id
+first_upload_id=$upload_id
+first_upload_dir=$upload_dir
 mkdir "$upload_dir"
 printf '%s\n' payload > "$upload_dir/payload"
 credentials=$fixture_root/backblaze-credentials
@@ -284,6 +470,14 @@ cat > "$mock_uploader" <<'SH'
 set -eu
 command_name=$1
 shift
+if [ -n "${MOCK_UPLOADER_CALL_LOG:-}" ]; then
+  {
+    printf 'command=%s\n' "$command_name"
+    for mock_arg in "$@"; do
+      printf 'arg=%s\n' "$mock_arg"
+    done
+  } >> "$MOCK_UPLOADER_CALL_LOG"
+fi
 if [ "$command_name" = b2-account-usage ]; then
   case "${MOCK_USAGE_RESULT:-failure}" in
     failure) exit 1 ;;
@@ -295,6 +489,83 @@ if [ "$command_name" = b2-account-usage ]; then
       ;;
     *) exit 64 ;;
   esac
+fi
+if [ "$command_name" = r2-retention ]; then
+  receipt_directory=$1
+  remote_prefix=$2
+  shift 2
+  retention_mode=dry-run
+  target_bytes=
+  minimum_age_secs=
+  minimum_retained_generations=
+  maximum_generation_slot=
+  provider=
+  credentials_file=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --target-bytes) target_bytes=$2; shift 2 ;;
+      --minimum-age-secs) minimum_age_secs=$2; shift 2 ;;
+      --maximum-generation-slot) maximum_generation_slot=$2; shift 2 ;;
+      --minimum-retained-generations)
+        minimum_retained_generations=$2
+        shift 2
+        ;;
+      --apply) retention_mode=apply; shift ;;
+      --provider) provider=$2; shift 2 ;;
+      --credentials-file) credentials_file=$2; shift 2 ;;
+      *) exit 64 ;;
+    esac
+  done
+  test -n "$receipt_directory"
+  test "$provider" = r2
+  test -n "$credentials_file"
+  case "$target_bytes:$minimum_age_secs:$minimum_retained_generations:$maximum_generation_slot" in
+    *[!0-9:]*) exit 64 ;;
+  esac
+  if [ "$retention_mode" = apply ]; then
+    case "${MOCK_R2_RETENTION_APPLY_RESULT:-valid}" in
+      failure) exit 1 ;;
+      invalid) printf '%s\n' '{}'; exit 0 ;;
+      valid) ;;
+      *) exit 64 ;;
+    esac
+  else
+    case "${MOCK_R2_RETENTION_DRY_RUN_RESULT:-valid}" in
+      failure) exit 1 ;;
+      invalid) printf '%s\n' '{}'; exit 0 ;;
+      valid) ;;
+      *) exit 64 ;;
+    esac
+  fi
+  active_file=${MOCK_R2_ACTIVE_BYTES_FILE:?}
+  before=$(cat "$active_file")
+  case "$before" in ''|*[!0-9]*) exit 64 ;; esac
+  before_count=${MOCK_R2_ACTIVE_GENERATIONS:-4}
+  after=$before
+  after_count=$before_count
+  selected_bytes=0
+  selected_ids='[]'
+  if [ "$retention_mode" = apply ] && [ "$before" -gt "$target_bytes" ]; then
+    after=${MOCK_R2_POST_APPLY_BYTES:-$target_bytes}
+    case "$after" in ''|*[!0-9]*) exit 64 ;; esac
+    [ "$after" -le "$before" ] || exit 64
+    selected_bytes=$((before - after))
+    after_count=$((before_count - 2))
+    selected_ids='["slot-00000000000000000001","slot-00000000000000000002"]'
+    printf '%s\n' "$after" > "$active_file"
+  fi
+  if [ "$after" -le "$target_bytes" ]; then
+    target_satisfied=true
+  else
+    target_satisfied=false
+  fi
+  printf '{"schema_version":1,"storage_provider":"r2","mode":"%s","remote_prefix":"%s","target_bytes":%s,"maximum_generation_slot":%s,"minimum_age_secs":%s,"minimum_retained_generations":%s,"retained_payload_bytes_before":%s,"retained_payload_bytes_after":%s,"retained_generation_count_before":%s,"retained_generation_count_after":%s,"selected_payload_bytes":%s,"selected_generation_ids":%s,"target_satisfied":%s}\n' \
+    "$retention_mode" "$remote_prefix" "$target_bytes" \
+    "$maximum_generation_slot" "$minimum_age_secs" \
+    "$minimum_retained_generations" "$before" \
+    "$after" "$before_count" "$after_count" "$selected_bytes" \
+    "$selected_ids" "$target_satisfied"
+  exit 0
 fi
 [ "$command_name" = upload-generation ] || exit 64
 generation_dir=$1
@@ -322,7 +593,8 @@ case "${MOCK_UPLOAD_RESULT:-failure}" in
     exit 0
     ;;
   valid)
-    manifest_hash=$(printf 'a%.0s' $(seq 1 64))
+    generation_number=${generation_id#slot-}
+    manifest_hash=$(printf '%064s' "$generation_number" | tr ' ' 0)
     commit_hash=$(printf 'b%.0s' $(seq 1 64))
     if [ -n "$predecessor" ]; then
       predecessor_json=$(printf ',"predecessor_manifest_sha256":"%s"' "$predecessor")
@@ -337,6 +609,10 @@ esac
 SH
 chmod +x "$mock_uploader"
 GENERATION_UPLOADER_BIN=$mock_uploader
+mock_uploader_calls=$fixture_root/uploader-calls
+: > "$mock_uploader_calls"
+MOCK_UPLOADER_CALL_LOG=$mock_uploader_calls
+export MOCK_UPLOADER_CALL_LOG
 
 # The account-usage worker must retain the uploader's typed capacity status so
 # it selects the same slow backoff as the generation worker.
@@ -370,6 +646,7 @@ if upload_one_generation; then
   exit 1
 fi
 test -d "$upload_dir"
+rm -f "$GENERATION_RECEIPT_DIR/$upload_id.json"
 
 MOCK_UPLOAD_RESULT=invalid
 export MOCK_UPLOAD_RESULT
@@ -378,6 +655,7 @@ if upload_one_generation; then
   exit 1
 fi
 test -d "$upload_dir"
+rm -f "$GENERATION_RECEIPT_DIR/$upload_id.json"
 
 # Typed Backblaze capacity failures survive the shell boundary exactly. An
 # unknown uploader failure remains the generic status and never inherits a cap
@@ -403,29 +681,43 @@ test -d "$upload_dir"
 
 MOCK_UPLOAD_RESULT=valid
 export MOCK_UPLOAD_RESULT
+upload_calls_before=$(grep -c '^command=upload-generation$' "$mock_uploader_calls" || true)
 upload_one_generation
-test ! -e "$upload_dir"
+test -d "$upload_dir"
 test -s "$GENERATION_RECEIPT_DIR/$upload_id.json"
 test -s "$GENERATION_RECEIPT_DIR/.chain"
+test "$(sealed_generation_count)" -eq 0
+test "$(retained_sealed_generation_count)" -eq 1
 load_upload_chain
 test "$UPLOAD_CHAIN_ID" = "$upload_id"
 test "${#UPLOAD_CHAIN_HASH}" -eq 64
-test "$UPLOAD_CHAIN_HASH" = "$(printf 'a%.0s' $(seq 1 64))"
+first_manifest_hash=$(printf '%064s' "${upload_id#slot-}" | tr ' ' 0)
+test "$UPLOAD_CHAIN_HASH" = "$first_manifest_hash"
+upload_calls_after=$(grep -c '^command=upload-generation$' "$mock_uploader_calls")
+test "$upload_calls_after" -eq $((upload_calls_before + 1))
+
+# Restart discovery skips a locally retained generation whose receipt is
+# already reachable from the durable chain head.
+upload_one_generation
+test -d "$upload_dir"
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls")" \
+  -eq "$upload_calls_after"
 
 # The next generation reloads the persisted 64-hex chain and binds its receipt
-# to the predecessor before the local sealed copy can be removed.
-second_upload_id=slot-00000000000000000124
+# to the predecessor while retaining both local copies.
+second_upload_id=slot-00000000000000000201
 second_upload_dir=$SEALED_GENERATION_DIR/$second_upload_id
 mkdir "$second_upload_dir"
 printf '%s\n' payload-2 > "$second_upload_dir/payload"
 upload_one_generation
-test ! -e "$second_upload_dir"
+test -d "$second_upload_dir"
 test -s "$GENERATION_RECEIPT_DIR/$second_upload_id.json"
 load_upload_chain
 test "$UPLOAD_CHAIN_ID" = "$second_upload_id"
-test "$UPLOAD_CHAIN_HASH" = "$(printf 'a%.0s' $(seq 1 64))"
+second_manifest_hash=$(printf '%064s' "${second_upload_id#slot-}" | tr ' ' 0)
+test "$UPLOAD_CHAIN_HASH" = "$second_manifest_hash"
 test "$("$GENERATION_PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["predecessor_manifest_sha256"])' \
-  "$GENERATION_RECEIPT_DIR/$second_upload_id.json")" = "$(printf 'a%.0s' $(seq 1 64))"
+  "$GENERATION_RECEIPT_DIR/$second_upload_id.json")" = "$first_manifest_hash"
 
 # Pressure draining is strictly FIFO even if directories were created in the
 # opposite order. Fixed-width generation IDs make lexical and slot order equal.
@@ -436,8 +728,248 @@ printf '%s\n' newer > "$SEALED_GENERATION_DIR/$fifo_newer_id/payload"
 mkdir "$SEALED_GENERATION_DIR/$fifo_older_id"
 printf '%s\n' older > "$SEALED_GENERATION_DIR/$fifo_older_id/payload"
 upload_one_generation
-test ! -e "$SEALED_GENERATION_DIR/$fifo_older_id"
+test -d "$SEALED_GENERATION_DIR/$fifo_older_id"
 test -d "$SEALED_GENERATION_DIR/$fifo_newer_id"
+
+# Disk pressure cannot evict even object-store-committed local generations
+# until Blockzilla provides a verified durable ACK. Uncommitted and off-chain
+# directories are retained as well.
+uncommitted_older_id=slot-00000000000000000150
+mkdir "$SEALED_GENERATION_DIR/$uncommitted_older_id"
+printf '%s\n' uncommitted > "$SEALED_GENERATION_DIR/$uncommitted_older_id/payload"
+printf '%s\n' '{}' > "$GENERATION_RECEIPT_DIR/$uncommitted_older_id.json"
+# Simulate a crash after a valid remote receipt was written for the newer
+# generation but before `.chain` publication. Valid-but-off-chain is still not
+# committed and therefore has no deletion authority.
+load_upload_chain
+offchain_prefix=$(generation_remote_prefix "$fifo_newer_id")
+"$GENERATION_UPLOADER_BIN" upload-generation \
+  "$SEALED_GENERATION_DIR/$fifo_newer_id" "$offchain_prefix" \
+  "$GENERATION_RECEIPT_DIR/$fifo_newer_id.json" \
+  --generation-id "$fifo_newer_id" \
+  --credentials-file "$GENERATION_CREDENTIALS_FILE" \
+  --predecessor-manifest-sha256 "$UPLOAD_CHAIN_HASH"
+validate_generation_receipt "$GENERATION_RECEIPT_DIR/$fifo_newer_id.json" \
+  "$fifo_newer_id" "$offchain_prefix" "$UPLOAD_CHAIN_HASH"
+load_generation_retention_state "$fifo_newer_id"
+test "$TARGET_GENERATION_COMMITTED" = 0
+generation_spill_active=true
+set +e
+evict_first_committed_generation
+blocked_eviction_status=$?
+set -e
+test "$blocked_eviction_status" -eq "$BLOCKZILLA_ACK_UNAVAILABLE_STATUS"
+test "$GENERATION_EVICTION_PERFORMED" = false
+test -z "$GENERATION_EVICTED_ID"
+test "$GENERATION_EVICTION_BLOCKED_REASON" = blockzilla_ack_unavailable
+test -d "$first_upload_dir"
+test -d "$second_upload_dir"
+test -d "$SEALED_GENERATION_DIR/$fifo_older_id"
+test -d "$SEALED_GENERATION_DIR/$uncommitted_older_id"
+test -d "$SEALED_GENERATION_DIR/$fifo_newer_id"
+
+# R2 uses the same receipt-verification path and retains its local copy, but
+# never calls the Backblaze account-usage command. Generic credentials and
+# prefix are passed unchanged to upload-generation.
+saved_object_store=$OBJECT_STORE
+saved_object_store_human_name=$OBJECT_STORE_HUMAN_NAME
+saved_generation_credentials_file=$GENERATION_CREDENTIALS_FILE
+saved_generation_remote_prefix=$GENERATION_REMOTE_PREFIX
+reset_rotation_fixture
+rm -rf "$ACTIVE_GENERATION_DIR"
+OBJECT_STORE=r2
+OBJECT_STORE_HUMAN_NAME='Cloudflare R2'
+GENERATION_REMOTE_PREFIX=r2-live/v1
+test "$(object_store_retry_seconds 21 60)" -eq 60
+r2_credentials=$fixture_root/r2-credentials
+printf '%s\n' r2-fixture > "$r2_credentials"
+GENERATION_CREDENTIALS_FILE=$r2_credentials
+mock_uploader_calls=$fixture_root/r2-uploader-calls
+: > "$mock_uploader_calls"
+MOCK_UPLOADER_CALL_LOG=$mock_uploader_calls
+export MOCK_UPLOADER_CALL_LOG
+
+set +e
+run_b2_usage_scan
+r2_b2_usage_status=$?
+set -e
+test "$r2_b2_usage_status" -eq 78
+test ! -s "$mock_uploader_calls"
+b2_usage_worker_pid=
+start_b2_usage_worker
+test -z "$b2_usage_worker_pid"
+R2_USAGE_ALERT_ENABLED=false
+R2_RETENTION_ENABLED=false
+r2_usage_worker_pid=
+start_r2_usage_worker
+test -z "$r2_usage_worker_pid"
+R2_USAGE_ALERT_ENABLED=true
+R2_RETENTION_ENABLED=true
+r2_active_bytes=$fixture_root/r2-active-bytes
+printf '%s\n' 0 > "$r2_active_bytes"
+MOCK_R2_ACTIVE_BYTES_FILE=$r2_active_bytes
+export MOCK_R2_ACTIVE_BYTES_FILE
+printf '%s\n' '{' > \
+  "$GENERATION_RECEIPT_DIR/slot-00000000000000000499.json"
+test "$(r2_receipt_ledger_bytes)" -eq 0
+
+r2_upload_id=slot-00000000000000000400
+r2_upload_dir=$SEALED_GENERATION_DIR/$r2_upload_id
+mkdir "$r2_upload_dir"
+printf '%s\n' r2-payload > "$r2_upload_dir/payload"
+MOCK_UPLOAD_RESULT=invalid
+export MOCK_UPLOAD_RESULT
+if upload_one_generation; then
+  echo "R2 invalid receipt was accepted" >&2
+  exit 1
+fi
+test -d "$r2_upload_dir"
+rm -f "$GENERATION_RECEIPT_DIR/$r2_upload_id.json"
+r2_expected_prefix=r2-live/v1/solana-mainnet/hetzner-test/$r2_upload_id
+grep -Fxq 'command=upload-generation' "$mock_uploader_calls"
+grep -Fxq "arg=$r2_expected_prefix" "$mock_uploader_calls"
+grep -Fxq "arg=$r2_credentials" "$mock_uploader_calls"
+if grep -q '^command=b2-account-usage$' "$mock_uploader_calls"; then
+  echo "R2 path invoked Backblaze account usage" >&2
+  exit 1
+fi
+
+MOCK_UPLOAD_RESULT=valid
+export MOCK_UPLOAD_RESULT
+upload_one_generation
+test -d "$r2_upload_dir"
+test -s "$GENERATION_RECEIPT_DIR/$r2_upload_id.json"
+printf '%s\n' 8 > "$r2_active_bytes"
+test "$(r2_receipt_ledger_bytes)" -eq 8
+
+# R2 commits a newly sealed generation immediately at healthy headroom, keeps
+# the verified local directory, and does not re-upload either retained copy on
+# the next worker start. Healthy upload retention must not create the old false
+# "space did not increase" incident.
+r2_healthy_id=slot-00000000000000000401
+r2_healthy_dir=$SEALED_GENERATION_DIR/$r2_healthy_id
+mkdir "$r2_healthy_dir"
+printf '%s\n' r2-healthy > "$r2_healthy_dir/payload"
+r2_calls_before=$(grep -c '^command=upload-generation$' "$mock_uploader_calls")
+(
+  MIN_FREE_BYTES=100
+  MAX_GENERATION_BYTES=80
+  GENERATION_SPILL_START_PERCENT=25
+  GENERATION_SPILL_RECOVERY_PERCENT=35
+  validate_data_volume() { return 0; }
+  available_bytes() { printf '%s\n' 500; }
+  filesystem_capacity_bytes() { printf '%s\n' 1000; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+test -d "$r2_upload_dir"
+test -d "$r2_healthy_dir"
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls")" \
+  -eq $((r2_calls_before + 1))
+test ! -e "$(alert_file generation_backlog active)"
+r2_calls_after=$(grep -c '^command=upload-generation$' "$mock_uploader_calls")
+(
+  MIN_FREE_BYTES=100
+  MAX_GENERATION_BYTES=80
+  GENERATION_SPILL_START_PERCENT=25
+  GENERATION_SPILL_RECOVERY_PERCENT=35
+  validate_data_volume() { return 0; }
+  available_bytes() { printf '%s\n' 500; }
+  filesystem_capacity_bytes() { printf '%s\n' 1000; }
+  sleep() { exit 0; }
+  generation_upload_worker
+)
+test "$(grep -c '^command=upload-generation$' "$mock_uploader_calls")" \
+  -eq "$r2_calls_after"
+test -d "$r2_healthy_dir"
+
+# R2 accounting is anchor-aware because the uploader owns `.chain` and
+# `.r2-retention-anchor.json` validation. The shell always supplies a maximum
+# generation slot of zero and never exposes --apply until signed generation
+# acknowledgements exist.
+R2_RETENTION_TRIGGER_BYTES=100
+R2_RETENTION_TARGET_BYTES=80
+R2_RETENTION_MINIMUM_AGE_SECS=86400
+R2_RETENTION_MINIMUM_RETAINED_GENERATIONS=2
+R2_RETENTION_CHECK_INTERVAL_SECS=3600
+printf '%s\n' 90 > "$r2_active_bytes"
+retention_calls_before=$(grep -c '^command=r2-retention$' "$mock_uploader_calls" || true)
+(
+  validate_data_volume() { return 0; }
+  sleep() { exit 0; }
+  r2_usage_worker
+)
+test "$(grep -c '^command=r2-retention$' "$mock_uploader_calls")" \
+  -eq $((retention_calls_before + 1))
+test "$(cat "$r2_active_bytes")" -eq 90
+grep -Fxq 'arg=--target-bytes' "$mock_uploader_calls"
+grep -Fxq "arg=$R2_RETENTION_SCAN_TARGET_BYTES" "$mock_uploader_calls"
+grep -Fxq 'arg=--maximum-generation-slot' "$mock_uploader_calls"
+grep -Fxq 'arg=0' "$mock_uploader_calls"
+grep -Fxq 'arg=--minimum-age-secs' "$mock_uploader_calls"
+grep -Fxq "arg=$R2_RETENTION_MINIMUM_AGE_SECS" "$mock_uploader_calls"
+grep -Fxq 'arg=--minimum-retained-generations' "$mock_uploader_calls"
+grep -Fxq "arg=$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS" "$mock_uploader_calls"
+grep -Fxq 'arg=--provider' "$mock_uploader_calls"
+grep -Fxq 'arg=r2' "$mock_uploader_calls"
+if grep -Fxq 'arg=--apply' "$mock_uploader_calls"; then
+  echo "unsigned R2 accounting invoked destructive retention" >&2
+  exit 1
+fi
+
+# Crossing the 950->900 policy boundary still cannot authorize deletion. The
+# active total is retained and one accounting pass is made; a direct apply
+# request is rejected before the uploader is invoked.
+printf '%s\n' 120 > "$r2_active_bytes"
+retention_calls_before=$(grep -c '^command=r2-retention$' "$mock_uploader_calls")
+(
+  validate_data_volume() { return 0; }
+  sleep() { exit 0; }
+  r2_usage_worker
+)
+test "$(grep -c '^command=r2-retention$' "$mock_uploader_calls")" \
+  -eq $((retention_calls_before + 1))
+test "$(cat "$r2_active_bytes")" -eq 120
+set +e
+run_r2_retention_command apply "$R2_RETENTION_TARGET_BYTES"
+blocked_apply_status=$?
+set -e
+test "$blocked_apply_status" -eq 78
+test "$(grep -c '^command=r2-retention$' "$mock_uploader_calls")" \
+  -eq $((retention_calls_before + 1))
+test "$(grep -c '^arg=--apply$' "$mock_uploader_calls" || true)" -eq 0
+
+# Backblaze and invalid/anchor-rejected dry runs never fall through to apply.
+retention_calls_before=$(grep -c '^command=r2-retention$' "$mock_uploader_calls")
+OBJECT_STORE=backblaze
+r2_usage_worker
+test "$(grep -c '^command=r2-retention$' "$mock_uploader_calls")" \
+  -eq "$retention_calls_before"
+OBJECT_STORE=r2
+MOCK_R2_RETENTION_DRY_RUN_RESULT=invalid
+export MOCK_R2_RETENTION_DRY_RUN_RESULT
+(
+  validate_data_volume() { return 0; }
+  sleep() { exit 0; }
+  r2_usage_worker
+)
+test "$(grep -c '^command=r2-retention$' "$mock_uploader_calls")" \
+  -eq $((retention_calls_before + 1))
+test "$(grep -c '^arg=--apply$' "$mock_uploader_calls" || true)" -eq 0
+unset MOCK_R2_RETENTION_DRY_RUN_RESULT
+
+MOCK_R2_RETENTION_DRY_RUN_RESULT=invalid
+export MOCK_R2_RETENTION_DRY_RUN_RESULT
+if r2_receipt_ledger_bytes >/dev/null 2>&1; then
+  echo "R2 retention accounting accepted an invalid ledger result" >&2
+  exit 1
+fi
+unset MOCK_R2_RETENTION_DRY_RUN_RESULT
+unset MOCK_UPLOADER_CALL_LOG MOCK_UPLOAD_RESULT MOCK_R2_ACTIVE_BYTES_FILE
+OBJECT_STORE=$saved_object_store
+OBJECT_STORE_HUMAN_NAME=$saved_object_store_human_name
+GENERATION_CREDENTIALS_FILE=$saved_generation_credentials_file
+GENERATION_REMOTE_PREFIX=$saved_generation_remote_prefix
 
 # Legacy replay evidence remains readable during the schema-2 rollout.
 reset_rotation_fixture

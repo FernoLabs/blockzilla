@@ -17,6 +17,7 @@ MAX_BLOCKS=${BLOCKZILLA_RAW_MAX_BLOCKS:-1000000000}
 TIMEOUT_SECS=${BLOCKZILLA_RAW_TIMEOUT_SECS:-31536000}
 IDLE_TIMEOUT_SECS=${BLOCKZILLA_RAW_IDLE_TIMEOUT_SECS:-180}
 RESTART_DELAY_SECS=${BLOCKZILLA_RAW_RESTART_DELAY_SECS:-5}
+UPSTREAM_BLOCKED_BACKOFF_SECS=${BLOCKZILLA_RAW_UPSTREAM_BLOCKED_BACKOFF_SECS:-3600}
 LOW_DISK_RECHECK_SECS=${BLOCKZILLA_RAW_LOW_DISK_RECHECK_SECS:-60}
 COMPRESSION_LEVEL=${BLOCKZILLA_RAW_COMPRESSION_LEVEL:-1}
 SEGMENT_TARGET_BYTES=${BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES:-268435456}
@@ -24,7 +25,7 @@ MAX_RECORD_BYTES=${BLOCKZILLA_RAW_MAX_RECORD_BYTES:-134217728}
 REQUIRE_COMPLETE_POH=${BLOCKZILLA_RAW_REQUIRE_COMPLETE_POH:-true}
 CLUSTER_ID=${BLOCKZILLA_RAW_CLUSTER_ID:-solana-mainnet}
 ORIGIN_NODE_ID=${BLOCKZILLA_RAW_ORIGIN_NODE_ID:-hetzner-dokploy-01}
-SOURCE_ID=${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-backup}
+SOURCE_ID=${BLOCKZILLA_RAW_SOURCE_ID:-grpc-raw-hetzner-primary}
 
 # The legacy mode keeps one ever-growing dedicated-volume spool. The bounded
 # cache mode stores one live generation at a stable path and exposes immutable
@@ -38,9 +39,28 @@ GENERATION_SPILL_START_PERCENT=${BLOCKZILLA_RAW_B2_SPILL_START_PERCENT:-25}
 GENERATION_SPILL_RECOVERY_PERCENT=${BLOCKZILLA_RAW_B2_SPILL_RECOVERY_PERCENT:-35}
 REPLAY_RESUME_HEADROOM_SLOTS=${BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS:-100}
 MAX_REPLAY_RESUME_HEADROOM_SLOTS=10000
+# Internal worker status: object-store verification is not a Blockzilla ACK.
+# There is deliberately no environment override that can enable local deletion.
+BLOCKZILLA_ACK_UNAVAILABLE_STATUS=76
 GENERATION_UPLOADER_BIN=${BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN:-/usr/local/bin/blockzilla-s3-upload}
-GENERATION_CREDENTIALS_FILE=${BLOCKZILLA_B2_CREDENTIALS_FILE:-/run/secrets/backblaze_credentials}
-GENERATION_REMOTE_PREFIX=${BLOCKZILLA_B2_REMOTE_PREFIX:-grpc-raw/v1}
+OBJECT_STORE=${BLOCKZILLA_RAW_OBJECT_STORE:-backblaze}
+case "$OBJECT_STORE" in
+  r2)
+    OBJECT_STORE_HUMAN_NAME='Cloudflare R2'
+    OBJECT_STORE_DEFAULT_CREDENTIALS_FILE=/run/secrets/r2_credentials
+    OBJECT_STORE_DEFAULT_REMOTE_PREFIX=live-grpc-backup/v1
+    ;;
+  *)
+    # Keep the legacy Backblaze defaults until the explicit provider
+    # validation below. This preserves existing deployments that do not set
+    # BLOCKZILLA_RAW_OBJECT_STORE.
+    OBJECT_STORE_HUMAN_NAME=Backblaze
+    OBJECT_STORE_DEFAULT_CREDENTIALS_FILE=${BLOCKZILLA_B2_CREDENTIALS_FILE:-/run/secrets/backblaze_credentials}
+    OBJECT_STORE_DEFAULT_REMOTE_PREFIX=${BLOCKZILLA_B2_REMOTE_PREFIX:-grpc-raw/v1}
+    ;;
+esac
+GENERATION_CREDENTIALS_FILE=${BLOCKZILLA_RAW_OBJECT_STORE_CREDENTIALS_FILE:-$OBJECT_STORE_DEFAULT_CREDENTIALS_FILE}
+GENERATION_REMOTE_PREFIX=${BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX:-$OBJECT_STORE_DEFAULT_REMOTE_PREFIX}
 GENERATION_PYTHON_BIN=${BLOCKZILLA_RAW_GENERATION_PYTHON_BIN:-python3}
 B2_USAGE_ALERT_ENABLED=${BLOCKZILLA_B2_USAGE_ALERT_ENABLED:-false}
 B2_USAGE_ALLOWANCE_BYTES=${BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:-10000000000}
@@ -50,6 +70,31 @@ B2_USAGE_RECOVERY_HYSTERESIS_BYTES=${BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYT
 B2_USAGE_CHECK_INTERVAL_SECS=${BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:-3600}
 B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS=${BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS:-21600}
 B2_CAP_RETRY_SECS=${BLOCKZILLA_B2_CAP_RETRY_SECS:-3600}
+R2_USAGE_ALERT_ENABLED=${BLOCKZILLA_R2_USAGE_ALERT_ENABLED:-true}
+R2_USAGE_WARNING_BYTES=${BLOCKZILLA_R2_USAGE_WARNING_BYTES:-800000000000}
+R2_USAGE_RECOVERY_HYSTERESIS_BYTES=${BLOCKZILLA_R2_USAGE_RECOVERY_HYSTERESIS_BYTES:-50000000000}
+# These configure the rolling-window policy and monitoring cadence. Destructive
+# apply remains compile-time absent below until a signed Blockzilla generation
+# ACK can authorize it; setting ENABLED never turns an unsigned heartbeat into
+# deletion authority.
+R2_RETENTION_ENABLED=${BLOCKZILLA_R2_RETENTION_ENABLED:-false}
+R2_RETENTION_TRIGGER_BYTES=${BLOCKZILLA_R2_RETENTION_TRIGGER_BYTES:-${BLOCKZILLA_R2_USAGE_CRITICAL_BYTES:-950000000000}}
+R2_RETENTION_TARGET_BYTES=${BLOCKZILLA_R2_RETENTION_TARGET_BYTES:-900000000000}
+R2_RETENTION_MINIMUM_AGE_SECS=${BLOCKZILLA_R2_RETENTION_MINIMUM_AGE_SECS:-86400}
+R2_RETENTION_MINIMUM_RETAINED_GENERATIONS=${BLOCKZILLA_R2_RETENTION_MINIMUM_RETAINED_GENERATIONS:-2}
+R2_RETENTION_CHECK_INTERVAL_SECS=${BLOCKZILLA_R2_RETENTION_CHECK_INTERVAL_SECS:-${BLOCKZILLA_R2_USAGE_CHECK_INTERVAL_SECS:-3600}}
+R2_RETENTION_PLANNING_BUDGET_BYTES=1000000000000
+R2_RETENTION_SCAN_TARGET_BYTES=9223372036854775807
+# Keep the previous names as explicit read-only aliases during the compose
+# migration. Retention uses the canonical settings above.
+R2_USAGE_CRITICAL_BYTES=$R2_RETENTION_TRIGGER_BYTES
+R2_USAGE_CHECK_INTERVAL_SECS=$R2_RETENTION_CHECK_INTERVAL_SECS
+
+RAW_RELAY_BIND=${BLOCKZILLA_RAW_RELAY_BIND:-}
+RAW_RELAY_X_TOKEN_FILE=${BLOCKZILLA_RAW_RELAY_X_TOKEN_FILE:-/run/secrets/grpc_relay_x_token}
+RAW_RELAY_MAX_RECORDS=${BLOCKZILLA_RAW_RELAY_MAX_RECORDS:-128}
+RAW_RELAY_MAX_ENCODED_BYTES=${BLOCKZILLA_RAW_RELAY_MAX_ENCODED_BYTES:-134217728}
+RAW_RELAY_MAX_CLIENTS=${BLOCKZILLA_RAW_RELAY_MAX_CLIENTS:-4}
 
 ACTIVE_GENERATION_DIR=$CACHE_ROOT/active
 SEALED_GENERATION_DIR=$CACHE_ROOT/sealed
@@ -150,6 +195,28 @@ validate_data_paths() {
   esac
 }
 
+validate_object_store() {
+  case "$OBJECT_STORE" in
+    backblaze|r2) ;;
+    *)
+      echo "BLOCKZILLA_RAW_OBJECT_STORE must be backblaze or r2" >&2
+      return 1
+      ;;
+  esac
+  if [ "$CACHE_MODE" = b2-generations ] \
+    && [ -z "$GENERATION_CREDENTIALS_FILE" ]
+  then
+    echo "BLOCKZILLA_RAW_OBJECT_STORE_CREDENTIALS_FILE must not be empty" >&2
+    return 1
+  fi
+  if [ "$CACHE_MODE" = b2-generations ] \
+    && ! normalized_generation_base_prefix >/dev/null
+  then
+    echo "BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX is not a safe relative object prefix" >&2
+    return 1
+  fi
+}
+
 validate_data_volume() {
   volume_require_output=${1:-false}
   if [ ! -d /data ]; then
@@ -241,6 +308,111 @@ require_uint() {
       exit 2
       ;;
   esac
+}
+
+validate_raw_relay_config() {
+  [ -n "$RAW_RELAY_BIND" ] || return 0
+  case "$RAW_RELAY_BIND" in
+    *[[:space:]]*)
+      echo "BLOCKZILLA_RAW_RELAY_BIND must not contain whitespace" >&2
+      return 1
+      ;;
+  esac
+  case "$RAW_RELAY_X_TOKEN_FILE" in
+    /*) ;;
+    *)
+      echo "BLOCKZILLA_RAW_RELAY_X_TOKEN_FILE must be an absolute path" >&2
+      return 1
+      ;;
+  esac
+  case "$RAW_RELAY_X_TOKEN_FILE/" in
+    */../*|*/./*)
+      echo "BLOCKZILLA_RAW_RELAY_X_TOKEN_FILE must not contain . or .. path components" >&2
+      return 1
+      ;;
+  esac
+  if [ -L "$RAW_RELAY_X_TOKEN_FILE" ] \
+    || [ ! -f "$RAW_RELAY_X_TOKEN_FILE" ] \
+    || [ ! -r "$RAW_RELAY_X_TOKEN_FILE" ] \
+    || [ ! -s "$RAW_RELAY_X_TOKEN_FILE" ]
+  then
+    echo "BLOCKZILLA_RAW_RELAY_X_TOKEN_FILE is missing, empty, unreadable, or a symlink" >&2
+    return 1
+  fi
+  relay_token_file_bytes=$(wc -c < "$RAW_RELAY_X_TOKEN_FILE" | tr -d ' ') \
+    || return 1
+  case "$relay_token_file_bytes" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  if [ "$relay_token_file_bytes" -gt 4096 ]; then
+    echo "BLOCKZILLA_RAW_RELAY_X_TOKEN_FILE is too large" >&2
+    return 1
+  fi
+  for relay_numeric_setting in \
+    "BLOCKZILLA_RAW_RELAY_MAX_RECORDS:$RAW_RELAY_MAX_RECORDS" \
+    "BLOCKZILLA_RAW_RELAY_MAX_ENCODED_BYTES:$RAW_RELAY_MAX_ENCODED_BYTES" \
+    "BLOCKZILLA_RAW_RELAY_MAX_CLIENTS:$RAW_RELAY_MAX_CLIENTS"
+  do
+    relay_setting_name=${relay_numeric_setting%%:*}
+    relay_setting_value=${relay_numeric_setting#*:}
+    case "$relay_setting_value" in
+      ''|*[!0-9]*|0)
+        echo "$relay_setting_name must be a non-zero unsigned integer" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+validate_r2_retention_config() {
+  [ "$OBJECT_STORE" = r2 ] || return 0
+  case "$R2_USAGE_ALERT_ENABLED" in
+    true|false) ;;
+    *)
+      echo "BLOCKZILLA_R2_USAGE_ALERT_ENABLED must be true or false" >&2
+      return 1
+      ;;
+  esac
+  case "$R2_RETENTION_ENABLED" in
+    true|false) ;;
+    *)
+      echo "BLOCKZILLA_R2_RETENTION_ENABLED must be true or false" >&2
+      return 1
+      ;;
+  esac
+  for numeric_setting in \
+    "BLOCKZILLA_R2_USAGE_WARNING_BYTES:$R2_USAGE_WARNING_BYTES" \
+    "BLOCKZILLA_R2_USAGE_RECOVERY_HYSTERESIS_BYTES:$R2_USAGE_RECOVERY_HYSTERESIS_BYTES" \
+    "BLOCKZILLA_R2_RETENTION_TRIGGER_BYTES:$R2_RETENTION_TRIGGER_BYTES" \
+    "BLOCKZILLA_R2_RETENTION_TARGET_BYTES:$R2_RETENTION_TARGET_BYTES" \
+    "BLOCKZILLA_R2_RETENTION_MINIMUM_AGE_SECS:$R2_RETENTION_MINIMUM_AGE_SECS" \
+    "BLOCKZILLA_R2_RETENTION_MINIMUM_RETAINED_GENERATIONS:$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS" \
+    "BLOCKZILLA_R2_RETENTION_CHECK_INTERVAL_SECS:$R2_RETENTION_CHECK_INTERVAL_SECS"
+  do
+    setting_name=${numeric_setting%%:*}
+    setting_value=${numeric_setting#*:}
+    require_uint "$setting_name" "$setting_value"
+  done
+  if [ "$R2_USAGE_WARNING_BYTES" -eq 0 ] \
+    || [ "$R2_USAGE_WARNING_BYTES" -ge "$R2_RETENTION_TRIGGER_BYTES" ] \
+    || [ "$R2_USAGE_RECOVERY_HYSTERESIS_BYTES" -eq 0 ] \
+    || [ "$R2_USAGE_RECOVERY_HYSTERESIS_BYTES" -ge "$R2_USAGE_WARNING_BYTES" ] \
+    || [ "$R2_RETENTION_TARGET_BYTES" -eq 0 ] \
+    || [ "$R2_RETENTION_TRIGGER_BYTES" -le "$R2_RETENTION_TARGET_BYTES" ] \
+    || [ "$R2_RETENTION_TRIGGER_BYTES" -gt "$R2_RETENTION_PLANNING_BUDGET_BYTES" ] \
+    || [ "$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS" -lt 2 ] \
+    || [ "$R2_RETENTION_CHECK_INTERVAL_SECS" -eq 0 ]
+  then
+    echo "Cloudflare R2 retention thresholds, limits, hysteresis, or interval are invalid" >&2
+    return 1
+  fi
+  if [ "$R2_RETENTION_ENABLED" = true ] \
+    && [ "$CACHE_MODE" != b2-generations ]
+  then
+    echo "Cloudflare R2 retention requires BLOCKZILLA_RAW_CACHE_MODE=b2-generations" >&2
+    return 1
+  fi
+  R2_USAGE_WARNING_RECOVERY_BYTES=$((R2_USAGE_WARNING_BYTES - R2_USAGE_RECOVERY_HYSTERESIS_BYTES))
 }
 
 write_state() {
@@ -432,12 +604,15 @@ alert_title() {
     b2_usage) printf '%s\n' 'Backblaze storage is filling up' ;;
     b2_usage_warning) printf '%s\n' 'Backblaze archive near 10 GB' ;;
     b2_usage_critical) printf '%s\n' 'Backblaze archive almost full' ;;
+    r2_usage_check_failed) printf '%s\n' 'Cannot check Cloudflare R2 archive' ;;
+    r2_usage) printf '%s\n' 'Cloudflare R2 archive usage' ;;
     primary_sync_stale) printf '%s\n' 'Blockzilla confirmation missing' ;;
+    upstream_access_blocked) printf '%s\n' 'gRPC provider access blocked' ;;
     generation_rotation_failed) printf '%s\n' 'Local backup is paused' ;;
     replay_recovery_failed) printf '%s\n' 'gRPC recovery is paused' ;;
     provider_replay_gap) printf '%s\n' 'Some gRPC slots are missing' ;;
     resume_coverage) printf '%s\n' 'gRPC reconnect not verified' ;;
-    generation_upload_failed) printf '%s\n' 'Backblaze upload failed' ;;
+    generation_upload_failed) printf '%s upload failed\n' "$OBJECT_STORE_HUMAN_NAME" ;;
     generation_backlog) printf '%s\n' 'Backup storage problem' ;;
     *) printf '%s\n' "$1" | tr '_' ' ' ;;
   esac
@@ -464,6 +639,23 @@ human_decimal_bytes() {
     fi
   else
     printf '%s' '<1 MB'
+  fi
+}
+
+human_decimal_gigabytes() {
+  human_gigabyte_value=$1
+  case "$human_gigabyte_value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  human_gigabyte_tenths=$((
+    (human_gigabyte_value / 100000000)
+    + (((human_gigabyte_value % 100000000) + 50000000) / 100000000)
+  ))
+  if [ $((human_gigabyte_tenths % 10)) -eq 0 ]; then
+    printf '%s GB' "$((human_gigabyte_tenths / 10))"
+  else
+    printf '%s.%s GB' "$((human_gigabyte_tenths / 10))" \
+      "$((human_gigabyte_tenths % 10))"
   fi
 }
 
@@ -845,12 +1037,23 @@ retry_pending_alerts() {
     disk_space \
     b2_usage_check_failed \
     b2_usage \
+    r2_usage_check_failed \
+    r2_usage \
     primary_sync_stale \
+    upstream_access_blocked \
     generation_rotation_failed \
     replay_recovery_failed \
     provider_replay_gap \
     generation_backlog
   do
+    case "$retry_key" in
+      b2_usage_check_failed|b2_usage)
+        [ "$OBJECT_STORE" = backblaze ] || continue
+        ;;
+      r2_usage_check_failed|r2_usage)
+        [ "$OBJECT_STORE" = r2 ] || continue
+        ;;
+    esac
     retry_pending_alert "$retry_key"
   done
   return 0
@@ -1020,6 +1223,7 @@ reset_rotated_journal_incident_floors() {
   reset_alert_journal_floor recorder_restarting
   reset_alert_journal_floor provider_replay_gap
   reset_alert_journal_floor resume_coverage
+  reset_alert_journal_floor upstream_access_blocked
 }
 
 clear_alert_after_journal_growth() {
@@ -1112,9 +1316,11 @@ update_disk_alerts() {
   if [ "$CACHE_MODE" = b2-generations ]; then
     pipeline_active=$(alert_file generation_backlog active)
     pipeline_backlog=
-    pipeline_backlog=$(sealed_generation_count 2>/dev/null) || pipeline_backlog=
+    pipeline_backlog=$(retained_sealed_generation_count 2>/dev/null) \
+      || pipeline_backlog=$(sealed_generation_count 2>/dev/null) \
+      || pipeline_backlog=
     if [ -n "$pipeline_backlog" ]; then
-      pipeline_disk_context="$pipeline_backlog backup batches are waiting locally."
+      pipeline_disk_context="$pipeline_backlog backup batches are kept locally."
     else
       pipeline_disk_context="The waiting backup count is unavailable."
     fi
@@ -1148,7 +1354,7 @@ update_disk_alerts() {
       raise_alert generation_backlog CRITICAL \
         "Status: Hetzner disk is full. Backup is paused; saved data is safe.
 Storage: $(human_decimal_bytes "$disk_free_bytes") free; backup needs $(human_decimal_bytes "$MIN_FREE_BYTES"). $pipeline_disk_context
-Action: Restore Backblaze uploads or add Hetzner disk space. Automatic retry is on."
+Action: Nothing is deleted without Blockzilla confirmation. Add Hetzner disk space and restore Blockzilla sync."
       return 0
     fi
     rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
@@ -1167,12 +1373,12 @@ Action: Restore Backblaze uploads or add Hetzner disk space. Automatic retry is 
     raise_alert disk_space CRITICAL \
       "Status: Backup is paused; saved data is safe.
 Storage: $(human_decimal_bytes "$disk_free_bytes") free; backup needs $(human_decimal_bytes "$MIN_FREE_BYTES").
-Action: Free Hetzner disk space or restore Backblaze uploads. Automatic retry is on."
+Action: Free Hetzner disk space or restore $OBJECT_STORE_HUMAN_NAME uploads. Automatic retry is on."
   elif [ "$disk_free_bytes" -lt "$DISK_WARN_FREE_BYTES" ]; then
     raise_alert disk_space WARNING \
       "Status: The Hetzner disk is getting low, but it still has room for recording.
 Storage: $(human_decimal_bytes "$disk_free_bytes") free; warning level is $(human_decimal_bytes "$DISK_WARN_FREE_BYTES").
-Action: Restore Backblaze uploads or add disk space."
+Action: Restore $OBJECT_STORE_HUMAN_NAME uploads or add disk space."
   elif [ -e "$disk_space_active" ] \
     && [ "$disk_free_bytes" -lt "$DISK_WARNING_RECOVERY_BYTES" ]
   then
@@ -1217,6 +1423,7 @@ Action: Repair that slot range from another source if needed."
 Data: The earlier reconnect range is still unverified.
 Action: Compare that range with another source if needed." \
       silent
+    clear_upstream_access_blocked_after_progress
   elif [ -e "$STARTED_FILE" ]; then
     monitor_start_age=$(file_age_seconds "$STARTED_FILE") || return 0
     if [ "$monitor_start_age" -gt "$STARTUP_GRACE_SECS" ]; then
@@ -1585,6 +1792,54 @@ Action: Check the Hetzner volume mount."
 start_child_monitor() {
   monitor_child "$1" &
   monitor_pid=$!
+}
+
+raw_child_report_string() {
+  report_path=$1
+  report_field=$2
+  sed -n "s/^[[:space:]]*\"$report_field\": \"\([^\"]*\)\",*$/\1/p" \
+    "$report_path" | tail -n 1
+}
+
+raw_child_report_uint() {
+  report_path=$1
+  report_field=$2
+  sed -n "s/^[[:space:]]*\"$report_field\": \([0-9][0-9]*\),*$/\1/p" \
+    "$report_path" | tail -n 1
+}
+
+raw_child_report_requires_upstream_action() {
+  report_path=$1
+  grep -q '^[[:space:]]*"action_required": true,*$' "$report_path" || return 1
+  report_retry_reason=$(raw_child_report_string "$report_path" retry_reason)
+  case "$report_retry_reason" in
+    permission_denied|unauthenticated) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+raw_child_report_backoff_seconds() {
+  if raw_child_report_requires_upstream_action "$1"; then
+    printf '%s\n' "$UPSTREAM_BLOCKED_BACKOFF_SECS"
+  else
+    printf '%s\n' "$RESTART_DELAY_SECS"
+  fi
+}
+
+raise_upstream_access_blocked_alert() {
+  [ "$TELEGRAM_ENABLED" = true ] || return 0
+  remember_alert_journal_floor upstream_access_blocked
+  raise_alert_once upstream_access_blocked ERROR \
+    "Status: Upstream gRPC access or credit is blocked. No new blocks can be recorded.
+Data: Everything already saved is safe.
+Action: Restore provider access or credit. Retrying in $(human_duration "$UPSTREAM_BLOCKED_BACKOFF_SECS")."
+}
+
+clear_upstream_access_blocked_after_progress() {
+  clear_alert_after_journal_growth upstream_access_blocked \
+    "Status: Upstream gRPC access is working and new blocks are being saved.
+Data: Backup recording has resumed.
+Action: None."
 }
 
 sync_path() {
@@ -2409,15 +2664,20 @@ normalized_generation_base_prefix() {
   printf '%s\n' "$normalized_prefix"
 }
 
-generation_remote_prefix() {
-  prefix_generation_id=$1
-  valid_generation_id "$prefix_generation_id" || return 1
-  prefix_base=$(normalized_generation_base_prefix) || return 1
+generation_retention_prefix() {
+  retention_prefix_base=$(normalized_generation_base_prefix) || return 1
   case "$CLUSTER_ID:$ORIGIN_NODE_ID" in
     *[!A-Za-z0-9._:-]*) return 1 ;;
   esac
-  printf '%s/%s/%s/%s\n' \
-    "$prefix_base" "$CLUSTER_ID" "$ORIGIN_NODE_ID" "$prefix_generation_id"
+  printf '%s/%s/%s\n' \
+    "$retention_prefix_base" "$CLUSTER_ID" "$ORIGIN_NODE_ID"
+}
+
+generation_remote_prefix() {
+  prefix_generation_id=$1
+  valid_generation_id "$prefix_generation_id" || return 1
+  prefix_base=$(generation_retention_prefix) || return 1
+  printf '%s/%s\n' "$prefix_base" "$prefix_generation_id"
 }
 
 valid_sha256_hex() {
@@ -2516,59 +2776,239 @@ publish_upload_chain() {
   sync_path "$GENERATION_RECEIPT_DIR"
 }
 
-finalize_uploaded_generation() {
-  finalized_dir=$1
-  finalized_id=$2
-  finalized_prefix=$3
-  finalized_receipt=$4
+commit_uploaded_generation() {
+  committed_dir=$1
+  committed_id=$2
+  committed_prefix=$3
+  committed_receipt=$4
+  case "$committed_dir" in
+    "$SEALED_GENERATION_DIR"/slot-*) ;;
+    *) return 1 ;;
+  esac
+  [ -d "$committed_dir" ] && [ ! -L "$committed_dir" ] || return 1
   load_upload_chain || return 1
-  if [ "$UPLOAD_CHAIN_ID" = "$finalized_id" ]; then
+  if [ "$UPLOAD_CHAIN_ID" = "$committed_id" ]; then
     expected_predecessor=*
   elif [ -n "$UPLOAD_CHAIN_HASH" ]; then
     expected_predecessor=$UPLOAD_CHAIN_HASH
   else
     expected_predecessor=-
   fi
-  validate_generation_receipt "$finalized_receipt" "$finalized_id" \
-    "$finalized_prefix" "$expected_predecessor" || return 1
-  finalized_hash=$(receipt_manifest_hash "$finalized_receipt") || return 1
-  if [ "$UPLOAD_CHAIN_ID" = "$finalized_id" ]; then
-    [ "$UPLOAD_CHAIN_HASH" = "$finalized_hash" ] || return 1
+  validate_generation_receipt "$committed_receipt" "$committed_id" \
+    "$committed_prefix" "$expected_predecessor" || return 1
+  committed_hash=$(receipt_manifest_hash "$committed_receipt") || return 1
+  if [ "$UPLOAD_CHAIN_ID" = "$committed_id" ]; then
+    [ "$UPLOAD_CHAIN_HASH" = "$committed_hash" ] || return 1
   else
-    publish_upload_chain "$finalized_id" "$finalized_hash" || return 1
+    publish_upload_chain "$committed_id" "$committed_hash" || return 1
   fi
-  case "$finalized_dir" in
-    "$SEALED_GENERATION_DIR"/slot-*) ;;
-    *) return 1 ;;
+  # Remote commit and local retention are deliberately separate. This receipt
+  # proves the object-store copy only; it never authorizes local deletion.
+  return 0
+}
+
+load_generation_retention_state() {
+  retention_target_id=${1:--}
+  GENERATION_RETAINED_COUNT=
+  GENERATION_UNCOMMITTED_COUNT=
+  FIRST_UNCOMMITTED_GENERATION=
+  FIRST_COMMITTED_GENERATION=
+  TARGET_GENERATION_COMMITTED=
+  if [ -L "$SEALED_GENERATION_DIR" ] \
+    || [ ! -d "$SEALED_GENERATION_DIR" ] \
+    || [ -L "$GENERATION_RECEIPT_DIR" ] \
+    || [ ! -d "$GENERATION_RECEIPT_DIR" ]
+  then
+    return 1
+  fi
+  retention_base=$(normalized_generation_base_prefix) || return 1
+  retention_scan=$("$GENERATION_PYTHON_BIN" - \
+    "$SEALED_GENERATION_DIR" "$GENERATION_RECEIPT_DIR" \
+    "$retention_base" "$CLUSTER_ID" "$ORIGIN_NODE_ID" \
+    "$retention_target_id" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+sealed_dir, receipt_dir, base_prefix, cluster_id, origin_node_id, target_id = sys.argv[1:]
+generation_id_pattern = re.compile(r"slot-[0-9]{20}").fullmatch
+receipt_name_pattern = re.compile(r"slot-[0-9]{20}\.json").fullmatch
+hex64 = re.compile(r"[0-9a-f]{64}").fullmatch
+
+def valid_version_id(value):
+    return (
+        type(value) is str
+        and 0 < len(value.encode("utf-8")) <= 1024
+        and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in value)
+    )
+
+try:
+    sealed_ids = []
+    with os.scandir(sealed_dir) as entries:
+        for entry in entries:
+            if not entry.name.startswith("slot-"):
+                continue
+            if not generation_id_pattern(entry.name):
+                raise ValueError("invalid sealed generation name")
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                raise ValueError("sealed generation is not a real directory")
+            sealed_ids.append(entry.name)
+    sealed_ids.sort()
+
+    receipts_by_hash = {}
+    with os.scandir(receipt_dir) as entries:
+        for entry in entries:
+            if not (entry.name.startswith("slot-") and entry.name.endswith(".json")):
+                continue
+            if not receipt_name_pattern(entry.name):
+                raise ValueError("invalid generation receipt name")
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                raise ValueError("generation receipt is not a real file")
+            size = entry.stat(follow_symlinks=False).st_size
+            if size <= 0 or size > 1048576:
+                # An uploader may have stopped before publishing a valid local
+                # receipt. It remains an uncommitted object-store upload.
+                continue
+            generation_id = entry.name[:-5]
+            prefix = f"{base_prefix}/{cluster_id}/{origin_node_id}/{generation_id}"
+            try:
+                with open(entry.path, "r", encoding="utf-8") as stream:
+                    receipt = json.load(stream)
+                if type(receipt) is not dict:
+                    raise ValueError("generation receipt is not an object")
+                if type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1:
+                    raise ValueError("unsupported generation receipt")
+                if receipt.get("generation_id") != generation_id:
+                    raise ValueError("generation receipt ID mismatch")
+                if receipt.get("remote_prefix") != prefix:
+                    raise ValueError("generation receipt prefix mismatch")
+                if receipt.get("manifest_key") != prefix + "/manifest.json":
+                    raise ValueError("generation manifest key mismatch")
+                if receipt.get("commit_key") != prefix + "/_COMMITTED":
+                    raise ValueError("generation commit key mismatch")
+                manifest_hash = receipt.get("manifest_sha256", "")
+                if not hex64(manifest_hash) or not hex64(receipt.get("commit_sha256", "")):
+                    raise ValueError("invalid generation digest")
+                if not valid_version_id(receipt.get("manifest_version_id")):
+                    raise ValueError("invalid manifest version")
+                if not valid_version_id(receipt.get("commit_version_id")):
+                    raise ValueError("invalid commit version")
+                if type(receipt.get("file_count")) is not int or receipt["file_count"] < 1:
+                    raise ValueError("invalid generation file count")
+                if type(receipt.get("total_bytes")) is not int or receipt["total_bytes"] <= 0:
+                    raise ValueError("invalid generation byte count")
+                if type(receipt.get("verified_unix_secs")) is not int or receipt["verified_unix_secs"] <= 0:
+                    raise ValueError("invalid generation verification time")
+                predecessor = receipt.get("predecessor_manifest_sha256")
+                if predecessor is not None and not hex64(predecessor):
+                    raise ValueError("invalid predecessor hash")
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                # Invalid or partially written off-chain receipts do not prove
+                # an object-store commit. If .chain references one, traversal
+                # fails below.
+                continue
+            if manifest_hash in receipts_by_hash:
+                raise ValueError("duplicate generation manifest hash")
+            receipts_by_hash[manifest_hash] = (generation_id, predecessor)
+
+    committed_ids = set()
+    chain_path = os.path.join(receipt_dir, ".chain")
+    try:
+        chain_stat = os.lstat(chain_path)
+    except FileNotFoundError:
+        chain_stat = None
+    if chain_stat is not None:
+        if not stat.S_ISREG(chain_stat.st_mode) or chain_stat.st_size <= 0 or chain_stat.st_size > 256:
+            raise ValueError("invalid receipt chain file")
+        with open(chain_path, "r", encoding="ascii") as stream:
+            chain_parts = stream.read().split()
+        if len(chain_parts) != 2:
+            raise ValueError("invalid receipt chain record")
+        chain_generation_id, current_hash = chain_parts
+        if not generation_id_pattern(chain_generation_id) or not hex64(current_hash):
+            raise ValueError("invalid receipt chain head")
+        seen_hashes = set()
+        first = True
+        while current_hash is not None:
+            if current_hash in seen_hashes or current_hash not in receipts_by_hash:
+                raise ValueError("receipt chain is incomplete or cyclic")
+            seen_hashes.add(current_hash)
+            generation_id, current_hash = receipts_by_hash[current_hash]
+            if first and generation_id != chain_generation_id:
+                raise ValueError("receipt chain head ID mismatch")
+            first = False
+            if generation_id in committed_ids:
+                raise ValueError("duplicate generation in receipt chain")
+            committed_ids.add(generation_id)
+
+    uncommitted_ids = [item for item in sealed_ids if item not in committed_ids]
+    committed_local_ids = [item for item in sealed_ids if item in committed_ids]
+    first_uncommitted = uncommitted_ids[0] if uncommitted_ids else "-"
+    first_committed = committed_local_ids[0] if committed_local_ids else "-"
+    target_committed = "1" if target_id != "-" and target_id in committed_ids else "0"
+    print(
+        len(sealed_ids),
+        len(uncommitted_ids),
+        first_uncommitted,
+        first_committed,
+        target_committed,
+    )
+except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+  ) || return 1
+  IFS=' ' read -r GENERATION_RETAINED_COUNT GENERATION_UNCOMMITTED_COUNT \
+    FIRST_UNCOMMITTED_GENERATION FIRST_COMMITTED_GENERATION \
+    TARGET_GENERATION_COMMITTED retention_extra <<EOF
+$retention_scan
+EOF
+  case "$GENERATION_RETAINED_COUNT" in ''|*[!0-9]*) return 1 ;; esac
+  case "$GENERATION_UNCOMMITTED_COUNT" in ''|*[!0-9]*) return 1 ;; esac
+  [ -z "${retention_extra:-}" ] || return 1
+  case "$FIRST_UNCOMMITTED_GENERATION" in
+    -) ;;
+    *) valid_generation_id "$FIRST_UNCOMMITTED_GENERATION" || return 1 ;;
   esac
-  [ -d "$finalized_dir" ] && [ ! -L "$finalized_dir" ] || return 1
-  rm -rf "$finalized_dir" || return 1
-  sync_path "$SEALED_GENERATION_DIR"
+  case "$FIRST_COMMITTED_GENERATION" in
+    -) ;;
+    *) valid_generation_id "$FIRST_COMMITTED_GENERATION" || return 1 ;;
+  esac
+  case "$TARGET_GENERATION_COMMITTED" in 0|1) ;; *) return 1 ;; esac
+}
+
+# Legacy callers use this as the actionable remote backlog. Locally retained,
+# already-committed generations are intentionally excluded.
+sealed_generation_count() {
+  load_generation_retention_state || return 1
+  printf '%s\n' "$GENERATION_UNCOMMITTED_COUNT"
+}
+
+retained_sealed_generation_count() {
+  load_generation_retention_state || return 1
+  printf '%s\n' "$GENERATION_RETAINED_COUNT"
 }
 
 first_sealed_generation() {
   FIRST_SEALED_GENERATION=
-  for sealed_candidate in "$SEALED_GENERATION_DIR"/slot-*; do
-    [ -e "$sealed_candidate" ] || continue
-    sealed_id=${sealed_candidate##*/}
-    valid_generation_id "$sealed_id" || return 1
-    if [ -L "$sealed_candidate" ] || [ ! -d "$sealed_candidate" ]; then
-      return 1
-    fi
-    FIRST_SEALED_GENERATION=$sealed_candidate
-    return 0
-  done
-  return 0
+  load_generation_retention_state || return 1
+  [ "$FIRST_UNCOMMITTED_GENERATION" != - ] || return 0
+  FIRST_SEALED_GENERATION=$SEALED_GENERATION_DIR/$FIRST_UNCOMMITTED_GENERATION
 }
 
-sealed_generation_count() {
-  sealed_count=0
-  for sealed_candidate in "$SEALED_GENERATION_DIR"/slot-*; do
-    [ -e "$sealed_candidate" ] || continue
-    [ -d "$sealed_candidate" ] && [ ! -L "$sealed_candidate" ] || return 1
-    sealed_count=$((sealed_count + 1))
-  done
-  printf '%s\n' "$sealed_count"
+evict_first_committed_generation() {
+  GENERATION_EVICTION_PERFORMED=false
+  GENERATION_EVICTED_ID=
+  GENERATION_EVICTION_BLOCKED_REASON=
+  [ "${generation_spill_active:-false}" = true ] || return 0
+  [ ! -e "$GENERATION_ROTATION_MARKER" ] || return 75
+  load_generation_retention_state || return 1
+  [ "$FIRST_COMMITTED_GENERATION" != - ] || return 0
+  # Fail closed until a concrete transport can verify Blockzilla's durable ACK
+  # for the exact slot range. A Backblaze/R2 receipt is upload proof only.
+  GENERATION_EVICTION_BLOCKED_REASON=blockzilla_ack_unavailable
+  return "$BLOCKZILLA_ACK_UNAVAILABLE_STATUS"
 }
 
 percentage_bytes() {
@@ -2628,6 +3068,11 @@ update_generation_spill_state() {
 
 generation_upload_failure_details() {
   failure_status=$1
+  if [ "$OBJECT_STORE" != backblaze ]; then
+    pipeline_cause="Status: $OBJECT_STORE_HUMAN_NAME upload failed."
+    pipeline_action="Action: Check $OBJECT_STORE_HUMAN_NAME and the recorder logs. Automatic retry is on."
+    return 0
+  fi
   case "$failure_status" in
     20)
       pipeline_cause="Status: Backblaze download limit reached."
@@ -2655,6 +3100,14 @@ backblaze_retry_seconds() {
   esac
 }
 
+object_store_retry_seconds() {
+  if [ "$OBJECT_STORE" = backblaze ]; then
+    backblaze_retry_seconds "$@"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
 upload_one_generation() {
   # A rotation marker means the old generation may be visible but the rename
   # transaction is not yet committed. Recovery owns it until the marker clears.
@@ -2676,9 +3129,15 @@ upload_one_generation() {
   if validate_generation_receipt "$upload_receipt" "$upload_id" \
     "$upload_prefix" "$existing_expected" 2>/dev/null
   then
-    finalize_uploaded_generation "$upload_dir" "$upload_id" \
+    commit_uploaded_generation "$upload_dir" "$upload_id" \
       "$upload_prefix" "$upload_receipt"
     return $?
+  fi
+  # A receipt that exists but cannot extend the current durable chain may be
+  # partial, corrupt, or off-chain. Preserve both it and the local generation;
+  # never overwrite evidence or let it authorize deletion.
+  if [ -e "$upload_receipt" ] || [ -L "$upload_receipt" ]; then
+    return 1
   fi
   if [ -L "$GENERATION_CREDENTIALS_FILE" ] \
     || [ ! -f "$GENERATION_CREDENTIALS_FILE" ] \
@@ -2705,12 +3164,14 @@ upload_one_generation() {
     # Preserve the uploader's small, allowlisted capacity statuses so the one
     # correlated pipeline incident can name the exact operator action. Unknown
     # failures remain generic and are never inferred from an untyped HTTP 403.
-    case "$generation_uploader_status" in
-      20|21|22) return "$generation_uploader_status" ;;
+    case "$OBJECT_STORE:$generation_uploader_status" in
+      backblaze:20|backblaze:21|backblaze:22)
+        return "$generation_uploader_status"
+        ;;
       *) return 1 ;;
     esac
   fi
-  finalize_uploaded_generation "$upload_dir" "$upload_id" \
+  commit_uploaded_generation "$upload_dir" "$upload_id" \
     "$upload_prefix" "$upload_receipt"
 }
 
@@ -2727,29 +3188,42 @@ raise_generation_spill_gate_alert() {
   spill_gate_backlog=$2
   spill_gate_free=$3
   spill_gate_level=ERROR
+  spill_gate_action="Action: Check the Hetzner disk and recorder service. Automatic retry is on."
   case "$spill_gate_failure" in
     queue)
-      spill_gate_status="Status: Cannot read local backup files. Backblaze upload is paused; saved data is safe."
+      spill_gate_status="Status: Cannot read local backup files. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."
       ;;
     free_space)
-      spill_gate_status="Status: Cannot read Hetzner free space. Backblaze upload is paused; saved data is safe."
+      spill_gate_status="Status: Cannot read Hetzner free space. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."
       ;;
     capacity)
-      spill_gate_status="Status: Cannot read Hetzner disk size. Backblaze upload is paused; saved data is safe."
+      spill_gate_status="Status: Cannot read Hetzner disk size. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."
       ;;
     policy)
-      spill_gate_status="Status: Storage safety check failed. Backblaze upload is paused; saved data is safe."
+      spill_gate_status="Status: Storage safety check failed. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."
+      ;;
+    blockzilla_ack)
+      spill_gate_status="Status: Blockzilla has not confirmed these blocks. Hetzner cleanup is paused; saved data is safe."
+      spill_gate_action="Action: Nothing was deleted. Restore Blockzilla sync or add Hetzner disk space. $OBJECT_STORE_HUMAN_NAME uploads continue."
       ;;
     *)
-      spill_gate_status="Status: Storage safety check failed. Backblaze upload is paused; saved data is safe."
+      spill_gate_status="Status: Storage safety check failed. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."
       ;;
   esac
   case "$spill_gate_backlog" in
     ''|*[!0-9]*)
-      spill_gate_backlog_detail="Waiting backup count unavailable."
+      if [ "$spill_gate_failure" = blockzilla_ack ]; then
+        spill_gate_backlog_detail="Local backup count unavailable."
+      else
+        spill_gate_backlog_detail="Waiting backup count unavailable."
+      fi
       ;;
     *)
-      spill_gate_backlog_detail="$spill_gate_backlog backup batches waiting locally."
+      if [ "$spill_gate_failure" = blockzilla_ack ]; then
+        spill_gate_backlog_detail="$spill_gate_backlog backup batches kept locally until Blockzilla confirms them."
+      else
+        spill_gate_backlog_detail="$spill_gate_backlog backup batches waiting locally."
+      fi
       ;;
   esac
   case "$spill_gate_free" in
@@ -2768,7 +3242,7 @@ raise_generation_spill_gate_alert() {
   raise_alert generation_backlog "$spill_gate_level" \
     "$spill_gate_status
 $spill_gate_space_detail
-Action: Check the Hetzner disk and recorder service. Automatic retry is on."
+$spill_gate_action"
 }
 
 generation_backlog_local_incident_active() {
@@ -2786,6 +3260,11 @@ generation_backlog_local_incident_active() {
   [ "$gate_incident_bytes" -le 4096 ] || return 1
   gate_incident_marker=$(sed -n '/^Status: /p' "$gate_incident_file" | head -n 1)
   case "$gate_incident_marker" in
+    "Status: Cannot read local backup files. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."|\
+    "Status: Cannot read Hetzner free space. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."|\
+    "Status: Cannot read Hetzner disk size. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."|\
+    "Status: Storage safety check failed. $OBJECT_STORE_HUMAN_NAME upload is paused; saved data is safe."|\
+    'Status: Blockzilla has not confirmed these blocks. Hetzner cleanup is paused; saved data is safe.'|\
     'Status: Cannot read local backup files. Backblaze upload is paused; saved data is safe.'|\
     'Status: Cannot read Hetzner free space. Backblaze upload is paused; saved data is safe.'|\
     'Status: Cannot read Hetzner disk size. Backblaze upload is paused; saved data is safe.'|\
@@ -2849,8 +3328,9 @@ generation_upload_worker() {
         generation_upload_attempted=false
         generation_upload_succeeded=false
         upload_status=
-        if [ "$generation_spill_active" = true ] \
-          && [ "$generation_backlog" -gt 0 ]
+        if [ "$generation_backlog" -gt 0 ] \
+          && { [ "$OBJECT_STORE" = r2 ] \
+            || [ "$generation_spill_active" = true ]; }
         then
           generation_upload_attempted=true
           if upload_one_generation; then
@@ -2861,17 +3341,43 @@ generation_upload_worker() {
             if [ "$upload_status" -ne 75 ]; then
               generation_upload_failed=true
               generation_upload_failure_details "$upload_status"
-              generation_sleep=$(backblaze_retry_seconds "$upload_status" \
+              generation_sleep=$(object_store_retry_seconds "$upload_status" \
                 "$GENERATION_UPLOAD_RETRY_SECS")
             fi
           fi
         fi
 
-        # Refresh both values after a verified upload and local removal. The
-        # worker drains FIFO without an artificial retry delay until the high
-        # watermark is restored; normal local retention does not touch B2.
+        generation_eviction_attempted=false
+        generation_eviction_performed=false
+        generation_eviction_failure=
+        if [ "$generation_spill_active" = true ] \
+          && [ -d "$GENERATION_RECEIPT_DIR" ] \
+          && [ ! -L "$GENERATION_RECEIPT_DIR" ]
+        then
+          generation_eviction_attempted=true
+          if evict_first_committed_generation; then
+            if [ "$GENERATION_EVICTION_PERFORMED" = true ]; then
+              generation_eviction_performed=true
+            fi
+          else
+            eviction_status=$?
+            case "$eviction_status" in
+              75) ;;
+              "$BLOCKZILLA_ACK_UNAVAILABLE_STATUS")
+                generation_eviction_failure=blockzilla_ack
+                ;;
+              *) generation_eviction_failure=queue ;;
+            esac
+          fi
+        fi
+
+        # Refresh after remote commit and any future ACK-authorized local FIFO
+        # eviction. Today the latter fails closed, so verified local copies stay
+        # retained while object-store uploads continue.
         generation_refresh_failure=
-        if ! generation_backlog=$(sealed_generation_count 2>/dev/null); then
+        if [ -n "$generation_eviction_failure" ]; then
+          generation_refresh_failure=$generation_eviction_failure
+        elif ! generation_backlog=$(sealed_generation_count 2>/dev/null); then
           generation_refresh_failure=queue
         elif ! generation_free_bytes=$(available_bytes 2>/dev/null); then
           generation_refresh_failure=free_space
@@ -2886,6 +3392,20 @@ generation_upload_worker() {
         fi
         if [ -n "$generation_refresh_failure" ]; then
           generation_space_valid=false
+        fi
+        if [ "$generation_space_valid" = true ] \
+          && [ "$OBJECT_STORE" = r2 ] \
+          && [ "$generation_upload_succeeded" = true ] \
+          && [ "$generation_backlog" -gt 0 ] \
+          && [ "$generation_backlog" -lt "$generation_backlog_before" ]
+        then
+          generation_retry_immediately=true
+        fi
+        if [ "$generation_space_valid" = true ] \
+          && [ "$generation_spill_active" = true ] \
+          && [ "$generation_eviction_performed" = true ]
+        then
+          generation_retry_immediately=true
         fi
 
         if [ "$generation_upload_failed" = true ]; then
@@ -2914,8 +3434,15 @@ generation_upload_worker() {
 $generation_free_detail
 $pipeline_action"
         elif [ -n "$generation_refresh_failure" ]; then
+          generation_alert_backlog=$generation_backlog
+          if [ "$generation_refresh_failure" = blockzilla_ack ]; then
+            case "${GENERATION_RETAINED_COUNT:-}" in
+              ''|*[!0-9]*) ;;
+              *) generation_alert_backlog=$GENERATION_RETAINED_COUNT ;;
+            esac
+          fi
           raise_generation_spill_gate_alert "$generation_refresh_failure" \
-            "$generation_backlog" "$generation_free_bytes"
+            "$generation_alert_backlog" "$generation_free_bytes"
         elif [ "$generation_space_valid" = true ] \
           && [ "$generation_spill_active" = false ] \
           && [ "$generation_free_bytes" -ge "$GENERATION_SPILL_RECOVERY_BYTES" ] \
@@ -2932,7 +3459,7 @@ Action: None."
             || [ "$generation_backlog" -eq 0 ]; }
         then
           clear_alert generation_backlog \
-            "Status: Backblaze uploads are working and backup recording can continue.
+            "Status: $OBJECT_STORE_HUMAN_NAME uploads are working and backup recording can continue.
 Storage: $(human_decimal_bytes "$generation_free_bytes") free on Hetzner.
 Action: None."
         elif [ "$generation_space_valid" = true ] \
@@ -2958,7 +3485,7 @@ Action: None."
           fi
           rm -f "$(alert_file generation_backlog handoff)" 2>/dev/null || true
           raise_alert generation_backlog "$pipeline_level" \
-            "Status: Backblaze upload finished, but Hetzner space did not increase. $pipeline_capture
+            "Status: $OBJECT_STORE_HUMAN_NAME upload finished, but Hetzner space did not increase. $pipeline_capture
 Storage: $(human_decimal_bytes "$generation_free_bytes") free; $generation_backlog backup batches waiting locally.
 Action: Check the recorder logs. Automatic retry is on."
         fi
@@ -3015,6 +3542,7 @@ PY
 }
 
 run_b2_usage_scan() {
+  [ "$OBJECT_STORE" = backblaze ] || return 78
   if [ -L "$GENERATION_CREDENTIALS_FILE" ] \
     || [ ! -f "$GENERATION_CREDENTIALS_FILE" ] \
     || [ ! -r "$GENERATION_CREDENTIALS_FILE" ] \
@@ -3123,6 +3651,7 @@ Action: None."
 }
 
 b2_usage_worker() {
+  [ "$OBJECT_STORE" = backblaze ] || return 0
   b2_usage_query_pid=
   trap terminate_b2_usage_worker INT TERM HUP
   while :; do
@@ -3147,8 +3676,301 @@ b2_usage_worker() {
 }
 
 start_b2_usage_worker() {
+  [ "$OBJECT_STORE" = backblaze ] || return 0
   b2_usage_worker &
   b2_usage_worker_pid=$!
+}
+
+r2_receipt_ledger_bytes() {
+  [ "$OBJECT_STORE" = r2 ] || return 1
+  run_r2_retention_command dry-run "$R2_RETENTION_SCAN_TARGET_BYTES" \
+    || return 1
+  printf '%s\n' "$R2_RETENTION_BYTES_BEFORE"
+}
+
+parse_r2_retention_result() {
+  retention_result_file=$1
+  retention_expected_mode=$2
+  retention_expected_target=$3
+  retention_expected_prefix=$4
+  retention_expected_maximum_slot=$5
+  retention_parsed=$("$GENERATION_PYTHON_BIN" - \
+    "$retention_result_file" "$retention_expected_mode" \
+    "$retention_expected_target" "$retention_expected_prefix" \
+    "$retention_expected_maximum_slot" \
+    "$R2_RETENTION_MINIMUM_AGE_SECS" \
+    "$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS" <<'PY'
+import json
+import re
+import sys
+
+(
+    path,
+    expected_mode,
+    expected_target,
+    expected_prefix,
+    expected_maximum_slot,
+    expected_minimum_age,
+    expected_minimum_generations,
+) = sys.argv[1:]
+
+def strict_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+def invalid_constant(_value):
+    raise ValueError("non-finite JSON number")
+
+def integer(record, name, minimum=0):
+    value = record.get(name)
+    if type(value) is not int or value < minimum or value > (1 << 63) - 1:
+        raise ValueError(f"invalid {name}")
+    return value
+
+try:
+    with open(path, "r", encoding="utf-8") as stream:
+        result = json.load(
+            stream,
+            object_pairs_hook=strict_object,
+            parse_constant=invalid_constant,
+        )
+    if type(result) is not dict:
+        raise ValueError("retention result is not an object")
+    target = int(expected_target)
+    minimum_age = int(expected_minimum_age)
+    minimum_generations = int(expected_minimum_generations)
+    maximum_slot = int(expected_maximum_slot)
+    if (
+        result.get("schema_version") != 1
+        or result.get("storage_provider") != "r2"
+        or result.get("mode") != expected_mode
+        or result.get("remote_prefix") != expected_prefix
+        or result.get("target_bytes") != target
+        or result.get("maximum_generation_slot") != maximum_slot
+        or result.get("minimum_age_secs") != minimum_age
+        or result.get("minimum_retained_generations") != minimum_generations
+    ):
+        raise ValueError("retention result scope mismatch")
+    before = integer(result, "retained_payload_bytes_before")
+    after = integer(result, "retained_payload_bytes_after")
+    before_count = integer(result, "retained_generation_count_before")
+    after_count = integer(result, "retained_generation_count_after")
+    selected_bytes = integer(result, "selected_payload_bytes")
+    selected = result.get("selected_generation_ids")
+    if type(selected) is not list or any(
+        type(value) is not str
+        or re.fullmatch(r"slot-[0-9]{20}", value) is None
+        for value in selected
+    ):
+        raise ValueError("invalid selected generation IDs")
+    if len(set(selected)) != len(selected):
+        raise ValueError("duplicate selected generation ID")
+    if (
+        after > before
+        or selected_bytes != before - after
+        or after_count > before_count
+        or before_count - after_count != len(selected)
+        or type(result.get("target_satisfied")) is not bool
+    ):
+        raise ValueError("inconsistent retention totals")
+    if expected_mode == "dry-run" and target == (1 << 63) - 1 and (
+        selected or before != after or result["target_satisfied"] is not True
+    ):
+        raise ValueError("accounting dry-run unexpectedly selected data")
+    first = selected[0] if selected else "-"
+    last = selected[-1] if selected else "-"
+except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+print(
+    before,
+    after,
+    before_count,
+    after_count,
+    len(selected),
+    selected_bytes,
+    1 if result["target_satisfied"] else 0,
+    first,
+    last,
+)
+PY
+  ) || return 1
+  # Every emitted field is constrained above to digits, a fixed generation ID,
+  # or '-'. Shell splitting therefore cannot reinterpret uploader-controlled
+  # content as syntax.
+  set -- $retention_parsed
+  [ "$#" -eq 9 ] || return 1
+  R2_RETENTION_BYTES_BEFORE=$1
+  R2_RETENTION_BYTES_AFTER=$2
+  R2_RETENTION_GENERATIONS_BEFORE=$3
+  R2_RETENTION_GENERATIONS_AFTER=$4
+  R2_RETENTION_SELECTED_COUNT=$5
+  R2_RETENTION_SELECTED_BYTES=$6
+  R2_RETENTION_TARGET_SATISFIED=$7
+  R2_RETENTION_FIRST_SELECTED=$8
+  R2_RETENTION_LAST_SELECTED=$9
+}
+
+run_r2_retention_command() {
+  retention_mode=$1
+  retention_target=$2
+  retention_maximum_slot=${3:-0}
+  [ "$OBJECT_STORE" = r2 ] || return 78
+  # Remote deletion is intentionally unavailable here. A generic heartbeat or
+  # unsigned slot is not deletion authority. The future ACK receiver must
+  # verify a signed generation acknowledgement binding manifest hash, commit
+  # identity, predecessor, primary fencing term, and durable disposition before
+  # this shell may expose an apply path.
+  [ "$retention_mode" = dry-run ] || return 78
+  [ "$retention_maximum_slot" -eq 0 ] || return 78
+  case "$retention_target" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -L "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -f "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -r "$GENERATION_CREDENTIALS_FILE" ] \
+    || [ ! -x "$GENERATION_UPLOADER_BIN" ]
+  then
+    return 1
+  fi
+  retention_prefix=$(generation_retention_prefix) || return 1
+  retention_result_tmp=$GENERATION_MONITORING_DIR/r2-retention-result.$$.tmp
+  rm -f "$retention_result_tmp" 2>/dev/null || return 1
+  if ! (set -C; : > "$retention_result_tmp") 2>/dev/null; then
+    return 1
+  fi
+  set -- r2-retention "$GENERATION_RECEIPT_DIR" "$retention_prefix" \
+    --target-bytes "$retention_target" \
+    --minimum-age-secs "$R2_RETENTION_MINIMUM_AGE_SECS" \
+    --maximum-generation-slot "$retention_maximum_slot" \
+    --minimum-retained-generations \
+    "$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS"
+  set -- "$@" --provider r2 \
+    --credentials-file "$GENERATION_CREDENTIALS_FILE"
+  "$GENERATION_UPLOADER_BIN" "$@" > "$retention_result_tmp" &
+  r2_retention_command_pid=$!
+  if wait "$r2_retention_command_pid"; then
+    retention_status=0
+  else
+    retention_status=$?
+  fi
+  r2_retention_command_pid=
+  if [ "$retention_status" -ne 0 ] \
+    || ! parse_r2_retention_result "$retention_result_tmp" \
+      "$retention_mode" "$retention_target" "$retention_prefix" \
+      "$retention_maximum_slot"
+  then
+    rm -f "$retention_result_tmp" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$retention_result_tmp" 2>/dev/null || return 1
+}
+
+update_r2_usage_alerts() {
+  r2_usage_bytes=$1
+  [ "$R2_USAGE_ALERT_ENABLED" = true ] || return 0
+  r2_usage_active=$(alert_file r2_usage active)
+  r2_usage_detail="Storage: $(human_decimal_gigabytes "$r2_usage_bytes") retained in Cloudflare R2."
+  if [ "$r2_usage_bytes" -ge "$R2_USAGE_WARNING_BYTES" ]; then
+    raise_alert_once r2_usage WARNING \
+      "Status: Cloudflare R2 backup is growing toward its 1 TB limit.
+$r2_usage_detail
+Action: Check Blockzilla sync. Nothing was deleted."
+  elif [ -e "$r2_usage_active" ] \
+    && [ "$r2_usage_bytes" -lt "$R2_USAGE_WARNING_RECOVERY_BYTES" ]
+  then
+    clear_alert r2_usage \
+      "Status: Cloudflare R2 archive is below the warning level.
+$r2_usage_detail
+Action: None."
+  fi
+}
+
+r2_retention_critical_alert() {
+  retention_critical_status=$1
+  retention_critical_bytes=$2
+  [ "$R2_USAGE_ALERT_ENABLED" = true ] || return 0
+  raise_alert_once r2_usage CRITICAL \
+    "$retention_critical_status
+Storage: $(human_decimal_gigabytes "$retention_critical_bytes") retained in Cloudflare R2.
+Action: Restore Blockzilla sync or add storage. Nothing was deleted."
+}
+
+r2_usage_scan_failed_alert() {
+  [ "$R2_USAGE_ALERT_ENABLED" = true ] || return 0
+  # Usage, validation, and automatic cleanup are one operator concern. Keep a
+  # single incident key so one broken ledger cannot produce parallel messages.
+  discard_alert r2_usage_check_failed
+  raise_alert_once r2_usage WARNING \
+    "Status: Cloudflare R2 backup size is unknown.
+Storage: Unknown.
+Action: Check the recorder and R2. Nothing was deleted."
+}
+
+r2_usage_scan_recovered_alert() {
+  # Retire the older parallel measurement incident without a second recovery.
+  discard_alert r2_usage_check_failed
+}
+
+terminate_r2_usage_worker() {
+  if [ -n "${r2_retention_command_pid:-}" ]; then
+    kill -TERM "$r2_retention_command_pid" 2>/dev/null || true
+    wait "$r2_retention_command_pid" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+r2_usage_worker() {
+  [ "$OBJECT_STORE" = r2 ] || return 0
+  r2_retention_command_pid=
+  trap terminate_r2_usage_worker INT TERM HUP
+  while :; do
+    if ! validate_data_volume true >/dev/null 2>&1; then
+      : # The dedicated volume incident is reported by the main monitor.
+    elif R2_USAGE_BYTES=$(r2_receipt_ledger_bytes); then
+      r2_usage_scan_recovered_alert
+      echo "$(timestamp) r2_retention_usage active_bytes=$R2_USAGE_BYTES trigger_bytes=$R2_RETENTION_TRIGGER_BYTES" >&2
+      if [ "$R2_USAGE_BYTES" -ge "$R2_RETENTION_TRIGGER_BYTES" ]; then
+        if [ "$R2_RETENTION_ENABLED" != true ]; then
+          r2_retention_critical_alert \
+            "Status: Cloudflare R2 backup is critical; signed cleanup is not enabled." \
+            "$R2_USAGE_BYTES"
+        else
+          r2_retention_critical_alert \
+            "Status: Blockzilla has not signed the oldest backup; R2 cleanup is paused." \
+            "$R2_USAGE_BYTES"
+        fi
+      else
+        update_r2_usage_alerts "$R2_USAGE_BYTES"
+      fi
+    else
+      r2_usage_scan_failed_alert
+    fi
+    sleep "$R2_RETENTION_CHECK_INTERVAL_SECS"
+  done
+}
+
+start_r2_usage_worker() {
+  [ "$OBJECT_STORE" = r2 ] || return 0
+  [ "$R2_USAGE_ALERT_ENABLED" = true ] \
+    || [ "$R2_RETENTION_ENABLED" = true ] || return 0
+  r2_usage_worker &
+  r2_usage_worker_pid=$!
+}
+
+start_raw_recorder_child() {
+  if [ -n "$RAW_RELAY_BIND" ]; then
+    set -- "$@" \
+      --relay-bind "$RAW_RELAY_BIND" \
+      --relay-x-token-file "$RAW_RELAY_X_TOKEN_FILE" \
+      --relay-max-records "$RAW_RELAY_MAX_RECORDS" \
+      --relay-max-encoded-bytes "$RAW_RELAY_MAX_ENCODED_BYTES" \
+      --relay-max-clients "$RAW_RELAY_MAX_CLIENTS"
+  fi
+  "$BIN" "$@" > "$CHILD_REPORT_FILE" &
+  RAW_RECORDER_CHILD_PID=$!
 }
 
 healthcheck() {
@@ -3158,6 +3980,7 @@ healthcheck() {
   require_uint BLOCKZILLA_RAW_STARTUP_GRACE_SECS "$startup_grace"
 
   validate_data_paths || return 1
+  validate_object_store || return 1
   validate_data_volume true || return 1
 
   if [ -r "$STATE_FILE" ]; then
@@ -3166,6 +3989,7 @@ healthcheck() {
       || [ "$recorder_state" = disk_check_failed ] \
       || [ "$recorder_state" = cache_rotation_failed ] \
       || [ "$recorder_state" = replay_recovery_failed ] \
+      || [ "$recorder_state" = upstream_access_blocked ] \
       || [ "$recorder_state" = stopping ]
     then
       echo "raw recorder state is $recorder_state" >&2
@@ -3256,8 +4080,14 @@ if [ -n "${BLOCKZILLA_GRPC_X_TOKEN_FILE:-}" ]; then
     exit 2
   fi
 fi
+if ! validate_raw_relay_config; then
+  exit 2
+fi
 
 if ! validate_data_paths; then
+  exit 2
+fi
+if ! validate_object_store; then
   exit 2
 fi
 case "$REQUIRE_COMPLETE_POH" in
@@ -3267,15 +4097,22 @@ case "$REQUIRE_COMPLETE_POH" in
     exit 2
     ;;
 esac
-case "$B2_USAGE_ALERT_ENABLED" in
-  true|false) ;;
-  *)
-    echo "BLOCKZILLA_B2_USAGE_ALERT_ENABLED must be true or false" >&2
+if [ "$OBJECT_STORE" = backblaze ]; then
+  case "$B2_USAGE_ALERT_ENABLED" in
+    true|false) ;;
+    *)
+      echo "BLOCKZILLA_B2_USAGE_ALERT_ENABLED must be true or false" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$B2_USAGE_ALERT_ENABLED" = true ] \
+    && [ "$CACHE_MODE" != b2-generations ]
+  then
+    echo "Backblaze usage alerts require BLOCKZILLA_RAW_CACHE_MODE=b2-generations" >&2
     exit 2
-    ;;
-esac
-if [ "$B2_USAGE_ALERT_ENABLED" = true ] && [ "$CACHE_MODE" != b2-generations ]; then
-  echo "Backblaze usage alerts require BLOCKZILLA_RAW_CACHE_MODE=b2-generations" >&2
+  fi
+fi
+if ! validate_r2_retention_config; then
   exit 2
 fi
 
@@ -3285,6 +4122,7 @@ for numeric_setting in \
   "BLOCKZILLA_RAW_TIMEOUT_SECS:$TIMEOUT_SECS" \
   "BLOCKZILLA_RAW_IDLE_TIMEOUT_SECS:$IDLE_TIMEOUT_SECS" \
   "BLOCKZILLA_RAW_RESTART_DELAY_SECS:$RESTART_DELAY_SECS" \
+  "BLOCKZILLA_RAW_UPSTREAM_BLOCKED_BACKOFF_SECS:$UPSTREAM_BLOCKED_BACKOFF_SECS" \
   "BLOCKZILLA_RAW_LOW_DISK_RECHECK_SECS:$LOW_DISK_RECHECK_SECS" \
   "BLOCKZILLA_RAW_SEGMENT_TARGET_BYTES:$SEGMENT_TARGET_BYTES" \
   "BLOCKZILLA_RAW_MAX_RECORD_BYTES:$MAX_RECORD_BYTES" \
@@ -3294,13 +4132,6 @@ for numeric_setting in \
   "BLOCKZILLA_RAW_B2_SPILL_START_PERCENT:$GENERATION_SPILL_START_PERCENT" \
   "BLOCKZILLA_RAW_B2_SPILL_RECOVERY_PERCENT:$GENERATION_SPILL_RECOVERY_PERCENT" \
   "BLOCKZILLA_RAW_REPLAY_RESUME_HEADROOM_SLOTS:$REPLAY_RESUME_HEADROOM_SLOTS" \
-  "BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:$B2_USAGE_ALLOWANCE_BYTES" \
-  "BLOCKZILLA_B2_USAGE_WARNING_BYTES:$B2_USAGE_WARNING_BYTES" \
-  "BLOCKZILLA_B2_USAGE_CRITICAL_BYTES:$B2_USAGE_CRITICAL_BYTES" \
-  "BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES:$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" \
-  "BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:$B2_USAGE_CHECK_INTERVAL_SECS" \
-  "BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS:$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" \
-  "BLOCKZILLA_B2_CAP_RETRY_SECS:$B2_CAP_RETRY_SECS" \
   "BLOCKZILLA_TELEGRAM_ALERT_COOLDOWN_SECS:$TELEGRAM_ALERT_COOLDOWN_SECS" \
   "BLOCKZILLA_RAW_DISK_WARN_FREE_BYTES:$DISK_WARN_FREE_BYTES" \
   "BLOCKZILLA_RAW_DISK_RECOVERY_HYSTERESIS_BYTES:$DISK_RECOVERY_HYSTERESIS_BYTES" \
@@ -3320,19 +4151,38 @@ if [ "$MONITOR_INTERVAL_SECS" -eq 0 ]; then
   echo "BLOCKZILLA_RAW_MONITOR_INTERVAL_SECS must be non-zero" >&2
   exit 2
 fi
-if [ "$B2_USAGE_WARNING_BYTES" -eq 0 ] \
-  || [ "$B2_USAGE_WARNING_BYTES" -ge "$B2_USAGE_CRITICAL_BYTES" ] \
-  || [ "$B2_USAGE_CRITICAL_BYTES" -gt "$B2_USAGE_ALLOWANCE_BYTES" ] \
-  || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -eq 0 ] \
-  || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -ge "$B2_USAGE_WARNING_BYTES" ] \
-  || [ "$B2_USAGE_CHECK_INTERVAL_SECS" -eq 0 ] \
-  || [ "$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" -eq 0 ] \
-  || [ "$B2_CAP_RETRY_SECS" -eq 0 ]
-then
-  echo "Backblaze usage thresholds, hysteresis, and intervals are invalid" >&2
+if [ "$UPSTREAM_BLOCKED_BACKOFF_SECS" -eq 0 ]; then
+  echo "BLOCKZILLA_RAW_UPSTREAM_BLOCKED_BACKOFF_SECS must be non-zero" >&2
   exit 2
 fi
-B2_USAGE_WARNING_RECOVERY_BYTES=$((B2_USAGE_WARNING_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
+if [ "$OBJECT_STORE" = backblaze ]; then
+  for numeric_setting in \
+    "BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:$B2_USAGE_ALLOWANCE_BYTES" \
+    "BLOCKZILLA_B2_USAGE_WARNING_BYTES:$B2_USAGE_WARNING_BYTES" \
+    "BLOCKZILLA_B2_USAGE_CRITICAL_BYTES:$B2_USAGE_CRITICAL_BYTES" \
+    "BLOCKZILLA_B2_USAGE_RECOVERY_HYSTERESIS_BYTES:$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" \
+    "BLOCKZILLA_B2_USAGE_CHECK_INTERVAL_SECS:$B2_USAGE_CHECK_INTERVAL_SECS" \
+    "BLOCKZILLA_B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS:$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" \
+    "BLOCKZILLA_B2_CAP_RETRY_SECS:$B2_CAP_RETRY_SECS"
+  do
+    setting_name=${numeric_setting%%:*}
+    setting_value=${numeric_setting#*:}
+    require_uint "$setting_name" "$setting_value"
+  done
+  if [ "$B2_USAGE_WARNING_BYTES" -eq 0 ] \
+    || [ "$B2_USAGE_WARNING_BYTES" -ge "$B2_USAGE_CRITICAL_BYTES" ] \
+    || [ "$B2_USAGE_CRITICAL_BYTES" -gt "$B2_USAGE_ALLOWANCE_BYTES" ] \
+    || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -eq 0 ] \
+    || [ "$B2_USAGE_RECOVERY_HYSTERESIS_BYTES" -ge "$B2_USAGE_WARNING_BYTES" ] \
+    || [ "$B2_USAGE_CHECK_INTERVAL_SECS" -eq 0 ] \
+    || [ "$B2_USAGE_OVER_LIMIT_CHECK_INTERVAL_SECS" -eq 0 ] \
+    || [ "$B2_CAP_RETRY_SECS" -eq 0 ]
+  then
+    echo "Backblaze usage thresholds, hysteresis, and intervals are invalid" >&2
+    exit 2
+  fi
+  B2_USAGE_WARNING_RECOVERY_BYTES=$((B2_USAGE_WARNING_BYTES - B2_USAGE_RECOVERY_HYSTERESIS_BYTES))
+fi
 if [ "$CACHE_MODE" = b2-generations ]; then
   if ! valid_replay_shell_uint "$REPLAY_RESUME_HEADROOM_SLOTS" \
     || [ "$REPLAY_RESUME_HEADROOM_SLOTS" \
@@ -3357,11 +4207,11 @@ if [ "$CACHE_MODE" = b2-generations ]; then
       -le "$GENERATION_SPILL_START_PERCENT" ] \
     || [ "$GENERATION_SPILL_RECOVERY_PERCENT" -gt 100 ]
   then
-    echo "Backblaze disk-spill percentages are invalid" >&2
+    echo "$OBJECT_STORE_HUMAN_NAME disk-spill percentages are invalid" >&2
     exit 2
   fi
   if ! generation_spill_thresholds 107374182400; then
-    echo "Backblaze disk-spill reserve arithmetic is invalid" >&2
+    echo "$OBJECT_STORE_HUMAN_NAME disk-spill reserve arithmetic is invalid" >&2
     exit 2
   fi
   if [ "$GENERATION_RECEIPT_DIR" != /data/grpc-cache/receipts ]; then
@@ -3373,7 +4223,7 @@ if [ "$CACHE_MODE" = b2-generations ]; then
     exit 2
   fi
   if ! normalized_generation_base_prefix >/dev/null; then
-    echo "BLOCKZILLA_B2_REMOTE_PREFIX is not a safe relative object prefix" >&2
+    echo "BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX is not a safe relative object prefix" >&2
     exit 2
   fi
   if ! command -v "$GENERATION_PYTHON_BIN" >/dev/null 2>&1; then
@@ -3465,12 +4315,16 @@ child_pid=
 monitor_pid=
 upload_worker_pid=
 b2_usage_worker_pid=
+r2_usage_worker_pid=
 REPLAY_VERIFIED_ANCHOR_SLOT=
 REPLAY_SKIP_RETIRE_VERIFY_ONCE=false
 REPLAY_PERSIST_FAILURE_STAGE=not_attempted
 terminate() {
   if [ -n "$b2_usage_worker_pid" ]; then
     kill -TERM "$b2_usage_worker_pid" 2>/dev/null || true
+  fi
+  if [ -n "$r2_usage_worker_pid" ]; then
+    kill -TERM "$r2_usage_worker_pid" 2>/dev/null || true
   fi
   if [ -n "$upload_worker_pid" ]; then
     kill -TERM "$upload_worker_pid" 2>/dev/null || true
@@ -3490,6 +4344,9 @@ terminate() {
   fi
   if [ -n "$b2_usage_worker_pid" ]; then
     wait "$b2_usage_worker_pid" 2>/dev/null || true
+  fi
+  if [ -n "$r2_usage_worker_pid" ]; then
+    wait "$r2_usage_worker_pid" 2>/dev/null || true
   fi
   write_state stopping
   exit 0
@@ -3528,7 +4385,7 @@ Action: None."
       write_state replay_recovery_failed
       raise_alert replay_recovery_failed CRITICAL \
         "Status: gRPC recovery check failed. Backup is paused.
-Data: Local and Backblaze data are safe.
+Data: Local and $OBJECT_STORE_HUMAN_NAME data are safe.
 Action: Automatic retry is on."
       echo "$(timestamp) raw_recorder paused_replay_recovery_marker_invalid" >&2
       sleep "$LOW_DISK_RECHECK_SECS"
@@ -3589,7 +4446,8 @@ Action: Backup will continue at slot $REPLAY_MIN_RESUME_SLOT. Repair the missing
       fi
       start_generation_upload_worker
     fi
-    if [ "$B2_USAGE_ALERT_ENABLED" = true ] \
+    if [ "$OBJECT_STORE" = backblaze ] \
+      && [ "$B2_USAGE_ALERT_ENABLED" = true ] \
       && { [ -z "$b2_usage_worker_pid" ] \
         || ! kill -0 "$b2_usage_worker_pid" 2>/dev/null; }
     then
@@ -3597,6 +4455,17 @@ Action: Backup will continue at slot $REPLAY_MIN_RESUME_SLOT. Repair the missing
         wait "$b2_usage_worker_pid" 2>/dev/null || true
       fi
       start_b2_usage_worker
+    fi
+    if [ "$OBJECT_STORE" = r2 ] \
+      && { [ "$R2_USAGE_ALERT_ENABLED" = true ] \
+        || [ "$R2_RETENTION_ENABLED" = true ]; } \
+      && { [ -z "$r2_usage_worker_pid" ] \
+        || ! kill -0 "$r2_usage_worker_pid" 2>/dev/null; }
+    then
+      if [ -n "$r2_usage_worker_pid" ]; then
+        wait "$r2_usage_worker_pid" 2>/dev/null || true
+      fi
+      start_r2_usage_worker
     fi
   elif ! mkdir -p "$OUTPUT_DIR"; then
     write_state volume_invalid
@@ -3680,8 +4549,9 @@ Action: None."
   write_state running
   echo "$(timestamp) raw_recorder starting output=$OUTPUT_DIR free_bytes=$free_bytes" >&2
   : > "$CHILD_REPORT_FILE"
-  "$BIN" "$@" > "$CHILD_REPORT_FILE" &
-  child_pid=$!
+  start_raw_recorder_child "$@"
+  child_pid=$RAW_RECORDER_CHILD_PID
+  RAW_RECORDER_CHILD_PID=
   # The monitor owns the runtime volume guard as well as optional alerts, so it
   # must remain active when Telegram delivery is temporarily disabled.
   start_child_monitor "$child_pid"
@@ -3698,9 +4568,15 @@ Action: None."
   child_pid=
   monitor_resume_coverage_alert
 
+  report_frames_written=$(raw_child_report_uint "$CHILD_REPORT_FILE" frames_written)
+  case "$report_frames_written" in
+    ''|*[!0-9]*) report_frames_written=0 ;;
+  esac
   exit_reason=process_error
   if [ "$status" -eq 0 ]; then
-    if grep -q '"replay_unavailable": true' "$CHILD_REPORT_FILE"; then
+    if raw_child_report_requires_upstream_action "$CHILD_REPORT_FILE"; then
+      exit_reason=upstream_access_blocked
+    elif grep -q '"replay_unavailable": true' "$CHILD_REPORT_FILE"; then
       exit_reason=provider_replay_unavailable
     elif grep -q '"stopped_generation_full": true' "$CHILD_REPORT_FILE"; then
       exit_reason=generation_byte_limit
@@ -3733,6 +4609,25 @@ Action: None."
 Data: Everything saved earlier is safe.
 Action: Check the Hetzner monitoring folder."
   fi
+  if [ "$status" -eq 0 ] \
+    && [ "$exit_reason" = upstream_access_blocked ]
+  then
+    blocked_retry_reason=$(raw_child_report_string "$CHILD_REPORT_FILE" retry_reason)
+    blocked_backoff_seconds=$(raw_child_report_backoff_seconds "$CHILD_REPORT_FILE")
+    raise_upstream_access_blocked_alert
+    if [ -s "$CHILD_REPORT_FILE" ]; then
+      sed -n '1,200p' "$CHILD_REPORT_FILE"
+    fi
+    write_state upstream_access_blocked
+    echo "$(timestamp) raw_recorder upstream_access_blocked retry_reason=$blocked_retry_reason; retrying in ${blocked_backoff_seconds}s" >&2
+    sleep "$blocked_backoff_seconds"
+    continue
+  fi
+  if [ "$report_frames_written" -gt 0 ]; then
+    # A report counts a frame only after WAL append_and_sync and the handoff
+    # journal append both succeed. Never close the incident on handshake alone.
+    clear_upstream_access_blocked_after_progress
+  fi
   if [ "$CACHE_MODE" = b2-generations ] \
     && [ "$status" -eq 0 ] \
     && [ "$exit_reason" = provider_replay_unavailable ]
@@ -3761,7 +4656,7 @@ Action: Backup will continue at slot $REPLAY_GAP_SELECTED_RESUME_SLOT. Repair th
     write_state replay_recovery_failed
     raise_alert replay_recovery_failed CRITICAL \
       "Status: The gRPC provider no longer has the requested old slots. Backup is paused.
-Data: Local and Backblaze data are safe.
+Data: Local and $OBJECT_STORE_HUMAN_NAME data are safe.
 Action: Automatic recovery is retrying."
     echo "$(timestamp) raw_recorder replay_recovery_persist_failed stage=${REPLAY_PERSIST_FAILURE_STAGE:-unknown}; retrying in ${RESTART_DELAY_SECS}s" >&2
     sleep "$RESTART_DELAY_SECS"

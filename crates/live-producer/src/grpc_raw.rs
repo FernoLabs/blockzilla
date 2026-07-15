@@ -5,10 +5,12 @@
 //! the durable ingress-spool boundary before its small handoff journal is advanced.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     future::Future,
-    io::{BufRead, BufReader, BufWriter, ErrorKind, Write},
+    io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -18,20 +20,32 @@ use futures::{SinkExt, StreamExt, channel::mpsc};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::time::{Instant as TokioInstant, sleep_until};
+use tokio::{
+    net::TcpListener,
+    sync::oneshot,
+    task::JoinHandle,
+    time::{Instant as TokioInstant, sleep_until},
+};
 use yellowstone_grpc_proto::prelude::{
     CommitmentLevel, SubscribeRequest, SubscribeRequestFilterBlocks, SubscribeRequestPing,
     SubscribeUpdate, SubscribeUpdateBlock, subscribe_update::UpdateOneof,
 };
-use yellowstone_grpc_proto::tonic::{Code, Status, metadata::MetadataMap};
+use yellowstone_grpc_proto::tonic::{
+    Code, Status, codec::CompressionEncoding, metadata::MetadataMap, transport::Server,
+};
 
 use crate::{
     epoch::{EpochSlot, OLD_FAITHFUL_SLOTS_PER_EPOCH},
-    grpc::connect_grpc_with_max_decoding_message_size,
+    grpc::{
+        GrpcRawArchiveWriteReport, GrpcRawArchiveWriter,
+        connect_grpc_with_max_decoding_message_size, inspect_capture,
+    },
+    grpc_relay::{YellowstoneBlockRelay, YellowstoneBlockRelayLimits, YellowstoneRelayAuth},
     ingest::{
         IngressRecordMeta, LockedSpoolAudit, LogicalKey, ObservationId, SpoolJournalIdentity,
         SpoolLocation, SpoolOptions, SpoolWriter, read_spool_record,
     },
+    layout::ProducerLayout,
 };
 
 const IDENTITY_SCHEMA_VERSION: u32 = 1;
@@ -46,11 +60,16 @@ const HANDOFF_JOURNAL_FILE: &str = "raw-blocks.jsonl";
 const WAL_ROOT_DIR: &str = "wal";
 const MONITORING_DIR: &str = ".monitoring";
 const RESUME_COVERAGE_WARNING_FILE: &str = "resume-coverage-warning.json";
+const MATERIALIZATION_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const MATERIALIZATION_RECEIPT_FILE: &str = "RAW-MATERIALIZATION-COMPLETE.v1.json";
+const MATERIALIZATION_PROGRESS_FILE: &str = "progress.json";
 const SUBSCRIBE_REQUEST_CHANNEL_CAPACITY: usize = 8;
 const SUBSCRIBE_PING_ID: i32 = 1;
 /// Covers two frame metadata envelopes, two handoff rows, and segment headers when sizing a
 /// generation for a max-size seed plus one max-size live append. Identity bytes are added exactly.
 const GENERATION_ROLLOVER_SAFETY_BYTES: u64 = 1024 * 1024;
+const RELAY_X_TOKEN_MAX_BYTES: u64 = 4096;
+const RELAY_SHUTDOWN_GRACE_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogOutcome<T> {
@@ -235,6 +254,31 @@ pub struct GrpcRawRecordConfig {
     pub cluster_id: String,
     pub origin_node_id: String,
     pub source_id: String,
+    /// Optional internal Yellowstone relay listener. This and `relay_x_token_file` must be set
+    /// together; the upstream token is deliberately not a fallback.
+    #[serde(default)]
+    pub relay_bind: Option<SocketAddr>,
+    /// File containing the dedicated downstream `x-token`.
+    #[serde(default)]
+    pub relay_x_token_file: Option<PathBuf>,
+    #[serde(default = "default_relay_max_records")]
+    pub relay_max_records: usize,
+    #[serde(default = "default_relay_max_encoded_bytes")]
+    pub relay_max_encoded_bytes: usize,
+    #[serde(default = "default_relay_max_clients")]
+    pub relay_max_clients: usize,
+}
+
+const fn default_relay_max_records() -> usize {
+    128
+}
+
+const fn default_relay_max_encoded_bytes() -> usize {
+    128 * 1024 * 1024
+}
+
+const fn default_relay_max_clients() -> usize {
+    4
 }
 
 impl Default for GrpcRawRecordConfig {
@@ -260,8 +304,39 @@ impl Default for GrpcRawRecordConfig {
             cluster_id: "solana-mainnet".to_string(),
             origin_node_id: "mac-bridge".to_string(),
             source_id: "grpc-raw".to_string(),
+            relay_bind: None,
+            relay_x_token_file: None,
+            relay_max_records: default_relay_max_records(),
+            relay_max_encoded_bytes: default_relay_max_encoded_bytes(),
+            relay_max_clients: default_relay_max_clients(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcRawRecordOutcome {
+    EpochBoundary,
+    #[default]
+    Retryable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcRawRecordRetryReason {
+    ConnectError,
+    SubscribeError,
+    TotalTimeout,
+    IdleTimeout,
+    StreamEof,
+    StreamError,
+    PermissionDenied,
+    Unauthenticated,
+    MaxBlocks,
+    ReplayUnavailable,
+    GenerationFull,
+    LowDisk,
+    ResumeCoverageWarningPublicationFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,6 +377,12 @@ pub struct GrpcRawRecordReport {
     pub idle_timed_out: bool,
     pub stream_ended: bool,
     pub stopped_at_epoch_boundary: bool,
+    #[serde(default)]
+    pub outcome: GrpcRawRecordOutcome,
+    #[serde(default)]
+    pub retry_reason: Option<GrpcRawRecordRetryReason>,
+    #[serde(default)]
+    pub action_required: bool,
     /// The provider no longer retains the exact requested slot. This is a clean supervisor
     /// handoff, not proof that source coverage is complete.
     #[serde(default)]
@@ -376,6 +457,61 @@ pub struct GrpcRawPohVerifyReport {
     pub transaction_references: u64,
     pub num_hashes: String,
     pub wal_incomplete_tail_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcRawMaterializeConfig {
+    pub input_dir: PathBuf,
+    pub archive_dir: PathBuf,
+    pub epoch: u64,
+    pub max_record_bytes: u64,
+    pub pubkey_hot_registry_path: Option<PathBuf>,
+    pub pubkey_hot_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrpcRawMaterializedArtifact {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// Stable proof tying one published capture to an immutable raw-WAL snapshot.
+///
+/// There is deliberately no timestamp, process id, or destination path in this structure. Running
+/// the materializer twice against the same stopped spool and epoch produces the same receipt even
+/// when the destination paths differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrpcRawMaterializationReceipt {
+    pub schema_version: u32,
+    pub source_identity_sha256: String,
+    pub source_handoff_journal_sha256: String,
+    pub source_frames: u64,
+    pub source_tail_frame_id: Option<u64>,
+    pub source_tail_slot: Option<u64>,
+    pub source_wal_incomplete_tail_bytes: u64,
+    pub epoch: u64,
+    pub first_source_frame_id: u64,
+    pub last_source_frame_id: u64,
+    pub first_slot: u64,
+    pub last_slot: u64,
+    pub blocks_written: u64,
+    pub transactions_written: u64,
+    pub entries_written: u64,
+    pub normalized_block_bytes: u64,
+    pub pubkey_run_files: usize,
+    pub pubkey_run_records: u64,
+    pub pubkey_hot_keys: usize,
+    pub pubkey_hot_records: usize,
+    pub artifacts: Vec<GrpcRawMaterializedArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcRawMaterializeReport {
+    pub input_dir: PathBuf,
+    pub archive_dir: PathBuf,
+    pub receipt_path: PathBuf,
+    pub receipt: GrpcRawMaterializationReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,12 +591,67 @@ fn mark_replay_unavailable(report: &mut GrpcRawRecordReport, status: &Status) ->
     report.replay_unavailable = true;
     report.replay_unavailable_requested_slot = Some(replay.requested_slot);
     report.replay_available_slot = Some(replay.available_slot);
+    apply_raw_record_retry(
+        report,
+        RawRecordRetry::new(GrpcRawRecordRetryReason::ReplayUnavailable),
+    );
     tracing::warn!(
         requested_slot = replay.requested_slot,
         available_slot = replay.available_slot,
         "provider replay window no longer includes requested raw gRPC slot"
     );
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawRecordRetry {
+    reason: GrpcRawRecordRetryReason,
+    action_required: bool,
+}
+
+impl RawRecordRetry {
+    const fn new(reason: GrpcRawRecordRetryReason) -> Self {
+        Self {
+            reason,
+            action_required: false,
+        }
+    }
+}
+
+fn classify_raw_record_status(
+    status: &Status,
+    fallback: GrpcRawRecordRetryReason,
+) -> RawRecordRetry {
+    match status.code() {
+        Code::PermissionDenied => RawRecordRetry {
+            reason: GrpcRawRecordRetryReason::PermissionDenied,
+            action_required: true,
+        },
+        Code::Unauthenticated => RawRecordRetry {
+            reason: GrpcRawRecordRetryReason::Unauthenticated,
+            action_required: true,
+        },
+        _ => RawRecordRetry::new(fallback),
+    }
+}
+
+fn classify_raw_record_error(
+    error: &anyhow::Error,
+    fallback: GrpcRawRecordRetryReason,
+) -> RawRecordRetry {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Status>())
+        .map_or_else(
+            || RawRecordRetry::new(fallback),
+            |status| classify_raw_record_status(status, fallback),
+        )
+}
+
+fn apply_raw_record_retry(report: &mut GrpcRawRecordReport, retry: RawRecordRetry) {
+    report.outcome = GrpcRawRecordOutcome::Retryable;
+    report.retry_reason = Some(retry.reason);
+    report.action_required = retry.action_required;
 }
 
 fn validate_complete_poh_block(block: &SubscribeUpdateBlock) -> Result<CompletePohBlockStats> {
@@ -615,7 +806,387 @@ struct JournalState {
     last: Option<GrpcRawHandoffRecord>,
 }
 
+#[derive(Debug)]
+struct RawGrpcRelayPublisher {
+    relay: YellowstoneBlockRelay,
+    next_sequence: u64,
+}
+
+impl RawGrpcRelayPublisher {
+    fn new(relay: YellowstoneBlockRelay) -> Self {
+        Self {
+            relay,
+            next_sequence: 0,
+        }
+    }
+
+    fn publish_after_durability(&mut self, update: &SubscribeUpdate) -> Result<()> {
+        self.publish_owned_after_durability(update.clone())
+    }
+
+    fn publish_owned_after_durability(&mut self, update: SubscribeUpdate) -> Result<()> {
+        let sequence = self.next_sequence;
+        self.relay
+            .publish_fsynced(sequence, update)
+            .with_context(|| {
+                format!("publish durable raw gRPC update to relay sequence {sequence}")
+            })?;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .context("raw gRPC relay sequence overflow")?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RawGrpcRelayRuntime {
+    publisher: RawGrpcRelayPublisher,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    server_task: Option<JoinHandle<Result<()>>>,
+}
+
+impl RawGrpcRelayRuntime {
+    async fn start_if_enabled(
+        config: &GrpcRawRecordConfig,
+        identity: &GrpcRawIdentityFile,
+        wal_dir: &Path,
+        journal_path: &Path,
+    ) -> Result<Option<Self>> {
+        let (bind, token_file) = match (config.relay_bind, config.relay_x_token_file.as_deref()) {
+            (None, None) => return Ok(None),
+            (Some(bind), Some(token_file)) => (bind, token_file),
+            (Some(_), None) => {
+                return Err(anyhow!(
+                    "--relay-bind requires a separate --relay-x-token-file"
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(anyhow!("--relay-x-token-file requires --relay-bind"));
+            }
+        };
+
+        let token = read_relay_x_token_file(token_file)?;
+        let auth = YellowstoneRelayAuth::from_shared_x_token(token)
+            .context("validate downstream relay x-token")?;
+        let limits = YellowstoneBlockRelayLimits {
+            max_records: config.relay_max_records,
+            max_encoded_bytes: config.relay_max_encoded_bytes,
+            max_clients: config.relay_max_clients,
+        };
+        let maximum_record_bytes = usize::try_from(config.max_record_bytes)
+            .context("raw gRPC maximum record bytes exceeds relay address space")?;
+        ensure!(
+            limits.max_encoded_bytes >= maximum_record_bytes,
+            "relay max encoded bytes {} must be at least raw gRPC max record bytes {} so every durably accepted block remains publishable",
+            limits.max_encoded_bytes,
+            config.max_record_bytes
+        );
+        let relay =
+            YellowstoneBlockRelay::new(auth, limits).context("validate downstream relay limits")?;
+
+        // Reserve the listener before any paid upstream transport is opened. A bad/occupied bind
+        // therefore cannot create a second Yellowstone consumer as a side effect.
+        let listener = TcpListener::bind(bind)
+            .await
+            .with_context(|| format!("bind downstream raw gRPC relay at {bind}"))?;
+        let bound_address = listener
+            .local_addr()
+            .context("read downstream raw gRPC relay listener address")?;
+
+        // Populate only the bounded tail of the active generation before the gRPC service starts
+        // answering requests. Sequence numbers are process-local and intentionally unrelated to
+        // generation frame ids, which reset when the active WAL rotates.
+        let mut publisher = RawGrpcRelayPublisher::new(relay.clone());
+        for row in read_relay_tail_rows(journal_path, limits)? {
+            let update =
+                read_verified_relay_update(wal_dir, identity, &row, config.max_record_bytes)?;
+            publisher.publish_owned_after_durability(update)?;
+        }
+        let preloaded_records = publisher.next_sequence;
+
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let item = listener.accept().await.map(|(socket, _peer)| socket);
+            Some((item, listener))
+        });
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let service = relay
+            .into_geyser_service()
+            .send_compressed(CompressionEncoding::Zstd);
+        let server_task = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .context("serve downstream raw gRPC relay")
+        });
+        tracing::info!(
+            bind = %bound_address,
+            preloaded_records,
+            max_records = limits.max_records,
+            max_encoded_bytes = limits.max_encoded_bytes,
+            max_clients = limits.max_clients,
+            "downstream raw gRPC relay started from durable active-WAL tail"
+        );
+        Ok(Some(Self {
+            publisher,
+            shutdown_tx: Some(shutdown_tx),
+            server_task: Some(server_task),
+        }))
+    }
+
+    fn publish_after_durability(&mut self, update: &SubscribeUpdate) -> Result<()> {
+        ensure!(
+            !self
+                .server_task
+                .as_ref()
+                .is_some_and(JoinHandle::is_finished),
+            "downstream raw gRPC relay server stopped before durable publication"
+        );
+        self.publisher.publish_after_durability(update)
+    }
+
+    async fn shutdown(mut self) -> Result<()> {
+        let close_result = self
+            .publisher
+            .relay
+            .close()
+            .context("close downstream raw gRPC relay subscriptions");
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(mut server_task) = self.server_task.take() {
+            match tokio::time::timeout(
+                Duration::from_secs(RELAY_SHUTDOWN_GRACE_SECS),
+                &mut server_task,
+            )
+            .await
+            {
+                Ok(joined) => joined.context("join downstream raw gRPC relay server")??,
+                Err(_) => {
+                    server_task.abort();
+                    let _ = server_task.await;
+                    return Err(anyhow!(
+                        "downstream raw gRPC relay did not stop within {RELAY_SHUTDOWN_GRACE_SECS} seconds"
+                    ));
+                }
+            }
+        }
+        close_result?;
+        Ok(())
+    }
+}
+
+impl Drop for RawGrpcRelayRuntime {
+    fn drop(&mut self) {
+        let _ = self.publisher.relay.close();
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+    }
+}
+
+fn read_relay_x_token_file(path: &Path) -> Result<Vec<u8>> {
+    let entry = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect downstream relay x-token file {}", path.display()))?;
+    ensure!(
+        !entry.file_type().is_symlink(),
+        "downstream relay x-token file must not be a symlink"
+    );
+    ensure!(
+        entry.file_type().is_file(),
+        "downstream relay x-token path must be a regular file"
+    );
+    ensure!(
+        entry.len() <= RELAY_X_TOKEN_MAX_BYTES,
+        "downstream relay x-token file exceeds {RELAY_X_TOKEN_MAX_BYTES} bytes"
+    );
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open downstream relay x-token file {}", path.display()))?;
+    ensure!(
+        file.metadata()?.file_type().is_file(),
+        "downstream relay x-token path must remain a regular file"
+    );
+    let mut token = Vec::new();
+    file.take(RELAY_X_TOKEN_MAX_BYTES + 1)
+        .read_to_end(&mut token)
+        .context("read downstream relay x-token file")?;
+    ensure!(
+        token.len() as u64 <= RELAY_X_TOKEN_MAX_BYTES,
+        "downstream relay x-token file exceeds {RELAY_X_TOKEN_MAX_BYTES} bytes"
+    );
+    if token.last() == Some(&b'\n') {
+        token.pop();
+        if token.last() == Some(&b'\r') {
+            token.pop();
+        }
+    }
+    ensure!(
+        !token.is_empty(),
+        "downstream relay x-token must not be empty"
+    );
+    ensure!(
+        token.iter().all(u8::is_ascii_graphic),
+        "downstream relay x-token must contain visible ASCII without control characters"
+    );
+    Ok(token)
+}
+
+fn read_relay_tail_rows(
+    journal_path: &Path,
+    limits: YellowstoneBlockRelayLimits,
+) -> Result<Vec<GrpcRawHandoffRecord>> {
+    let file = File::open(journal_path)
+        .with_context(|| format!("open raw gRPC journal {}", journal_path.display()))?;
+    let mut rows = VecDeque::new();
+    let mut retained_bytes = 0usize;
+    let mut expected_frame_id = 0u64;
+    for line in BufReader::new(file).lines() {
+        let line = line.with_context(|| format!("read {}", journal_path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: GrpcRawHandoffRecord = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "decode {} frame {expected_frame_id} for relay preload",
+                journal_path.display()
+            )
+        })?;
+        validate_handoff_sequence(&row, expected_frame_id)?;
+        expected_frame_id = expected_frame_id
+            .checked_add(1)
+            .context("raw gRPC relay preload frame id overflow")?;
+        let row_bytes = usize::try_from(row.uncompressed_len)
+            .context("raw gRPC relay preload record length exceeds usize")?;
+        retained_bytes = retained_bytes
+            .checked_add(row_bytes)
+            .context("raw gRPC relay preload byte accounting overflow")?;
+        rows.push_back(row);
+        while rows.len() > limits.max_records || retained_bytes > limits.max_encoded_bytes {
+            let evicted = rows
+                .pop_front()
+                .context("raw gRPC relay preload queue unexpectedly empty")?;
+            retained_bytes -= usize::try_from(evicted.uncompressed_len)
+                .context("raw gRPC relay evicted record length exceeds usize")?;
+        }
+    }
+    Ok(rows.into())
+}
+
+fn read_verified_relay_update(
+    wal_dir: &Path,
+    identity: &GrpcRawIdentityFile,
+    row: &GrpcRawHandoffRecord,
+    max_record_bytes: u64,
+) -> Result<SubscribeUpdate> {
+    ensure!(
+        row.uncompressed_len <= max_record_bytes,
+        "raw gRPC relay preload frame {} exceeds maximum record bytes",
+        row.frame_id
+    );
+    let stored = read_spool_record(wal_dir, row.location(), max_record_bytes)?;
+    ensure!(
+        stored.metadata.observation.sequence == row.frame_id,
+        "raw gRPC relay preload WAL/journal sequence mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.metadata.cluster_id == identity.cluster_id
+            && stored.metadata.observation.origin_node_id == identity.origin_node_id
+            && stored.metadata.observation.journal_id == identity.journal_id
+            && stored.metadata.source_id == identity.source_id
+            && stored.metadata.payload_format_version == PAYLOAD_FORMAT_ZSTD_PROTOBUF_UPDATE_V1,
+        "raw gRPC relay preload identity/format mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.payload.len() as u64 == row.compressed_len,
+        "raw gRPC relay preload compressed length mismatch at frame {}",
+        row.frame_id
+    );
+    let raw_capacity = usize::try_from(row.uncompressed_len)
+        .context("raw gRPC relay preload length exceeds usize")?;
+    let raw = zstd::bulk::decompress(&stored.payload, raw_capacity)
+        .with_context(|| format!("decompress raw gRPC relay preload frame {}", row.frame_id))?;
+    ensure!(
+        raw.len() as u64 == row.uncompressed_len && sha256_hex(&raw) == row.protobuf_sha256,
+        "raw gRPC relay preload payload verification failed at frame {}",
+        row.frame_id
+    );
+    let update = SubscribeUpdate::decode(raw.as_slice())
+        .with_context(|| format!("decode raw gRPC relay preload frame {}", row.frame_id))?;
+    let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
+        return Err(anyhow!(
+            "raw gRPC relay preload frame {} is not a block update",
+            row.frame_id
+        ));
+    };
+    ensure!(
+        block.slot == row.slot
+            && block.parent_slot == row.parent_slot
+            && block.blockhash == row.blockhash,
+        "raw gRPC relay preload protobuf metadata mismatch at frame {}",
+        row.frame_id
+    );
+    ensure!(
+        stored.metadata.logical_key
+            == (LogicalKey::Block {
+                slot: block.slot,
+                blockhash: decode_blockhash(&block.blockhash)?,
+            }),
+        "raw gRPC relay preload logical key mismatch at frame {}",
+        row.frame_id
+    );
+    Ok(update)
+}
+
+fn cross_durable_relay_boundary<T, W, H, P>(
+    append_wal_and_sync: W,
+    append_handoff_and_sync: H,
+    publish_relay: P,
+) -> Result<T>
+where
+    W: FnOnce() -> Result<T>,
+    H: FnOnce(&T) -> Result<()>,
+    P: FnOnce() -> Result<()>,
+{
+    let durable = append_wal_and_sync()?;
+    append_handoff_and_sync(&durable)?;
+    publish_relay()?;
+    Ok(durable)
+}
+
 pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcRawRecordReport> {
+    let mut relay_runtime = None;
+    let capture_result = record_grpc_raw_blocks_inner(config, &mut relay_runtime).await;
+    let shutdown_result = match relay_runtime.take() {
+        Some(runtime) => runtime.shutdown().await,
+        None => Ok(()),
+    };
+    match (capture_result, shutdown_result) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Ok(_), Err(shutdown)) => Err(shutdown),
+        (Err(capture), Ok(())) => Err(capture),
+        (Err(capture), Err(shutdown)) => Err(capture.context(format!(
+            "downstream relay shutdown also failed: {shutdown:#}"
+        ))),
+    }
+}
+
+async fn record_grpc_raw_blocks_inner(
+    config: GrpcRawRecordConfig,
+    relay_runtime: &mut Option<RawGrpcRelayRuntime>,
+) -> Result<GrpcRawRecordReport> {
     ensure!(
         config.slots_per_epoch > 0,
         "slots per epoch must be non-zero"
@@ -703,6 +1274,9 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         idle_timed_out: false,
         stream_ended: false,
         stopped_at_epoch_boundary: false,
+        outcome: GrpcRawRecordOutcome::Retryable,
+        retry_reason: None,
+        action_required: false,
         replay_unavailable: false,
         replay_unavailable_requested_slot: None,
         replay_available_slot: None,
@@ -726,6 +1300,10 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             durable_tail_row = Some(rotated.seeded_tail);
         } else {
             report.stopped_generation_full = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::GenerationFull),
+            );
             report.elapsed_ms = started_at.elapsed().as_millis();
             return Ok(report);
         }
@@ -733,9 +1311,21 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     if let Some(available) = low_disk_bytes(&config.output_dir, config.min_free_bytes)? {
         report.stopped_low_disk = true;
         report.available_bytes_at_stop = Some(available);
+        apply_raw_record_retry(
+            &mut report,
+            RawRecordRetry::new(GrpcRawRecordRetryReason::LowDisk),
+        );
         report.elapsed_ms = started_at.elapsed().as_millis();
         return Ok(report);
     }
+
+    *relay_runtime = RawGrpcRelayRuntime::start_if_enabled(
+        &config,
+        &identity,
+        spool.journal_dir(),
+        &journal_path,
+    )
+    .await?;
 
     let watchdog_started_at = TokioInstant::now();
     let deadline = deadline_after(
@@ -751,14 +1341,34 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
     )
     .await
     {
-        WatchdogOutcome::Completed(result) => result?,
+        WatchdogOutcome::Completed(Ok(client)) => client,
+        WatchdogOutcome::Completed(Err(error)) => {
+            let retry = classify_raw_record_error(&error, GrpcRawRecordRetryReason::ConnectError);
+            tracing::warn!(
+                retry_reason = ?retry.reason,
+                action_required = retry.action_required,
+                error = %error,
+                "raw gRPC connection ended before subscription"
+            );
+            apply_raw_record_retry(&mut report, retry);
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
+        }
         WatchdogOutcome::TotalTimeout => {
             report.timed_out = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::TotalTimeout),
+            );
             report.elapsed_ms = started_at.elapsed().as_millis();
             return Ok(report);
         }
         WatchdogOutcome::IdleTimeout => {
             report.idle_timed_out = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::IdleTimeout),
+            );
             report.elapsed_ms = started_at.elapsed().as_millis();
             return Ok(report);
         }
@@ -784,15 +1394,34 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         mpsc::channel::<SubscribeRequest>(SUBSCRIBE_REQUEST_CHANNEL_CAPACITY);
     match await_with_watchdogs(request_sink.send(request), deadline, idle_deadline).await {
         WatchdogOutcome::Completed(result) => {
-            result.context("queue initial raw gRPC subscription request")?
+            if let Err(error) = result {
+                tracing::warn!(
+                    error = %error,
+                    "raw gRPC request side closed before subscription"
+                );
+                apply_raw_record_retry(
+                    &mut report,
+                    RawRecordRetry::new(GrpcRawRecordRetryReason::SubscribeError),
+                );
+                report.elapsed_ms = started_at.elapsed().as_millis();
+                return Ok(report);
+            }
         }
         WatchdogOutcome::TotalTimeout => {
             report.timed_out = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::TotalTimeout),
+            );
             report.elapsed_ms = started_at.elapsed().as_millis();
             return Ok(report);
         }
         WatchdogOutcome::IdleTimeout => {
             report.idle_timed_out = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::IdleTimeout),
+            );
             report.elapsed_ms = started_at.elapsed().as_millis();
             return Ok(report);
         }
@@ -810,15 +1439,33 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                 report.elapsed_ms = started_at.elapsed().as_millis();
                 return Ok(report);
             }
-            return Err(status).context("open raw gRPC bidirectional subscription");
+            let retry =
+                classify_raw_record_status(&status, GrpcRawRecordRetryReason::SubscribeError);
+            tracing::warn!(
+                grpc_code = ?status.code(),
+                retry_reason = ?retry.reason,
+                action_required = retry.action_required,
+                "raw gRPC subscription was rejected"
+            );
+            apply_raw_record_retry(&mut report, retry);
+            report.elapsed_ms = started_at.elapsed().as_millis();
+            return Ok(report);
         }
         WatchdogOutcome::TotalTimeout => {
             report.timed_out = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::TotalTimeout),
+            );
             report.elapsed_ms = started_at.elapsed().as_millis();
             return Ok(report);
         }
         WatchdogOutcome::IdleTimeout => {
             report.idle_timed_out = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::IdleTimeout),
+            );
             report.elapsed_ms = started_at.elapsed().as_millis();
             return Ok(report);
         }
@@ -851,20 +1498,36 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                 // process must either durably append it or retain it across a rollover.
                 report.stopped_low_disk = true;
                 report.available_bytes_at_stop = Some(available);
+                apply_raw_record_retry(
+                    &mut report,
+                    RawRecordRetry::new(GrpcRawRecordRetryReason::LowDisk),
+                );
                 break;
             }
             DiskAdmittedOutcome::Admitted(WatchdogOutcome::Completed(update)) => update,
             DiskAdmittedOutcome::Admitted(WatchdogOutcome::TotalTimeout) => {
                 report.timed_out = true;
+                apply_raw_record_retry(
+                    &mut report,
+                    RawRecordRetry::new(GrpcRawRecordRetryReason::TotalTimeout),
+                );
                 break;
             }
             DiskAdmittedOutcome::Admitted(WatchdogOutcome::IdleTimeout) => {
                 report.idle_timed_out = true;
+                apply_raw_record_retry(
+                    &mut report,
+                    RawRecordRetry::new(GrpcRawRecordRetryReason::IdleTimeout),
+                );
                 break;
             }
         };
         let Some(update) = update else {
             report.stream_ended = true;
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::StreamEof),
+            );
             break;
         };
         let update = match update {
@@ -873,7 +1536,16 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                 if mark_replay_unavailable(&mut report, &status) {
                     break;
                 }
-                return Err(status).context("read raw gRPC subscription update");
+                let retry =
+                    classify_raw_record_status(&status, GrpcRawRecordRetryReason::StreamError);
+                tracing::warn!(
+                    grpc_code = ?status.code(),
+                    retry_reason = ?retry.reason,
+                    action_required = retry.action_required,
+                    "raw gRPC subscription stream failed"
+                );
+                apply_raw_record_retry(&mut report, retry);
+                break;
             }
         };
         if matches!(update.update_oneof.as_ref(), Some(UpdateOneof::Ping(_))) {
@@ -893,10 +1565,18 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                 }
                 SubscribePingReplyOutcome::TotalTimeout => {
                     report.timed_out = true;
+                    apply_raw_record_retry(
+                        &mut report,
+                        RawRecordRetry::new(GrpcRawRecordRetryReason::TotalTimeout),
+                    );
                     break;
                 }
                 SubscribePingReplyOutcome::IdleTimeout => {
                     report.idle_timed_out = true;
+                    apply_raw_record_retry(
+                        &mut report,
+                        RawRecordRetry::new(GrpcRawRecordRetryReason::IdleTimeout),
+                    );
                     break;
                 }
             }
@@ -952,6 +1632,12 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                         ) => {}
                         Err(error) => {
                             report.resume_coverage_warning_publication_failed = true;
+                            apply_raw_record_retry(
+                                &mut report,
+                                RawRecordRetry::new(
+                                    GrpcRawRecordRetryReason::ResumeCoverageWarningPublicationFailed,
+                                ),
+                            );
                             tracing::error!(
                                 warning_file = %path.display(),
                                 error = %error,
@@ -974,6 +1660,9 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             && capture_epoch.is_some_and(|epoch| epoch != epoch_slot.epoch)
         {
             report.stopped_at_epoch_boundary = true;
+            report.outcome = GrpcRawRecordOutcome::EpochBoundary;
+            report.retry_reason = None;
+            report.action_required = false;
             break;
         }
         capture_epoch.get_or_insert(epoch_slot.epoch);
@@ -1046,6 +1735,10 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                     durable_tail_row.as_ref(),
                 ) else {
                     report.stopped_generation_full = true;
+                    apply_raw_record_retry(
+                        &mut report,
+                        RawRecordRetry::new(GrpcRawRecordRetryReason::GenerationFull),
+                    );
                     break 'capture;
                 };
                 let rotated = hot_rotate_generation(
@@ -1068,12 +1761,20 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
                 continue;
             }
 
-            let durable = spool.append_and_sync(metadata, &compressed)?;
-            ensure!(
-                durable.location() == projection.location,
-                "spool append location differed from its preflight projection"
-            );
-            append_handoff_record(&journal_path, &row)?;
+            cross_durable_relay_boundary(
+                || spool.append_and_sync(metadata, &compressed),
+                |durable| {
+                    ensure!(
+                        durable.location() == projection.location,
+                        "spool append location differed from its preflight projection"
+                    );
+                    append_handoff_record(&journal_path, &row)
+                },
+                || match relay_runtime.as_mut() {
+                    Some(runtime) => runtime.publish_after_durability(&update),
+                    None => Ok(()),
+                },
+            )?;
             report.generation_bytes = projected_generation_bytes;
             next_frame_id = next_frame_id
                 .checked_add(1)
@@ -1119,8 +1820,22 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
             // next update so disk pressure cannot create an acknowledged coverage hole.
             report.stopped_low_disk = true;
             report.available_bytes_at_stop = Some(available);
+            apply_raw_record_retry(
+                &mut report,
+                RawRecordRetry::new(GrpcRawRecordRetryReason::LowDisk),
+            );
             break;
         }
+    }
+
+    if report.retry_reason.is_none()
+        && report.outcome == GrpcRawRecordOutcome::Retryable
+        && report.frames_written >= max_blocks
+    {
+        apply_raw_record_retry(
+            &mut report,
+            RawRecordRetry::new(GrpcRawRecordRetryReason::MaxBlocks),
+        );
     }
 
     report.elapsed_ms = started_at.elapsed().as_millis();
@@ -1143,10 +1858,13 @@ where
     Ok(replay_grpc_raw_blocks_audited(output_dir, max_record_bytes, visit)?.records)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GrpcRawReplayAudit {
     records: u64,
     wal_incomplete_tail_bytes: u64,
+    identity_sha256: String,
+    handoff_journal_sha256: String,
+    tail: Option<GrpcRawHandoffRecord>,
 }
 
 fn replay_grpc_raw_blocks_audited<F>(
@@ -1196,6 +1914,8 @@ where
 {
     let wal_tail = spool_audit.last_record().cloned();
     let journal_path = output_dir.join(HANDOFF_JOURNAL_FILE);
+    let identity_sha256 = sha256_file(&output_dir.join(IDENTITY_FILE))?;
+    let handoff_journal_sha256 = sha256_file(&journal_path)?;
     let journal_state = read_handoff_journal(&journal_path, false)?;
     let file = File::open(&journal_path)
         .with_context(|| format!("open raw gRPC journal {}", journal_path.display()))?;
@@ -1319,6 +2039,158 @@ where
     Ok(GrpcRawReplayAudit {
         records: expected_frame_id,
         wal_incomplete_tail_bytes: spool_audit.incomplete_tail_bytes(),
+        identity_sha256,
+        handoff_journal_sha256,
+        tail: journal_tail,
+    })
+}
+
+/// Convert the currently committed slice of one epoch from a stopped raw recorder spool into a
+/// fresh live-capture directory.
+///
+/// The replay audit holds the spool writer lock for the full conversion. Consequently this
+/// function is intentionally incompatible with an active recorder: callers must rotate/stop the
+/// recorder or provide a filesystem snapshot. Output is written to a deterministic sibling staging
+/// directory and published with one rename only after every source frame and generated sidecar has
+/// been validated and synced. Neither the source WAL nor its handoff journal is ever modified.
+pub fn materialize_grpc_raw_blocks(
+    config: GrpcRawMaterializeConfig,
+) -> Result<GrpcRawMaterializeReport> {
+    ensure!(
+        config.max_record_bytes > 0,
+        "max record bytes must be non-zero"
+    );
+    ensure!(
+        config.input_dir != config.archive_dir,
+        "raw input and materialized archive directories must differ"
+    );
+    ensure_path_absent(&config.archive_dir, "materialized archive")?;
+    let staging_dir = materialization_staging_path(&config.archive_dir)?;
+    ensure_path_absent(&staging_dir, "raw materialization staging directory")?;
+
+    let mut writer = None;
+    let mut first_source_frame_id = None;
+    let mut last_source_frame_id = None;
+    let mut previous_slot = None;
+    let replay = replay_grpc_raw_blocks_audited(
+        &config.input_dir,
+        config.max_record_bytes,
+        |row, update| {
+            if row.epoch != config.epoch {
+                return Ok(());
+            }
+            if let Some(previous_slot) = previous_slot {
+                ensure!(
+                    row.slot > previous_slot,
+                    "raw epoch {} slots are not strictly increasing: {} followed {}",
+                    config.epoch,
+                    row.slot,
+                    previous_slot
+                );
+            }
+            let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
+                return Err(anyhow!("raw gRPC frame {} is not a block", row.frame_id));
+            };
+            if writer.is_none() {
+                fs::create_dir(&staging_dir).with_context(|| {
+                    format!(
+                        "create raw materialization staging directory {}",
+                        staging_dir.display()
+                    )
+                })?;
+                writer = Some(GrpcRawArchiveWriter::create(
+                    &staging_dir,
+                    config.epoch,
+                    config.pubkey_hot_registry_path.as_deref(),
+                    config.pubkey_hot_count,
+                )?);
+            }
+            writer
+                .as_mut()
+                .context("raw materialization writer was not initialized")?
+                .write_block(block, row.epoch, row.epoch_slot_index)?;
+            first_source_frame_id.get_or_insert(row.frame_id);
+            last_source_frame_id = Some(row.frame_id);
+            previous_slot = Some(row.slot);
+            Ok(())
+        },
+    )?;
+
+    let first_source_frame_id = first_source_frame_id.with_context(|| {
+        format!(
+            "raw gRPC spool contains no committed blocks for epoch {}",
+            config.epoch
+        )
+    })?;
+    let last_source_frame_id = last_source_frame_id.context("missing selected source tail")?;
+    let archive = writer
+        .context("raw materialization writer was not created")?
+        .finish()?;
+    ensure!(
+        archive.blocks_written > 0,
+        "raw materializer wrote no blocks"
+    );
+
+    rewrite_published_layout(&staging_dir, &config.archive_dir)?;
+    validate_materialized_capture(&staging_dir, &archive)?;
+    let artifacts = collect_materialized_artifacts(&staging_dir)?;
+    let receipt = GrpcRawMaterializationReceipt {
+        schema_version: MATERIALIZATION_RECEIPT_SCHEMA_VERSION,
+        source_identity_sha256: replay.identity_sha256,
+        source_handoff_journal_sha256: replay.handoff_journal_sha256,
+        source_frames: replay.records,
+        source_tail_frame_id: replay.tail.as_ref().map(|row| row.frame_id),
+        source_tail_slot: replay.tail.as_ref().map(|row| row.slot),
+        source_wal_incomplete_tail_bytes: replay.wal_incomplete_tail_bytes,
+        epoch: config.epoch,
+        first_source_frame_id,
+        last_source_frame_id,
+        first_slot: archive
+            .first_slot
+            .context("materialized archive has no first slot")?,
+        last_slot: archive
+            .last_slot
+            .context("materialized archive has no last slot")?,
+        blocks_written: archive.blocks_written,
+        transactions_written: archive.transactions_written,
+        entries_written: archive.entries_written,
+        normalized_block_bytes: archive.normalized_block_bytes,
+        pubkey_run_files: archive.pubkey_run_files,
+        pubkey_run_records: archive.pubkey_run_records,
+        pubkey_hot_keys: archive.pubkey_hot_keys,
+        pubkey_hot_records: archive.pubkey_hot_records,
+        artifacts,
+    };
+    let staged_receipt_path = staging_dir
+        .join("journal")
+        .join(MATERIALIZATION_RECEIPT_FILE);
+    write_json_file_synced(&staged_receipt_path, &receipt)?;
+    write_materialization_progress(&staging_dir, &config.archive_dir, &receipt)?;
+    sync_tree(&staging_dir)?;
+
+    // Recheck immediately before rename. The deterministic staging name already serializes
+    // cooperating materializers targeting this archive; this check prevents replacing a target
+    // created after the initial preflight.
+    ensure_path_absent(&config.archive_dir, "materialized archive")?;
+    fs::rename(&staging_dir, &config.archive_dir).with_context(|| {
+        format!(
+            "publish raw materialization {} -> {}",
+            staging_dir.display(),
+            config.archive_dir.display()
+        )
+    })?;
+    if let Some(parent) = effective_parent(&config.archive_dir) {
+        sync_directory(parent)?;
+    }
+
+    Ok(GrpcRawMaterializeReport {
+        input_dir: config.input_dir,
+        receipt_path: config
+            .archive_dir
+            .join("journal")
+            .join(MATERIALIZATION_RECEIPT_FILE),
+        archive_dir: config.archive_dir,
+        receipt,
     })
 }
 
@@ -2704,6 +3576,247 @@ fn spool_journal_dir(output_dir: &Path, identity: &GrpcRawIdentityFile) -> PathB
         .join(hex_bytes(&identity.journal_id))
 }
 
+fn ensure_path_absent(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(anyhow!("{description} already exists: {}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+fn materialization_staging_path(archive_dir: &Path) -> Result<PathBuf> {
+    let name = archive_dir
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .context("materialized archive path has no file name")?;
+    let mut staging_name = OsString::from(".");
+    staging_name.push(name);
+    staging_name.push(".raw-materializing");
+    Ok(effective_parent(archive_dir)
+        .unwrap_or_else(|| Path::new("."))
+        .join(staging_name))
+}
+
+fn effective_parent(path: &Path) -> Option<&Path> {
+    path.parent().map(|parent| {
+        if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        }
+    })
+}
+
+fn rewrite_published_layout(staging_dir: &Path, archive_dir: &Path) -> Result<()> {
+    write_json_file_synced(
+        &staging_dir.join("producer-layout.json"),
+        &ProducerLayout::new(archive_dir),
+    )
+}
+
+fn validate_materialized_capture(
+    staging_dir: &Path,
+    archive: &GrpcRawArchiveWriteReport,
+) -> Result<()> {
+    let inspected = inspect_capture(staging_dir.to_path_buf())
+        .context("inspect staged raw gRPC materialization")?;
+    ensure!(
+        inspected.block_frames as u64 == archive.blocks_written,
+        "materialized block count mismatch: wrote {}, inspected {}",
+        archive.blocks_written,
+        inspected.block_frames
+    );
+    ensure!(
+        inspected.block_index_rows as u64 == archive.blocks_written,
+        "materialized block-index count mismatch: wrote {}, inspected {}",
+        archive.blocks_written,
+        inspected.block_index_rows
+    );
+    ensure!(
+        inspected.poh_frames as u64 == archive.blocks_written,
+        "materialized PoH count mismatch: wrote {}, inspected {}",
+        archive.blocks_written,
+        inspected.poh_frames
+    );
+    ensure!(
+        inspected.transactions as u64 == archive.transactions_written,
+        "materialized transaction count mismatch: wrote {}, inspected {}",
+        archive.transactions_written,
+        inspected.transactions
+    );
+    ensure!(
+        inspected.poh_entries as u64 == archive.entries_written,
+        "materialized PoH-entry count mismatch: wrote {}, inspected {}",
+        archive.entries_written,
+        inspected.poh_entries
+    );
+    ensure!(
+        inspected.first_slot == archive.first_slot && inspected.last_slot == archive.last_slot,
+        "materialized slot range differs from writer report"
+    );
+    ensure!(
+        inspected.pubkey_run_files == archive.pubkey_run_files
+            && inspected.pubkey_run_records == archive.pubkey_run_records,
+        "materialized pubkey-run totals differ from writer report"
+    );
+    Ok(())
+}
+
+fn collect_materialized_artifacts(root: &Path) -> Result<Vec<GrpcRawMaterializedArtifact>> {
+    let mut paths = Vec::new();
+    collect_regular_files(root, root, &mut paths)?;
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|path| {
+            !matches!(
+                path.as_str(),
+                "producer-layout.json"
+                    | "journal/progress.json"
+                    | "journal/RAW-MATERIALIZATION-COMPLETE.v1.json"
+            )
+        })
+        .map(|relative| {
+            let path = root.join(&relative);
+            Ok(GrpcRawMaterializedArtifact {
+                path: relative,
+                bytes: fs::metadata(&path)
+                    .with_context(|| format!("stat materialized artifact {}", path.display()))?
+                    .len(),
+                sha256: sha256_file(&path)?,
+            })
+        })
+        .collect()
+}
+
+fn collect_regular_files(root: &Path, dir: &Path, output: &mut Vec<String>) -> Result<()> {
+    let mut entries = fs::read_dir(dir)
+        .with_context(|| format!("read materialized directory {}", dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect materialized path {}", path.display()))?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "materialized staging contains a symlink: {}",
+            path.display()
+        );
+        if metadata.is_dir() {
+            collect_regular_files(root, &path, output)?;
+        } else {
+            ensure!(
+                metadata.is_file(),
+                "materialized staging contains a non-regular file: {}",
+                path.display()
+            );
+            let relative = path
+                .strip_prefix(root)
+                .context("materialized artifact escaped staging root")?;
+            let relative = relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            output.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn write_materialization_progress(
+    staging_dir: &Path,
+    archive_dir: &Path,
+    receipt: &GrpcRawMaterializationReceipt,
+) -> Result<()> {
+    let progress = serde_json::json!({
+        "schema_version": 2,
+        "phase": "Raw gRPC materialization",
+        "state": "materialized_snapshot",
+        "capture_dir": archive_dir,
+        "epoch": receipt.epoch,
+        "first_slot": receipt.first_slot,
+        "last_slot": receipt.last_slot,
+        "blocks_done": receipt.blocks_written,
+        "transactions_done": receipt.transactions_written,
+        "entries_done": receipt.entries_written,
+        "stopped_at_epoch_boundary": false,
+        "updated_unix_secs": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs()),
+    });
+    write_json_file_synced(
+        &staging_dir
+            .join("journal")
+            .join(MATERIALIZATION_PROGRESS_FILE),
+        &progress,
+    )
+}
+
+fn write_json_file_synced(path: &Path, value: &impl Serialize) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("open JSON output {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)
+        .with_context(|| format!("serialize JSON output {}", path.display()))?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    Ok(())
+}
+
+fn sync_tree(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect path before sync {}", path.display()))?;
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "refuse to sync symlink in materialized staging: {}",
+        path.display()
+    );
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(path)
+            .with_context(|| format!("read directory before sync {}", path.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            sync_tree(&entry.path())?;
+        }
+        sync_directory(path)
+    } else {
+        ensure!(
+            metadata.is_file(),
+            "refuse to sync non-regular materialized path: {}",
+            path.display()
+        );
+        File::open(path)
+            .with_context(|| format!("open file before sync {}", path.display()))?
+            .sync_all()
+            .with_context(|| format!("sync materialized file {}", path.display()))
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file =
+        File::open(path).with_context(|| format!("open {} for SHA-256", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {} for SHA-256", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex_bytes(&hasher.finalize()))
+}
+
 fn decode_blockhash(value: &str) -> Result<[u8; 32]> {
     let mut bytes = [0u8; 32];
     five8::decode_32(value, &mut bytes)
@@ -3404,6 +4517,47 @@ mod tests {
     }
 
     #[test]
+    fn auth_statuses_produce_action_required_raw_reports() {
+        let output_dir = temp_dir("auth-report");
+        let mut config = test_config(output_dir.clone());
+        // Build a real report without contacting the network, then exercise the
+        // same status-to-report path used by subscribe and stream failures.
+        config.min_free_bytes = u64::MAX;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut report = runtime.block_on(record_grpc_raw_blocks(config)).unwrap();
+
+        for (status, expected_reason) in [
+            (
+                Status::permission_denied("provider HTTP 403: credit exhausted"),
+                GrpcRawRecordRetryReason::PermissionDenied,
+            ),
+            (
+                Status::unauthenticated("token rejected"),
+                GrpcRawRecordRetryReason::Unauthenticated,
+            ),
+        ] {
+            let retry = classify_raw_record_status(&status, GrpcRawRecordRetryReason::StreamError);
+            apply_raw_record_retry(&mut report, retry);
+            assert_eq!(report.outcome, GrpcRawRecordOutcome::Retryable);
+            assert_eq!(report.retry_reason, Some(expected_reason));
+            assert!(report.action_required);
+            let json = serde_json::to_value(&report).unwrap();
+            assert_eq!(json["outcome"], "retryable");
+            assert!(json["action_required"].as_bool().unwrap());
+        }
+
+        let replay = classify_raw_record_status(
+            &Status::out_of_range("broadcast from 100 is not available, last available: 200"),
+            GrpcRawRecordRetryReason::StreamError,
+        );
+        assert_eq!(replay.reason, GrpcRawRecordRetryReason::StreamError);
+        assert!(!replay.action_required);
+        fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[test]
     fn normalizes_response_encoding_without_exposing_unknown_metadata() {
         let mut metadata = MetadataMap::new();
         assert_eq!(
@@ -3849,6 +5003,125 @@ mod tests {
     }
 
     #[test]
+    fn stopped_spool_materializes_atomically_with_deterministic_receipt_and_no_approval() {
+        let root = temp_dir("materialize-source");
+        let archive_one = temp_dir("materialize-output-one");
+        let archive_two = temp_dir("materialize-output-two");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        for frame_id in 0..2 {
+            let source = complete_poh_update(800 + frame_id);
+            let row = append_fixture(&mut spool, &identity, &source, frame_id);
+            append_handoff_record(&journal, &row).unwrap();
+        }
+        drop(spool);
+
+        let materialize = |archive_dir: PathBuf| {
+            materialize_grpc_raw_blocks(GrpcRawMaterializeConfig {
+                input_dir: root.clone(),
+                archive_dir,
+                epoch: 0,
+                max_record_bytes: config.max_record_bytes,
+                pubkey_hot_registry_path: None,
+                pubkey_hot_count: 0,
+            })
+            .unwrap()
+        };
+        let first = materialize(archive_one.clone());
+        let second = materialize(archive_two.clone());
+
+        assert_eq!(first.receipt, second.receipt);
+        assert_eq!(first.receipt.blocks_written, 2);
+        assert_eq!(first.receipt.first_source_frame_id, 0);
+        assert_eq!(first.receipt.last_source_frame_id, 1);
+        assert_eq!(first.receipt.first_slot, 800);
+        assert_eq!(first.receipt.last_slot, 801);
+        assert_eq!(
+            first.receipt_path.file_name().unwrap(),
+            MATERIALIZATION_RECEIPT_FILE
+        );
+        assert!(first.receipt_path.is_file());
+        assert!(root.join(IDENTITY_FILE).is_file());
+        assert!(root.join(HANDOFF_JOURNAL_FILE).is_file());
+        assert!(!materialization_staging_path(&archive_one).unwrap().exists());
+
+        // A stopped spool is only a stable source snapshot. It is not evidence that the epoch is
+        // complete, so the materializer must never grant repair or packaging approval.
+        for archive in [&archive_one, &archive_two] {
+            assert!(!archive.join("READY-TO-PACKAGE").exists());
+            assert!(!archive.join("FINALIZE-NEXT.md").exists());
+            let progress: serde_json::Value = serde_json::from_reader(
+                File::open(archive.join("journal").join(MATERIALIZATION_PROGRESS_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(progress["state"], "materialized_snapshot");
+            assert_eq!(progress["stopped_at_epoch_boundary"], false);
+        }
+
+        let inspected = inspect_capture(archive_one.clone()).unwrap();
+        assert_eq!(inspected.block_frames, 2);
+        assert_eq!(inspected.block_index_rows, 2);
+        assert_eq!(inspected.poh_frames, 2);
+        assert_eq!(inspected.poh_entries, 4);
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(archive_one).unwrap();
+        fs::remove_dir_all(archive_two).unwrap();
+    }
+
+    #[test]
+    fn active_recorder_rejects_materialization_before_staging_is_created() {
+        let root = temp_dir("materialize-active-source");
+        let archive = temp_dir("materialize-active-output");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let source = complete_poh_update(900);
+        let row = append_fixture(&mut spool, &identity, &source, 0);
+        append_handoff_record(&journal, &row).unwrap();
+
+        let error = materialize_grpc_raw_blocks(GrpcRawMaterializeConfig {
+            input_dir: root.clone(),
+            archive_dir: archive.clone(),
+            epoch: 0,
+            max_record_bytes: config.max_record_bytes,
+            pubkey_hot_registry_path: None,
+            pubkey_hot_count: 0,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("lock and audit raw gRPC WAL"));
+        assert!(!archive.exists());
+        assert!(!materialization_staging_path(&archive).unwrap().exists());
+        assert!(root.join(HANDOFF_JOURNAL_FILE).is_file());
+
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn reconciles_wal_record_committed_before_handoff_journal() {
         let root = temp_dir("reconcile");
         fs::create_dir_all(&root).unwrap();
@@ -4135,6 +5408,325 @@ mod tests {
         let state = recover_handoff_journal(&journal).unwrap();
         assert_eq!(state.records, 1);
         assert_eq!(fs::metadata(&journal).unwrap().len(), valid_len);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn relay_publication_is_strictly_after_both_durability_steps() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let result = cross_durable_relay_boundary(
+            || -> Result<u64> {
+                events.borrow_mut().push("wal");
+                Err(anyhow!("wal fsync failed"))
+            },
+            |_| {
+                events.borrow_mut().push("handoff");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("relay");
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(&*events.borrow(), &["wal"]);
+
+        events.borrow_mut().clear();
+        let result = cross_durable_relay_boundary(
+            || {
+                events.borrow_mut().push("wal");
+                Ok(7u64)
+            },
+            |_| {
+                events.borrow_mut().push("handoff");
+                Err(anyhow!("handoff fsync failed"))
+            },
+            || {
+                events.borrow_mut().push("relay");
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(&*events.borrow(), &["wal", "handoff"]);
+
+        events.borrow_mut().clear();
+        let result = cross_durable_relay_boundary(
+            || {
+                events.borrow_mut().push("wal");
+                Ok(8u64)
+            },
+            |_| {
+                events.borrow_mut().push("handoff");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("relay");
+                Err(anyhow!("relay publication failed"))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(&*events.borrow(), &["wal", "handoff", "relay"]);
+
+        events.borrow_mut().clear();
+        let durable = cross_durable_relay_boundary(
+            || {
+                events.borrow_mut().push("wal");
+                Ok(9u64)
+            },
+            |_| {
+                events.borrow_mut().push("handoff");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("relay");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(durable, 9);
+        assert_eq!(&*events.borrow(), &["wal", "handoff", "relay"]);
+    }
+
+    #[test]
+    fn process_local_relay_sequence_ignores_generation_frame_resets() {
+        let auth = YellowstoneRelayAuth::from_shared_x_token(b"relay-only").unwrap();
+        let relay = YellowstoneBlockRelay::new(
+            auth,
+            YellowstoneBlockRelayLimits {
+                max_records: 8,
+                max_encoded_bytes: 1024 * 1024,
+                max_clients: 2,
+            },
+        )
+        .unwrap();
+        let mut publisher = RawGrpcRelayPublisher::new(relay.clone());
+
+        // The first generation can end at an arbitrary WAL frame id and its successor restarts at
+        // zero. Neither value enters the relay publication API.
+        let generation_frame_ids = [73u64, 0u64];
+        publisher.publish_after_durability(&update(100)).unwrap();
+        publisher.publish_after_durability(&update(101)).unwrap();
+
+        assert_eq!(generation_frame_ids, [73, 0]);
+        assert_eq!(publisher.next_sequence, 2);
+        let stats = relay.stats().unwrap();
+        assert_eq!(stats.last_durable_sequence, Some(1));
+        assert_eq!(stats.last_durable_slot, Some(101));
+    }
+
+    #[test]
+    fn relay_preload_reads_only_the_verified_bounded_active_wal_tail() {
+        let root = temp_dir("relay-preload-tail");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        for (frame_id, slot) in [(0, 100), (1, 101), (2, 102)] {
+            let row = append_fixture(&mut spool, &identity, &update(slot), frame_id);
+            append_handoff_record(&journal, &row).unwrap();
+        }
+
+        let limits = YellowstoneBlockRelayLimits {
+            max_records: 2,
+            max_encoded_bytes: 1024 * 1024,
+            max_clients: 1,
+        };
+        let rows = read_relay_tail_rows(&journal, limits).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.frame_id).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let relay = YellowstoneBlockRelay::new(
+            YellowstoneRelayAuth::from_shared_x_token(b"relay-only").unwrap(),
+            limits,
+        )
+        .unwrap();
+        let mut publisher = RawGrpcRelayPublisher::new(relay.clone());
+        for row in rows {
+            let replayed = read_verified_relay_update(
+                spool.journal_dir(),
+                &identity,
+                &row,
+                config.max_record_bytes,
+            )
+            .unwrap();
+            publisher.publish_after_durability(&replayed).unwrap();
+        }
+        let stats = relay.stats().unwrap();
+        assert_eq!(stats.retained_records, 2);
+        assert_eq!(stats.first_available_slot, Some(101));
+        assert_eq!(stats.last_durable_slot, Some(102));
+        assert_eq!(stats.last_durable_sequence, Some(1));
+
+        drop(spool);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn downstream_token_file_is_separate_from_an_upstream_like_token() {
+        use yellowstone_grpc_proto::{
+            prelude::{PingRequest, geyser_server::Geyser},
+            tonic::Request,
+        };
+
+        let root = temp_dir("relay-token-separation");
+        fs::create_dir_all(&root).unwrap();
+        let token_file = root.join("relay-token");
+        fs::write(&token_file, b"downstream-secret\n").unwrap();
+        let token = read_relay_x_token_file(&token_file).unwrap();
+        assert_eq!(token, b"downstream-secret");
+        let relay = YellowstoneBlockRelay::new(
+            YellowstoneRelayAuth::from_shared_x_token(token).unwrap(),
+            YellowstoneBlockRelayLimits::default(),
+        )
+        .unwrap();
+
+        let mut wrong = Request::new(PingRequest { count: 1 });
+        wrong
+            .metadata_mut()
+            .insert("x-token", "upstream-secret".parse().unwrap());
+        assert_eq!(
+            Geyser::ping(&relay, wrong).await.unwrap_err().code(),
+            Code::Unauthenticated
+        );
+        let mut right = Request::new(PingRequest { count: 2 });
+        right
+            .metadata_mut()
+            .insert("x-token", "downstream-secret".parse().unwrap());
+        assert_eq!(
+            Geyser::ping(&relay, right)
+                .await
+                .unwrap()
+                .into_inner()
+                .count,
+            2
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn downstream_token_file_rejects_unsafe_entries_and_contents() {
+        let root = temp_dir("relay-token-validation");
+        fs::create_dir_all(&root).unwrap();
+
+        let empty = root.join("empty");
+        fs::write(&empty, b"\n").unwrap();
+        assert!(read_relay_x_token_file(&empty).is_err());
+
+        let control = root.join("control");
+        fs::write(&control, b"secret\tvalue").unwrap();
+        assert!(read_relay_x_token_file(&control).is_err());
+
+        let oversized = root.join("oversized");
+        fs::write(&oversized, vec![b'x'; RELAY_X_TOKEN_MAX_BYTES as usize + 1]).unwrap();
+        assert!(read_relay_x_token_file(&oversized).is_err());
+        assert!(read_relay_x_token_file(&root).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let valid = root.join("valid");
+            let link = root.join("link");
+            fs::write(&valid, b"secret").unwrap();
+            symlink(&valid, &link).unwrap();
+            assert!(read_relay_x_token_file(&link).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_bind_failure_prevents_any_upstream_connection() {
+        use tokio::time::{Duration, timeout};
+
+        let root = temp_dir("relay-bind-before-upstream");
+        fs::create_dir_all(&root).unwrap();
+        let token_file = root.join("relay-token");
+        fs::write(&token_file, b"downstream-secret\n").unwrap();
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = test_config(root.clone());
+        config.endpoint = format!("http://{}", upstream.local_addr().unwrap());
+        config.min_free_bytes = 0;
+        config.relay_bind = Some(occupied.local_addr().unwrap());
+        config.relay_x_token_file = Some(token_file);
+
+        let error = record_grpc_raw_blocks(config).await.unwrap_err();
+        assert!(error.to_string().contains("bind downstream raw gRPC relay"));
+        assert!(
+            timeout(Duration::from_millis(100), upstream.accept())
+                .await
+                .is_err(),
+            "the recorder contacted upstream despite a relay bind failure"
+        );
+
+        drop(occupied);
+        drop(upstream);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_runtime_closes_an_authenticated_client_cleanly() {
+        use yellowstone_grpc_proto::{
+            prelude::{PingRequest, geyser_client::GeyserClient},
+            tonic::Request,
+        };
+
+        let root = temp_dir("relay-clean-shutdown");
+        fs::create_dir_all(&root).unwrap();
+        let token_file = root.join("relay-token");
+        fs::write(&token_file, b"downstream-secret\n").unwrap();
+        let address_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_address = address_probe.local_addr().unwrap();
+        drop(address_probe);
+
+        let mut config = test_config(root.clone());
+        config.relay_bind = Some(relay_address);
+        config.relay_x_token_file = Some(token_file);
+        let identity = load_or_create_identity(&config).unwrap();
+        let spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let runtime = RawGrpcRelayRuntime::start_if_enabled(
+            &config,
+            &identity,
+            spool.journal_dir(),
+            &journal,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let mut client = GeyserClient::connect(format!("http://{relay_address}"))
+            .await
+            .unwrap();
+        let mut ping = Request::new(PingRequest { count: 42 });
+        ping.metadata_mut()
+            .insert("x-token", "downstream-secret".parse().unwrap());
+        assert_eq!(client.ping(ping).await.unwrap().into_inner().count, 42);
+        runtime.shutdown().await.unwrap();
+
+        drop(client);
+        drop(spool);
         fs::remove_dir_all(root).unwrap();
     }
 }

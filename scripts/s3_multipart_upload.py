@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import contextlib
 import datetime as dt
 import fcntl
@@ -29,9 +30,23 @@ SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 SINGLE_PUT_ETAG_RE = re.compile(r"^[0-9a-f]{32}$")
 API_ERROR_CODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
 GENERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+RETENTION_GENERATION_ID_RE = re.compile(r"^slot-([0-9]{20})$")
+MAX_RETENTION_GENERATION_SLOT = (1 << 63) - 1
 GENERATION_MANIFEST_SCHEMA_VERSION = 1
 GENERATION_COMMIT_SCHEMA_VERSION = 1
 GENERATION_RECEIPT_SCHEMA_VERSION = 1
+R2_RETENTION_SCHEMA_VERSION = 1
+R2_RETENTION_MIN_GENERATIONS = 2
+MAX_RETENTION_CONTROL_OBJECT_BYTES = 16 * 1024 * 1024
+MAX_RETENTION_LOCAL_STATE_BYTES = 32 * 1024 * 1024
+MAX_RETENTION_CHAIN_FILE_BYTES = 4096
+MAX_RETENTION_GENERATIONS = 1_000_000
+R2_RETENTION_ANCHOR_NAME = ".r2-retention-anchor.json"
+R2_RETENTION_PENDING_NAME = ".r2-retention-pending.json"
+R2_RETENTION_LOCK_NAME = ".r2-retention.lock"
+R2_DELETE_CONCURRENCY_PRECONDITION = (
+    "exclusive-immutable-prefix-no-concurrent-overwrite-or-delete"
+)
 READ_CHUNK_SIZE = 1024 * 1024
 MAX_CREDENTIALS_FILE_BYTES = 64 * 1024
 MAX_VERSION_ID_BYTES = 1024
@@ -57,15 +72,37 @@ BACKBLAZE_CAPACITY_EXIT_STATUSES = {
 ALLOWED_CREDENTIAL_KEYS = {
     "AWS_ACCESS_KEY_ID",
     "AWS_DEFAULT_REGION",
+    "AWS_ENDPOINT_URL_S3",
     "AWS_ENDPOINT_URL",
+    "AWS_REGION",
     "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
     "B2_APPLICATION_KEY",
     "B2_APPLICATION_KEY_ID",
     "B2_BUCKET",
     "B2_BUCKET_ID",
     "B2_S3_ENDPOINT",
     "B2_S3_REGION",
+    "R2_ACCESS_KEY_ID",
+    "R2_BUCKET",
+    "R2_ENDPOINT",
+    "R2_REGION",
+    "R2_S3_ENDPOINT",
+    "R2_S3_REGION",
+    "R2_SECRET_ACCESS_KEY",
+    "R2_SESSION_TOKEN",
+    "S3_ACCESS_KEY_ID",
+    "S3_BUCKET",
+    "S3_ENDPOINT",
+    "S3_PROVIDER",
+    "S3_REGION",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_SESSION_TOKEN",
+    "STORAGE_PROVIDER",
 }
+
+R2_PROVIDER_ALIASES = {"cloudflare", "cloudflare-r2", "r2"}
+B2_PROVIDER_ALIASES = {"b2", "backblaze", "backblaze-b2"}
 
 
 def uri_encode(value: str) -> str:
@@ -199,21 +236,122 @@ def parse_credentials_file(path: Path) -> dict[str, str]:
     return values
 
 
-def storage_settings(credentials_file: Path | None):
+def normalize_storage_provider(value: str | None) -> str:
+    normalized = (value or "auto").strip().lower()
+    if normalized == "auto":
+        return normalized
+    if normalized in R2_PROVIDER_ALIASES:
+        return "r2"
+    if normalized in B2_PROVIDER_ALIASES:
+        return "b2"
+    if normalized == "s3":
+        return normalized
+    raise ValueError("storage provider must be auto, b2, r2, or s3")
+
+
+def infer_storage_provider(
+    endpoint: str | None,
+    values,
+    provider_override: str | None = None,
+) -> str:
+    configured = normalize_storage_provider(provider_override)
+    if configured == "auto":
+        configured = normalize_storage_provider(
+            values.get("STORAGE_PROVIDER") or values.get("S3_PROVIDER")
+        )
+    if configured != "auto":
+        return configured
+    endpoint_host = ""
+    if endpoint:
+        endpoint_host = urllib.parse.urlparse(endpoint).hostname or ""
+        endpoint_host = endpoint_host.lower()
+    if endpoint_host == "r2.cloudflarestorage.com" or endpoint_host.endswith(
+        ".r2.cloudflarestorage.com"
+    ):
+        return "r2"
+    if any(
+        values.get(name)
+        for name in (
+            "R2_ACCESS_KEY_ID",
+            "R2_BUCKET",
+            "R2_ENDPOINT",
+            "R2_S3_ENDPOINT",
+            "R2_SECRET_ACCESS_KEY",
+        )
+    ):
+        return "r2"
+    if endpoint_host == "backblazeb2.com" or endpoint_host.endswith(
+        ".backblazeb2.com"
+    ):
+        return "b2"
+    if any(
+        values.get(name)
+        for name in (
+            "B2_APPLICATION_KEY",
+            "B2_APPLICATION_KEY_ID",
+            "B2_BUCKET",
+            "B2_BUCKET_ID",
+            "B2_S3_ENDPOINT",
+        )
+    ):
+        return "b2"
+    return "s3"
+
+
+def storage_settings(
+    credentials_file: Path | None,
+    provider_override: str | None = None,
+):
     values = (
         parse_credentials_file(credentials_file) if credentials_file else os.environ
     )
-    endpoint = values.get("B2_S3_ENDPOINT") or values.get("AWS_ENDPOINT_URL")
-    region = values.get("B2_S3_REGION") or values.get("AWS_DEFAULT_REGION")
-    bucket = values.get("B2_BUCKET")
-    access_key = values.get("AWS_ACCESS_KEY_ID") or values.get("B2_APPLICATION_KEY_ID")
-    secret_key = values.get("AWS_SECRET_ACCESS_KEY") or values.get("B2_APPLICATION_KEY")
+    endpoint = (
+        values.get("R2_S3_ENDPOINT")
+        or values.get("R2_ENDPOINT")
+        or values.get("S3_ENDPOINT")
+        or values.get("AWS_ENDPOINT_URL_S3")
+        or values.get("B2_S3_ENDPOINT")
+        or values.get("AWS_ENDPOINT_URL")
+    )
+    provider = infer_storage_provider(endpoint, values, provider_override)
+    region = (
+        values.get("R2_S3_REGION")
+        or values.get("R2_REGION")
+        or values.get("S3_REGION")
+        or values.get("B2_S3_REGION")
+        or values.get("AWS_REGION")
+        or values.get("AWS_DEFAULT_REGION")
+    )
+    bucket = values.get("R2_BUCKET") or values.get("S3_BUCKET") or values.get(
+        "B2_BUCKET"
+    )
+    access_key = (
+        values.get("R2_ACCESS_KEY_ID")
+        or values.get("S3_ACCESS_KEY_ID")
+        or values.get("AWS_ACCESS_KEY_ID")
+        or values.get("B2_APPLICATION_KEY_ID")
+    )
+    secret_key = (
+        values.get("R2_SECRET_ACCESS_KEY")
+        or values.get("S3_SECRET_ACCESS_KEY")
+        or values.get("AWS_SECRET_ACCESS_KEY")
+        or values.get("B2_APPLICATION_KEY")
+    )
+    session_token = (
+        values.get("R2_SESSION_TOKEN")
+        or values.get("S3_SESSION_TOKEN")
+        or values.get("AWS_SESSION_TOKEN")
+    )
+    if provider == "r2":
+        if region and region.lower() not in {"auto", "us-east-1"}:
+            raise ValueError("Cloudflare R2 region must be auto")
+        region = "auto"
     missing = [
         name
         for name, value in [
-            ("B2_S3_ENDPOINT", endpoint),
-            ("B2_S3_REGION", region),
-            ("B2_BUCKET", bucket),
+            ("S3 endpoint", endpoint),
+            ("S3 region", region),
+            ("S3 bucket", bucket),
             ("AWS_ACCESS_KEY_ID", access_key),
             ("AWS_SECRET_ACCESS_KEY", secret_key),
         ]
@@ -221,7 +359,7 @@ def storage_settings(credentials_file: Path | None):
     ]
     if missing:
         raise ValueError(f"missing required storage settings: {', '.join(missing)}")
-    return endpoint, region, bucket, access_key, secret_key
+    return endpoint, region, bucket, access_key, secret_key, provider, session_token
 
 
 def backblaze_native_settings(credentials_file: Path | None):
@@ -384,6 +522,9 @@ class S3Client:
         access_key: str,
         secret_key: str,
         retries: int,
+        *,
+        provider: str = "s3",
+        session_token: str | None = None,
     ):
         self.endpoint = endpoint.rstrip("/")
         self.region = region
@@ -391,6 +532,10 @@ class S3Client:
         self.access_key = access_key
         self.secret_key = secret_key
         self.retries = retries
+        self.provider = normalize_storage_provider(provider)
+        if self.provider == "auto":
+            self.provider = infer_storage_provider(self.endpoint, {})
+        self.session_token = session_token
         parsed_endpoint = urllib.parse.urlparse(self.endpoint)
         if (
             parsed_endpoint.scheme not in ("http", "https")
@@ -415,6 +560,13 @@ class S3Client:
             raise ValueError("S3 bucket name is invalid")
         if retries < 0:
             raise ValueError("retry count must be non-negative")
+        if self.provider == "r2" and self.region != "auto":
+            raise ValueError("Cloudflare R2 client region must be auto")
+        if session_token is not None and (
+            not session_token
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in session_token)
+        ):
+            raise ValueError("S3 session token is invalid")
         self.host = parsed_endpoint.netloc
 
     def url_path(self, key: str) -> str:
@@ -515,6 +667,8 @@ class S3Client:
             "x-amz-date": amz_date,
             **headers,
         }
+        if self.session_token is not None:
+            signed_headers["x-amz-security-token"] = self.session_token
         canonical_headers = "".join(
             f"{name}:{str(value).strip()}\n"
             for name, value in sorted(signed_headers.items())
@@ -1533,11 +1687,24 @@ def xml_text(root, tag):
     return None
 
 
-def object_headers(content_type: str, sha256: str):
-    return {
+def object_headers(
+    content_type: str,
+    sha256: str,
+    content_md5: str | None = None,
+):
+    headers = {
         "content-type": content_type,
         "x-amz-meta-sha256": validate_sha256(sha256, "object SHA-256"),
     }
+    if content_md5 is not None:
+        headers["content-md5"] = content_md5
+    return headers
+
+
+def content_md5_base64(data: bytes) -> str:
+    return base64.b64encode(
+        hashlib.md5(data, usedforsecurity=False).digest()
+    ).decode("ascii")
 
 
 def response_version_id(response, operation: str, key: str) -> str:
@@ -1755,6 +1922,138 @@ def _head_matches(
         if not hmac.compare_digest(remote_etag, normalized_expected_etag):
             raise RuntimeError(f"HEAD {key} ETag mismatch")
     return version_id
+
+
+def _r2_head_matches(
+    response,
+    expected_size: int,
+    expected_sha256: str,
+    expected_etag: str,
+    key: str,
+) -> str:
+    try:
+        remote_size = int(response.headers.get("content-length", ""))
+    except ValueError as error:
+        raise RuntimeError(f"HEAD {key} returned an invalid Content-Length") from error
+    if remote_size != expected_size:
+        raise RuntimeError(
+            f"immutable R2 object collision at {key}: size differs"
+        )
+    remote_sha256 = response.headers.get("x-amz-meta-sha256", "").lower()
+    if not hmac.compare_digest(
+        remote_sha256,
+        validate_sha256(expected_sha256, "expected R2 SHA-256"),
+    ):
+        raise RuntimeError(
+            f"immutable R2 object collision at {key}: SHA-256 metadata differs"
+        )
+    remote_etag = response_single_put_etag(response, "HEAD", key)
+    normalized_expected_etag = normalize_single_put_etag(
+        expected_etag, "expected R2 ETag"
+    )
+    if not hmac.compare_digest(remote_etag, normalized_expected_etag):
+        raise RuntimeError(
+            f"immutable R2 object collision at {key}: ETag differs"
+        )
+    return remote_etag
+
+
+def r2_existing_object_identity(
+    client: S3Client,
+    key: str,
+    expected_size: int,
+    expected_sha256: str,
+    expected_etag: str,
+) -> str | None:
+    if client.provider != "r2":
+        raise ValueError("R2 immutable verification requires an R2 client")
+    response = client.request("HEAD", key, allowed_statuses=(404,))
+    try:
+        if response.status_code == 404:
+            return None
+        return _r2_head_matches(
+            response,
+            expected_size,
+            expected_sha256,
+            expected_etag,
+            key,
+        )
+    finally:
+        response.close()
+
+
+def r2_put_immutable_bytes(
+    client: S3Client,
+    data: bytes,
+    key: str,
+    content_type: str,
+    expected_sha256: str | None = None,
+) -> dict:
+    if client.provider != "r2":
+        raise ValueError("immutable R2 PUT requires an R2 client")
+    size = len(data)
+    if size > IMMUTABLE_GENERATION_SINGLE_PUT_LIMIT:
+        raise ValueError(
+            f"immutable R2 object exceeds the single-PUT limit: {key}"
+        )
+    sha256 = hashlib.sha256(data).hexdigest()
+    if expected_sha256 is not None and not hmac.compare_digest(
+        sha256,
+        validate_sha256(expected_sha256, "expected R2 object SHA-256"),
+    ):
+        raise RuntimeError(f"local R2 object digest changed before upload: {key}")
+    etag = hashlib.md5(data, usedforsecurity=False).hexdigest()
+    existing = r2_existing_object_identity(client, key, size, sha256, etag)
+    if existing is not None:
+        return {
+            "already_present": True,
+            "etag": existing,
+            "key": key,
+            "sha256": sha256,
+            "size": size,
+        }
+
+    headers = object_headers(content_type, sha256, content_md5_base64(data))
+    headers["if-none-match"] = "*"
+    response = client.request(
+        "PUT",
+        key,
+        headers=headers,
+        body=data,
+        allowed_statuses=(412,),
+    )
+    try:
+        if response.status_code == 412:
+            # A concurrent identical creator is an idempotent success. A
+            # different creator is an immutable-prefix collision.
+            raced = r2_existing_object_identity(client, key, size, sha256, etag)
+            if raced is None:
+                raise RuntimeError(
+                    f"immutable R2 PUT precondition failed but {key} is absent"
+                )
+            return {
+                "already_present": True,
+                "etag": raced,
+                "key": key,
+                "sha256": sha256,
+                "size": size,
+            }
+        returned_etag = response_single_put_etag(response, "PUT", key)
+        if not hmac.compare_digest(returned_etag, etag):
+            raise RuntimeError(f"PUT {key} ETag mismatch")
+    finally:
+        response.close()
+
+    verified_etag = r2_existing_object_identity(client, key, size, sha256, etag)
+    if verified_etag is None:
+        raise RuntimeError(f"uploaded R2 object disappeared before publication: {key}")
+    return {
+        "already_present": False,
+        "etag": verified_etag,
+        "key": key,
+        "sha256": sha256,
+        "size": size,
+    }
 
 
 def verify_remote_metadata(
@@ -2335,6 +2634,458 @@ def write_receipt_atomic(path: Path, receipt: dict, generation_dir: Path):
             pass
 
 
+def _read_regular_file(path: Path, maximum_bytes: int, label: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"cannot open {label} safely: {error}") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{label} must be a regular file, not a symlink")
+        if metadata.st_size <= 0 or metadata.st_size > maximum_bytes:
+            raise ValueError(f"{label} has an invalid size")
+        chunks = []
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, READ_CHUNK_SIZE))
+            if not chunk:
+                raise ValueError(f"{label} was truncated while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ValueError(f"{label} changed while reading")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _read_json_file(path: Path, maximum_bytes: int, label: str):
+    payload = _read_regular_file(path, maximum_bytes, label)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not valid UTF-8 JSON") from error
+    if type(value) is not dict:
+        raise ValueError(f"{label} must contain a JSON object")
+    return value
+
+
+def _retention_directory(path: Path) -> Path:
+    requested = Path(path).absolute()
+    try:
+        metadata = requested.lstat()
+    except OSError as error:
+        raise ValueError(f"cannot inspect receipt-chain directory: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("receipt-chain path must be a directory, not a symlink")
+    return requested.resolve(strict=True)
+
+
+def _fsync_directory(path: Path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_json_atomic_durable(path: Path, value):
+    path = Path(path)
+    parent = path.parent.resolve(strict=True)
+    if path.parent.resolve(strict=True) != parent:
+        raise ValueError("retention state parent changed unexpectedly")
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and (
+        stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)
+    ):
+        raise ValueError(f"retention state path is unsafe: {path.name}")
+    payload = canonical_json_bytes(value)
+    if len(payload) > MAX_RETENTION_LOCAL_STATE_BYTES:
+        raise ValueError("retention state is unexpectedly large")
+    temporary = parent / f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        _fsync_directory(parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_json_exclusive_durable(path: Path, value):
+    path = Path(path)
+    payload = canonical_json_bytes(value)
+    if len(payload) > MAX_RETENTION_LOCAL_STATE_BYTES:
+        raise ValueError("retention audit receipt is unexpectedly large")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+    _fsync_directory(path.parent)
+
+
+def _unlink_durable(path: Path):
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"retention state path is unsafe: {path.name}")
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
+@contextlib.contextmanager
+def _lock_retention_directory(directory: Path):
+    lock_path = directory / R2_RETENTION_LOCK_NAME
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        raise ValueError(f"cannot open retention lock safely: {error}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("retention lock must be a regular file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def normalize_retention_prefix(value: str) -> str:
+    prefix = normalize_remote_prefix(value)
+    if len(prefix.split("/")) < 2:
+        raise ValueError(
+            "R2 retention prefix must contain at least two safe path components"
+        )
+    return prefix
+
+
+def _required_int(value, label: str, minimum: int) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{label} must be an integer greater than or equal to {minimum}")
+    return value
+
+
+def _retention_generation_slot(generation_id: str) -> int:
+    if type(generation_id) is not str:
+        raise ValueError("retention generation ID is invalid")
+    matched = RETENTION_GENERATION_ID_RE.fullmatch(generation_id)
+    if matched is None:
+        raise ValueError("retention generation ID must use slot-%020d format")
+    return int(matched.group(1))
+
+
+def _validate_maximum_generation_slot(value) -> int:
+    value = _required_int(value, "maximum generation slot", 0)
+    if value > MAX_RETENTION_GENERATION_SLOT:
+        raise ValueError("maximum generation slot exceeds the supported integer range")
+    return value
+
+
+def _validate_r2_generation_receipt(
+    receipt,
+    filename_generation_id: str,
+    retention_prefix: str,
+) -> dict:
+    if type(receipt) is not dict:
+        raise ValueError("generation receipt must be a JSON object")
+    if (
+        type(receipt.get("schema_version")) is not int
+        or receipt.get("schema_version") != GENERATION_RECEIPT_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported generation receipt schema")
+    if receipt.get("storage_provider") != "r2":
+        raise ValueError("retention authority contains a non-R2 receipt")
+    if receipt.get("object_identity") != "single-put-etag":
+        raise ValueError("R2 receipt does not pin single-PUT object identities")
+    generation_id = receipt.get("generation_id")
+    if type(generation_id) is not str:
+        raise ValueError("generation receipt ID is invalid")
+    generation_id = validate_generation_id(generation_id)
+    _retention_generation_slot(generation_id)
+    if generation_id != filename_generation_id:
+        raise ValueError("generation receipt filename does not match its ID")
+    generation_prefix = receipt.get("remote_prefix")
+    if type(generation_prefix) is not str:
+        raise ValueError("generation receipt prefix is invalid")
+    generation_prefix = normalize_remote_prefix(generation_prefix)
+    if not generation_prefix.startswith(f"{retention_prefix}/"):
+        raise ValueError("generation receipt is outside the retention prefix")
+    if generation_prefix.rsplit("/", 1)[-1] != generation_id:
+        raise ValueError("generation receipt prefix does not end with its ID")
+    manifest_key = receipt.get("manifest_key")
+    commit_key = receipt.get("commit_key")
+    if manifest_key != f"{generation_prefix}/manifest.json":
+        raise ValueError("generation receipt manifest key is invalid")
+    if commit_key != f"{generation_prefix}/_COMMITTED":
+        raise ValueError("generation receipt commit key is invalid")
+    manifest_sha256 = receipt.get("manifest_sha256")
+    commit_sha256 = receipt.get("commit_sha256")
+    if type(manifest_sha256) is not str or type(commit_sha256) is not str:
+        raise ValueError("generation receipt digest is invalid")
+    manifest_sha256 = validate_sha256(manifest_sha256, "receipt manifest SHA-256")
+    commit_sha256 = validate_sha256(commit_sha256, "receipt commit SHA-256")
+    manifest_etag = receipt.get("manifest_version_id")
+    commit_etag = receipt.get("commit_version_id")
+    if type(manifest_etag) is not str or type(commit_etag) is not str:
+        raise ValueError("generation receipt object identity is invalid")
+    manifest_etag = normalize_single_put_etag(manifest_etag, "manifest ETag")
+    commit_etag = normalize_single_put_etag(commit_etag, "commit ETag")
+    file_count = _required_int(receipt.get("file_count"), "receipt file count", 1)
+    total_bytes = _required_int(receipt.get("total_bytes"), "receipt total bytes", 1)
+    verified_unix_secs = _required_int(
+        receipt.get("verified_unix_secs"), "receipt verification time", 1
+    )
+    predecessor = receipt.get("predecessor_manifest_sha256")
+    if predecessor is not None:
+        if type(predecessor) is not str:
+            raise ValueError("receipt predecessor digest is invalid")
+        predecessor = validate_sha256(predecessor, "receipt predecessor SHA-256")
+    return {
+        "commit_etag": commit_etag,
+        "commit_key": commit_key,
+        "commit_sha256": commit_sha256,
+        "file_count": file_count,
+        "generation_id": generation_id,
+        "manifest_etag": manifest_etag,
+        "manifest_key": manifest_key,
+        "manifest_sha256": manifest_sha256,
+        "predecessor_manifest_sha256": predecessor,
+        "remote_prefix": generation_prefix,
+        "total_bytes": total_bytes,
+        "verified_unix_secs": verified_unix_secs,
+    }
+
+
+def _read_retention_chain_head(directory: Path) -> tuple[str, str]:
+    payload = _read_regular_file(
+        directory / ".chain",
+        MAX_RETENTION_CHAIN_FILE_BYTES,
+        "receipt chain head",
+    )
+    try:
+        parts = payload.decode("ascii").split()
+    except UnicodeError as error:
+        raise ValueError("receipt chain head is not ASCII") from error
+    if len(parts) != 2:
+        raise ValueError("receipt chain head must contain an ID and manifest digest")
+    generation_id = validate_generation_id(parts[0])
+    _retention_generation_slot(generation_id)
+    manifest_sha256 = validate_sha256(parts[1], "receipt chain head SHA-256")
+    return generation_id, manifest_sha256
+
+
+def _load_r2_receipt_chain(directory: Path, retention_prefix: str) -> dict:
+    head_generation_id, head_manifest_sha256 = _read_retention_chain_head(directory)
+    receipts_by_hash = {}
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.name.startswith(".") or not entry.name.endswith(".json"):
+                continue
+            generation_id = entry.name[:-5]
+            if not GENERATION_ID_RE.fullmatch(generation_id):
+                continue
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                raise ValueError(f"unsafe generation receipt entry: {entry.name}")
+            receipt = _validate_r2_generation_receipt(
+                _read_json_file(
+                    Path(entry.path),
+                    1024 * 1024,
+                    f"generation receipt {entry.name}",
+                ),
+                generation_id,
+                retention_prefix,
+            )
+            digest = receipt["manifest_sha256"]
+            if digest in receipts_by_hash:
+                raise ValueError("receipt chain contains duplicate manifest digests")
+            receipts_by_hash[digest] = receipt
+            if len(receipts_by_hash) > MAX_RETENTION_GENERATIONS:
+                raise ValueError("receipt chain contains too many generations")
+
+    newest_to_oldest = []
+    seen = set()
+    current = head_manifest_sha256
+    while current is not None:
+        if current in seen:
+            raise ValueError("receipt chain is cyclic")
+        receipt = receipts_by_hash.get(current)
+        if receipt is None:
+            raise ValueError("receipt chain is incomplete")
+        seen.add(current)
+        newest_to_oldest.append(receipt)
+        current = receipt["predecessor_manifest_sha256"]
+    if not newest_to_oldest:
+        raise ValueError("receipt chain is empty")
+    if newest_to_oldest[0]["generation_id"] != head_generation_id:
+        raise ValueError("receipt chain head ID does not match its manifest digest")
+    return {
+        "head_generation_id": head_generation_id,
+        "head_manifest_sha256": head_manifest_sha256,
+        "oldest_to_newest": list(reversed(newest_to_oldest)),
+    }
+
+
+def _retention_anchor_digest(anchor) -> str | None:
+    if anchor is None:
+        return None
+    return hashlib.sha256(canonical_json_bytes(anchor)).hexdigest()
+
+
+def _retention_audit_path(directory: Path, sequence: int, operation_id: str) -> Path:
+    return directory / f".r2-prune-{sequence:020d}-{operation_id}.json"
+
+
+def _validate_retention_anchor(
+    anchor,
+    chain: dict,
+    retention_prefix: str,
+    client: S3Client,
+) -> dict:
+    expected_fields = {
+        "bucket",
+        "chain_head_generation_id",
+        "chain_head_manifest_sha256",
+        "endpoint",
+        "first_retained_generation_id",
+        "first_retained_manifest_sha256",
+        "first_retained_predecessor_manifest_sha256",
+        "kind",
+        "last_operation_id",
+        "pruned_generation_count",
+        "pruned_oldest_manifest_sha256",
+        "pruned_newest_manifest_sha256",
+        "pruned_payload_bytes",
+        "remote_prefix",
+        "schema_version",
+        "sequence",
+        "storage_provider",
+        "updated_unix_secs",
+    }
+    if set(anchor) != expected_fields:
+        raise ValueError("retention anchor fields are invalid")
+    if (
+        type(anchor.get("schema_version")) is not int
+        or anchor.get("schema_version") != R2_RETENTION_SCHEMA_VERSION
+        or anchor.get("kind") != "r2-retention-anchor"
+        or anchor.get("storage_provider") != "r2"
+        or anchor.get("remote_prefix") != retention_prefix
+        or anchor.get("bucket") != client.bucket
+        or anchor.get("endpoint") != client.endpoint
+    ):
+        raise ValueError("retention anchor storage identity is invalid")
+    sequence = _required_int(anchor.get("sequence"), "anchor sequence", 1)
+    _required_int(anchor.get("updated_unix_secs"), "anchor update time", 1)
+    operation_id = anchor.get("last_operation_id")
+    if type(operation_id) is not str:
+        raise ValueError("retention anchor operation ID is invalid")
+    validate_sha256(operation_id, "retention operation ID")
+    oldest_to_newest = chain["oldest_to_newest"]
+    by_hash = {receipt["manifest_sha256"]: receipt for receipt in oldest_to_newest}
+    first_hash = anchor.get("first_retained_manifest_sha256")
+    if type(first_hash) is not str:
+        raise ValueError("retention anchor first-retained digest is invalid")
+    first_hash = validate_sha256(first_hash, "first-retained manifest SHA-256")
+    first_receipt = by_hash.get(first_hash)
+    if first_receipt is None:
+        raise ValueError("retention anchor is not part of the local receipt chain")
+    first_index = oldest_to_newest.index(first_receipt)
+    if first_index < 1:
+        raise ValueError("retention anchor does not bind a pruned tail")
+    pruned = oldest_to_newest[:first_index]
+    if anchor.get("first_retained_generation_id") != first_receipt["generation_id"]:
+        raise ValueError("retention anchor first-retained ID is invalid")
+    predecessor = anchor.get("first_retained_predecessor_manifest_sha256")
+    if predecessor != first_receipt["predecessor_manifest_sha256"]:
+        raise ValueError("retention anchor predecessor binding is invalid")
+    if predecessor != pruned[-1]["manifest_sha256"]:
+        raise ValueError("retention anchor does not bind the newest pruned manifest")
+    if anchor.get("pruned_oldest_manifest_sha256") != pruned[0]["manifest_sha256"]:
+        raise ValueError("retention anchor oldest-tail binding is invalid")
+    if anchor.get("pruned_newest_manifest_sha256") != pruned[-1]["manifest_sha256"]:
+        raise ValueError("retention anchor newest-tail binding is invalid")
+    if _required_int(
+        anchor.get("pruned_generation_count"), "pruned generation count", 1
+    ) != len(pruned):
+        raise ValueError("retention anchor pruned count is inconsistent")
+    if _required_int(
+        anchor.get("pruned_payload_bytes"), "pruned payload bytes", 1
+    ) != sum(receipt["total_bytes"] for receipt in pruned):
+        raise ValueError("retention anchor pruned bytes are inconsistent")
+    historical_head_hash = anchor.get("chain_head_manifest_sha256")
+    if type(historical_head_hash) is not str:
+        raise ValueError("retention anchor chain-head digest is invalid")
+    historical_head_hash = validate_sha256(
+        historical_head_hash, "anchor chain-head SHA-256"
+    )
+    historical_head = by_hash.get(historical_head_hash)
+    if historical_head is None or oldest_to_newest.index(historical_head) < first_index:
+        raise ValueError("retention anchor historical chain head is invalid")
+    if anchor.get("chain_head_generation_id") != historical_head["generation_id"]:
+        raise ValueError("retention anchor historical chain-head ID is invalid")
+    anchor["sequence"] = sequence
+    return anchor
+
+
+def _load_retention_anchor(
+    directory: Path,
+    chain: dict,
+    retention_prefix: str,
+    client: S3Client,
+):
+    path = directory / R2_RETENTION_ANCHOR_NAME
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    return _validate_retention_anchor(
+        _read_json_file(path, MAX_RETENTION_LOCAL_STATE_BYTES, "retention anchor"),
+        chain,
+        retention_prefix,
+        client,
+    )
+
+
 def _file_stat_identity(metadata) -> tuple[int, int, int, int]:
     return (
         metadata.st_dev,
@@ -2579,6 +3330,162 @@ def _upload_generation_with_native_snapshot_verification(
     }
 
 
+def _r2_verify_specs(client: S3Client, specs: dict[str, dict]):
+    for key, spec in specs.items():
+        identity = r2_existing_object_identity(
+            client,
+            key,
+            spec["size"],
+            spec["sha256"],
+            spec["etag"],
+        )
+        if identity is None:
+            raise RuntimeError(f"immutable R2 object is missing after publication: {key}")
+
+
+def _upload_generation_to_r2(
+    client: S3Client,
+    generation_id: str,
+    remote_prefix: str,
+    local_files: list[dict],
+    total_bytes: int,
+    file_by_relative: dict[str, Path],
+    predecessor_manifest_sha256: str | None,
+) -> dict:
+    """Publish one immutable, non-versioned R2 generation with commit last."""
+    if client.provider != "r2":
+        raise ValueError("R2 generation publication requires an R2 client")
+    file_specs, stat_identities = _generation_file_metadata_specs(
+        local_files, file_by_relative
+    )
+    file_object_ids = {
+        record["path"]: file_specs[record["object_key"]]["etag"]
+        for record in local_files
+    }
+
+    manifest = build_generation_manifest(
+        generation_id,
+        local_files,
+        file_object_ids,
+        total_bytes,
+        predecessor_manifest_sha256,
+    )
+    # R2 has no S3 bucket-versioning API. The immutable key and verified
+    # single-PUT ETag are the object identity pinned by the existing v1 fields.
+    manifest["object_identity"] = "single-put-etag"
+    manifest["storage_provider"] = "r2"
+    manifest_bytes = canonical_json_bytes(manifest)
+    manifest_spec = _bytes_metadata_spec(manifest_bytes)
+    manifest_key = f"{remote_prefix}/manifest.json"
+
+    commit = json.loads(
+        generation_commit_payload(
+            generation_id,
+            manifest_key,
+            manifest_spec["sha256"],
+            manifest_spec["etag"],
+            len(local_files),
+            total_bytes,
+            predecessor_manifest_sha256,
+        )
+    )
+    commit["object_identity"] = "single-put-etag"
+    commit["storage_provider"] = "r2"
+    commit_bytes = canonical_json_bytes(commit)
+    commit_spec = _bytes_metadata_spec(commit_bytes)
+    commit_key = f"{remote_prefix}/_COMMITTED"
+
+    existing_files = {
+        key: r2_existing_object_identity(
+            client, key, spec["size"], spec["sha256"], spec["etag"]
+        )
+        for key, spec in file_specs.items()
+    }
+    existing_manifest = r2_existing_object_identity(
+        client,
+        manifest_key,
+        manifest_spec["size"],
+        manifest_spec["sha256"],
+        manifest_spec["etag"],
+    )
+    existing_commit = r2_existing_object_identity(
+        client,
+        commit_key,
+        commit_spec["size"],
+        commit_spec["sha256"],
+        commit_spec["etag"],
+    )
+    missing_file_keys = [
+        key for key, identity in existing_files.items() if identity is None
+    ]
+    if missing_file_keys and (existing_manifest is not None or existing_commit is not None):
+        raise RuntimeError(
+            "immutable R2 generation has a manifest or commit before all files"
+        )
+    if existing_commit is not None and existing_manifest is None:
+        raise RuntimeError("immutable R2 generation has a commit without its manifest")
+
+    for record in local_files:
+        key = record["object_key"]
+        if existing_files[key] is not None:
+            continue
+        path = file_by_relative[record["path"]]
+        before = path.stat(follow_symlinks=False)
+        if _file_stat_identity(before) != stat_identities[record["path"]]:
+            raise RuntimeError(f"local file changed before upload: {path}")
+        uploaded = r2_put_immutable_bytes(
+            client,
+            path.read_bytes(),
+            key,
+            "application/octet-stream",
+            file_specs[key]["sha256"],
+        )
+        if not hmac.compare_digest(uploaded["etag"], file_specs[key]["etag"]):
+            raise RuntimeError(f"PUT {key} ETag mismatch")
+        after = path.stat(follow_symlinks=False)
+        if _file_stat_identity(after) != stat_identities[record["path"]]:
+            raise RuntimeError(f"local file changed during upload: {path}")
+
+    _r2_verify_specs(client, file_specs)
+    if existing_manifest is None:
+        r2_put_immutable_bytes(
+            client,
+            manifest_bytes,
+            manifest_key,
+            "application/json",
+            manifest_spec["sha256"],
+        )
+    _r2_verify_specs(client, file_specs)
+    _r2_verify_specs(client, {manifest_key: manifest_spec})
+
+    # `_COMMITTED` is the final remote write. Subsequent calls are read-only
+    # verification and local receipt publication.
+    if existing_commit is None:
+        r2_put_immutable_bytes(
+            client,
+            commit_bytes,
+            commit_key,
+            "application/json",
+            commit_spec["sha256"],
+        )
+    _r2_verify_specs(client, file_specs)
+    _r2_verify_specs(
+        client,
+        {manifest_key: manifest_spec, commit_key: commit_spec},
+    )
+
+    return {
+        "commit_key": commit_key,
+        "commit_sha256": commit_spec["sha256"],
+        "commit_version_id": commit_spec["etag"],
+        "file_version_ids": file_object_ids,
+        "manifest_key": manifest_key,
+        "manifest_sha256": manifest_spec["sha256"],
+        "manifest_version_id": manifest_spec["etag"],
+        "storage_provider": "r2",
+    }
+
+
 def upload_generation(
     client: S3Client,
     generation_dir: Path,
@@ -2614,7 +3521,21 @@ def upload_generation(
                 + ", ".join(oversized_files)
             )
         file_by_relative = dict(walk_generation(generation_dir))
-        if metadata_verifier is not None:
+        publication = None
+        if client.provider == "r2":
+            if metadata_verifier is not None:
+                raise ValueError("R2 generation upload cannot use a B2 Native verifier")
+            publication = _upload_generation_to_r2(
+                client,
+                generation_id,
+                remote_prefix,
+                local_files,
+                total_bytes,
+                file_by_relative,
+                predecessor_manifest_sha256,
+            )
+            file_version_ids = publication["file_version_ids"]
+        elif metadata_verifier is not None:
             publication = _upload_generation_with_native_snapshot_verification(
                 client,
                 generation_id,
@@ -2647,7 +3568,7 @@ def upload_generation(
         if final_files != local_files or final_total_bytes != total_bytes:
             raise RuntimeError("generation changed while it was being uploaded")
 
-        if metadata_verifier is not None:
+        if publication is not None:
             manifest_key = publication["manifest_key"]
             manifest_sha256 = publication["manifest_sha256"]
             manifest_version_id = publication["manifest_version_id"]
@@ -2706,6 +3627,9 @@ def upload_generation(
             "total_bytes": total_bytes,
             "verified_unix_secs": int(time.time()),
         }
+        if publication is not None and publication.get("storage_provider") == "r2":
+            receipt["object_identity"] = "single-put-etag"
+            receipt["storage_provider"] = "r2"
         if predecessor_manifest_sha256:
             receipt["predecessor_manifest_sha256"] = validate_sha256(
                 predecessor_manifest_sha256,
@@ -2715,11 +3639,1114 @@ def upload_generation(
         return receipt
 
 
+def _read_bounded_streamed_response(response, key: str) -> bytes:
+    raw_content_length = response.headers.get("content-length")
+    if raw_content_length is None:
+        raise RuntimeError(f"GET {key} is missing an exact Content-Length")
+    if (
+        type(raw_content_length) is not str
+        or len(raw_content_length) > 20
+        or not re.fullmatch(r"[0-9]+", raw_content_length)
+    ):
+        raise RuntimeError(f"GET {key} returned an invalid Content-Length")
+    content_length = int(raw_content_length)
+    if content_length <= 0 or content_length > MAX_RETENTION_CONTROL_OBJECT_BYTES:
+        raise RuntimeError(f"GET {key} returned an unsafe control-object size")
+    transfer_encoding = response.headers.get("transfer-encoding")
+    if transfer_encoding and transfer_encoding.lower() != "identity":
+        raise RuntimeError(f"GET {key} must not use chunked Transfer-Encoding")
+    content_encoding = response.headers.get("content-encoding")
+    if content_encoding and content_encoding.lower() != "identity":
+        raise RuntimeError(f"GET {key} must not use Content-Encoding")
+
+    chunks = []
+    received = 0
+    try:
+        for chunk in response.raw.stream(READ_CHUNK_SIZE, decode_content=False):
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > content_length:
+                raise RuntimeError(
+                    f"GET {key} body exceeds its declared Content-Length"
+                )
+            chunks.append(chunk)
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"GET {key} body stream was truncated or invalid") from error
+    if received != content_length:
+        raise RuntimeError(
+            f"GET {key} body length does not match Content-Length: "
+            f"received={received} expected={content_length}"
+        )
+    return b"".join(chunks)
+
+
+def _r2_get_verified_control_json(
+    client: S3Client,
+    key: str,
+    expected_sha256: str,
+    expected_etag: str,
+    label: str,
+) -> tuple[dict, dict]:
+    if client.provider != "r2":
+        raise ValueError("R2 control-object verification requires an R2 client")
+    expected_sha256 = validate_sha256(expected_sha256, f"{label} SHA-256")
+    expected_etag = normalize_single_put_etag(expected_etag, f"{label} ETag")
+    response = client.request(
+        "GET",
+        key,
+        headers={"if-match": f'"{expected_etag}"'},
+        stream=True,
+    )
+    try:
+        body = _read_bounded_streamed_response(response, key)
+        remote_sha256 = response.headers.get("x-amz-meta-sha256", "").lower()
+        if not hmac.compare_digest(remote_sha256, expected_sha256):
+            raise RuntimeError(f"GET {key} SHA-256 metadata mismatch")
+        remote_etag = response_single_put_etag(response, "GET", key)
+        if not hmac.compare_digest(remote_etag, expected_etag):
+            raise RuntimeError(f"GET {key} ETag mismatch")
+        body_sha256 = hashlib.sha256(body).hexdigest()
+        body_etag = hashlib.md5(body, usedforsecurity=False).hexdigest()
+        if not hmac.compare_digest(body_sha256, expected_sha256):
+            raise RuntimeError(f"GET {key} body SHA-256 mismatch")
+        if not hmac.compare_digest(body_etag, expected_etag):
+            raise RuntimeError(f"GET {key} body ETag mismatch")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"GET {key} is not valid UTF-8 JSON") from error
+        if type(value) is not dict:
+            raise RuntimeError(f"GET {key} must contain a JSON object")
+        return value, {
+            "etag": expected_etag,
+            "key": key,
+            "sha256": expected_sha256,
+            "size": len(body),
+        }
+    finally:
+        response.close()
+
+
+def _optional_predecessor_fields(predecessor: str | None) -> set[str]:
+    return {"predecessor_manifest_sha256"} if predecessor is not None else set()
+
+
+def _validate_r2_remote_manifest(manifest, receipt: dict) -> list[dict]:
+    expected_fields = {
+        "files",
+        "generation_id",
+        "object_identity",
+        "schema_version",
+        "storage_provider",
+        "total_bytes",
+    } | _optional_predecessor_fields(receipt["predecessor_manifest_sha256"])
+    if set(manifest) != expected_fields:
+        raise RuntimeError("R2 generation manifest fields are invalid")
+    if (
+        type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != GENERATION_MANIFEST_SCHEMA_VERSION
+        or type(manifest.get("total_bytes")) is not int
+        or manifest.get("storage_provider") != "r2"
+        or manifest.get("object_identity") != "single-put-etag"
+        or manifest.get("generation_id") != receipt["generation_id"]
+        or manifest.get("total_bytes") != receipt["total_bytes"]
+        or manifest.get("predecessor_manifest_sha256")
+        != receipt["predecessor_manifest_sha256"]
+    ):
+        raise RuntimeError("R2 generation manifest does not match its local receipt")
+    files = manifest.get("files")
+    if type(files) is not list or len(files) != receipt["file_count"]:
+        raise RuntimeError("R2 generation manifest file count is invalid")
+    expected_file_fields = {"object_key", "path", "sha256", "size", "version_id"}
+    validated = []
+    seen_paths = set()
+    seen_keys = set()
+    for record in files:
+        if type(record) is not dict or set(record) != expected_file_fields:
+            raise RuntimeError("R2 generation manifest file record is invalid")
+        relative_path = record.get("path")
+        if type(relative_path) is not str:
+            raise RuntimeError("R2 generation manifest path is invalid")
+        try:
+            _validate_relative_generation_path(relative_path)
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        expected_key = f"{receipt['remote_prefix']}/files/{relative_path}"
+        object_key = record.get("object_key")
+        if object_key != expected_key:
+            raise RuntimeError(
+                "R2 generation manifest contains a key outside its generation prefix"
+            )
+        size = record.get("size")
+        if type(size) is not int or size < 0:
+            raise RuntimeError("R2 generation manifest file size is invalid")
+        sha256 = record.get("sha256")
+        version_id = record.get("version_id")
+        if type(sha256) is not str or type(version_id) is not str:
+            raise RuntimeError("R2 generation manifest file identity is invalid")
+        try:
+            sha256 = validate_sha256(sha256, "manifest file SHA-256")
+            etag = normalize_single_put_etag(version_id, "manifest file ETag")
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        if relative_path in seen_paths or object_key in seen_keys:
+            raise RuntimeError("R2 generation manifest contains a duplicate file")
+        seen_paths.add(relative_path)
+        seen_keys.add(object_key)
+        validated.append(
+            {
+                "etag": etag,
+                "key": object_key,
+                "path": relative_path,
+                "sha256": sha256,
+                "size": size,
+            }
+        )
+    if [item["path"] for item in validated] != sorted(
+        (item["path"] for item in validated), key=lambda value: value.encode("utf-8")
+    ):
+        raise RuntimeError("R2 generation manifest files are not canonically ordered")
+    if sum(item["size"] for item in validated) != receipt["total_bytes"]:
+        raise RuntimeError("R2 generation manifest byte total is invalid")
+    return validated
+
+
+def _validate_r2_remote_commit(commit, receipt: dict):
+    expected_fields = {
+        "file_count",
+        "generation_id",
+        "manifest_key",
+        "manifest_sha256",
+        "manifest_version_id",
+        "object_identity",
+        "schema_version",
+        "storage_provider",
+        "total_bytes",
+    } | _optional_predecessor_fields(receipt["predecessor_manifest_sha256"])
+    if set(commit) != expected_fields:
+        raise RuntimeError("R2 generation commit fields are invalid")
+    if (
+        type(commit.get("schema_version")) is not int
+        or commit.get("schema_version") != GENERATION_COMMIT_SCHEMA_VERSION
+        or type(commit.get("file_count")) is not int
+        or type(commit.get("total_bytes")) is not int
+        or commit.get("storage_provider") != "r2"
+        or commit.get("object_identity") != "single-put-etag"
+        or commit.get("generation_id") != receipt["generation_id"]
+        or commit.get("manifest_key") != receipt["manifest_key"]
+        or commit.get("manifest_sha256") != receipt["manifest_sha256"]
+        or commit.get("manifest_version_id") != receipt["manifest_etag"]
+        or commit.get("file_count") != receipt["file_count"]
+        or commit.get("total_bytes") != receipt["total_bytes"]
+        or commit.get("predecessor_manifest_sha256")
+        != receipt["predecessor_manifest_sha256"]
+    ):
+        raise RuntimeError("R2 generation commit does not match its local receipt")
+
+
+def _validate_remote_r2_generation(client: S3Client, receipt: dict) -> dict:
+    manifest, manifest_spec = _r2_get_verified_control_json(
+        client,
+        receipt["manifest_key"],
+        receipt["manifest_sha256"],
+        receipt["manifest_etag"],
+        "generation manifest",
+    )
+    payloads = _validate_r2_remote_manifest(manifest, receipt)
+    commit, commit_spec = _r2_get_verified_control_json(
+        client,
+        receipt["commit_key"],
+        receipt["commit_sha256"],
+        receipt["commit_etag"],
+        "generation commit",
+    )
+    _validate_r2_remote_commit(commit, receipt)
+    for spec in payloads:
+        if (
+            r2_existing_object_identity(
+                client,
+                spec["key"],
+                spec["size"],
+                spec["sha256"],
+                spec["etag"],
+            )
+            is None
+        ):
+            raise RuntimeError(
+                f"R2 committed generation payload is missing: {spec['key']}"
+            )
+    return {
+        "commit": commit_spec,
+        "file_count": receipt["file_count"],
+        "generation_id": receipt["generation_id"],
+        "generation_prefix": receipt["remote_prefix"],
+        "manifest": manifest_spec,
+        "manifest_sha256": receipt["manifest_sha256"],
+        "payloads": payloads,
+        "predecessor_manifest_sha256": receipt["predecessor_manifest_sha256"],
+        "total_bytes": receipt["total_bytes"],
+        "verified_unix_secs": receipt["verified_unix_secs"],
+    }
+
+
+def _active_retention_chain(chain: dict, anchor) -> list[dict]:
+    receipts = chain["oldest_to_newest"]
+    if anchor is None:
+        return receipts
+    first_hash = anchor["first_retained_manifest_sha256"]
+    for index, receipt in enumerate(receipts):
+        if receipt["manifest_sha256"] == first_hash:
+            return receipts[index:]
+    raise ValueError("retention anchor is outside the receipt chain")
+
+
+def _validate_retention_limits(
+    target_bytes: int,
+    minimum_age_secs: int,
+    minimum_retained_generations: int,
+):
+    target_bytes = _required_int(target_bytes, "retention target bytes", 0)
+    minimum_age_secs = _required_int(minimum_age_secs, "minimum age seconds", 0)
+    minimum_retained_generations = _required_int(
+        minimum_retained_generations,
+        "minimum retained generations",
+        R2_RETENTION_MIN_GENERATIONS,
+    )
+    maximum = (1 << 63) - 1
+    if target_bytes > maximum or minimum_age_secs > maximum:
+        raise ValueError("retention limit exceeds the supported integer range")
+    return target_bytes, minimum_age_secs, minimum_retained_generations
+
+
+def _select_retention_tail(
+    active: list[dict],
+    target_bytes: int,
+    minimum_age_secs: int,
+    minimum_retained_generations: int,
+    maximum_generation_slot: int,
+    now_unix_secs: int,
+) -> dict:
+    retained_bytes_before = sum(receipt["total_bytes"] for receipt in active)
+    if retained_bytes_before > (1 << 63) - 1:
+        raise ValueError("retained payload total exceeds the supported integer range")
+    remaining = retained_bytes_before
+    selected = []
+    limited_by = None
+    maximum_prunable = max(0, len(active) - minimum_retained_generations)
+    for receipt in active[:maximum_prunable]:
+        if remaining <= target_bytes:
+            break
+        if maximum_generation_slot == 0 or (
+            _retention_generation_slot(receipt["generation_id"])
+            > maximum_generation_slot
+        ):
+            limited_by = "blockzilla_sync"
+            break
+        age = now_unix_secs - receipt["verified_unix_secs"]
+        if age < minimum_age_secs:
+            limited_by = "minimum_age"
+            break
+        selected.append(receipt)
+        remaining -= receipt["total_bytes"]
+    if remaining > target_bytes and limited_by is None:
+        limited_by = "minimum_retained_generations"
+    return {
+        "limited_by": limited_by,
+        "retained_payload_bytes_after": remaining,
+        "retained_payload_bytes_before": retained_bytes_before,
+        "selected": selected,
+        "target_satisfied": remaining <= target_bytes,
+    }
+
+
+def _build_retention_anchor(
+    chain: dict,
+    previous_anchor,
+    active: list[dict],
+    selected_count: int,
+    retention_prefix: str,
+    client: S3Client,
+    operation_id: str,
+    now_unix_secs: int,
+) -> dict:
+    if selected_count < 1 or selected_count >= len(active):
+        raise ValueError("retention anchor requires a non-empty pruned tail")
+    first_retained = active[selected_count]
+    all_receipts = chain["oldest_to_newest"]
+    first_index = next(
+        index
+        for index, receipt in enumerate(all_receipts)
+        if receipt["manifest_sha256"] == first_retained["manifest_sha256"]
+    )
+    pruned = all_receipts[:first_index]
+    return {
+        "bucket": client.bucket,
+        "chain_head_generation_id": chain["head_generation_id"],
+        "chain_head_manifest_sha256": chain["head_manifest_sha256"],
+        "endpoint": client.endpoint,
+        "first_retained_generation_id": first_retained["generation_id"],
+        "first_retained_manifest_sha256": first_retained["manifest_sha256"],
+        "first_retained_predecessor_manifest_sha256": first_retained[
+            "predecessor_manifest_sha256"
+        ],
+        "kind": "r2-retention-anchor",
+        "last_operation_id": operation_id,
+        "pruned_generation_count": len(pruned),
+        "pruned_oldest_manifest_sha256": pruned[0]["manifest_sha256"],
+        "pruned_newest_manifest_sha256": pruned[-1]["manifest_sha256"],
+        "pruned_payload_bytes": sum(receipt["total_bytes"] for receipt in pruned),
+        "remote_prefix": retention_prefix,
+        "schema_version": R2_RETENTION_SCHEMA_VERSION,
+        "sequence": (previous_anchor["sequence"] if previous_anchor else 0) + 1,
+        "storage_provider": "r2",
+        "updated_unix_secs": now_unix_secs,
+    }
+
+
+def _retention_operation_material(
+    chain: dict,
+    anchor,
+    selection: dict,
+    validated_generations: list[dict],
+    retention_prefix: str,
+    client: S3Client,
+    target_bytes: int,
+    minimum_age_secs: int,
+    minimum_retained_generations: int,
+    maximum_generation_slot: int,
+    now_unix_secs: int,
+) -> dict:
+    active_count = len(_active_retention_chain(chain, anchor))
+    return {
+        "anchor_before_sha256": _retention_anchor_digest(anchor),
+        "bucket": client.bucket,
+        "chain_head_generation_id": chain["head_generation_id"],
+        "chain_head_manifest_sha256": chain["head_manifest_sha256"],
+        "delete_concurrency_precondition": R2_DELETE_CONCURRENCY_PRECONDITION,
+        "endpoint": client.endpoint,
+        "limited_by": selection["limited_by"],
+        "maximum_generation_slot": maximum_generation_slot,
+        "minimum_age_secs": minimum_age_secs,
+        "minimum_retained_generations": minimum_retained_generations,
+        "planned_unix_secs": now_unix_secs,
+        "remote_prefix": retention_prefix,
+        "retained_generation_count_after": active_count
+        - len(validated_generations),
+        "retained_generation_count_before": active_count,
+        "retained_payload_bytes_after": selection[
+            "retained_payload_bytes_after"
+        ],
+        "retained_payload_bytes_before": selection[
+            "retained_payload_bytes_before"
+        ],
+        "selected_generations": validated_generations,
+        "selected_payload_bytes": sum(
+            generation["total_bytes"] for generation in validated_generations
+        ),
+        "target_bytes": target_bytes,
+        "target_satisfied": selection["target_satisfied"],
+    }
+
+
+def _new_retention_pending(
+    material: dict,
+    anchor_after: dict,
+    operation_id: str,
+    now_unix_secs: int,
+) -> dict:
+    return {
+        "anchor_after": anchor_after,
+        "kind": "r2-retention-pending",
+        "operation_id": operation_id,
+        "phase": "prepared",
+        "phase_log": [{"phase": "prepared", "unix_secs": now_unix_secs}],
+        "plan": material,
+        "prepared_unix_secs": now_unix_secs,
+        "schema_version": R2_RETENTION_SCHEMA_VERSION,
+    }
+
+
+def _validate_retention_delete_cutoff(material: dict) -> int:
+    maximum_generation_slot = _validate_maximum_generation_slot(
+        material.get("maximum_generation_slot")
+    )
+    selected = material.get("selected_generations")
+    if type(selected) is not list:
+        raise ValueError("prepared retention selection is invalid")
+    if maximum_generation_slot == 0 and selected:
+        raise ValueError("maximum generation slot zero authorizes no deletion")
+    for entry in selected:
+        if type(entry) is not dict:
+            raise ValueError("prepared retention generation is invalid")
+        if (
+            _retention_generation_slot(entry.get("generation_id"))
+            > maximum_generation_slot
+        ):
+            raise ValueError(
+                "prepared retention generation exceeds the Blockzilla durable cutoff"
+            )
+    return maximum_generation_slot
+
+
+def _validate_retention_spec(spec, expected_key: str, *, payload: bool):
+    expected_fields = {"etag", "key", "sha256", "size"}
+    if payload:
+        expected_fields.add("path")
+    if type(spec) is not dict or set(spec) != expected_fields:
+        raise ValueError("prepared retention object specification is invalid")
+    if spec.get("key") != expected_key:
+        raise ValueError("prepared retention object key is invalid")
+    if type(spec.get("sha256")) is not str or type(spec.get("etag")) is not str:
+        raise ValueError("prepared retention object identity is invalid")
+    validate_sha256(spec["sha256"], "prepared object SHA-256")
+    normalize_single_put_etag(spec["etag"], "prepared object ETag")
+    _required_int(spec.get("size"), "prepared object size", 0 if payload else 1)
+
+
+def _validate_prepared_generation(entry, receipt: dict):
+    expected_fields = {
+        "commit",
+        "file_count",
+        "generation_id",
+        "generation_prefix",
+        "manifest",
+        "manifest_sha256",
+        "payloads",
+        "predecessor_manifest_sha256",
+        "total_bytes",
+        "verified_unix_secs",
+    }
+    if type(entry) is not dict or set(entry) != expected_fields:
+        raise ValueError("prepared retention generation is invalid")
+    for name, receipt_name in (
+        ("generation_id", "generation_id"),
+        ("generation_prefix", "remote_prefix"),
+        ("manifest_sha256", "manifest_sha256"),
+        ("predecessor_manifest_sha256", "predecessor_manifest_sha256"),
+        ("file_count", "file_count"),
+        ("total_bytes", "total_bytes"),
+        ("verified_unix_secs", "verified_unix_secs"),
+    ):
+        if entry.get(name) != receipt[receipt_name]:
+            raise ValueError("prepared retention generation does not match its receipt")
+    _validate_retention_spec(
+        entry.get("commit"), receipt["commit_key"], payload=False
+    )
+    _validate_retention_spec(
+        entry.get("manifest"), receipt["manifest_key"], payload=False
+    )
+    if entry["commit"]["sha256"] != receipt["commit_sha256"] or entry["commit"][
+        "etag"
+    ] != receipt["commit_etag"]:
+        raise ValueError("prepared commit does not match its receipt")
+    if entry["manifest"]["sha256"] != receipt["manifest_sha256"] or entry[
+        "manifest"
+    ]["etag"] != receipt["manifest_etag"]:
+        raise ValueError("prepared manifest does not match its receipt")
+    payloads = entry.get("payloads")
+    if type(payloads) is not list or len(payloads) != receipt["file_count"]:
+        raise ValueError("prepared payload list has an invalid file count")
+    seen = set()
+    for spec in payloads:
+        if type(spec) is not dict or type(spec.get("path")) is not str:
+            raise ValueError("prepared payload specification is invalid")
+        try:
+            _validate_relative_generation_path(spec["path"])
+        except ValueError as error:
+            raise ValueError(str(error)) from error
+        expected_key = f"{receipt['remote_prefix']}/files/{spec['path']}"
+        _validate_retention_spec(spec, expected_key, payload=True)
+        if spec["key"] in seen:
+            raise ValueError("prepared payload list contains duplicate keys")
+        seen.add(spec["key"])
+    if [spec["path"] for spec in payloads] != sorted(
+        (spec["path"] for spec in payloads), key=lambda value: value.encode("utf-8")
+    ):
+        raise ValueError("prepared payload list is not canonically ordered")
+    if sum(spec["size"] for spec in payloads) != receipt["total_bytes"]:
+        raise ValueError("prepared payload byte total is invalid")
+
+
+def _validate_pending_operation(
+    pending,
+    chain: dict,
+    current_anchor,
+    retention_prefix: str,
+    client: S3Client,
+    target_bytes: int,
+    minimum_age_secs: int,
+    minimum_retained_generations: int,
+    maximum_generation_slot: int,
+) -> dict:
+    expected_fields = {
+        "anchor_after",
+        "kind",
+        "operation_id",
+        "phase",
+        "phase_log",
+        "plan",
+        "prepared_unix_secs",
+        "schema_version",
+    }
+    if type(pending) is not dict or set(pending) != expected_fields:
+        raise ValueError("pending retention operation fields are invalid")
+    if (
+        type(pending.get("schema_version")) is not int
+        or pending.get("schema_version") != R2_RETENTION_SCHEMA_VERSION
+        or pending.get("kind") != "r2-retention-pending"
+    ):
+        raise ValueError("pending retention operation schema is invalid")
+    operation_id = pending.get("operation_id")
+    material = pending.get("plan")
+    if type(operation_id) is not str or type(material) is not dict:
+        raise ValueError("pending retention operation identity is invalid")
+    expected_operation_id = hashlib.sha256(canonical_json_bytes(material)).hexdigest()
+    if not hmac.compare_digest(operation_id, expected_operation_id):
+        raise ValueError("pending retention operation digest is invalid")
+    valid_phases = {
+        "prepared",
+        "deleting_generations",
+        "generations_deleted",
+        # Retain the pre-FIFO phase names so an operation prepared by the
+        # immediately previous build can still recover idempotently.
+        "deleting_commits",
+        "commits_deleted",
+        "deleting_manifests",
+        "manifests_deleted",
+        "deleting_payloads",
+        "payloads_deleted",
+        "anchor_written",
+    }
+    if pending.get("phase") not in valid_phases:
+        raise ValueError("pending retention phase is invalid")
+    phase_log = pending.get("phase_log")
+    if type(phase_log) is not list or not phase_log:
+        raise ValueError("pending retention phase log is invalid")
+    for record in phase_log:
+        if (
+            type(record) is not dict
+            or set(record) != {"phase", "unix_secs"}
+            or record.get("phase") not in valid_phases
+        ):
+            raise ValueError("pending retention phase log record is invalid")
+        _required_int(record.get("unix_secs"), "pending phase time", 1)
+    _required_int(pending.get("prepared_unix_secs"), "retention prepare time", 1)
+    expected_material_fields = {
+        "anchor_before_sha256",
+        "bucket",
+        "chain_head_generation_id",
+        "chain_head_manifest_sha256",
+        "delete_concurrency_precondition",
+        "endpoint",
+        "limited_by",
+        "maximum_generation_slot",
+        "minimum_age_secs",
+        "minimum_retained_generations",
+        "planned_unix_secs",
+        "remote_prefix",
+        "retained_generation_count_after",
+        "retained_generation_count_before",
+        "retained_payload_bytes_after",
+        "retained_payload_bytes_before",
+        "selected_generations",
+        "selected_payload_bytes",
+        "target_bytes",
+        "target_satisfied",
+    }
+    if set(material) != expected_material_fields:
+        raise ValueError("pending retention plan fields are invalid")
+    if type(material.get("target_satisfied")) is not bool or material.get(
+        "limited_by"
+    ) not in {
+        None,
+        "blockzilla_sync",
+        "minimum_age",
+        "minimum_retained_generations",
+    }:
+        raise ValueError("pending retention plan result fields are invalid")
+    if (
+        material.get("delete_concurrency_precondition")
+        != R2_DELETE_CONCURRENCY_PRECONDITION
+    ):
+        raise ValueError("pending retention delete precondition is invalid")
+    for field, minimum in (
+        ("retained_generation_count_after", R2_RETENTION_MIN_GENERATIONS),
+        ("retained_generation_count_before", R2_RETENTION_MIN_GENERATIONS + 1),
+        ("retained_payload_bytes_after", 1),
+        ("retained_payload_bytes_before", 1),
+        ("selected_payload_bytes", 1),
+    ):
+        _required_int(material.get(field), f"pending plan {field}", minimum)
+    if (
+        material.get("remote_prefix") != retention_prefix
+        or material.get("bucket") != client.bucket
+        or material.get("endpoint") != client.endpoint
+        or material.get("target_bytes") != target_bytes
+        or material.get("maximum_generation_slot") != maximum_generation_slot
+        or material.get("minimum_age_secs") != minimum_age_secs
+        or material.get("minimum_retained_generations")
+        != minimum_retained_generations
+    ):
+        raise ValueError("pending retention plan does not match this invocation")
+    _validate_retention_delete_cutoff(material)
+    planned_at = _required_int(
+        material.get("planned_unix_secs"), "retention plan time", 1
+    )
+    all_receipts = chain["oldest_to_newest"]
+    by_hash = {receipt["manifest_sha256"]: receipt for receipt in all_receipts}
+    plan_head = by_hash.get(material.get("chain_head_manifest_sha256"))
+    if (
+        plan_head is None
+        or plan_head["generation_id"] != material.get("chain_head_generation_id")
+    ):
+        raise ValueError("pending retention plan chain head is invalid")
+    anchor_after = _validate_retention_anchor(
+        pending.get("anchor_after"), chain, retention_prefix, client
+    )
+    if anchor_after["last_operation_id"] != operation_id:
+        raise ValueError("pending retention anchor operation binding is invalid")
+    current_digest = _retention_anchor_digest(current_anchor)
+    before_digest = material.get("anchor_before_sha256")
+    if before_digest is not None:
+        if type(before_digest) is not str:
+            raise ValueError("pending prior-anchor digest is invalid")
+        before_digest = validate_sha256(before_digest, "prior anchor SHA-256")
+    after_digest = _retention_anchor_digest(anchor_after)
+    if current_digest not in {before_digest, after_digest}:
+        raise ValueError("retention anchor changed outside the pending operation")
+    selected = material.get("selected_generations")
+    if type(selected) is not list or not selected:
+        raise ValueError("pending retention plan has no selected generations")
+    first_retained_hash = anchor_after["first_retained_manifest_sha256"]
+    first_retained_index = next(
+        index
+        for index, receipt in enumerate(all_receipts)
+        if receipt["manifest_sha256"] == first_retained_hash
+    )
+    selected_start = first_retained_index - len(selected)
+    if selected_start < 0:
+        raise ValueError("pending retention selection is outside the receipt chain")
+    expected_selected_receipts = all_receipts[selected_start:first_retained_index]
+    if [entry.get("manifest_sha256") for entry in selected] != [
+        receipt["manifest_sha256"] for receipt in expected_selected_receipts
+    ]:
+        raise ValueError("pending retention selection is not the oldest contiguous tail")
+    for entry, receipt in zip(selected, expected_selected_receipts, strict=True):
+        _validate_prepared_generation(entry, receipt)
+    plan_head_index = all_receipts.index(plan_head)
+    if plan_head_index < first_retained_index:
+        raise ValueError("pending retention plan retains no chain head")
+    active_at_plan = all_receipts[selected_start : plan_head_index + 1]
+    recomputed = _select_retention_tail(
+        active_at_plan,
+        target_bytes,
+        minimum_age_secs,
+        minimum_retained_generations,
+        maximum_generation_slot,
+        planned_at,
+    )
+    if [receipt["manifest_sha256"] for receipt in recomputed["selected"]] != [
+        entry["manifest_sha256"] for entry in selected
+    ]:
+        raise ValueError("pending retention selection no longer validates")
+    expected_values = {
+        "limited_by": recomputed["limited_by"],
+        "retained_generation_count_after": len(active_at_plan) - len(selected),
+        "retained_generation_count_before": len(active_at_plan),
+        "retained_payload_bytes_after": recomputed["retained_payload_bytes_after"],
+        "retained_payload_bytes_before": recomputed["retained_payload_bytes_before"],
+        "selected_payload_bytes": sum(entry["total_bytes"] for entry in selected),
+        "target_satisfied": recomputed["target_satisfied"],
+    }
+    for field, expected in expected_values.items():
+        if material.get(field) != expected:
+            raise ValueError(f"pending retention plan {field} is inconsistent")
+    return pending
+
+
+def _validate_completed_anchor_audit(directory: Path, anchor):
+    if anchor is None:
+        return None
+    audit_path = _retention_audit_path(
+        directory, anchor["sequence"], anchor["last_operation_id"]
+    )
+    audit = _read_json_file(
+        audit_path, MAX_RETENTION_LOCAL_STATE_BYTES, "completed prune receipt"
+    )
+    expected_fields = {
+        "anchor_after",
+        "completed_unix_secs",
+        "kind",
+        "operation_id",
+        "phase",
+        "phase_log",
+        "plan",
+        "prepared_unix_secs",
+        "schema_version",
+    }
+    if (
+        set(audit) != expected_fields
+        or type(audit.get("schema_version")) is not int
+        or audit.get("schema_version") != R2_RETENTION_SCHEMA_VERSION
+        or audit.get("kind") != "r2-retention-prune-receipt"
+        or audit.get("phase") != "completed"
+        or audit.get("operation_id") != anchor["last_operation_id"]
+        or audit.get("anchor_after") != anchor
+    ):
+        raise ValueError("completed prune receipt does not match the retention anchor")
+    if type(audit.get("plan")) is not dict or type(audit.get("phase_log")) is not list:
+        raise ValueError("completed prune receipt audit trail is invalid")
+    if not audit["phase_log"]:
+        raise ValueError("completed prune receipt has no completion phase")
+    for record in audit["phase_log"]:
+        if type(record) is not dict or set(record) != {"phase", "unix_secs"}:
+            raise ValueError("completed prune receipt phase record is invalid")
+        _required_int(record.get("unix_secs"), "prune phase time", 1)
+    if audit["phase_log"][-1].get("phase") != "completed":
+        raise ValueError("completed prune receipt has no completion phase")
+    if hashlib.sha256(canonical_json_bytes(audit.get("plan"))).hexdigest() != audit[
+        "operation_id"
+    ]:
+        raise ValueError("completed prune receipt operation digest is invalid")
+    _required_int(audit.get("prepared_unix_secs"), "prune prepare time", 1)
+    _required_int(audit.get("completed_unix_secs"), "prune completion time", 1)
+    return audit
+
+
+def _advance_pending_phase(directory: Path, pending: dict, phase: str) -> dict:
+    updated = dict(pending)
+    updated["phase"] = phase
+    updated["phase_log"] = list(pending["phase_log"]) + [
+        {"phase": phase, "unix_secs": max(1, int(time.time()))}
+    ]
+    _write_json_atomic_durable(directory / R2_RETENTION_PENDING_NAME, updated)
+    return updated
+
+
+def _r2_delete_verified_spec(client: S3Client, spec: dict) -> bool:
+    # Cloudflare's R2 S3 compatibility table does not expose conditional
+    # operations for DeleteObject. There is therefore no supported If-Match
+    # header that can atomically bind this DELETE to the ETag verified below.
+    # Safety requires a dedicated immutable prefix: uploads are create-only,
+    # and no other writer/principal may overwrite or delete these keys while
+    # retention runs. The immediate HEAD and post-delete HEAD narrow/detect
+    # violations, but cannot close the unsupported HEAD-to-DELETE race.
+    identity = r2_existing_object_identity(
+        client,
+        spec["key"],
+        spec["size"],
+        spec["sha256"],
+        spec["etag"],
+    )
+    if identity is None:
+        return False
+    response = client.request("DELETE", spec["key"])
+    response.close()
+    if (
+        r2_existing_object_identity(
+            client,
+            spec["key"],
+            spec["size"],
+            spec["sha256"],
+            spec["etag"],
+        )
+        is not None
+    ):
+        raise RuntimeError(f"R2 object still exists after DELETE: {spec['key']}")
+    return True
+
+
+def _retention_public_result(
+    material: dict,
+    operation_id: str | None,
+    mode: str,
+    *,
+    delete_requests: int = 0,
+    already_absent: int = 0,
+) -> dict:
+    return {
+        "already_absent_object_count": already_absent,
+        "bucket": material["bucket"],
+        "delete_concurrency_precondition": material[
+            "delete_concurrency_precondition"
+        ],
+        "delete_request_count": delete_requests,
+        "limited_by": material["limited_by"],
+        "maximum_generation_slot": material["maximum_generation_slot"],
+        "minimum_age_secs": material["minimum_age_secs"],
+        "minimum_retained_generations": material[
+            "minimum_retained_generations"
+        ],
+        "mode": mode,
+        "operation_id": operation_id,
+        "remote_prefix": material["remote_prefix"],
+        "retained_generation_count_after": material[
+            "retained_generation_count_after"
+        ],
+        "retained_generation_count_before": material[
+            "retained_generation_count_before"
+        ],
+        "retained_payload_bytes_after": material["retained_payload_bytes_after"],
+        "retained_payload_bytes_before": material["retained_payload_bytes_before"],
+        "schema_version": R2_RETENTION_SCHEMA_VERSION,
+        "selected_generation_ids": [
+            entry["generation_id"] for entry in material["selected_generations"]
+        ],
+        "selected_payload_bytes": material["selected_payload_bytes"],
+        "storage_provider": "r2",
+        "target_bytes": material["target_bytes"],
+        "target_satisfied": material["target_satisfied"],
+    }
+
+
+def _complete_retention_apply(
+    client: S3Client,
+    directory: Path,
+    pending: dict,
+) -> dict:
+    material = pending["plan"]
+    _validate_retention_delete_cutoff(material)
+    selected = material["selected_generations"]
+    current_anchor_path = directory / R2_RETENTION_ANCHOR_NAME
+    try:
+        current_anchor_path.lstat()
+    except FileNotFoundError:
+        current_anchor = None
+    else:
+        current_anchor = _read_json_file(
+            current_anchor_path,
+            MAX_RETENTION_LOCAL_STATE_BYTES,
+            "retention anchor",
+        )
+    if current_anchor == pending["anchor_after"]:
+        audit_path = _retention_audit_path(
+            directory,
+            current_anchor["sequence"],
+            current_anchor["last_operation_id"],
+        )
+        try:
+            audit_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            audit = _validate_completed_anchor_audit(directory, current_anchor)
+            if audit["plan"] != material:
+                raise ValueError("completed prune receipt plan collision")
+            _unlink_durable(directory / R2_RETENTION_PENDING_NAME)
+            return _retention_public_result(
+                material,
+                pending["operation_id"],
+                "apply",
+                already_absent=sum(
+                    2 + len(entry["payloads"]) for entry in selected
+                ),
+            )
+    delete_requests = 0
+    already_absent = 0
+    pending = _advance_pending_phase(directory, pending, "deleting_generations")
+    for entry in selected:
+        # A generation is the rolling-window unit. Finish the oldest generation
+        # completely before invalidating the next one so retention is a true
+        # spool-by-spool FIFO even when one plan selects several generations.
+        for spec in (entry["commit"], entry["manifest"], *entry["payloads"]):
+            if _r2_delete_verified_spec(client, spec):
+                delete_requests += 1
+            else:
+                already_absent += 1
+    pending = _advance_pending_phase(directory, pending, "generations_deleted")
+
+    for entry in selected:
+        for spec in (entry["commit"], entry["manifest"], *entry["payloads"]):
+            if (
+                r2_existing_object_identity(
+                    client,
+                    spec["key"],
+                    spec["size"],
+                    spec["sha256"],
+                    spec["etag"],
+                )
+                is not None
+            ):
+                raise RuntimeError(
+                    f"planned R2 object remains after pruning: {spec['key']}"
+                )
+
+    anchor_after = pending["anchor_after"]
+    _write_json_atomic_durable(directory / R2_RETENTION_ANCHOR_NAME, anchor_after)
+    pending = _advance_pending_phase(directory, pending, "anchor_written")
+    completed_at = max(1, int(time.time()))
+    completed = {
+        "anchor_after": anchor_after,
+        "completed_unix_secs": completed_at,
+        "kind": "r2-retention-prune-receipt",
+        "operation_id": pending["operation_id"],
+        "phase": "completed",
+        "phase_log": list(pending["phase_log"])
+        + [{"phase": "completed", "unix_secs": completed_at}],
+        "plan": material,
+        "prepared_unix_secs": pending["prepared_unix_secs"],
+        "schema_version": R2_RETENTION_SCHEMA_VERSION,
+    }
+    audit_path = _retention_audit_path(
+        directory, anchor_after["sequence"], pending["operation_id"]
+    )
+    try:
+        _write_json_exclusive_durable(audit_path, completed)
+    except FileExistsError:
+        existing = _read_json_file(
+            audit_path,
+            MAX_RETENTION_LOCAL_STATE_BYTES,
+            "completed prune receipt",
+        )
+        if existing != completed:
+            raise ValueError("completed prune receipt collision")
+    _unlink_durable(directory / R2_RETENTION_PENDING_NAME)
+    return _retention_public_result(
+        material,
+        pending["operation_id"],
+        "apply",
+        delete_requests=delete_requests,
+        already_absent=already_absent,
+    )
+
+
+def r2_retention(
+    client: S3Client,
+    receipt_directory: Path,
+    remote_prefix: str,
+    target_bytes: int,
+    minimum_age_secs: int,
+    minimum_retained_generations: int = R2_RETENTION_MIN_GENERATIONS,
+    *,
+    maximum_generation_slot: int,
+    apply: bool = False,
+    now_unix_secs: int | None = None,
+) -> dict:
+    if client.provider != "r2":
+        raise ValueError("rolling retention requires provider=r2")
+    retention_prefix = normalize_retention_prefix(remote_prefix)
+    (
+        target_bytes,
+        minimum_age_secs,
+        minimum_retained_generations,
+    ) = _validate_retention_limits(
+        target_bytes, minimum_age_secs, minimum_retained_generations
+    )
+    maximum_generation_slot = _validate_maximum_generation_slot(
+        maximum_generation_slot
+    )
+    now_unix_secs = int(time.time()) if now_unix_secs is None else now_unix_secs
+    now_unix_secs = _required_int(now_unix_secs, "current Unix time", 1)
+    directory = _retention_directory(receipt_directory)
+    with _lock_retention_directory(directory):
+        chain = _load_r2_receipt_chain(directory, retention_prefix)
+        anchor = _load_retention_anchor(directory, chain, retention_prefix, client)
+        pending_path = directory / R2_RETENTION_PENDING_NAME
+        try:
+            pending_path.lstat()
+        except FileNotFoundError:
+            pending = None
+        else:
+            pending = _read_json_file(
+                pending_path,
+                MAX_RETENTION_LOCAL_STATE_BYTES,
+                "pending retention operation",
+            )
+        if pending is not None:
+            if not apply:
+                raise RuntimeError(
+                    "a prepared retention operation requires explicit --apply recovery"
+                )
+            pending = _validate_pending_operation(
+                pending,
+                chain,
+                anchor,
+                retention_prefix,
+                client,
+                target_bytes,
+                minimum_age_secs,
+                minimum_retained_generations,
+                maximum_generation_slot,
+            )
+            return _complete_retention_apply(client, directory, pending)
+        _validate_completed_anchor_audit(directory, anchor)
+
+        active = _active_retention_chain(chain, anchor)
+        selection = _select_retention_tail(
+            active,
+            target_bytes,
+            minimum_age_secs,
+            minimum_retained_generations,
+            maximum_generation_slot,
+            now_unix_secs,
+        )
+        validated_generations = [
+            _validate_remote_r2_generation(client, receipt)
+            for receipt in selection["selected"]
+        ]
+        material = _retention_operation_material(
+            chain,
+            anchor,
+            selection,
+            validated_generations,
+            retention_prefix,
+            client,
+            target_bytes,
+            minimum_age_secs,
+            minimum_retained_generations,
+            maximum_generation_slot,
+            now_unix_secs,
+        )
+        if not validated_generations:
+            return _retention_public_result(material, None, "apply" if apply else "dry-run")
+        operation_id = hashlib.sha256(canonical_json_bytes(material)).hexdigest()
+        anchor_after = _build_retention_anchor(
+            chain,
+            anchor,
+            active,
+            len(validated_generations),
+            retention_prefix,
+            client,
+            operation_id,
+            now_unix_secs,
+        )
+        if not apply:
+            return _retention_public_result(material, operation_id, "dry-run")
+
+        # Remote verification may take time. Refuse to prepare a destructive
+        # operation if the local authority changed while it was in progress.
+        refreshed = _load_r2_receipt_chain(directory, retention_prefix)
+        if refreshed != chain:
+            raise RuntimeError("receipt chain changed while planning retention")
+        refreshed_anchor = _load_retention_anchor(
+            directory, refreshed, retention_prefix, client
+        )
+        if _retention_anchor_digest(refreshed_anchor) != _retention_anchor_digest(anchor):
+            raise RuntimeError("retention anchor changed while planning")
+        if pending_path.exists():
+            raise RuntimeError("another retention operation was prepared concurrently")
+        pending = _new_retention_pending(
+            material, anchor_after, operation_id, now_unix_secs
+        )
+        _write_json_exclusive_durable(pending_path, pending)
+        return _complete_retention_apply(client, directory, pending)
+
+
 def add_storage_arguments(parser):
     parser.add_argument(
         "--credentials-file",
         type=Path,
         help="literal dotenv file containing storage settings; never sourced as shell code",
+    )
+    parser.add_argument(
+        "--provider",
+        help=(
+            "storage provider: auto, b2, r2, or s3; auto also reads "
+            "STORAGE_PROVIDER/S3_PROVIDER and infers known endpoint hosts"
+        ),
     )
     parser.add_argument("--retries", type=int, default=8)
 
@@ -2764,6 +4791,34 @@ def argument_parser():
     generation.add_argument("--predecessor-manifest-sha256")
     add_storage_arguments(generation)
 
+    retention = commands.add_parser(
+        "r2-retention",
+        help=(
+            "plan rolling retention from the validated local R2 receipt chain; "
+            "remote deletion requires --apply"
+        ),
+    )
+    retention.add_argument("receipt_directory", type=Path)
+    retention.add_argument("remote_prefix")
+    retention.add_argument("--target-bytes", required=True, type=int)
+    retention.add_argument("--minimum-age-secs", required=True, type=int)
+    retention.add_argument(
+        "--maximum-generation-slot",
+        required=True,
+        type=int,
+        help=(
+            "last slot from the caller-verified durable Blockzilla ACK; "
+            "0 authorizes no generation deletion"
+        ),
+    )
+    retention.add_argument(
+        "--minimum-retained-generations",
+        type=int,
+        default=R2_RETENTION_MIN_GENERATIONS,
+    )
+    retention.add_argument("--apply", action="store_true")
+    add_storage_arguments(retention)
+
     account_usage = commands.add_parser(
         "b2-account-usage",
         help=(
@@ -2776,10 +4831,28 @@ def argument_parser():
 
 
 def make_client(args):
-    endpoint, region, bucket, access_key, secret_key = storage_settings(
-        args.credentials_file
+    (
+        endpoint,
+        region,
+        bucket,
+        access_key,
+        secret_key,
+        provider,
+        session_token,
+    ) = storage_settings(
+        args.credentials_file,
+        getattr(args, "provider", None),
     )
-    return S3Client(endpoint, region, bucket, access_key, secret_key, args.retries)
+    return S3Client(
+        endpoint,
+        region,
+        bucket,
+        access_key,
+        secret_key,
+        args.retries,
+        provider=provider,
+        session_token=session_token,
+    )
 
 
 def make_b2_native_client(args):
@@ -2795,6 +4868,8 @@ def make_b2_native_client(args):
 
 
 def make_optional_b2_native_object_verifier(args, s3_client: S3Client):
+    if s3_client.provider == "r2":
+        return None
     settings = optional_backblaze_native_object_settings(args.credentials_file)
     if settings is None:
         endpoint_host = urllib.parse.urlparse(s3_client.endpoint).hostname or ""
@@ -2825,6 +4900,13 @@ def run(args):
         return 0
 
     client = make_client(args)
+    if client.provider == "r2" and args.command not in {
+        "r2-retention",
+        "upload-generation",
+    }:
+        raise ValueError(
+            "Cloudflare R2 is supported only by immutable generation commands"
+        )
     if args.command == "upload-file":
         result = upload_verified_file(
             client,
@@ -2874,6 +4956,19 @@ def run(args):
         )
         print(canonical_json_bytes(receipt).decode("utf-8"), end="")
         return 0
+    if args.command == "r2-retention":
+        result = r2_retention(
+            client,
+            args.receipt_directory,
+            args.remote_prefix,
+            args.target_bytes,
+            args.minimum_age_secs,
+            args.minimum_retained_generations,
+            maximum_generation_slot=args.maximum_generation_slot,
+            apply=args.apply,
+        )
+        print(canonical_json_bytes(result).decode("utf-8"), end="")
+        return 0
     raise RuntimeError(f"unsupported command {args.command}")
 
 
@@ -2884,6 +4979,7 @@ def main(argv=None):
         "upload-file",
         "commit-marker",
         "upload-generation",
+        "r2-retention",
         "b2-account-usage",
         "-h",
         "--help",

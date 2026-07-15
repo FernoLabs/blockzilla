@@ -4,6 +4,7 @@ pub mod epoch;
 pub mod fixture_bench;
 pub mod grpc;
 pub mod grpc_raw;
+pub mod grpc_relay;
 pub mod ingest;
 pub mod layout;
 pub mod rpc;

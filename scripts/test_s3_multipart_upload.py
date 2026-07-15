@@ -18,6 +18,35 @@ sys.path.insert(0, str(Path(__file__).parent))
 import s3_multipart_upload as uploader
 
 
+class FakeBoundedRawStream:
+    def __init__(self, chunks, *, fail_on_read=False):
+        self.chunks = list(chunks)
+        self.fail_on_read = fail_on_read
+        self.read_started = False
+
+    def stream(self, amount, *, decode_content):
+        self.read_started = True
+        if self.fail_on_read:
+            raise AssertionError("response body must not be read")
+        if amount != uploader.READ_CHUNK_SIZE or decode_content:
+            raise AssertionError("unexpected streamed-read configuration")
+        yield from self.chunks
+
+
+class FakeStreamingResponse:
+    def __init__(self, headers, chunks, *, fail_on_read=False):
+        self.headers = headers
+        self.raw = FakeBoundedRawStream(chunks, fail_on_read=fail_on_read)
+        self.closed = False
+
+    @property
+    def content(self):
+        raise AssertionError("streaming verification must never preload response.content")
+
+    def close(self):
+        self.closed = True
+
+
 class FakeS3State:
     def __init__(self):
         self.objects = {}
@@ -30,6 +59,10 @@ class FakeS3State:
         self.inject_after_put = {}
         self.head_status = None
         self.override_put_version_ids = {}
+        self.support_conditional_put = False
+        self.emit_version_ids = True
+        self.require_content_md5 = False
+        self.delete_fail_once = {}
         self.lock = threading.Lock()
 
     def add_version(self, key, data, sha256):
@@ -111,16 +144,18 @@ class FakeS3Handler(BaseHTTPRequestHandler):
         if stored is None:
             self.send_empty(404)
             return
+        response_headers = {
+            "x-amz-meta-sha256": stored["sha256"],
+            "ETag": '"00000000000000000000000000000000"'
+            if corrupt_etag
+            else f'"{stored["etag"]}"',
+        }
+        if self.state.emit_version_ids:
+            response_headers["x-amz-version-id"] = stored["version_id"]
         self.send_bytes(
             200,
             stored["data"],
-            {
-                "x-amz-meta-sha256": stored["sha256"],
-                "x-amz-version-id": stored["version_id"],
-                "ETag": '"00000000000000000000000000000000"'
-                if corrupt_etag
-                else f'"{stored["etag"]}"',
-            },
+            response_headers,
             include_body=False,
         )
 
@@ -140,17 +175,15 @@ class FakeS3Handler(BaseHTTPRequestHandler):
         body = stored["data"]
         if corrupt and body:
             body = bytes([body[0] ^ 1]) + body[1:]
-        self.send_bytes(
-            200,
-            body,
-            {
-                "x-amz-meta-sha256": stored["sha256"],
-                "x-amz-version-id": stored["version_id"],
-                "ETag": '"00000000000000000000000000000000"'
-                if corrupt_etag
-                else f'"{stored["etag"]}"',
-            },
-        )
+        response_headers = {
+            "x-amz-meta-sha256": stored["sha256"],
+            "ETag": '"00000000000000000000000000000000"'
+            if corrupt_etag
+            else f'"{stored["etag"]}"',
+        }
+        if self.state.emit_version_ids:
+            response_headers["x-amz-version-id"] = stored["version_id"]
+        self.send_bytes(200, body, response_headers)
 
     def do_PUT(self):
         key, query = self.object_key()
@@ -173,9 +206,22 @@ class FakeS3Handler(BaseHTTPRequestHandler):
             return
 
         with self.state.lock:
-            if self.headers.get("if-none-match") is not None:
-                self.send_empty(501)
-                return
+            if_none_match = self.headers.get("if-none-match")
+            if if_none_match is not None:
+                if not self.state.support_conditional_put:
+                    self.send_empty(501)
+                    return
+                if if_none_match != "*":
+                    self.send_empty(400)
+                    return
+                if self.state.object_version(key) is not None:
+                    self.send_empty(412)
+                    return
+            if self.state.require_content_md5:
+                supplied_md5 = self.headers.get("content-md5", "")
+                if supplied_md5 != uploader.content_md5_base64(body):
+                    self.send_empty(400)
+                    return
             stored = self.state.add_version(
                 key,
                 body,
@@ -185,17 +231,16 @@ class FakeS3Handler(BaseHTTPRequestHandler):
             if injected is not None:
                 self.state.add_version(key, injected["data"], injected["sha256"])
             corrupt_etag = key in self.state.corrupt_etag_keys
-        self.send_empty(
-            200,
-            {
-                "ETag": '"00000000000000000000000000000000"'
-                if corrupt_etag
-                else f'"{stored["etag"]}"',
-                "x-amz-version-id": self.state.override_put_version_ids.get(
-                    key, stored["version_id"]
-                ),
-            },
-        )
+        response_headers = {
+            "ETag": '"00000000000000000000000000000000"'
+            if corrupt_etag
+            else f'"{stored["etag"]}"',
+        }
+        if self.state.emit_version_ids:
+            response_headers["x-amz-version-id"] = (
+                self.state.override_put_version_ids.get(key, stored["version_id"])
+            )
+        self.send_empty(200, response_headers)
 
     def do_POST(self):
         key, query = self.object_key()
@@ -251,6 +296,15 @@ class FakeS3Handler(BaseHTTPRequestHandler):
         if upload_ids:
             with self.state.lock:
                 self.state.uploads.pop(upload_ids[0], None)
+            self.send_empty(204)
+            return
+        with self.state.lock:
+            failure_status = self.state.delete_fail_once.pop(key, None)
+            if failure_status is None:
+                self.state.objects.pop(key, None)
+        if failure_status is not None:
+            self.send_empty(failure_status)
+            return
         self.send_empty(204)
 
 
@@ -469,13 +523,13 @@ class S3UploaderTests(unittest.TestCase):
         self.thread.join(timeout=5)
         self.temporary.cleanup()
 
-    def create_generation(self):
-        generation = self.root / "generation"
+    def create_generation(self, name="generation", wal_payload=b"durable wal"):
+        generation = self.root / name
         writer_lock = generation / "wal" / "journal" / "writer.lock"
         writer_lock.parent.mkdir(parents=True)
         writer_lock.write_bytes(b"")
         (writer_lock.parent / "segment-00000000000000000000.wal").write_bytes(
-            b"durable wal"
+            wal_payload
         )
         (generation / "identity.json").write_text('{"schema_version":1}\n')
         (generation / "raw-blocks.jsonl").write_text('{"frame_id":0,"slot":1}\n')
@@ -496,6 +550,136 @@ class S3UploaderTests(unittest.TestCase):
             )
         )
         return credentials
+
+    def r2_client(self, *, session_token=None):
+        self.state.support_conditional_put = True
+        self.state.emit_version_ids = False
+        self.state.require_content_md5 = True
+        return uploader.S3Client(
+            f"http://127.0.0.1:{self.server.server_port}",
+            "auto",
+            "test-bucket",
+            "fake-r2-id",
+            "fake-r2-secret",
+            0,
+            provider="r2",
+            session_token=session_token,
+        )
+
+    def create_r2_credentials(self):
+        credentials = self.root / "r2-credentials.env"
+        credentials.write_text(
+            "\n".join(
+                [
+                    "STORAGE_PROVIDER=r2",
+                    f"S3_ENDPOINT=http://127.0.0.1:{self.server.server_port}",
+                    "S3_BUCKET=test-bucket",
+                    "R2_ACCESS_KEY_ID=fake-r2-id",
+                    "R2_SECRET_ACCESS_KEY=fake-r2-secret",
+                    "AWS_SESSION_TOKEN=fake-r2-session",
+                    "",
+                ]
+            )
+        )
+        return credentials
+
+    def create_r2_receipt_chain(self, count, *, verified_times=None):
+        if verified_times is None:
+            verified_times = [1_000 + index for index in range(count)]
+        self.assertEqual(len(verified_times), count)
+        client = self.r2_client()
+        receipts = []
+        receipt_directory = self.root / "r2-receipts"
+        receipt_directory.mkdir(exist_ok=True)
+        predecessor = None
+        for index in range(count):
+            generation_id = f"slot-{index + 1:020d}"
+            generation, _writer_lock = self.create_generation(
+                f"generation-{index + 1}",
+                wal_payload=(f"durable wal {index + 1}".encode("ascii")),
+            )
+            prefix = (
+                "live-grpc-backup/v1/test-cluster/test-node/"
+                f"{generation_id}"
+            )
+            with mock.patch.object(
+                uploader.time, "time", return_value=verified_times[index]
+            ):
+                receipt = uploader.upload_generation(
+                    client,
+                    generation,
+                    generation_id,
+                    prefix,
+                    receipt_directory / f"{generation_id}.json",
+                    predecessor_manifest_sha256=predecessor,
+                )
+            receipts.append(receipt)
+            predecessor = receipt["manifest_sha256"]
+        (receipt_directory / ".chain").write_text(
+            f"{receipts[-1]['generation_id']} {receipts[-1]['manifest_sha256']}\n",
+            encoding="ascii",
+        )
+        return client, receipt_directory, receipts
+
+    def rewrite_r2_receipt_chain(self, receipt_directory, receipts, mutate_manifest):
+        predecessor = None
+        rewritten = []
+        for index, original_receipt in enumerate(receipts):
+            receipt = dict(original_receipt)
+            manifest_stored = self.state.object_version(receipt["manifest_key"])
+            manifest = json.loads(manifest_stored["data"])
+            if predecessor is None:
+                manifest.pop("predecessor_manifest_sha256", None)
+            else:
+                manifest["predecessor_manifest_sha256"] = predecessor
+            mutate_manifest(index, manifest)
+            manifest_data = uploader.canonical_json_bytes(manifest)
+            manifest_sha256 = hashlib.sha256(manifest_data).hexdigest()
+            manifest_etag = hashlib.md5(
+                manifest_data, usedforsecurity=False
+            ).hexdigest()
+            manifest_stored.update(
+                data=manifest_data,
+                etag=manifest_etag,
+                sha256=manifest_sha256,
+            )
+
+            commit_stored = self.state.object_version(receipt["commit_key"])
+            commit = json.loads(commit_stored["data"])
+            commit["manifest_sha256"] = manifest_sha256
+            commit["manifest_version_id"] = manifest_etag
+            if predecessor is None:
+                commit.pop("predecessor_manifest_sha256", None)
+                receipt.pop("predecessor_manifest_sha256", None)
+            else:
+                commit["predecessor_manifest_sha256"] = predecessor
+                receipt["predecessor_manifest_sha256"] = predecessor
+            commit_data = uploader.canonical_json_bytes(commit)
+            commit_sha256 = hashlib.sha256(commit_data).hexdigest()
+            commit_etag = hashlib.md5(
+                commit_data, usedforsecurity=False
+            ).hexdigest()
+            commit_stored.update(
+                data=commit_data,
+                etag=commit_etag,
+                sha256=commit_sha256,
+            )
+            receipt.update(
+                manifest_sha256=manifest_sha256,
+                manifest_version_id=manifest_etag,
+                commit_sha256=commit_sha256,
+                commit_version_id=commit_etag,
+            )
+            (receipt_directory / f"{receipt['generation_id']}.json").write_bytes(
+                uploader.canonical_json_bytes(receipt)
+            )
+            rewritten.append(receipt)
+            predecessor = manifest_sha256
+        (receipt_directory / ".chain").write_text(
+            f"{rewritten[-1]['generation_id']} {rewritten[-1]['manifest_sha256']}\n",
+            encoding="ascii",
+        )
+        return rewritten
 
     def native_verifier(self):
         native_client = FakeNativeVersionClient(self.state)
@@ -528,6 +712,43 @@ class S3UploaderTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "duplicate key"):
             uploader.parse_credentials_file(credentials)
+
+    def test_r2_provider_aliases_infer_region_auto_and_sign_session_token(self):
+        credentials = self.root / "r2-aliases.env"
+        credentials.write_text(
+            "\n".join(
+                [
+                    "R2_ENDPOINT=https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+                    "R2_BUCKET=blockzilla-live-grpc",
+                    "R2_ACCESS_KEY_ID=r2-access-key",
+                    "R2_SECRET_ACCESS_KEY=r2-secret-key",
+                    "R2_SESSION_TOKEN=r2-session-token",
+                    "",
+                ]
+            )
+        )
+        settings = uploader.storage_settings(credentials)
+        self.assertEqual(settings[1], "auto")
+        self.assertEqual(settings[2], "blockzilla-live-grpc")
+        self.assertEqual(settings[5], "r2")
+        self.assertEqual(settings[6], "r2-session-token")
+
+        client = self.r2_client(session_token="r2-session-token")
+        data = b"signed R2 payload"
+        uploader.r2_put_immutable_bytes(
+            client,
+            data,
+            "live-grpc-backup/v1/signed/object.bin",
+            "application/octet-stream",
+        )
+        put_headers = next(
+            headers
+            for method, key, headers, _query in self.state.requests
+            if method == "PUT" and key.endswith("object.bin")
+        )
+        self.assertEqual(put_headers["x-amz-security-token"], "r2-session-token")
+        self.assertIn("/auto/s3/aws4_request", put_headers["authorization"])
+        self.assertIn("x-amz-security-token", put_headers["authorization"])
 
     def test_upload_file_uses_metadata_head_and_streamed_get(self):
         path = self.root / "segment.wal"
@@ -686,6 +907,798 @@ class S3UploaderTests(unittest.TestCase):
                 "if-none-match" in headers
                 for method, _key, headers, _query in self.state.requests
                 if method == "PUT"
+            )
+        )
+
+    def test_r2_generation_fresh_upload_is_conditional_and_head_verified(self):
+        generation, _writer_lock = self.create_generation()
+        receipt_path = self.root / "r2-fresh-receipt.json"
+        prefix = "live-grpc-backup/v1/generation-r2-fresh"
+        receipt = uploader.upload_generation(
+            self.r2_client(session_token="r2-session-token"),
+            generation,
+            "generation-r2-fresh",
+            prefix,
+            receipt_path,
+        )
+
+        self.assertEqual(receipt["storage_provider"], "r2")
+        self.assertEqual(receipt["object_identity"], "single-put-etag")
+        self.assertRegex(receipt["manifest_version_id"], r"^[0-9a-f]{32}$")
+        self.assertRegex(receipt["commit_version_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(receipt, json.loads(receipt_path.read_text()))
+        self.assertTrue(generation.is_dir())
+
+        put_requests = [
+            (index, key, headers)
+            for index, (method, key, headers, _query) in enumerate(self.state.requests)
+            if method == "PUT"
+        ]
+        self.assertTrue(put_requests)
+        for put_index, key, headers in put_requests:
+            stored = self.state.object_version(key)
+            self.assertEqual(headers.get("if-none-match"), "*")
+            self.assertEqual(
+                headers.get("content-md5"),
+                uploader.content_md5_base64(stored["data"]),
+            )
+            self.assertEqual(headers.get("x-amz-meta-sha256"), stored["sha256"])
+            self.assertTrue(
+                any(
+                    later_index > put_index and method == "HEAD" and head_key == key
+                    for later_index, (method, head_key, _headers, _query) in enumerate(
+                        self.state.requests
+                    )
+                ),
+                f"{key} was not verified by HEAD after PUT",
+            )
+        self.assertFalse(
+            any(
+                method in {"DELETE", "GET", "POST"}
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+
+    def test_r2_generation_retry_is_idempotent_without_second_put(self):
+        generation, _writer_lock = self.create_generation()
+        client = self.r2_client()
+        prefix = "live-grpc-backup/v1/generation-r2-retry"
+        receipt_path = self.root / "r2-retry-receipt.json"
+        first = uploader.upload_generation(
+            client,
+            generation,
+            "generation-r2-retry",
+            prefix,
+            receipt_path,
+        )
+        puts_before = sum(
+            method == "PUT" for method, _key, _headers, _query in self.state.requests
+        )
+        second = uploader.upload_generation(
+            client,
+            generation,
+            "generation-r2-retry",
+            prefix,
+            receipt_path,
+        )
+        puts_after = sum(
+            method == "PUT" for method, _key, _headers, _query in self.state.requests
+        )
+        self.assertEqual(puts_after, puts_before)
+        self.assertEqual(second["manifest_version_id"], first["manifest_version_id"])
+        self.assertEqual(second["commit_version_id"], first["commit_version_id"])
+
+    def test_r2_generation_collision_fails_closed_without_any_put(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "live-grpc-backup/v1/generation-r2-collision"
+        records, _total_bytes = uploader.build_generation_file_records(
+            generation, prefix
+        )
+        first_key = records[0]["object_key"]
+        conflict = b"different immutable object"
+        self.state.add_version(
+            first_key,
+            conflict,
+            hashlib.sha256(conflict).hexdigest(),
+        )
+        receipt_path = self.root / "r2-collision-receipt.json"
+        with self.assertRaisesRegex(RuntimeError, "immutable R2 object collision"):
+            uploader.upload_generation(
+                self.r2_client(),
+                generation,
+                "generation-r2-collision",
+                prefix,
+                receipt_path,
+            )
+        self.assertFalse(receipt_path.exists())
+        self.assertTrue(generation.is_dir())
+        self.assertFalse(
+            any(method == "PUT" for method, _key, _headers, _query in self.state.requests)
+        )
+
+    def test_r2_generation_puts_manifest_then_commit_last(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "live-grpc-backup/v1/generation-r2-order"
+        receipt = uploader.upload_generation(
+            self.r2_client(),
+            generation,
+            "generation-r2-order",
+            prefix,
+            self.root / "r2-order-receipt.json",
+        )
+        put_keys = [
+            key
+            for method, key, _headers, _query in self.state.requests
+            if method == "PUT"
+        ]
+        self.assertEqual(
+            put_keys[-2:], [receipt["manifest_key"], receipt["commit_key"]]
+        )
+        self.assertEqual(put_keys[-1], f"{prefix}/_COMMITTED")
+        manifest = json.loads(
+            self.state.object_version(receipt["manifest_key"])["data"]
+        )
+        commit = json.loads(self.state.object_version(receipt["commit_key"])["data"])
+        self.assertEqual(manifest["storage_provider"], "r2")
+        self.assertEqual(commit["storage_provider"], "r2")
+        self.assertEqual(commit["manifest_version_id"], receipt["manifest_version_id"])
+
+    def test_upload_generation_cli_selects_explicit_r2_provider(self):
+        generation, _writer_lock = self.create_generation()
+        self.state.support_conditional_put = True
+        self.state.emit_version_ids = False
+        self.state.require_content_md5 = True
+        receipt_path = self.root / "r2-cli-receipt.json"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = uploader.main(
+                [
+                    "upload-generation",
+                    str(generation),
+                    "live-grpc-backup/v1/generation-r2-cli",
+                    str(receipt_path),
+                    "--generation-id",
+                    "generation-r2-cli",
+                    "--credentials-file",
+                    str(self.create_r2_credentials()),
+                    "--provider",
+                    "auto",
+                    "--retries",
+                    "0",
+                ]
+            )
+        self.assertEqual(status, 0)
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt["storage_provider"], "r2")
+        self.assertEqual(receipt, json.loads(receipt_path.read_text()))
+        put_headers = [
+            headers
+            for method, _key, headers, _query in self.state.requests
+            if method == "PUT"
+        ]
+        self.assertTrue(put_headers)
+        self.assertTrue(all(headers.get("if-none-match") == "*" for headers in put_headers))
+        self.assertTrue(
+            all(
+                headers.get("x-amz-security-token") == "fake-r2-session"
+                for headers in put_headers
+            )
+        )
+
+    def test_backblaze_generation_regression_keeps_versioned_native_path(self):
+        generation, _writer_lock = self.create_generation()
+        prefix = "live-grpc-backup/v1/generation-b2-regression"
+        native_client, verifier = self.native_verifier()
+        b2_client = uploader.S3Client(
+            f"http://127.0.0.1:{self.server.server_port}",
+            "test-region",
+            "test-bucket",
+            "fake-b2-id",
+            "fake-b2-key",
+            0,
+            provider="b2",
+        )
+        receipt = uploader.upload_generation(
+            b2_client,
+            generation,
+            "generation-b2-regression",
+            prefix,
+            self.root / "b2-regression-receipt.json",
+            metadata_verifier=verifier,
+        )
+        self.assertTrue(receipt["manifest_version_id"].startswith("version-"))
+        self.assertTrue(receipt["commit_version_id"].startswith("version-"))
+        self.assertTrue(native_client.calls)
+        self.assertFalse(
+            any(
+                "if-none-match" in headers
+                for method, _key, headers, _query in self.state.requests
+                if method == "PUT"
+            )
+        )
+
+    def test_r2_retention_dry_run_verifies_but_never_deletes(self):
+        client, receipt_directory, receipts = self.create_r2_receipt_chain(3)
+        target_bytes = sum(receipt["total_bytes"] for receipt in receipts[-2:])
+        self.state.requests.clear()
+
+        result = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            target_bytes,
+            0,
+            maximum_generation_slot=999,
+            now_unix_secs=10_000,
+        )
+
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(
+            result["selected_generation_ids"], [receipts[0]["generation_id"]]
+        )
+        self.assertEqual(result["retained_payload_bytes_after"], target_bytes)
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+        get_keys = {
+            key
+            for method, key, _headers, _query in self.state.requests
+            if method == "GET"
+        }
+        self.assertEqual(
+            get_keys,
+            {receipts[0]["manifest_key"], receipts[0]["commit_key"]},
+        )
+        self.assertFalse((receipt_directory / uploader.R2_RETENTION_PENDING_NAME).exists())
+        self.assertFalse((receipt_directory / uploader.R2_RETENTION_ANCHOR_NAME).exists())
+
+    def test_r2_control_json_uses_strict_bounded_streaming(self):
+        body = uploader.canonical_json_bytes({"safe": True})
+        sha256 = hashlib.sha256(body).hexdigest()
+        etag = hashlib.md5(body, usedforsecurity=False).hexdigest()
+
+        def response(content_length, chunks, **headers):
+            return FakeStreamingResponse(
+                {
+                    "content-length": content_length,
+                    "etag": f'"{etag}"',
+                    "x-amz-meta-sha256": sha256,
+                    **headers,
+                },
+                chunks,
+            )
+
+        client = mock.Mock()
+        client.provider = "r2"
+        valid_response = response(str(len(body)), [body[:3], body[3:]])
+        client.request.return_value = valid_response
+        value, spec = uploader._r2_get_verified_control_json(
+            client, "safe/v1/manifest.json", sha256, etag, "control object"
+        )
+        self.assertEqual(value, {"safe": True})
+        self.assertEqual(spec["size"], len(body))
+        self.assertTrue(valid_response.closed)
+        self.assertTrue(valid_response.raw.read_started)
+        self.assertTrue(client.request.call_args.kwargs["stream"])
+
+        cases = (
+            (
+                response(None, [body], **{"transfer-encoding": "chunked"}),
+                "missing an exact Content-Length",
+            ),
+            (
+                response(
+                    str(len(body)),
+                    [body, b"unexpected"],
+                    **{"transfer-encoding": "chunked"},
+                ),
+                "must not use chunked Transfer-Encoding",
+            ),
+            (response("not-a-number", [body]), "invalid Content-Length"),
+            (response(str(len(body) - 1), [body]), "exceeds its declared"),
+            (response(str(len(body) + 1), [body]), "does not match Content-Length"),
+        )
+        for invalid_response, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                client.request.return_value = invalid_response
+                with self.assertRaisesRegex(RuntimeError, expected_error):
+                    uploader._r2_get_verified_control_json(
+                        client,
+                        "safe/v1/manifest.json",
+                        sha256,
+                        etag,
+                        "control object",
+                    )
+                self.assertTrue(invalid_response.closed)
+
+        oversized = FakeStreamingResponse(
+            {
+                "content-length": str(
+                    uploader.MAX_RETENTION_CONTROL_OBJECT_BYTES + 1
+                ),
+                "etag": f'"{etag}"',
+                "x-amz-meta-sha256": sha256,
+            },
+            [],
+            fail_on_read=True,
+        )
+        client.request.return_value = oversized
+        with self.assertRaisesRegex(RuntimeError, "unsafe control-object size"):
+            uploader._r2_get_verified_control_json(
+                client, "safe/v1/manifest.json", sha256, etag, "control object"
+            )
+        self.assertFalse(oversized.raw.read_started)
+        self.assertTrue(oversized.closed)
+
+    def test_r2_retention_cli_is_dry_run_without_explicit_apply(self):
+        _client, receipt_directory, receipts = self.create_r2_receipt_chain(3)
+        target_bytes = sum(receipt["total_bytes"] for receipt in receipts[-2:])
+        self.state.requests.clear()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = uploader.main(
+                [
+                    "r2-retention",
+                    str(receipt_directory),
+                    "live-grpc-backup/v1",
+                    "--target-bytes",
+                    str(target_bytes),
+                    "--minimum-age-secs",
+                    "0",
+                    "--maximum-generation-slot",
+                    "999",
+                    "--credentials-file",
+                    str(self.create_r2_credentials()),
+                    "--retries",
+                    "0",
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(output.getvalue())["mode"], "dry-run")
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+
+    def test_r2_retention_cli_requires_maximum_generation_slot(self):
+        _client, receipt_directory, receipts = self.create_r2_receipt_chain(3)
+        target_bytes = sum(receipt["total_bytes"] for receipt in receipts[-2:])
+        self.state.requests.clear()
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                uploader.main(
+                    [
+                        "r2-retention",
+                        str(receipt_directory),
+                        "live-grpc-backup/v1",
+                        "--target-bytes",
+                        str(target_bytes),
+                        "--minimum-age-secs",
+                        "0",
+                        "--credentials-file",
+                        str(self.create_r2_credentials()),
+                        "--retries",
+                        "0",
+                    ]
+                )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+
+    def test_r2_retention_deletes_only_blockzilla_confirmed_fifo_tail(self):
+        with self.assertRaisesRegex(ValueError, "zero authorizes no deletion"):
+            uploader._validate_retention_delete_cutoff(
+                {
+                    "maximum_generation_slot": 0,
+                    "selected_generations": [
+                        {"generation_id": "slot-00000000000000000000"}
+                    ],
+                }
+            )
+
+        client, receipt_directory, receipts = self.create_r2_receipt_chain(5)
+        self.state.requests.clear()
+
+        with self.assertRaisesRegex(ValueError, "maximum generation slot"):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "live-grpc-backup/v1",
+                0,
+                0,
+                maximum_generation_slot=-1,
+                apply=True,
+                now_unix_secs=9_000,
+            )
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+
+        blocked = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            0,
+            0,
+            maximum_generation_slot=0,
+            apply=True,
+            now_unix_secs=10_000,
+        )
+        self.assertEqual(blocked["selected_generation_ids"], [])
+        self.assertEqual(blocked["limited_by"], "blockzilla_sync")
+        self.assertFalse(blocked["target_satisfied"])
+        self.assertEqual(blocked["maximum_generation_slot"], 0)
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+
+        allowed = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            0,
+            0,
+            maximum_generation_slot=2,
+            apply=True,
+            now_unix_secs=20_000,
+        )
+        self.assertEqual(
+            allowed["selected_generation_ids"],
+            [receipts[0]["generation_id"], receipts[1]["generation_id"]],
+        )
+        self.assertEqual(allowed["limited_by"], "blockzilla_sync")
+        self.assertFalse(allowed["target_satisfied"])
+        self.assertEqual(allowed["maximum_generation_slot"], 2)
+        deleted_keys = {
+            key
+            for method, key, _headers, _query in self.state.requests
+            if method == "DELETE"
+        }
+        for receipt in receipts[:2]:
+            self.assertIn(receipt["commit_key"], deleted_keys)
+            self.assertIn(receipt["manifest_key"], deleted_keys)
+        for receipt in receipts[2:]:
+            self.assertNotIn(receipt["commit_key"], deleted_keys)
+            self.assertNotIn(receipt["manifest_key"], deleted_keys)
+
+    def test_r2_retention_apply_deletes_exact_whole_generations_in_fifo_order(self):
+        client, receipt_directory, receipts = self.create_r2_receipt_chain(4)
+        selected = receipts[:2]
+        retained = receipts[2:]
+        target_bytes = sum(receipt["total_bytes"] for receipt in retained)
+        retained_keys = []
+        for receipt in retained:
+            manifest = json.loads(
+                self.state.object_version(receipt["manifest_key"])["data"]
+            )
+            retained_keys.extend(
+                [receipt["commit_key"], receipt["manifest_key"]]
+                + [record["object_key"] for record in manifest["files"]]
+            )
+        expected_delete_order = []
+        for receipt in selected:
+            manifest = json.loads(
+                self.state.object_version(receipt["manifest_key"])["data"]
+            )
+            expected_delete_order.extend(
+                [receipt["commit_key"], receipt["manifest_key"]]
+                + [record["object_key"] for record in manifest["files"]]
+            )
+        self.state.requests.clear()
+
+        result = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            target_bytes,
+            0,
+            maximum_generation_slot=999,
+            apply=True,
+            now_unix_secs=10_000,
+        )
+
+        delete_keys = [
+            key
+            for method, key, _headers, _query in self.state.requests
+            if method == "DELETE"
+        ]
+        self.assertEqual(delete_keys, expected_delete_order)
+        self.assertTrue(
+            all(
+                "if-match" not in headers
+                for method, _key, headers, _query in self.state.requests
+                if method == "DELETE"
+            ),
+            "R2 DeleteObject has no documented conditional If-Match support",
+        )
+        self.assertEqual(result["delete_request_count"], len(expected_delete_order))
+        self.assertEqual(
+            result["delete_concurrency_precondition"],
+            uploader.R2_DELETE_CONCURRENCY_PRECONDITION,
+        )
+        self.assertTrue(
+            all(self.state.object_version(key) is None for key in expected_delete_order)
+        )
+        self.assertTrue(
+            all(self.state.object_version(key) is not None for key in retained_keys)
+        )
+        anchor = json.loads(
+            (receipt_directory / uploader.R2_RETENTION_ANCHOR_NAME).read_text()
+        )
+        self.assertEqual(
+            anchor["first_retained_manifest_sha256"], receipts[2]["manifest_sha256"]
+        )
+        self.assertEqual(
+            anchor["first_retained_predecessor_manifest_sha256"],
+            receipts[1]["manifest_sha256"],
+        )
+        self.assertEqual(
+            anchor["pruned_newest_manifest_sha256"], receipts[1]["manifest_sha256"]
+        )
+        self.assertEqual(anchor["pruned_generation_count"], 2)
+        self.assertEqual(len(list(receipt_directory.glob(".r2-prune-*.json"))), 1)
+        self.assertFalse((receipt_directory / uploader.R2_RETENTION_PENDING_NAME).exists())
+        delete_count = len(delete_keys)
+        repeated = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            target_bytes,
+            0,
+            maximum_generation_slot=999,
+            now_unix_secs=20_000,
+        )
+        self.assertEqual(repeated["selected_generation_ids"], [])
+        self.assertEqual(
+            sum(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            ),
+            delete_count,
+        )
+
+    def test_r2_retention_rejects_manifest_key_outside_its_generation(self):
+        client, receipt_directory, receipts = self.create_r2_receipt_chain(3)
+
+        def mutate(index, manifest):
+            if index == 0:
+                manifest["files"][0]["object_key"] = (
+                    "live-grpc-backup/v1/another-generation/files/victim"
+                )
+
+        receipts = self.rewrite_r2_receipt_chain(
+            receipt_directory, receipts, mutate
+        )
+        target_bytes = sum(receipt["total_bytes"] for receipt in receipts[-2:])
+        self.state.requests.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "outside its generation prefix"):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "live-grpc-backup/v1",
+                target_bytes,
+                0,
+                maximum_generation_slot=999,
+                apply=True,
+                now_unix_secs=10_000,
+            )
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+        self.assertFalse((receipt_directory / uploader.R2_RETENTION_PENDING_NAME).exists())
+
+    def test_r2_retention_requires_an_exclusive_immutable_prefix(self):
+        client, receipt_directory, receipts = self.create_r2_receipt_chain(3)
+        selected_manifest = json.loads(
+            self.state.object_version(receipts[0]["manifest_key"])["data"]
+        )
+        payload_key = selected_manifest["files"][0]["object_key"]
+        replacement = b"concurrent replacement"
+        replaced = self.state.object_version(payload_key)
+        replaced.update(
+            data=replacement,
+            etag=hashlib.md5(replacement, usedforsecurity=False).hexdigest(),
+            sha256=hashlib.sha256(replacement).hexdigest(),
+        )
+        target_bytes = sum(receipt["total_bytes"] for receipt in receipts[-2:])
+        self.state.requests.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "immutable R2 object collision"):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "live-grpc-backup/v1",
+                target_bytes,
+                0,
+                maximum_generation_slot=999,
+                apply=True,
+                now_unix_secs=10_000,
+            )
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            )
+        )
+        self.assertIsNotNone(self.state.object_version(payload_key))
+        self.assertFalse((receipt_directory / uploader.R2_RETENTION_PENDING_NAME).exists())
+
+    def test_r2_retention_enforces_minimum_count_and_age(self):
+        client, receipt_directory, receipts = self.create_r2_receipt_chain(
+            5, verified_times=[100, 200, 950, 960, 970]
+        )
+        age_limited = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            0,
+            500,
+            maximum_generation_slot=999,
+            now_unix_secs=1_000,
+        )
+        self.assertEqual(
+            age_limited["selected_generation_ids"],
+            [receipts[0]["generation_id"], receipts[1]["generation_id"]],
+        )
+        self.assertEqual(age_limited["limited_by"], "minimum_age")
+        self.assertEqual(age_limited["retained_generation_count_after"], 3)
+
+        count_limited = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            0,
+            0,
+            minimum_retained_generations=4,
+            maximum_generation_slot=999,
+            now_unix_secs=1_000,
+        )
+        self.assertEqual(
+            count_limited["selected_generation_ids"],
+            [receipts[0]["generation_id"]],
+        )
+        self.assertEqual(
+            count_limited["limited_by"], "minimum_retained_generations"
+        )
+        self.assertEqual(count_limited["retained_generation_count_after"], 4)
+        with self.assertRaisesRegex(ValueError, "minimum retained generations"):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "live-grpc-backup/v1",
+                0,
+                0,
+                minimum_retained_generations=1,
+                maximum_generation_slot=999,
+                now_unix_secs=1_000,
+            )
+
+    def test_r2_retention_crash_retry_is_idempotent_and_fail_closed(self):
+        client, receipt_directory, receipts = self.create_r2_receipt_chain(4)
+        selected = receipts[:2]
+        target_bytes = sum(receipt["total_bytes"] for receipt in receipts[-2:])
+        failing_key = selected[0]["manifest_key"]
+        self.state.delete_fail_once[failing_key] = 500
+        self.state.requests.clear()
+
+        with self.assertRaises(uploader.S3APIError):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "live-grpc-backup/v1",
+                target_bytes,
+                0,
+                maximum_generation_slot=2,
+                apply=True,
+                now_unix_secs=10_000,
+            )
+        self.assertTrue((receipt_directory / uploader.R2_RETENTION_PENDING_NAME).is_file())
+        self.assertFalse((receipt_directory / uploader.R2_RETENTION_ANCHOR_NAME).exists())
+
+        delete_count_before_mismatch = sum(
+            method == "DELETE"
+            for method, _key, _headers, _query in self.state.requests
+        )
+        with self.assertRaisesRegex(ValueError, "does not match this invocation"):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "live-grpc-backup/v1",
+                target_bytes,
+                0,
+                maximum_generation_slot=3,
+                apply=True,
+                now_unix_secs=15_000,
+            )
+        self.assertEqual(
+            sum(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
+            ),
+            delete_count_before_mismatch,
+        )
+
+        result = uploader.r2_retention(
+            client,
+            receipt_directory,
+            "live-grpc-backup/v1",
+            target_bytes,
+            0,
+            maximum_generation_slot=2,
+            apply=True,
+            now_unix_secs=20_000,
+        )
+        delete_keys = [
+            key
+            for method, key, _headers, _query in self.state.requests
+            if method == "DELETE"
+        ]
+        for receipt in selected:
+            self.assertEqual(delete_keys.count(receipt["commit_key"]), 1)
+        self.assertEqual(delete_keys.count(failing_key), 2)
+        self.assertGreaterEqual(result["already_absent_object_count"], 1)
+        self.assertFalse((receipt_directory / uploader.R2_RETENTION_PENDING_NAME).exists())
+        self.assertTrue((receipt_directory / uploader.R2_RETENTION_ANCHOR_NAME).is_file())
+
+    def test_r2_retention_rejects_wrong_provider_and_unsafe_prefix(self):
+        client, receipt_directory, _receipts = self.create_r2_receipt_chain(3)
+        self.state.requests.clear()
+        with self.assertRaisesRegex(ValueError, "provider=r2"):
+            uploader.r2_retention(
+                self.client,
+                receipt_directory,
+                "live-grpc-backup/v1",
+                0,
+                0,
+                maximum_generation_slot=999,
+                now_unix_secs=10_000,
+            )
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "live-grpc-backup",
+                0,
+                0,
+                maximum_generation_slot=999,
+                now_unix_secs=10_000,
+            )
+        with self.assertRaisesRegex(ValueError, "outside the retention prefix"):
+            uploader.r2_retention(
+                client,
+                receipt_directory,
+                "other-dedicated/v1",
+                0,
+                0,
+                maximum_generation_slot=999,
+                apply=True,
+                now_unix_secs=10_000,
+            )
+        self.assertFalse(
+            any(
+                method == "DELETE"
+                for method, _key, _headers, _query in self.state.requests
             )
         )
 
