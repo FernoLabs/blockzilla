@@ -295,8 +295,8 @@ of the source identity and handoff journal.
 
 A stopped spool proves only a stable committed snapshot, not a complete epoch.
 The command therefore creates neither `READY-TO-PACKAGE` nor `FINALIZE-NEXT.md`.
-Hivezilla must keep the materialized slice repair-gated until a separate epoch
-boundary, slot-coverage, and missing-field audit grants approval. If conversion
+The orchestration layer must keep the materialized slice repair-gated until a
+separate epoch boundary, slot-coverage, and missing-field audit grants approval. If conversion
 fails after its fresh staging directory was created, that directory is retained
 for inspection; remove only that deterministic staging sibling after verifying
 its ownership before retrying. Never remove the source WAL as retry cleanup.

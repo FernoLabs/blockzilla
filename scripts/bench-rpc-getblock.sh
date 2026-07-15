@@ -8,7 +8,7 @@ Usage:
 
 Examples:
   scripts/bench-rpc-getblock.sh 378967388
-  scripts/bench-rpc-getblock.sh https://worker.example.com/ 378967388
+  scripts/bench-rpc-getblock.sh https://your-worker.example 378967388
   ROUNDS=5 TRANSACTION_DETAILS=none scripts/bench-rpc-getblock.sh https://api.mainnet-beta.solana.com 378967388
 
 Environment:
@@ -20,14 +20,19 @@ Environment:
   MAX_SUPPORTED_TX_VERSION       Default: 0
   REQUEST_DELAY                  Seconds to sleep after each request. Default: 0
   CURL_EXTRA                     Extra curl flags, e.g. '--compressed'
+  BLOCKZILLA_WORKER_URL          Default endpoint when no endpoint argument is given
 EOF
   exit 0
 fi
 
-endpoint="https://worker.example.com/"
+endpoint="${BLOCKZILLA_WORKER_URL:-}"
 if [[ "${1:-}" =~ ^https?:// ]]; then
   endpoint="$1"
   shift
+fi
+if [[ -z "$endpoint" ]]; then
+  echo "endpoint argument or BLOCKZILLA_WORKER_URL is required" >&2
+  exit 2
 fi
 
 slots=("$@")

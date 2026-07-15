@@ -45,7 +45,7 @@ enum Command {
     /// Benchmark direct getBlock archive reads from local files.
     LocalBench {
         /// Archive root containing epoch-N directories.
-        #[arg(long, default_value = "/home/blockzilla/dev/blockzilla-v2")]
+        #[arg(long, default_value = "blockzilla-v2")]
         archive_root: PathBuf,
         /// Epochs to sample, comma/space separated. Ranges like 200-205 are accepted.
         #[arg(long, default_value = "200")]
@@ -110,7 +110,9 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     match Cli::parse().command {
         Command::Info => {
-            println!("https://worker.example.com");
+            let url = std::env::var("BLOCKZILLA_WORKER_URL")
+                .context("BLOCKZILLA_WORKER_URL must be set")?;
+            println!("{url}");
         }
         Command::LocalBench {
             archive_root,

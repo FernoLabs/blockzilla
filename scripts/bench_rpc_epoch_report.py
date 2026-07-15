@@ -22,7 +22,7 @@ from pathlib import Path
 SLOTS_PER_EPOCH = 432_000
 RAW_STRIDE = 12
 V2_STRIDE = 44
-DEFAULT_ENDPOINT = "https://worker.example.com/"
+DEFAULT_ENDPOINT = os.environ.get("BLOCKZILLA_WORKER_URL")
 PROFILE_FIELDS = [
     "profile_total_ms",
     "profile_slot_index_ms",
@@ -58,10 +58,12 @@ def parse_args():
             "Default: available."
         ),
     )
-    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    parser.add_argument(
+        "--endpoint", default=DEFAULT_ENDPOINT, required=DEFAULT_ENDPOINT is None
+    )
     parser.add_argument(
         "--slot-index-dir",
-        default=os.environ.get("SLOT_INDEX_DIR", "/srv/blockzilla/blockzilla/slot-index"),
+        default=os.environ.get("SLOT_INDEX_DIR", "slot-index"),
     )
     parser.add_argument("--plan-file", help="Read epoch/slot plan TSV instead of scanning indexes.")
     parser.add_argument("--samples-per-epoch", type=int, default=100)

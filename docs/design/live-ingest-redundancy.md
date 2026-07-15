@@ -4,9 +4,9 @@ Date: 2026-07-13
 
 ## Decision
 
-Keep ingestion in `blockzilla-live-producer` as a separately deployable durable service. Hivezilla
-observes it, schedules repair/finalization, and exposes status through its API, but it must not own
-the long-lived gRPC/shred sockets.
+Keep ingestion in `blockzilla-live-producer` as a separately deployable durable service. External
+orchestration may observe it and schedule repair or finalization, but it must not own the long-lived
+gRPC/shred sockets.
 
 All sources feed one raw durable spool, one deterministic dedup/merge stage, and one canonical
 archive writer:
@@ -204,6 +204,5 @@ The first code slice now provides:
 Still required before production cutover: source socket tasks, provider cursor persistence, the
 disk-backed dedup implementation, spool quota/free-space enforcement, concrete mTLS/Ed25519 network
 transport, sealed-segment ACK manifests/tombstones/GC, canonical archive-writer replay, and the full
-power-loss fault matrix. The running NAS capture is therefore not replaced by this slice. The
-canonical remaining-work checklist is tracked in
-[`TODO.md`](../TODO.md#redundant-live-ingest).
+power-loss fault matrix. The existing production capture is therefore not replaced by this slice.
+Public stabilization work is tracked in the project [roadmap](../../ROADMAP.md).

@@ -6,7 +6,7 @@ cd "$repo_root"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out_root="${OUT_DIR:-target/rpc-bench/correctness-matrix-${stamp}}"
-slot_index_dir="${SLOT_INDEX_DIR:-/srv/blockzilla/blockzilla/slot-index}"
+slot_index_dir="${SLOT_INDEX_DIR:-slot-index}"
 epochs="${EPOCHS:-available}"
 slots="${SLOTS:-}"
 samples_per_epoch="${SAMPLES_PER_EPOCH:-100}"
@@ -14,12 +14,16 @@ slot_concurrency="${SLOT_CONCURRENCY:-2}"
 primary="${PRIMARY:-helius}"
 max_diffs_per_call="${MAX_DIFFS_PER_CALL:-256}"
 
-blockzilla_url="${BLOCKZILLA_WORKER_URL:-https://worker.example.com}"
+blockzilla_url="${BLOCKZILLA_WORKER_URL:-}"
 of_worker_url="${OF_WORKER_URL:-}"
 helius_url="${HELIUS_RPC_URL:-}"
 triton_url="${TRITON_RPC_URL:-}"
 mainnet_url="${MAINNET_BETA_RPC_URL:-https://api.mainnet-beta.solana.com}"
 
+if [[ -z "$blockzilla_url" ]]; then
+  echo "BLOCKZILLA_WORKER_URL must be set" >&2
+  exit 2
+fi
 if [[ -z "$helius_url" ]]; then
   echo "HELIUS_RPC_URL must be set" >&2
   exit 2

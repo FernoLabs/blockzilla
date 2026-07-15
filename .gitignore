@@ -39,6 +39,14 @@ solana-prog/
 
 # Generated outputs
 /tmp/
+/dist/
+/.codex-tmp/
+/debug/
+/reports/
+/deploy/.integration-*/
+/deploy/.release-*/
+**/node_modules/
+**/.svelte-kit/
 /.wrangler/
 **/.wrangler/
 /flamegraph.svg

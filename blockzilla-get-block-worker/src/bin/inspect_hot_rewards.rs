@@ -16,7 +16,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let archive_root = PathBuf::from(
         args.next()
-            .unwrap_or_else(|| "/home/blockzilla/dev/blockzilla-v2".to_string()),
+            .context("usage: inspect-hot-rewards ARCHIVE_ROOT slots_csv")?,
     );
     let slots = args
         .next()

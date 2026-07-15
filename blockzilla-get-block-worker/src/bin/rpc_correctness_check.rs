@@ -31,7 +31,7 @@ struct Cli {
     primary: String,
 
     /// Directory containing epoch-N-slot-ranges-v2.raw files.
-    #[arg(long, default_value = "/srv/blockzilla/blockzilla/slot-index")]
+    #[arg(long, default_value = "slot-index")]
     slot_index_dir: PathBuf,
 
     /// Epoch specs: 10, 10-20, 10,50,100, or available.
