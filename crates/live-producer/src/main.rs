@@ -1214,6 +1214,10 @@ async fn pull_grpc_raw(args: PullGrpcRawArgs) -> Result<()> {
                 continue;
             }
             Err(error) => {
+                tracing::error!(
+                    error_kind = ?error.kind(),
+                    "durable raw pull client connection failed closed"
+                );
                 return Err(anyhow::Error::new(error)
                     .context("durable raw pull client failed closed during connection"));
             }
@@ -1267,6 +1271,10 @@ async fn pull_grpc_raw(args: PullGrpcRawArgs) -> Result<()> {
                     continue 'client;
                 }
                 Err(error) => {
+                    tracing::error!(
+                        error_kind = ?error.kind(),
+                        "durable raw pull batch failed closed"
+                    );
                     return Err(
                         anyhow::Error::new(error).context("durable raw pull client failed closed")
                     );
