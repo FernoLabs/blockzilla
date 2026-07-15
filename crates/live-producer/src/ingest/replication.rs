@@ -160,7 +160,13 @@ fn validate_replication_offer(
 }
 
 fn validate_bounded_string(value: &str) -> Result<(), CumulativeAckValidationError> {
-    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+    let mut characters = value.chars();
+    let valid_first = characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphanumeric());
+    let valid_rest = characters
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'));
+    if value.len() > 64 || !valid_first || !valid_rest {
         Err(CumulativeAckValidationError::InvalidField)
     } else {
         Ok(())
@@ -309,7 +315,7 @@ fn validate_signable_cumulative_ack_fields(
     validate_stream_id(&ack.stream)?;
     validate_bounded_string(&ack.primary_id)?;
     validate_bounded_string(&ack.signing_key_id)?;
-    if ack.primary_term == 0 {
+    if ack.primary_term == 0 || ack.durable_lsn == 0 {
         return Err(CumulativeAckValidationError::InvalidField);
     }
     Ok(())
@@ -335,6 +341,7 @@ pub enum CumulativeAckValidationError {
     WrongSequence,
     WrongContent,
     WrongChain,
+    NonDurableDisposition,
     EmptySigningKeyId,
     EmptySignature,
     InvalidSignatureLength,
@@ -391,6 +398,9 @@ pub(crate) fn verify_cumulative_ack<V: CumulativeAckSignatureVerifier>(
     }
     if ack.rolling_chain_digest != expected.rolling_chain_digest {
         return Err(CumulativeAckValidationError::WrongChain);
+    }
+    if !ack.disposition.authorizes_replica_gc() {
+        return Err(CumulativeAckValidationError::NonDurableDisposition);
     }
     if ack.signing_key_id.trim().is_empty() {
         return Err(CumulativeAckValidationError::EmptySigningKeyId);
@@ -1052,6 +1062,10 @@ impl CumulativeAckWalState {
         );
         validate_signable_cumulative_ack_fields(ack)
             .map_err(|_| anyhow::anyhow!("cumulative ACK contains an invalid signable field"))?;
+        ensure!(
+            ack.disposition.authorizes_replica_gc(),
+            "cumulative ACK disposition does not prove durable storage"
+        );
         ensure!(
             ack.signature.len() == ED25519_SIGNATURE_BYTES,
             "cumulative ACK signature length is {}, expected {}",
@@ -1872,6 +1886,18 @@ mod tests {
         assert_eq!(
             verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
             Err(CumulativeAckValidationError::WrongChain)
+        );
+        let mut wrong = ack.clone();
+        wrong.durable_lsn = 0;
+        assert_eq!(
+            verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
+            Err(CumulativeAckValidationError::InvalidField)
+        );
+        let mut wrong = ack.clone();
+        wrong.disposition = ReceiptDisposition::Rejected;
+        assert_eq!(
+            verify_cumulative_ack(wrong, expected(), &AcceptCumulativeSignature),
+            Err(CumulativeAckValidationError::NonDurableDisposition)
         );
         let mut wrong = ack;
         wrong.primary_term = 6;

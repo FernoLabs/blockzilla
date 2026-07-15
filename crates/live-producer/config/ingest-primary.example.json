@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cluster_id": "solana-mainnet",
-  "max_total_queue_bytes": 268435456,
+  "max_total_queue_bytes": 536870912,
   "max_total_queue_events": 16,
   "role": {
     "mode": "primary",
@@ -12,11 +12,22 @@
       "server_private_key_file": "/run/secrets/blockzilla-primary.key",
       "client_ca_file": "/etc/blockzilla/tls/replica-ca.crt",
       "allowed_nodes_file": "/etc/blockzilla/replication/allowed-nodes.json",
+      "primary_term_file": "/data/blockzilla-ingest-primary/primary-term",
       "receipt_signing_key_id": "receipt-2026-q3",
       "receipt_signing_key": {
         "provider": "file",
         "path": "/run/secrets/blockzilla-receipt-2026-q3.key"
-      }
+      },
+      "max_wire_request_bytes": 20971520,
+      "max_batch_events": 4,
+      "max_batch_compressed_bytes": 33554432,
+      "max_batch_uncompressed_bytes": 134217728,
+      "max_compressed_event_bytes": 16777216,
+      "max_uncompressed_event_bytes": 67108864,
+      "max_concurrent_requests": 2,
+      "max_open_streams": 64,
+      "request_idle_timeout_ms": 15000,
+      "request_total_timeout_ms": 60000
     }
   },
   "spool": {

@@ -38,7 +38,24 @@ fn shipped_primary_and_replica_examples_validate() {
             .unwrap();
 
     assert_eq!(primary.redacted_summary().role, "primary");
+    assert_eq!(
+        primary.redacted_summary().schema_version,
+        ingest::INGEST_CONFIG_SCHEMA_VERSION
+    );
     assert_eq!(primary.redacted_summary().enabled_source_count, 2);
+    assert_eq!(
+        primary
+            .redacted_summary()
+            .replica_listener
+            .unwrap()
+            .max_concurrent_requests,
+        2
+    );
     assert_eq!(replica.redacted_summary().role, "replica");
+    assert_eq!(
+        replica.redacted_summary().schema_version,
+        ingest::INGEST_CONFIG_SCHEMA_VERSION
+    );
+    assert!(replica.redacted_summary().replica_listener.is_none());
     assert_eq!(replica.redacted_summary().enabled_source_count, 1);
 }

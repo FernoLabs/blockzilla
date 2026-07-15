@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cluster_id": "solana-mainnet",
   "max_total_queue_bytes": 134217728,
   "max_total_queue_events": 4,

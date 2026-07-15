@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package blockzilla.ingest.replication.v1;
+
+// Wire contract only. Authentication, transport policy, request limits, and durable receiver
+// implementation are intentionally owned by the runtime layer.
+service RawReplication {
+  // Durably offer one non-empty batch from a single replication stream. Each protobuf message
+  // carries one record so the receiver can enforce count and cumulative-byte limits while
+  // decoding instead of allocating an attacker-controlled repeated field up front.
+  rpc PushBatch(stream PushBatchRequest) returns (CumulativePrimaryAck);
+
+  // Poll the latest signed durable prefix without submitting data.
+  rpc GetAck(GetAckRequest) returns (GetAckResponse);
+}
+
+message StreamId {
+  string cluster_id = 1;
+  string origin_node_id = 2;
+  string source_id = 3;
+  bytes journal_id = 4; // Exactly 16 bytes.
+}
+
+message PushBatchRequest {
+  StreamId stream = 1;
+  RawReplicationRecord record = 2;
+}
+
+message GetAckRequest {
+  StreamId stream = 1;
+}
+
+message GetAckResponse {
+  // Absent when the primary has no durable contiguous prefix for this stream yet.
+  optional CumulativePrimaryAck ack = 1;
+}
+
+// Carries the exact independently-compressed spool payload. A receiver must not recompress it.
+message RawReplicationRecord {
+  ReplicationOffer offer = 1;
+  bytes compressed_payload = 2;
+  uint64 uncompressed_len = 3;
+  bytes raw_protobuf_sha256 = 4; // SHA-256 of the uncompressed protobuf; exactly 32 bytes.
+}
+
+message ReplicationOffer {
+  uint32 protocol_version = 1;
+  StreamId stream = 2;
+  uint64 sequence = 3;
+  LogicalKey logical_key = 4;
+  bytes content_digest = 5; // Domain-separated digest of compressed_payload; exactly 32 bytes.
+  uint64 payload_len = 6; // Exact compressed_payload length.
+  uint32 payload_format_version = 7;
+  CommitmentEvidence commitment = 8;
+}
+
+message LogicalKey {
+  oneof kind {
+    BlockKey block = 1;
+    EntryKey entry = 2;
+    ShredKey shred = 3;
+  }
+}
+
+message BlockKey {
+  uint64 slot = 1;
+  bytes blockhash = 2; // Exactly 32 bytes.
+}
+
+message EntryKey {
+  uint64 slot = 1;
+  uint64 entry_index = 2;
+  bytes entry_hash = 3; // Exactly 32 bytes.
+}
+
+message ShredKey {
+  uint64 slot = 1;
+  ShredKind kind = 2;
+  uint32 shred_index = 3;
+  optional uint32 fec_set_index = 4;
+}
+
+enum ShredKind {
+  SHRED_KIND_UNSPECIFIED = 0;
+  SHRED_KIND_DATA = 1;
+  SHRED_KIND_CODING = 2;
+}
+
+enum CommitmentEvidence {
+  COMMITMENT_EVIDENCE_UNSPECIFIED = 0;
+  COMMITMENT_EVIDENCE_UNKNOWN = 1;
+  COMMITMENT_EVIDENCE_PROCESSED = 2;
+  COMMITMENT_EVIDENCE_CONFIRMED = 3;
+  COMMITMENT_EVIDENCE_FINALIZED = 4;
+}
+
+message CumulativePrimaryAck {
+  uint32 protocol_version = 1;
+  StreamId stream = 2;
+  string primary_id = 3;
+  uint64 primary_term = 4;
+  uint64 through_sequence = 5;
+  bytes through_content_digest = 6; // Exactly 32 bytes.
+  bytes rolling_chain_digest = 7; // Exactly 32 bytes.
+  ReceiptDisposition disposition = 8;
+  uint64 durable_lsn = 9;
+  string signing_key_id = 10;
+  bytes signature = 11; // Ed25519 signature; exactly 64 bytes.
+}
+
+enum ReceiptDisposition {
+  RECEIPT_DISPOSITION_UNSPECIFIED = 0;
+  RECEIPT_DISPOSITION_DURABLY_STORED = 1;
+  RECEIPT_DISPOSITION_ALREADY_COMMITTED = 2;
+  RECEIPT_DISPOSITION_DURABLY_STORED_CONFLICT = 3;
+  RECEIPT_DISPOSITION_REJECTED = 4;
+}
