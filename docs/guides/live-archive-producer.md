@@ -1,17 +1,30 @@
 # Live Archive Producer
 
-Status: design draft
+Status: historical design note for the prototype now named `hivezilla`.
+
+> [!IMPORTANT]
+> This document preserves earlier implementation reasoning. It is not the
+> target service-ownership specification. Hivezilla is a family of separate
+> Yellowstone gRPC and shred implementations, each with one or more independent
+> source instances and a per-instance identity, WAL/cursor, and failure
+> boundary. Those instances converge only at Blockzilla, which alone assigns
+> canonical archive state. See the
+> [system architecture](../architecture/system-overview.md).
 
 Blockzilla should be able to build its archive live from feeds we control or
 subscribe to. Historical CAR data remains important, but the target production
 path is not `CAR -> Blockzilla`; it is:
 
 ```text
-live feed -> normalized block intake -> Blockzilla archive
-                          ^
-                          |
-                    CAR repair lane
+Yellowstone gRPC -> Hivezilla gRPC instance(s) ---+
+shred streams    -> Hivezilla shred instance(s) --+-> Blockzilla -> Archive V2
+Old Faithful CAR ---------------------------------+   build / repair
 ```
+
+The sections below use “producer” for the historical combined prototype. In the
+target architecture, Hivezilla owns source capture, native evidence WALs, and
+verified candidate production; Blockzilla owns cross-source repair, epoch work,
+and canonical archive writes.
 
 The CAR lane is a backup and repair source, especially for fields that are not
 available from regular RPC responses, such as full PoH entry data or shred
@@ -207,7 +220,7 @@ Live gRPC blocks can be written immediately with an empty block-header
 `shredding` field and `MissingShredding` in the journal. A later CAR repair job
 or raw-shred-derived repair job can append the sidecar record independently.
 
-## Producer Pipeline
+## Historical producer pipeline (superseded)
 
 ```text
 Source adapter
@@ -260,10 +273,10 @@ This makes epoch close a registry lookup plus re-encode/compress pass instead of
 a full transaction/metadata/log decode pass. The desired bottleneck becomes
 registry lookup, zstd, and disk I/O.
 
-## First Implementation Slice
+## Historical first implementation slice (superseded)
 
 1. Define the normalized live block intake structs and completeness states.
-2. Keep live production in a standalone `blockzilla-live-producer` app crate so
+2. Keep live production in a standalone producer app crate so
    it can be deployed independently from the historical CAR optimizer.
 3. Add a CAR-backed adapter that produces the same structs. This becomes the
    golden test source.

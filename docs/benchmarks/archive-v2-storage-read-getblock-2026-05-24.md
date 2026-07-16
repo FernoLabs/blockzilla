@@ -1,4 +1,10 @@
-# Blockzilla lean report - current snapshot - 2026-05-24
+# Archive V2 storage and read snapshot — 2026-05-24
+
+Status: historical measurement, retained as development evidence. It is not a
+current performance promise and cannot be reproduced byte-for-byte because the
+original run used uncommitted changes. The base revision, corpus, workload, and
+hardware class are recorded so the results remain useful as directional
+context; new claims should come from a clean, pinned revision.
 
 ## Summary
 
@@ -111,49 +117,12 @@ All getBlock tables use the same 132-slot test set: epochs `10,100,200,300,400,5
 | blockBin, no materialization | 132/0 | 217 | 149 | 467 | 0.79 MiB |
 | blockBin + materialization | 132/0 | 389 | 357 | 620 | 1.58 MiB |
 
-## Cloudflare Cost
+## Cost scope
 
-Pricing assumptions checked on Cloudflare docs: Workers Standard $0.30/M extra requests and $0.02/M extra CPU-ms; R2 Standard $0.015/GB-month and $0.36/M Class B reads; R2 egress free.
-
-Variable Worker cost per 1M successful requests, using measured wall time as a conservative CPU upper bound:
-
-| Method | full | signatures | accounts | full+rewards | blockBin no mat. | blockBin + mat. |
-|---|---:|---:|---:|---:|---:|---:|
-| Blockzilla worker | ~$9.96 | ~$4.86 | ~$5.78 | ~$20.90 | ~$4.65 | ~$8.07 |
-| OF worker | ~$14.98 | ~$10.92 | ~$11.26 | ~$90.54* | n/a | n/a |
-| Triton / Helius | external provider cost | external provider cost | external provider cost | external provider cost | n/a | n/a |
-
-`blockBin` R2 read variable cost, added to Worker cost when pricing that route directly:
-
-| Binary route | R2 reads/request | Worker + R2 reads per 1M |
-|---|---:|---:|
-| blockBin, no materialization | 2 | ~$5.37 |
-| blockBin + materialization | 3 | ~$9.15 |
-
-Storage and R2-read cost per month. Cells show fixed storage plus the Class B read variable cost for the request volume; Worker CPU/request cost is the separate variable table above.
-
-| Storage layout | Fixed storage/mo | 10M req/mo | 100M req/mo | 1B req/mo |
-|---|---:|---:|---:|---:|
-| BZ blocks | ~$687 | ~$687 + $4 = $691 | ~$687 + $36 = $723 | ~$687 + $360 = $1,047 |
-| BZ + epoch mat. | ~$1,955 | ~$1,955 + $4 = $1,958 | ~$1,955 + $36 = $1,991 | ~$1,955 + $360 = $2,315 |
-| BZ + block mat. | ~$3,155 | ~$3,155 + $4 = $3,158 | ~$3,155 + $36 = $3,191 | ~$3,155 + $360 = $3,515 |
-| CAR.zst | ~$2,843 | ~$2,843 + $4 = $2,846 | ~$2,843 + $36 = $2,879 | ~$2,843 + $360 = $3,203 |
-| CAR+OF index | ~$7,445 | ~$7,445 + $4 = $7,448 | ~$7,445 + $36 = $7,481 | ~$7,445 + $360 = $7,805 |
-
-Live gRPC stream ingest fixed cost, using Triton PAYG streaming bandwidth pricing as the reference:
-
-| Stream source | Assumption | Fixed cost/mo |
-|---|---:|---:|
-| Triton gRPC full-block stream | epoch 920 CAR proxy: 866 GB/epoch * ~15 epochs/mo * $0.08/GB | ~$1,039 |
-
-Recommended billing floor, assuming `BZ + epoch mat.`, the highest measured Blockzilla JSON request class (`full+rewards`, ~$20.90/M variable), R2 Class B reads, the Triton-priced gRPC full-block stream fixed cost, and a 20% safety margin:
-
-| Monthly volume | Cost to cover | Recommended bill floor |
-|---:|---:|---:|
-| 1M req/mo | ~$3,015/M | **~$3,618/M** = ~$0.003618/request |
-| 10M req/mo | ~$321/M | **~$385/M** = ~$0.000385/request |
-| 100M req/mo | ~$51/M | **~$61/M** = ~$0.000061/request |
-| 1B req/mo | ~$24/M | **~$29/M** = ~$0.000029/request |
+The original report also mixed these technical measurements with dated
+provider pricing and commercial billing recommendations. Those calculations
+are intentionally excluded from the public reference repository: prices change
+independently of the code, and product billing is not an archive-format result.
 
 ## Annex: RPC Oddities And Bugs
 
@@ -187,21 +156,17 @@ The important lesson is that byte-for-byte RPC parity is not enough by itself. P
 
 ## Annex: Test Machine
 
-Scanner, Jetstreamer, CAR/CAR.zst reader, and local Blockzilla build/rebuild measurements were run on the same archive host. getBlock and blockBin HTTP latency rows compare deployed workers/providers, so they include provider/network behavior rather than only this machine's local read speed.
+Scanner, Jetstreamer, CAR/CAR.zst reader, and local Blockzilla build/rebuild measurements were run on the same archive host. getBlock and blockBin HTTP latency rows compare deployed workers/providers, so they include provider/network behavior rather than only this machine's local read speed. The public record keeps the hardware class but omits the operator hostname and exact storage inventory.
 
 | Component | Value |
 |---|---|
-| Host | Blockzilla-00 |
 | OS / kernel | Debian GNU/Linux 12, Linux 6.12.30+ |
 | CPU | Intel Core i5-1235U, 12 logical CPUs, 10 cores, 1 socket |
-| Memory | 7.5 GiB RAM, 9.7 GiB swap |
-| Primary archive storage | 8 x 28 TB Seagate Exos HDDs, RAID0/LVM, 203.6 TB usable |
-| Cache tier | 2 x 4 TB Crucial P310 NVMe SSDs, RAID1/LVM cache |
+| Memory | 7.5 GiB RAM plus swap |
+| Primary archive storage | Multi-disk HDD archive volume |
+| Cache tier | Mirrored NVMe cache |
 | Network | 10 Gbit/s Ethernet, full duplex |
 
 ## Sources
 
 - Old Faithful CAR report: https://github.com/rpcpool/yellowstone-faithful/blob/gha-report/docs/CAR-REPORT.md
-- Triton One pricing: https://triton.one/pricing
-- Cloudflare Workers pricing: https://developers.cloudflare.com/workers/platform/pricing/
-- Cloudflare R2 pricing: https://developers.cloudflare.com/r2/pricing/

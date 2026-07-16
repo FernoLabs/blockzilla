@@ -1,402 +1,396 @@
-# Archive V2 Hot Block Format
+# Archive V2 hot-block format
 
-Status: design proposal
+Status: **implemented format reference**.
 
-This proposal summarizes the current Archive V2 format optimization direction. The main read unit remains a whole block. Runtime metadata stays colocated with the block for now, but the binary layout should make metadata cheap to skip after decompression. Cold, high-entropy, or audit-only data should move out of the hot block blob.
+This document describes the hot-block Archive V2 files written and read by
+current `main`. The Rust schemas and constants in
+[`crates/blockzilla-format/src/v2/mod.rs`](../../crates/blockzilla-format/src/v2/mod.rs)
+and
+[`crates/blockzilla-format/src/v2/archive.rs`](../../crates/blockzilla-format/src/v2/archive.rs)
+are the executable source of truth.
 
-## Goals
+This reference covers the independently addressable hot-block family used by
+Blockzilla and Edgezilla. It does not describe the older monolithic semantic
+Archive V2 stream, CAR byte-for-byte reconstruction, or a future publication
+manifest.
 
-- Keep one independently compressed zstd frame per block.
-- Optimize the hot path for full-block reads and block scans.
-- Let stream and zero-copy readers parse block headers and transaction messages without allocating metadata structures.
-- Remove transaction signatures from the compressed block payload.
-- Keep enough sidecar data to reconstruct full transactions, serve signature lookups, and validate/replay when needed.
-- Keep block blobs simple: block payloads should not be wrapped in a larger archive-record enum.
+## Versions and encoding
 
-## Non-Goals
+| Contract | Current value |
+| --- | --- |
+| Hot-block payload version | `2` |
+| Block-access payload version | `2` |
+| Hot-block index version | `1` |
+| Block-access index version | `1` |
+| Archive integer encoding | little-endian wincode with unsigned LEB128; signed integers use zigzag LEB128 |
+| Hot transaction row size | 28 bytes |
+| Maximum block-access payload | 64 MiB |
 
-- Do not physically split all runtime metadata into a separate `runtime.bin` in the first iteration.
-- Do not optimize for random byte seeking inside a compressed block frame.
-- Do not store CAR reconstruction or build diagnostics in the hot block blob.
-- Do not make the block file self-indexing with embedded index records.
+Wincode schemas encode enums, sequences, and optional fields according to the
+workspace-resolved `wincode` implementation. Consumers should use
+`blockzilla-format::wincode_leb128_config()` rather than reproduce the schema by
+hand.
 
-## File Layout
-
-The target epoch directory is:
+The metadata, PoH, and shredding streams are framed as:
 
 ```text
-epoch-N/
-  registry.bin
-  registry_counts.bin
-  blockhash_registry.bin
-  vote_hash_registry.bin
-  poh.wincode
-
-  archive-v2-blocks.zstd
-  archive-v2-blocks.index
-  archive-v2-meta.wincode
-
-  signatures.bin
-  signature.index/
+unsigned-LEB128 u32 payload length
+wincode payload bytes
 ```
 
-`archive-v2-blocks.zstd` contains concatenated independently compressed block blobs. `archive-v2-blocks.index` is the authoritative block offset table. `archive-v2-meta.wincode` stores archive-level records such as header, genesis, and footer.
+The hot-block and block-access blob files are not length-prefixed. Their fixed
+indexes provide every byte offset and length.
 
-For production batches, store the completed epoch directories under one stable archive root such as `<archive-root>/blockzilla-v2/epoch-N/`. Builders should process epochs sequentially enough that `epoch-(N-1)` is available before `epoch-N` starts. When the current epoch needs the previous recent-blockhash window, it should read `epoch-(N-1)/blockhash_registry.bin` plus `archive-v2-blocks.index` when available. If the hot index is missing, the fallback is the brutal blockhash scan: stream the previous CAR, remember the latest Entry hash, and append that hash whenever the next Block node arrives.
+## Epoch directory
 
-`signatures.bin` stores raw transaction signatures in archive transaction order. `signature.index/` maps signatures to block-local transaction positions.
+A normal hot-block build produces or consumes the following files. Some
+registry preparation and live-finalization modes add internal manifests or
+temporary markers that are not part of the reader contract.
 
-`vote_hash_registry.bin` stores vote-only hash side data discovered while reading transactions. This is separate from `blockhash_registry.bin`: vote-state `hash` is the bank hash checked against the `SlotHashes` sysvar, and TowerSync `block_id` is Agave's chain block-id hash. Those are not the PoH entry hash used as the transaction recent blockhash.
+| File | Role |
+| --- | --- |
+| `archive-v2-blocks.zstd` | Concatenated independent zstd frames, one serialized hot block per frame |
+| `archive-v2-blocks.index` | Fixed-width block offset and ordinal index |
+| `archive-v2-meta.wincode` | Framed archive header, optional genesis record, and footer |
+| `registry.bin` | Raw 32-byte pubkeys in registry order |
+| `registry_counts.bin` | Registry reference counts used by builders and audits |
+| `registry.mphf` | Lookup index for `registry.bin` |
+| `blockhash_registry.bin` | Raw 32-byte blockhash rows |
+| `blockhash_index_v3.bin` | Optional slot/blockhash/time lookup index |
+| `prev_blockhash_tail.bin` | Previous-epoch recent-blockhash window used by builders/readers when required |
+| `signatures.bin` | Raw 64-byte signatures in archive transaction order |
+| `vote_hash_registry.bin` | Fixed 65-byte vote hash rows |
+| `poh.wincode` | Framed PoH records by block ID and slot |
+| `shredding.wincode` | Framed shredding records by block ID and slot when source evidence is available |
+| `archive-v2-block-access.wincode` | Optional concatenated block-local access payloads |
+| `archive-v2-block-access.index` | Optional fixed-width access-payload index |
+| `archive-v2-get-block.index` | Optional direct slot-offset table joining hot and access blobs |
 
-## Block Index
+`archive-v2-blocks.wincode` and
+`archive-v2-blocks.wincode.zst` are implemented repack variants. The former
+stores concatenated raw hot-block payloads; the latter compresses that entire
+raw stream as one zstd stream. Both use the same hot-block index with the
+`RAW_BLOCKS` flag, whose offsets refer to the decompressed raw stream.
 
-The zstd block index is the first lookup structure for block reads.
+## Hot-block index
+
+`archive-v2-blocks.index` begins with a 36-byte little-endian header.
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 8 | magic: ASCII `BZV2HIX1` |
+| 8 | 2 | version: `1` |
+| 10 | 2 | reserved: `0` |
+| 12 | 8 | row count (`u64`) |
+| 20 | 8 | indexed blob-file bytes (`u64`) |
+| 28 | 4 | zstd level (`i32`) |
+| 32 | 4 | flags (`u32`) |
+
+Index flags:
+
+| Bit | Name | Meaning |
+| ---: | --- | --- |
+| 0 | `DICTIONARY` | Independent frames require the external zstd dictionary selected by the caller |
+| 1 | `RAW_BLOCKS` | Rows address raw serialized block payloads instead of independent zstd frames |
+
+The header is followed by exactly `row_count` rows of 52 bytes.
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 4 | `block_id: u32` |
+| 4 | 8 | `slot: u64` |
+| 12 | 8 | `compressed_offset: u64` |
+| 20 | 4 | `compressed_len: u32` |
+| 24 | 4 | `uncompressed_len: u32` |
+| 28 | 4 | `tx_count: u32` |
+| 32 | 8 | `first_tx_ordinal: u64` |
+| 40 | 8 | `first_signature_ordinal: u64` |
+| 48 | 4 | `signature_count: u32` |
+
+The field names retain `compressed_*` for compatibility. With `RAW_BLOCKS`
+set, the offset addresses raw payload bytes and readers do not decompress the
+range.
+
+Current writers emit rows in block order with dense epoch-local `block_id`
+values starting at zero. A reader must validate the exact index length, indexed
+blob size, every offset/length range, row order assumptions it relies on, and
+the decoded slot/transaction count before trusting a row.
+
+## Hot-block blob
+
+Without `RAW_BLOCKS`, each range in `archive-v2-blocks.zstd` is one complete
+zstd frame. Decompression yields one wincode-encoded `ArchiveV2HotBlockBlob`:
 
 ```text
-ArchiveV2BlockIndexHeader {
-  magic
-  version
-  row_count
-  blob_file_bytes
-  flags
-}
-
-ArchiveV2BlockIndexRow {
-  block_id: u32
-  slot: u64
-  compressed_offset: u64
-  compressed_len: u32
-  uncompressed_len: u32
+ArchiveV2HotBlockBlob {
+  header: ArchiveV2HotBlockHeader
   tx_count: u32
-  first_tx_ordinal: u64
-  first_signature_ordinal: u64
-  signature_count: u32
+  tx_rows: Vec<ArchiveV2HotTxRow>
+  message_bytes: Vec<u8>
+  metadata_bytes: Vec<u8>
 }
 ```
 
-`block_id` is dense and epoch-local. The row order is block order, so `block_id` can be used as a direct row index after validation.
+There is no archive-record enum tag or embedded index around this blob.
+`tx_count` must equal `tx_rows.len()` and the matching hot-index row's
+`tx_count`.
 
-The index should be external only. Embedded `Index` records inside the block stream are not needed once this file exists.
-
-## Block Blob
-
-Each compressed frame decompresses to exactly one block blob, not an enum variant such as `WincodeArchiveV2Record::Block`.
+### Block header
 
 ```text
-ArchiveV2BlockBlob {
-  header: BlockHeaderHot
-  tx_count: u32
-  tx_rows: [TxRow; tx_count]
-  message_bytes: [u8]
-  metadata_bytes: [u8]
-}
-```
-
-The row table is the key reader optimization. A reader can decode the header and table, then choose which payload ranges to materialize. Metadata remains in the same decompressed block, but it is a byte range that can be skipped without walking the metadata schema.
-
-Prefer fixed-width little-endian fields for `TxRow`, so `tx_rows[n]` is O(1). Use compact varints inside the message and metadata payloads where they still help.
-
-```text
-TxRow {
-  tx_index: u32
-  flags: u32
-
-  message_offset: u32
-  message_len: u32
-
-  metadata_offset: u32
-  metadata_len: u32
-
-  signature_count: u8
-  reserved: [u8; 3]
-}
-```
-
-Offsets are relative to their containing payload region. `metadata_len = 0` means metadata is absent. `signature_count` is normally equal to the message header's required signature count, but storing it in the row lets signature sidecar offsets be computed without parsing the message first.
-
-Suggested `flags`:
-
-```text
-HAS_METADATA          = 1 << 0
-MESSAGE_V0           = 1 << 1
-TX_RAW_FALLBACK      = 1 << 2
-METADATA_RAW_FALLBACK = 1 << 3
-HAS_RETURN_DATA      = 1 << 4
-HAS_LOGS             = 1 << 5
-HAS_INNER_IX         = 1 << 6
-HAS_TOKEN_BALANCES   = 1 << 7
-HAS_LOADED_ADDRESSES = 1 << 8
-HAS_ERROR            = 1 << 9
-```
-
-The high-level flags let block scanners answer common questions from the row table without decoding full metadata.
-
-## Hot Block Header
-
-The block header should keep only fields that help identify and read the block.
-
-```text
-BlockHeaderHot {
+ArchiveV2HotBlockHeader {
   slot: u64
   parent_slot: u64
   blockhash_id: u32
   previous_blockhash_id: u32
   block_time: Option<i64>
   block_height: Option<u64>
-  rewards: Option<BlockRewards>
+  rewards: Option<ArchiveV2HotRewards>
+}
+
+ArchiveV2HotRewards {
+  num_partitions: Option<u64>
+  decoded: Vec<CompactReward>
 }
 ```
 
-PoH entries remain in `poh.wincode`, addressed by `block_id`. Shredding metadata remains in `shredding.wincode`, also addressed by `block_id`. Full blockhash bytes remain in `blockhash_registry.bin`.
+Full blockhash bytes live in `blockhash_registry.bin` or the block-access
+payload. PoH entries and shredding metadata are sidecars, not header fields in
+the current writer.
 
-The current `CompactBlockHeader` fields `poh_entries`, `shredding`, and legacy raw `rewards` should not be populated in the hot block blob when equivalent sidecars or decoded rewards exist.
+### Transaction row
 
-## Transaction Message Payload
+`ArchiveV2HotTxRow` has a custom fixed-width 28-byte encoding even though its
+surrounding blob uses LEB128 wincode.
 
-The transaction message payload stores the compact transaction message without signatures.
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 4 | `tx_index: u32` |
+| 4 | 4 | `flags: u32` |
+| 8 | 4 | `message_offset: u32` |
+| 12 | 4 | `message_len: u32` |
+| 16 | 4 | `metadata_offset: u32` |
+| 20 | 4 | `metadata_len: u32` |
+| 24 | 1 | `signature_count: u8` |
+| 25 | 3 | reserved; current writers emit zero |
+
+Message offsets are relative to `message_bytes`; metadata offsets are relative
+to `metadata_bytes`. Each `offset + len` must be checked for overflow and must
+stay inside its region before decoding. Absent metadata has
+`HAS_METADATA == 0` and `metadata_len == 0`.
+
+Transaction flags:
+
+| Bit | Constant |
+| ---: | --- |
+| 0 | `HAS_METADATA` |
+| 1 | `MESSAGE_V0` |
+| 2 | `TX_RAW_FALLBACK` |
+| 3 | `METADATA_RAW_FALLBACK` |
+| 4 | `HAS_RETURN_DATA` |
+| 5 | `HAS_LOGS` |
+| 6 | `HAS_INNER_IX` |
+| 7 | `HAS_TOKEN_BALANCES` |
+| 8 | `HAS_LOADED_ADDRESSES` |
+| 9 | `HAS_ERROR` |
+| 10 | `HAS_COMPACT_VOTE_IX` |
+
+The current primary hot writer requires decoded transactions and normally does
+not emit `TX_RAW_FALLBACK`; the bit remains part of the reader schema.
+`METADATA_RAW_FALLBACK` means the selected metadata range contains source bytes
+rather than `CompactMetaV1`.
+
+### Message and metadata regions
+
+A normal message range contains one `ArchiveV2HotMessagePayload`:
 
 ```text
-MessagePayload {
-  header: CompactMessageHeader
-  account_keys: Vec<CompactPubkey>
-  recent_blockhash: OwnedCompactRecentBlockhash
-  instructions: Vec<OwnedCompactInstruction>
-  address_table_lookups: Vec<OwnedCompactAddressTableLookup> // v0 only
+ArchiveV2HotMessagePayload = Legacy {
+  header, account_keys, recent_blockhash, instructions
+} | V0 {
+  header, account_keys, recent_blockhash, instructions,
+  address_table_lookups
 }
 ```
 
-This is equivalent to the current `OwnedCompactTransaction.message` without the `signatures` field.
+`CompactPubkey::Id` resolves through the one-based `registry.bin`; ID zero is
+reserved as the raw-pubkey sentinel. `OwnedCompactRecentBlockhash::Id(i32)`
+resolves through the current blockhash registry or the previous-epoch tail;
+`Nonce([u8; 32])` stores a durable nonce inline.
 
-Vote program compact instructions may replace raw instruction data with semantic payloads for:
+Instruction data is either preserved (`Raw`, `UnknownSystem`, or
+`UnknownVote`) or encoded into one of the implemented Compute Budget, System,
+or Vote semantic variants. Unknown/unsupported System and Vote instruction
+bytes remain byte-preserving fallbacks.
 
-- `CompactUpdateVoteState`
-- `CompactUpdateVoteStateSwitch`
-- `TowerSync`
-- `TowerSyncSwitch`
+A normal metadata range contains one `CompactMetaV1` encoded with the same
+wincode configuration. The row flags allow scanners to decide whether logs,
+inner instructions, token balances, loaded addresses, return data, or an error
+are present before decoding that metadata range.
 
-Their vote-state `hash` and TowerSync `block_id` fields use `VoteHashRef` values:
+## Signatures and registries
+
+`signatures.bin` is a headerless sequence of 64-byte signatures ordered by hot
+index row, transaction row, then signature position. For a block row:
 
 ```text
-VoteHashRef =
-  Zero
-  Block(block_id) // resolves through vote_hash_registry.bin
-  Raw([u8; 32])
+signature byte offset = first_signature_ordinal * 64
+signature byte length = signature_count * 64
 ```
 
-The `Block(block_id)` reference is epoch-local Archive V2 block order, matching the main block index. For cross-epoch or not-yet-known slots, the builder stores the raw hash inline.
+The sum of transaction-row `signature_count` values must equal the hot-index
+row's `signature_count`.
 
-If transaction decoding fails, `TX_RAW_FALLBACK` is set and the message payload contains the raw transaction bytes. Diagnostic error strings should go to an audit sidecar, not the hot block blob.
+`registry.bin` is a headerless sequence of 32-byte pubkeys. IDs are one-based:
+ID 1 addresses bytes `0..32`.
 
-## Metadata Payload
+`blockhash_registry.bin` is a headerless sequence of 32-byte hashes. The exact
+current/previous-epoch interpretation is carried by the compact blockhash
+reference type and `prev_blockhash_tail.bin`.
 
-Metadata remains colocated with the block in this iteration.
+`vote_hash_registry.bin` contains fixed 65-byte rows indexed by Archive V2
+block ID:
 
-The important format change is framing: every metadata payload has a length in `TxRow`. A block-info or message-only reader can skip `metadata_len` bytes without parsing `CompactMetaV1`.
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 1 | presence flags: bit 0 bank hash, bit 1 Agave block-ID hash |
+| 1 | 32 | bank hash bytes; ignored when bit 0 is clear |
+| 33 | 32 | block-ID hash bytes; ignored when bit 1 is clear |
 
-Decoded metadata can continue using the current compact metadata model:
+Vote instructions use `ArchiveV2VoteHashRef::{Zero, Block, Raw}`. `Block(id)`
+resolves the appropriate column of row `id`; conflicting or out-of-epoch hashes
+remain inline as `Raw`.
+
+## Metadata, PoH, and shredding streams
+
+`archive-v2-meta.wincode` contains framed `ArchiveV2HotMetaRecord` values:
+
+1. `Header { version: 2, flags }`, where `LEB128` is set; first-seen builds
+   additionally set `FIRST_SEEN_REGISTRY` and `ALL_PUBKEY_REF_COUNTS`;
+2. optional `Genesis(...)` for epoch zero;
+3. `Footer(...)` after a successful complete write.
+
+The footer contains build counts and fallback/audit totals. Current completion
+logic treats metadata publication as the last visibility boundary in live
+finalization; readers must not infer completion from the block file alone.
+
+`poh.wincode` contains framed records:
 
 ```text
-CompactMetaV1 {
-  err
-  fee
-  pre_balances
-  post_balances
-  inner_instructions
-  logs
-  token_balances
-  rewards
-  loaded_addresses
-  return_data
-  compute_units_consumed
-  cost_units
+WincodeArchiveV2PohRecord { block_id, slot, entries }
+```
+
+`shredding.wincode` contains framed records when the input supplies shredding
+evidence:
+
+```text
+WincodeArchiveV2ShreddingRecord { block_id, slot, shredding }
+```
+
+Both sidecars are aligned by `block_id` and slot with the hot index. Missing
+shredding evidence is not equivalent to an empty verified shred set.
+
+## Block-access payload
+
+The optional block-access files make one block self-contained for serving
+without fetching whole epoch registries.
+
+`archive-v2-block-access.wincode` is a concatenation of unframed wincode
+`ArchiveV2BlockAccessBlob` values:
+
+```text
+ArchiveV2BlockAccessBlob {
+  version: u16                         // current: 2
+  flags: u32
+  blockhash: [u8; 32]
+  previous_blockhash: [u8; 32]
+  signature_counts: Vec<u8>
+  signatures: Vec<u8>
+  pubkeys: Vec<{ id: u32, pubkey: [u8; 32] }>
+  blockhashes: Vec<{ id: i32, blockhash: [u8; 32] }>
+  vote_hashes: Vec<{
+    block_id: u32,
+    bank_hash: Option<[u8; 32]>,
+    block_id_hash: Option<[u8; 32]>
+  }>
 }
 ```
 
-Future metadata improvements should focus on making the inner layout more table-like:
+Only IDs referenced by that block are included. Pubkey, blockhash, and vote
+rows are sorted/deduplicated by their IDs by the current builder. The signature
+bytes and counts must agree with the hot block. A payload or advertised access
+length above 64 MiB is rejected.
 
-- block-level string/data tables for logs instead of per-transaction tables
-- offset tables for log strings and binary data
-- compact error codes instead of raw error byte blobs where possible
-- separate byte ranges for logs, inner instructions, balances, and loaded addresses
+### Block-access index
 
-## Block Account Filter Sidecar
+`archive-v2-block-access.index` has a 32-byte header:
 
-Status: benchmark prototype only. This is useful for token/event scanners, wallet history
-queries, and any reader that can skip an entire block when none of its tracked accounts are
-present.
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 8 | magic: ASCII `BZV2AIX1` |
+| 8 | 2 | version: `1` |
+| 10 | 2 | reserved: `0` |
+| 12 | 8 | row count (`u64`) |
+| 20 | 8 | access blob-file bytes (`u64`) |
+| 28 | 4 | flags (`u32`) |
 
-The sidecar stores the sorted unique registry ids touched by each block:
+Each row is 32 bytes:
 
-```text
-archive-v2-block-accounts.index
-  row[block_id] = { offset: u64, byte_len: u32 }
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 4 | `block_id: u32` |
+| 4 | 8 | `slot: u64` |
+| 12 | 8 | `access_offset: u64` |
+| 20 | 4 | `access_len: u32` |
+| 24 | 4 | `tx_count: u32` |
+| 28 | 4 | `signature_count: u32` |
 
-archive-v2-block-accounts.delta
-  block = varint(unique_count) + delta_varint(sorted_account_ids)
-```
+The current builder aligns access rows one-for-one with hot rows.
 
-Readers use the existing `archive-v2-blocks.index` for block offsets and this sidecar only
-for the account predicate. A scanner with one target id uses binary search. A scanner with a
-tracked account set walks two sorted lists and skips the block if the intersection is empty.
+### Direct getBlock index
 
-Two flavors are worth keeping separate:
+`archive-v2-get-block.index` has no header. It contains one 24-byte row for
+each slot offset in the epoch (`432,000` rows with the current schedule):
 
-- `message_accounts`: static message keys plus loaded addresses. This is enough for wallet
-  history and most account-activity filters.
-- `semantic_accounts`: message accounts plus compact metadata references such as token-balance
-  mint, owner, and program ids. This catches mint-only filters like an initial USDC scan, but
-  requires metadata decode while building the sidecar.
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 8 | hot-block offset (`u64`) |
+| 8 | 4 | hot-block length (`u32`) |
+| 12 | 8 | block-access offset (`u64`) |
+| 20 | 4 | block-access length (`u32`) |
 
-Local benchmark on the 2048-slot epoch-644 USDC window:
+A row is missing when either length is zero; current writers emit all-zero
+missing rows. The slot's row number is `slot % 432_000`. The index is valid only
+with the exact hot and block-access blobs from which it was built.
 
-```text
-blocks=1939 txs=3108414 compressed_block_bytes=322796310
-message_accounts sidecar ~= 7.19 MB, 3709 bytes/block
-semantic_accounts sidecar ~= 8.02 MB, 4135 bytes/block
+## Reader sequence
 
-message_accounts build/read:
-  1 worker: 814k tx/s
-  4 workers: 3.32M tx/s
-  8 workers: 4.29M tx/s
+For an indexed full block read:
 
-semantic_accounts build/read:
-  4 workers: 1.24M-2.00M tx/s on warmed local cache
-```
+1. Select the hot row directly or through the per-slot getBlock row.
+2. Validate the selected ranges against their declared blob sizes.
+3. Fetch the hot range and decompress it unless `RAW_BLOCKS` is set.
+4. Decode `ArchiveV2HotBlockBlob` and validate slot, transaction count, row
+   regions, and signature counts.
+5. Fetch and decode the matching block-access range when full key/hash/signature
+   reconstruction is required.
+6. Resolve compact IDs and construct the requested view.
 
-Filter behavior on the same window:
+The helper `deserialize_archive_v2_hot_block_blob` reads the current schema and
+two legacy hot-block layouts retained for compatibility. Current writers emit
+only the schema documented above.
 
-```text
-target=USDC mint:
-  message_accounts skips 12.7% blocks / 12.5% txs
-  semantic_accounts skips 1.1% blocks / 1.0% txs
+## Change policy
 
-target=one discovered USDC token account:
-  message_accounts skips 97.2% blocks / 96.5% txs
-```
+- A changed fixed index layout requires an index version change and matching
+  reader/writer fixtures.
+- A changed hot or block-access schema requires a payload version change unless
+  the existing decoder can distinguish it unambiguously.
+- Writers must preserve raw bytes when a semantic instruction or metadata form
+  cannot be represented losslessly.
+- Publication completeness, object hashes, and generation manifests are a
+  separate contract and must not be inferred solely from file presence.
 
-The USDC mint itself is a poor skip key in this launch window because it appears almost
-everywhere in token balances. The table becomes much more interesting once the scanner has a
-tracked token-account or wallet set.
-
-Format notes:
-
-- Account ids should stay epoch-registry ids, not raw pubkeys.
-- Delta-varint encoding looks worthwhile: about 7.2 MB vs 26.2 MB fixed `u32` ids for the
-  message-account table in the local window.
-- Keep the account sidecar external so block blobs remain stable and so it can be rebuilt with
-  different semantics.
-- The sidecar must be deterministic and should be validated against block row counts and
-  registry length.
-
-These are internal metadata improvements; they do not require physically splitting metadata out of the block frame.
-
-## Signature Sidecar
-
-Signatures are cold, high-entropy data and should not live in `archive-v2-blocks.zstd`.
-
-`signatures.bin` stores every signature as a raw fixed-width row:
-
-```text
-signatures.bin:
-  [signature_0: [u8; 64]]
-  [signature_1: [u8; 64]]
-  ...
-```
-
-Rows are ordered by block order, transaction order, then signature order inside the transaction.
-
-For block-local reconstruction:
-
-```text
-block_row.first_signature_ordinal
-tx_signature_offset = sum(tx_rows[0..tx_ordinal].signature_count)
-signature_file_offset = (block_row.first_signature_ordinal + tx_signature_offset) * 64
-```
-
-For signature lookup:
-
-```text
-SignatureLookupRecord {
-  fingerprint: u64
-  block_id: u32
-  tx_ordinal: u32
-  signature_index: u8
-}
-```
-
-`tx_ordinal` is the offset in the block transaction array. This matches the reader's natural access path: signature -> block id -> block blob -> tx row.
-
-The existing `of-signature-index` crate already has the right broad shape: a filter, minimal perfect hash, and compact value table. The value record should change from CAR file offsets to block-local archive positions.
-
-## Reader Paths
-
-Block summary:
-
-1. Read `archive-v2-blocks.index`.
-2. Seek to the compressed block frame.
-3. Decompress one block.
-4. Decode `BlockHeaderHot` and `TxRow` table.
-5. Stop.
-
-Messages only:
-
-1. Read and decompress the block.
-2. Decode `TxRow` table.
-3. Decode only the message byte ranges.
-4. Ignore `metadata_bytes` and `signatures.bin`.
-
-Full block / RPC block:
-
-1. Read and decompress the block.
-2. Decode messages and metadata ranges.
-3. Join signatures from `signatures.bin` if the response requires them.
-4. Join PoH or blockhash sidecars only when requested.
-
-Signature lookup:
-
-1. Query `signature.index/`.
-2. Get `{ block_id, tx_ordinal, signature_index }`.
-3. Read the block index row.
-4. Decompress the block.
-5. Decode the requested tx row and message/metadata ranges.
-6. Read signatures from `signatures.bin` if needed.
-
-## Data Placement Rules
-
-Keep in hot block blob:
-
-- block identity fields
-- transaction row table
-- compact transaction messages
-- metadata, length-framed and skippable
-- decoded block rewards if they are commonly served with block reads
-
-Move to sidecars:
-
-- signatures
-- PoH entries
-- full blockhash bytes
-- archive header/genesis/footer
-- reconstruction-only data
-- build diagnostics and decode error strings
-- source byte lengths used only for audit statistics
-
-## Migration Plan
-
-1. Add a message-only transaction type that removes `signatures`.
-2. Add `signatures.bin` writer and block-index signature ordinals.
-3. Change zstd block repack to serialize raw block blobs, not `WincodeArchiveV2Record::Block`.
-4. Replace nested `Vec<WincodeArchiveV2Transaction>` with `tx_rows + message_bytes + metadata_bytes`.
-5. Update the reader to support:
-   - block summary
-   - message-only block read
-   - full block read with signature join
-   - signature lookup by `{ block_id, tx_ordinal }`
-6. Move audit-only fields such as `source_len` and diagnostic strings out of the hot blob.
-
-## Open Questions
-
-- Whether `TxRow` should store `first_signature_delta` directly, or derive it from prior `signature_count` values.
-- Whether decoded rewards are hot enough to stay in the block header, or should become another sidecar.
-- Whether metadata internals should move to block-level tables before or after the signature sidecar lands.
-- Whether this format should be a new Archive V2 flag or a version bump.
+Proposed account-filter indexes, signature lookup indexes, and metadata layout
+changes live in the non-normative
+[Archive V2 evolution note](../design/archive-v2-evolution.md).

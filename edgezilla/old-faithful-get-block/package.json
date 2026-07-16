@@ -1,0 +1,12 @@
+{
+  "name": "old-faithful-get-block",
+  "private": true,
+  "scripts": {
+    "bench": "node scripts/bench-worker.mjs",
+    "build": "worker-build --release .",
+    "dev": "wrangler dev --config wrangler.example.toml"
+  },
+  "devDependencies": {
+    "wrangler": "4.111.0"
+  }
+}

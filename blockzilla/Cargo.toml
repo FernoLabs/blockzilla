@@ -2,13 +2,26 @@
 name = "blockzilla"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
+autobins = false
+default-run = "blockzilla"
 
 [features]
 default = ["known-program-logs"]
 known-program-logs = ["blockzilla-format/known-program-logs"]
+# Opt-in binaries for archive investigation and fixture extraction.
+diagnostic-tools = []
+# Opt-in experimental performance probes; these are not stable user commands.
+benchmark-tools = []
+# Opt-in one-shot archive migration programs.
+migration-tools = []
+# Convenience feature for contributors who need every non-product binary.
+developer-tools = ["diagnostic-tools", "benchmark-tools", "migration-tools"]
 
+# The supported product entry point. All other binaries below are contributor tools.
 [[bin]]
 name = "blockzilla"
 path = "src/main.rs"
@@ -16,14 +29,57 @@ path = "src/main.rs"
 [[bin]]
 name = "car-log-audit"
 path = "src/bin/car_log_audit.rs"
+required-features = ["diagnostic-tools"]
+
+[[bin]]
+name = "compare-archive-v2-access"
+path = "src/bin/compare_archive_v2_access.rs"
+required-features = ["diagnostic-tools"]
+
+[[bin]]
+name = "dump-system-instruction-slot"
+path = "src/bin/dump_system_instruction_slot.rs"
+required-features = ["diagnostic-tools"]
+
+[[bin]]
+name = "dump-vote-instruction-slot"
+path = "src/bin/dump_vote_instruction_slot.rs"
+required-features = ["diagnostic-tools"]
+
+[[bin]]
+name = "inspect-hot-tx-logs"
+path = "src/bin/inspect_hot_tx_logs.rs"
+required-features = ["diagnostic-tools"]
+
+[[bin]]
+name = "verify-access-vote-hashes"
+path = "src/bin/verify_access_vote_hashes.rs"
+required-features = ["diagnostic-tools"]
 
 [[bin]]
 name = "big-block-log-bench"
 path = "src/bin/big_block_log_bench.rs"
+required-features = ["benchmark-tools"]
 
 [[bin]]
 name = "blockhash-scan-bench"
 path = "src/bin/blockhash_scan_bench.rs"
+required-features = ["benchmark-tools"]
+
+[[bin]]
+name = "first-seen-hot-tier-bench"
+path = "src/bin/first_seen_hot_tier_bench.rs"
+required-features = ["benchmark-tools"]
+
+[[bin]]
+name = "first-seen-registry-bench"
+path = "src/bin/first_seen_registry_bench.rs"
+required-features = ["benchmark-tools"]
+
+[[bin]]
+name = "upgrade-block-access-vote-hashes"
+path = "src/bin/upgrade_block_access_vote_hashes.rs"
+required-features = ["migration-tools"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

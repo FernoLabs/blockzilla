@@ -11,17 +11,11 @@ use tracing::{Level, info};
 
 mod archive_v2;
 mod car_preflight;
-mod commands;
 mod first_seen_finalization;
 mod genesis_epoch0;
 mod pre_hot;
 mod split_compact;
 mod token_events;
-
-use commands::{
-    analyze::{analyze_epoch_file, print_epoch_report},
-    dump_log_strings::dump_log_strings,
-};
 
 pub const BUFFER_SIZE: usize = 256 << 20;
 pub const PROGRESS_REPORT_INTERVAL_SECS: u64 = 3;
@@ -34,10 +28,6 @@ pub const SLOTS_PER_EPOCH: u64 = 432_000;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-
-    /// Print progress every N blocks for legacy compact analyzers (0 disables).
-    #[arg(long, default_value_t = 10_000)]
-    progress_every: u64,
 
     /// Resume Archive V2 builders when complete sidecars already exist.
     #[arg(long, default_value_t = true, global = true)]
@@ -63,7 +53,7 @@ enum Commands {
             value_parser = clap::value_parser!(u16).range(1..=256)
         )]
         io_buffer_mib: u16,
-        /// Optional atomic progress JSON path for the scheduler/dashboard.
+        /// Optional atomic progress JSON path for scheduler or monitoring integrations.
         #[arg(long)]
         progress_json: Option<PathBuf>,
     },
@@ -324,7 +314,7 @@ enum Commands {
         no_access: bool,
     },
 
-    /// Build hot-block Archive V2 from a live producer capture directory.
+    /// Build hot-block Archive V2 from a Hivezilla capture directory.
     BuildArchiveV2HotBlocksFromLive {
         /// Live producer capture directory.
         capture_dir: PathBuf,
@@ -812,35 +802,6 @@ enum Commands {
         /// Optional TSV output path. Defaults to stdout.
         #[arg(long)]
         output: Option<PathBuf>,
-    },
-
-    /// Legacy analyzer for the removed compact.bin V1 format.
-    AnalyzeCompact {
-        /// Input file containing varint_u32_len + postcard(CompactBlockRecord).
-        #[arg(short, long)]
-        input: PathBuf,
-        /// If set, stop after N blocks.
-        #[arg(long)]
-        limit_blocks: Option<u64>,
-    },
-
-    /// Legacy log-string dumper for the removed compact.bin V1 format.
-    DumpCompactLogStrings {
-        /// Input file containing varint_u32_len + postcard(CompactBlockRecord).
-        #[arg(short, long)]
-        input: PathBuf,
-        /// Output path (defaults to stdout). Tip: /dev/null to benchmark parse-only.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// If set, stop after N blocks.
-        #[arg(long)]
-        limit_blocks: Option<u64>,
-        /// If > 0, stop after writing N lines.
-        #[arg(long, default_value_t = 0)]
-        max_lines: u64,
-        /// Also dump decoded data table entries as base64 strings.
-        #[arg(long, default_value_t = false)]
-        include_data: bool,
     },
 }
 
@@ -1439,25 +1400,6 @@ fn main() -> Result<()> {
         Commands::FindPohGaps { input, output } => {
             archive_v2::find_poh_gaps(&input, output.as_deref())
         }
-        Commands::AnalyzeCompact {
-            input,
-            limit_blocks,
-        } => analyze_epoch_file(&input, cli.progress_every, limit_blocks)
-            .map(|r| print_epoch_report(&r)),
-        Commands::DumpCompactLogStrings {
-            input,
-            out,
-            limit_blocks,
-            max_lines,
-            include_data,
-        } => dump_log_strings(
-            &input,
-            out.as_deref(),
-            limit_blocks,
-            cli.progress_every,
-            max_lines,
-            include_data,
-        ),
     }
 }
 
@@ -1739,6 +1681,16 @@ fn json_f64(value: Option<f64>) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn compact_v1_commands_are_not_exposed() {
+        for command in ["analyze-compact", "dump-compact-log-strings"] {
+            let error = Cli::try_parse_from(["blockzilla", command])
+                .err()
+                .expect("Compact V1 commands must remain outside the public CLI");
+            assert!(error.to_string().contains("unrecognized subcommand"));
+        }
+    }
 
     #[test]
     fn preflight_car_cli_has_bounded_default_and_receipt() {

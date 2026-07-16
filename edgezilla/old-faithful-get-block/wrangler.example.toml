@@ -1,0 +1,16 @@
+name = "old-faithful-get-block-local"
+main = "build/index.js"
+compatibility_date = "2026-05-18"
+workers_dev = false
+
+[build]
+command = "worker-build --release ."
+
+[[r2_buckets]]
+binding = "OF_INDEXES"
+bucket_name = "REPLACE_WITH_DEDICATED_INDEX_MIRROR_BUCKET"
+
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

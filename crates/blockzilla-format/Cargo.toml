@@ -2,8 +2,11 @@
 name = "blockzilla-format"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Archive V2 records, codecs, indexes, and registries for Blockzilla"
+readme = "README.md"
 
 [features]
 default = ["known-program-logs"]

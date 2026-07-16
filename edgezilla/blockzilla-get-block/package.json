@@ -1,0 +1,11 @@
+{
+  "name": "blockzilla-get-block",
+  "private": true,
+  "scripts": {
+    "build": "worker-build --release . --no-default-features --features worker",
+    "dev": "wrangler dev --config wrangler.example.toml"
+  },
+  "devDependencies": {
+    "wrangler": "4.111.0"
+  }
+}

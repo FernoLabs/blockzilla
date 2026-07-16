@@ -1,0 +1,28 @@
+[package]
+name = "old-faithful-get-block"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.22.1"
+base58-turbo = "0.1.0"
+five8 = "1.0.0"
+js-sys = "0.3.98"
+of-car-reader = { path = "../../crates/old-faithful/car-reader", default-features = false, features = ["compact-index", "zstd-wasm"] }
+of-slot-ranges = { path = "../../crates/old-faithful/slot-ranges", default-features = false }
+prost = "0.14.3"
+quick-protobuf = "0.8.1"
+ryu = "1.0.23"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+wasm-bindgen = "0.2.121"
+wincode = "0.5.4"
+worker = { version = "0.8.3", features = ["http"] }

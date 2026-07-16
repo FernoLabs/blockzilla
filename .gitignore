@@ -35,16 +35,12 @@ epochs/
 .DS_Store
 Thumbs.db
 
-solana-prog/
-
 # Generated outputs
 /tmp/
 /dist/
 /.codex-tmp/
 /debug/
 /reports/
-/deploy/.integration-*/
-/deploy/.release-*/
 **/node_modules/
 **/.svelte-kit/
 /.wrangler/
@@ -53,5 +49,3 @@ solana-prog/
 *.log
 __pycache__/
 *.pyc
-apps/**/build/
-crates/**/build/

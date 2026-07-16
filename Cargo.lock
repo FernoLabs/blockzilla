@@ -309,6 +309,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base58-turbo"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1ec3b483727070a4fae619141a1901803d420e336ff8c61ce01151df7cf0a8"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -413,7 +419,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockzilla-get-block-worker"
+name = "blockzilla-get-block"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -440,37 +446,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wincode",
  "worker",
- "zstd",
-]
-
-[[package]]
-name = "blockzilla-live-producer"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "anyhow",
- "base64",
- "blockzilla-format",
- "clap 4.6.1",
- "five8",
- "futures",
- "gxhash",
- "hashbrown 0.17.1",
- "libc",
- "of-car-reader",
- "prost",
- "reqwest",
- "rustc-hash",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wincode",
- "yellowstone-grpc-client",
- "yellowstone-grpc-proto",
  "zstd",
 ]
 
@@ -1431,6 +1406,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hivezilla"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "base64",
+ "blockzilla-format",
+ "clap 4.6.1",
+ "five8",
+ "futures",
+ "gxhash",
+ "hashbrown 0.17.1",
+ "libc",
+ "of-car-reader",
+ "prost",
+ "reqwest",
+ "rustc-hash",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wincode",
+ "yellowstone-grpc-client",
+ "yellowstone-grpc-proto",
+ "zstd",
+]
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2097,6 +2103,27 @@ dependencies = [
  "sha2",
  "time",
  "zstd",
+]
+
+[[package]]
+name = "old-faithful-get-block"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base58-turbo",
+ "base64",
+ "five8",
+ "js-sys",
+ "of-car-reader",
+ "of-slot-ranges",
+ "prost",
+ "quick-protobuf",
+ "ryu",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wincode",
+ "worker",
 ]
 
 [[package]]

@@ -2,19 +2,20 @@
 resolver = "2"
 members = [
     "blockzilla",
-    "blockzilla-get-block-worker",
+    "hivezilla",
+    "edgezilla/blockzilla-get-block",
+    "edgezilla/old-faithful-get-block",
     "crates/blockzilla-format",
     "crates/blockzilla-log-parser",
-    "crates/live-producer",
     "crates/old-faithful/car-reader",
     "crates/old-faithful/slot-ranges",
-    "crates/token-price-api",
+    "examples/token-api",
 ]
-exclude = ["solana-prog/"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/FernoLabs/blockzilla"
 

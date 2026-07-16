@@ -83,7 +83,7 @@ mkdir -p "$out_root"
 echo "out_root=${out_root}"
 echo "primary=${primary} epochs=${epochs} slots=${slots:-none} samples_per_epoch=${samples_per_epoch} cases=${#cases[@]}"
 
-cargo build -p blockzilla-get-block-worker --bin rpc-correctness-check
+cargo build -p blockzilla-get-block --bin rpc-correctness-check
 runner="${RUNNER:-target/debug/rpc-correctness-check}"
 
 for case_spec in "${cases[@]}"; do

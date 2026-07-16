@@ -1,5 +1,10 @@
 # Horizon Problem Statement
 
+Status: research context. This document explains the motivation for a compact,
+replay-friendly archive; it is not an implemented replay or account-diff
+contract. The implemented storage layout is documented separately in the
+[Archive V2 reference](../reference/archive-v2-hot-block-format.md).
+
 ## What Solana Proves Today
 
 Solana already has strong integrity primitives, but they do not prove everything people actually care about.

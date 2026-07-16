@@ -1021,7 +1021,7 @@ pub struct WincodeArchiveV2NoRegistryReturnData {
     pub data: Vec<u8>,
 }
 
-/// Binary getBlock envelope returned by `blockzilla-get-block-worker`.
+/// Binary getBlock envelope returned by `blockzilla-get-block`.
 ///
 /// This is not a replacement for `ArchiveV2HotBlockBlob`. It packages the two
 /// block-local blobs a client needs to reconstruct a JSON getBlock response:

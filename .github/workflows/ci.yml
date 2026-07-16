@@ -17,15 +17,82 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust components
-        run: |
-          rustup update stable --no-self-update
-          rustup default stable
-          rustup component add rustfmt
+        run: rustup component add rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
+      - name: Check opt-in Blockzilla contributor binaries
+        run: cargo check --locked -p blockzilla --features developer-tools --all-targets
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked
+      - name: Build and read the Archive V2 fixture
+        run: |
+          output="$RUNNER_TEMP/blockzilla-fixture"
+          cargo run --locked -p blockzilla -- \
+            build-archive-v2-hot-blocks \
+            crates/old-faithful/car-reader/benches/fixtures/epoch-157-biggest.car \
+            "$output" \
+            --max-blocks 1 \
+            --no-access
+          test -s "$output/archive-v2-blocks.zstd"
+          test -s "$output/archive-v2-blocks.index"
+          test -s "$output/archive-v2-meta.wincode"
+          cargo run --locked -p blockzilla -- \
+            bench-archive-v2-hot-blocks \
+            "$output/archive-v2-blocks.zstd" \
+            --workers 1 \
+            --chunk-size 1
+
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Worker build tools
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install worker-build --locked --version 0.8.3
+      - name: Build Archive V2 Edgezilla Worker
+        working-directory: edgezilla/blockzilla-get-block
+        run: worker-build --release . --no-default-features --features worker
+      - name: Build Old Faithful Edgezilla Worker
+        working-directory: edgezilla/old-faithful-get-block
+        run: worker-build --release .
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Check local Markdown links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --offline --root-dir "${{ github.workspace }}" --no-progress './**/*.md'
+          fail: true
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - name: Scan reachable history with Gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$archive"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git . \
+            --log-opts=--all \
+            --redact=100 \
+            --no-banner \
+            --no-color
