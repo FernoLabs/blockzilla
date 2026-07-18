@@ -1,0 +1,26 @@
+[Unit]
+Description=Blockzilla archive scheduler
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ach
+Environment=HIVEZILLA_ENV_FILE=/volume1/@home/ach/dev/blockzilla-pipeline/config/nas-pipeline-v2.env
+ExecStartPre=/usr/bin/test -x /volume1/@home/ach/dev/blockzilla-pipeline/releases/blockzilla-nas-pipeline-2026.07.18-gap-sidecar-admission-1/run-nas-pipeline.sh
+ExecStartPre=/usr/bin/test -r /volume1/@home/ach/dev/blockzilla-pipeline/config/nas-pipeline-v2.env
+ExecStart=/volume1/@home/ach/dev/blockzilla-pipeline/releases/blockzilla-nas-pipeline-2026.07.18-gap-sidecar-admission-1/run-nas-pipeline.sh
+Restart=always
+RestartSec=10s
+# Workers are resumable process-group leaders and are adopted by exact
+# PID/start-time/argv identity when the controller restarts.
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+UMask=0022
+SyslogIdentifier=blockzilla-archive
+
+[Install]
+WantedBy=default.target
