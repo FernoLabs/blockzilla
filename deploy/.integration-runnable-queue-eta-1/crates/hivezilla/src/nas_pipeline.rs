@@ -107,14 +107,21 @@ const LEGACY_TUNER_SETTLE_SECS: u64 = 180;
 const LEGACY_TUNER_MIN_SAMPLES: usize = 12;
 const LEGACY_TUNER_PROBE_COOLDOWN_SECS: u64 = 60;
 const LEGACY_TUNER_BACKOFF_SECS: u64 = 300;
+const LEGACY_TUNER_CONFIRMED_DOWNSHIFT_BACKOFF_SECS: u64 = 3_600;
 const LEGACY_TUNER_MIN_GAIN_MIB_PER_SEC: f64 = 8.0;
 const LEGACY_TUNER_MIN_GAIN_RATIO: f64 = 0.05;
+const LEGACY_TUNER_DEGRADATION_MIN_MIB_PER_SEC: f64 = 16.0;
+const LEGACY_TUNER_DEGRADATION_MIN_RATIO: f64 = 0.10;
+const LEGACY_TUNER_DEGRADATION_WINDOWS: usize = 2;
+const LEGACY_TUNER_DOWNSHIFT_TIMEOUT_SECS: u64 = LEGACY_TUNER_SETTLE_SECS * 2;
+const LEGACY_TUNER_ACTION_TIMEOUT_SECS: u64 = 30;
 const LEGACY_TUNER_RATE_FRESH_SECS: u64 = 30;
 const LEGACY_TUNER_LIVE_STALL_SECS: u64 = 60;
 const SOURCE_READ_RATE_MIN_WINDOW_SECS: f64 = 15.0;
 const SOURCE_READ_RATE_MAX_WINDOW_SECS: f64 = 60.0;
 const SOURCE_READ_RATE_MAX_SAMPLES: usize = 32;
 const LEGACY_TUNER_PAUSE_PREFIX: &str = "throughput probe rejected:";
+const LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX: &str = "throughput tuner downshift:";
 const LEGACY_TUNER_GUARD_PAUSE_PREFIX: &str = "throughput tuner hard guard:";
 const LEGACY_COMPACT_OWNERSHIP_KIND: &str = "historical_compact_reuse";
 const LEGACY_BLOCKHASH_LOCK_DIR: &str = ".blockhash.lock";
@@ -885,12 +892,19 @@ struct LegacyThroughputTuner {
     backoff_until_unix_secs: u64,
     window: Option<LegacyTunerWindow>,
     pending_action: Option<LegacyTunerAction>,
+    pending_action_started_unix_secs: u64,
     probe_identity: Option<(u64, u32, LegacyLaneStartIdentity)>,
     current_useful_mib_per_sec: Option<f64>,
     current_rate_source: Option<LegacyTunerRateSource>,
     current_active_lanes: usize,
     current_sampled_lanes: usize,
     last_decision: Option<String>,
+    degraded_windows: usize,
+    degraded_identities: Option<BTreeSet<(u64, u32, LegacyLaneStartIdentity)>>,
+    baseline_ready: bool,
+    audit_loaded_identities: Option<BTreeSet<(u64, u32, LegacyLaneStartIdentity)>>,
+    audit_survivor_identities: Option<BTreeSet<(u64, u32, LegacyLaneStartIdentity)>>,
+    audit_started_unix_secs: u64,
     live_slot_watch: BTreeMap<String, LegacyLiveSlotWatch>,
 }
 
@@ -916,6 +930,24 @@ enum LegacyTunerPhase {
         probe_mib_per_sec: f64,
         probe_epoch: u64,
     },
+    VerifyDownshift {
+        loaded_lanes: usize,
+        loaded_mib_per_sec: f64,
+        audit_epoch: u64,
+    },
+    VerifyDownshiftReloaded {
+        loaded_lanes: usize,
+        loaded_mib_per_sec: f64,
+        reduced_mib_per_sec: f64,
+        reduced_device_mib_per_sec: Option<f64>,
+        audit_epoch: u64,
+    },
+    CommitDownshift {
+        loaded_lanes: usize,
+        reduced_mib_per_sec: f64,
+        reduced_device_mib_per_sec: Option<f64>,
+        audit_epoch: u64,
+    },
     Backoff,
 }
 
@@ -934,13 +966,22 @@ enum LegacyLaneStartIdentity {
     /// wall-clock progress timestamp.
     LinuxStartTicks(u64),
     /// Portable fallback used by tests and non-Linux observers.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     UnixSecs(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LegacyTunerAction {
-    Pause { epoch: u64, reason: String },
-    Resume { epoch: u64, reason: String },
+    Pause {
+        epoch: u64,
+        expected_identity: Option<(u64, u32, LegacyLaneStartIdentity)>,
+        reason: String,
+    },
+    Resume {
+        epoch: u64,
+        expected_identity: Option<(u64, u32, LegacyLaneStartIdentity)>,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1859,6 +1900,24 @@ fn set_manual_pause_state(
 ) {
     if pause {
         if let Some(epoch) = legacy_epoch {
+            let tuner_targeted = runtime
+                .legacy_throughput_tuner
+                .pending_action
+                .as_ref()
+                .is_some_and(|action| match action {
+                    LegacyTunerAction::Pause { epoch: target, .. }
+                    | LegacyTunerAction::Resume { epoch: target, .. } => *target == epoch,
+                })
+                || active_tuner_probe_epoch(&runtime.legacy_throughput_tuner) == Some(epoch);
+            if tuner_targeted {
+                cancel_legacy_tuner_experiment(
+                    &mut runtime.legacy_throughput_tuner,
+                    unix_now(),
+                    format!(
+                        "manual pause took ownership of compact_reuse:{epoch}; cancelled automatic throughput experiment"
+                    ),
+                );
+            }
             runtime.auto_paused_legacy.remove(&epoch);
         }
         runtime.paused_jobs.insert(key.to_string());
@@ -7147,9 +7206,11 @@ fn lane_from_adopted_legacy(
     let key = format!("compact_reuse:{}", compact.epoch);
     let mut progress = read_progress(&compact.progress_path).unwrap_or_default();
     let rss_bytes = process_rss_bytes(compact.pid);
+    let auto_pause = runtime.auto_paused_legacy.get(&compact.epoch);
+    let paused = runtime.paused_jobs.contains(&key) || auto_pause.is_some();
     progress.pid = Some(compact.pid);
     progress.rss_bytes = rss_bytes;
-    progress.state = Some(if runtime.paused_jobs.contains(&key) {
+    progress.state = Some(if paused {
         "paused".to_string()
     } else {
         "running".to_string()
@@ -7164,13 +7225,13 @@ fn lane_from_adopted_legacy(
         epoch: Some(compact.epoch),
         capture_id: None,
         phase,
-        state: if runtime.paused_jobs.contains(&key) {
+        state: if paused {
             "paused".to_string()
         } else {
             "running".to_string()
         },
-        auto_paused: false,
-        auto_pause_reason: None,
+        auto_paused: auto_pause.is_some(),
+        auto_pause_reason: auto_pause.map(|record| record.reason.clone()),
         pid: Some(compact.pid),
         progress,
         rss_bytes,
@@ -7354,9 +7415,19 @@ fn legacy_lane_start_identity(
     started_unix_secs: Option<u64>,
     linux_start_ticks: Option<u64>,
 ) -> Option<LegacyLaneStartIdentity> {
-    linux_start_ticks
-        .map(LegacyLaneStartIdentity::LinuxStartTicks)
-        .or_else(|| started_unix_secs.map(LegacyLaneStartIdentity::UnixSecs))
+    #[cfg(target_os = "linux")]
+    {
+        // Linux controls require the kernel's monotonic process start tick.
+        // A wall-clock second is display metadata, not PID-reuse proof.
+        let _ = started_unix_secs;
+        linux_start_ticks.map(LegacyLaneStartIdentity::LinuxStartTicks)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        linux_start_ticks
+            .map(LegacyLaneStartIdentity::LinuxStartTicks)
+            .or_else(|| started_unix_secs.map(LegacyLaneStartIdentity::UnixSecs))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -7478,8 +7549,15 @@ fn legacy_tuner_capacity_limit_for_state(
     match tuner.phase {
         LegacyTunerPhase::ProbeUp { baseline_lanes, .. } => baseline_lanes.saturating_add(1),
         LegacyTunerPhase::VerifyPause { baseline_lanes, .. } => baseline_lanes,
+        LegacyTunerPhase::VerifyDownshift { loaded_lanes, .. } => loaded_lanes.saturating_sub(1),
+        LegacyTunerPhase::VerifyDownshiftReloaded { loaded_lanes, .. } => loaded_lanes,
+        LegacyTunerPhase::CommitDownshift { loaded_lanes, .. } => loaded_lanes.saturating_sub(1),
         LegacyTunerPhase::Backoff => tuner.accepted_lanes,
-        LegacyTunerPhase::ObserveBaseline if now >= tuner.next_probe_unix_secs => {
+        LegacyTunerPhase::ObserveBaseline
+            if tuner.baseline_ready
+                && tuner.degraded_windows == 0
+                && now >= tuner.next_probe_unix_secs =>
+        {
             tuner.accepted_lanes.saturating_add(1)
         }
         LegacyTunerPhase::ObserveBaseline => tuner.accepted_lanes,
@@ -7624,19 +7702,17 @@ fn update_current_live_ingest_health(
     healthy
 }
 
-fn newest_managed_running_legacy_epoch(runtime: &RuntimeState) -> Option<u64> {
-    runtime
-        .legacy_compacts
+fn newest_tuner_controlled_running_legacy_epoch(
+    config: &NasPipelineConfig,
+    runtime: &RuntimeState,
+    identities: &BTreeSet<(u64, u32, LegacyLaneStartIdentity)>,
+) -> Option<u64> {
+    identities
         .iter()
-        .filter(|(epoch, child)| {
-            child.pid.is_some()
-                && !runtime
-                    .paused_jobs
-                    .contains(&format!("compact_reuse:{epoch}"))
-                && !runtime.auto_paused_legacy.contains_key(epoch)
-        })
-        .max_by_key(|(_, child)| child.started_unix_secs)
-        .map(|(epoch, _)| *epoch)
+        .copied()
+        .filter(|identity| legacy_identity_matches_controlled_lane(config, runtime, *identity))
+        .max_by_key(|(_, _, start)| *start)
+        .map(|(epoch, _, _)| epoch)
 }
 
 fn median_rate(samples: &VecDeque<f64>) -> Option<f64> {
@@ -7669,13 +7745,184 @@ fn legacy_tuner_window_result(
     Some((useful, device))
 }
 
+fn legacy_tuner_degradation(
+    accepted_mib_per_sec: f64,
+    measured_mib_per_sec: f64,
+) -> Option<(f64, f64)> {
+    if !accepted_mib_per_sec.is_finite()
+        || !measured_mib_per_sec.is_finite()
+        || accepted_mib_per_sec <= 0.0
+        || measured_mib_per_sec < 0.0
+    {
+        return None;
+    }
+    let drop = accepted_mib_per_sec - measured_mib_per_sec;
+    let required = LEGACY_TUNER_DEGRADATION_MIN_MIB_PER_SEC
+        .max(accepted_mib_per_sec * LEGACY_TUNER_DEGRADATION_MIN_RATIO);
+    (drop >= required).then_some((drop, required))
+}
+
+fn clear_legacy_tuner_degradation(tuner: &mut LegacyThroughputTuner) {
+    tuner.degraded_windows = 0;
+    tuner.degraded_identities = None;
+}
+
+fn clear_legacy_tuner_audit(tuner: &mut LegacyThroughputTuner) {
+    tuner.audit_loaded_identities = None;
+    tuner.audit_survivor_identities = None;
+    tuner.audit_started_unix_secs = 0;
+}
+
+fn queue_legacy_tuner_action(
+    tuner: &mut LegacyThroughputTuner,
+    action: LegacyTunerAction,
+    now: u64,
+) {
+    tuner.pending_action = Some(action);
+    tuner.pending_action_started_unix_secs = now;
+}
+
+fn cancel_legacy_tuner_experiment(
+    tuner: &mut LegacyThroughputTuner,
+    now: u64,
+    reason: impl Into<String>,
+) {
+    tuner.phase = LegacyTunerPhase::ObserveBaseline;
+    tuner.pending_action = None;
+    tuner.pending_action_started_unix_secs = 0;
+    tuner.probe_identity = None;
+    tuner.window = None;
+    tuner.baseline_ready = false;
+    clear_legacy_tuner_degradation(tuner);
+    clear_legacy_tuner_audit(tuner);
+    tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_BACKOFF_SECS);
+    tuner.backoff_until_unix_secs = 0;
+    tuner.last_decision = Some(reason.into());
+}
+
+fn legacy_identity_matches_controlled_lane(
+    config: &NasPipelineConfig,
+    runtime: &RuntimeState,
+    identity: (u64, u32, LegacyLaneStartIdentity),
+) -> bool {
+    let (epoch, pid, start) = identity;
+    if let Some(child) = runtime.legacy_compacts.get(&epoch) {
+        if child.pid != Some(pid) {
+            return false;
+        }
+        return match start {
+            LegacyLaneStartIdentity::LinuxStartTicks(expected) => {
+                process_stat_identity(pid).is_some_and(|(_, actual)| actual == expected)
+                    && process_cmdline_matches_legacy_exact(config, epoch, pid) == Some(true)
+                    && process_is_group_leader(pid)
+            }
+            // Portable test/non-Linux fallback. Production Linux observations
+            // always carry kernel start ticks and therefore take the stronger arm.
+            LegacyLaneStartIdentity::UnixSecs(expected) => {
+                #[cfg(target_os = "linux")]
+                {
+                    // A wall-clock second is not a safe signal identity on Linux:
+                    // PID reuse can occur inside that interval. Missing /proc
+                    // start ticks therefore disables the action rather than
+                    // weakening SIGSTOP/SIGCONT ownership proof.
+                    let _ = expected;
+                    false
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    child.started_unix_secs == expected
+                }
+            }
+        };
+    }
+
+    let Some(adopted) = runtime.adopted_legacy_compacts.get(&epoch) else {
+        return false;
+    };
+    if adopted.identity_tainted || adopted.pid != pid {
+        return false;
+    }
+    let LegacyLaneStartIdentity::LinuxStartTicks(expected) = start else {
+        // Adopted workers only become signal-eligible when Linux gives us a
+        // monotonic start-tick identity. Their wall-clock display timestamp is
+        // never sufficient ownership proof.
+        return false;
+    };
+    if adopted.process_start_ticks != expected
+        || !process_stat_identity(pid)
+            .is_some_and(|(state, actual)| state != 'Z' && actual == adopted.process_start_ticks)
+        || process_cmdline_matches_legacy_exact(config, epoch, pid) != Some(true)
+        || !process_is_group_leader(pid)
+    {
+        return false;
+    }
+    read_ownership(&config.archive_root.join(format!("epoch-{epoch}"))).is_some_and(|owner| {
+        owner_matches_legacy_identity(&owner, epoch, pid, adopted.owner_schema_version)
+    })
+}
+
+fn controlled_legacy_pid(
+    config: &NasPipelineConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+) -> Option<u32> {
+    let (pid, start) = if let Some(child) = runtime.legacy_compacts.get(&epoch) {
+        let pid = child.pid?;
+        let start = process_stat_identity(pid)?.1;
+        (pid, LegacyLaneStartIdentity::LinuxStartTicks(start))
+    } else {
+        let adopted = runtime.adopted_legacy_compacts.get(&epoch)?;
+        (
+            adopted.pid,
+            LegacyLaneStartIdentity::LinuxStartTicks(adopted.process_start_ticks),
+        )
+    };
+    legacy_identity_matches_controlled_lane(config, runtime, (epoch, pid, start)).then_some(pid)
+}
+
+fn exact_tuner_pause_owned(
+    config: &NasPipelineConfig,
+    runtime: &RuntimeState,
+    identity: (u64, u32, LegacyLaneStartIdentity),
+) -> bool {
+    let (epoch, pid, start) = identity;
+    if runtime
+        .paused_jobs
+        .contains(&format!("compact_reuse:{epoch}"))
+        || !legacy_identity_matches_controlled_lane(config, runtime, identity)
+    {
+        return false;
+    }
+    runtime
+        .auto_paused_legacy
+        .get(&epoch)
+        .is_some_and(|record| {
+            record.pid == pid
+                && legacy_tuner_owns_pause_reason(&record.reason)
+                && match start {
+                    LegacyLaneStartIdentity::LinuxStartTicks(expected) => {
+                        record.process_start_ticks == Some(expected)
+                    }
+                    LegacyLaneStartIdentity::UnixSecs(_) => true,
+                }
+        })
+}
+
 fn reset_legacy_tuner_context(runtime: &mut RuntimeState, context: LegacyTunerContext, now: u64) {
     remember_legacy_tuner_profile(runtime);
     let paused_probe = runtime
         .auto_paused_legacy
         .values()
         .find(|record| legacy_tuner_owns_pause_reason(&record.reason))
-        .map(|record| record.epoch);
+        .map(|record| {
+            (
+                record.epoch,
+                record.pid,
+                record
+                    .process_start_ticks
+                    .map(LegacyLaneStartIdentity::LinuxStartTicks),
+            )
+        });
     let profile = runtime.legacy_tuner_profiles.get(context).clone();
     runtime.legacy_throughput_tuner = LegacyThroughputTuner {
         context: Some(context),
@@ -7684,16 +7931,19 @@ fn reset_legacy_tuner_context(runtime: &mut RuntimeState, context: LegacyTunerCo
         accepted_rate_source: profile.accepted_rate_source,
         accepted_device_mib_per_sec: profile.accepted_device_mib_per_sec,
         next_probe_unix_secs: now.saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS),
-        pending_action: paused_probe.map(|epoch| LegacyTunerAction::Resume {
+        pending_action: paused_probe.map(|(epoch, pid, start)| LegacyTunerAction::Resume {
             epoch,
+            expected_identity: start.map(|start| (epoch, pid, start)),
             reason: "scheduler context changed; re-observe resumed probe".to_string(),
         }),
+        pending_action_started_unix_secs: paused_probe.is_some().then_some(now).unwrap_or_default(),
         ..LegacyThroughputTuner::default()
     };
 }
 
 fn legacy_tuner_owns_pause_reason(reason: &str) -> bool {
     reason.starts_with(LEGACY_TUNER_PAUSE_PREFIX)
+        || reason.starts_with(LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX)
         || reason.starts_with(LEGACY_TUNER_GUARD_PAUSE_PREFIX)
 }
 
@@ -7712,17 +7962,76 @@ fn observe_legacy_throughput_tuner(
     }
 
     let mut observation = legacy_throughput_observation(snapshot, now);
-    let newest_managed_epoch = newest_managed_running_legacy_epoch(runtime);
+    let newest_controlled_epoch =
+        newest_tuner_controlled_running_legacy_epoch(config, runtime, &observation.identities);
     let paused_throughput_probe = runtime
         .auto_paused_legacy
         .values()
-        .find(|record| record.reason.starts_with(LEGACY_TUNER_PAUSE_PREFIX))
+        .find(|record| {
+            record.reason.starts_with(LEGACY_TUNER_PAUSE_PREFIX)
+                || record
+                    .reason
+                    .starts_with(LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX)
+        })
         .map(|record| record.epoch);
     let paused_by_guard = runtime
         .auto_paused_legacy
         .values()
         .find(|record| record.reason.starts_with(LEGACY_TUNER_GUARD_PAUSE_PREFIX))
         .map(|record| record.epoch);
+    let legacy_pause_present = !runtime.auto_paused_legacy.is_empty()
+        || runtime
+            .paused_jobs
+            .iter()
+            .any(|key| key.starts_with("compact_reuse:"));
+    let pressure = legacy_pressure_state(config, &snapshot.machine);
+    let pressure_recovered = matches!(&pressure, LegacyPressureState::Resume);
+    // One lane is the functional floor: `legacy_compact_min_running` is the
+    // bootstrap target, not a permanent claim that two lanes must be faster.
+    let downshift_floor = 1usize;
+    let audit_identity = runtime.legacy_throughput_tuner.probe_identity;
+    let exact_probe_pause_owned =
+        audit_identity.is_some_and(|identity| exact_tuner_pause_owned(config, runtime, identity));
+    let audit_pause_owned = exact_probe_pause_owned
+        && audit_identity.is_some_and(|identity| {
+            runtime
+                .auto_paused_legacy
+                .get(&identity.0)
+                .is_some_and(|record| {
+                    record
+                        .reason
+                        .starts_with(LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX)
+                })
+        });
+    let rejected_probe_pause_owned = exact_probe_pause_owned
+        && audit_identity.is_some_and(|identity| {
+            runtime
+                .auto_paused_legacy
+                .get(&identity.0)
+                .is_some_and(|record| record.reason.starts_with(LEGACY_TUNER_PAUSE_PREFIX))
+        });
+    let audit_manually_paused = audit_identity.is_some_and(|(epoch, _, _)| {
+        runtime
+            .paused_jobs
+            .contains(&format!("compact_reuse:{epoch}"))
+    });
+    let paused_tuner_identities = runtime
+        .auto_paused_legacy
+        .values()
+        .filter(|record| legacy_tuner_owns_pause_reason(&record.reason))
+        .filter_map(|record| {
+            record.process_start_ticks.map(|ticks| {
+                (
+                    record.epoch,
+                    (
+                        record.epoch,
+                        record.pid,
+                        LegacyLaneStartIdentity::LinuxStartTicks(ticks),
+                    ),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
     let tuner = &mut runtime.legacy_throughput_tuner;
     // Once native logical-input telemetry is established, a transient stale
     // progress sample must not downgrade the objective and invalidate a good
@@ -7738,6 +8047,8 @@ fn observe_legacy_throughput_tuner(
         && tuner.current_rate_source != observation.rate_source;
     if rate_source_changed {
         tuner.window = None;
+        tuner.baseline_ready = false;
+        clear_legacy_tuner_degradation(tuner);
         tuner.last_decision = Some("throughput metric source changed; re-observing".into());
     }
     if tuner.accepted_rate_source.is_some()
@@ -7750,6 +8061,9 @@ fn observe_legacy_throughput_tuner(
         tuner.accepted_device_mib_per_sec = None;
         tuner.probe_identity = None;
         tuner.window = None;
+        tuner.baseline_ready = false;
+        clear_legacy_tuner_degradation(tuner);
+        clear_legacy_tuner_audit(tuner);
         tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS);
         tuner.last_decision = Some(format!(
             "throughput metric source changed; recalibrating rate without discarding the proven {}-lane topology",
@@ -7760,13 +8074,23 @@ fn observe_legacy_throughput_tuner(
     tuner.current_sampled_lanes = observation.sampled_lanes;
     tuner.current_useful_mib_per_sec = observation.useful_mib_per_sec;
     tuner.current_rate_source = observation.rate_source;
+    if !pressure_recovered {
+        tuner.baseline_ready = false;
+    }
 
     if tuner.phase_matches_backoff() && now >= tuner.backoff_until_unix_secs {
-        if let Some(epoch) = paused_throughput_probe {
-            tuner.pending_action = Some(LegacyTunerAction::Resume {
-                epoch,
-                reason: "throughput-probe backoff elapsed".to_string(),
-            });
+        if let Some(identity @ (epoch, _, _)) = tuner.probe_identity
+            && paused_throughput_probe == Some(epoch)
+        {
+            queue_legacy_tuner_action(
+                tuner,
+                LegacyTunerAction::Resume {
+                    epoch,
+                    expected_identity: Some(identity),
+                    reason: "throughput-probe backoff elapsed".to_string(),
+                },
+                now,
+            );
             tuner.phase = LegacyTunerPhase::ProbeUp {
                 baseline_lanes: tuner.accepted_lanes,
                 baseline_mib_per_sec: tuner.accepted_useful_mib_per_sec.unwrap_or_default(),
@@ -7783,6 +8107,7 @@ fn observe_legacy_throughput_tuner(
         tuner.next_probe_unix_secs = now;
         tuner.backoff_until_unix_secs = 0;
         tuner.probe_identity = None;
+        tuner.baseline_ready = false;
     }
 
     // Live ingest health is operational telemetry, not a compaction resource
@@ -7807,13 +8132,24 @@ fn observe_legacy_throughput_tuner(
     if let Some(reason) = hard_guard {
         tuner.guard_held = true;
         tuner.window = None;
+        clear_legacy_tuner_degradation(tuner);
         // A hard guard invalidates any queued resume from an earlier context.
         // Keep at most the next pause request; target=0 prevents refills while
-        // managed lanes are stopped one reconciliation pass at a time.
-        tuner.pending_action = newest_managed_epoch.map(|epoch| LegacyTunerAction::Pause {
+        // exactly controlled lanes are stopped one reconciliation pass at a time.
+        tuner.pending_action = newest_controlled_epoch.map(|epoch| LegacyTunerAction::Pause {
             epoch,
+            expected_identity: observation
+                .identities
+                .iter()
+                .find(|(candidate, _, _)| *candidate == epoch)
+                .copied(),
             reason: format!("{LEGACY_TUNER_GUARD_PAUSE_PREFIX} {reason}"),
         });
+        tuner.pending_action_started_unix_secs = tuner
+            .pending_action
+            .is_some()
+            .then_some(now)
+            .unwrap_or_default();
         tuner.last_decision = Some(format!("held throughput probing: {reason}"));
         return;
     }
@@ -7821,10 +8157,15 @@ fn observe_legacy_throughput_tuner(
         tuner.window = None;
         if let Some(epoch) = paused_by_guard {
             if tuner.pending_action.is_none() {
-                tuner.pending_action = Some(LegacyTunerAction::Resume {
-                    epoch,
-                    reason: "throughput-tuner hard guard recovered".to_string(),
-                });
+                queue_legacy_tuner_action(
+                    tuner,
+                    LegacyTunerAction::Resume {
+                        epoch,
+                        expected_identity: paused_tuner_identities.get(&epoch).copied(),
+                        reason: "throughput-tuner hard guard recovered".to_string(),
+                    },
+                    now,
+                );
             }
             tuner.last_decision = Some(format!(
                 "hard guard recovered; resuming compact_reuse:{epoch} before probing"
@@ -7837,6 +8178,7 @@ fn observe_legacy_throughput_tuner(
         tuner.guard_held = false;
         tuner.phase = LegacyTunerPhase::ObserveBaseline;
         tuner.probe_identity = None;
+        clear_legacy_tuner_degradation(tuner);
         tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS);
         tuner.last_decision =
             Some("hard guard recovered; restoring the proven topology before probing".to_string());
@@ -7851,6 +8193,9 @@ fn observe_legacy_throughput_tuner(
     }
     let protected_probe_epoch = match tuner.phase {
         LegacyTunerPhase::VerifyPause { probe_epoch, .. } => Some(probe_epoch),
+        LegacyTunerPhase::VerifyDownshift { audit_epoch, .. }
+        | LegacyTunerPhase::VerifyDownshiftReloaded { audit_epoch, .. }
+        | LegacyTunerPhase::CommitDownshift { audit_epoch, .. } => Some(audit_epoch),
         LegacyTunerPhase::Backoff => paused_throughput_probe,
         _ => None,
     };
@@ -7863,10 +8208,16 @@ fn observe_legacy_throughput_tuner(
         })
         .map(|record| record.epoch)
     {
-        tuner.pending_action = Some(LegacyTunerAction::Resume {
-            epoch,
-            reason: "recovering an orphaned throughput-tuner pause".to_string(),
-        });
+        let expected_identity = paused_tuner_identities.get(&epoch).copied();
+        queue_legacy_tuner_action(
+            tuner,
+            LegacyTunerAction::Resume {
+                epoch,
+                expected_identity,
+                reason: "recovering an orphaned throughput-tuner pause".to_string(),
+            },
+            now,
+        );
         tuner.window = None;
         tuner.last_decision = Some(format!(
             "resuming orphaned tuner pause compact_reuse:{epoch} before probing"
@@ -7874,8 +8225,126 @@ fn observe_legacy_throughput_tuner(
         return;
     }
 
+    let downshift_phase = matches!(
+        tuner.phase,
+        LegacyTunerPhase::VerifyDownshift { .. }
+            | LegacyTunerPhase::VerifyDownshiftReloaded { .. }
+            | LegacyTunerPhase::CommitDownshift { .. }
+    );
+    if downshift_phase
+        && tuner.audit_started_unix_secs > 0
+        && now.saturating_sub(tuner.audit_started_unix_secs) >= LEGACY_TUNER_DOWNSHIFT_TIMEOUT_SECS
+    {
+        let identity = tuner.probe_identity;
+        cancel_legacy_tuner_experiment(
+            tuner,
+            now,
+            "downshift audit timed out; preserving the proven topology",
+        );
+        if audit_pause_owned && let Some(identity @ (epoch, _, _)) = identity {
+            queue_legacy_tuner_action(
+                tuner,
+                LegacyTunerAction::Resume {
+                    epoch,
+                    expected_identity: Some(identity),
+                    reason: "downshift audit timed out; resume the exactly owned lane".to_string(),
+                },
+                now,
+            );
+        }
+        return;
+    }
+    if downshift_phase && !pressure_recovered {
+        match pressure {
+            LegacyPressureState::Pause(reason) => {
+                let identity = tuner.probe_identity;
+                cancel_legacy_tuner_experiment(
+                    tuner,
+                    now,
+                    format!(
+                        "resource pressure interrupted the downshift audit ({reason}); preserving the proven topology"
+                    ),
+                );
+                if audit_pause_owned && let Some(identity @ (epoch, _, _)) = identity {
+                    queue_legacy_tuner_action(
+                        tuner,
+                        LegacyTunerAction::Resume {
+                            epoch,
+                            expected_identity: Some(identity),
+                            reason: "resource-pressure audit interruption; resume after recovery"
+                                .to_string(),
+                        },
+                        now,
+                    );
+                }
+            }
+            LegacyPressureState::Hold => {
+                tuner.window = None;
+                tuner.baseline_ready = false;
+                tuner.last_decision = Some(
+                    "waiting for resource pressure to recover before scoring the downshift audit"
+                        .to_string(),
+                );
+            }
+            LegacyPressureState::Resume => unreachable!(),
+        }
+        return;
+    }
+    if let LegacyTunerPhase::CommitDownshift {
+        loaded_lanes,
+        reduced_mib_per_sec,
+        reduced_device_mib_per_sec,
+        audit_epoch,
+    } = tuner.phase
+    {
+        let exact_survivors =
+            tuner.audit_survivor_identities.as_ref() == Some(&observation.identities);
+        if !audit_pause_owned || !exact_survivors {
+            let identity = tuner.probe_identity;
+            cancel_legacy_tuner_experiment(
+                tuner,
+                now,
+                format!(
+                    "could not prove final pause ownership for compact_reuse:{audit_epoch}; preserving {loaded_lanes} lanes"
+                ),
+            );
+            if audit_pause_owned && let Some(identity @ (epoch, _, _)) = identity {
+                queue_legacy_tuner_action(
+                    tuner,
+                    LegacyTunerAction::Resume {
+                        epoch,
+                        expected_identity: Some(identity),
+                        reason: "downshift commit topology changed; preserve accepted lane"
+                            .to_string(),
+                    },
+                    now,
+                );
+            }
+            return;
+        }
+        tuner.accepted_lanes = loaded_lanes.saturating_sub(1).max(1);
+        tuner.accepted_useful_mib_per_sec = Some(reduced_mib_per_sec);
+        tuner.accepted_rate_source = Some(LegacyTunerRateSource::LogicalInput);
+        tuner.accepted_device_mib_per_sec = reduced_device_mib_per_sec;
+        tuner.phase = LegacyTunerPhase::Backoff;
+        tuner.backoff_until_unix_secs =
+            now.saturating_add(LEGACY_TUNER_CONFIRMED_DOWNSHIFT_BACKOFF_SECS);
+        tuner.window = None;
+        tuner.baseline_ready = false;
+        clear_legacy_tuner_degradation(tuner);
+        clear_legacy_tuner_audit(tuner);
+        tuner.last_decision = Some(format!(
+            "accepted {} lanes only after N→N-1→N confirmation; compact_reuse:{audit_epoch} remains paused until probe backoff {}",
+            tuner.accepted_lanes, tuner.backoff_until_unix_secs,
+        ));
+        return;
+    }
+
     let Some(useful) = observation.useful_mib_per_sec else {
         tuner.window = None;
+        if matches!(tuner.phase, LegacyTunerPhase::ObserveBaseline) {
+            clear_legacy_tuner_degradation(tuner);
+        }
         tuner.last_decision = Some(format!(
             "waiting for complete useful-throughput coverage ({}/{})",
             observation.sampled_lanes, observation.active_lanes
@@ -7888,6 +8357,25 @@ fn observe_legacy_throughput_tuner(
             probe_epoch,
             ..
         } => {
+            if tuner.audit_loaded_identities.is_none()
+                && let Some(probe_identity) = tuner.probe_identity
+            {
+                tuner.audit_loaded_identities = Some(observation.identities.clone());
+                tuner.audit_survivor_identities = Some(
+                    observation
+                        .identities
+                        .iter()
+                        .copied()
+                        .filter(|identity| *identity != probe_identity)
+                        .collect(),
+                );
+                tuner.window = None;
+                tuner.last_decision = Some(format!(
+                    "captured exact {}-lane probe topology for compact_reuse:{probe_epoch}",
+                    observation.active_lanes,
+                ));
+                return;
+            }
             let probe_present = tuner.probe_identity.map_or_else(
                 || {
                     observation
@@ -7897,14 +8385,21 @@ fn observe_legacy_throughput_tuner(
                 },
                 |identity| observation.identities.contains(&identity),
             );
-            if observation.active_lanes != baseline_lanes.saturating_add(1) || !probe_present {
-                tuner.phase = LegacyTunerPhase::ObserveBaseline;
-                tuner.probe_identity = None;
-                tuner.window = None;
-                tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS);
-                tuner.last_decision = Some(format!(
-                    "probe compact_reuse:{probe_epoch} topology changed; preserving the accepted {baseline_lanes}-lane floor"
-                ));
+            let exact_probe_topology = tuner
+                .audit_loaded_identities
+                .as_ref()
+                .is_none_or(|expected| expected == &observation.identities);
+            if observation.active_lanes != baseline_lanes.saturating_add(1)
+                || !probe_present
+                || !exact_probe_topology
+            {
+                cancel_legacy_tuner_experiment(
+                    tuner,
+                    now,
+                    format!(
+                        "probe compact_reuse:{probe_epoch} topology changed; preserving the accepted {baseline_lanes}-lane floor"
+                    ),
+                );
                 return;
             }
         }
@@ -7917,15 +8412,87 @@ fn observe_legacy_throughput_tuner(
                 .identities
                 .iter()
                 .any(|(epoch, _, _)| *epoch == probe_epoch);
-            if observation.active_lanes != baseline_lanes || probe_present {
-                tuner.window = None;
-                tuner.last_decision = Some(format!(
-                    "waiting for compact_reuse:{probe_epoch} pause topology ({}/{baseline_lanes} baseline lanes running)",
-                    observation.active_lanes
-                ));
+            let exact_survivors = tuner
+                .audit_survivor_identities
+                .as_ref()
+                .is_none_or(|expected| expected == &observation.identities);
+            if observation.active_lanes != baseline_lanes
+                || probe_present
+                || !exact_survivors
+                || (tuner.probe_identity.is_some() && !rejected_probe_pause_owned)
+            {
+                let identity = tuner.probe_identity;
+                cancel_legacy_tuner_experiment(
+                    tuner,
+                    now,
+                    format!(
+                        "probe compact_reuse:{probe_epoch} lost exact pause ownership or survivor identity; preserving {baseline_lanes} lanes"
+                    ),
+                );
+                if rejected_probe_pause_owned && let Some(identity @ (epoch, _, _)) = identity {
+                    queue_legacy_tuner_action(
+                        tuner,
+                        LegacyTunerAction::Resume {
+                            epoch,
+                            expected_identity: Some(identity),
+                            reason: "probe verification topology changed".to_string(),
+                        },
+                        now,
+                    );
+                }
                 return;
             }
         }
+        LegacyTunerPhase::VerifyDownshift {
+            loaded_lanes,
+            audit_epoch,
+            ..
+        } => {
+            let exact_survivors =
+                tuner.audit_survivor_identities.as_ref() == Some(&observation.identities);
+            if !audit_pause_owned || !exact_survivors {
+                let identity = tuner.probe_identity;
+                cancel_legacy_tuner_experiment(
+                    tuner,
+                    now,
+                    format!(
+                        "downshift audit compact_reuse:{audit_epoch} lost exact pause ownership or survivor identity; preserving {loaded_lanes} lanes"
+                    ),
+                );
+                if audit_pause_owned && let Some(identity @ (epoch, _, _)) = identity {
+                    queue_legacy_tuner_action(
+                        tuner,
+                        LegacyTunerAction::Resume {
+                            epoch,
+                            expected_identity: Some(identity),
+                            reason: "downshift audit topology changed; preserve accepted lane"
+                                .to_string(),
+                        },
+                        now,
+                    );
+                }
+                return;
+            }
+        }
+        LegacyTunerPhase::VerifyDownshiftReloaded {
+            loaded_lanes,
+            audit_epoch,
+            ..
+        } => {
+            let exact_loaded =
+                tuner.audit_loaded_identities.as_ref() == Some(&observation.identities);
+            if !exact_loaded || audit_pause_owned || audit_manually_paused {
+                cancel_legacy_tuner_experiment(
+                    tuner,
+                    now,
+                    format!(
+                        "reloaded downshift audit compact_reuse:{audit_epoch} changed identity; preserving {loaded_lanes} lanes"
+                    ),
+                );
+                return;
+            }
+        }
+        LegacyTunerPhase::CommitDownshift { .. } => unreachable!("handled before telemetry gating"),
         LegacyTunerPhase::Backoff => return,
         LegacyTunerPhase::ObserveBaseline => {}
     }
@@ -7933,10 +8500,34 @@ fn observe_legacy_throughput_tuner(
         && tuner.accepted_lanes > observation.active_lanes
     {
         tuner.window = None;
+        tuner.baseline_ready = false;
+        clear_legacy_tuner_degradation(tuner);
         tuner.last_decision = Some(format!(
             "restoring proven {}-lane topology ({}/{} currently active)",
             tuner.accepted_lanes, observation.active_lanes, tuner.accepted_lanes,
         ));
+        return;
+    }
+    if matches!(tuner.phase, LegacyTunerPhase::ObserveBaseline)
+        && tuner.accepted_lanes > 0
+        && observation.active_lanes > tuner.accepted_lanes.saturating_add(1)
+    {
+        tuner.window = None;
+        tuner.baseline_ready = false;
+        clear_legacy_tuner_degradation(tuner);
+        tuner.last_decision = Some(format!(
+            "holding the proven {}-lane target while an unattributed {}-lane topology converges; additions are evaluated one lane at a time",
+            tuner.accepted_lanes, observation.active_lanes,
+        ));
+        return;
+    }
+    if matches!(tuner.phase, LegacyTunerPhase::ObserveBaseline) && !pressure_recovered {
+        tuner.window = None;
+        tuner.baseline_ready = false;
+        tuner.last_decision = Some(
+            "waiting for memory, CPU, and I/O pressure to recover before measuring throughput"
+                .to_string(),
+        );
         return;
     }
     let identities_changed = tuner
@@ -7968,10 +8559,10 @@ fn observe_legacy_throughput_tuner(
         && tuner.accepted_lanes > 0
         && observation.active_lanes == tuner.accepted_lanes.saturating_add(1)
     {
-        let Some(probe_epoch) = newest_managed_epoch else {
+        let Some(probe_epoch) = newest_controlled_epoch else {
             tuner.window = None;
             tuner.last_decision = Some(
-                "cannot attribute the extra lane to a managed probe; re-observing topology"
+                "cannot attribute the extra lane to an exactly controlled probe; re-observing topology"
                     .to_string(),
             );
             return;
@@ -7981,11 +8572,21 @@ fn observe_legacy_throughput_tuner(
             .iter()
             .find(|(epoch, _, _)| *epoch == probe_epoch)
             .copied();
+        tuner.audit_loaded_identities = Some(observation.identities.clone());
+        tuner.audit_survivor_identities = tuner.probe_identity.map(|probe_identity| {
+            observation
+                .identities
+                .iter()
+                .copied()
+                .filter(|identity| *identity != probe_identity)
+                .collect()
+        });
         tuner.phase = LegacyTunerPhase::ProbeUp {
             baseline_lanes: tuner.accepted_lanes,
             baseline_mib_per_sec: tuner.accepted_useful_mib_per_sec.unwrap_or_default(),
             probe_epoch,
         };
+        tuner.baseline_ready = false;
         tuner.window = None;
         tuner.last_decision = Some(format!(
             "probing {} lanes with compact_reuse:{}",
@@ -8003,15 +8604,148 @@ fn observe_legacy_throughput_tuner(
     let rate_label = rate_source.label();
     match tuner.phase {
         LegacyTunerPhase::ObserveBaseline => {
-            tuner.accepted_lanes = tuner.accepted_lanes.max(observation.active_lanes);
-            tuner.accepted_useful_mib_per_sec = Some(measured);
+            let exact_accepted_topology =
+                tuner.accepted_lanes > 0 && observation.active_lanes == tuner.accepted_lanes;
+            let controlled_audit_epoch = newest_controlled_epoch.filter(|epoch| {
+                observation
+                    .identities
+                    .iter()
+                    .any(|(candidate, _, _)| candidate == epoch)
+            });
+            let throughput_comparable = exact_accepted_topology
+                && observation.active_lanes > downshift_floor
+                && tuner.accepted_rate_source == Some(LegacyTunerRateSource::LogicalInput)
+                && rate_source == LegacyTunerRateSource::LogicalInput
+                && pressure_recovered
+                && !legacy_pause_present;
+            let downshift_eligible = throughput_comparable && controlled_audit_epoch.is_some();
+            let degradation = downshift_eligible
+                .then(|| tuner.accepted_useful_mib_per_sec)
+                .flatten()
+                .and_then(|accepted| legacy_tuner_degradation(accepted, measured));
+            if let Some((drop, required_drop)) = degradation {
+                if tuner.degraded_identities.as_ref() == Some(&observation.identities) {
+                    tuner.degraded_windows = tuner.degraded_windows.saturating_add(1);
+                } else {
+                    tuner.degraded_windows = 1;
+                    tuner.degraded_identities = Some(observation.identities.clone());
+                }
+                tuner.window = None;
+                tuner.baseline_ready = false;
+                // The next window starts on the following reconciliation
+                // pass. Keep the upward-probe gate closed for one additional
+                // cooldown so the full comparison window can settle first.
+                tuner.next_probe_unix_secs = now
+                    .saturating_add(LEGACY_TUNER_SETTLE_SECS)
+                    .saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS);
+                if tuner.degraded_windows < LEGACY_TUNER_DEGRADATION_WINDOWS {
+                    tuner.last_decision = Some(format!(
+                        "sustained-throughput check {}/{}: {} lanes measured {:.1} MiB/s, down {:.1} from the {:.1} baseline (trigger {:.1})",
+                        tuner.degraded_windows,
+                        LEGACY_TUNER_DEGRADATION_WINDOWS,
+                        observation.active_lanes,
+                        measured,
+                        drop,
+                        tuner.accepted_useful_mib_per_sec.unwrap_or_default(),
+                        required_drop,
+                    ));
+                    return;
+                }
+                let audit_epoch = controlled_audit_epoch
+                    .expect("eligible downshift has an exactly controlled lane");
+                let reason = format!(
+                    "{LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX} sustained degradation at {} lanes ({:.1} vs {:.1} MiB/s); testing whether N-1 improves aggregate logical input",
+                    observation.active_lanes,
+                    measured,
+                    tuner.accepted_useful_mib_per_sec.unwrap_or_default(),
+                );
+                let audit_identity = observation
+                    .identities
+                    .iter()
+                    .find(|(epoch, _, _)| *epoch == audit_epoch)
+                    .copied()
+                    .expect("eligible downshift has a complete managed identity");
+                queue_legacy_tuner_action(
+                    tuner,
+                    LegacyTunerAction::Pause {
+                        epoch: audit_epoch,
+                        expected_identity: Some(audit_identity),
+                        reason: reason.clone(),
+                    },
+                    now,
+                );
+                tuner.phase = LegacyTunerPhase::VerifyDownshift {
+                    loaded_lanes: observation.active_lanes,
+                    loaded_mib_per_sec: measured,
+                    audit_epoch,
+                };
+                tuner.probe_identity = Some(audit_identity);
+                tuner.audit_loaded_identities = Some(observation.identities.clone());
+                tuner.audit_survivor_identities = Some(
+                    observation
+                        .identities
+                        .iter()
+                        .copied()
+                        .filter(|identity| *identity != audit_identity)
+                        .collect(),
+                );
+                tuner.audit_started_unix_secs = now;
+                tuner.baseline_ready = false;
+                clear_legacy_tuner_degradation(tuner);
+                tuner.last_decision = Some(reason);
+                return;
+            }
+            let suspected_decline = throughput_comparable
+                .then(|| tuner.accepted_useful_mib_per_sec)
+                .flatten()
+                .and_then(|accepted| {
+                    let drop = accepted - measured;
+                    let watch = LEGACY_TUNER_MIN_GAIN_MIB_PER_SEC
+                        .max(accepted * LEGACY_TUNER_MIN_GAIN_RATIO);
+                    (drop >= watch).then_some((accepted, drop, watch))
+                });
+            if let Some((accepted, drop, watch)) = suspected_decline {
+                clear_legacy_tuner_degradation(tuner);
+                tuner.baseline_ready = false;
+                tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_SETTLE_SECS);
+                tuner.last_decision = Some(format!(
+                    "holding {} lanes while aggregate {rate_label} is {:.1} MiB/s below the {:.1} proven baseline (watch threshold {:.1}); waiting for recovery or sustained audit evidence",
+                    observation.active_lanes, drop, accepted, watch,
+                ));
+                return;
+            }
+            clear_legacy_tuner_degradation(tuner);
+            let same_proven_topology = tuner.accepted_lanes == observation.active_lanes
+                && tuner.accepted_rate_source == Some(rate_source);
+            let proven_rate = tuner.accepted_useful_mib_per_sec;
+            let bootstrapped = tuner.accepted_lanes == 0;
+            if bootstrapped {
+                // A controller restart may inherit several byte-exact,
+                // start-tick-verified workers. Establish that existing
+                // topology as the initial baseline without disrupting it;
+                // every future addition still passes through ProbeUp.
+                tuner.accepted_lanes = observation.active_lanes;
+            }
+            tuner.accepted_useful_mib_per_sec = Some(
+                proven_rate
+                    .filter(|_| same_proven_topology)
+                    .map_or(measured, |proven| proven.max(measured)),
+            );
             tuner.accepted_rate_source = Some(rate_source);
             tuner.accepted_device_mib_per_sec = device;
             tuner.probe_identity = None;
+            clear_legacy_tuner_audit(tuner);
+            tuner.baseline_ready = true;
             tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS);
             tuner.last_decision = Some(format!(
-                "accepted {}-lane baseline at {:.1} MiB/s ({rate_label})",
-                observation.active_lanes, measured,
+                "{} {}-lane baseline at {:.1} MiB/s ({rate_label}); future additions are one lane at a time",
+                if bootstrapped {
+                    "bootstrapped"
+                } else {
+                    "refreshed"
+                },
+                observation.active_lanes,
+                measured,
             ));
         }
         LegacyTunerPhase::ProbeUp {
@@ -8028,9 +8762,11 @@ fn observe_legacy_throughput_tuner(
                 tuner.accepted_rate_source = Some(rate_source);
                 tuner.accepted_device_mib_per_sec = device;
                 tuner.probe_identity = None;
+                clear_legacy_tuner_audit(tuner);
                 tuner.phase = LegacyTunerPhase::ObserveBaseline;
                 tuner.backoff_until_unix_secs = 0;
                 tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS);
+                tuner.baseline_ready = true;
                 tuner.last_decision = Some(format!(
                     "accepted {} lanes: aggregate {rate_label} +{:.1} MiB/s",
                     observation.active_lanes, gain,
@@ -8040,10 +8776,15 @@ fn observe_legacy_throughput_tuner(
                     "{LEGACY_TUNER_PAUSE_PREFIX} {} lanes produced {:.1} MiB/s {rate_label} vs {:.1} baseline (required +{:.1})",
                     observation.active_lanes, measured, baseline_mib_per_sec, required,
                 );
-                tuner.pending_action = Some(LegacyTunerAction::Pause {
-                    epoch: probe_epoch,
-                    reason: reason.clone(),
-                });
+                queue_legacy_tuner_action(
+                    tuner,
+                    LegacyTunerAction::Pause {
+                        epoch: probe_epoch,
+                        expected_identity: tuner.probe_identity,
+                        reason: reason.clone(),
+                    },
+                    now,
+                );
                 tuner.phase = LegacyTunerPhase::VerifyPause {
                     baseline_lanes,
                     baseline_mib_per_sec,
@@ -8068,6 +8809,7 @@ fn observe_legacy_throughput_tuner(
                 tuner.accepted_rate_source = Some(rate_source);
                 tuner.phase = LegacyTunerPhase::Backoff;
                 tuner.backoff_until_unix_secs = now.saturating_add(LEGACY_TUNER_BACKOFF_SECS);
+                tuner.baseline_ready = false;
                 tuner.last_decision = Some(format!(
                     "rejected lane {} after paired pause restored {:.1} MiB/s {rate_label}; retry after {}",
                     probe_epoch, measured, tuner.backoff_until_unix_secs,
@@ -8076,21 +8818,118 @@ fn observe_legacy_throughput_tuner(
                 tuner.accepted_lanes = baseline_lanes.saturating_add(1);
                 tuner.accepted_useful_mib_per_sec = Some(probe_mib_per_sec);
                 tuner.accepted_rate_source = Some(rate_source);
-                tuner.probe_identity = None;
-                tuner.pending_action = Some(LegacyTunerAction::Resume {
-                    epoch: probe_epoch,
-                    reason: format!(
-                        "paired pause reduced aggregate throughput to {:.1} MiB/s; keep probe",
-                        measured
-                    ),
-                });
+                let expected_identity = tuner.probe_identity;
+                queue_legacy_tuner_action(
+                    tuner,
+                    LegacyTunerAction::Resume {
+                        epoch: probe_epoch,
+                        expected_identity,
+                        reason: format!(
+                            "paired pause reduced aggregate throughput to {:.1} MiB/s; keep probe",
+                            measured
+                        ),
+                    },
+                    now,
+                );
                 tuner.phase = LegacyTunerPhase::ObserveBaseline;
                 tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_PROBE_COOLDOWN_SECS);
+                tuner.baseline_ready = false;
                 tuner.last_decision = Some(format!(
                     "accepted lane {} because pause reduced aggregate {rate_label}",
                     probe_epoch,
                 ));
             }
+        }
+        LegacyTunerPhase::VerifyDownshift {
+            loaded_lanes,
+            loaded_mib_per_sec,
+            audit_epoch,
+        } => {
+            clear_legacy_tuner_degradation(tuner);
+            let identity = tuner
+                .probe_identity
+                .expect("verified downshift has an exact audit identity");
+            queue_legacy_tuner_action(
+                tuner,
+                LegacyTunerAction::Resume {
+                    epoch: audit_epoch,
+                    expected_identity: Some(identity),
+                    reason: "remeasure the original N-lane topology before deciding a downshift"
+                        .to_string(),
+                },
+                now,
+            );
+            tuner.phase = LegacyTunerPhase::VerifyDownshiftReloaded {
+                loaded_lanes,
+                loaded_mib_per_sec,
+                reduced_mib_per_sec: measured,
+                reduced_device_mib_per_sec: device,
+                audit_epoch,
+            };
+            tuner.window = None;
+            tuner.audit_started_unix_secs = now;
+            tuner.baseline_ready = false;
+            tuner.last_decision = Some(format!(
+                "N-1 measured {:.1} MiB/s {rate_label}; restoring {loaded_lanes} lanes for causal confirmation",
+                measured,
+            ));
+        }
+        LegacyTunerPhase::VerifyDownshiftReloaded {
+            loaded_lanes,
+            loaded_mib_per_sec,
+            reduced_mib_per_sec,
+            reduced_device_mib_per_sec,
+            audit_epoch,
+        } => {
+            let comparison = loaded_mib_per_sec.max(measured);
+            let required =
+                LEGACY_TUNER_MIN_GAIN_MIB_PER_SEC.max(comparison * LEGACY_TUNER_MIN_GAIN_RATIO);
+            let gain = reduced_mib_per_sec - comparison;
+            let identity = tuner
+                .probe_identity
+                .expect("reloaded downshift has an exact audit identity");
+            if gain >= required {
+                let reason = format!(
+                    "{LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX} N-1 produced {:.1} MiB/s vs {:.1} across both N-lane windows; committing lower topology",
+                    reduced_mib_per_sec, comparison,
+                );
+                queue_legacy_tuner_action(
+                    tuner,
+                    LegacyTunerAction::Pause {
+                        epoch: audit_epoch,
+                        expected_identity: Some(identity),
+                        reason: reason.clone(),
+                    },
+                    now,
+                );
+                tuner.phase = LegacyTunerPhase::CommitDownshift {
+                    loaded_lanes,
+                    reduced_mib_per_sec,
+                    reduced_device_mib_per_sec,
+                    audit_epoch,
+                };
+                tuner.window = None;
+                tuner.audit_started_unix_secs = now;
+                tuner.last_decision = Some(reason);
+            } else {
+                tuner.accepted_lanes = loaded_lanes;
+                tuner.accepted_useful_mib_per_sec = Some(comparison);
+                tuner.accepted_rate_source = Some(rate_source);
+                tuner.accepted_device_mib_per_sec = device;
+                tuner.phase = LegacyTunerPhase::ObserveBaseline;
+                tuner.probe_identity = None;
+                tuner.window = None;
+                tuner.next_probe_unix_secs = now.saturating_add(LEGACY_TUNER_BACKOFF_SECS);
+                tuner.baseline_ready = false;
+                clear_legacy_tuner_audit(tuner);
+                tuner.last_decision = Some(format!(
+                    "retained {loaded_lanes} lanes after N→N-1→N: N-1 gain {:+.1} MiB/s, required +{:.1}",
+                    gain, required,
+                ));
+            }
+        }
+        LegacyTunerPhase::CommitDownshift { .. } => {
+            unreachable!("downshift commit is finalized after exact topology validation")
         }
         LegacyTunerPhase::Backoff => {}
     }
@@ -8106,6 +8945,9 @@ impl LegacyThroughputTuner {
             LegacyTunerPhase::ObserveBaseline => "observe_baseline",
             LegacyTunerPhase::ProbeUp { .. } => "probe_up",
             LegacyTunerPhase::VerifyPause { .. } => "verify_pause",
+            LegacyTunerPhase::VerifyDownshift { .. } => "verify_downshift",
+            LegacyTunerPhase::VerifyDownshiftReloaded { .. } => "verify_downshift_reloaded",
+            LegacyTunerPhase::CommitDownshift { .. } => "commit_downshift",
             LegacyTunerPhase::Backoff => "backoff",
         }
     }
@@ -8115,6 +8957,9 @@ fn active_tuner_probe_epoch(tuner: &LegacyThroughputTuner) -> Option<u64> {
     match tuner.phase {
         LegacyTunerPhase::ProbeUp { probe_epoch, .. }
         | LegacyTunerPhase::VerifyPause { probe_epoch, .. } => Some(probe_epoch),
+        LegacyTunerPhase::VerifyDownshift { audit_epoch, .. }
+        | LegacyTunerPhase::VerifyDownshiftReloaded { audit_epoch, .. }
+        | LegacyTunerPhase::CommitDownshift { audit_epoch, .. } => Some(audit_epoch),
         LegacyTunerPhase::ObserveBaseline | LegacyTunerPhase::Backoff => None,
     }
 }
@@ -8122,12 +8967,12 @@ fn active_tuner_probe_epoch(tuner: &LegacyThroughputTuner) -> Option<u64> {
 fn hard_pressure_legacy_epoch(
     config: &NasPipelineConfig,
     tuner: &LegacyThroughputTuner,
-    managed_running_epochs: &[u64],
+    controlled_running_epochs: &[u64],
 ) -> Option<u64> {
     active_tuner_probe_epoch(tuner)
-        .filter(|epoch| managed_running_epochs.contains(epoch))
+        .filter(|epoch| controlled_running_epochs.contains(epoch))
         .or_else(|| {
-            managed_running_epochs
+            controlled_running_epochs
                 .iter()
                 .copied()
                 .max_by_key(|epoch| historical_schedule_priority_key(config, *epoch))
@@ -8240,7 +9085,7 @@ fn plan_legacy_adaptive_action(
     config: &NasPipelineConfig,
     machine: &MachineSnapshot,
     total_running: usize,
-    managed_running_epochs: &[u64],
+    controlled_running_epochs: &[u64],
     auto_paused: &[AutoPausedLegacy],
     last_action_unix_secs: u64,
     now: u64,
@@ -8255,7 +9100,7 @@ fn plan_legacy_adaptive_action(
             if total_running <= config.legacy_compact_min_running {
                 return None;
             }
-            managed_running_epochs
+            controlled_running_epochs
                 .iter()
                 .copied()
                 .max_by_key(|epoch| historical_schedule_priority_key(config, *epoch))
@@ -8306,6 +9151,105 @@ fn record_legacy_adaptive_action(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyTunerActionResolution {
+    Applied,
+    Retryable,
+    Obsolete,
+}
+
+fn legacy_tuner_action_resolution(
+    config: &NasPipelineConfig,
+    runtime: &RuntimeState,
+    action: &LegacyTunerAction,
+    now: u64,
+) -> LegacyTunerActionResolution {
+    let timed_out = runtime
+        .legacy_throughput_tuner
+        .pending_action_started_unix_secs
+        > 0
+        && now.saturating_sub(
+            runtime
+                .legacy_throughput_tuner
+                .pending_action_started_unix_secs,
+        ) >= LEGACY_TUNER_ACTION_TIMEOUT_SECS;
+    match action {
+        LegacyTunerAction::Pause {
+            epoch,
+            expected_identity,
+            ..
+        } => {
+            if runtime
+                .paused_jobs
+                .contains(&format!("compact_reuse:{epoch}"))
+            {
+                return LegacyTunerActionResolution::Obsolete;
+            }
+            if let Some(identity) = expected_identity {
+                if exact_tuner_pause_owned(config, runtime, *identity) {
+                    return LegacyTunerActionResolution::Applied;
+                }
+                if !legacy_identity_matches_controlled_lane(config, runtime, *identity)
+                    || runtime.auto_paused_legacy.contains_key(epoch)
+                    || timed_out
+                {
+                    return LegacyTunerActionResolution::Obsolete;
+                }
+                LegacyTunerActionResolution::Retryable
+            } else if runtime
+                .auto_paused_legacy
+                .get(epoch)
+                .is_some_and(|record| legacy_tuner_owns_pause_reason(&record.reason))
+            {
+                LegacyTunerActionResolution::Applied
+            } else if runtime
+                .legacy_compacts
+                .get(epoch)
+                .and_then(|child| child.pid)
+                .is_some()
+                && !timed_out
+            {
+                LegacyTunerActionResolution::Retryable
+            } else {
+                LegacyTunerActionResolution::Obsolete
+            }
+        }
+        LegacyTunerAction::Resume {
+            epoch,
+            expected_identity,
+            ..
+        } => {
+            if runtime
+                .paused_jobs
+                .contains(&format!("compact_reuse:{epoch}"))
+            {
+                return LegacyTunerActionResolution::Obsolete;
+            }
+            if let Some(identity) = expected_identity {
+                if exact_tuner_pause_owned(config, runtime, *identity) {
+                    // Never forget an exactly owned SIGSTOP merely because a
+                    // SIGCONT retry is slow; keeping the action is safer.
+                    return LegacyTunerActionResolution::Retryable;
+                }
+                if runtime.auto_paused_legacy.contains_key(epoch)
+                    || !legacy_identity_matches_controlled_lane(config, runtime, *identity)
+                {
+                    return LegacyTunerActionResolution::Obsolete;
+                }
+                LegacyTunerActionResolution::Applied
+            } else if runtime
+                .auto_paused_legacy
+                .get(epoch)
+                .is_some_and(|record| legacy_tuner_owns_pause_reason(&record.reason))
+            {
+                LegacyTunerActionResolution::Retryable
+            } else {
+                LegacyTunerActionResolution::Applied
+            }
+        }
+    }
+}
+
 fn adjust_legacy_workers_for_pressure(
     config: &NasPipelineConfig,
     snapshot: &PipelineSnapshot,
@@ -8314,6 +9258,44 @@ fn adjust_legacy_workers_for_pressure(
 ) {
     if !config.legacy_compact_auto_pause {
         return;
+    }
+    if let Some(action) = runtime.legacy_throughput_tuner.pending_action.clone() {
+        match legacy_tuner_action_resolution(config, runtime, &action, now) {
+            LegacyTunerActionResolution::Applied => {
+                runtime.legacy_throughput_tuner.pending_action = None;
+                runtime
+                    .legacy_throughput_tuner
+                    .pending_action_started_unix_secs = 0;
+                return;
+            }
+            LegacyTunerActionResolution::Obsolete => {
+                let epoch = match action {
+                    LegacyTunerAction::Pause { epoch, .. }
+                    | LegacyTunerAction::Resume { epoch, .. } => epoch,
+                };
+                cancel_legacy_tuner_experiment(
+                    &mut runtime.legacy_throughput_tuner,
+                    now,
+                    format!(
+                        "cancelled stale topology action for compact_reuse:{epoch}; preserving the proven worker target"
+                    ),
+                );
+                return;
+            }
+            LegacyTunerActionResolution::Retryable => {
+                let pending_since = runtime
+                    .legacy_throughput_tuner
+                    .pending_action_started_unix_secs;
+                if pending_since > 0
+                    && now.saturating_sub(pending_since) >= LEGACY_TUNER_ACTION_TIMEOUT_SECS
+                    && let LegacyTunerAction::Resume { epoch, .. } = &action
+                {
+                    runtime.legacy_throughput_tuner.last_decision = Some(format!(
+                        "retrying exact resume for compact_reuse:{epoch}; replacement starts remain blocked until SIGCONT succeeds"
+                    ));
+                }
+            }
+        }
     }
     let pressure = legacy_pressure_state(config, &snapshot.machine);
     // A throughput minimum is a target, never permission to violate a hard
@@ -8329,16 +9311,30 @@ fn adjust_legacy_workers_for_pressure(
         .iter()
         .filter(|lane| lane.kind == "historical_compact_reuse" && lane.state.as_str() != "paused")
         .count();
-    let managed_running_epochs = runtime
+    let controlled_running_epochs = runtime
         .legacy_compacts
         .iter()
         .filter_map(|(epoch, child)| {
             let key = format!("compact_reuse:{epoch}");
             (!runtime.paused_jobs.contains(&key)
                 && !runtime.auto_paused_legacy.contains_key(epoch)
-                && child.pid.is_some())
+                && child
+                    .pid
+                    .is_some_and(|pid| controlled_legacy_pid(config, runtime, *epoch) == Some(pid)))
             .then_some(*epoch)
         })
+        .chain(
+            runtime
+                .adopted_legacy_compacts
+                .iter()
+                .filter_map(|(epoch, adopted)| {
+                    let key = format!("compact_reuse:{epoch}");
+                    (!runtime.paused_jobs.contains(&key)
+                        && !runtime.auto_paused_legacy.contains_key(epoch)
+                        && controlled_legacy_pid(config, runtime, *epoch) == Some(adopted.pid))
+                    .then_some(*epoch)
+                }),
+        )
         .collect::<Vec<_>>();
     let ordinary_resumable = runtime
         .auto_paused_legacy
@@ -8348,10 +9344,7 @@ fn adjust_legacy_workers_for_pressure(
                 && !runtime
                     .paused_jobs
                     .contains(&format!("compact_reuse:{}", record.epoch))
-                && runtime
-                    .legacy_compacts
-                    .get(&record.epoch)
-                    .is_some_and(|child| child.pid == Some(record.pid))
+                && controlled_legacy_pid(config, runtime, record.epoch) == Some(record.pid)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -8360,14 +9353,26 @@ fn adjust_legacy_workers_for_pressure(
         .pending_action
         .as_ref()
         .map(|action| match action {
-            LegacyTunerAction::Pause { epoch, reason } => LegacyAdaptiveDecision::Pause {
+            LegacyTunerAction::Pause { epoch, reason, .. } => LegacyAdaptiveDecision::Pause {
                 epoch: *epoch,
                 reason: reason.clone(),
             },
-            LegacyTunerAction::Resume { epoch, reason } => LegacyAdaptiveDecision::Resume {
+            LegacyTunerAction::Resume { epoch, reason, .. } => LegacyAdaptiveDecision::Resume {
                 epoch: *epoch,
                 reason: reason.clone(),
             },
+        });
+    let tuner_expected_identity = runtime
+        .legacy_throughput_tuner
+        .pending_action
+        .as_ref()
+        .and_then(|action| match action {
+            LegacyTunerAction::Pause {
+                expected_identity, ..
+            }
+            | LegacyTunerAction::Resume {
+                expected_identity, ..
+            } => *expected_identity,
         });
     let tuner_guard_pause = runtime
         .legacy_throughput_tuner
@@ -8393,7 +9398,7 @@ fn adjust_legacy_workers_for_pressure(
             hard_pressure_legacy_epoch(
                 config,
                 &runtime.legacy_throughput_tuner,
-                &managed_running_epochs,
+                &controlled_running_epochs,
             )
             .map(|epoch| LegacyAdaptiveDecision::Pause { epoch, reason }),
             false,
@@ -8409,7 +9414,7 @@ fn adjust_legacy_workers_for_pressure(
                 &adaptive_config,
                 &snapshot.machine,
                 total_running,
-                &managed_running_epochs,
+                &controlled_running_epochs,
                 &ordinary_resumable,
                 runtime.legacy_last_adaptive_action_unix_secs,
                 now,
@@ -8423,11 +9428,19 @@ fn adjust_legacy_workers_for_pressure(
 
     match decision {
         LegacyAdaptiveDecision::Pause { epoch, reason } => {
-            let Some(pid) = runtime
-                .legacy_compacts
-                .get(&epoch)
-                .and_then(|child| child.pid)
-            else {
+            if from_tuner
+                && tuner_expected_identity.is_some_and(|identity| {
+                    !legacy_identity_matches_controlled_lane(config, runtime, identity)
+                })
+            {
+                cancel_legacy_tuner_experiment(
+                    &mut runtime.legacy_throughput_tuner,
+                    now,
+                    format!("compact_reuse:{epoch} identity changed before tuner pause"),
+                );
+                return;
+            }
+            let Some(pid) = controlled_legacy_pid(config, runtime, epoch) else {
                 return;
             };
             if process_cmdline_matches_legacy_exact(config, epoch, pid) != Some(true)
@@ -8504,6 +9517,9 @@ fn adjust_legacy_workers_for_pressure(
             }
             if from_tuner {
                 runtime.legacy_throughput_tuner.pending_action = None;
+                runtime
+                    .legacy_throughput_tuner
+                    .pending_action_started_unix_secs = 0;
             }
             if let Err(error) = append_control_event(config, "legacy_adaptive", &action) {
                 record_error(
@@ -8515,6 +9531,17 @@ fn adjust_legacy_workers_for_pressure(
             }
         }
         LegacyAdaptiveDecision::Resume { epoch, reason } => {
+            if from_tuner
+                && tuner_expected_identity
+                    .is_some_and(|identity| !exact_tuner_pause_owned(config, runtime, identity))
+            {
+                cancel_legacy_tuner_experiment(
+                    &mut runtime.legacy_throughput_tuner,
+                    now,
+                    format!("compact_reuse:{epoch} pause ownership changed before tuner resume"),
+                );
+                return;
+            }
             let Some(record) = runtime.auto_paused_legacy.get(&epoch).cloned() else {
                 return;
             };
@@ -8544,6 +9571,9 @@ fn adjust_legacy_workers_for_pressure(
             runtime.auto_paused_legacy.remove(&epoch);
             if from_tuner {
                 runtime.legacy_throughput_tuner.pending_action = None;
+                runtime
+                    .legacy_throughput_tuner
+                    .pending_action_started_unix_secs = 0;
             }
             record_legacy_adaptive_action(
                 config,
@@ -8614,6 +9644,13 @@ async fn top_up_legacy_compacts(
     runtime: &mut RuntimeState,
     capacity_limit: usize,
 ) -> usize {
+    // A pause/resume handshake owns the topology until the exact signal has
+    // either succeeded or been cancelled. Starting a replacement while a
+    // tuner-owned lane is still stopped would turn a later resume into N+1
+    // and invalidate the paired throughput experiment.
+    if runtime.legacy_throughput_tuner.pending_action.is_some() {
+        return 0;
+    }
     let active_rss = active_legacy_compact_rss(snapshot, runtime);
     let mut active_epochs = active_rss.keys().copied().collect::<BTreeSet<_>>();
     let mut running_count = active_epochs
@@ -9984,6 +11021,7 @@ fn reap_adopted_legacy_compacts(config: &NasPipelineConfig, runtime: &mut Runtim
             }
             AdoptedLegacyProcessState::Gone => {
                 runtime.adopted_legacy_compacts.remove(&epoch);
+                clear_legacy_pause_state_after_exit(config, runtime, epoch);
                 if compact.identity_tainted {
                     fail_adopted_legacy(
                         config,
@@ -10063,6 +11101,24 @@ fn clear_legacy_pause_state_after_exit(
     runtime: &mut RuntimeState,
     epoch: u64,
 ) {
+    let tuner_targeted_exit = runtime
+        .legacy_throughput_tuner
+        .pending_action
+        .as_ref()
+        .is_some_and(|action| match action {
+            LegacyTunerAction::Pause { epoch: target, .. }
+            | LegacyTunerAction::Resume { epoch: target, .. } => *target == epoch,
+        })
+        || active_tuner_probe_epoch(&runtime.legacy_throughput_tuner) == Some(epoch);
+    if tuner_targeted_exit {
+        cancel_legacy_tuner_experiment(
+            &mut runtime.legacy_throughput_tuner,
+            unix_now(),
+            format!(
+                "compact_reuse:{epoch} exited during throughput tuning; preserving the proven target and re-observing"
+            ),
+        );
+    }
     let changed = runtime.auto_paused_legacy.remove(&epoch).is_some()
         | runtime
             .paused_jobs
@@ -12436,6 +13492,28 @@ mod tests {
         ))
     }
 
+    #[cfg(target_os = "linux")]
+    fn compile_idle_legacy_worker(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        let source = root.join("idle-legacy-worker.c");
+        let binary = root.join("idle-legacy-worker");
+        fs::write(
+            &source,
+            b"#include <signal.h>\n#include <unistd.h>\nint main(void) { for (;;) pause(); }\n",
+        )
+        .unwrap();
+        let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let status = std::process::Command::new(compiler)
+            .arg("-O0")
+            .arg("-o")
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success(), "compile Linux idle worker fixture");
+        binary
+    }
+
     fn test_live_capture(
         root: &Path,
         id: &str,
@@ -13144,10 +14222,13 @@ mod tests {
             legacy_lane_start_identity(Some(77), Some(77)),
             Some(LegacyLaneStartIdentity::LinuxStartTicks(77))
         );
+        #[cfg(not(target_os = "linux"))]
         assert_eq!(
             legacy_lane_start_identity(Some(77), None),
             Some(LegacyLaneStartIdentity::UnixSecs(77))
         );
+        #[cfg(target_os = "linux")]
+        assert_eq!(legacy_lane_start_identity(Some(77), None), None);
         assert_ne!(
             LegacyLaneStartIdentity::LinuxStartTicks(77),
             LegacyLaneStartIdentity::UnixSecs(77),
@@ -14330,6 +15411,14 @@ mod tests {
         input_mib_per_sec: f64,
         now: u64,
     ) -> LaneSnapshot {
+        #[cfg(target_os = "linux")]
+        let pid = {
+            let _ = pid;
+            // Synthetic tuner lanes use a guaranteed live /proc identity.
+            // Tests that exercise a managed child overwrite this with its
+            // real PID explicitly.
+            std::process::id()
+        };
         LaneSnapshot {
             id: format!("compact_reuse:{epoch}"),
             kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
@@ -16326,6 +17415,7 @@ mod tests {
             context: Some(LegacyTunerContext::Bulk),
             accepted_lanes: 7,
             next_probe_unix_secs: now,
+            baseline_ready: true,
             ..LegacyThroughputTuner::default()
         };
         assert_eq!(
@@ -16371,6 +17461,814 @@ mod tests {
             ),
             0,
             "a hard guard must prevent paused lanes from being refilled"
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn tuner_downshifts_only_after_sustained_degradation_and_a_b_gain() {
+        let root = temp_root("legacy-tuner-downshift");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_min_running = 2;
+        config.legacy_compact_cpu_budget_cores = 12;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        let first_now = 30_000;
+        let mut loaded = empty_snapshot(false);
+        let managed = make_finished_child(
+            ChildKind::HistoricalCompactReuse { epoch: 701 },
+            root.join("progress.json"),
+            root.join("worker.log"),
+        )
+        .await;
+        let managed_pid = managed.pid.unwrap();
+        let managed_started = managed.started_unix_secs;
+        loaded.lanes = vec![
+            useful_throughput_lane(700, 7_000, 100, 45.0, first_now),
+            useful_throughput_lane(701, managed_pid, managed_started, 45.0, first_now),
+        ];
+        let mut runtime = RuntimeState {
+            legacy_compacts: BTreeMap::from([(701, managed)]),
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                accepted_lanes: 2,
+                accepted_useful_mib_per_sec: Some(120.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                window: Some(settled_tuner_window(&loaded, first_now, 90.0)),
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, first_now);
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert_eq!(tuner.degraded_windows, 1);
+        assert_eq!(tuner.accepted_lanes, 2);
+        assert_eq!(tuner.accepted_useful_mib_per_sec, Some(120.0));
+        assert!(tuner.pending_action.is_none());
+        assert_eq!(
+            legacy_tuner_capacity_limit_for_state(
+                &config,
+                LegacyTunerContext::Bulk,
+                2,
+                tuner,
+                first_now,
+            ),
+            2,
+            "a single degraded window must hold the topology instead of probing up"
+        );
+
+        let second_now = first_now + LEGACY_TUNER_SETTLE_SECS;
+        for lane in &mut loaded.lanes {
+            lane.progress.updated_unix_secs = Some(second_now);
+            lane.updated_unix_secs = second_now;
+        }
+        runtime.legacy_throughput_tuner.window =
+            Some(settled_tuner_window(&loaded, second_now, 90.0));
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, second_now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert!(matches!(
+            tuner.phase,
+            LegacyTunerPhase::VerifyDownshift {
+                loaded_lanes: 2,
+                audit_epoch: 701,
+                ..
+            }
+        ));
+        assert!(matches!(
+            tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Pause { epoch: 701, reason, .. })
+                if reason.starts_with(LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX)
+        ));
+        assert_eq!(
+            legacy_tuner_capacity_limit_for_state(
+                &config,
+                LegacyTunerContext::Bulk,
+                2,
+                tuner,
+                second_now,
+            ),
+            1,
+            "the scheduler must not replace the deliberately paused audit lane"
+        );
+
+        let verify_now = second_now + LEGACY_TUNER_SETTLE_SECS;
+        let mut reduced = empty_snapshot(false);
+        reduced.lanes = vec![useful_throughput_lane(700, 7_000, 100, 100.0, verify_now)];
+        runtime.auto_paused_legacy.insert(
+            701,
+            AutoPausedLegacy {
+                epoch: 701,
+                pid: managed_pid,
+                process_start_ticks: None,
+                reason: format!("{LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX} test downshift"),
+                paused_unix_secs: second_now,
+            },
+        );
+        runtime.legacy_throughput_tuner.pending_action = None;
+        runtime.legacy_throughput_tuner.window =
+            Some(settled_tuner_window(&reduced, verify_now, 100.0));
+        observe_legacy_throughput_tuner(&config, &reduced, &mut runtime, verify_now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert_eq!(tuner.accepted_lanes, 2, "N-1 is only provisional");
+        assert!(matches!(
+            tuner.phase,
+            LegacyTunerPhase::VerifyDownshiftReloaded { .. }
+        ));
+        assert!(matches!(
+            tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Resume { epoch: 701, .. })
+        ));
+
+        let reload_now = verify_now + LEGACY_TUNER_SETTLE_SECS;
+        for lane in &mut loaded.lanes {
+            lane.progress.updated_unix_secs = Some(reload_now);
+            lane.updated_unix_secs = reload_now;
+        }
+        runtime.auto_paused_legacy.remove(&701);
+        runtime.legacy_throughput_tuner.pending_action = None;
+        runtime.legacy_throughput_tuner.window =
+            Some(settled_tuner_window(&loaded, reload_now, 91.0));
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, reload_now);
+
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::CommitDownshift { .. }
+        ));
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Pause { epoch: 701, .. })
+        ));
+
+        let commit_now = reload_now + 1;
+        runtime.auto_paused_legacy.insert(
+            701,
+            AutoPausedLegacy {
+                epoch: 701,
+                pid: managed_pid,
+                process_start_ticks: None,
+                reason: format!("{LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX} commit test"),
+                paused_unix_secs: commit_now,
+            },
+        );
+        runtime.legacy_throughput_tuner.pending_action = None;
+        for lane in &mut reduced.lanes {
+            lane.progress.updated_unix_secs = Some(commit_now);
+            lane.updated_unix_secs = commit_now;
+        }
+        observe_legacy_throughput_tuner(&config, &reduced, &mut runtime, commit_now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert_eq!(tuner.accepted_lanes, 1);
+        assert_eq!(tuner.accepted_useful_mib_per_sec, Some(100.0));
+        assert!(matches!(tuner.phase, LegacyTunerPhase::Backoff));
+        assert_eq!(
+            tuner.backoff_until_unix_secs,
+            commit_now + LEGACY_TUNER_CONFIRMED_DOWNSHIFT_BACKOFF_SECS
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tuner_linux_adopted_exact_identity_pauses_resumes_and_blocks_replacement() {
+        let root = temp_root("legacy-tuner-linux-handshake");
+        let mut config = test_config(&root);
+        config.blockzilla_bin = compile_idle_legacy_worker(&root.join("fixture"));
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_min_running = 2;
+        config.legacy_compact_cpu_budget_cores = 12;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        config.legacy_compact_pause_cooldown = Duration::ZERO;
+        config.start_epoch = Some(0);
+        config.end_epoch = Some(1_000);
+        make_legacy_range_ready(&config, 701);
+        let epoch = test_epoch(&root, 701, HistoricalState::Queued);
+        let mut managed = spawn_legacy_compact_reuse(&config, &epoch).await.unwrap();
+        let managed_pid = managed.pid.unwrap();
+        let managed_started = managed.started_unix_secs;
+        let (_, start_ticks) = process_stat_identity(managed_pid).unwrap();
+        let adopted = trusted_adopted_legacy_candidate(&config, 701)
+            .expect("spawned worker is an exactly trusted restart survivor");
+        let audit_identity = (
+            701,
+            managed_pid,
+            LegacyLaneStartIdentity::LinuxStartTicks(start_ticks),
+        );
+        let survivor_pid = u32::MAX - 1;
+        let first_now = 90_000;
+        let mut loaded = empty_snapshot(false);
+        loaded.lanes = vec![
+            useful_throughput_lane(700, survivor_pid, 100, 45.0, first_now),
+            useful_throughput_lane(701, managed_pid, managed_started, 45.0, first_now),
+        ];
+        loaded.lanes[1].pid = Some(managed_pid);
+        let mut runtime = RuntimeState {
+            adopted_legacy_compacts: BTreeMap::from([(701, adopted)]),
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                accepted_lanes: 2,
+                accepted_useful_mib_per_sec: Some(120.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                window: Some(settled_tuner_window(&loaded, first_now, 90.0)),
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        assert!(legacy_identity_matches_controlled_lane(
+            &config,
+            &runtime,
+            audit_identity,
+        ));
+        runtime
+            .adopted_legacy_compacts
+            .get_mut(&701)
+            .unwrap()
+            .identity_tainted = true;
+        assert!(!legacy_identity_matches_controlled_lane(
+            &config,
+            &runtime,
+            audit_identity,
+        ));
+        runtime
+            .adopted_legacy_compacts
+            .get_mut(&701)
+            .unwrap()
+            .identity_tainted = false;
+        let output = config.archive_root.join("epoch-701");
+        let mut owner = read_ownership(&output).unwrap();
+        owner.pid = None;
+        publish_ownership_marker(&output, &owner).unwrap();
+        assert!(!legacy_identity_matches_controlled_lane(
+            &config,
+            &runtime,
+            audit_identity,
+        ));
+        owner.pid = Some(managed_pid);
+        publish_ownership_marker(&output, &owner).unwrap();
+        runtime.paused_jobs.insert("compact_reuse:701".to_string());
+        assert!(!exact_tuner_pause_owned(&config, &runtime, audit_identity,));
+        runtime.paused_jobs.remove("compact_reuse:701");
+
+        // A resumed restart survivor at exactly accepted+1 is still a causal
+        // one-lane probe even though this controller did not spawn it.
+        runtime.legacy_throughput_tuner = LegacyThroughputTuner {
+            context: Some(LegacyTunerContext::Bulk),
+            accepted_lanes: 1,
+            accepted_useful_mib_per_sec: Some(60.0),
+            accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+            ..LegacyThroughputTuner::default()
+        };
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, first_now);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::ProbeUp {
+                baseline_lanes: 1,
+                probe_epoch: 701,
+                ..
+            }
+        ));
+        assert_eq!(
+            runtime.legacy_throughput_tuner.probe_identity,
+            Some(audit_identity)
+        );
+
+        // The absolute archive-device ceiling must also be able to queue an
+        // exact pause when every eligible lane was adopted after restart.
+        runtime.legacy_throughput_tuner = LegacyThroughputTuner {
+            context: Some(LegacyTunerContext::Bulk),
+            accepted_lanes: 2,
+            accepted_useful_mib_per_sec: Some(120.0),
+            accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+            ..LegacyThroughputTuner::default()
+        };
+        config.legacy_compact_io_budget_mib_per_sec = 80;
+        loaded.machine.archive_device_read_mib_per_sec = Some(90.0);
+        loaded.machine.archive_device_write_mib_per_sec = Some(1.0);
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, first_now + 1);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Pause {
+                epoch: 701,
+                expected_identity: Some(identity),
+                reason,
+            }) if *identity == audit_identity
+                && reason.starts_with(LEGACY_TUNER_GUARD_PAUSE_PREFIX)
+        ));
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        loaded.machine.archive_device_read_mib_per_sec = None;
+        loaded.machine.archive_device_write_mib_per_sec = None;
+        runtime.legacy_throughput_tuner = LegacyThroughputTuner {
+            context: Some(LegacyTunerContext::Bulk),
+            accepted_lanes: 2,
+            accepted_useful_mib_per_sec: Some(120.0),
+            accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+            window: Some(settled_tuner_window(&loaded, first_now, 90.0)),
+            ..LegacyThroughputTuner::default()
+        };
+
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, first_now);
+        assert_eq!(runtime.legacy_throughput_tuner.degraded_windows, 1);
+        let second_now = first_now + LEGACY_TUNER_SETTLE_SECS;
+        for lane in &mut loaded.lanes {
+            lane.progress.updated_unix_secs = Some(second_now);
+            lane.updated_unix_secs = second_now;
+        }
+        runtime.legacy_throughput_tuner.window =
+            Some(settled_tuner_window(&loaded, second_now, 90.0));
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, second_now);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Pause {
+                expected_identity: Some(identity),
+                ..
+            }) if *identity == audit_identity
+        ));
+
+        adjust_legacy_workers_for_pressure(&config, &loaded, &mut runtime, second_now + 1);
+        let paused_record = runtime.auto_paused_legacy.get(&701).unwrap();
+        assert_eq!(paused_record.process_start_ticks, Some(start_ticks));
+        assert!(
+            paused_record
+                .reason
+                .starts_with(LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX)
+        );
+        assert!(runtime.legacy_throughput_tuner.pending_action.is_none());
+
+        let verify_now = second_now + LEGACY_TUNER_SETTLE_SECS;
+        let mut reduced = empty_snapshot(false);
+        reduced.lanes = vec![useful_throughput_lane(
+            700,
+            survivor_pid,
+            100,
+            100.0,
+            verify_now,
+        )];
+        runtime.legacy_throughput_tuner.window =
+            Some(settled_tuner_window(&reduced, verify_now, 100.0));
+        observe_legacy_throughput_tuner(&config, &reduced, &mut runtime, verify_now);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::VerifyDownshiftReloaded { .. }
+        ));
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Resume {
+                expected_identity: Some(identity),
+                ..
+            }) if *identity == audit_identity
+        ));
+
+        // Production order is adjust -> schedule -> fresh snapshot -> observe.
+        // A retryable resume must prevent the scheduler from replacing the
+        // stopped audit lane before SIGCONT succeeds.
+        make_legacy_range_ready(&config, 800);
+        let mut schedulable =
+            schedulable_snapshot(&root, vec![test_epoch(&root, 800, HistoricalState::Queued)]);
+        schedulable.lanes = reduced.lanes.clone();
+        schedulable.machine = legacy_scheduler_machine(&config, 8 * 1024, 2 * 1024);
+        assert_eq!(
+            top_up_legacy_compacts(&config, &schedulable, &mut runtime, usize::MAX).await,
+            0
+        );
+        assert!(!runtime.legacy_compacts.contains_key(&800));
+
+        adjust_legacy_workers_for_pressure(&config, &reduced, &mut runtime, verify_now + 1);
+        assert!(!runtime.auto_paused_legacy.contains_key(&701));
+        assert!(runtime.legacy_throughput_tuner.pending_action.is_none());
+        assert_eq!(process_stat_identity(managed_pid).unwrap().1, start_ticks);
+
+        let reload_now = verify_now + LEGACY_TUNER_SETTLE_SECS;
+        for lane in &mut loaded.lanes {
+            lane.progress.updated_unix_secs = Some(reload_now);
+            lane.updated_unix_secs = reload_now;
+        }
+        runtime.legacy_throughput_tuner.window =
+            Some(settled_tuner_window(&loaded, reload_now, 91.0));
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, reload_now);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::CommitDownshift { .. }
+        ));
+
+        adjust_legacy_workers_for_pressure(&config, &loaded, &mut runtime, reload_now + 1);
+        assert!(runtime.auto_paused_legacy.contains_key(&701));
+        let commit_now = reload_now + 2;
+        for lane in &mut reduced.lanes {
+            lane.progress.updated_unix_secs = Some(commit_now);
+            lane.updated_unix_secs = commit_now;
+        }
+        observe_legacy_throughput_tuner(&config, &reduced, &mut runtime, commit_now);
+        assert_eq!(runtime.legacy_throughput_tuner.accepted_lanes, 1);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::Backoff
+        ));
+
+        // A restart survivor also remains eligible for the ordinary hard
+        // resource guard, independently of the throughput experiment.
+        assert_eq!(
+            unsafe { libc::kill(-(managed_pid as libc::pid_t), libc::SIGCONT) },
+            0
+        );
+        runtime.auto_paused_legacy.remove(&701);
+        runtime.legacy_throughput_tuner.pending_action = None;
+        loaded.machine.load_1m = config.legacy_compact_cpu_budget_cores as f64 + 1.0;
+        adjust_legacy_workers_for_pressure(&config, &loaded, &mut runtime, commit_now + 1);
+        assert!(
+            runtime
+                .auto_paused_legacy
+                .get(&701)
+                .is_some_and(|record| record.reason.contains("CPU load ceiling"))
+        );
+
+        // SAFETY: the fixture was spawned by spawn_child with process_group(0).
+        let _ = unsafe { libc::kill(-(managed_pid as libc::pid_t), libc::SIGCONT) };
+        let _ = unsafe { libc::kill(-(managed_pid as libc::pid_t), libc::SIGKILL) };
+        let _ = managed.child.wait().await;
+        runtime.adopted_legacy_compacts.remove(&701);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn tuner_keeps_sticky_reference_during_gradual_degradation() {
+        let root = temp_root("legacy-tuner-gradual-degradation");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_min_running = 2;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        let now = 35_000;
+        let managed = make_finished_child(
+            ChildKind::HistoricalCompactReuse { epoch: 701 },
+            root.join("progress.json"),
+            root.join("worker.log"),
+        )
+        .await;
+        let mut snapshot = empty_snapshot(false);
+        snapshot.lanes = vec![
+            useful_throughput_lane(700, 7_000, 100, 137.5, now),
+            useful_throughput_lane(
+                701,
+                managed.pid.unwrap(),
+                managed.started_unix_secs,
+                137.5,
+                now,
+            ),
+        ];
+        let mut runtime = RuntimeState {
+            legacy_compacts: BTreeMap::from([(701, managed)]),
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                accepted_lanes: 2,
+                accepted_useful_mib_per_sec: Some(300.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                baseline_ready: true,
+                window: Some(settled_tuner_window(&snapshot, now, 275.0)),
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        observe_legacy_throughput_tuner(&config, &snapshot, &mut runtime, now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert_eq!(tuner.accepted_useful_mib_per_sec, Some(300.0));
+        assert!(!tuner.baseline_ready);
+        assert!(tuner.pending_action.is_none());
+        assert_eq!(
+            legacy_tuner_capacity_limit_for_state(&config, LegacyTunerContext::Bulk, 2, tuner, now,),
+            2,
+            "a gradual decline must be observed at N instead of erased or hidden by N+1"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn downshift_audit_resumes_lane_when_less_parallelism_is_not_faster() {
+        let root = temp_root("legacy-tuner-downshift-reject");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        let now = 40_000;
+        let mut loaded = empty_snapshot(false);
+        loaded.lanes = vec![
+            useful_throughput_lane(700, 7_000, 100, 45.0, now),
+            useful_throughput_lane(701, 7_001, 200, 45.0, now),
+        ];
+        let identities = legacy_throughput_observation(&loaded, now).identities;
+        let mut runtime = RuntimeState {
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                phase: LegacyTunerPhase::VerifyDownshiftReloaded {
+                    loaded_lanes: 2,
+                    loaded_mib_per_sec: 90.0,
+                    reduced_mib_per_sec: 82.0,
+                    reduced_device_mib_per_sec: None,
+                    audit_epoch: 701,
+                },
+                accepted_lanes: 2,
+                accepted_useful_mib_per_sec: Some(120.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                probe_identity: identities.iter().find(|id| id.0 == 701).copied(),
+                audit_loaded_identities: Some(identities),
+                audit_started_unix_secs: now - LEGACY_TUNER_SETTLE_SECS,
+                window: Some(settled_tuner_window(&loaded, now, 90.0)),
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        observe_legacy_throughput_tuner(&config, &loaded, &mut runtime, now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert_eq!(tuner.accepted_lanes, 2);
+        assert_eq!(tuner.accepted_useful_mib_per_sec, Some(90.0));
+        assert!(matches!(tuner.phase, LegacyTunerPhase::ObserveBaseline));
+        assert!(tuner.pending_action.is_none());
+        assert_eq!(tuner.next_probe_unix_secs, now + LEGACY_TUNER_BACKOFF_SECS);
+    }
+
+    #[test]
+    fn throughput_degradation_requires_both_absolute_and_relative_evidence() {
+        assert_eq!(legacy_tuner_degradation(300.0, 269.0), Some((31.0, 30.0)));
+        assert_eq!(legacy_tuner_degradation(300.0, 271.0), None);
+        assert_eq!(legacy_tuner_degradation(100.0, 84.0), Some((16.0, 16.0)));
+        assert_eq!(legacy_tuner_degradation(100.0, 85.0), None);
+        assert_eq!(legacy_tuner_degradation(f64::NAN, 80.0), None);
+    }
+
+    #[test]
+    fn stale_tuner_pause_action_cancels_without_lowering_the_proven_target() {
+        let root = temp_root("legacy-tuner-stale-pause");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        let now = 50_000;
+        let mut runtime = RuntimeState {
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                accepted_lanes: 3,
+                accepted_useful_mib_per_sec: Some(180.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                pending_action: Some(LegacyTunerAction::Pause {
+                    epoch: 703,
+                    expected_identity: Some((
+                        703,
+                        7_003,
+                        LegacyLaneStartIdentity::LinuxStartTicks(300),
+                    )),
+                    reason: format!("{LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX} stale test"),
+                }),
+                pending_action_started_unix_secs: now - LEGACY_TUNER_ACTION_TIMEOUT_SECS,
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+        let snapshot = empty_snapshot(false);
+
+        adjust_legacy_workers_for_pressure(&config, &snapshot, &mut runtime, now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert!(tuner.pending_action.is_none());
+        assert!(matches!(tuner.phase, LegacyTunerPhase::ObserveBaseline));
+        assert_eq!(tuner.accepted_lanes, 3);
+        assert_eq!(tuner.accepted_useful_mib_per_sec, Some(180.0));
+        assert!(
+            tuner
+                .last_decision
+                .as_deref()
+                .is_some_and(|message| message.contains("cancelled stale topology action"))
+        );
+    }
+
+    #[test]
+    fn manual_pause_ownership_cancels_tuner_action_without_auto_resume() {
+        let now = 60_000;
+        let identity = (701, 7_001, LegacyLaneStartIdentity::LinuxStartTicks(200));
+        let mut runtime = RuntimeState {
+            auto_paused_legacy: BTreeMap::from([(
+                701,
+                AutoPausedLegacy {
+                    epoch: 701,
+                    pid: 7_001,
+                    process_start_ticks: Some(200),
+                    reason: format!("{LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX} ownership test"),
+                    paused_unix_secs: now - 1,
+                },
+            )]),
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                phase: LegacyTunerPhase::VerifyDownshift {
+                    loaded_lanes: 2,
+                    loaded_mib_per_sec: 90.0,
+                    audit_epoch: 701,
+                },
+                accepted_lanes: 2,
+                probe_identity: Some(identity),
+                pending_action: Some(LegacyTunerAction::Resume {
+                    epoch: 701,
+                    expected_identity: Some(identity),
+                    reason: "test resume".to_string(),
+                }),
+                pending_action_started_unix_secs: now,
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        set_manual_pause_state(&mut runtime, "compact_reuse:701", Some(701), true);
+
+        assert!(runtime.paused_jobs.contains("compact_reuse:701"));
+        assert!(!runtime.auto_paused_legacy.contains_key(&701));
+        assert!(runtime.legacy_throughput_tuner.pending_action.is_none());
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::ObserveBaseline
+        ));
+        assert_eq!(runtime.legacy_throughput_tuner.accepted_lanes, 2);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn downshift_identity_churn_and_timeout_resume_only_the_owned_lane() {
+        let root = temp_root("legacy-tuner-downshift-identity");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        let now = 70_000;
+        let managed = make_finished_child(
+            ChildKind::HistoricalCompactReuse { epoch: 701 },
+            root.join("progress.json"),
+            root.join("worker.log"),
+        )
+        .await;
+        let audit_identity = (
+            701,
+            managed.pid.unwrap(),
+            LegacyLaneStartIdentity::UnixSecs(managed.started_unix_secs),
+        );
+        let expected_survivor = (700, 7_000, LegacyLaneStartIdentity::UnixSecs(100));
+        let mut changed = empty_snapshot(false);
+        changed.lanes = vec![useful_throughput_lane(700, 7_002, 100, 100.0, now)];
+        let paused = AutoPausedLegacy {
+            epoch: 701,
+            pid: audit_identity.1,
+            process_start_ticks: None,
+            reason: format!("{LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX} identity test"),
+            paused_unix_secs: now - LEGACY_TUNER_SETTLE_SECS,
+        };
+        let mut runtime = RuntimeState {
+            legacy_compacts: BTreeMap::from([(701, managed)]),
+            auto_paused_legacy: BTreeMap::from([(701, paused.clone())]),
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                phase: LegacyTunerPhase::VerifyDownshift {
+                    loaded_lanes: 2,
+                    loaded_mib_per_sec: 90.0,
+                    audit_epoch: 701,
+                },
+                accepted_lanes: 2,
+                accepted_useful_mib_per_sec: Some(120.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                probe_identity: Some(audit_identity),
+                audit_survivor_identities: Some(BTreeSet::from([expected_survivor])),
+                audit_started_unix_secs: now - LEGACY_TUNER_SETTLE_SECS,
+                window: Some(settled_tuner_window(&changed, now, 100.0)),
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        observe_legacy_throughput_tuner(&config, &changed, &mut runtime, now);
+        assert_eq!(runtime.legacy_throughput_tuner.accepted_lanes, 2);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Resume {
+                epoch: 701,
+                expected_identity: Some(identity),
+                ..
+            }) if *identity == audit_identity
+        ));
+
+        runtime.legacy_throughput_tuner.pending_action = None;
+        runtime.legacy_throughput_tuner.phase = LegacyTunerPhase::VerifyDownshift {
+            loaded_lanes: 2,
+            loaded_mib_per_sec: 90.0,
+            audit_epoch: 701,
+        };
+        runtime.legacy_throughput_tuner.probe_identity = Some(audit_identity);
+        runtime.legacy_throughput_tuner.audit_survivor_identities =
+            Some(BTreeSet::from([expected_survivor]));
+        runtime.legacy_throughput_tuner.audit_started_unix_secs =
+            now - LEGACY_TUNER_DOWNSHIFT_TIMEOUT_SECS;
+        runtime.auto_paused_legacy.insert(701, paused);
+        let mut expected = empty_snapshot(false);
+        expected.lanes = vec![useful_throughput_lane(700, 7_000, 100, 0.0, now)];
+        expected.lanes[0].progress.input_mib_per_sec = None;
+
+        observe_legacy_throughput_tuner(&config, &expected, &mut runtime, now);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.pending_action.as_ref(),
+            Some(LegacyTunerAction::Resume {
+                epoch: 701,
+                expected_identity: Some(identity),
+                ..
+            }) if *identity == audit_identity
+        ));
+        assert_eq!(runtime.legacy_throughput_tuner.accepted_lanes, 2);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pressure_hold_never_rebases_or_unlocks_a_throughput_probe() {
+        let root = temp_root("legacy-tuner-pressure-hold");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        let now = 80_000;
+        let mut snapshot = empty_snapshot(false);
+        snapshot.lanes = vec![
+            useful_throughput_lane(700, 7_000, 100, 45.0, now),
+            useful_throughput_lane(701, 7_001, 200, 45.0, now),
+        ];
+        let mib = 1024 * 1024;
+        let pause = config
+            .memory_reserve_mib
+            .saturating_add(config.legacy_compact_memory_guard_mib)
+            .saturating_mul(mib);
+        let resume = config
+            .memory_reserve_mib
+            .saturating_add(config.legacy_compact_memory_guard_mib.saturating_mul(2))
+            .saturating_mul(mib);
+        snapshot.machine.memory_total_bytes = 8 * 1024 * 1024 * 1024;
+        snapshot.machine.memory_available_bytes = (pause + resume) / 2;
+        assert_eq!(
+            legacy_pressure_state(&config, &snapshot.machine),
+            LegacyPressureState::Hold
+        );
+        let mut runtime = RuntimeState {
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                accepted_lanes: 2,
+                accepted_useful_mib_per_sec: Some(120.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                baseline_ready: true,
+                window: Some(settled_tuner_window(&snapshot, now, 90.0)),
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        observe_legacy_throughput_tuner(&config, &snapshot, &mut runtime, now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert_eq!(tuner.accepted_useful_mib_per_sec, Some(120.0));
+        assert!(!tuner.baseline_ready);
+        assert!(tuner.window.is_none());
+        assert_eq!(
+            legacy_tuner_capacity_limit_for_state(&config, LegacyTunerContext::Bulk, 2, tuner, now,),
+            2
+        );
+
+        runtime.legacy_throughput_tuner.phase = LegacyTunerPhase::VerifyDownshift {
+            loaded_lanes: 2,
+            loaded_mib_per_sec: 90.0,
+            audit_epoch: 701,
+        };
+        runtime.legacy_throughput_tuner.audit_started_unix_secs = now;
+        runtime.legacy_throughput_tuner.window = Some(settled_tuner_window(&snapshot, now, 90.0));
+        observe_legacy_throughput_tuner(&config, &snapshot, &mut runtime, now);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::VerifyDownshift { .. }
+        ));
+        assert_eq!(
+            runtime.legacy_throughput_tuner.accepted_useful_mib_per_sec,
+            Some(120.0)
+        );
+
+        snapshot.machine.memory_available_bytes = pause.saturating_sub(1);
+        observe_legacy_throughput_tuner(&config, &snapshot, &mut runtime, now + 1);
+        assert!(matches!(
+            runtime.legacy_throughput_tuner.phase,
+            LegacyTunerPhase::ObserveBaseline
+        ));
+        assert_eq!(runtime.legacy_throughput_tuner.accepted_lanes, 2);
+        assert!(
+            runtime
+                .legacy_throughput_tuner
+                .last_decision
+                .as_deref()
+                .is_some_and(|decision| decision.contains("resource pressure interrupted"))
         );
     }
 
@@ -16521,6 +18419,7 @@ mod tests {
                 context: Some(LegacyTunerContext::Bulk),
                 pending_action: Some(LegacyTunerAction::Pause {
                     epoch: 700,
+                    expected_identity: None,
                     reason: format!("{LEGACY_TUNER_PAUSE_PREFIX} test handshake"),
                 }),
                 window: Some(window),
@@ -16539,6 +18438,51 @@ mod tests {
             tuner.pending_action.as_ref(),
             Some(LegacyTunerAction::Pause { epoch: 700, .. })
         ));
+    }
+
+    #[test]
+    fn tuner_never_rebases_across_an_unattributed_multi_lane_jump() {
+        let root = temp_root("legacy-tuner-multi-lane-jump");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_io_budget_mib_per_sec = 0;
+        let now = 6_000;
+        let mut snapshot = empty_snapshot(false);
+        snapshot.lanes = vec![
+            useful_throughput_lane(700, 7_000, 100, 40.0, now),
+            useful_throughput_lane(701, 7_001, 200, 40.0, now),
+            useful_throughput_lane(702, 7_002, 300, 40.0, now),
+        ];
+        let mut runtime = RuntimeState {
+            legacy_throughput_tuner: LegacyThroughputTuner {
+                context: Some(LegacyTunerContext::Bulk),
+                accepted_lanes: 1,
+                accepted_useful_mib_per_sec: Some(50.0),
+                accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                baseline_ready: true,
+                window: Some(settled_tuner_window(&snapshot, now, 120.0)),
+                ..LegacyThroughputTuner::default()
+            },
+            ..RuntimeState::default()
+        };
+
+        observe_legacy_throughput_tuner(&config, &snapshot, &mut runtime, now);
+
+        let tuner = &runtime.legacy_throughput_tuner;
+        assert_eq!(tuner.accepted_lanes, 1);
+        assert!(!tuner.baseline_ready);
+        assert!(tuner.window.is_none());
+        assert!(
+            tuner
+                .last_decision
+                .as_deref()
+                .is_some_and(|decision| decision.contains("one lane at a time"))
+        );
+        assert_eq!(
+            legacy_tuner_capacity_limit_for_state(&config, LegacyTunerContext::Bulk, 3, tuner, now),
+            1,
+        );
     }
 
     #[test]
@@ -16634,6 +18578,7 @@ mod tests {
                 accepted_lanes: 2,
                 accepted_useful_mib_per_sec: Some(120.0),
                 accepted_rate_source: Some(LegacyTunerRateSource::LogicalInput),
+                baseline_ready: true,
                 ..LegacyThroughputTuner::default()
             },
             ..RuntimeState::default()
@@ -16855,7 +18800,7 @@ mod tests {
         ));
         assert!(matches!(
             runtime.legacy_throughput_tuner.pending_action.as_ref(),
-            Some(LegacyTunerAction::Pause { epoch: 702, reason })
+            Some(LegacyTunerAction::Pause { epoch: 702, reason, .. })
                 if reason.starts_with(LEGACY_TUNER_PAUSE_PREFIX)
         ));
 
