@@ -470,8 +470,9 @@ are explicitly excluded.
 
 Historical builders still emit slot range, block rate, percentage, and phase
 progress for individual task visibility. Live ETA is separate: it uses the
-atomic live progress snapshot and a rolling slot rate, with journal-tail growth
-as fallback.
+atomic live progress snapshot and a time-weighted slot rate over the trailing
+60 seconds, after a 15-second warm-up. Journal-tail growth feeds the same
+window when an older producer does not publish a rate.
 
 Bind to `127.0.0.1` unless the dashboard must be reachable directly on the LAN.
 If binding to `0.0.0.0`, restrict port 8787 with the NAS firewall or a trusted

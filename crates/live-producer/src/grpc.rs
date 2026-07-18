@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
@@ -49,6 +49,59 @@ use crate::{
 };
 
 type LivePubkeyCounts = GxHashMap<[u8; 32], u32>;
+
+const LIVE_SLOT_RATE_WARMUP: Duration = Duration::from_secs(15);
+const LIVE_SLOT_RATE_WINDOW: Duration = Duration::from_secs(60);
+const LIVE_SLOT_RATE_MAX_SAMPLES: usize = 32;
+
+#[derive(Debug, Clone, Copy)]
+struct LiveSlotRateSample {
+    slot: u64,
+    observed_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct LiveSlotRateWindow {
+    samples: VecDeque<LiveSlotRateSample>,
+}
+
+impl LiveSlotRateWindow {
+    fn observe(&mut self, slot: Option<u64>, observed_at: Instant) {
+        let Some(slot) = slot else {
+            return;
+        };
+
+        if let Some(last) = self.samples.back_mut() {
+            if observed_at < last.observed_at || slot < last.slot {
+                self.samples.clear();
+            } else if observed_at == last.observed_at {
+                last.slot = slot;
+                return;
+            }
+        }
+
+        self.samples
+            .push_back(LiveSlotRateSample { slot, observed_at });
+        while self.samples.front().is_some_and(|sample| {
+            observed_at.duration_since(sample.observed_at) > LIVE_SLOT_RATE_WINDOW
+        }) {
+            self.samples.pop_front();
+        }
+        while self.samples.len() > LIVE_SLOT_RATE_MAX_SAMPLES {
+            self.samples.pop_front();
+        }
+    }
+
+    fn slots_per_sec(&self) -> Option<f64> {
+        let first = self.samples.front()?;
+        let last = self.samples.back()?;
+        let elapsed = last.observed_at.duration_since(first.observed_at);
+        if elapsed < LIVE_SLOT_RATE_WARMUP {
+            return None;
+        }
+        Some(last.slot.saturating_sub(first.slot) as f64 / elapsed.as_secs_f64())
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrpcRawBlockStorage {
@@ -1016,6 +1069,7 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
 
     let started_at = Instant::now();
     let mut last_progress_write = None;
+    let mut slot_rate_window = LiveSlotRateWindow::default();
     let mut report = GrpcCaptureReport {
         endpoint: config.endpoint,
         archive_dir: layout.archive_dir,
@@ -1205,6 +1259,8 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
                     next_block_id,
                     config.slots_per_epoch,
                     started_at,
+                    now,
+                    &mut slot_rate_window,
                     "capturing",
                 );
                 last_progress_write = Some(now);
@@ -1282,12 +1338,15 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
     } else {
         "stopped"
     };
+    let progress_observed_at = Instant::now();
     let _ = write_grpc_capture_progress(
         &progress_path,
         &report,
         next_block_id,
         config.slots_per_epoch,
         started_at,
+        progress_observed_at,
+        &mut slot_rate_window,
         final_state,
     );
 
@@ -1300,9 +1359,14 @@ fn write_grpc_capture_progress(
     existing_blocks: u32,
     slots_per_epoch: u64,
     started_at: Instant,
+    observed_at: Instant,
+    slot_rate_window: &mut LiveSlotRateWindow,
     state: &str,
 ) -> Result<()> {
-    let elapsed_secs = started_at.elapsed().as_secs_f64().max(0.001);
+    let elapsed_secs = observed_at
+        .duration_since(started_at)
+        .as_secs_f64()
+        .max(0.001);
     let blocks_done = u64::from(existing_blocks)
         .checked_add(
             u64::try_from(report.blocks_written).context("capture progress block overflow")?,
@@ -1312,11 +1376,15 @@ fn write_grpc_capture_progress(
     let progress_pct = epoch_slot_index.map(|slot_index| {
         ((slot_index.saturating_add(1)) as f64 / slots_per_epoch.max(1) as f64 * 100.0).min(100.0)
     });
-    let slots_per_sec = report
+    let lifetime_slots_per_sec = report
         .first_slot
         .zip(report.last_slot)
         .map(|(first, last)| last.saturating_sub(first) as f64 / elapsed_secs)
         .unwrap_or(0.0);
+    slot_rate_window.observe(report.last_slot, observed_at);
+    let slots_per_sec = slot_rate_window
+        .slots_per_sec()
+        .unwrap_or(lifetime_slots_per_sec);
     let eta_secs = epoch_slot_index.and_then(|slot_index| {
         (slots_per_sec > 0.0).then(|| {
             slots_per_epoch.saturating_sub(slot_index.saturating_add(1)) as f64 / slots_per_sec
@@ -1452,6 +1520,91 @@ mod capture_epoch_tests {
 
         assert_eq!(read_existing_capture_epoch(&path).unwrap(), Some(1000));
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod live_slot_rate_tests {
+    use super::*;
+
+    fn assert_rate(actual: Option<f64>, expected: f64) {
+        let actual = actual.expect("rate should be mature");
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn rolling_rate_is_time_weighted_across_irregular_samples() {
+        let started_at = Instant::now();
+        let mut window = LiveSlotRateWindow::default();
+
+        window.observe(Some(100), started_at);
+        window.observe(Some(125), started_at + Duration::from_secs(10));
+        window.observe(Some(162), started_at + Duration::from_secs(25));
+
+        // Slot deltas intentionally include skipped slots: (162 - 100) / 25s.
+        assert_rate(window.slots_per_sec(), 2.48);
+    }
+
+    #[test]
+    fn rolling_rate_uses_lifetime_fallback_until_warm_and_stays_bounded() {
+        let started_at = Instant::now();
+        let mut window = LiveSlotRateWindow::default();
+
+        window.observe(Some(100), started_at);
+        window.observe(Some(142), started_at + Duration::from_secs(14));
+        assert_eq!(window.slots_per_sec(), None);
+
+        window.observe(Some(145), started_at + Duration::from_secs(15));
+        assert_rate(window.slots_per_sec(), 3.0);
+
+        for seconds in 16..=55 {
+            window.observe(
+                Some(100 + 3 * seconds),
+                started_at + Duration::from_secs(seconds),
+            );
+        }
+        assert_eq!(window.samples.len(), LIVE_SLOT_RATE_MAX_SAMPLES);
+        assert_rate(window.slots_per_sec(), 3.0);
+    }
+
+    #[test]
+    fn rolling_rate_evicts_samples_outside_the_trailing_window() {
+        let started_at = Instant::now();
+        let mut window = LiveSlotRateWindow::default();
+
+        window.observe(Some(100), started_at);
+        window.observe(Some(160), started_at + Duration::from_secs(30));
+        window.observe(Some(220), started_at + Duration::from_secs(60));
+        assert_rate(window.slots_per_sec(), 2.0);
+
+        window.observe(Some(283), started_at + Duration::from_secs(61));
+        assert_eq!(window.samples.front().map(|sample| sample.slot), Some(160));
+        assert_rate(window.slots_per_sec(), 123.0 / 31.0);
+    }
+
+    #[test]
+    fn rolling_rate_resets_on_time_or_slot_regression() {
+        let started_at = Instant::now();
+        let mut window = LiveSlotRateWindow::default();
+
+        window.observe(Some(100), started_at);
+        window.observe(Some(160), started_at + Duration::from_secs(20));
+        assert_rate(window.slots_per_sec(), 3.0);
+
+        window.observe(Some(170), started_at + Duration::from_secs(10));
+        assert_eq!(window.samples.len(), 1);
+        assert_eq!(window.slots_per_sec(), None);
+        window.observe(Some(215), started_at + Duration::from_secs(25));
+        assert_rate(window.slots_per_sec(), 3.0);
+
+        window.observe(Some(200), started_at + Duration::from_secs(30));
+        assert_eq!(window.samples.len(), 1);
+        assert_eq!(window.slots_per_sec(), None);
+        window.observe(Some(245), started_at + Duration::from_secs(45));
+        assert_rate(window.slots_per_sec(), 3.0);
     }
 }
 

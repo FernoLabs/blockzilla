@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/test -x /volume1/@home/ach/dev/blockzilla-pipeline/tools/runtime-operations/publish-runtime-operations.py
-ExecStart=/usr/bin/python3 /volume1/@home/ach/dev/blockzilla-pipeline/tools/runtime-operations/publish-runtime-operations.py --output /volume1/@home/ach/dev/blockzilla-pipeline/releases/blockzilla-nas-pipeline-2026.07.18-adaptive-throughput-1/ui/api/v1/sidecars/runtime-operations/status.json --interval-secs 5
+ExecStart=/usr/bin/python3 /volume1/@home/ach/dev/blockzilla-pipeline/tools/runtime-operations/publish-runtime-operations.py --output /volume1/@home/ach/dev/blockzilla-pipeline/releases/blockzilla-nas-pipeline-2026.07.18-live-rate-window-1/ui/api/v1/sidecars/runtime-operations/status.json --interval-secs 5
 Restart=always
 RestartSec=5s
 NoNewPrivileges=true

@@ -1094,7 +1094,8 @@
     const rate = liveRate(capture);
     if (rate === null) return 'unknown';
     if (rate === 0) return 'stalled';
-    return `${formatDecimal(rate, 2)} ${capture.state === 'capturing' ? 'slots/s' : 'blocks/s'}`;
+    if (capture.state === 'capturing') return `${formatDecimal(rate, 2)} slots/s · 60s avg`;
+    return `${formatDecimal(rate, 2)} blocks/s`;
   }
 
   function liveMemoryValue(capture: LiveStatus) {

@@ -83,6 +83,9 @@ const MAX_LIVE_REPAIR_SOURCES: usize = 256;
 const MAX_LIVE_REPAIR_SOURCE_PATH_BYTES: usize = 4 * 1024;
 const PROGRESS_STALE_SECS: u64 = 120;
 const PROGRESS_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
+const LIVE_SLOT_RATE_MIN_WINDOW_SECS: u64 = 15;
+const LIVE_SLOT_RATE_WINDOW_SECS: u64 = 60;
+const LIVE_SLOT_RATE_MAX_SAMPLES: usize = 128;
 const MAX_ERRORS: usize = 100;
 const OWNERSHIP_MARKER: &str = ".hivezilla-pipeline-owned.v1.json";
 const FINALIZER_BUILD_OVERHEAD_BYTES: u64 = 256 * 1024 * 1024;
@@ -778,8 +781,25 @@ struct AppState {
     snapshot: RwLock<PipelineSnapshot>,
     updates: broadcast::Sender<RealtimeEnvelope<SnapshotPatch>>,
     sequence: AtomicU64,
-    publication: Mutex<()>,
+    publication: Mutex<PublicationState>,
     runtime: Mutex<RuntimeState>,
+}
+
+#[derive(Debug, Default)]
+struct PublicationState {
+    live_slot_rate_windows: BTreeMap<String, LiveSlotRateWindow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiveSlotRateSample {
+    updated_unix_secs: u64,
+    last_slot: u64,
+}
+
+#[derive(Debug, Default)]
+struct LiveSlotRateWindow {
+    pid: Option<u32>,
+    samples: VecDeque<LiveSlotRateSample>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1249,7 +1269,7 @@ pub async fn run_nas_pipeline(config: NasPipelineConfig) -> Result<()> {
         snapshot: RwLock::new(initial),
         updates,
         sequence: AtomicU64::new(0),
-        publication: Mutex::new(()),
+        publication: Mutex::new(PublicationState::default()),
         runtime: Mutex::new(RuntimeState::default()),
     });
     load_persisted_errors(&state).await;
@@ -2168,7 +2188,7 @@ async fn reconcile_and_schedule(state: &Arc<AppState>) {
     }
     snapshot.errors = runtime.errors.iter().cloned().collect();
     let status_bytes = {
-        let _publication = state.publication.lock().await;
+        let mut publication = state.publication.lock().await;
         let mut published = state.snapshot.write().await;
         preserve_newer_published_progress(&mut snapshot, &published);
         sample_worker_disk_io(&mut snapshot, &mut runtime);
@@ -2180,6 +2200,11 @@ async fn reconcile_and_schedule(state: &Arc<AppState>) {
             &mut runtime,
         );
         let now = snapshot.now_unix_secs.max(unix_now());
+        smooth_live_slot_rates(
+            &mut snapshot.live,
+            &mut publication.live_slot_rate_windows,
+            now,
+        );
         let tuner_profiles_before = runtime.legacy_tuner_profiles.clone();
         observe_legacy_throughput_tuner(&state.config, &snapshot, &mut runtime, now);
         remember_legacy_tuner_profile(&mut runtime);
@@ -2264,7 +2289,7 @@ async fn publish_monitored_progress(
 ) -> bool {
     // Publication is the only serialized section. Progress reads never wait
     // for the scheduler/runtime lock or the full filesystem reconciliation.
-    let _publication = state.publication.lock().await;
+    let mut publication = state.publication.lock().await;
     let mut snapshot = state.snapshot.write().await;
     let Some(epochs_changed) =
         apply_active_progress_updates(&mut snapshot, &lane_updates, &live_updates, now)
@@ -2274,6 +2299,11 @@ async fn publish_monitored_progress(
     let sequence = state.sequence.fetch_add(1, Ordering::Relaxed) + 1;
     snapshot.sequence = sequence;
     snapshot.now_unix_secs = snapshot.now_unix_secs.max(now);
+    smooth_live_slot_rates(
+        &mut snapshot.live,
+        &mut publication.live_slot_rate_windows,
+        now,
+    );
     let patch = SnapshotPatch::active_progress(&snapshot, epochs_changed);
     let _ = state.updates.send(RealtimeEnvelope {
         event_type: "snapshot_patch",
@@ -2476,10 +2506,14 @@ fn read_live_progress_update(target: &LiveProgressTarget, now: u64) -> Option<Li
             (journal_updated > 0).then_some(journal_updated),
         );
         let latest_updated = progress.updated_unix_secs.unwrap_or_default();
-        if source_updated >= journal_updated {
-            if let Some(rate) = explicit_slot_rate {
-                progress.slots_per_sec = Some(rate);
-            }
+        let fresh_explicit_slot_rate = explicit_slot_rate.filter(|_| {
+            source_updated > 0 && now.saturating_sub(source_updated) <= PROGRESS_STALE_SECS
+        });
+        if let Some(rate) = fresh_explicit_slot_rate {
+            // A journal append can be newer than the producer's periodic
+            // progress file by a second or two. Keep the producer's stable
+            // window rate while using the journal's newer slot for ETA.
+            progress.slots_per_sec = Some(rate);
         } else if latest_updated > baseline_updated {
             progress.slots_per_sec =
                 target
@@ -2495,12 +2529,36 @@ fn read_live_progress_update(target: &LiveProgressTarget, now: u64) -> Option<Li
         refresh_live_producer_process_metrics(&mut progress, &target.capture_dir, now);
     }
     hide_stale_live_rates(&mut progress, now);
-    progress_source_changed(&target.baseline, &progress).then(|| LiveProgressUpdate {
+    live_progress_source_changed(&target.baseline, &progress, now).then(|| LiveProgressUpdate {
         id: target.id.clone(),
         baseline: target.baseline.clone(),
         baseline_identity: target.baseline_identity.clone(),
         progress,
     })
+}
+
+fn live_progress_source_changed(
+    current: &ProgressSnapshot,
+    candidate: &ProgressSnapshot,
+    now: u64,
+) -> bool {
+    let same_source_cursor = candidate.updated_unix_secs == current.updated_unix_secs
+        && candidate.last_slot == current.last_slot
+        && candidate.blocks_done == current.blocks_done;
+    let candidate_is_fresh = candidate
+        .updated_unix_secs
+        .is_some_and(|updated| now.saturating_sub(updated) <= PROGRESS_STALE_SECS);
+    if !same_source_cursor || !candidate_is_fresh {
+        return progress_source_changed(current, candidate);
+    }
+
+    // The publication layer replaces these two derived values with its rolling
+    // window. Do not emit a no-op patch merely because the unchanged source
+    // still contains its raw rate; retain all other process-metric changes.
+    let mut normalized = candidate.clone();
+    normalized.slots_per_sec = current.slots_per_sec;
+    normalized.eta_secs = current.eta_secs;
+    progress_source_changed(current, &normalized)
 }
 
 fn progress_source_changed(current: &ProgressSnapshot, candidate: &ProgressSnapshot) -> bool {
@@ -11686,6 +11744,101 @@ fn refresh_live_epoch_metrics(progress: &mut ProgressSnapshot) {
     };
 }
 
+impl LiveSlotRateWindow {
+    fn observe(&mut self, pid: Option<u32>, sample: LiveSlotRateSample) -> Option<f64> {
+        let pid_changed = self
+            .pid
+            .zip(pid)
+            .is_some_and(|(previous, current)| previous != current);
+        let counters_regressed = self.samples.back().is_some_and(|previous| {
+            sample.updated_unix_secs < previous.updated_unix_secs
+                || sample.last_slot < previous.last_slot
+        });
+        if pid_changed || counters_regressed {
+            self.samples.clear();
+        }
+        if pid.is_some() {
+            self.pid = pid;
+        }
+
+        if self
+            .samples
+            .back()
+            .is_some_and(|previous| previous.updated_unix_secs == sample.updated_unix_secs)
+        {
+            self.samples.pop_back();
+        }
+        self.samples.push_back(sample);
+        while self.samples.len() > LIVE_SLOT_RATE_MAX_SAMPLES
+            || self.samples.front().is_some_and(|oldest| {
+                sample
+                    .updated_unix_secs
+                    .saturating_sub(oldest.updated_unix_secs)
+                    > LIVE_SLOT_RATE_WINDOW_SECS
+            })
+        {
+            self.samples.pop_front();
+        }
+
+        let oldest = self.samples.front()?;
+        let newest = self.samples.back()?;
+        let elapsed = newest
+            .updated_unix_secs
+            .checked_sub(oldest.updated_unix_secs)?;
+        if elapsed < LIVE_SLOT_RATE_MIN_WINDOW_SECS {
+            return None;
+        }
+        let slots_advanced = newest.last_slot.checked_sub(oldest.last_slot)?;
+        nonnegative_finite_option(Some(slots_advanced as f64 / elapsed as f64))
+    }
+}
+
+fn smooth_live_slot_rates(
+    captures: &mut [LiveCaptureSnapshot],
+    windows: &mut BTreeMap<String, LiveSlotRateWindow>,
+    now: u64,
+) {
+    let mut sampled_capture_ids = BTreeSet::new();
+    for capture in captures
+        .iter_mut()
+        .filter(|capture| capture.state == LiveState::Capturing && capture.superseded_by.is_none())
+    {
+        let Some(updated_unix_secs) = capture
+            .progress
+            .updated_unix_secs
+            .filter(|updated| now.saturating_sub(*updated) <= PROGRESS_STALE_SECS)
+        else {
+            continue;
+        };
+        let Some(last_slot) = capture.progress.last_slot.or(capture.last_slot) else {
+            continue;
+        };
+        let Some(pid) = capture.progress.pid else {
+            // Missing or ambiguous process identity deliberately suppresses
+            // live rates. Never let an older rolling window resurrect them.
+            continue;
+        };
+        sampled_capture_ids.insert(capture.id.clone());
+        let sample = LiveSlotRateSample {
+            updated_unix_secs,
+            last_slot,
+        };
+        let Some(rate) = windows
+            .entry(capture.id.clone())
+            .or_default()
+            .observe(Some(pid), sample)
+        else {
+            continue;
+        };
+
+        capture.progress.slots_per_sec = Some(rate);
+        refresh_live_epoch_metrics(&mut capture.progress);
+        capture.slots_per_sec = capture.progress.slots_per_sec;
+        capture.eta_secs = capture.progress.eta_secs;
+    }
+    windows.retain(|capture_id, _| sampled_capture_ids.contains(capture_id));
+}
+
 fn hide_stale_live_rates(progress: &mut ProgressSnapshot, now: u64) {
     let fresh = progress
         .updated_unix_secs
@@ -14748,7 +14901,7 @@ mod tests {
             snapshot: RwLock::new(snapshot),
             updates,
             sequence: AtomicU64::new(0),
-            publication: Mutex::new(()),
+            publication: Mutex::new(PublicationState::default()),
             runtime: Mutex::new(RuntimeState::default()),
         });
         let baseline_identity = {
@@ -15509,7 +15662,7 @@ mod tests {
             snapshot: RwLock::new(empty_snapshot(false)),
             updates,
             sequence: AtomicU64::new(0),
-            publication: Mutex::new(()),
+            publication: Mutex::new(PublicationState::default()),
             runtime: Mutex::new(RuntimeState::default()),
         })
     }
@@ -16333,6 +16486,123 @@ mod tests {
     }
 
     #[test]
+    fn live_slot_rate_window_is_time_weighted_bounded_and_resets() {
+        let sample = |updated_unix_secs, last_slot| LiveSlotRateSample {
+            updated_unix_secs,
+            last_slot,
+        };
+        let mut window = LiveSlotRateWindow::default();
+        assert_eq!(window.observe(Some(7), sample(100, 1_000)), None);
+        assert_eq!(window.observe(Some(7), sample(110, 1_030)), None);
+
+        let rate = window.observe(Some(7), sample(125, 1_060)).unwrap();
+        assert!((rate - 2.4).abs() < 1e-9, "rate={rate}");
+
+        let bounded_rate = window.observe(Some(7), sample(161, 1_146)).unwrap();
+        assert_eq!(window.samples.front().unwrap().updated_unix_secs, 110);
+        assert!((bounded_rate - (116.0 / 51.0)).abs() < 1e-9);
+
+        assert_eq!(window.observe(Some(8), sample(162, 1_148)), None);
+        assert_eq!(window.samples.len(), 1, "PID change resets the window");
+        assert_eq!(window.observe(Some(8), sample(163, 900)), None);
+        assert_eq!(window.samples.len(), 1, "slot regression resets the window");
+    }
+
+    #[test]
+    fn live_progress_ignores_only_derived_rate_changes_at_the_same_cursor() {
+        let current = ProgressSnapshot {
+            pid: Some(7),
+            blocks_done: 100,
+            last_slot: Some(1_000),
+            slots_per_sec: Some(2.4),
+            eta_secs: Some(100.0),
+            updated_unix_secs: Some(1_000),
+            ..ProgressSnapshot::default()
+        };
+        let mut raw = current.clone();
+        raw.slots_per_sec = Some(3.0);
+        raw.eta_secs = Some(80.0);
+        assert!(!live_progress_source_changed(&current, &raw, 1_000));
+
+        raw.rss_bytes = Some(1024);
+        assert!(live_progress_source_changed(&current, &raw, 1_000));
+        raw.rss_bytes = None;
+        raw.last_slot = Some(1_001);
+        assert!(live_progress_source_changed(&current, &raw, 1_000));
+
+        let mut stale = current.clone();
+        stale.slots_per_sec = None;
+        stale.eta_secs = None;
+        assert!(live_progress_source_changed(
+            &current,
+            &stale,
+            1_000 + PROGRESS_STALE_SECS + 1
+        ));
+    }
+
+    #[test]
+    fn live_slot_rate_window_updates_rate_and_eta_together() {
+        let root = temp_root("live-slot-rate-window");
+        let mut capture =
+            test_live_capture(&root, "capture-test", 1_001, LiveState::Capturing, 1_000);
+        let epoch_start = 1_001 * SLOTS_PER_EPOCH;
+        capture.progress = ProgressSnapshot {
+            pid: Some(7),
+            state: Some("capturing".to_string()),
+            first_slot: Some(epoch_start),
+            last_slot: Some(epoch_start + 100),
+            slots_per_sec: Some(3.0),
+            updated_unix_secs: Some(1_000),
+            ..ProgressSnapshot::default()
+        };
+        capture.last_slot = capture.progress.last_slot;
+        capture.slots_per_sec = capture.progress.slots_per_sec;
+        let mut windows = BTreeMap::new();
+        smooth_live_slot_rates(std::slice::from_mut(&mut capture), &mut windows, 1_000);
+        assert_eq!(
+            capture.slots_per_sec,
+            Some(3.0),
+            "raw rate is kept during warm-up"
+        );
+
+        capture.progress.last_slot = Some(epoch_start + 136);
+        capture.progress.slots_per_sec = Some(2.0);
+        capture.progress.updated_unix_secs = Some(1_015);
+        capture.last_slot = capture.progress.last_slot;
+        smooth_live_slot_rates(std::slice::from_mut(&mut capture), &mut windows, 1_015);
+
+        let rate = capture.slots_per_sec.unwrap();
+        assert!((rate - 2.4).abs() < 1e-9);
+        assert_eq!(capture.progress.slots_per_sec, capture.slots_per_sec);
+        assert_eq!(capture.progress.eta_secs, capture.eta_secs);
+        let remaining_slots = SLOTS_PER_EPOCH - 137;
+        assert!((capture.eta_secs.unwrap() - remaining_slots as f64 / rate).abs() < 1e-6);
+
+        capture.progress.pid = None;
+        capture.progress.slots_per_sec = None;
+        capture.progress.eta_secs = None;
+        capture.slots_per_sec = None;
+        capture.eta_secs = None;
+        smooth_live_slot_rates(std::slice::from_mut(&mut capture), &mut windows, 1_015);
+        assert_eq!(capture.slots_per_sec, None);
+        assert!(
+            windows.is_empty(),
+            "missing producer identity must discard the mature rate window"
+        );
+
+        capture.progress.updated_unix_secs = Some(1_015 - PROGRESS_STALE_SECS - 1);
+        hide_stale_live_rates(&mut capture.progress, 1_015);
+        capture.slots_per_sec = capture.progress.slots_per_sec;
+        capture.eta_secs = capture.progress.eta_secs;
+        smooth_live_slot_rates(std::slice::from_mut(&mut capture), &mut windows, 1_015);
+        assert_eq!(capture.slots_per_sec, None);
+        assert!(
+            windows.is_empty(),
+            "stale captures cannot retain a rate window"
+        );
+    }
+
+    #[test]
     fn live_journal_fallback_computes_eta_from_pre_merge_progress_baseline() {
         let first_slot = 432_655_313;
         let baseline_slot = 432_663_030;
@@ -16471,10 +16741,6 @@ mod tests {
         let expected_pct =
             ((journal_slot % SLOTS_PER_EPOCH + 1) as f64 / SLOTS_PER_EPOCH as f64) * 100.0;
         assert_eq!(classified.progress.progress_pct, Some(expected_pct));
-        assert_eq!(classified.slots_per_sec, classified.progress.slots_per_sec);
-        assert_eq!(classified.eta_secs, classified.progress.eta_secs);
-        assert!(classified.slots_per_sec.is_some());
-        assert!(classified.eta_secs.is_some());
         fs::remove_dir_all(root).unwrap();
     }
 
