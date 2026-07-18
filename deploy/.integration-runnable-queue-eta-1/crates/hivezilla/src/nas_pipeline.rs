@@ -54,6 +54,9 @@ const REGISTRY_FILE: &str = "registry.bin";
 const REGISTRY_COUNTS_FILE: &str = "registry_counts.bin";
 const REGISTRY_INDEX_FILE: &str = "registry.mphf";
 const BLOCKHASH_INDEX_V3_FILE: &str = "blockhash_index_v3.bin";
+const BLOCKHASH_INDEX_V3_TMP_FILE: &str = "blockhash_index_v3.bin.tmp";
+const BLOCK_TIME_GAP_FILE: &str = "block-time-gaps.bin";
+const BLOCK_TIME_GAP_LOCK_FILE: &str = ".block-time-gaps.bin.lock";
 const FIRST_SEEN_MANIFEST_FILE: &str = "registry-first-seen.manifest";
 const BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
 const BLOCKS_FILE: &str = "archive-v2-blocks.zstd";
@@ -3884,6 +3887,8 @@ fn legacy_registry_only_shape(output: &Path) -> bool {
                 REGISTRY_INDEX_FILE,
                 BLOCKHASH_REGISTRY_FILE,
                 BLOCKHASH_INDEX_V3_FILE,
+                BLOCK_TIME_GAP_FILE,
+                BLOCK_TIME_GAP_LOCK_FILE,
                 PREVIOUS_BLOCKHASH_TAIL_FILE,
                 POH_FILE,
             ],
@@ -3902,6 +3907,9 @@ fn legacy_owned_retry_shape(output: &Path) -> bool {
                 REGISTRY_INDEX_FILE,
                 BLOCKHASH_REGISTRY_FILE,
                 BLOCKHASH_INDEX_V3_FILE,
+                BLOCKHASH_INDEX_V3_TMP_FILE,
+                BLOCK_TIME_GAP_FILE,
+                BLOCK_TIME_GAP_LOCK_FILE,
                 PREVIOUS_BLOCKHASH_TAIL_FILE,
                 META_FILE,
                 BLOCKS_FILE,
@@ -14781,7 +14789,21 @@ mod tests {
         fs::remove_file(stale_lock.join("owner")).unwrap();
         fs::remove_dir(&stale_lock).unwrap();
 
+        // Timestamp/gap artifacts are derived from the immutable CAR and are
+        // invalidated before compact/reuse publishes replacements. The gap
+        // extractor intentionally leaves its regular lock file in place.
+        fs::write(output.join(BLOCK_TIME_GAP_FILE), b"derived").unwrap();
+        fs::write(output.join(BLOCK_TIME_GAP_LOCK_FILE), b"").unwrap();
         assert!(legacy_registry_only_shape(&output));
+
+        // Keep interrupted standalone publications visible to an operator;
+        // only the two canonical derived paths above are migration metadata.
+        let unexpected_gap_temp = output.join(".block-time-gaps.bin.123.456.tmp");
+        fs::write(&unexpected_gap_temp, b"partial").unwrap();
+        assert!(!legacy_registry_only_shape(&output));
+        fs::remove_file(unexpected_gap_temp).unwrap();
+        assert!(legacy_registry_only_shape(&output));
+
         assert_eq!(
             legacy_compact_reuse_status(&config, 700),
             LegacyCompactReuseStatus::Ready
@@ -14812,6 +14834,37 @@ mod tests {
             legacy_compact_reuse_status(&config, 700),
             LegacyCompactReuseStatus::NotCandidate
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_owned_retry_shape_accepts_known_timestamp_build_residue_only() {
+        let root = temp_root("legacy-compact-retry-timestamps");
+        let config = test_config(&root);
+        let output = config.archive_root.join("epoch-700");
+        write_legacy_registry_sidecars(&output, true);
+        write_ownership(
+            &output,
+            LEGACY_COMPACT_OWNERSHIP_KIND,
+            "700",
+            "retry_ready",
+            None,
+        )
+        .unwrap();
+        for name in [
+            BLOCKHASH_INDEX_V3_TMP_FILE,
+            BLOCK_TIME_GAP_FILE,
+            BLOCK_TIME_GAP_LOCK_FILE,
+            META_FILE,
+            BLOCKS_FILE,
+            "archive-v2-blocks.index.tmp",
+        ] {
+            fs::write(output.join(name), b"known residue").unwrap();
+        }
+        assert!(legacy_owned_retry_shape(&output));
+
+        fs::write(output.join("block-time-gaps.bin.tmp"), b"unknown").unwrap();
+        assert!(!legacy_owned_retry_shape(&output));
         fs::remove_dir_all(root).unwrap();
     }
 
