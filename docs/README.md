@@ -1,36 +1,12 @@
 # Blockzilla documentation
 
-This directory separates implemented interfaces from proposed architecture and
-historical design work. For a first successful run, start with the repository
-[fixture quick start](../README.md#quick-start-build-and-read-the-fixture), not
-the target-system documents.
+Start with the repository [fixture quick start](../README.md#quick-start-build-and-read-the-fixture).
+It is the shortest working path through the project.
 
-## Product documentation
-
-- [Blockzilla CLI](../blockzilla/README.md): the working CAR-to-Archive V2 path,
-  command groups, code map, and validation.
-- [Hivezilla](../hivezilla/README.md): the live-input prototype and its current
-  safety boundary.
-- [Edgezilla](../edgezilla/README.md): the experimental cloud-replica and
-  read-only serving boundary.
-- [Token API example](../examples/token-api/README.md): an experimental derived
-  index and local HTTP API.
-- [Developer scripts](../scripts/README.md): benchmark and correctness utilities
-  with network and credential requirements.
-
-## Architecture proposals
-
-- [Full system schema](architecture/full-system-schema.md) is the concise target
-  flow across network inputs, Hivezilla, Blockzilla, cloud storage, Edgezilla,
-  and local indexers.
-- [System overview](architecture/system-overview.md) explains product ownership,
-  current repository boundaries, and the proposed end state.
-- [Local sync and indexing](architecture/local-streaming.md) proposes how a local
-  indexer could seed, checkpoint, and follow compacted archives. Its `sync` and
-  `stream` commands are not implemented yet.
-
-Architecture documents describe direction unless they explicitly identify an
-implemented command or format.
+Current guides: [Blockzilla CLI](../blockzilla/README.md),
+[supporting services](../services/README.md), the
+[token API example](../examples/token-api/README.md), and
+[developer scripts](../scripts/README.md).
 
 ## Implemented reference
 
@@ -38,31 +14,27 @@ implemented command or format.
   documents the files and records implemented by `blockzilla-format` and the
   Blockzilla builders.
 
-Pin a Git revision when implementing a reader: Archive V2 is still pre-1.0.
+Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
-## Design and historical context
+## Proposed architecture
 
-- [Horizon problem statement](design/horizon-problem-statement.md) describes the
-  historical-verification problem Blockzilla addresses.
-- [Live-ingest redundancy](design/live-ingest-redundancy.md) records durability,
-  deduplication, and receipt invariants. It includes work not yet wired into a
-  production Hivezilla service.
-- [Archive V2 evolution](design/archive-v2-evolution.md) collects non-normative
-  sidecar, lookup-index, metadata, and publication-manifest ideas.
-- [Log compression](design/log-compression.md) is a research question about
-  generalized, byte-preserving runtime-log templates.
-- [Live archive producer guide](guides/live-archive-producer.md) preserves the
-  earlier prototype design. Use the product READMEs for current ownership and
-  status.
+- [Full system schema](architecture/full-system-schema.md): concise target flow
+  from network input to storage, edge serving, and local indexers.
+- [System overview](architecture/system-overview.md): product ownership and the
+  proposed end state.
+- [Local sync and indexing](architecture/local-streaming.md): proposed local
+  indexer seeding and streaming; its commands are not implemented yet.
 
-## Benchmarks
+## Research and history
 
-- [Archive V2 storage and read snapshot](benchmarks/archive-v2-storage-read-getblock-2026-05-24.md)
-  is a curated historical measurement. Results are specific to the stated
-  corpus, commit, build profile, and hardware; they are not a service-level
-  guarantee.
+- [Horizon problem statement](design/horizon-problem-statement.md)
+- [Live-ingest redundancy](design/live-ingest-redundancy.md)
+- [Archive V2 evolution](design/archive-v2-evolution.md)
+- [Log compression](design/log-compression.md)
+- [Earlier live-producer design](guides/live-archive-producer.md)
+- [Archive V2 benchmark snapshot](benchmarks/archive-v2-storage-read-getblock-2026-05-24.md)
 
-Machine-specific runbooks, provider credentials, incident reports, raw
-benchmark output, and production deployment configuration do not belong in this
-public reference documentation. See the repository [security policy](../SECURITY.md)
-for private vulnerability reporting.
+These documents preserve ideas and measurements; they are not all implemented
+or current. Machine-specific runbooks, credentials, incidents, raw benchmark
+output, and production deployment configuration do not belong here. Use the
+repository [security policy](../SECURITY.md) for private reporting.

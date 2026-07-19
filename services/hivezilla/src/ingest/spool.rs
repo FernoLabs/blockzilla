@@ -216,6 +216,10 @@ pub struct SpoolWriter {
 }
 
 impl SpoolWriter {
+    /// Open a writer after validating every sealed segment in the journal.
+    ///
+    /// This is the conservative path for offline tasks. Latency grows with the complete spool,
+    /// because every historical payload checksum is recomputed before appending is allowed.
     pub fn open(
         spool_root: impl AsRef<Path>,
         identity: SpoolJournalIdentity,
@@ -277,6 +281,120 @@ impl SpoolWriter {
             identity,
             options,
             segment_id,
+            segment_len,
+            writer,
+            _journal_lock: journal_lock,
+            last_record,
+            poisoned: false,
+        })
+    }
+
+    /// Open a live writer from a handoff-journal checkpoint without rescanning sealed history.
+    ///
+    /// The checkpoint is an already-synced handoff row. Its exact WAL frame is checksummed here,
+    /// then only the current segment is recovered. A full [`LockedSpoolAudit`] remains required
+    /// for offline validation before materialization or deletion of source data.
+    pub fn open_from_checkpoint(
+        spool_root: impl AsRef<Path>,
+        identity: SpoolJournalIdentity,
+        options: SpoolOptions,
+        checkpoint: Option<SpoolLocation>,
+    ) -> Result<Self> {
+        let options = options.validate()?;
+        validate_path_component(&identity.cluster_id, "cluster id")?;
+        validate_path_component(&identity.origin_node_id, "origin node id")?;
+        validate_path_component(&identity.source_id, "source id")?;
+        let journal_dir = spool_root
+            .as_ref()
+            .join(&identity.cluster_id)
+            .join(&identity.origin_node_id)
+            .join(&identity.source_id)
+            .join(hex_journal_id(identity.journal_id));
+        create_dir_all_durable(&journal_dir)?;
+
+        let lock_path = journal_dir.join("writer.lock");
+        let (journal_lock, lock_created) = open_regular_file(&lock_path, true)?;
+        try_lock_exclusive(&journal_lock, &lock_path)?;
+        if lock_created {
+            sync_directory(&journal_dir)?;
+        }
+
+        let segment_ids = segment_ids(&journal_dir)?;
+        ensure!(
+            checkpoint.is_some() || segment_ids.len() <= 1,
+            "a handoff checkpoint is required to resume a multi-segment spool; run the offline raw-spool audit"
+        );
+        let active_segment_id = segment_ids.last().copied().unwrap_or(0);
+        let checkpoint_record = checkpoint
+            .map(|location| {
+                ensure!(
+                    segment_ids.binary_search(&location.segment_id).is_ok(),
+                    "handoff checkpoint references missing spool segment {}",
+                    location.segment_id
+                );
+                ensure!(
+                    active_segment_id == location.segment_id
+                        || active_segment_id == location.segment_id.saturating_add(1),
+                    "active spool segment {} is not adjacent to checkpoint segment {}",
+                    active_segment_id,
+                    location.segment_id
+                );
+                let stored = read_spool_record(&journal_dir, location, options.max_record_bytes)
+                    .context("validate handoff checkpoint WAL frame")?;
+                ensure_record_matches_identity(&stored.metadata, &identity)?;
+                if active_segment_id != location.segment_id {
+                    let checkpoint_end = location
+                        .frame_offset
+                        .checked_add(location.frame_len)
+                        .context("handoff checkpoint frame end overflow")?;
+                    let checkpoint_len =
+                        fs::metadata(segment_path(&journal_dir, location.segment_id))?.len();
+                    ensure!(
+                        checkpoint_end == checkpoint_len,
+                        "handoff checkpoint does not end at sealed segment boundary"
+                    );
+                }
+                Ok(DurableSpoolRecord {
+                    location: stored.location,
+                    metadata: stored.metadata,
+                })
+            })
+            .transpose()?;
+
+        let (writer, segment_len, recovered_last) = open_and_recover_segment(
+            &journal_dir,
+            active_segment_id,
+            options.max_record_bytes,
+            &identity,
+        )?;
+        let last_record = match (checkpoint_record, recovered_last) {
+            (None, recovered_last) => recovered_last,
+            (Some(checkpoint), recovered_last) => {
+                if active_segment_id != checkpoint.location.segment_id {
+                    if let Some(last) = recovered_last.as_ref() {
+                        ensure_record_follows(&checkpoint, last)?;
+                    }
+                }
+                if let Some(last) = recovered_last.as_ref() {
+                    let checkpoint_sequence = checkpoint.metadata.observation.sequence;
+                    let maximum_sequence = checkpoint_sequence
+                        .checked_add(1)
+                        .context("handoff checkpoint sequence overflow")?;
+                    ensure!(
+                        last.metadata.observation.sequence >= checkpoint_sequence
+                            && last.metadata.observation.sequence <= maximum_sequence,
+                        "WAL is more than one frame ahead of handoff checkpoint"
+                    );
+                }
+                recovered_last.or(Some(checkpoint))
+            }
+        };
+        sync_directory(&journal_dir)?;
+        Ok(Self {
+            journal_dir,
+            identity,
+            options,
+            segment_id: active_segment_id,
             segment_len,
             writer,
             _journal_lock: journal_lock,
@@ -760,6 +878,20 @@ fn ensure_record_follows(previous: &DurableSpoolRecord, next: &DurableSpoolRecor
             next.location.segment_id, next.location.frame_offset
         )
     })
+}
+
+fn ensure_record_matches_identity(
+    metadata: &IngressRecordMeta,
+    identity: &SpoolJournalIdentity,
+) -> Result<()> {
+    ensure!(
+        metadata.cluster_id == identity.cluster_id
+            && metadata.observation.origin_node_id == identity.origin_node_id
+            && metadata.source_id == identity.source_id
+            && metadata.observation.journal_id == identity.journal_id,
+        "handoff checkpoint identity does not match spool journal"
+    );
+    Ok(())
 }
 
 fn ensure_observation_follows(
@@ -1486,6 +1618,78 @@ mod tests {
 
         assert!(SpoolWriter::open(&root, journal_identity(), options).is_err());
         assert_eq!(fs::metadata(older_segment).unwrap().len(), original_len);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_checkpoint_recovery_skips_sealed_history_but_offline_audit_checks_it() {
+        let root = temp_root("checkpoint-skips-history");
+        let options = SpoolOptions {
+            segment_target_bytes: 200,
+            max_record_bytes: 1024,
+        };
+        let (older_segment, checkpoint) = {
+            let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+            let first = spool
+                .append_and_sync(metadata(1, &[1; 64]), &[1; 64])
+                .unwrap();
+            spool
+                .append_and_sync(metadata(2, &[2; 64]), &[2; 64])
+                .unwrap();
+            let checkpoint = spool
+                .append_and_sync(metadata(3, &[3; 64]), &[3; 64])
+                .unwrap();
+            (
+                segment_path(spool.journal_dir(), first.location.segment_id),
+                checkpoint,
+            )
+        };
+        assert!(checkpoint.location.segment_id > 0);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&older_segment)
+            .unwrap();
+        file.seek(SeekFrom::Start(SEGMENT_HEADER_LEN)).unwrap();
+        file.write_all(b"X").unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        let live = SpoolWriter::open_from_checkpoint(
+            &root,
+            journal_identity(),
+            options,
+            Some(checkpoint.location()),
+        )
+        .unwrap();
+        assert_eq!(live.last_record(), Some(&checkpoint));
+        drop(live);
+
+        let error = LockedSpoolAudit::open(&root, journal_identity(), options).unwrap_err();
+        assert!(format!("{error:#}").contains("corrupt spool frame magic"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_checkpoint_is_required_for_multi_segment_resume() {
+        let root = temp_root("checkpoint-required");
+        let options = SpoolOptions {
+            segment_target_bytes: 200,
+            max_record_bytes: 1024,
+        };
+        {
+            let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+            spool
+                .append_and_sync(metadata(1, &[1; 64]), &[1; 64])
+                .unwrap();
+            spool
+                .append_and_sync(metadata(2, &[2; 64]), &[2; 64])
+                .unwrap();
+        }
+        let error = SpoolWriter::open_from_checkpoint(&root, journal_identity(), options, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("handoff checkpoint is required"));
         fs::remove_dir_all(root).unwrap();
     }
 

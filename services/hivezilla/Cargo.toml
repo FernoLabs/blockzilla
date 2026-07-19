@@ -15,14 +15,14 @@ path = "src/main.rs"
 anyhow = "1.0.102"
 ahash = "0.8.12"
 base64 = "0.22.1"
-blockzilla-format = { path = "../crates/blockzilla-format" }
+blockzilla-format = { path = "../../crates/blockzilla-format" }
 clap = { version = "4.6.1", features = ["derive"] }
 five8 = "1.0.0"
 futures = "0.3.32"
 gxhash = "3.5.0"
 hashbrown = "0.17.1"
 libc = "0.2.186"
-of-car-reader = { path = "../crates/old-faithful/car-reader", default-features = false }
+of-car-reader = { path = "../../crates/old-faithful/car-reader", default-features = false }
 prost = "0.14.3"
 reqwest = { version = "0.13.3", default-features = false, features = ["http2", "json", "rustls"] }
 rustc-hash = "2.1.2"

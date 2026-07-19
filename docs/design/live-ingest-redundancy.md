@@ -66,6 +66,14 @@ contains bounded lengths, its identities, payload, checksum, and an end marker.
 Recovery may truncate an incomplete final frame; interior corruption is a
 quarantine condition.
 
+Live reconnect is deliberately bounded. The writer validates the final
+handoff row, its exact checksummed WAL frame, and at most the active segment;
+it does not reread every sealed segment before reconnecting. Complete sealed
+history and journal-sequence validation belongs to the offline Blockzilla
+maintenance task, which runs against a stopped source or immutable snapshot
+before materialization or source retention cleanup. This split keeps recovery
+latency independent of capture age without weakening the publish/delete gate.
+
 Payload bytes remain in WAL segments. An exact index stores observation,
 content, and logical-key metadata. An in-memory cache may accelerate recent
 lookups but is never authoritative.
@@ -136,7 +144,7 @@ Yellowstone and shred inputs also have different fallback behavior:
 
 ## Implemented foundation
 
-The current `hivezilla/src/ingest/` code contains:
+The current `services/hivezilla/src/ingest/` code contains:
 
 - validated, redacted ingest configuration types;
 - domain-separated content identities and explicit deduplication decisions;

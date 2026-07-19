@@ -19,11 +19,11 @@ Status words in this roadmap are intentional:
 - The hot-block Archive V2 writer, indexes, sidecars, and readers are
   implemented. The current contract is documented in the
   [format reference](docs/reference/archive-v2-hot-block-format.md).
-- The `hivezilla/` folder contains the current Yellowstone capture and repair
-  prototype, including the `hivezilla` executable.
-- `edgezilla/blockzilla-get-block/` contains a read-only R2-backed Worker and
+- The `services/hivezilla/` folder contains the current Yellowstone capture
+  and repair prototype, including the `hivezilla` executable.
+- `services/blockzilla-get-block/` contains a read-only R2-backed Worker and
   native inspection/correctness tools.
-- `edgezilla/old-faithful-get-block/` contains the restored, buildable,
+- `services/old-faithful-get-block/` contains the restored, buildable,
   read-only CAR-backed compatibility Worker. It is experimental and is not the
   canonical Blockzilla Archive V2 serving path.
 - The optional token API is an example under `examples/token-api/`.
@@ -50,7 +50,8 @@ redacted history scan.
 
 Status: implemented by the current cleanup; continue refining documentation.
 
-- Keep product code in top-level `blockzilla/`, `hivezilla/`, and `edgezilla/`.
+- Keep the main Blockzilla product in `blockzilla/` and deployable supporting
+  processes in `services/`.
 - Keep reusable format/reader libraries in `crates/`, examples in `examples/`,
   contributor scripts in `scripts/`, and public material in `docs/`.
 - Expose `blockzilla` as the default product binary. Keep diagnostic,

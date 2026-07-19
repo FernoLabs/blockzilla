@@ -2,9 +2,9 @@
 resolver = "2"
 members = [
     "blockzilla",
-    "hivezilla",
-    "edgezilla/blockzilla-get-block",
-    "edgezilla/old-faithful-get-block",
+    "services/hivezilla",
+    "services/blockzilla-get-block",
+    "services/old-faithful-get-block",
     "crates/blockzilla-format",
     "crates/blockzilla-log-parser",
     "crates/old-faithful/car-reader",

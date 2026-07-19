@@ -56,11 +56,35 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo install worker-build --locked --version 0.8.3
       - name: Build Archive V2 Edgezilla Worker
-        working-directory: edgezilla/blockzilla-get-block
+        working-directory: services/blockzilla-get-block
         run: worker-build --release . --no-default-features --features worker
       - name: Build Old Faithful Edgezilla Worker
-        working-directory: edgezilla/old-faithful-get-block
+        working-directory: services/old-faithful-get-block
         run: worker-build --release .
+
+  watcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: services/blockzilla-watcher/package-lock.json
+      - name: Install watcher dependencies
+        working-directory: services/blockzilla-watcher
+        run: npm ci
+      - name: Test watcher data handling
+        working-directory: services/blockzilla-watcher
+        run: npm test
+      - name: Check watcher UI
+        working-directory: services/blockzilla-watcher
+        run: npm run check
+      - name: Build watcher UI
+        working-directory: services/blockzilla-watcher
+        run: npm run build
 
   docs:
     runs-on: ubuntu-latest

@@ -1,0 +1,29 @@
+{
+  "name": "blockzilla-watcher",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "overrides": {
+    "cookie": "0.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@sveltejs/adapter-static": "^3.0.9",
+    "@sveltejs/kit": "^2.27.0",
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "svelte": "^5.39.6",
+    "svelte-check": "^4.3.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  }
+}

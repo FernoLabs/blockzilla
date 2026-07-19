@@ -68,7 +68,7 @@ and verifies both edge copies; Edgezilla stores and serves them read-only.
 | --- | --- |
 | CAR/CAR.ZST → Blockzilla → local Archive V2 | Implemented |
 | Current Hivezilla capture directory → Blockzilla → local Archive V2 | Implemented prototype path |
-| Yellowstone capture and durable-ingest foundations | Implemented under `hivezilla/` |
+| Yellowstone capture and durable-ingest foundations | Implemented under `services/hivezilla/` |
 | Multiple production gRPC instances | Planned |
 | Shred Hivezilla implementation | Planned |
 | Blockzilla server, scheduler, and R2/B2 publisher | Planned |

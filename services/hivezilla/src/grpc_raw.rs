@@ -9,7 +9,7 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     future::Future,
-    io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write},
+    io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -56,6 +56,8 @@ const MATERIALIZATION_RECEIPT_FILE: &str = "raw-materialization-receipt.json";
 const MATERIALIZATION_PROGRESS_FILE: &str = "progress.json";
 const SUBSCRIBE_REQUEST_CHANNEL_CAPACITY: usize = 8;
 const SUBSCRIBE_PING_ID: i32 = 1;
+const HANDOFF_TAIL_SCAN_BYTES: usize = 64 * 1024;
+const MAX_HANDOFF_RECORD_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogOutcome<T> {
@@ -513,9 +515,18 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         max_record_bytes: config.max_record_bytes,
     };
     let wal_root = config.output_dir.join(WAL_ROOT_DIR);
-    let mut spool = SpoolWriter::open(&wal_root, identity.spool_identity(), spool_options)?;
     let journal_path = config.output_dir.join(HANDOFF_JOURNAL_FILE);
-    let mut journal_state = recover_handoff_journal(&journal_path)?;
+    let mut journal_state = recover_handoff_journal_tail(&journal_path)?;
+    let checkpoint = journal_state
+        .last
+        .as_ref()
+        .map(GrpcRawHandoffRecord::location);
+    let mut spool = SpoolWriter::open_from_checkpoint(
+        &wal_root,
+        identity.spool_identity(),
+        spool_options,
+        checkpoint,
+    )?;
     let recovered_handoff_record = reconcile_handoff_tail(
         &mut spool,
         &journal_path,
@@ -523,6 +534,11 @@ pub async fn record_grpc_raw_blocks(config: GrpcRawRecordConfig) -> Result<GrpcR
         config.slots_per_epoch,
         config.max_record_bytes,
     )?;
+    tracing::info!(
+        existing_frames = journal_state.records,
+        active_segment = spool.current_segment_id(),
+        "raw gRPC recorder recovered its durable tail; sealed-history validation is deferred to the offline audit task"
+    );
 
     let resume_anchor = journal_state.last.clone();
     let last_durable_slot = resume_anchor.as_ref().map(|row| row.slot);
@@ -1442,6 +1458,97 @@ fn recover_handoff_journal(path: &Path) -> Result<JournalState> {
     }
     let state = read_handoff_journal(path, true)?;
     Ok(state)
+}
+
+/// Recover only the durable journal tail used by the live writer.
+///
+/// Full sequence validation remains in `read_handoff_journal` and is run by offline inspection,
+/// replay, and materialization. The live path bounds startup work to at most one small JSON row.
+fn recover_handoff_journal_tail(path: &Path) -> Result<JournalState> {
+    if !path.exists() {
+        return recover_handoff_journal(path);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open raw gRPC journal tail {}", path.display()))?;
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok(JournalState::default());
+    }
+
+    file.seek(SeekFrom::Start(file_len - 1))?;
+    let mut final_byte = [0u8; 1];
+    file.read_exact(&mut final_byte)?;
+    let complete_end = if final_byte[0] == b'\n' {
+        file_len
+    } else {
+        previous_newline(&mut file, file_len)?
+            .map(|offset| offset + 1)
+            .unwrap_or(0)
+    };
+    if complete_end != file_len {
+        file.set_len(complete_end)?;
+        file.sync_data()?;
+    }
+    if complete_end == 0 {
+        return Ok(JournalState::default());
+    }
+
+    let mut line_end = complete_end;
+    loop {
+        let newline = line_end - 1;
+        let previous = previous_newline(&mut file, newline)?;
+        let line_start = previous.map_or(0, |offset| offset + 1);
+        let line_len = newline
+            .checked_sub(line_start)
+            .context("raw gRPC handoff journal tail offset moved backward")?;
+        ensure!(
+            line_len <= MAX_HANDOFF_RECORD_BYTES,
+            "raw gRPC handoff journal tail is {} bytes, over maximum {}",
+            line_len,
+            MAX_HANDOFF_RECORD_BYTES
+        );
+        let mut line = vec![0u8; line_len as usize];
+        file.seek(SeekFrom::Start(line_start))?;
+        file.read_exact(&mut line)?;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            if line_start == 0 {
+                return Ok(JournalState::default());
+            }
+            line_end = line_start;
+            continue;
+        }
+        let row: GrpcRawHandoffRecord = serde_json::from_slice(&line)
+            .with_context(|| format!("decode raw gRPC journal tail in {}", path.display()))?;
+        validate_handoff_sequence(&row, row.frame_id)?;
+        let records = row
+            .frame_id
+            .checked_add(1)
+            .context("raw gRPC handoff journal record count overflow")?;
+        return Ok(JournalState {
+            records,
+            first: None,
+            last: Some(row),
+        });
+    }
+}
+
+fn previous_newline(file: &mut File, end_exclusive: u64) -> Result<Option<u64>> {
+    let mut cursor = end_exclusive;
+    let mut buffer = vec![0u8; HANDOFF_TAIL_SCAN_BYTES];
+    while cursor > 0 {
+        let amount = cursor.min(buffer.len() as u64) as usize;
+        let start = cursor - amount as u64;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buffer[..amount])?;
+        if let Some(index) = buffer[..amount].iter().rposition(|byte| *byte == b'\n') {
+            return Ok(Some(start + index as u64));
+        }
+        cursor = start;
+    }
+    Ok(None)
 }
 
 fn read_handoff_journal(path: &Path, truncate_partial_tail: bool) -> Result<JournalState> {
@@ -2802,6 +2909,61 @@ mod tests {
     }
 
     #[test]
+    fn fast_live_resume_reconciles_one_orphan_across_segment_rotation() {
+        let root = temp_dir("fast-reconcile-rotation");
+        fs::create_dir_all(&root).unwrap();
+        let mut config = test_config(root.clone());
+        config.segment_target_bytes = 200;
+        let identity = load_or_create_identity(&config).unwrap();
+        let options = SpoolOptions {
+            segment_target_bytes: config.segment_target_bytes,
+            max_record_bytes: config.max_record_bytes,
+        };
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let orphan = {
+            let mut spool =
+                SpoolWriter::open(root.join(WAL_ROOT_DIR), identity.spool_identity(), options)
+                    .unwrap();
+            for frame_id in 0..2 {
+                let row = append_fixture(&mut spool, &identity, &update(700 + frame_id), frame_id);
+                append_handoff_record(&journal, &row).unwrap();
+            }
+            append_fixture(&mut spool, &identity, &update(702), 2)
+        };
+
+        let mut state = recover_handoff_journal_tail(&journal).unwrap();
+        assert_eq!(state.records, 2);
+        let checkpoint = state.last.as_ref().map(GrpcRawHandoffRecord::location);
+        let mut spool = SpoolWriter::open_from_checkpoint(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            options,
+            checkpoint,
+        )
+        .unwrap();
+        assert!(
+            reconcile_handoff_tail(
+                &mut spool,
+                &journal,
+                &mut state,
+                OLD_FAITHFUL_SLOTS_PER_EPOCH,
+                config.max_record_bytes,
+            )
+            .unwrap()
+        );
+        assert_eq!(state.records, 3);
+        assert_eq!(state.last, Some(orphan));
+        drop(spool);
+
+        let inspected =
+            inspect_grpc_raw_blocks(root.clone(), config.max_record_bytes, true).unwrap();
+        assert_eq!(inspected.records, 3);
+        assert_eq!(inspected.last_slot, Some(702));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_valid_json_tail_with_slot_different_from_wal() {
         let root = temp_dir("journal-slot-tamper");
         fs::create_dir_all(&root).unwrap();
@@ -2968,6 +3130,71 @@ mod tests {
         let state = recover_handoff_journal(&journal).unwrap();
         assert_eq!(state.records, 1);
         assert_eq!(fs::metadata(&journal).unwrap().len(), valid_len);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_tail_recovery_truncates_only_the_partial_suffix() {
+        let root = temp_dir("fast-partial-journal");
+        fs::create_dir_all(&root).unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        let row = GrpcRawHandoffRecord {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            frame_id: 7,
+            slot: 49,
+            parent_slot: 48,
+            epoch: 0,
+            epoch_slot_index: 49,
+            segment_id: 3,
+            frame_offset: 8,
+            frame_len: 100,
+            compressed_len: 20,
+            uncompressed_len: 40,
+            protobuf_sha256: "00".repeat(32),
+            blockhash: "11111111111111111111111111111111".to_string(),
+        };
+        let mut contents = serde_json::to_vec(&row).unwrap();
+        contents.push(b'\n');
+        let valid_len = contents.len() as u64;
+        contents.extend_from_slice(b"{\"schema_version\":1");
+        fs::write(&journal, contents).unwrap();
+
+        let state = recover_handoff_journal_tail(&journal).unwrap();
+        assert_eq!(state.records, 8);
+        assert_eq!(state.last, Some(row));
+        assert_eq!(fs::metadata(&journal).unwrap().len(), valid_len);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_tail_recovery_defers_old_journal_corruption_to_offline_audit() {
+        let root = temp_dir("fast-tail-offline-audit");
+        fs::create_dir_all(&root).unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        let row = GrpcRawHandoffRecord {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            frame_id: 4,
+            slot: 46,
+            parent_slot: 45,
+            epoch: 0,
+            epoch_slot_index: 46,
+            segment_id: 1,
+            frame_offset: 8,
+            frame_len: 100,
+            compressed_len: 20,
+            uncompressed_len: 40,
+            protobuf_sha256: "00".repeat(32),
+            blockhash: "11111111111111111111111111111111".to_string(),
+        };
+        let mut contents = b"not-json\n".to_vec();
+        contents.extend_from_slice(&serde_json::to_vec(&row).unwrap());
+        contents.push(b'\n');
+        fs::write(&journal, contents).unwrap();
+
+        let state = recover_handoff_journal_tail(&journal).unwrap();
+        assert_eq!(state.records, 5);
+        assert_eq!(state.last, Some(row));
+        assert!(read_handoff_journal(&journal, false).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
