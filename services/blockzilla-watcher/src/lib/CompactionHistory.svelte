@@ -53,14 +53,18 @@
 <section class="history-panel">
   <header>
     <div>
-      <h2>Completed compactions</h2>
-      <p>{formatInteger(entries.length)} {entries.length === 1 ? 'run' : 'runs'} available</p>
+      <h2>Archive history</h2>
+      <p>{formatInteger(entries.length)} {entries.length === 1 ? 'record' : 'records'} available</p>
     </div>
     {#if latest}
       <p class="latest">
-        {latest.completed_unix_secs === null ? 'Highest complete' : 'Latest'}
+        {latest.completed_unix_secs === null
+          ? 'Highest complete'
+          : latest.timestamp_source === 'archive_file'
+            ? 'Latest archive file time'
+            : 'Latest'}
         · Epoch {formatInteger(latest.epoch)}
-        · {latest.duration_secs === null ? 'timing unavailable' : formatDuration(latest.duration_secs)}
+        · {latest.duration_secs === null ? 'duration unavailable' : formatDuration(latest.duration_secs)}
       </p>
     {/if}
   </header>
@@ -84,11 +88,16 @@
               {#if showWorkflow}<td>{workflowLabel(entry.workflow)}</td>{/if}
               <td>
                 {#if entry.completed_unix_secs !== null}
-                  <time
-                    datetime={new Date(entry.completed_unix_secs * 1000).toISOString()}
-                    aria-label={formatClockLabel(entry.completed_unix_secs)}
-                    title={formatClockLabel(entry.completed_unix_secs)}
-                  >{formatClock(entry.completed_unix_secs)}</time>
+                  <span class="completion-time">
+                    <time
+                      datetime={new Date(entry.completed_unix_secs * 1000).toISOString()}
+                      aria-label={formatClockLabel(entry.completed_unix_secs)}
+                      title={formatClockLabel(entry.completed_unix_secs)}
+                    >{formatClock(entry.completed_unix_secs)}</time>
+                    {#if entry.timestamp_source === 'archive_file'}
+                      <span class="time-source">archive file time</span>
+                    {/if}
+                  </span>
                 {:else}
                   <span class="unknown" aria-label="Completion time unavailable">—</span>
                 {/if}
@@ -181,6 +190,16 @@
 
   tbody tr:last-child td {
     border-bottom: 0;
+  }
+
+  .completion-time {
+    display: grid;
+    gap: 1px;
+  }
+
+  .time-source {
+    color: var(--faint);
+    font-size: 10px;
   }
 
   th:first-child,

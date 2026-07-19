@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import {
     liveEtaSecs,
     liveEtaStatus,
@@ -22,11 +23,16 @@
   } from '$lib/process-telemetry';
   import {
     buildEpochCalendarMonths,
-    epochCalendarStartDate,
-    formatEpochCalendarDay,
+    extendEpochCalendarTail,
     formatEpochCalendarRange,
+    mergeEpochCalendars,
+    parseEpochCalendarEnvelope,
     type EpochCalendarEntry
   } from '$lib/epoch-calendar';
+  import EpochYearCalendar from '$lib/EpochYearCalendar.svelte';
+  import ServiceUnavailable from '$lib/ServiceUnavailable.svelte';
+  import { buildEpochYearCalendars } from '$lib/epoch-year-calendar';
+  import mainnetEpochCalendar from '$lib/data/mainnet-epoch-calendar.json';
   import {
     integerValue,
     numberValue,
@@ -42,8 +48,20 @@
   } from '$lib/pipeline-snapshot';
   import { useWatcherClient } from '$lib/watcher-client.svelte';
   import { formatBytes } from '$lib/format';
+  import { archiveProgressState } from '$lib/archive-progress';
+  import {
+    blockTimeGapBackfillIsFresh,
+    blockTimeGapBackfillPercent,
+    type BlockTimeGapBackfill,
+    type BlockTimeGapBackfillState
+  } from '$lib/block-time-gap-backfill';
+  import {
+    runtimeOperationsIsFresh,
+    type RuntimeJob
+  } from '$lib/runtime-operations';
 
   type VisualState = 'complete' | 'first-seen-complete' | 'legacy-complete' | 'active' | 'ready' | 'finalizing' | 'partial' | 'queued' | 'missing' | 'na' | 'attention' | 'failed';
+  type CalendarView = 'year' | 'epochs';
 
   type ArtifactGroup = {
     id: 'car' | 'preflight' | 'source' | 'archive';
@@ -83,6 +101,20 @@
     { tone: 'attention', label: 'needs action' },
     { tone: 'failed', label: 'failed' }
   ];
+  const DAY_TONE_PRIORITY: Record<VisualState, number> = {
+    na: 0,
+    complete: 1,
+    'first-seen-complete': 2,
+    'legacy-complete': 3,
+    queued: 5,
+    partial: 6,
+    ready: 7,
+    finalizing: 8,
+    active: 9,
+    missing: 10,
+    attention: 11,
+    failed: 12
+  };
   const ARTIFACT_GROUP_ORDER: ArtifactGroup['id'][] = ['car', 'preflight', 'source', 'archive'];
   const ARTIFACT_GROUP_LABELS: Record<ArtifactGroup['id'], string> = {
     car: 'CAR',
@@ -90,14 +122,19 @@
     source: 'Source PoH + shred',
     archive: 'Archive sidecars'
   };
+  const REFERENCE_EPOCH_CALENDAR = parseEpochCalendarEnvelope(mainnetEpochCalendar)?.epoch_calendar ?? [];
 
   const watcher = useWatcherClient();
   const snapshot = $derived(watcher.snapshot);
   const connectionState = $derived(watcher.connectionState);
   const connectionMessage = $derived(watcher.connectionMessage);
+  const blockTimeGapBackfill = $derived(watcher.blockTimeGapBackfill);
+  const runtimeOperations = $derived(watcher.runtimeOperations);
   let selectedEpoch = $state<number | null>(null);
   let selectionAnnouncement = $state('');
   let epochTabStop = $state<number | null>(null);
+  let calendarView = $state<CalendarView>('year');
+  let epochSelectionTriggerId = $state<string | null>(null);
   let showProcessResources = $state(false);
 
   const groupedLiveCaptures = $derived(groupLiveCaptures(snapshot?.live ?? []));
@@ -140,9 +177,37 @@
     liveCapturesByEpoch.filter((capture) => capture.state === 'complete').length
   );
   const epochMap = $derived(buildEpochMap(snapshot?.epochs ?? [], liveCapturesByEpoch));
-  const calendarMonths = $derived(
-    buildEpochCalendarMonths(epochMap, snapshot?.epoch_calendar ?? [])
+  const latestTrackedEpoch = $derived(epochMap.at(-1)?.epoch ?? null);
+  const epochCalendarSource = $derived(
+    mergeEpochCalendars(REFERENCE_EPOCH_CALENDAR, snapshot?.epoch_calendar ?? [])
   );
+  const epochCalendar = $derived(
+    extendEpochCalendarTail(epochCalendarSource, latestTrackedEpoch)
+  );
+  const calendarMonths = $derived(
+    buildEpochCalendarMonths(epochMap, epochCalendar)
+  );
+  const epochYearStatuses = $derived(
+    epochMap.map((entry) => {
+      const tone = epochMapVisualState(entry);
+      return {
+        epoch: entry.epoch,
+        tone,
+        label: epochMapStateLabel(entry),
+        priority: DAY_TONE_PRIORITY[tone],
+        archived: ['complete', 'first-seen-complete', 'legacy-complete'].includes(tone),
+        tracked: true
+      };
+    })
+  );
+  const yearCalendars = $derived(
+    buildEpochYearCalendars(epochYearStatuses, epochCalendar, snapshot?.now_unix_secs ?? 0)
+  );
+  const untrackedYearEpochCount = $derived.by(() => {
+    const tracked = new Set(epochMap.map((entry) => entry.epoch));
+    const now = snapshot?.now_unix_secs ?? 0;
+    return epochCalendar.filter((timing) => timing.start_unix_secs <= now && !tracked.has(timing.epoch)).length;
+  });
   const epochCalendarSummary = $derived.by(() => {
     let dated = 0;
     let estimated = 0;
@@ -155,14 +220,13 @@
     }
     return { dated, estimated, undated: epochMap.length - dated };
   });
-  const latestTrackedEpoch = $derived(epochMap.at(-1)?.epoch ?? null);
   const selectedEpochEntry = $derived(
     selectedEpoch === null ? null : (epochMap.find((entry) => entry.epoch === selectedEpoch) ?? null)
   );
   const selectedEpochTiming = $derived(
     selectedEpoch === null
       ? null
-      : (snapshot?.epoch_calendar?.find((timing) => timing.epoch === selectedEpoch) ?? null)
+      : (epochCalendar.find((timing) => timing.epoch === selectedEpoch) ?? null)
   );
   const selectedEpochStatus = $derived(
     selectedEpochEntry?.kind === 'historical' ? selectedEpochEntry.status : null
@@ -217,6 +281,42 @@
   const activeHistoricalLanes = $derived(
     activeLanes.filter((lane) => lane.epoch !== null && !lane.kind.startsWith('live_'))
   );
+  const pausedLaneCount = $derived(
+    activeLanes.filter((lane) => normalizedState(lane.state) === 'paused').length
+  );
+  const unpausedLaneCount = $derived(activeLanes.length - pausedLaneCount);
+  const runtimeOperationsFresh = $derived(
+    runtimeOperations !== null &&
+      runtimeOperationsIsFresh(
+        runtimeOperations,
+        snapshot?.now_unix_secs ?? Math.floor(Date.now() / 1000)
+      )
+  );
+  const runtimeLiveCapture = $derived(
+    runtimeOperationsFresh ? (runtimeOperations?.live_capture ?? null) : null
+  );
+  const runtimeJobs = $derived(
+    runtimeOperationsFresh ? (runtimeOperations?.jobs ?? []) : []
+  );
+  const runtimeActiveJobCount = $derived(
+    runtimeJobs.filter((job) => job.state === 'running').length
+  );
+  const runtimeWaitingJobCount = $derived(
+    runtimeJobs.filter((job) => job.state === 'waiting').length
+  );
+  const runtimeFailedJobCount = $derived(
+    runtimeJobs.filter((job) => job.state === 'failed').length
+  );
+  const taskActivitySummary = $derived.by(() => {
+    const active = unpausedLaneCount + runtimeActiveJobCount;
+    const waiting = pausedLaneCount + runtimeWaitingJobCount;
+    const parts = [
+      `${active} active`,
+      waiting > 0 ? `${waiting} waiting` : null,
+      runtimeFailedJobCount > 0 ? `${runtimeFailedJobCount} failed` : null
+    ];
+    return parts.filter((part): part is string => part !== null).join(' · ');
+  });
   const legacyCompactLanes = $derived(
     activeLanes.filter((lane) => lane.kind === 'historical_compact_reuse')
   );
@@ -235,6 +335,15 @@
   const historicalNeedsAction = $derived(
     snapshot ? snapshot.summary.blocked + snapshot.summary.failed : 0
   );
+  const dependencyWaitingEpochs = $derived(
+    snapshot?.epochs.filter((epoch) =>
+      epoch.state === 'queued' &&
+      /previous blockhash tail|predecessor reader sidecars/i.test(epoch.message ?? '')
+    ).length ?? 0
+  );
+  const archiveWorkersWaiting = $derived(
+    activeHistoricalLanes.length === 0 && (snapshot?.summary.queued ?? 0) > 0
+  );
   const liveCaptureDiagnostics = $derived(
     groupedLiveCaptures.visible.filter((capture) =>
       ['blocked', 'failed', 'repair_required'].includes(capture.state)
@@ -248,6 +357,40 @@
   const runnableQueueEtaTitle = $derived(
     queueEtaExplanation(runnableQueueEtaReason, historicalNeedsAction)
   );
+  const archiveProgress = $derived(archiveProgressState({
+    reportedPercent: snapshot?.summary.progress_pct,
+    completedEpochs: snapshot?.summary.complete,
+    totalEpochs: snapshot?.summary.epochs_total,
+    inventoryComplete: snapshot?.inventory?.complete ?? snapshot?.scheduler.inventory?.complete
+  }));
+  const blockTimeGapBackfillProgress = $derived(
+    blockTimeGapBackfill ? blockTimeGapBackfillPercent(blockTimeGapBackfill) : 0
+  );
+  const blockTimeGapBackfillFresh = $derived(
+    blockTimeGapBackfill
+      ? blockTimeGapBackfillIsFresh(
+          blockTimeGapBackfill,
+          snapshot?.now_unix_secs ?? Math.floor(Date.now() / 1000)
+        )
+      : false
+  );
+  const blockTimeGapBackfillActive = $derived(
+    blockTimeGapBackfill !== null &&
+      blockTimeGapBackfillFresh &&
+      !['complete', 'failed'].includes(blockTimeGapBackfill.state)
+  );
+  const liveCaptureActive = $derived(
+    connectionState === 'live' &&
+      (currentLiveCapture?.state === 'capturing' || runtimeLiveCapture?.state === 'capturing')
+  );
+  const archiveQueueWaitingForGapBackfill = $derived(
+    snapshot?.scheduler.paused === true && blockTimeGapBackfillActive
+  );
+  const archiveQueueEtaTitle = $derived(
+    archiveQueueWaitingForGapBackfill
+      ? 'Historical archive processing resumes after the block-time gap backfill.'
+      : runnableQueueEtaTitle
+  );
   const machineMemoryPct = $derived(percent(snapshot?.machine.memory_used_bytes, snapshot?.machine.memory_total_bytes));
   const machineDiskPct = $derived(percent(snapshot?.machine.disk_used_bytes, snapshot?.machine.disk_total_bytes));
   const machineSwapPct = $derived(percent(snapshot?.machine.swap_used_bytes, snapshot?.machine.swap_total_bytes));
@@ -258,24 +401,27 @@
       (snapshot.machine.car_disk_shared_with_archive === undefined &&
         snapshot.machine.car_disk_total_bytes !== snapshot.machine.disk_total_bytes))
   ));
-  const externalProcessIo = $derived(rankProcessIo(snapshot?.process_io?.processes ?? [], 10));
+  const effectiveProcessIo = $derived(
+    snapshot?.process_io ?? (runtimeOperationsFresh ? runtimeOperations?.process_io : undefined)
+  );
+  const externalProcessIo = $derived(rankProcessIo(effectiveProcessIo?.processes ?? [], 10));
   const hasProcessResources = $derived(hasProcessResourceMetrics(externalProcessIo));
   const showProcessResourceColumns = $derived(showProcessResources && hasProcessResources);
   const processIoSampleAgeSecs = $derived(
-    snapshot?.process_io?.sampled_unix_secs === null ||
-      snapshot?.process_io?.sampled_unix_secs === undefined
+    effectiveProcessIo?.sampled_unix_secs === null ||
+      effectiveProcessIo?.sampled_unix_secs === undefined
       ? null
-      : Math.max(0, snapshot.now_unix_secs - snapshot.process_io.sampled_unix_secs)
+      : Math.max(0, (snapshot?.now_unix_secs ?? 0) - effectiveProcessIo.sampled_unix_secs)
   );
   const processIoStale = $derived(
     processIoSampleAgeSecs !== null &&
-      processIoSampleAgeSecs > Math.max(30, (snapshot?.process_io?.sample_window_secs ?? 0) * 3)
+    processIoSampleAgeSecs > Math.max(30, (effectiveProcessIo?.sample_window_secs ?? 0) * 3)
   );
   const processIoMeta = $derived(
-    processIoSummary(snapshot?.process_io, externalProcessIo.length, processIoSampleAgeSecs, processIoStale)
+    processIoSummary(effectiveProcessIo, externalProcessIo.length, processIoSampleAgeSecs, processIoStale)
   );
   function canonicalLiveCaptures(captures: LiveStatus[], currentEpoch: number | null) {
-    const byEpoch = new Map<string, LiveStatus>();
+    const byEpoch = new SvelteMap<string, LiveStatus>();
     for (const capture of captures) {
       const key = capture.epoch === null ? `capture:${capture.id}` : `epoch:${capture.epoch}`;
       const existing = byEpoch.get(key);
@@ -311,7 +457,7 @@
   }
 
   function buildEpochMap(epochs: EpochStatus[], captures: LiveStatus[]): EpochMapEntry[] {
-    const entries = new Map<number, EpochMapEntry>();
+    const entries = new SvelteMap<number, EpochMapEntry>();
     for (const epoch of epochs) {
       entries.set(epoch.epoch, { epoch: epoch.epoch, kind: 'historical', status: epoch });
     }
@@ -378,8 +524,30 @@
       : artifactTooltip(artifact);
   }
 
-  async function toggleEpochDetails(epoch: number) {
+  async function selectEpochCell(epoch: number) {
+    await toggleEpochDetails(epoch, `epoch-cell-${epoch}`);
+  }
+
+  function handleCalendarViewKeydown(event: KeyboardEvent) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const current = event.currentTarget;
+    if (!(current instanceof HTMLButtonElement)) return;
+    const tablist = current.closest('[role="tablist"]');
+    if (!(tablist instanceof HTMLElement)) return;
+    const tabs = [...tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const index = tabs.indexOf(current);
+    if (index < 0) return;
+    const targetIndex = event.key === 'Home' || event.key === 'ArrowLeft' ? 0 : tabs.length - 1;
+    const target = tabs[targetIndex];
+    if (!target || target === current) return;
+    event.preventDefault();
+    target.click();
+    target.focus();
+  }
+
+  async function toggleEpochDetails(epoch: number, triggerId = `epoch-cell-${epoch}`) {
     epochTabStop = epoch;
+    epochSelectionTriggerId = triggerId;
     if (selectedEpoch === epoch) {
       selectedEpoch = null;
       selectionAnnouncement = `Epoch ${epoch} details closed.`;
@@ -419,11 +587,13 @@
 
   async function closeEpochDetails(restoreFocus = false) {
     const epoch = selectedEpoch;
+    const triggerId = epochSelectionTriggerId;
     selectedEpoch = null;
+    epochSelectionTriggerId = null;
     if (epoch !== null) selectionAnnouncement = `Epoch ${epoch} details closed.`;
     if (!restoreFocus || epoch === null) return;
     await tick();
-    document.getElementById(`epoch-cell-${epoch}`)?.focus();
+    document.getElementById(triggerId ?? `epoch-cell-${epoch}`)?.focus();
   }
 
   function handlePageKeydown(event: KeyboardEvent) {
@@ -542,7 +712,7 @@
     const rate = liveRate(capture);
     if (rate === null) return 'unknown';
     if (rate === 0) return 'stalled';
-    return `${formatDecimal(rate, 2)} ${capture.state === 'capturing' ? 'slots/s' : 'blocks/s'}`;
+    return `${formatDecimal(rate, 2)} ${capture.state === 'capturing' ? 'slots/s · 60s avg' : 'blocks/s'}`;
   }
 
   function compactLiveMetric(value: string) {
@@ -611,6 +781,16 @@
     const read = readRate === null ? 'read unavailable' : `read ${formatDecimal(readRate)} mebibytes per second`;
     const write = writeRate === null ? 'write unavailable' : `write ${formatDecimal(writeRate)} mebibytes per second`;
     return `${read}, ${write}`;
+  }
+
+  function runtimeJobMetricsFresh(job: RuntimeJob) {
+    if (!runtimeOperationsFresh) return false;
+    const now = snapshot?.now_unix_secs ?? Math.floor(Date.now() / 1000);
+    return now <= job.updated_unix_secs + 20;
+  }
+
+  function runtimeJobDiskRateAriaLabel(job: RuntimeJob) {
+    return diskRateAriaLabel(job.read_mib_per_sec, job.write_mib_per_sec, runtimeJobMetricsFresh(job));
   }
 
   function processIoRateAriaLabel(process: ProcessIoEntry) {
@@ -898,6 +1078,10 @@
     return clampPercent(((capture.last_slot - epochStart + 1) * 100) / SLOTS_PER_EPOCH);
   }
 
+  function runtimeLiveProgress(epoch: number, lastSlot: number) {
+    return clampPercent(((lastSlot - epoch * SLOTS_PER_EPOCH + 1) * 100) / SLOTS_PER_EPOCH);
+  }
+
   function epochStartSlot(epoch: number | null) {
     return epoch === null ? null : epoch * SLOTS_PER_EPOCH;
   }
@@ -950,6 +1134,36 @@
     }).format(new Date(value * 1000));
   }
 
+  function formatUtcClock(value: number) {
+    return new Intl.DateTimeFormat('en-GB', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+      timeZone: 'UTC'
+    }).format(new Date(value * 1000));
+  }
+
+  function blockTimeGapBackfillTone(state: BlockTimeGapBackfillState): VisualState {
+    if (state === 'complete') return 'complete';
+    if (state === 'failed') return 'failed';
+    if (state === 'paused_for_resources') return 'attention';
+    if (state === 'running') return 'active';
+    return 'queued';
+  }
+
+  function blockTimeGapBackfillLabel(value: BlockTimeGapBackfill) {
+    const epoch = value.current.epoch === null ? '' : ` · ${formatInteger(value.current.epoch)}`;
+    if (value.state === 'running') return value.current.epoch === null ? 'Running' : `Epoch ${formatInteger(value.current.epoch)}`;
+    if (value.state === 'paused_for_resources') return `Paused${epoch}`;
+    if (value.state === 'waiting_for_resources') return `Waiting${epoch}`;
+    if (value.state === 'starting') return 'Starting';
+    if (value.state === 'complete') return 'Complete';
+    return `Failed${epoch}`;
+  }
+
 </script>
 
 <svelte:window onkeydown={handlePageKeydown} />
@@ -967,13 +1181,13 @@
     <main>
       <section class="priority-panel" aria-label="Current Blockzilla work">
         <div class="priority-summary">
-          <div class="queue-eta-primary" title={runnableQueueEtaTitle}>
-            <span>Queue ETA</span>
-            <strong>{formatDuration(runnableQueueEtaSecs)}</strong>
-          </div>
-          <div>
-            <span>Complete</span>
-            <strong>{snapshot.summary.complete} / {snapshot.summary.epochs_total}</strong>
+          <div class="queue-eta-primary" title={archiveQueueEtaTitle}>
+            <span>Runnable ETA</span>
+            <strong class:waiting={archiveQueueWaitingForGapBackfill}>
+              {archiveQueueWaitingForGapBackfill
+                ? 'Waiting for block-time gaps'
+                : formatDuration(runnableQueueEtaSecs)}
+            </strong>
           </div>
           <div>
             <span>Queued</span>
@@ -985,11 +1199,86 @@
           </div>
         </div>
 
+        <div class="archive-progress">
+          <div class="archive-progress-copy">
+            <span>Archive progress</span>
+            {#if archiveProgress.state === 'ready'}
+              <strong>
+                {formatInteger(snapshot.summary.complete)} / {formatInteger(snapshot.summary.epochs_total)} complete
+              </strong>
+            {:else if archiveProgress.state === 'scanning'}
+              <strong>Inventory scanning…</strong>
+            {:else}
+              <strong>No epochs discovered</strong>
+            {/if}
+          </div>
+          {#if archiveProgress.state === 'ready'}
+            <progress
+              max="100"
+              value={archiveProgress.percent}
+              title="Includes partial progress from active archive compactions."
+              aria-label="Overall archive progress"
+              aria-valuetext={`${formatInteger(snapshot.summary.complete)} of ${formatInteger(snapshot.summary.epochs_total)} epochs complete; ${formatDecimal(archiveProgress.percent)} percent overall archive progress including active compactions`}
+            >{archiveProgress.percent}%</progress>
+            <strong class="archive-progress-percent">{formatDecimal(archiveProgress.percent)}%</strong>
+          {:else}
+            <progress
+              max="100"
+              aria-label="Overall archive progress"
+              aria-valuetext={archiveProgress.state === 'scanning' ? 'Inventory scanning' : 'No epochs discovered'}
+            ></progress>
+            <strong class="archive-progress-percent">—</strong>
+          {/if}
+        </div>
+
+        {#if blockTimeGapBackfill}
+          {@const backfillTone = blockTimeGapBackfillTone(blockTimeGapBackfill.state)}
+          <div class="backfill-progress" class:stale={!blockTimeGapBackfillFresh}>
+            <div class="archive-progress-copy">
+              <span>Block-time gaps</span>
+              <strong>
+                {formatInteger(blockTimeGapBackfill.backfill.epochs_done)} /
+                {formatInteger(blockTimeGapBackfill.backfill.epochs_total)} epochs
+              </strong>
+            </div>
+            <span
+              class={`plain-status tone-${backfillTone}`}
+              title={`Slot and block-time gap sidecar backfill · ${humanize(blockTimeGapBackfill.state)}`}
+            >
+              <span aria-hidden="true">{VISUAL_META[backfillTone].icon}</span>
+              {blockTimeGapBackfillLabel(blockTimeGapBackfill)}
+            </span>
+            <progress
+              max="100"
+              value={blockTimeGapBackfillProgress}
+              title={`${formatBytes(blockTimeGapBackfill.backfill.source_bytes_done)} of ${formatBytes(blockTimeGapBackfill.backfill.source_bytes_total)} source data scanned`}
+              aria-label="Block-time gap sidecar backfill progress"
+              aria-valuetext={`${formatDecimal(blockTimeGapBackfillProgress)} percent; ${formatInteger(blockTimeGapBackfill.backfill.epochs_done)} of ${formatInteger(blockTimeGapBackfill.backfill.epochs_total)} source epochs complete`}
+            >{blockTimeGapBackfillProgress}%</progress>
+            <strong class="archive-progress-percent">{formatDecimal(blockTimeGapBackfillProgress)}%</strong>
+            <div class="backfill-eta">
+              <span>{blockTimeGapBackfillFresh ? 'ETA' : 'Last update'}</span>
+              <strong>
+                {#if !blockTimeGapBackfillFresh}
+                  stale
+                {:else if blockTimeGapBackfill.state === 'complete'}
+                  done
+                {:else if blockTimeGapBackfill.state === 'failed'}
+                  failed
+                {:else if blockTimeGapBackfill.backfill.eta_reliable && blockTimeGapBackfill.backfill.eta_secs !== null}
+                  {formatDuration(blockTimeGapBackfill.backfill.eta_secs)}
+                {:else}
+                  calculating
+                {/if}
+              </strong>
+            </div>
+          </div>
+        {/if}
+
         <div class="work-lines">
           {#if currentLiveCapture}
             <article class="work-line live-work-line">
               <div class="work-identity">
-                <span class="work-kind">Live index</span>
                 <strong>Epoch {formatInteger(currentLiveCapture.epoch)}</strong>
               </div>
               <span class={`plain-status tone-${liveVisualState(currentLiveCapture)}`}>
@@ -1013,11 +1302,42 @@
                 <strong>{connectionState === 'live' ? compactLiveMetric(liveEtaValue(currentLiveCapture)) : 'paused'}</strong>
               </div>
             </article>
+          {:else if runtimeLiveCapture}
+            {@const rawProgress = runtimeLiveProgress(runtimeLiveCapture.epoch, runtimeLiveCapture.last_slot)}
+            {@const rawTone = runtimeLiveCapture.state === 'capturing' ? 'active' : 'attention'}
+            <article class="work-line live-work-line">
+              <div class="work-identity">
+                <strong>Epoch {formatInteger(runtimeLiveCapture.epoch)}</strong>
+              </div>
+              <span class={`plain-status tone-${rawTone}`}>
+                <span aria-hidden="true">{VISUAL_META[rawTone].icon}</span>
+                raw WAL {runtimeLiveCapture.state === 'capturing' ? 'capture' : 'stalled'}
+              </span>
+              <div class="work-progress" title={`${formatDecimal(rawProgress)}%`}>
+                <progress
+                  max="100"
+                  value={rawProgress}
+                  aria-label={`Raw live epoch ${formatInteger(runtimeLiveCapture.epoch)} capture progress`}
+                  aria-valuetext={`${formatDecimal(rawProgress)} percent`}
+                >{rawProgress}%</progress>
+              </div>
+              <div class="work-metric">
+                <span>WAL write</span>
+                <strong>
+                  {runtimeLiveCapture.write_mib_per_sec === null
+                    ? 'collecting'
+                    : `${formatDecimal(runtimeLiveCapture.write_mib_per_sec)} MiB/s`}
+                </strong>
+              </div>
+              <div class="work-metric work-eta">
+                <span>Latest slot</span>
+                <strong>{formatInteger(runtimeLiveCapture.last_slot)}</strong>
+              </div>
+            </article>
           {:else}
             <article class="work-line idle-work-line">
               <div class="work-identity">
-                <span class="work-kind">Live index</span>
-                <strong>Idle</strong>
+                <strong>Live capture idle</strong>
               </div>
             </article>
           {/if}
@@ -1026,7 +1346,6 @@
             {@const metricsFresh = connectionState === 'live' && laneMetricsFresh(lane)}
             <article class="work-line archive-work-line">
               <div class="work-identity">
-                <span class="work-kind">Archive</span>
                 <strong>Epoch {formatInteger(lane.epoch)}</strong>
               </div>
               <span class="task-phase" class:task-paused={lane.state === 'paused'}>
@@ -1054,9 +1373,24 @@
         </div>
       </section>
 
-      {#if snapshot.summary.admission_blocked_reason || snapshot.summary.finalizer_admission_blocked_reason || snapshot.scheduler.paused}
+      {#if snapshot.summary.admission_blocked_reason || snapshot.summary.finalizer_admission_blocked_reason || snapshot.scheduler.paused || archiveWorkersWaiting}
         <div class="operations-alerts" role="status">
-          {#if snapshot.scheduler.paused}<span><strong>Scheduler paused</strong> · active work is draining</span>{/if}
+          {#if snapshot.scheduler.paused}
+            <span>
+              <strong>Historical archive paused</strong>
+              {#if blockTimeGapBackfillActive} · prioritizing block-time gaps{/if}
+              {#if liveCaptureActive} · live capture continues{/if}
+            </span>
+          {/if}
+          {#if archiveWorkersWaiting}
+            <span>
+              <strong>Archive workers idle</strong>
+              · {formatInteger(snapshot.summary.queued)} queued
+              {#if dependencyWaitingEpochs > 0}
+                · {formatInteger(dependencyWaitingEpochs)} waiting on predecessor sidecars
+              {/if}
+            </span>
+          {/if}
           {#if snapshot.summary.admission_blocked_reason}<span><strong>Scan admission</strong> · {snapshot.summary.admission_blocked_reason}</span>{/if}
           {#if snapshot.summary.finalizer_admission_blocked_reason}<span><strong>Finalizer</strong> · {snapshot.summary.finalizer_admission_blocked_reason}</span>{/if}
         </div>
@@ -1065,34 +1399,85 @@
       <section class="panel epoch-panel">
         <div class="section-heading">
           <div>
-            <h2>Epoch calendar</h2>
+            <h2>Archive coverage</h2>
             <p>
-              {#if latestTrackedEpoch !== null}Through epoch {formatInteger(latestTrackedEpoch)}{/if}
-              {#if epochCalendarSummary.dated > 0}
-                · UTC dates
-                {#if epochCalendarSummary.estimated > 0} · ~ estimated{/if}
-                {#if epochCalendarSummary.undated > 0} · {epochCalendarSummary.undated} undated{/if}
+              {#if calendarView === 'year'}
+                {yearCalendars.length} years · one square per UTC day · oldest to newest
               {:else}
-                · dates unavailable
+                {#if latestTrackedEpoch !== null}Through epoch {formatInteger(latestTrackedEpoch)}{/if}
+                {#if epochCalendarSummary.dated > 0}
+                  · grouped by UTC start month
+                  {#if epochCalendarSummary.estimated > 0} · ~ estimated{/if}
+                  {#if epochCalendarSummary.undated > 0} · {epochCalendarSummary.undated} undated{/if}
+                {:else}
+                  · dates unavailable
+                {/if}
               {/if}
             </p>
           </div>
-          <div class="legend" aria-label="Epoch status legend">
-            {#each EPOCH_LEGEND as item (item.tone)}
-              {#if epochToneCounts[item.tone] > 0}
+          <div class="epoch-header-tools">
+            <div class="calendar-tabs" role="tablist" aria-label="Archive coverage view">
+              <button
+                id="calendar-tab-year"
+                type="button"
+                role="tab"
+                class:active={calendarView === 'year'}
+                aria-selected={calendarView === 'year'}
+                aria-controls="calendar-panel-year"
+                tabindex={calendarView === 'year' ? 0 : -1}
+                onclick={() => calendarView = 'year'}
+                onkeydown={handleCalendarViewKeydown}
+              >Year</button>
+              <button
+                id="calendar-tab-epochs"
+                type="button"
+                role="tab"
+                class:active={calendarView === 'epochs'}
+                aria-selected={calendarView === 'epochs'}
+                aria-controls="calendar-panel-epochs"
+                tabindex={calendarView === 'epochs' ? 0 : -1}
+                onclick={() => calendarView = 'epochs'}
+                onkeydown={handleCalendarViewKeydown}
+              >Epochs</button>
+            </div>
+            <div class="legend" aria-label="Epoch status legend">
+              {#each EPOCH_LEGEND as item (item.tone)}
+                {#if epochToneCounts[item.tone] > 0}
+                  <span>
+                    <i class={`legend-swatch tone-${item.tone}`} aria-hidden="true"></i>
+                    {item.label}
+                  </span>
+                {/if}
+              {/each}
+              {#if calendarView === 'year' && untrackedYearEpochCount > 0}
                 <span>
-                  <i class={`legend-swatch tone-${item.tone}`} aria-hidden="true"></i>
-                  {item.label}
+                  <i class="legend-swatch tone-untracked" aria-hidden="true"></i>
+                  untracked
                 </span>
               {/if}
-            {/each}
+            </div>
           </div>
         </div>
 
-        {#if epochMap.length > 0}
-          <div class="epoch-calendar" aria-label="Epoch calendar with UTC dates">
-            {#each calendarMonths as month (month.key)}
-              <section class="epoch-month">
+        {#if epochMap.length > 0 || yearCalendars.length > 0}
+          {#if calendarView === 'year'}
+            <div
+              id="calendar-panel-year"
+              role="tabpanel"
+              aria-labelledby="calendar-tab-year"
+            >
+              <EpochYearCalendar years={yearCalendars} />
+            </div>
+          {:else}
+            <div
+              id="calendar-panel-epochs"
+              class="epoch-calendar"
+              role="tabpanel"
+              aria-labelledby="calendar-tab-epochs"
+              aria-label="Epoch status map grouped by UTC start month"
+            >
+              {#each calendarMonths as month (month.key)}
+                <section class="epoch-month">
                 <h3
                   class:estimated={month.has_estimates}
                   aria-label={`${month.label}${month.has_estimates ? ', contains estimated dates' : ''}`}
@@ -1124,23 +1509,16 @@
                       tabindex={(epochTabStop ?? latestTrackedEpoch) === entry.epoch ? 0 : -1}
                       onfocus={() => epochTabStop = entry.epoch}
                       onkeydown={handleEpochGridKeydown}
-                      onclick={() => void toggleEpochDetails(entry.epoch)}
+                      onclick={() => void selectEpochCell(entry.epoch)}
                     >
-                      <b>E{entry.epoch}</b>
-                      {#if timing}
-                        <time
-                          class:estimated={timing.precision === 'estimated'}
-                          datetime={timing.precision === 'observed' ? epochCalendarStartDate(timing) : undefined}
-                        >{timing.precision === 'estimated' ? '~' : ''}{formatEpochCalendarDay(timing)}</time>
-                      {:else}
-                        <span class="epoch-day-unavailable" aria-hidden="true">—</span>
-                      {/if}
+                      <b>{entry.epoch}</b>
                     </button>
                   {/each}
                 </div>
-              </section>
-            {/each}
-          </div>
+                </section>
+              {/each}
+            </div>
+          {/if}
 
           <span class="visually-hidden" aria-live="polite">{selectionAnnouncement}</span>
 
@@ -1160,6 +1538,14 @@
               </span>
               {#if selectedEpochTiming}
                 <span>{formatEpochCalendarRange(selectedEpochTiming)}</span>
+                {#if selectedEpochTiming.end_unix_secs === null}
+                  <span>Chain epoch in progress</span>
+                {:else}
+                  <span title="Last produced block timestamp">
+                    {selectedEpochTiming.precision === 'estimated' ? 'Estimated chain end' : 'Chain ended'}
+                    {formatUtcClock(selectedEpochTiming.end_unix_secs)} UTC
+                  </span>
+                {/if}
               {/if}
               {#if selectedEpochStatus}
                 {#if selectedEpochStatus.progress.progress_pct !== null}
@@ -1247,6 +1633,34 @@
                 {/if}
               </details>
             {/if}
+          {:else if selectedEpochTiming && selectedEpoch !== null}
+            <div
+              id={`epoch-detail-${selectedEpoch}`}
+              class="epoch-detail"
+              role="region"
+              tabindex="-1"
+              aria-labelledby={`epoch-detail-title-${selectedEpoch}`}
+            >
+              <strong id={`epoch-detail-title-${selectedEpoch}`}>Epoch {selectedEpoch}</strong>
+              <span class="detail-status tone-untracked">untracked</span>
+              <span>{formatEpochCalendarRange(selectedEpochTiming)}</span>
+              {#if selectedEpochTiming.end_unix_secs === null}
+                <span>Chain epoch in progress</span>
+              {:else}
+                <span title="Last produced block timestamp">
+                  {selectedEpochTiming.precision === 'estimated' ? 'Estimated chain end' : 'Chain ended'}
+                  {formatUtcClock(selectedEpochTiming.end_unix_secs)} UTC
+                </span>
+              {/if}
+              <button
+                class="epoch-detail-close"
+                type="button"
+                aria-label={`Close epoch ${selectedEpoch} details`}
+                onclick={() => void closeEpochDetails(true)}
+              >
+                Close details
+              </button>
+            </div>
           {/if}
         {:else}
           <p class="empty">No epoch plan has been loaded.</p>
@@ -1256,7 +1670,7 @@
       <details class="panel disclosure-panel lanes-panel">
         <summary>
           <strong>Tasks</strong>
-          <b>{activeLanes.length} active</b>
+          <b>{taskActivitySummary}</b>
         </summary>
 
         {#if legacyCompactLanes.length > 0 || snapshot.summary.legacy_compact_auto_pause_enabled}
@@ -1434,9 +1848,58 @@
                   <td class="eta-column" title={metricsFresh ? undefined : 'ETA hidden because this task is paused or its progress sample is stale.'}>{metricsFresh ? formatDuration(lane.progress.eta_secs) : '—'}</td>
                   <td class="rss-column">{formatBytes(lane.rss_bytes ?? lane.progress.rss_bytes)}</td>
                 </tr>
-              {:else}
-                <tr><td colspan="8" class="empty-cell">No task is active.</td></tr>
               {/each}
+              {#each runtimeJobs as job (job.id)}
+                {@const metricsFresh = runtimeJobMetricsFresh(job)}
+                <tr>
+                  <td>
+                    <div class="task-name">
+                      <strong>{taskLabel(job.kind)}</strong>
+                      <span class="mono">{job.id}</span>
+                    </div>
+                  </td>
+                  <td>{formatInteger(job.epoch)}</td>
+                  <td>
+                    <span
+                      class="task-phase"
+                      class:task-paused={job.state === 'waiting'}
+                      title={`${humanize(job.state)} · ${humanize(job.phase)}`}
+                    >
+                      <span aria-hidden="true">{taskStateIcon(job.state)}</span>
+                      {humanize(job.phase)}
+                    </span>
+                  </td>
+                  <td class="progress-column">
+                    {#if job.progress_pct !== null}
+                      <div class="inline-progress">
+                        <progress max="100" value={job.progress_pct}>{job.progress_pct}%</progress>
+                        <span>{formatDecimal(job.progress_pct)}%</span>
+                      </div>
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                  <td>—</td>
+                  <td class="io-rate-column">
+                    <span class="io-rate-pair" aria-label={runtimeJobDiskRateAriaLabel(job)}>
+                      <span aria-hidden="true">R {metricsFresh ? formatDecimal(job.read_mib_per_sec) : '—'}</span>
+                      <span aria-hidden="true">W {metricsFresh ? formatDecimal(job.write_mib_per_sec) : '—'}</span>
+                    </span>
+                  </td>
+                  <td class="eta-column">{metricsFresh ? formatDuration(job.eta_secs) : '—'}</td>
+                  <td class="rss-column">{formatBytes(job.rss_bytes)}</td>
+                </tr>
+              {/each}
+              {#if activeLanes.length === 0 && runtimeJobs.length === 0}
+                <tr>
+                  <td colspan="8" class="empty-cell">
+                    No task is active.
+                    {#if dependencyWaitingEpochs > 0}
+                      {formatInteger(dependencyWaitingEpochs)} archive epochs are waiting on predecessor sidecars.
+                    {/if}
+                  </td>
+                </tr>
+              {/if}
             </tbody>
           </table>
         </div>
@@ -1634,13 +2097,11 @@
 
       <div class="system-monitor">
         <div class="two-column lower-grid">
-        <section class="panel machine-panel">
-          <div class="section-heading">
-            <div>
-              <h2>NAS resources</h2>
-            </div>
-            {#if snapshot.machine.load_1m !== null}<span>load {formatDecimal(snapshot.machine.load_1m, 2)}</span>{/if}
-          </div>
+        <details class="panel disclosure-panel machine-panel">
+          <summary>
+            <strong>NAS resources</strong>
+            {#if snapshot.machine.load_1m !== null}<b>load {formatDecimal(snapshot.machine.load_1m, 2)}</b>{/if}
+          </summary>
 
           <div class="resources">
             <div class="resource-row">
@@ -1721,15 +2182,13 @@
               >{machineSwapPct}%</progress>
             </div>
           </div>
-        </section>
+        </details>
 
-        <section class="panel errors-panel">
-          <div class="section-heading">
-            <div>
-              <h2>Recent error log</h2>
-            </div>
-            {#if snapshot.errors.length > 0}<span>{snapshot.errors.length}</span>{/if}
-          </div>
+        <details class="panel disclosure-panel errors-panel">
+          <summary>
+            <strong>Recent error log</strong>
+            <b>{snapshot.errors.length === 0 ? 'clear' : `${snapshot.errors.length} ${snapshot.errors.length === 1 ? 'error' : 'errors'}`}</b>
+          </summary>
 
           <ul class="errors">
             {#each snapshot.errors as error (`${error.at_unix_secs}-${error.scope}-${error.message}`)}
@@ -1741,36 +2200,35 @@
               <li class="empty">No recent errors.</li>
             {/each}
           </ul>
-        </section>
+        </details>
         </div>
 
-        <section class="panel process-panel">
-          <div class="section-heading process-heading">
-            <div>
-              <h2>External process I/O</h2>
-            </div>
-            <div class="process-controls">
-              <span class:stale={processIoStale}>{processIoMeta}</span>
-              <label
-                class="process-option"
-                class:disabled={!hasProcessResources}
-                title={hasProcessResources
-                  ? 'Show optional CPU and resident-memory samples.'
-                  : 'CPU and memory samples are not available.'}
-              >
-                <input
-                  type="checkbox"
-                  checked={showProcessResourceColumns}
-                  disabled={!hasProcessResources}
-                  aria-controls="process-io-table"
-                  onchange={toggleProcessResources}
-                />
-                CPU &amp; memory
-              </label>
-            </div>
+        <details class="panel disclosure-panel process-panel">
+          <summary>
+            <strong>External process I/O</strong>
+            <b class:stale={processIoStale}>{processIoMeta}</b>
+          </summary>
+
+          <div class="process-controls">
+            <label
+              class="process-option"
+              class:disabled={!hasProcessResources}
+              title={hasProcessResources
+                ? 'Show optional CPU and resident-memory samples.'
+                : 'CPU and memory samples are not available.'}
+            >
+              <input
+                type="checkbox"
+                checked={showProcessResourceColumns}
+                disabled={!hasProcessResources}
+                aria-controls="process-io-table"
+                onchange={toggleProcessResources}
+              />
+              CPU &amp; memory
+            </label>
           </div>
 
-          {#if snapshot.process_io?.state === 'ready' && externalProcessIo.length > 0}
+          {#if effectiveProcessIo?.state === 'ready' && externalProcessIo.length > 0}
             <div
               id="process-io-table"
               class="table-wrap process-table-wrap"
@@ -1823,27 +2281,24 @@
               </table>
             </div>
           {:else}
-            <p class="process-empty" aria-live="polite">{processIoEmptyMessage(snapshot.process_io)}</p>
+            <p class="process-empty" aria-live="polite">{processIoEmptyMessage(effectiveProcessIo)}</p>
           {/if}
 
-          {#if snapshot.process_io && (snapshot.process_io.inaccessible_count > 0 || snapshot.process_io.truncated)}
+          {#if effectiveProcessIo && (effectiveProcessIo.inaccessible_count > 0 || effectiveProcessIo.truncated)}
             <p class="process-note">
-              {#if snapshot.process_io.truncated}
-                Showing the {externalProcessIo.length} busiest of {snapshot.process_io.active_count} active external processes.
+              {#if effectiveProcessIo.truncated}
+                Showing the {externalProcessIo.length} busiest of {effectiveProcessIo.active_count} active external processes.
               {/if}
-              {#if snapshot.process_io.inaccessible_count > 0}
-                {snapshot.process_io.inaccessible_count} {snapshot.process_io.inaccessible_count === 1 ? 'process was' : 'processes were'} inaccessible.
+              {#if effectiveProcessIo.inaccessible_count > 0}
+                {effectiveProcessIo.inaccessible_count} {effectiveProcessIo.inaccessible_count === 1 ? 'process was' : 'processes were'} inaccessible.
               {/if}
             </p>
           {/if}
-        </section>
+        </details>
       </div>
     </main>
   {:else}
-    <main class="loading" aria-live="polite">
-      <h2>Waiting for watcher status</h2>
-      <p>{connectionMessage}</p>
-    </main>
+    <ServiceUnavailable {connectionState} {connectionMessage} />
   {/if}
 </div>
 
@@ -1924,7 +2379,7 @@
 
   .priority-summary {
     display: grid;
-    grid-template-columns: minmax(190px, 1.4fr) repeat(3, minmax(90px, 0.7fr));
+    grid-template-columns: minmax(190px, 1.4fr) repeat(2, minmax(90px, 0.7fr));
     border-bottom: 1px solid var(--border);
   }
 
@@ -1938,12 +2393,17 @@
     border-right: 1px solid var(--border);
   }
 
+  .priority-summary > .queue-eta-primary {
+    padding-left: 16px;
+    background: #181d1c;
+    box-shadow: inset 3px 0 0 var(--green);
+  }
+
   .priority-summary > div:last-child {
     border-right: 0;
   }
 
   .priority-summary span,
-  .work-kind,
   .work-metric > span {
     color: var(--muted);
     font-size: 10px;
@@ -1958,10 +2418,99 @@
     white-space: nowrap;
   }
 
+  .priority-summary .queue-eta-primary > span {
+    color: #c8c8cc;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
   .queue-eta-primary strong {
     color: #f3f3f4;
-    font-size: 20px;
-    letter-spacing: -0.02em;
+    font-size: 26px;
+    font-weight: 680;
+    line-height: 1.05;
+    letter-spacing: -0.025em;
+  }
+
+  .queue-eta-primary strong.waiting {
+    font-size: 15px;
+    letter-spacing: 0;
+    white-space: normal;
+  }
+
+  .archive-progress {
+    min-height: 44px;
+    display: grid;
+    grid-template-columns: minmax(210px, auto) minmax(240px, 1fr) 52px;
+    align-items: center;
+    gap: 14px;
+    padding: 7px 13px 7px 16px;
+    border-bottom: 1px solid var(--border);
+    background: #171719;
+  }
+
+  .archive-progress-copy {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .archive-progress-copy > span {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .archive-progress-copy > strong {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .archive-progress progress {
+    height: 8px;
+  }
+
+  .archive-progress-percent {
+    color: var(--status-complete-accent);
+    font-size: 13px;
+    font-weight: 650;
+    text-align: right;
+  }
+
+  .backfill-progress {
+    min-height: 44px;
+    display: grid;
+    grid-template-columns: minmax(230px, auto) minmax(104px, auto) minmax(220px, 1fr) 52px minmax(88px, auto);
+    align-items: center;
+    gap: 14px;
+    padding: 7px 13px 7px 16px;
+    border-bottom: 1px solid var(--border);
+    background: #171719;
+  }
+
+  .backfill-progress.stale progress,
+  .backfill-progress.stale .archive-progress-percent {
+    opacity: 0.6;
+  }
+
+  .backfill-eta {
+    min-width: 88px;
+    display: grid;
+    gap: 1px;
+  }
+
+  .backfill-eta span {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .backfill-eta strong {
+    color: var(--status-active-accent);
+    font-size: 13px;
+    font-weight: 650;
+    white-space: nowrap;
   }
 
   .work-lines {
@@ -1970,12 +2519,12 @@
 
   .work-line {
     min-width: 0;
-    min-height: 60px;
+    min-height: 54px;
     display: grid;
     grid-template-columns: minmax(108px, 0.85fr) minmax(120px, 0.9fr) minmax(190px, 1.8fr) minmax(100px, 0.8fr) minmax(140px, 1fr);
     align-items: center;
     gap: 12px;
-    padding: 9px 13px;
+    padding: 7px 13px;
     border-bottom: 1px solid #29292d;
   }
 
@@ -2001,11 +2550,6 @@
     font-weight: 590;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .work-kind {
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
   }
 
   .work-progress {
@@ -2145,6 +2689,11 @@
     --tone-accent: var(--status-failed-accent);
   }
 
+  .tone-untracked {
+    --tone-bg: #2a2a2e;
+    --tone-accent: #6f7078;
+  }
+
   .section-heading {
     min-height: 50px;
     justify-content: space-between;
@@ -2163,6 +2712,45 @@
     color: var(--muted);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
+  }
+
+  .epoch-header-tools {
+    max-width: 72%;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 7px;
+  }
+
+  .calendar-tabs {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .calendar-tabs button {
+    padding: 2px 0 4px;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .calendar-tabs button:hover,
+  .calendar-tabs button:focus-visible {
+    color: var(--text);
+  }
+
+  .calendar-tabs button:focus-visible {
+    outline: 1px solid var(--border-strong);
+    outline-offset: 3px;
+  }
+
+  .calendar-tabs button.active {
+    border-bottom-color: var(--green);
+    color: var(--text);
   }
 
   .legend {
@@ -2197,9 +2785,9 @@
 
   .epoch-month {
     display: grid;
-    grid-template-columns: 82px minmax(0, 1fr);
-    gap: 12px;
-    padding: 9px 14px;
+    grid-template-columns: 68px minmax(0, 1fr);
+    gap: 6px;
+    padding: 5px 8px;
     border-bottom: 1px solid var(--border);
   }
 
@@ -2209,9 +2797,9 @@
 
   .epoch-month h3 {
     margin: 0;
-    padding-top: 6px;
+    padding-top: 2px;
     color: #d0d0d4;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -2223,49 +2811,38 @@
 
   .epoch-month-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, 48px);
-    gap: 3px;
+    grid-template-columns: repeat(auto-fill, 30px);
+    gap: 1px;
     justify-content: start;
   }
 
   .epoch-cell {
+    position: relative;
     min-width: 0;
-    height: 36px;
+    height: 18px;
     display: grid;
     place-items: center;
-    grid-template-rows: auto auto;
     align-content: center;
-    gap: 2px;
-    padding: 3px;
+    padding: 0;
     border: 1px solid #35363b;
     border-bottom: 2px solid var(--tone-accent);
-    border-radius: 3px;
+    border-radius: 2px;
     background: var(--tone-bg);
     color: #f4f4f5;
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 9px;
+    font-size: 8px;
     font-variant-numeric: tabular-nums;
     line-height: 1;
     cursor: pointer;
   }
 
   .epoch-cell > b {
+    grid-area: 1 / 1;
     overflow: hidden;
-    font-weight: 560;
+    opacity: 1;
+    font-weight: 520;
     text-align: center;
     text-overflow: clip;
-  }
-
-  .epoch-cell time,
-  .epoch-day-unavailable {
-    color: #d0d0d4;
-    font-size: 9px;
-    font-weight: 450;
-  }
-
-  .epoch-cell time.estimated,
-  .epoch-day-unavailable {
-    color: var(--muted);
   }
 
   .epoch-cell:hover,
@@ -2481,6 +3058,10 @@
     font-weight: 520;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+
+  .disclosure-panel > summary > b.stale {
+    color: var(--amber);
   }
 
   .disclosure-panel .two-column {
@@ -3009,6 +3590,12 @@
   }
 
   .system-monitor .lower-grid {
+    align-items: start;
+    margin-top: 0;
+  }
+
+  .system-monitor .lower-grid > .disclosure-panel {
+    width: 100%;
     margin-top: 0;
   }
 
@@ -3027,16 +3614,9 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 8px 16px;
-  }
-
-  .process-controls > span {
-    color: var(--muted);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .process-controls > span.stale {
-    color: var(--amber);
+    min-height: 40px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
   }
 
   .process-option {
@@ -3203,19 +3783,6 @@
     font-size: 12px;
   }
 
-  .loading {
-    min-height: calc(100vh - 54px);
-    display: grid;
-    place-content: center;
-    gap: 6px;
-    color: var(--muted);
-    text-align: center;
-  }
-
-  .loading h2 {
-    color: var(--text);
-  }
-
   @media (max-width: 1050px) {
     .two-column,
     .lower-grid {
@@ -3246,8 +3813,46 @@
       border-right: 0;
     }
 
-    .priority-summary > div:last-child {
+    .archive-progress {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px 12px;
+      padding-block: 9px;
+    }
+
+    .backfill-progress {
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 7px 12px;
+      padding-block: 9px;
+    }
+
+    .backfill-progress > .plain-status {
+      justify-self: end;
+    }
+
+    .backfill-progress > progress {
       grid-column: 1 / -1;
+      grid-row: 2;
+    }
+
+    .backfill-progress > .archive-progress-percent {
+      grid-column: 2;
+      grid-row: 3;
+    }
+
+    .backfill-eta {
+      grid-column: 3;
+      grid-row: 3;
+      text-align: right;
+    }
+
+    .archive-progress progress {
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
+
+    .archive-progress-percent {
+      grid-column: 2;
+      grid-row: 1;
     }
 
     .work-line {
@@ -3271,19 +3876,20 @@
       display: block;
     }
 
+    .epoch-header-tools {
+      max-width: none;
+      align-items: flex-start;
+      margin-top: 8px;
+    }
+
     .legend {
       max-width: none;
       justify-content: flex-start;
-      margin-top: 8px;
-    }
-
-    .process-heading {
-      display: block;
+      margin-top: 0;
     }
 
     .process-controls {
-      justify-content: space-between;
-      margin-top: 8px;
+      justify-content: flex-start;
     }
 
     .epoch-calendar {
@@ -3292,16 +3898,16 @@
 
     .epoch-month {
       display: block;
-      padding: 9px 10px;
+      padding: 5px 8px;
     }
 
     .epoch-month h3 {
-      margin-bottom: 7px;
+      margin-bottom: 5px;
       padding-top: 0;
     }
 
     .epoch-month-grid {
-      grid-template-columns: repeat(auto-fill, 46px);
+      grid-template-columns: repeat(auto-fill, 30px);
     }
 
     .facts {

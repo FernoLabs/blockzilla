@@ -11,11 +11,24 @@ import {
   applySnapshotPatch,
   snapshotPatchSequenceAction
 } from '$lib/snapshot-patch';
+import {
+  parseBlockTimeGapBackfill,
+  type BlockTimeGapBackfill
+} from '$lib/block-time-gap-backfill';
+import {
+  parseRuntimeOperations,
+  type RuntimeOperations
+} from '$lib/runtime-operations';
 
 export type ConnectionState = 'connecting' | 'live' | 'retrying' | 'offline';
 
+const STATUS_REQUEST_TIMEOUT_MS = 5_000;
+const STATUS_RETRY_INTERVAL_MS = 10_000;
+
 export class WatcherClient {
   snapshot = $state.raw<PipelineSnapshot | null>(null);
+  blockTimeGapBackfill = $state.raw<BlockTimeGapBackfill | null>(null);
+  runtimeOperations = $state.raw<RuntimeOperations | null>(null);
   connectionState = $state<ConnectionState>('connecting');
   connectionMessage = $state('Connecting');
 
@@ -27,6 +40,8 @@ export class WatcherClient {
     let disposed = false;
     let lastSequence = -1;
     let statusFetchInFlight = false;
+    let backfillFetchInFlight = false;
+    let runtimeFetchInFlight = false;
 
     const acceptPayload = (value: unknown, sequence?: number) => {
       const normalized = parsePipelineSnapshot(value);
@@ -84,9 +99,15 @@ export class WatcherClient {
     const resyncSnapshot = async () => {
       if (statusFetchInFlight) return;
       statusFetchInFlight = true;
+      const controller = new AbortController();
+      const requestTimeout = window.setTimeout(
+        () => controller.abort(),
+        STATUS_REQUEST_TIMEOUT_MS
+      );
       try {
         const response = await fetch('/api/v1/status', {
-          headers: { accept: 'application/json' }
+          headers: { accept: 'application/json' },
+          signal: controller.signal
         });
         if (!response.ok) throw new Error(`status ${response.status}`);
         if (!acceptPayload(await response.json())) throw new Error('invalid status snapshot');
@@ -103,11 +124,68 @@ export class WatcherClient {
           this.connectionMessage = `Event stream resync failed: ${errorMessage(error)}`;
         }
       } finally {
+        window.clearTimeout(requestTimeout);
         statusFetchInFlight = false;
       }
     };
 
+    const refreshBlockTimeGapBackfill = async () => {
+      if (backfillFetchInFlight) return;
+      backfillFetchInFlight = true;
+      try {
+        const response = await fetch('/api/v1/sidecars/block-time-gaps/status.json', {
+          cache: 'no-store',
+          headers: { accept: 'application/json' }
+        });
+        if (response.status === 404) {
+          this.blockTimeGapBackfill = null;
+          return;
+        }
+        if (!response.ok) throw new Error(`backfill status ${response.status}`);
+        const status = parseBlockTimeGapBackfill(await response.json());
+        if (!status) throw new Error('invalid block-time-gap backfill status');
+        this.blockTimeGapBackfill = status;
+      } catch {
+        // This feed is optional. Preserve the last valid sample so the page can
+        // mark it stale instead of flashing the row during a transient failure.
+      } finally {
+        backfillFetchInFlight = false;
+      }
+    };
+
+    const refreshRuntimeOperations = async () => {
+      if (runtimeFetchInFlight) return;
+      runtimeFetchInFlight = true;
+      try {
+        const response = await fetch('/api/v1/sidecars/runtime-operations/status.json', {
+          cache: 'no-store',
+          headers: { accept: 'application/json' }
+        });
+        if (response.status === 404) {
+          this.runtimeOperations = null;
+          return;
+        }
+        if (!response.ok) throw new Error(`runtime operations status ${response.status}`);
+        const status = parseRuntimeOperations(await response.json());
+        if (!status) throw new Error('invalid runtime operations status');
+        this.runtimeOperations = status;
+      } catch {
+        // Preserve the last valid sample so the UI can mark it stale instead
+        // of hiding an operation during a transient sidecar refresh failure.
+      } finally {
+        runtimeFetchInFlight = false;
+      }
+    };
+
     const events = new EventSource('/api/v1/events');
+    void resyncSnapshot();
+    const statusPoll = window.setInterval(() => {
+      if (events.readyState !== EventSource.OPEN) void resyncSnapshot();
+    }, STATUS_RETRY_INTERVAL_MS);
+    void refreshBlockTimeGapBackfill();
+    const backfillPoll = window.setInterval(refreshBlockTimeGapBackfill, 15_000);
+    void refreshRuntimeOperations();
+    const runtimePoll = window.setInterval(refreshRuntimeOperations, 5_000);
     events.onopen = () => {
       if (disposed) return;
       // The service sequence is process-local and restarts from zero. Reset
@@ -174,6 +252,9 @@ export class WatcherClient {
       if (disposed) return;
       disposed = true;
       events.close();
+      window.clearInterval(statusPoll);
+      window.clearInterval(backfillPoll);
+      window.clearInterval(runtimePoll);
       this.#disconnect = null;
     };
     this.#disconnect = disconnect;
