@@ -32,8 +32,8 @@ case "$command_name" in
     config_file=$2
     [ -f "$config_file" ]
     [ -f "$BLOCKZILLA_TEST_RUNTIME_KEY" ]
-    mode=$(stat -f '%Lp' "$BLOCKZILLA_TEST_RUNTIME_KEY" 2>/dev/null || \
-      stat -c '%a' "$BLOCKZILLA_TEST_RUNTIME_KEY")
+    mode=$(stat -c '%a' "$BLOCKZILLA_TEST_RUNTIME_KEY" 2>/dev/null || \
+      stat -f '%Lp' "$BLOCKZILLA_TEST_RUNTIME_KEY")
     [ "$mode" = 600 ]
     grep -F "\"client_private_key_file\":\"$BLOCKZILLA_TEST_RUNTIME_KEY\"" \
       "$config_file" >/dev/null
