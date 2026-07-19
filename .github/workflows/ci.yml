@@ -89,14 +89,12 @@ jobs:
   hivezilla-ops:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      PYTHONPATH: ${{ runner.temp }}/hivezilla-python
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Python dependencies
         run: >-
           python3 -m pip install
-          --target "$PYTHONPATH"
+          --target "$RUNNER_TEMP/hivezilla-python"
           --requirement services/hivezilla/scripts/requirements.txt
       - name: Check portable launch scripts
         run: |
@@ -110,7 +108,8 @@ jobs:
             services/hivezilla/scripts/run-grpc-receiver-bridge.sh
       - name: Test Python operational helpers
         run: |
-          python3 services/hivezilla/scripts/test_s3_multipart_upload.py
+          PYTHONPATH="$RUNNER_TEMP/hivezilla-python" \
+            python3 services/hivezilla/scripts/test_s3_multipart_upload.py
           python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
       - name: Test shell operational helpers
         run: |
