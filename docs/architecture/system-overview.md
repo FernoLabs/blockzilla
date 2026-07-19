@@ -62,7 +62,8 @@ exist.
 | Hivezilla Yellowstone capture and repair tools | Implemented prototype |
 | Hivezilla multi-instance gRPC runtime | Planned |
 | Hivezilla shred capture/reconstruction | Planned |
-| Blockzilla long-running ingest receiver and scheduler | Planned |
+| Blockzilla finite archive scheduler and read-only status API | Restored, buildable, and experimental |
+| Hivezilla durable receiver | Implemented; Blockzilla-boundary integration and deployment remain planned |
 | Blockzilla R2/B2 publication | Planned |
 | Edgezilla read-only R2 Worker | Implemented |
 | Edgezilla read-only CAR compatibility Worker | Restored, buildable, and experimental |

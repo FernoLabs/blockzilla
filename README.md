@@ -10,14 +10,14 @@ pre-1.0, so pin the Git revision used to produce an archive.
 
 | Path | Status | Role |
 | --- | --- | --- |
-| [`blockzilla/`](blockzilla/README.md) | Active | Builds and reads local Archive V2 archives from CAR or CAR.ZST files. |
-| [`services/`](services/README.md) | Prototype / experimental | Hivezilla capture, the Blockzilla watcher, and read-only Edgezilla implementations. |
+| [`blockzilla/`](blockzilla/README.md) | Active | Builds and reads Archive V2 and includes an experimental finite-work scheduler. |
+| [`services/`](services/README.md) | Prototype / experimental | Hivezilla durable capture/replication, the Blockzilla watcher, and read-only Edgezilla implementations. |
 | [`crates/`](crates/) | Libraries | Shared formats, parsers, and Old Faithful readers. |
 | [`examples/token-api/`](examples/token-api/README.md) | Example | Builds a small derived index and local API. |
 | [`docs/`](docs/README.md) | Reference | Implemented formats, architecture, research, and historical results. |
 | [`scripts/`](scripts/README.md) | Developer tools | Benchmarks and correctness utilities. |
 
-The working newcomer path is:
+The shortest working newcomer path is:
 
 ```text
 Old Faithful CAR -> Blockzilla -> local Archive V2

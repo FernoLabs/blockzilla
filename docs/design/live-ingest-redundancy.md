@@ -150,9 +150,13 @@ The current `services/hivezilla/src/ingest/` code contains:
 - domain-separated content identities and explicit deduplication decisions;
 - a segmented checksummed spool with committed records and tail recovery;
 - canonical durable-receipt bytes and a checksummed receipt WAL;
-- deletion eligibility bound to a verified receipt and exact local spool token.
+- deletion eligibility bound to a verified receipt and exact local spool token;
+- bounded mTLS push and pull transports with signed cumulative acknowledgements;
+  and
+- ACK-gated retirement of whole sealed generations.
 
-These are foundations, not a complete redundant live service. Current `main`
-still lacks the full multi-instance network runtime, production disk-backed
-dedup index, complete transport, sealed-segment garbage collection, and shred
-adapter. Those gaps are tracked in the project [roadmap](../../ROADMAP.md).
+These hardened primitives are not yet the complete target topology. Hivezilla
+still lacks canonical multi-source orchestration and a shred adapter;
+Blockzilla still lacks the production boundary integration and disk-backed
+dedup index that choose and commit one canonical block stream. Those gaps are
+tracked in the project [roadmap](../../ROADMAP.md).

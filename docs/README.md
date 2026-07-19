@@ -13,6 +13,12 @@ Current guides: [Blockzilla CLI](../blockzilla/README.md),
 - [Archive V2 hot-block format](reference/archive-v2-hot-block-format.md)
   documents the files and records implemented by `blockzilla-format` and the
   Blockzilla builders.
+- [Block-time gap sidecar](reference/block-time-gap-sidecar.md) documents the
+  locally derived slot/time discontinuity file emitted by current builders.
+- [Blockzilla scheduler](../blockzilla/README.md#scheduler) documents the
+  experimental finite-work scheduler and its read-only status boundary.
+- [Blockzilla watcher](../services/blockzilla-watcher/README.md) documents the
+  separate read-only operational UI and API contract.
 - [FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
   hands off the completed-epoch read SDK and authenticated Range-gateway flow;
   the FireWatch adapter itself remains work for the FireWatch repository.
