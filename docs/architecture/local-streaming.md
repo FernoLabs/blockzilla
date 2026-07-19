@@ -1,8 +1,9 @@
 # Blockzilla Streamer
 
-Status: **proposed product contract**. Current `main` does not provide
-`blockzilla sync`, `blockzilla stream`, a sink trait, or durable consumer
-checkpoints.
+Status: **partially implemented foundation**. `blockzilla-read-sdk` and the
+read-only archive gateway can validate and Range-read completed immutable
+generations. Current `main` still does not provide `blockzilla sync`,
+`blockzilla stream`, a sink trait, or durable consumer checkpoints.
 
 ## Purpose
 
@@ -39,6 +40,14 @@ cargo run -p blockzilla -- \
 That command is implemented. It does not stream to an indexer and does not
 publish the result to edge storage. Full epochs can be very large; contributors
 should use the repository's small fixture workflow for initial testing.
+
+The focused `blockzilla-read-sdk` can also open a completed generation from a
+local or HTTP Range source, bind pubkey filters to its registry and generation,
+decode independent hot-block frames, and fetch selected signatures. The
+`blockzilla-archive-gateway` publishes an authenticated read-only Range surface.
+See the [FireWatch handoff](../guides/firewatch-local-archive-indexing.md) for
+their exact boundary. They do not yet provide database-specific delivery or a
+consumer checkpoint.
 
 ## Proposed commands
 

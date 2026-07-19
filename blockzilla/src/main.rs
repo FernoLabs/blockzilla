@@ -10,10 +10,12 @@ use std::{
 use tracing::{Level, info};
 
 mod archive_v2;
+mod block_time_gaps;
 mod car_preflight;
 mod first_seen_finalization;
 mod genesis_epoch0;
 mod pre_hot;
+mod scheduler;
 mod split_compact;
 mod token_events;
 
@@ -36,6 +38,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run the storage scheduler and its read-only status API.
+    Scheduler,
+
     /// Stream a CAR to clean EOF and atomically publish a bounded-memory structural receipt.
     PreflightCar {
         /// Input CAR or CAR.ZST file, including an in-progress `.car[.zst].part` path.
@@ -56,6 +61,36 @@ enum Commands {
         /// Optional atomic progress JSON path for scheduler or monitoring integrations.
         #[arg(long)]
         progress_json: Option<PathBuf>,
+    },
+
+    /// Build a sparse slot-gap and block-time sidecar from a local Archive V2 timestamp index.
+    BuildBlockTimeGaps {
+        /// Input epoch directory or blockhash_index_v3.bin file. No RPC is used.
+        input: PathBuf,
+        /// Epoch expected for every indexed slot.
+        #[arg(long)]
+        epoch: u64,
+        /// Timestamp source. Auto prefers V3 and otherwise scans Archive V2 hot blocks.
+        #[arg(long, value_enum, default_value_t = BlockTimeGapSourceArg::Auto)]
+        source: BlockTimeGapSourceArg,
+        /// Output path. Defaults to block-time-gaps.bin beside the input index.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Atomic progress JSON for monitoring long Archive V2 scans.
+        #[arg(long)]
+        progress_json: Option<PathBuf>,
+        /// Replace an existing sidecar when its source fingerprint or contents differ.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Strictly validate an existing block-time gap sidecar without reading its archive source.
+    VerifyBlockTimeGaps {
+        /// block-time-gaps.bin path.
+        input: PathBuf,
+        /// Optional expected epoch.
+        #[arg(long)]
+        epoch: Option<u64>,
     },
 
     /// Build semantic Solana Archive V2 with wincode/LEB128 records.
@@ -150,11 +185,11 @@ enum Commands {
         finalizer_lock: Option<PathBuf>,
     },
 
-    /// Build blockhash_registry.bin plus blockhash_index_v3.bin from a CAR file, skipping tx/metadata decode.
+    /// Build blockhash_registry.bin, blockhash_index_v3.bin, and its gap sidecar from a CAR file.
     BuildBlockhashRegistry {
         /// Input CAR or CAR.ZST file.
         input: PathBuf,
-        /// Output directory for blockhash_registry.bin and blockhash_index_v3.bin.
+        /// Output directory for blockhash_registry.bin, blockhash_index_v3.bin, and block-time-gaps.bin.
         output_dir: PathBuf,
         /// Explicit slot/blockhash provenance file for documented PoH-gap blocks.
         #[arg(long)]
@@ -806,6 +841,23 @@ enum Commands {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BlockTimeGapSourceArg {
+    Auto,
+    V3,
+    Archive,
+}
+
+impl From<BlockTimeGapSourceArg> for block_time_gaps::BuildBlockTimeGapsSource {
+    fn from(value: BlockTimeGapSourceArg) -> Self {
+        match value {
+            BlockTimeGapSourceArg::Auto => Self::Auto,
+            BlockTimeGapSourceArg::V3 => Self::BlockhashIndexV3,
+            BlockTimeGapSourceArg::Archive => Self::ArchiveV2Hot,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum TokenEventInputFormat {
     Auto,
     Car,
@@ -868,10 +920,22 @@ impl From<LiveRegistrySourceArg> for archive_v2::LiveRegistrySource {
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
+    // The archive CLI already has a large generated Clap tree. Parse scheduler
+    // options only when that subcommand is selected so unrelated commands do
+    // not build another large option graph on their stack.
+    if let Some(args) = scheduler_invocation_args() {
+        let config = scheduler::SchedulerArgs::parse_from(args).into_config()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(scheduler::run_scheduler(config));
+    }
+
     let cli = Cli::parse();
     let resume = cli.resume;
 
     match cli.command {
+        Commands::Scheduler => unreachable!("scheduler arguments are parsed before the main CLI"),
         Commands::PreflightCar {
             input,
             epoch,
@@ -886,6 +950,25 @@ fn main() -> Result<()> {
             progress_json: progress_json.as_deref(),
         })
         .map(|_| ()),
+        Commands::BuildBlockTimeGaps {
+            input,
+            epoch,
+            source,
+            output,
+            progress_json,
+            force,
+        } => block_time_gaps::build_block_time_gaps(block_time_gaps::BuildBlockTimeGapsConfig {
+            input: &input,
+            epoch: Some(epoch),
+            output: output.as_deref(),
+            force,
+            source: source.into(),
+            progress_json: progress_json.as_deref(),
+        })
+        .map(|_| ()),
+        Commands::VerifyBlockTimeGaps { input, epoch } => {
+            block_time_gaps::verify_block_time_gaps(&input, epoch)
+        }
         Commands::BuildArchiveV2 {
             input,
             output_dir,
@@ -1403,6 +1486,16 @@ fn main() -> Result<()> {
     }
 }
 
+fn scheduler_invocation_args() -> Option<Vec<std::ffi::OsString>> {
+    let mut args = std::env::args_os();
+    args.next()?;
+    (args.next()?.as_os_str() == std::ffi::OsStr::new("scheduler")).then(|| {
+        std::iter::once(std::ffi::OsString::from("blockzilla scheduler"))
+            .chain(args)
+            .collect()
+    })
+}
+
 pub(crate) fn file_nonempty(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.len() > 0)
@@ -1722,6 +1815,89 @@ mod cli_tests {
         assert_eq!(receipt, PathBuf::from("/state/epoch-900.json"));
         assert_eq!(io_buffer_mib, 8);
         assert!(progress_json.is_none());
+    }
+
+    #[test]
+    fn block_time_gap_cli_parses_local_source_and_output() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-block-time-gaps",
+            "/archive-v2/epoch-314",
+            "--epoch",
+            "314",
+            "--output",
+            "/state/epoch-314/block-time-gaps.bin",
+        ])
+        .unwrap();
+        let Commands::BuildBlockTimeGaps {
+            input,
+            epoch,
+            source,
+            output,
+            progress_json,
+            force,
+        } = cli.command
+        else {
+            panic!("expected build-block-time-gaps command");
+        };
+        assert_eq!(input, PathBuf::from("/archive-v2/epoch-314"));
+        assert_eq!(epoch, 314);
+        assert_eq!(source, BlockTimeGapSourceArg::Auto);
+        assert_eq!(
+            output,
+            Some(PathBuf::from("/state/epoch-314/block-time-gaps.bin"))
+        );
+        assert!(progress_json.is_none());
+        assert!(!force);
+    }
+
+    #[test]
+    fn block_time_gap_cli_can_force_archive_source_with_progress() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-block-time-gaps",
+            "/archive-v2/epoch-314",
+            "--epoch",
+            "314",
+            "--source",
+            "archive",
+            "--progress-json",
+            "/state/epoch-314/gap-progress.json",
+        ])
+        .unwrap();
+        let Commands::BuildBlockTimeGaps {
+            source,
+            progress_json,
+            ..
+        } = cli.command
+        else {
+            panic!("expected build-block-time-gaps command");
+        };
+        assert_eq!(source, BlockTimeGapSourceArg::Archive);
+        assert_eq!(
+            progress_json,
+            Some(PathBuf::from("/state/epoch-314/gap-progress.json"))
+        );
+    }
+
+    #[test]
+    fn verify_block_time_gap_cli_parses_expected_epoch() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "verify-block-time-gaps",
+            "/archive-v2/epoch-314/block-time-gaps.bin",
+            "--epoch",
+            "314",
+        ])
+        .unwrap();
+        let Commands::VerifyBlockTimeGaps { input, epoch } = cli.command else {
+            panic!("expected verify-block-time-gaps command");
+        };
+        assert_eq!(
+            input,
+            PathBuf::from("/archive-v2/epoch-314/block-time-gaps.bin")
+        );
+        assert_eq!(epoch, Some(314));
     }
 
     #[test]

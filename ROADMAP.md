@@ -19,18 +19,23 @@ Status words in this roadmap are intentional:
 - The hot-block Archive V2 writer, indexes, sidecars, and readers are
   implemented. The current contract is documented in the
   [format reference](docs/reference/archive-v2-hot-block-format.md).
-- The `hivezilla/` folder contains the current Yellowstone capture and repair
-  prototype, including the `hivezilla` executable.
-- `edgezilla/blockzilla-get-block/` contains a read-only R2-backed Worker and
+- The `services/hivezilla/` folder contains the current Yellowstone capture
+  and repair prototype, including durable raw recording, mTLS push/pull
+  replication, signed acknowledgements, and the `hivezilla` executable.
+- The `blockzilla scheduler` command restores the finite archive inventory,
+  repair/finalization scheduling, and read-only status API as an experimental
+  contributor-facing implementation.
+- `services/blockzilla-get-block/` contains a read-only R2-backed Worker and
   native inspection/correctness tools.
-- `edgezilla/old-faithful-get-block/` contains the restored, buildable,
+- `services/old-faithful-get-block/` contains the restored, buildable,
   read-only CAR-backed compatibility Worker. It is experimental and is not the
   canonical Blockzilla Archive V2 serving path.
 - The optional token API is an example under `examples/token-api/`.
 
 The repository does **not** yet contain `blockzilla sync`, `blockzilla stream`,
-a production Blockzilla ingest server/scheduler/publisher, a finished shred
-adapter, or an integrated R2/B2 replication pipeline.
+a production Blockzilla ingest boundary or publisher, a finished shred adapter,
+or an integrated R2/B2 publication pipeline. The recovered scheduler is
+experimental rather than a production support promise.
 
 ## Phase 0 — publication safety
 
@@ -50,7 +55,8 @@ redacted history scan.
 
 Status: implemented by the current cleanup; continue refining documentation.
 
-- Keep product code in top-level `blockzilla/`, `hivezilla/`, and `edgezilla/`.
+- Keep the main Blockzilla product in `blockzilla/` and deployable supporting
+  processes in `services/`.
 - Keep reusable format/reader libraries in `crates/`, examples in `examples/`,
   contributor scripts in `scripts/`, and public material in `docs/`.
 - Expose `blockzilla` as the default product binary. Keep diagnostic,
@@ -114,10 +120,13 @@ stopping source capture within configured capacity.
 
 ## Phase 5 — Blockzilla storage authority
 
-Status: planned around the implemented finite builders.
+Status: finite builders and an experimental scheduler are implemented;
+production boundary integration and publication remain planned.
 
-- Add a durable Hivezilla receiver, raw fallback staging, cross-source repair,
-  completeness gates, and finite idempotent scheduler jobs.
+- Integrate the implemented Hivezilla durable receiver and raw fallback with
+  Blockzilla cross-source repair and completeness gates.
+- Stabilize the recovered finite idempotent scheduler jobs and their durable
+  ownership/provenance contracts for supported deployments.
 - Run scheduling and publication with the Blockzilla storage authority, not in
   Hivezilla or Edgezilla.
 - Publish payloads and indexes first and a verified completion manifest last.

@@ -56,7 +56,8 @@ temporary markers that are not part of the reader contract.
 | `registry_counts.bin` | Registry reference counts used by builders and audits |
 | `registry.mphf` | Lookup index for `registry.bin` |
 | `blockhash_registry.bin` | Raw 32-byte blockhash rows |
-| `blockhash_index_v3.bin` | Optional slot/blockhash/time lookup index |
+| `blockhash_index_v3.bin` | Slot/blockhash/time lookup index emitted by complete current compactors |
+| `block-time-gaps.bin` | Sparse, source-fingerprinted slot/time discontinuities derived from the V3 index |
 | `prev_blockhash_tail.bin` | Previous-epoch recent-blockhash window used by builders/readers when required |
 | `signatures.bin` | Raw 64-byte signatures in archive transaction order |
 | `vote_hash_registry.bin` | Fixed 65-byte vote hash rows |

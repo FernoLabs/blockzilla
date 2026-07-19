@@ -1,0 +1,47 @@
+{
+  "schema_version": 2,
+  "cluster_id": "solana-mainnet",
+  "max_total_queue_bytes": 536870912,
+  "max_total_queue_events": 16,
+  "role": {
+    "mode": "primary",
+    "node_id": "blockzilla-primary",
+    "replica_listener": {
+      "bind": "0.0.0.0:9443",
+      "server_certificate_file": "/etc/blockzilla/tls/primary.crt",
+      "server_private_key_file": "/tmp/blockzilla-receiver/server-private-key.pem",
+      "client_ca_file": "/etc/blockzilla/tls/replica-ca.crt",
+      "allowed_nodes_file": "/etc/blockzilla/replication/allowed-nodes.json",
+      "primary_term_file": "/data/replication-control/primary-term",
+      "receipt_signing_key_id": "receipt-current",
+      "receipt_signing_key": {
+        "provider": "file",
+        "path": "/tmp/blockzilla-receiver/receipt-signing-key.pem"
+      },
+      "max_wire_request_bytes": 134283264,
+      "max_batch_events": 4,
+      "max_batch_compressed_bytes": 134217728,
+      "max_batch_uncompressed_bytes": 134217728,
+      "max_compressed_event_bytes": 134217728,
+      "max_uncompressed_event_bytes": 134217728,
+      "max_concurrent_requests": 1,
+      "max_open_streams": 64,
+      "max_known_streams": 4096,
+      "tls_handshake_timeout_ms": 10000,
+      "request_idle_timeout_ms": 15000,
+      "request_total_timeout_ms": 60000
+    }
+  },
+  "spool": {
+    "root": "/data/blockzilla-ingest-primary",
+    "max_bytes": 1099511627776,
+    "segment_bytes": 268435456,
+    "reserve_free_bytes": 10737418240,
+    "sync": {
+      "max_delay_ms": 10,
+      "max_unsynced_bytes": 4194304
+    },
+    "full_policy": "pause_sources"
+  },
+  "sources": []
+}

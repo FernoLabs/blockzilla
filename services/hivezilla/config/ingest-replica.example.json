@@ -1,0 +1,64 @@
+{
+  "schema_version": 2,
+  "cluster_id": "solana-mainnet",
+  "max_total_queue_bytes": 536870912,
+  "max_total_queue_events": 64,
+  "role": {
+    "mode": "replica",
+    "node_id": "source-node-01",
+    "upstream": {
+      "endpoint": "https://192.0.2.45:9443",
+      "expected_primary_id": "blockzilla-primary",
+      "cumulative_ack_wal_file": "/data/replication-control/cumulative-ack.wal",
+      "tls": {
+        "ca_file": "/run/secrets/blockzilla-primary-ca.crt",
+        "client_certificate_file": "/run/secrets/source-node-replica.crt",
+        "client_private_key_file": "/tmp/blockzilla-replicator/client-private-key.pem",
+        "server_name": "blockzilla-primary"
+      },
+      "auth": {
+        "method": "mutual_tls"
+      },
+      "trusted_receipt_keys": [
+        {
+          "key_id": "receipt-previous",
+          "public_key_file": "/run/secrets/receipt-previous.pub"
+        },
+        {
+          "key_id": "receipt-current",
+          "public_key_file": "/run/secrets/receipt-current.pub"
+        }
+      ],
+      "reconnect": {
+        "initial_delay_ms": 500,
+        "max_delay_ms": 30000,
+        "backoff_factor_milli": 2000,
+        "jitter_percent": 20,
+        "connect_timeout_ms": 5000,
+        "heartbeat_interval_ms": 15000,
+        "idle_timeout_ms": 60000,
+        "max_attempts": null
+      },
+      "batch": {
+        "max_events": 4,
+        "max_bytes": 134217728,
+        "max_uncompressed_bytes": 134217728,
+        "max_compressed_event_bytes": 134217728,
+        "max_uncompressed_event_bytes": 134217728,
+        "ack_timeout_ms": 30000
+      }
+    }
+  },
+  "spool": {
+    "root": "/data/grpc-cache",
+    "max_bytes": 2818572288,
+    "segment_bytes": 134217728,
+    "reserve_free_bytes": 402653184,
+    "sync": {
+      "max_delay_ms": 10,
+      "max_unsynced_bytes": 4194304
+    },
+    "full_policy": "pause_sources"
+  },
+  "sources": []
+}
