@@ -1,0 +1,97 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    "Helvetica Neue",
+    sans-serif;
+  font-synthesis: none;
+  background: #111113;
+  color: #ededee;
+  line-height: 1.45;
+
+  --background: #111113;
+  --surface: #171719;
+  --surface-raised: #1d1d20;
+  --border: #303035;
+  --border-strong: #44444b;
+  --text: #ededee;
+  --muted: #9c9ca3;
+  --faint: #85858d;
+  --green: #4fb68a;
+  --amber: #d2a352;
+  --orange: #c87945;
+  --red: #d26b6b;
+  --violet: #9d83cb;
+  --slate: #737983;
+
+  --status-complete-bg: #164534;
+  --status-complete-accent: #52d19b;
+  --status-first-seen-complete-bg: #403a2b;
+  --status-first-seen-complete-accent: #d4bc78;
+  --status-legacy-complete-bg: #3b5b3e;
+  --status-legacy-complete-accent: #b8d99d;
+  --status-active-bg: #1f4144;
+  --status-active-accent: #67bec2;
+  --status-ready-bg: #39453a;
+  --status-ready-accent: #a6c584;
+  --status-finalizing-bg: #473866;
+  --status-finalizing-accent: #c0a5ff;
+  --status-partial-bg: #3d424a;
+  --status-partial-accent: #a5acb8;
+  --status-queued-bg: #202126;
+  --status-queued-accent: #737986;
+  --status-missing-bg: #452326;
+  --status-missing-accent: #df7379;
+  --status-na-bg: #191a1e;
+  --status-na-accent: #656a73;
+  --status-attention-bg: #533713;
+  --status-attention-accent: #f0b95b;
+  --status-failed-bg: #552329;
+  --status-failed-accent: #f07880;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--background);
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-size: 14px;
+}
+
+button,
+input,
+select,
+textarea {
+  color: inherit;
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: #315b4a;
+  color: #ffffff;
+}

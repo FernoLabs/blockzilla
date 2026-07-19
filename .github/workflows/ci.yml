@@ -16,6 +16,8 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      RUSTFLAGS: -C target-cpu=native
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Install Rust components
@@ -56,11 +58,67 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo install worker-build --locked --version 0.8.3
       - name: Build Archive V2 Edgezilla Worker
-        working-directory: edgezilla/blockzilla-get-block
+        working-directory: services/blockzilla-get-block
         run: worker-build --release . --no-default-features --features worker
       - name: Build Old Faithful Edgezilla Worker
-        working-directory: edgezilla/old-faithful-get-block
+        working-directory: services/old-faithful-get-block
         run: worker-build --release .
+
+  watcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: services/blockzilla-watcher/package-lock.json
+      - name: Install watcher dependencies
+        working-directory: services/blockzilla-watcher
+        run: npm ci
+      - name: Test watcher data handling
+        working-directory: services/blockzilla-watcher
+        run: npm test
+      - name: Check watcher UI
+        working-directory: services/blockzilla-watcher
+        run: npm run check
+      - name: Build watcher UI
+        working-directory: services/blockzilla-watcher
+        run: npm run build
+
+  hivezilla-ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Python dependencies
+        run: >-
+          python3 -m pip install
+          --target "$RUNNER_TEMP/hivezilla-python"
+          --requirement services/hivezilla/scripts/requirements.txt
+      - name: Check portable launch scripts
+        run: |
+          /bin/sh -n \
+            services/hivezilla/scripts/generate-grpc-replication-pki.sh \
+            services/hivezilla/scripts/generate-grpc-pull-pki.sh \
+            services/hivezilla/scripts/run-grpc-raw-receiver.sh \
+            services/hivezilla/scripts/run-grpc-raw-replicator.sh \
+            services/hivezilla/scripts/run-grpc-raw-pull-source.sh \
+            services/hivezilla/scripts/run-grpc-raw-pull-client.sh \
+            services/hivezilla/scripts/run-grpc-receiver-bridge.sh
+      - name: Test Python operational helpers
+        run: |
+          PYTHONPATH="$RUNNER_TEMP/hivezilla-python" \
+            python3 services/hivezilla/scripts/test_s3_multipart_upload.py
+          python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
+      - name: Test shell operational helpers
+        run: |
+          bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
+          bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
+          bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh
+          bash services/hivezilla/scripts/test-generate-grpc-replication-pki.sh
 
   docs:
     runs-on: ubuntu-latest

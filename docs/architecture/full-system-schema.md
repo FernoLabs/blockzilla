@@ -68,10 +68,12 @@ and verifies both edge copies; Edgezilla stores and serves them read-only.
 | --- | --- |
 | CAR/CAR.ZST → Blockzilla → local Archive V2 | Implemented |
 | Current Hivezilla capture directory → Blockzilla → local Archive V2 | Implemented prototype path |
-| Yellowstone capture and durable-ingest foundations | Implemented under `hivezilla/` |
+| Yellowstone capture and durable-ingest foundations | Implemented under `services/hivezilla/` |
 | Multiple production gRPC instances | Planned |
 | Shred Hivezilla implementation | Planned |
-| Blockzilla server, scheduler, and R2/B2 publisher | Planned |
+| Blockzilla finite archive scheduler and read-only status API | Restored, buildable, and experimental |
+| Hivezilla durable receiver | Implemented; Blockzilla-boundary integration and deployment remain planned |
+| Blockzilla R2/B2 publisher | Planned |
 | R2 → read-only Edgezilla Worker → `getBlock` | Implemented |
 | Experimental CAR-backed Edgezilla compatibility Worker | Restored and buildable; intentionally outside the canonical schema above |
 | Independently verified B2 publication/recovery | Planned |

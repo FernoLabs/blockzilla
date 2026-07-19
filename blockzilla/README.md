@@ -1,99 +1,91 @@
 # Blockzilla CLI
 
-## Purpose
+`blockzilla` is the main product in this repository. It converts Solana CAR or
+CAR.ZST files into indexed Archive V2 directories and reads them back.
 
-`blockzilla` is the main product in this repository. It turns Solana historical
-inputs into Archive V2 directories and provides the commands used to inspect,
-read, repair, and derive data from those archives.
+The local CAR-to-Archive V2 path works today. The CLI and format are pre-1.0;
+pin the producing Git revision. The CLI can finalize captured live input, but
+continuous production ingestion, replication, and indexer streaming remain
+roadmap work. A recovered finite-work scheduler is available for experimental
+deployments.
 
-## Status
+## Try it
 
-The CAR/CAR.ZST to local Archive V2 path is usable today and is the public
-starting point. The CLI is pre-1.0: advanced repair, analysis, and benchmark
-commands remain subject to change.
-
-Blockzilla does not yet run the target NAS scheduler, consume gRPC or shreds as
-a standalone daemon, replicate an archive to cloud storage, or provide the
-planned `sync` and `stream` commands.
-
-## Supported newcomer path
-
-| Task | Command |
-| --- | --- |
-| Verify a CAR can be streamed to clean EOF | `preflight-car` |
-| Build the indexed hot-block Archive V2 representation | `build-archive-v2-hot-blocks` |
-| Read and decode every indexed hot block | `bench-archive-v2-hot-blocks` |
-| Build getBlock access data | `build-archive-v2-block-access` |
-| Build the direct per-slot serving index | `build-archive-v2-get-block-index` |
-
-The CLI also contains no-registry builders, repackers, live-capture finalizers,
-repair materializers, analyzers, data dumps, and focused benchmarks. These are
-maintainer and research surfaces rather than a stable public API. The current
-command list and flags are authoritative:
+The repository [quick start](../README.md#quick-start-build-and-read-the-fixture)
+builds and reads a one-block fixture without network access.
 
 ```bash
 cargo run --locked -p blockzilla -- --help
-cargo run --locked -p blockzilla -- \
-  build-archive-v2-hot-blocks --help
 ```
 
-The repository-level [quick start](../README.md#quick-start-build-and-read-the-fixture)
-builds and reads a one-block fixture without network access.
+The main commands are:
 
-## Archive output
-
-A hot-block build writes one directory containing:
-
-- `archive-v2-blocks.zstd` and `archive-v2-blocks.index` for indexed block
-  reads;
-- `archive-v2-meta.wincode` for archive metadata;
-- `registry.bin`, `registry_counts.bin`, and `registry.mphf` for pubkeys;
-- blockhash, signature, vote-hash, PoH, and shredding sidecars; and
-- optional block-access and getBlock indexes for serving.
-
-The implemented constants and record types live in
-[`crates/blockzilla-format`](../crates/blockzilla-format/README.md). See the
-[Archive V2 format reference](../docs/reference/archive-v2-hot-block-format.md)
-before writing another reader.
-
-## Source map
-
-| Path | Responsibility |
+| Command | Purpose |
 | --- | --- |
-| `src/main.rs` | CLI definition and command dispatch. |
-| `src/archive_v2.rs` | Archive V2 builders, readers, indexes, repackers, and benchmarks. |
-| `src/archive_v2/repair.rs` | Repair-specific validation and materialization. |
-| `src/car_preflight.rs` | Bounded-memory CAR structural preflight. |
-| `src/first_seen_finalization.rs` | Deferred first-seen registry finalization. |
-| `src/pre_hot.rs` | Typed pre-hot spool used by staged builds. |
-| `src/token_events.rs` | Derived token instruction/event extraction. |
-| `src/bin/` | Opt-in contributor diagnostics, benchmarks, and one-shot migrations. |
+| `scheduler` | Observe archive inventory and optionally schedule finite build, repair, and finalization jobs. |
+| `preflight-car` | Verify that a CAR can be streamed to clean EOF. |
+| `build-block-time-gaps` | Build a sparse local slot-gap and block-time sidecar without RPC. |
+| `build-archive-v2-hot-blocks` | Build compressed blocks, indexes, metadata, and serving sidecars. |
+| `bench-archive-v2-hot-blocks` | Read and decode indexed blocks. |
 
-`blockzilla` is the only default executable. Contributor binaries are disabled
-unless the caller explicitly enables `diagnostic-tools`, `benchmark-tools`, or
-`migration-tools`; `developer-tools` enables all three. They are not supported
-product commands. For example:
+Other commands are advanced repair, analysis, migration, or benchmark tools;
+use `--help` as the authoritative command reference.
 
-```bash
-cargo run --locked -p blockzilla --features diagnostic-tools \
-  --bin car-log-audit -- --help
-```
+### Scheduler
 
-## Validation
+The scheduler requires explicit CAR, archive, and live roots and starts in
+observer mode. Its status and SSE endpoints are read-only and bind to
+`127.0.0.1:8787` by default. Add `--execute` only after reviewing the detected
+inventory and resource settings.
 
 ```bash
-cargo fmt --all -- --check
-cargo check --locked -p blockzilla --all-targets
-cargo test --locked -p blockzilla --all-targets
+blockzilla scheduler \
+  --car-root ./cars \
+  --archive-root ./archive-v2 \
+  --live-root ./live
 ```
 
-## Safety and security
+Mutation routes are absent unless `--management-bind` is supplied. That bind is
+restricted to a loopback address; expose the read-only status API, never the
+management listener, to a separate watcher or reverse proxy. Scheduler state
+defaults to the relative `blockzilla-scheduler-state/` directory. Existing
+durable ownership markers keep their historical filename so upgraded
+deployments can adopt work safely.
 
-Use a fresh output directory. Builders create or replace named files inside the
-destination, and full-epoch work can consume hundreds of gigabytes. Keep source
-CAR files immutable, retain the producing Git revision with each archive, and
-test destructive operational workflows on copies.
+### Block-time gap sidecars
 
-Do not place provider credentials, production paths, incident data, or archive
-artifacts in this repository. Report vulnerabilities through the
-[security policy](../SECURITY.md).
+For an Archive V2 epoch that contains `blockhash_index_v3.bin`, build a
+`block-time-gaps.bin` sidecar entirely from local archive data:
+
+```bash
+cargo run --locked -p blockzilla -- build-block-time-gaps \
+  /archive-v2/epoch-842 --epoch 842
+```
+
+The sidecar stores each run of absent slots together with the archived block
+time immediately before and after it. It also preserves consecutive-slot time
+discontinuities above the recorded whole-second threshold. These are archive
+observations, not an automatic claim that Solana was unavailable: a slot gap
+can also reveal incomplete archive input. The header retains the source
+SHA-256, threshold, and first/last block so adjacent epoch results can be joined
+safely.
+
+Complete `build-archive-v2-hot-blocks` runs now publish
+`blockhash_index_v3.bin` and `block-time-gaps.bin` by default during their
+existing CAR pass. This includes the normal, first-seen, and PreHot builders.
+Bounded `--max-blocks` runs are intentionally partial and publish neither file.
+`build-blockhash-registry` also creates or repairs the gap sidecar whenever it
+publishes or reuses a complete V3 index.
+Deferred first-seen scans written by the new builder persist this requirement;
+pre-upgrade scan candidates remain finalizable as an explicit legacy exception.
+
+## Archive format
+
+An Archive V2 directory contains compressed blocks plus indexes, registries,
+metadata, and optional serving sidecars. The implemented layout is documented
+in the [Archive V2 format reference](../docs/reference/archive-v2-hot-block-format.md)
+and shared types live in [`blockzilla-format`](../crates/blockzilla-format/README.md).
+
+Use a fresh output directory, keep source CAR files immutable, and budget ample
+space for full epochs. See the [roadmap](../ROADMAP.md) for planned product work
+and the [security policy](../SECURITY.md) for private reporting.

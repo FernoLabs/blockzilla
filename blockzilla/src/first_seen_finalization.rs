@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use blockzilla_format::{
     ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE,
-    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
     ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE, ARCHIVE_V2_META_FILE, ARCHIVE_V2_POH_FILE,
     ARCHIVE_V2_PUBKEY_HOT_SEED_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
     ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE, ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    BLOCK_TIME_GAP_FILE,
 };
 use std::{
     fs::{File, OpenOptions},
@@ -19,6 +20,8 @@ use crate::archive_v2;
 pub(crate) const FIRST_SEEN_SCAN_COMPLETE_FILE: &str = "archive-v2-first-seen-scan-complete.v1";
 const FIRST_SEEN_SCAN_COMPLETE_MAGIC: &str = "blockzilla-first-seen-scan-complete-v1";
 const DEFAULT_FINALIZER_LOCK_FILE: &str = "blockzilla-first-seen-finalizer.lock";
+pub(crate) const FIRST_SEEN_TIMESTAMP_ARTIFACTS_VALUE: &str =
+    "blockhash_index_v3_and_block_time_gaps_v1";
 
 /// Facts persisted after the large in-memory first-seen registry has been
 /// written, but before the memory-intensive MPHF is constructed.
@@ -27,10 +30,20 @@ pub(crate) struct FirstSeenScanMarker {
     pub(crate) registry_keys: u64,
     pub(crate) references: u64,
     pub(crate) include_access: bool,
+    timestamp_artifacts_required: bool,
 }
 
 impl FirstSeenScanMarker {
     pub(crate) fn new(registry_keys: usize, references: u64, include_access: bool) -> Result<Self> {
+        Self::new_with_timestamp_artifacts(registry_keys, references, include_access, true)
+    }
+
+    fn new_with_timestamp_artifacts(
+        registry_keys: usize,
+        references: u64,
+        include_access: bool,
+        timestamp_artifacts_required: bool,
+    ) -> Result<Self> {
         let registry_keys =
             u64::try_from(registry_keys).context("first-seen registry key count exceeds u64")?;
         anyhow::ensure!(
@@ -41,16 +54,23 @@ impl FirstSeenScanMarker {
             registry_keys,
             references,
             include_access,
+            timestamp_artifacts_required,
         })
     }
 
     fn encode(self) -> String {
-        format!(
+        let mut encoded = format!(
             "{FIRST_SEEN_SCAN_COMPLETE_MAGIC}\nregistry_keys={}\nreferences={}\ninclude_access={}\n",
             self.registry_keys,
             self.references,
             u8::from(self.include_access),
-        )
+        );
+        // Preserve the exact pre-feature marker shape for recovered legacy
+        // candidates so a rollback to the previous finalizer can still read it.
+        if self.timestamp_artifacts_required {
+            encoded.push_str("timestamp_artifacts=1\n");
+        }
+        encoded
     }
 
     fn decode(bytes: &[u8]) -> Result<Self> {
@@ -64,6 +84,10 @@ impl FirstSeenScanMarker {
         let mut registry_keys = None;
         let mut references = None;
         let mut include_access = None;
+        // Markers produced before the timestamp sidecar feature omitted this
+        // field. They remain finalizable without rescanning hundreds of GiB of
+        // CAR data; every newly emitted marker writes and requires the field.
+        let mut timestamp_artifacts_required = false;
         for line in lines {
             let Some((name, value)) = line.split_once('=') else {
                 anyhow::bail!("malformed first-seen scan-complete marker line: {line}");
@@ -86,6 +110,13 @@ impl FirstSeenScanMarker {
                         _ => anyhow::bail!("invalid marker include_access value {value}"),
                     });
                 }
+                "timestamp_artifacts" => {
+                    timestamp_artifacts_required = match value {
+                        "0" => false,
+                        "1" => true,
+                        _ => anyhow::bail!("invalid marker timestamp_artifacts value {value}"),
+                    };
+                }
                 _ => anyhow::bail!("unknown first-seen scan-complete marker field {name}"),
             }
         }
@@ -93,6 +124,7 @@ impl FirstSeenScanMarker {
             registry_keys: registry_keys.context("marker is missing registry_keys")?,
             references: references.context("marker is missing references")?,
             include_access: include_access.context("marker is missing include_access")?,
+            timestamp_artifacts_required,
         };
         anyhow::ensure!(
             marker.registry_keys <= u64::from(u32::MAX),
@@ -267,6 +299,12 @@ pub(crate) fn finalize_first_seen_scan(output_dir: &Path, lock_path: Option<&Pat
             "published metadata exists but final first-seen sidecars are incomplete in {}",
             output_dir.display()
         );
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read finalized manifest {}", manifest_path.display()))?;
+        validate_timestamp_contract(
+            output_dir,
+            manifest_timestamp_artifacts_required(&manifest)?,
+        )?;
         info!(
             "First-seen archive is already finalized: {}",
             output_dir.display()
@@ -288,6 +326,15 @@ pub(crate) fn finalize_first_seen_scan(output_dir: &Path, lock_path: Option<&Pat
             "published metadata exists but final first-seen sidecars are incomplete in {}",
             output_dir.display()
         );
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read finalized manifest {}", manifest_path.display()))?;
+        let manifest_requires_timestamp_artifacts =
+            manifest_timestamp_artifacts_required(&manifest)?;
+        anyhow::ensure!(
+            manifest_requires_timestamp_artifacts == marker.timestamp_artifacts_required,
+            "first-seen manifest timestamp artifact contract does not match scan marker"
+        );
+        validate_timestamp_contract(output_dir, manifest_requires_timestamp_artifacts)?;
         std::fs::remove_file(&marker_path)
             .with_context(|| format!("remove completed marker {}", marker_path.display()))?;
         sync_directory(output_dir)?;
@@ -364,7 +411,14 @@ fn recover_unmarked_scan(output_dir: &Path) -> Result<()> {
         access_path.display(),
         access_index_path.display(),
     );
-    let marker = FirstSeenScanMarker::new(registry_keys, references, access_path.is_file())?;
+    let timestamp_artifacts_required = manifest_timestamp_artifacts_required(&text)
+        .context("parse recoverable first-seen timestamp artifact contract")?;
+    let marker = FirstSeenScanMarker::new_with_timestamp_artifacts(
+        registry_keys,
+        references,
+        access_path.is_file(),
+        timestamp_artifacts_required,
+    )?;
     validate_scan_outputs(output_dir, marker)?;
     write_scan_complete_marker(output_dir, marker)?;
     info!(
@@ -462,6 +516,34 @@ fn validate_scan_outputs(output_dir: &Path, marker: FirstSeenScanMarker) -> Resu
     };
     let audit = validate_manifest(&manifest_candidate, marker)?;
     validate_registry_counts_audit(output_dir, marker, audit)?;
+    validate_timestamp_contract(output_dir, marker.timestamp_artifacts_required)?;
+    Ok(())
+}
+
+fn validate_timestamp_contract(output_dir: &Path, required: bool) -> Result<()> {
+    let source = output_dir.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE);
+    let gaps = output_dir.join(BLOCK_TIME_GAP_FILE);
+    if !required && !source.exists() && !gaps.exists() {
+        info!(
+            "Accepting pre-timestamp-sidecar first-seen candidate without V3/gap artifacts: {}",
+            output_dir.display()
+        );
+        return Ok(());
+    }
+    validate_timestamp_artifacts(output_dir)
+}
+
+fn validate_timestamp_artifacts(output_dir: &Path) -> Result<()> {
+    let source = output_dir.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE);
+    anyhow::ensure!(
+        crate::file_nonempty(&source),
+        "first-seen scan output is missing or empty: {}",
+        source.display()
+    );
+    // This validates the complete V3 source and atomically creates, reuses, or
+    // repairs the derived gap sidecar before metadata can be published.
+    archive_v2::ensure_default_block_time_gaps(output_dir)
+        .context("validate first-seen block-time gap artifacts")?;
     Ok(())
 }
 
@@ -502,6 +584,11 @@ fn validate_manifest(path: &Path, marker: FirstSeenScanMarker) -> Result<Manifes
         "unsupported first-seen reference audit manifest value {:?}",
         audit_kind,
     );
+    let manifest_requires_timestamp_artifacts = manifest_timestamp_artifacts_required(&text)?;
+    anyhow::ensure!(
+        manifest_requires_timestamp_artifacts == marker.timestamp_artifacts_required,
+        "first-seen manifest timestamp artifact contract does not match scan marker"
+    );
     let low = u128::from_str_radix(
         audit_low.context("first-seen manifest is missing reference_audit_low")?,
         16,
@@ -520,6 +607,19 @@ fn manifest_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
         line.strip_prefix(name)
             .and_then(|value| value.strip_prefix('='))
     })
+}
+
+fn manifest_timestamp_artifacts_required(text: &str) -> Result<bool> {
+    match manifest_field(text, "timestamp_artifacts") {
+        Some(value) => {
+            anyhow::ensure!(
+                value == FIRST_SEEN_TIMESTAMP_ARTIFACTS_VALUE,
+                "unsupported first-seen timestamp_artifacts manifest value {value}"
+            );
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 fn validate_registry_counts_audit(
@@ -614,7 +714,23 @@ pub(crate) fn sync_directory(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockzilla_format::KeyIndex;
+    use blockzilla_format::{
+        ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN,
+        ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, BLOCK_TIME_GAP_FILE, KeyIndex,
+        read_block_time_gap_sidecar,
+    };
+
+    fn write_test_v3(output_dir: &Path, epoch: u64) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC);
+        bytes.extend_from_slice(&ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN as u16).to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&(epoch * crate::SLOTS_PER_EPOCH).to_le_bytes());
+        bytes.extend_from_slice(&[7u8; 32]);
+        bytes.extend_from_slice(&1_700_000_000i64.to_le_bytes());
+        std::fs::write(output_dir.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE), bytes).unwrap();
+    }
 
     fn test_audit(keys: &[[u8; 32]], counts: &[u32]) -> ManifestReferenceAudit {
         let mut audit = ManifestReferenceAudit { low: 0, high: 0 };
@@ -631,6 +747,13 @@ mod tests {
 
     fn test_manifest(keys: u64, references: u64, audit: ManifestReferenceAudit) -> String {
         format!(
+            "version=1\nfingerprint=gxhash128_random_seed_full_key_v1\nreference_audit=wrapping_u128_halves_le_v1\ntimestamp_artifacts={FIRST_SEEN_TIMESTAMP_ARTIFACTS_VALUE}\nregistry_keys={keys}\nreferences={references}\nreference_audit_low={:032x}\nreference_audit_high={:032x}\n",
+            audit.low, audit.high,
+        )
+    }
+
+    fn legacy_test_manifest(keys: u64, references: u64, audit: ManifestReferenceAudit) -> String {
+        format!(
             "version=1\nfingerprint=gxhash128_random_seed_full_key_v1\nreference_audit=wrapping_u128_halves_le_v1\nregistry_keys={keys}\nreferences={references}\nreference_audit_low={:032x}\nreference_audit_high={:032x}\n",
             audit.low, audit.high,
         )
@@ -643,6 +766,12 @@ mod tests {
             FirstSeenScanMarker::decode(marker.encode().as_bytes()).unwrap(),
             marker
         );
+        let legacy = FirstSeenScanMarker::decode(
+            b"blockzilla-first-seen-scan-complete-v1\nregistry_keys=7\nreferences=11\ninclude_access=1\n",
+        )
+        .unwrap();
+        assert!(!legacy.timestamp_artifacts_required);
+        assert!(!legacy.encode().contains("timestamp_artifacts"));
         let error = FirstSeenScanMarker::decode(
             b"blockzilla-first-seen-scan-complete-v2\nregistry_keys=1\nreferences=2\ninclude_access=0\n",
         )
@@ -674,6 +803,16 @@ mod tests {
         )
         .unwrap();
         validate_manifest(&path, marker).unwrap();
+        let legacy_marker =
+            FirstSeenScanMarker::new_with_timestamp_artifacts(7, 11, false, false).unwrap();
+        std::fs::write(
+            &path,
+            legacy_test_manifest(7, 11, ManifestReferenceAudit { low: 0, high: 0 }),
+        )
+        .unwrap();
+        validate_manifest(&path, legacy_marker).unwrap();
+        let error = validate_manifest(&path, marker).unwrap_err();
+        assert!(error.to_string().contains("timestamp artifact contract"));
         let error =
             validate_manifest(&path, FirstSeenScanMarker::new(8, 11, false).unwrap()).unwrap_err();
         assert!(error.to_string().contains("do not match"));
@@ -711,6 +850,78 @@ mod tests {
                 .to_string()
                 .contains("references 2 != marker references 3")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_timestamp_contract_accepts_absence_but_rejects_partial_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-legacy-timestamps-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        validate_timestamp_contract(&root, false).unwrap();
+
+        std::fs::write(root.join(BLOCK_TIME_GAP_FILE), b"orphaned-gap").unwrap();
+        let error = validate_timestamp_contract(&root, false).unwrap_err();
+        assert!(format!("{error:#}").contains("blockhash_index_v3.bin"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_marker_and_manifest_finalize_without_timestamp_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-first-seen-legacy-finalize-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let keys = [[1u8; 32], [2u8; 32]];
+        std::fs::write(root.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE), keys.concat()).unwrap();
+        for name in [
+            ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+            ARCHIVE_V2_BLOCKS_FILE,
+            ARCHIVE_V2_BLOCK_INDEX_FILE,
+            ARCHIVE_V2_POH_FILE,
+            ARCHIVE_V2_SHREDDING_FILE,
+        ] {
+            std::fs::write(root.join(name), [1]).unwrap();
+        }
+        for name in [
+            ARCHIVE_V2_SIGNATURES_FILE,
+            ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+            ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
+        ] {
+            std::fs::write(root.join(name), []).unwrap();
+        }
+        let mut counts = Vec::new();
+        blockzilla_format::framed::write_u32_varint(&mut counts, 1).unwrap();
+        blockzilla_format::framed::write_u32_varint(&mut counts, 2).unwrap();
+        std::fs::write(root.join(ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE), counts).unwrap();
+
+        let meta_path = root.join(ARCHIVE_V2_META_FILE);
+        std::fs::write(first_seen_temp_path(&meta_path), [1]).unwrap();
+        let manifest_path = root.join(ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE);
+        std::fs::write(
+            first_seen_temp_path(&manifest_path),
+            legacy_test_manifest(2, 3, test_audit(&keys, &[1, 2])),
+        )
+        .unwrap();
+        let legacy_marker =
+            FirstSeenScanMarker::new_with_timestamp_artifacts(2, 3, false, false).unwrap();
+        write_scan_complete_marker(&root, legacy_marker).unwrap();
+
+        finalize_first_seen_scan(&root, Some(&root.join("finalizer.lock"))).unwrap();
+        assert!(meta_path.is_file());
+        assert!(manifest_path.is_file());
+        assert!(root.join(ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE).is_file());
+        assert!(!root.join(FIRST_SEEN_SCAN_COMPLETE_FILE).exists());
+        assert!(!root.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE).exists());
+        assert!(!root.join(BLOCK_TIME_GAP_FILE).exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -766,6 +977,14 @@ mod tests {
         .unwrap();
 
         let lock_path = root.join("finalizer.lock");
+        // A legacy/incomplete scan cannot publish metadata without the V3
+        // timestamp source required by the default gap sidecar contract.
+        let error = finalize_first_seen_scan(&root, Some(&lock_path)).unwrap_err();
+        assert!(format!("{error:#}").contains("blockhash_index_v3.bin"));
+        assert!(!meta_path.exists());
+
+        write_test_v3(&root, 314);
+        std::fs::write(root.join(BLOCK_TIME_GAP_FILE), b"interrupted-old-sidecar").unwrap();
         // A kill after the manifest was flushed but before marker publication
         // is recovered and revalidated automatically.
         finalize_first_seen_scan(&root, Some(&lock_path)).unwrap();
@@ -775,9 +994,17 @@ mod tests {
         let index = KeyIndex::load(&root.join(ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE)).unwrap();
         assert_eq!(index.lookup(&first_key), Some(1));
         assert_eq!(index.lookup(&second_key), Some(2));
+        let gap = read_block_time_gap_sidecar(File::open(root.join(BLOCK_TIME_GAP_FILE)).unwrap())
+            .unwrap();
+        assert_eq!(gap.header.epoch, 314);
+        assert_eq!(gap.header.block_count, 1);
 
         // Finalization is safe to retry after the metadata-last commit.
         finalize_first_seen_scan(&root, Some(&lock_path)).unwrap();
+        std::fs::remove_file(root.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE)).unwrap();
+        std::fs::remove_file(root.join(BLOCK_TIME_GAP_FILE)).unwrap();
+        let error = finalize_first_seen_scan(&root, Some(&lock_path)).unwrap_err();
+        assert!(format!("{error:#}").contains("blockhash_index_v3.bin"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

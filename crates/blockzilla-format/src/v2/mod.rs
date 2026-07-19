@@ -26,6 +26,9 @@ use crate::{
 mod archive;
 pub use archive::*;
 
+mod block_time_gaps;
+pub use block_time_gaps::*;
+
 pub const WINCODE_LOG_ARCHIVE_V2_VERSION: u16 = 2;
 pub const WINCODE_LOG_ARCHIVE_KEYS_FREQUENCY_SORTED: u32 = 1 << 0;
 pub const WINCODE_ARCHIVE_V2_VERSION: u16 = 2;
@@ -570,6 +573,33 @@ impl From<ArchiveV2HotBlockBlobLegacyRewardsVec> for ArchiveV2HotBlockBlob {
     }
 }
 
+// All shipped hot-block schemas begin with the same outer `header` field and the same fields
+// through `block_time`. Decoding only this prefix avoids allocating or validating the transaction,
+// message, metadata, shredding, and rewards vectors when a caller only needs archive timing data.
+#[derive(SchemaRead)]
+struct ArchiveV2HotBlockSlotTimePrefix {
+    header: ArchiveV2HotBlockSlotTimeHeaderPrefix,
+}
+
+#[derive(SchemaRead)]
+struct ArchiveV2HotBlockSlotTimeHeaderPrefix {
+    slot: u64,
+    _parent_slot: u64,
+    _blockhash_id: u32,
+    _previous_blockhash_id: u32,
+    block_time: Option<i64>,
+}
+
+/// Decode only the slot and optional block time shared by current and legacy hot-block payloads.
+///
+/// The decoder intentionally stops after the common header prefix, so large block-local vectors
+/// in the remainder of the payload are neither decoded nor allocated.
+pub fn deserialize_archive_v2_hot_block_slot_time(bytes: &[u8]) -> ReadResult<(u64, Option<i64>)> {
+    let prefix: ArchiveV2HotBlockSlotTimePrefix =
+        wincode::config::deserialize(bytes, wincode_leb128_config())?;
+    Ok((prefix.header.slot, prefix.header.block_time))
+}
+
 pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<ArchiveV2HotBlockBlob> {
     match wincode::config::deserialize(bytes, wincode_leb128_config()) {
         Ok(block) => Ok(block),
@@ -588,6 +618,90 @@ pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<Archive
                 Err(_) => Err(primary_error),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hot_block_slot_time_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_decoder_supports_current_hot_block_encoding() {
+        let block = ArchiveV2HotBlockBlob {
+            header: ArchiveV2HotBlockHeader {
+                slot: 123,
+                parent_slot: 122,
+                blockhash_id: 7,
+                previous_blockhash_id: 6,
+                block_time: Some(1_700_000_123),
+                block_height: Some(120),
+                rewards: None,
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+
+        assert_eq!(
+            deserialize_archive_v2_hot_block_slot_time(&bytes).unwrap(),
+            (123, Some(1_700_000_123))
+        );
+    }
+
+    #[test]
+    fn prefix_decoder_supports_legacy_shredding_hot_block_encoding() {
+        let block = ArchiveV2HotBlockBlobLegacyShredding {
+            header: ArchiveV2HotBlockHeaderLegacyShredding {
+                slot: 456,
+                parent_slot: 455,
+                blockhash_id: 9,
+                previous_blockhash_id: 8,
+                block_time: None,
+                block_height: Some(450),
+                shredding: vec![CompactShredding {
+                    entry_end_idx: 3,
+                    shred_end_idx: 4,
+                }],
+                rewards: None,
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+
+        assert_eq!(
+            deserialize_archive_v2_hot_block_slot_time(&bytes).unwrap(),
+            (456, None)
+        );
+    }
+
+    #[test]
+    fn prefix_decoder_supports_legacy_rewards_vec_hot_block_encoding() {
+        let block = ArchiveV2HotBlockBlobLegacyRewardsVec {
+            header: ArchiveV2HotBlockHeaderLegacyRewardsVec {
+                slot: 789,
+                parent_slot: 788,
+                blockhash_id: 11,
+                previous_blockhash_id: 10,
+                block_time: Some(-42),
+                block_height: None,
+                rewards: Vec::new(),
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+
+        assert_eq!(
+            deserialize_archive_v2_hot_block_slot_time(&bytes).unwrap(),
+            (789, Some(-42))
+        );
     }
 }
 

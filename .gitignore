@@ -17,6 +17,10 @@
 *.env
 yellowstone-x-token
 telegram-bot-token
+*.key
+*.pem
+/replication-pki/
+/pull-pki/
 !.env.example
 !**/.env.example
 account-index-local/
@@ -41,6 +45,7 @@ Thumbs.db
 /.codex-tmp/
 /debug/
 /reports/
+/outputs/
 **/node_modules/
 **/.svelte-kit/
 /.wrangler/

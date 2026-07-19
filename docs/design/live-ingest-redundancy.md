@@ -66,6 +66,14 @@ contains bounded lengths, its identities, payload, checksum, and an end marker.
 Recovery may truncate an incomplete final frame; interior corruption is a
 quarantine condition.
 
+Live reconnect is deliberately bounded. The writer validates the final
+handoff row, its exact checksummed WAL frame, and at most the active segment;
+it does not reread every sealed segment before reconnecting. Complete sealed
+history and journal-sequence validation belongs to the offline Blockzilla
+maintenance task, which runs against a stopped source or immutable snapshot
+before materialization or source retention cleanup. This split keeps recovery
+latency independent of capture age without weakening the publish/delete gate.
+
 Payload bytes remain in WAL segments. An exact index stores observation,
 content, and logical-key metadata. An in-memory cache may accelerate recent
 lookups but is never authoritative.
@@ -136,15 +144,19 @@ Yellowstone and shred inputs also have different fallback behavior:
 
 ## Implemented foundation
 
-The current `hivezilla/src/ingest/` code contains:
+The current `services/hivezilla/src/ingest/` code contains:
 
 - validated, redacted ingest configuration types;
 - domain-separated content identities and explicit deduplication decisions;
 - a segmented checksummed spool with committed records and tail recovery;
 - canonical durable-receipt bytes and a checksummed receipt WAL;
-- deletion eligibility bound to a verified receipt and exact local spool token.
+- deletion eligibility bound to a verified receipt and exact local spool token;
+- bounded mTLS push and pull transports with signed cumulative acknowledgements;
+  and
+- ACK-gated retirement of whole sealed generations.
 
-These are foundations, not a complete redundant live service. Current `main`
-still lacks the full multi-instance network runtime, production disk-backed
-dedup index, complete transport, sealed-segment garbage collection, and shred
-adapter. Those gaps are tracked in the project [roadmap](../../ROADMAP.md).
+These hardened primitives are not yet the complete target topology. Hivezilla
+still lacks canonical multi-source orchestration and a shred adapter;
+Blockzilla still lacks the production boundary integration and disk-backed
+dedup index that choose and commit one canonical block stream. Those gaps are
+tracked in the project [roadmap](../../ROADMAP.md).

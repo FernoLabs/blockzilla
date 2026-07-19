@@ -1,25 +1,12 @@
 # blockzilla-log-parser
 
 `blockzilla-log-parser` classifies the top-level shape of Solana runtime log
-lines while borrowing text from the input. Blockzilla uses those classifications
-when building compact, byte-preserving log records.
+lines while borrowing text from the input.
 
-The parser deliberately does not validate pubkeys, decode base64 payloads, or
-interpret program-specific payload data. Unknown input remains available as
-borrowed text rather than being discarded.
+It does not validate pubkeys, decode base64, or interpret program-specific
+payloads. Unknown input is preserved as borrowed text.
 
-```rust
-use blockzilla_log_parser::{ParsedLogLine, parse_line};
-
-assert_eq!(
-    parse_line("Program Example111111111111111111111111111111 success"),
-    ParsedLogLine::Success {
-        program: "Example111111111111111111111111111111",
-    },
-);
-```
-
-Run its tests and parser benchmark with:
+## Check
 
 ```bash
 cargo test --locked -p blockzilla-log-parser

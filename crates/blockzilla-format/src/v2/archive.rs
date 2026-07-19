@@ -41,6 +41,8 @@ pub const ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY: u32 = 1 << 0;
 /// whole-file-zstd companion `archive-v2-blocks.wincode.zst`; in the latter
 /// case offsets are in the decompressed stream.
 pub const ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS: u32 = 1 << 1;
+const ARCHIVE_V2_HOT_INDEX_KNOWN_FLAGS: u32 =
+    ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY | ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS;
 pub const ARCHIVE_V2_HOT_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8 + 8 + 4 + 4;
 pub const ARCHIVE_V2_HOT_INDEX_ROW_LEN: usize = 4 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 4;
 
@@ -296,13 +298,28 @@ pub fn read_archive_v2_hot_block_index(path: &Path) -> Result<ArchiveV2HotBlockI
         "{} has unsupported Archive V2 hot-block index version {version}",
         path.display()
     );
+    anyhow::ensure!(
+        header[10..12] == [0, 0],
+        "{} has non-zero reserved Archive V2 hot-block index header bytes",
+        path.display()
+    );
     let row_count = u64::from_le_bytes(header[12..20].try_into().unwrap());
     let blob_file_bytes = u64::from_le_bytes(header[20..28].try_into().unwrap());
     let level = i32::from_le_bytes(header[28..32].try_into().unwrap());
     let flags = u32::from_le_bytes(header[32..36].try_into().unwrap());
+    anyhow::ensure!(
+        flags & !ARCHIVE_V2_HOT_INDEX_KNOWN_FLAGS == 0,
+        "{} has unknown Archive V2 hot-block index flags {:#x}",
+        path.display(),
+        flags & !ARCHIVE_V2_HOT_INDEX_KNOWN_FLAGS
+    );
     let row_count_usize = usize::try_from(row_count).context("index row count exceeds usize")?;
-    let expected_len =
-        ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64 + row_count * ARCHIVE_V2_HOT_INDEX_ROW_LEN as u64;
+    let rows_len = row_count
+        .checked_mul(ARCHIVE_V2_HOT_INDEX_ROW_LEN as u64)
+        .context("Archive V2 hot-block index row bytes overflow u64")?;
+    let expected_len = (ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64)
+        .checked_add(rows_len)
+        .context("Archive V2 hot-block index length overflows u64")?;
     let actual_len = std::fs::metadata(path)
         .with_context(|| format!("stat {}", path.display()))?
         .len();
@@ -315,7 +332,9 @@ pub fn read_archive_v2_hot_block_index(path: &Path) -> Result<ArchiveV2HotBlockI
         row_count
     );
 
-    let mut rows = Vec::with_capacity(row_count_usize);
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(row_count_usize)
+        .context("allocate Archive V2 hot-block index rows")?;
     let mut row_buf = [0u8; ARCHIVE_V2_HOT_INDEX_ROW_LEN];
     for _ in 0..row_count_usize {
         reader
@@ -513,6 +532,40 @@ mod tests {
             );
             assert_eq!(actual.signature_count, expected.signature_count);
         }
+    }
+
+    #[test]
+    fn archive_v2_hot_block_index_rejects_reserved_unknown_and_overflowing_headers() {
+        let path = std::env::temp_dir().join(format!(
+            "blockzilla-hot-index-invalid-header-{}-{}.index",
+            std::process::id(),
+            unique_suffix()
+        ));
+        write_archive_v2_hot_block_index(&path, 0, 1, 0, &[]).unwrap();
+        let valid = std::fs::read(&path).unwrap();
+
+        let mut reserved = valid.clone();
+        reserved[10] = 1;
+        std::fs::write(&path, reserved).unwrap();
+        let error = read_archive_v2_hot_block_index(&path).unwrap_err();
+        assert!(error.to_string().contains("non-zero reserved"));
+
+        let mut unknown_flags = valid.clone();
+        unknown_flags[32..36].copy_from_slice(&(1u32 << 31).to_le_bytes());
+        std::fs::write(&path, unknown_flags).unwrap();
+        let error = read_archive_v2_hot_block_index(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown Archive V2 hot-block index flags")
+        );
+
+        let mut overflowing_rows = valid;
+        overflowing_rows[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(&path, overflowing_rows).unwrap();
+        assert!(read_archive_v2_hot_block_index(&path).is_err());
+
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

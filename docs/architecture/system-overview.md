@@ -31,8 +31,8 @@ The current top-level layout is:
 
 ```text
 blockzilla/                         Blockzilla CLI and archive builders
-hivezilla/                          current live prototype and executable
-edgezilla/
+services/
+  hivezilla/                        current live prototype and executable
   blockzilla-get-block/             read-only Worker and native reader tools
   old-faithful-get-block/           experimental read-only CAR compatibility
                                     Worker restored from preserved history
@@ -62,7 +62,8 @@ exist.
 | Hivezilla Yellowstone capture and repair tools | Implemented prototype |
 | Hivezilla multi-instance gRPC runtime | Planned |
 | Hivezilla shred capture/reconstruction | Planned |
-| Blockzilla long-running ingest receiver and scheduler | Planned |
+| Blockzilla finite archive scheduler and read-only status API | Restored, buildable, and experimental |
+| Hivezilla durable receiver | Implemented; Blockzilla-boundary integration and deployment remain planned |
 | Blockzilla R2/B2 publication | Planned |
 | Edgezilla read-only R2 Worker | Implemented |
 | Edgezilla read-only CAR compatibility Worker | Restored, buildable, and experimental |
@@ -202,7 +203,8 @@ explicit states.
 
 ## Repository evolution rules
 
-- Keep product lifecycle code in `blockzilla/`, `hivezilla/`, or `edgezilla/`.
+- Keep Blockzilla product code in `blockzilla/` and deployable Hivezilla and
+  Edgezilla processes in `services/`.
 - Extract a crate only after it has a stable responsibility and a real second
   consumer; avoid generic `core`, `common`, or `utils` crates.
 - A future Streamer reader crate may live under `crates/` once both CLI and
