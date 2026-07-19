@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { formatBytes } from '../src/lib/format.ts';
+import { formatBytes, formatStorageBytes } from '../src/lib/format.ts';
 import {
   liveEtaSecs,
   liveEtaStatus,
@@ -110,6 +110,12 @@ test('memory byte values use compact binary units and preserve unknown values', 
   assert.equal(formatBytes(0), '0 B');
   assert.equal(formatBytes(512 * 1024 * 1024), '512 MiB');
   assert.equal(formatBytes(1.5 * 1024 * 1024 * 1024), '1.5 GiB');
+});
+
+test('storage byte values use simple decimal MB and GB labels', () => {
+  assert.equal(formatStorageBytes(null), '—');
+  assert.equal(formatStorageBytes(512_000_000), '512 MB');
+  assert.equal(formatStorageBytes(1_500_000_000), '1.5 GB');
 });
 
 test('negative live metrics are unavailable', () => {

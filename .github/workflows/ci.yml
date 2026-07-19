@@ -169,11 +169,12 @@ jobs:
             services/hivezilla/scripts/run-grpc-raw-pull-source.sh \
             services/hivezilla/scripts/run-grpc-raw-pull-client.sh \
             services/hivezilla/scripts/run-grpc-receiver-bridge.sh
-      - name: Build native Hivezilla operational helpers
-        run: >-
-          cargo build --locked
-          -p hivezilla --bin hivezilla
-          -p hivezilla-object-store --bin blockzilla-s3-upload
+      - name: Test Python operational helpers
+        run: |
+          PYTHONPATH="$RUNNER_TEMP/hivezilla-python" \
+            python3 services/hivezilla/scripts/test_s3_multipart_upload.py
+          python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
+          python3 services/hivezilla/scripts/test_ingest_status_server.py
       - name: Test shell operational helpers
         run: |
           bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh

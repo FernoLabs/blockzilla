@@ -77,9 +77,11 @@ export function parseRuntimeOperations(value: unknown): RuntimeOperations | null
 export function runtimeOperationsIsFresh(
   value: RuntimeOperations,
   nowUnixSecs: number,
-  maxAgeSecs = 20
+  maxAgeSecs = 20,
+  maxFutureSkewSecs = 5
 ) {
-  return nowUnixSecs <= value.updated_unix_secs + maxAgeSecs;
+  return value.updated_unix_secs <= nowUnixSecs + maxFutureSkewSecs &&
+    nowUnixSecs <= value.updated_unix_secs + maxAgeSecs;
 }
 
 function parseRuntimeLiveCapture(value: unknown): RuntimeLiveCapture | null {

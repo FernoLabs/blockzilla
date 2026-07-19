@@ -17,20 +17,9 @@ complete node-owned cloud-overflow lifecycle.
 | `run-grpc-receiver-bridge.sh` | Copy a receiver's durable prefix into a standard raw generation without mutating the receiver tree |
 | `generate-grpc-replication-pki.sh` | Create an offline CA and push-replication identities |
 | `generate-grpc-pull-pki.sh` | Add pull identities to an existing replication trust bundle |
-
-Object-store upload, immutable readback verification, Backblaze usage
-reporting, and crash-safe R2 retention are implemented by the workspace Rust
-binary `blockzilla-s3-upload`. The recorder defaults to
-`/usr/local/bin/blockzilla-s3-upload`; deployments may select an exact installed
-binary with `BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN`.
-
-Both public status collectors are native Rust commands:
-`hivezilla serve-ingest-status` and `hivezilla serve-shred-status`. Their
-superseded Python implementations and tests have been removed.
-The receiver-ACK Telegram monitor is also native:
-`hivezilla monitor-pull-ack-telegram`. It keeps the existing `BLOCKZILLA_*`
-environment interface for deployment compatibility, while explicit CLI flags
-take precedence. Its bot token remains file-backed and is never logged.
+| `s3_multipart_upload.py` | Upload and verify bounded generations in an S3-compatible store; includes provider-specific retention support |
+| `pull_ack_telegram_monitor.py` | Alert when signed receiver acknowledgements stop advancing |
+| `ingest_status_server.py` | Serve a bounded, secret-free capture and signed-ACK status snapshot for the watcher UI |
 
 The launch wrappers expect a dedicated UID and file-backed secrets. Override
 their documented `BLOCKZILLA_*` environment variables for your deployment; do
@@ -98,9 +87,10 @@ Build both native operational binaries before running the shell suites. The
 object-store and shell tests use local fixtures only:
 
 ```bash
-cargo build --locked -p hivezilla --bin hivezilla
-cargo build --locked -p hivezilla-object-store --bin blockzilla-s3-upload
-cargo test --locked -p hivezilla-object-store --all-targets
+python3 -m pip install -r services/hivezilla/scripts/requirements.txt
+python3 services/hivezilla/scripts/test_s3_multipart_upload.py
+python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
+python3 services/hivezilla/scripts/test_ingest_status_server.py
 bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
 bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
 bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh
@@ -127,33 +117,13 @@ treated as delivered after restart: if shutdown or a network timeout makes the
 Telegram result unknowable, the monitor suppresses a duplicate notification.
 
 Review every filesystem limit, TLS identity, retention threshold, and cleanup
-policy before operating against real data. The current helper's generation
-cleanup requires a verified durable receiver acknowledgement; upload success
-alone does not trigger that cleanup.
-
-The V1 target makes a narrower distinction. Every source Hivezilla has its own
-private temporary cloud-overflow bucket or namespace. After a sealed segment is
-uploaded with a provider-verified end-to-end checksum (or verified read-back)
-and recorded in a durable local catalog, disk pressure may evict that local
-copy. The logical source record is not retired:
-the cloud object must remain available until the one configured terminal raw
-consumer writes verified exact objects plus a durable range index to its
-separate permanent raw dataset and cumulatively ACKs the exact contiguous
-prefix. Once the source persists that ACK and its retirement anchor, it may
-delete covered copies from both local disk and cloud.
-
-The target reconnect path also is not implemented by these wrappers. It chooses
-an atomic cutover `T`, resumes live delivery at `T`, and runs separately
-budgeted stateless range fetches over `[C, T)` from local disk or cloud. Bulk
-ranges may arrive out of order, but only one
-contiguous exact-byte ACK advances cleanup. Blockzilla schedules archive work
-and owns the canonical catalog; a separately fenced Hivezilla compact worker
-builds and uploads Archive V2 objects. Neither archive progress nor a public
-subscriber can acknowledge raw custody.
+policy before operating against real data. Upload success is not permission to
+delete a source generation: cleanup additionally requires a verified durable
+receiver acknowledgement.
 
 ## Read-only ingest status
 
-`hivezilla serve-ingest-status` reads only the raw cache and the monitoring copy of
+`ingest_status_server.py` reads only the raw cache and the monitoring copy of
 the signed receiver ACK. It selects public counters into a cached JSON document
 and never publishes endpoints, identities, journal IDs, block hashes, object
 keys, receipt hashes, alert text, tokens, command lines, or paths. It has no
@@ -170,7 +140,7 @@ Run it behind an authenticated same-origin reverse proxy. Bind it to loopback
 or an explicit private address; wildcard and public listeners are rejected:
 
 ```bash
-hivezilla serve-ingest-status \
+python3 services/hivezilla/scripts/ingest_status_server.py \
   --listen 127.0.0.1:8790 \
   --cache-root /path/to/read-only/grpc-cache \
   --ack-status-file /path/to/read-only/pull-ack-status.json \

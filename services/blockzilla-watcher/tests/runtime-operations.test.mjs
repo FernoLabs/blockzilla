@@ -85,4 +85,6 @@ test('uses a bounded freshness window', () => {
   assert.ok(parsed);
   assert.equal(runtimeOperationsIsFresh(parsed, 2_020), true);
   assert.equal(runtimeOperationsIsFresh(parsed, 2_021), false);
+  assert.equal(runtimeOperationsIsFresh(parsed, 1_994), false);
+  assert.equal(runtimeOperationsIsFresh(parsed, 1_995), true);
 });
