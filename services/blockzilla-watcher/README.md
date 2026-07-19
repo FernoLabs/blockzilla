@@ -96,6 +96,13 @@ The client reads:
   lines, endpoints, tokens, or filesystem paths. The fallback process sampler
   is deliberately limited to processes owned by the publisher's Unix user and
   excludes Blockzilla/Hivezilla work already represented elsewhere in the UI.
+- Optionally, `GET /api/v1/sidecars/ingest-pipeline/status.json` for the focused
+  `/ingest` page. This feed reports only secret-free capture, local retention,
+  signed receiver-ACK, indexer, R2, fallback, continuity, and incident fields.
+  The client polls it every five seconds and marks samples older than 30 seconds
+  stale. A receiver ACK proves durable backup storage; it must not be presented
+  as an indexer watermark. Indexing remains `unavailable` until its own durable
+  post-commit status is published.
 
 The standard-library-only runtime publisher can write that sidecar beside the
 built UI:
@@ -114,14 +121,21 @@ service, place `scripts/public-status-proxy.py` on the public boundary instead:
 ```sh
 python3 scripts/public-status-proxy.py \
   --listen 127.0.0.1:8787 \
-  --upstream 127.0.0.1:8786
+  --upstream 127.0.0.1:8786 \
+  --ingest-upstream 127.0.0.1:8790
 ```
 
 The proxy is read-only, preserves the status and SSE contracts, and strips
 absolute storage paths from full snapshots, sidecar JSON, and real-time
-patches. Keep the upstream on loopback. The listener may use loopback or the
-explicit private address targeted by the tunnel; wildcard and public binds are
-rejected.
+patches. The dedicated ingest route cannot accidentally fall through to the
+watcher upstream. Keep both upstreams on loopback. The listener may use
+loopback or an explicit private address; wildcard and public binds are rejected.
+
+The ingest status publisher must select fields from recorder and receiver
+state rather than proxying raw files. In particular, never publish upstream
+endpoints, journal or origin identifiers, block hashes, digests, receipt object
+keys, command lines, tokens, or filesystem paths. The browser must not receive
+Dokploy credentials and the status endpoint must remain read-only.
 
 Raw WAL capture is labeled as capture, not indexing. Archive materialization
 remains a separate Blockzilla task. A completed CAR transfer undergoing SHA-256

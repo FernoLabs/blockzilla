@@ -19,16 +19,25 @@ import {
   parseRuntimeOperations,
   type RuntimeOperations
 } from '$lib/runtime-operations';
+import {
+  parseIngestPipelineStatus,
+  type IngestPipelineStatus
+} from '$lib/ingest-pipeline-status';
 
 export type ConnectionState = 'connecting' | 'live' | 'retrying' | 'offline';
+export type IngestFeedState = 'loading' | 'live' | 'retrying' | 'unavailable';
 
 const STATUS_REQUEST_TIMEOUT_MS = 5_000;
 const STATUS_RETRY_INTERVAL_MS = 10_000;
+const INGEST_REQUEST_TIMEOUT_MS = 4_000;
 
 export class WatcherClient {
   snapshot = $state.raw<PipelineSnapshot | null>(null);
   blockTimeGapBackfill = $state.raw<BlockTimeGapBackfill | null>(null);
   runtimeOperations = $state.raw<RuntimeOperations | null>(null);
+  ingestPipeline = $state.raw<IngestPipelineStatus | null>(null);
+  ingestFeedState = $state<IngestFeedState>('loading');
+  ingestFeedMessage = $state('Loading ingest status');
   connectionState = $state<ConnectionState>('connecting');
   connectionMessage = $state('Connecting');
 
@@ -42,6 +51,8 @@ export class WatcherClient {
     let statusFetchInFlight = false;
     let backfillFetchInFlight = false;
     let runtimeFetchInFlight = false;
+    let ingestFetchInFlight = false;
+    let ingestRequestController: AbortController | null = null;
 
     const acceptPayload = (value: unknown, sequence?: number) => {
       const normalized = parsePipelineSnapshot(value);
@@ -177,6 +188,49 @@ export class WatcherClient {
       }
     };
 
+    const refreshIngestPipeline = async () => {
+      if (ingestFetchInFlight) return;
+      ingestFetchInFlight = true;
+      const controller = new AbortController();
+      ingestRequestController = controller;
+      const requestTimeout = window.setTimeout(
+        () => controller.abort(),
+        INGEST_REQUEST_TIMEOUT_MS
+      );
+      try {
+        const response = await fetch('/api/v1/sidecars/ingest-pipeline/status.json', {
+          cache: 'no-store',
+          headers: { accept: 'application/json' },
+          signal: controller.signal
+        });
+        if (disposed) return;
+        if (response.status === 404) {
+          this.ingestPipeline = null;
+          this.ingestFeedState = 'unavailable';
+          this.ingestFeedMessage = 'Ingest status publisher is not installed';
+          return;
+        }
+        if (!response.ok) throw new Error(`ingest status ${response.status}`);
+        const status = parseIngestPipelineStatus(await response.json());
+        if (!status) throw new Error('invalid ingest status');
+        if (disposed) return;
+        this.ingestPipeline = status;
+        this.ingestFeedState = 'live';
+        this.ingestFeedMessage = 'Ingest status is updating';
+      } catch (error) {
+        if (!disposed) {
+          this.ingestFeedState = this.ingestPipeline ? 'retrying' : 'unavailable';
+          this.ingestFeedMessage = controller.signal.aborted
+            ? 'Ingest status timed out; retrying'
+            : `Ingest status unavailable: ${errorMessage(error)}`;
+        }
+      } finally {
+        window.clearTimeout(requestTimeout);
+        if (ingestRequestController === controller) ingestRequestController = null;
+        ingestFetchInFlight = false;
+      }
+    };
+
     const events = new EventSource('/api/v1/events');
     void resyncSnapshot();
     const statusPoll = window.setInterval(() => {
@@ -186,6 +240,8 @@ export class WatcherClient {
     const backfillPoll = window.setInterval(refreshBlockTimeGapBackfill, 15_000);
     void refreshRuntimeOperations();
     const runtimePoll = window.setInterval(refreshRuntimeOperations, 5_000);
+    void refreshIngestPipeline();
+    const ingestPoll = window.setInterval(refreshIngestPipeline, 5_000);
     events.onopen = () => {
       if (disposed) return;
       // The service sequence is process-local and restarts from zero. Reset
@@ -255,6 +311,9 @@ export class WatcherClient {
       window.clearInterval(statusPoll);
       window.clearInterval(backfillPoll);
       window.clearInterval(runtimePoll);
+      window.clearInterval(ingestPoll);
+      ingestRequestController?.abort();
+      ingestRequestController = null;
       this.#disconnect = null;
     };
     this.#disconnect = disconnect;

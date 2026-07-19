@@ -118,6 +118,7 @@ GENERATION_RETENTION_LOCK=$CACHE_ROOT/.retention.lock
 B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 REPLAY_RECOVERY_FILE=$GENERATION_MONITORING_DIR/replay-recovery-floor.json
 REPLAY_GAP_DIR=$ACTIVE_GENERATION_DIR/replay-gaps
+REPLAY_GAP_REGISTRY_DIR=$GENERATION_MONITORING_DIR/replay-gaps
 if generation_cache_enabled; then
   OUTPUT_DIR=$ACTIVE_GENERATION_DIR
 fi
@@ -2378,7 +2379,12 @@ publish_replay_gap_record_to_generation() {
 }
 
 publish_replay_gap_record() {
-  publish_replay_gap_record_to_generation "$ACTIVE_GENERATION_DIR" "$@"
+  publish_replay_gap_record_to_generation "$ACTIVE_GENERATION_DIR" "$@" \
+    || return 1
+  # Generation evidence authorizes replay recovery. This second immutable copy
+  # is an audit registry only, so the status page retains continuity history
+  # after ACK-covered generations are safely retired.
+  publish_replay_gap_record_to_generation "$GENERATION_MONITORING_DIR" "$@"
 }
 
 publish_replay_recovery_floor() {
@@ -2899,9 +2905,12 @@ rotate_active_generation_unlocked() {
     return 1
   fi
   if [ "$REPLAY_RECOVERY_NEEDS_CARRY" = true ] \
-    && ! publish_replay_gap_record_to_generation "$rotation_next" \
+    && { ! publish_replay_gap_record_to_generation "$rotation_next" \
       "$REPLAY_RECOVERY_ANCHOR_SLOT" "$REPLAY_RECOVERY_REQUESTED_SLOT" \
-      "$REPLAY_MIN_RESUME_SLOT" "$REPLAY_PROVIDER_AVAILABLE_SLOT"
+      "$REPLAY_MIN_RESUME_SLOT" "$REPLAY_PROVIDER_AVAILABLE_SLOT" \
+      || ! publish_replay_gap_record_to_generation "$GENERATION_MONITORING_DIR" \
+        "$REPLAY_RECOVERY_ANCHOR_SLOT" "$REPLAY_RECOVERY_REQUESTED_SLOT" \
+        "$REPLAY_MIN_RESUME_SLOT" "$REPLAY_PROVIDER_AVAILABLE_SLOT"; }
   then
     echo "seeded cache generation could not retain provider replay-gap evidence" >&2
     rm -f "$verify_report" "$seed_report" "$seed_report.verified"

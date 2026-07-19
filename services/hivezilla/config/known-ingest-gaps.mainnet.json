@@ -1,0 +1,8 @@
+[
+  {
+    "from_slot": 433728271,
+    "to_slot": 433731796,
+    "produced_blocks": 3526,
+    "coverage": "rpc_recoverable"
+  }
+]

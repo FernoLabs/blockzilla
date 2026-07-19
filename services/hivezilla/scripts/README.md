@@ -15,6 +15,7 @@ specific server, provider account, or deployment system.
 | `generate-grpc-pull-pki.sh` | Add pull identities to an existing replication trust bundle |
 | `s3_multipart_upload.py` | Upload and verify bounded generations in an S3-compatible store; includes provider-specific retention support |
 | `pull_ack_telegram_monitor.py` | Alert when signed receiver acknowledgements stop advancing |
+| `ingest_status_server.py` | Serve a bounded, secret-free capture and signed-ACK status snapshot for the watcher UI |
 
 The launch wrappers expect a dedicated UID and file-backed secrets. Override
 their documented `BLOCKZILLA_*` environment variables for your deployment; do
@@ -85,6 +86,7 @@ The object-store helper requires Python 3.11 or newer and the dependency in
 python3 -m pip install -r services/hivezilla/scripts/requirements.txt
 python3 services/hivezilla/scripts/test_s3_multipart_upload.py
 python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
+python3 services/hivezilla/scripts/test_ingest_status_server.py
 bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
 bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
 bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh
@@ -95,3 +97,48 @@ Review every filesystem limit, TLS identity, retention threshold, and cleanup
 policy before operating against real data. Upload success is not permission to
 delete a source generation: cleanup additionally requires a verified durable
 receiver acknowledgement.
+
+## Read-only ingest status
+
+`ingest_status_server.py` reads only the raw cache and the monitoring copy of
+the signed receiver ACK. It selects public counters into a cached JSON document
+and never publishes endpoints, identities, journal IDs, block hashes, object
+keys, receipt hashes, alert text, tokens, command lines, or paths. It has no
+mutation endpoint and does not need the Docker socket or any secret mount.
+Replay-gap evidence is also read from the recorder's persistent
+`monitoring/replay-gaps` registry, so an ACK-covered generation can be retired
+without making a known continuity loss disappear from the dashboard.
+The checked-in mainnet seed records the already-audited
+`433728271`–`433731796` window as RPC-recoverable. When `--known-gaps-file` is
+set, a missing or non-regular file fails the publisher health check instead of
+silently reporting false continuity.
+
+Run it behind an authenticated same-origin reverse proxy. Bind it to loopback
+or an explicit private address; wildcard and public listeners are rejected:
+
+```bash
+python3 services/hivezilla/scripts/ingest_status_server.py \
+  --listen 127.0.0.1:8790 \
+  --cache-root /path/to/read-only/grpc-cache \
+  --ack-status-file /path/to/read-only/pull-ack-status.json \
+  --known-gaps-file services/hivezilla/config/known-ingest-gaps.mainnet.json \
+  --disk-critical-free-bytes 402653184 \
+  --disk-warning-free-bytes 805306368
+```
+
+By default, missing WAL progress fails red after 60 seconds and a stale signed
+ACK fails red after 120 seconds. Both thresholds are explicit CLI options for
+deployments with different operational tolerances. Disk thresholds must match
+the recorder deployment: the values above are the current roughly 403 MB
+critical and 805 MB warning gates for the 3 GB Hetzner volume. The publisher's
+conservative 20/30 GiB defaults match the standalone recorder defaults and
+must be overridden for that small volume.
+
+The watcher reads
+`/api/v1/sidecars/ingest-pipeline/status.json`. Route that one path to this
+service, for example with the public watcher's dedicated loopback
+`--ingest-upstream 127.0.0.1:8790`; keep every management and raw-data path
+unreachable. The ACK proves
+durable receiver storage, not indexing. Indexer and NAS fallback fields remain
+`unavailable` in this source-side snapshot and the watcher fills them only from
+its separate, fresh NAS telemetry.

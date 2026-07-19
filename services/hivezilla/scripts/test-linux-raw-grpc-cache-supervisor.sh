@@ -267,6 +267,7 @@ GENERATION_RETENTION_LOCK=$CACHE_ROOT/.retention.lock
 B2_USAGE_REPORT_FILE=$GENERATION_MONITORING_DIR/b2-account-usage.json
 REPLAY_RECOVERY_FILE=$GENERATION_MONITORING_DIR/replay-recovery-floor.json
 REPLAY_GAP_DIR=$ACTIVE_GENERATION_DIR/replay-gaps
+REPLAY_GAP_REGISTRY_DIR=$GENERATION_MONITORING_DIR/replay-gaps
 ALERT_STATE_DIR=$CACHE_ROOT/alert-state
 JOURNAL_FILE=$ACTIVE_GENERATION_DIR/raw-blocks.jsonl
 MAX_RECORD_BYTES=1024
@@ -420,6 +421,7 @@ persist_replay_recovery_from_report "$local_replay_report"
 load_replay_recovery_floor
 test "$REPLAY_MIN_RESUME_SLOT" -eq 200
 test -f "$REPLAY_GAP_DIR/replay-gap-123-123-200-200.json"
+test -f "$REPLAY_GAP_REGISTRY_DIR/replay-gap-123-123-200-200.json"
 CACHE_MODE=b2-generations
 
 # Rotation never follows a lock-file symlink or mutates its target.
@@ -1429,5 +1431,6 @@ load_replay_recovery_floor
 test -z "$REPLAY_MIN_RESUME_SLOT"
 test -f "$SEALED_GENERATION_DIR/slot-00000000000000000200/replay-gaps/replay-gap-123-123-200-200.json"
 test ! -e "$ACTIVE_GENERATION_DIR/replay-gaps/replay-gap-123-123-200-200.json"
+test -f "$REPLAY_GAP_REGISTRY_DIR/replay-gap-123-123-200-200.json"
 
 printf '%s\n' "linux raw recorder bounded-cache tests: ok"
