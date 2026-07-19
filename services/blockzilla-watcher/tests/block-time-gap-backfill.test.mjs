@@ -16,6 +16,8 @@ function status(overrides = {}) {
     backfill: {
       epochs_done: 265,
       epochs_total: 526,
+      workers_configured: 2,
+      active_workers: 2,
       source_bytes_done: 2_500,
       source_bytes_total: 10_000,
       throughput_bytes_per_sec: 120,
@@ -33,6 +35,10 @@ test('parses the allowlisted public backfill status', () => {
   assert.deepEqual(parseBlockTimeGapBackfill(status()), status());
 });
 
+test('accepts an intentionally stopped backfill', () => {
+  assert.deepEqual(parseBlockTimeGapBackfill(status({ state: 'stopped' })), status({ state: 'stopped' }));
+});
+
 test('rejects invalid state and inconsistent counters', () => {
   assert.equal(parseBlockTimeGapBackfill(status({ state: 'mystery' })), null);
   assert.equal(parseBlockTimeGapBackfill(status({
@@ -40,6 +46,9 @@ test('rejects invalid state and inconsistent counters', () => {
   })), null);
   assert.equal(parseBlockTimeGapBackfill(status({
     backfill: { ...status().backfill, source_bytes_done: 10_001 }
+  })), null);
+  assert.equal(parseBlockTimeGapBackfill(status({
+    backfill: { ...status().backfill, active_workers: 3 }
   })), null);
 });
 

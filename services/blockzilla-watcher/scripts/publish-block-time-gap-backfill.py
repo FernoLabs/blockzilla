@@ -18,6 +18,7 @@ STATES = {
     "waiting_for_resources",
     "running",
     "paused_for_resources",
+    "stopped",
     "failed",
     "complete",
 }
@@ -70,6 +71,13 @@ def public_status(private):
     if epochs_done > epochs_total or source_bytes_done > source_bytes_total:
         raise ValueError("backfill counters exceed their totals")
 
+    workers_configured = nonnegative_int(
+        backfill.get("workers_configured"), "workers_configured"
+    )
+    active_workers = nonnegative_int(backfill.get("active_workers"), "active_workers")
+    if active_workers > workers_configured:
+        raise ValueError("active_workers exceeds workers_configured")
+
     progress_state = current.get("progress_state")
     if progress_state is not None and not isinstance(progress_state, str):
         raise ValueError("progress_state must be a string or null")
@@ -89,6 +97,8 @@ def public_status(private):
         "backfill": {
             "epochs_done": epochs_done,
             "epochs_total": epochs_total,
+            "workers_configured": workers_configured,
+            "active_workers": active_workers,
             "source_bytes_done": source_bytes_done,
             "source_bytes_total": source_bytes_total,
             "throughput_bytes_per_sec": nonnegative_number(

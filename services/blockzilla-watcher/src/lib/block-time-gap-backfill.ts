@@ -3,6 +3,7 @@ export type BlockTimeGapBackfillState =
   | 'waiting_for_resources'
   | 'running'
   | 'paused_for_resources'
+  | 'stopped'
   | 'failed'
   | 'complete';
 
@@ -14,6 +15,8 @@ export type BlockTimeGapBackfill = {
   backfill: {
     epochs_done: number;
     epochs_total: number;
+    workers_configured: number;
+    active_workers: number;
     source_bytes_done: number;
     source_bytes_total: number;
     throughput_bytes_per_sec: number;
@@ -33,6 +36,7 @@ const BACKFILL_STATES = new Set<BlockTimeGapBackfillState>([
   'waiting_for_resources',
   'running',
   'paused_for_resources',
+  'stopped',
   'failed',
   'complete'
 ]);
@@ -48,6 +52,8 @@ export function parseBlockTimeGapBackfill(value: unknown): BlockTimeGapBackfill 
   const updatedUnixSecs = integerValue(root.updated_unix_secs);
   const epochsDone = integerValue(backfill.epochs_done);
   const epochsTotal = integerValue(backfill.epochs_total);
+  const workersConfigured = integerValue(backfill.workers_configured);
+  const activeWorkers = integerValue(backfill.active_workers);
   const sourceBytesDone = integerValue(backfill.source_bytes_done);
   const sourceBytesTotal = integerValue(backfill.source_bytes_total);
   const throughput = numberValue(backfill.throughput_bytes_per_sec);
@@ -66,6 +72,9 @@ export function parseBlockTimeGapBackfill(value: unknown): BlockTimeGapBackfill 
     epochsDone === null ||
     epochsTotal === null ||
     epochsDone > epochsTotal ||
+    workersConfigured === null ||
+    activeWorkers === null ||
+    activeWorkers > workersConfigured ||
     sourceBytesDone === null ||
     sourceBytesTotal === null ||
     sourceBytesDone > sourceBytesTotal ||

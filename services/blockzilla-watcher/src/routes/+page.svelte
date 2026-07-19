@@ -377,7 +377,7 @@
   const blockTimeGapBackfillActive = $derived(
     blockTimeGapBackfill !== null &&
       blockTimeGapBackfillFresh &&
-      !['complete', 'failed'].includes(blockTimeGapBackfill.state)
+      !['complete', 'failed', 'stopped'].includes(blockTimeGapBackfill.state)
   );
   const liveCaptureActive = $derived(
     connectionState === 'live' &&
@@ -1159,6 +1159,7 @@
     if (value.state === 'running') return value.current.epoch === null ? 'Running' : `Epoch ${formatInteger(value.current.epoch)}`;
     if (value.state === 'paused_for_resources') return `Paused${epoch}`;
     if (value.state === 'waiting_for_resources') return `Waiting${epoch}`;
+    if (value.state === 'stopped') return `Stopped${epoch}`;
     if (value.state === 'starting') return 'Starting';
     if (value.state === 'complete') return 'Complete';
     return `Failed${epoch}`;
@@ -1236,9 +1237,13 @@
           <div class="backfill-progress" class:stale={!blockTimeGapBackfillFresh}>
             <div class="archive-progress-copy">
               <span>Block-time gaps</span>
-              <strong>
+              <strong
+                title={`${formatInteger(blockTimeGapBackfill.backfill.active_workers)} active of ${formatInteger(blockTimeGapBackfill.backfill.workers_configured)} configured workers`}
+              >
                 {formatInteger(blockTimeGapBackfill.backfill.epochs_done)} /
                 {formatInteger(blockTimeGapBackfill.backfill.epochs_total)} epochs
+                · {formatInteger(blockTimeGapBackfill.backfill.active_workers)}/{formatInteger(blockTimeGapBackfill.backfill.workers_configured)}
+                {blockTimeGapBackfill.backfill.workers_configured === 1 ? 'worker' : 'workers'}
               </strong>
             </div>
             <span
@@ -1265,6 +1270,8 @@
                   done
                 {:else if blockTimeGapBackfill.state === 'failed'}
                   failed
+                {:else if blockTimeGapBackfill.state === 'stopped'}
+                  stopped
                 {:else if blockTimeGapBackfill.backfill.eta_reliable && blockTimeGapBackfill.backfill.eta_secs !== null}
                   {formatDuration(blockTimeGapBackfill.backfill.eta_secs)}
                 {:else}
