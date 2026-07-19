@@ -296,7 +296,9 @@ pub struct EpochSnapshot {
     pub state: HistoricalState,
     #[serde(default)]
     pub registry_order: RegistryOrder,
+    #[serde(serialize_with = "serialize_optional_path_basename")]
     pub input_path: Option<PathBuf>,
+    #[serde(serialize_with = "serialize_path_basename")]
     pub output_path: PathBuf,
     pub car_bytes: u64,
     pub artifacts: Vec<ArtifactSnapshot>,
@@ -393,7 +395,9 @@ pub struct LiveCaptureSnapshot {
     #[serde(default)]
     pub is_current: bool,
     pub state: LiveState,
+    #[serde(serialize_with = "serialize_path_basename")]
     pub capture_dir: PathBuf,
+    #[serde(serialize_with = "serialize_optional_path_basename")]
     pub output_path: Option<PathBuf>,
     pub ready_to_package: bool,
     pub repair_gate: bool,
@@ -422,6 +426,30 @@ pub struct LiveCaptureSnapshot {
     pub peak_rss_bytes: Option<u64>,
     pub message: Option<String>,
     pub updated_unix_secs: u64,
+}
+
+fn serialize_path_basename<S>(path: &Path, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let basename = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    serializer.serialize_str(&basename)
+}
+
+fn serialize_optional_path_basename<S>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match path.as_deref().and_then(Path::file_name) {
+        Some(name) => serializer.serialize_some(&name.to_string_lossy()),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18672,6 +18700,14 @@ mod tests {
         assert_eq!(value["summary"]["legacy_compact_capacity_admitted"], 0);
         assert_eq!(value["summary"]["legacy_compact_active"], 0);
         assert_eq!(value["epochs"][0]["registry_order"], "unknown");
+        assert_eq!(value["epochs"][0]["input_path"], "epoch-700.car");
+        assert_eq!(value["epochs"][0]["output_path"], "epoch-700");
+        assert_eq!(value["live"][0]["capture_dir"], "epoch-701-live");
+        assert_eq!(value["live"][0]["output_path"], "epoch-701");
+        assert!(
+            !serde_json::to_string(&value).unwrap().contains("/tmp"),
+            "public monitoring JSON must not expose absolute storage paths"
+        );
         assert_eq!(
             value["live"][0]["source_capture_ids"],
             serde_json::json!([])
