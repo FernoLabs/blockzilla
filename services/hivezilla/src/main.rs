@@ -25,8 +25,12 @@ use hivezilla::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
         sync_epoch_info,
     },
+    supervisor::{
+        BackoffPolicy, RestartPolicy, SupervisorConfig, SupervisorNotificationKind,
+        notify_supervisor, run_supervisor,
+    },
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, ffi::OsString, time::Duration};
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Debug, Parser)]
@@ -64,6 +68,10 @@ enum Command {
     BenchFixture(BenchFixtureArgs),
     /// Validate a redundant-ingest JSON config and print only its redacted summary.
     ValidateIngestConfig(ValidateIngestConfigArgs),
+    /// Portably supervise one long-lived service with bounded restart and health policy.
+    Supervise(SuperviseArgs),
+    /// Notify a parent Hivezilla supervisor of readiness or one heartbeat.
+    NotifySupervisor(NotifySupervisorArgs),
 }
 
 #[derive(Debug, Args)]
@@ -79,6 +87,124 @@ struct RunArgs {
 struct ValidateIngestConfigArgs {
     #[arg(long)]
     config: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct SuperviseArgs {
+    #[arg(long)]
+    name: String,
+
+    #[arg(long)]
+    state_dir: std::path::PathBuf,
+
+    #[arg(long)]
+    working_dir: Option<std::path::PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = RestartPolicyArg::OnFailure)]
+    restart: RestartPolicyArg,
+
+    #[arg(long, default_value_t = 1_000)]
+    initial_backoff_ms: u64,
+
+    #[arg(long, default_value_t = 60_000)]
+    max_backoff_ms: u64,
+
+    /// Integer fixed point: 2000 means 2.0x.
+    #[arg(long, default_value_t = 2_000)]
+    backoff_factor_milli: u32,
+
+    /// Maximum restarts permitted inside the restart window.
+    #[arg(long, default_value_t = 5)]
+    restart_burst: usize,
+
+    #[arg(long, default_value_t = 60)]
+    restart_window_secs: u64,
+
+    /// Uptime that resets crash-loop history and exponential backoff.
+    #[arg(long, default_value_t = 300)]
+    healthy_after_secs: u64,
+
+    /// Require a tokenized ready notification within this time. Zero disables.
+    #[arg(long, default_value_t = 0)]
+    readiness_timeout_secs: u64,
+
+    /// Require notifications to keep advancing after readiness. Zero disables.
+    #[arg(long, default_value_t = 0)]
+    heartbeat_timeout_secs: u64,
+
+    #[arg(long, default_value_t = 45)]
+    stop_timeout_secs: u64,
+
+    /// Executable and arguments, placed after `--`.
+    #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+    command: Vec<OsString>,
+}
+
+impl SuperviseArgs {
+    fn into_config(mut self) -> Result<SupervisorConfig> {
+        anyhow::ensure!(
+            !self.command.is_empty(),
+            "supervise requires a command after --"
+        );
+        let program = self.command.remove(0);
+        Ok(SupervisorConfig {
+            name: self.name,
+            state_dir: self.state_dir,
+            program,
+            args: self.command,
+            working_dir: self.working_dir,
+            restart_policy: self.restart.into(),
+            backoff: BackoffPolicy {
+                initial: Duration::from_millis(self.initial_backoff_ms),
+                maximum: Duration::from_millis(self.max_backoff_ms),
+                factor_milli: self.backoff_factor_milli,
+            },
+            restart_burst: self.restart_burst,
+            restart_window: Duration::from_secs(self.restart_window_secs),
+            healthy_after: Duration::from_secs(self.healthy_after_secs),
+            readiness_timeout: Duration::from_secs(self.readiness_timeout_secs),
+            heartbeat_timeout: Duration::from_secs(self.heartbeat_timeout_secs),
+            stop_timeout: Duration::from_secs(self.stop_timeout_secs),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RestartPolicyArg {
+    Never,
+    OnFailure,
+    Always,
+}
+
+impl From<RestartPolicyArg> for RestartPolicy {
+    fn from(value: RestartPolicyArg) -> Self {
+        match value {
+            RestartPolicyArg::Never => Self::Never,
+            RestartPolicyArg::OnFailure => Self::OnFailure,
+            RestartPolicyArg::Always => Self::Always,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct NotifySupervisorArgs {
+    #[arg(value_enum)]
+    kind: SupervisorNotificationKindArg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SupervisorNotificationKindArg {
+    Ready,
+    Heartbeat,
+}
+
+impl From<SupervisorNotificationKindArg> for SupervisorNotificationKind {
+    fn from(value: SupervisorNotificationKindArg) -> Self {
+        match value {
+            SupervisorNotificationKindArg::Ready => Self::Ready,
+            SupervisorNotificationKindArg::Heartbeat => Self::Heartbeat,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -975,6 +1101,18 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&config.redacted_summary())?
             );
+        }
+        Command::Supervise(args) => {
+            let report = run_supervisor(args.into_config()?).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            anyhow::ensure!(
+                report.successful,
+                "supervised service did not exit successfully"
+            );
+        }
+        Command::NotifySupervisor(args) => {
+            notify_supervisor(args.kind.into())?;
+            println!("{{\"notified\":true}}");
         }
     }
 

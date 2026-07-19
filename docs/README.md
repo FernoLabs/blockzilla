@@ -13,6 +13,9 @@ Current guides: [Blockzilla CLI](../blockzilla/README.md),
 - [Archive V2 hot-block format](reference/archive-v2-hot-block-format.md)
   documents the files and records implemented by `blockzilla-format` and the
   Blockzilla builders.
+- [FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
+  hands off the completed-epoch read SDK and authenticated Range-gateway flow;
+  the FireWatch adapter itself remains work for the FireWatch repository.
 
 Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
@@ -22,13 +25,15 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
   from network input to storage, edge serving, and local indexers.
 - [System overview](architecture/system-overview.md): product ownership and the
   proposed end state.
-- [Local sync and indexing](architecture/local-streaming.md): proposed local
-  indexer seeding and streaming; its commands are not implemented yet.
+- [Local sync and indexing](architecture/local-streaming.md): local indexer
+  direction and the boundary between the implemented reader foundation and
+  still-proposed sync, sink, and checkpoint commands.
 
 ## Research and history
 
 - [Horizon problem statement](design/horizon-problem-statement.md)
 - [Live-ingest redundancy](design/live-ingest-redundancy.md)
+- [Portable Hivezilla supervisor](design/portable-supervisor.md)
 - [Archive V2 evolution](design/archive-v2-evolution.md)
 - [Log compression](design/log-compression.md)
 - [Earlier live-producer design](guides/live-archive-producer.md)

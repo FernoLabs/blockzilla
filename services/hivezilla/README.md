@@ -33,6 +33,7 @@ The main command groups are:
 | Retain | `record-grpc-raw`, `inspect-grpc-raw`, `verify-grpc-raw-poh`, `materialize-grpc-raw` |
 | Capture | `capture-grpc`, `inspect-capture` |
 | Repair | `sync-rpc-epoch`, `backfill-rpc`, `prepare-epoch-repair` |
+| Operate | `supervise`, `notify-supervisor` |
 
 Use command-specific `--help` before starting a networked or disk-writing task.
 Examples reference credentials through environment variables or files; do not
@@ -53,6 +54,24 @@ hivezilla inspect-grpc-raw \
 The full audit holds the writer lock and checks all sealed WAL segments, every
 handoff row, payload checksums, and protobuf decoding. Run it only against a
 stopped capture or an immutable filesystem snapshot.
+
+Long-lived source processes can use Hivezilla's portable supervisor instead of
+depending on systemd or Docker for restart policy:
+
+```bash
+hivezilla supervise \
+  --name mainnet-grpc-a \
+  --state-dir /var/lib/blockzilla/supervisor/mainnet-grpc-a \
+  --restart on-failure \
+  --restart-burst 4 \
+  --restart-window-secs 120 \
+  -- \
+  hivezilla record-grpc-raw [source arguments]
+```
+
+Rapid failures are fenced as `crash_loop`; they are never retried forever.
+Optional tokenized readiness and heartbeat notifications are described in the
+[portable-supervisor design](../../docs/design/portable-supervisor.md).
 
 The durability model and unfinished work are described in the
 [live-ingest design](../../docs/design/live-ingest-redundancy.md). Keep raw spools

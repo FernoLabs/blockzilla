@@ -25,22 +25,23 @@ use blockzilla_format::{
     ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
     ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotTxRow, ArchiveV2HotV0Message,
     ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset,
-    ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, CompactBlockHeader, CompactInnerInstruction,
-    CompactInnerInstructions, CompactLogStream, CompactMessageHeader, CompactMetaV1,
-    CompactPohEntry, CompactPubkey, CompactReturnData, CompactReward, CompactShredding,
-    CompactTokenBalance, CompactTransactionError, KeyIndex, KeyStore, LIVE_PRE_HOT_BLOCK_VERSION,
-    LIVE_PUBKEY_RUN_HOT_FILE, LIVE_PUBKEY_RUN_RECORD_LEN, LIVE_PUBKEY_RUNS_DIR, LivePreHotBlock,
-    LivePreHotRecord, LogEvent, OwnedCompactAddressTableLookup, OwnedCompactInstruction,
-    OwnedCompactLegacyMessage, OwnedCompactMessage, OwnedCompactRecentBlockhash,
-    OwnedCompactTransaction, OwnedCompactV0Message, SplitCompactIndexRecord,
-    WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
-    WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-    WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-    WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block, WincodeArchiveV2BlockHeader,
-    WincodeArchiveV2Footer, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisAccount,
-    WincodeArchiveV2GenesisBuiltin, WincodeArchiveV2GenesisEpochSchedule,
-    WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams,
-    WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
+    ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, BLOCK_TIME_GAP_FILE, CompactBlockHeader,
+    CompactInnerInstruction, CompactInnerInstructions, CompactLogStream, CompactMessageHeader,
+    CompactMetaV1, CompactPohEntry, CompactPubkey, CompactReturnData, CompactReward,
+    CompactShredding, CompactTokenBalance, CompactTransactionError, KeyIndex, KeyStore,
+    LIVE_PRE_HOT_BLOCK_VERSION, LIVE_PUBKEY_RUN_HOT_FILE, LIVE_PUBKEY_RUN_RECORD_LEN,
+    LIVE_PUBKEY_RUNS_DIR, LivePreHotBlock, LivePreHotRecord, LogEvent,
+    OwnedCompactAddressTableLookup, OwnedCompactInstruction, OwnedCompactLegacyMessage,
+    OwnedCompactMessage, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
+    OwnedCompactV0Message, SplitCompactIndexRecord, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
+    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
+    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
+    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block,
+    WincodeArchiveV2BlockHeader, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
+    WincodeArchiveV2GenesisAccount, WincodeArchiveV2GenesisBuiltin,
+    WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams,
+    WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
+    WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
     WincodeArchiveV2NoRegistryAddressTableLookup, WincodeArchiveV2NoRegistryBlock,
     WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryGenesis,
     WincodeArchiveV2NoRegistryGenesisAccount, WincodeArchiveV2NoRegistryGenesisBuiltin,
@@ -952,6 +953,7 @@ pub(crate) fn build_hot_blocks(
         )?;
     }
 
+    let mut blockhash_index_v3 = full_blockhash_index_v3_publisher(output_dir, max_blocks)?;
     let mut scanner = RawCarScanner::open_with_buffer(input, BLOCKHASH_SCAN_BUFFER_SIZE)?;
     scanner.skip_header()?;
     let mut pending = PendingBlock::default();
@@ -1040,6 +1042,7 @@ pub(crate) fn build_hot_blocks(
                     None,
                 )?;
                 let slot = pending.last_slot;
+                let block_time = record.header.compact.block_time;
                 let expected_blockhash = blockhashes.get(blockhash_index).with_context(|| {
                     format!("missing blockhash registry entry for blockhash id {blockhash_index}")
                 })?;
@@ -1111,6 +1114,9 @@ pub(crate) fn build_hot_blocks(
                     slot,
                     shredding: block_shredding,
                 })?;
+                if let Some(index) = blockhash_index_v3.as_mut() {
+                    index.push(slot, &sidecar.blockhash, block_time)?;
+                }
                 timings.hot_poh_write += poh_started.elapsed();
                 if let (Some(access_writer), Some(store)) =
                     (access_writer.as_mut(), access_store.as_ref())
@@ -1211,6 +1217,12 @@ pub(crate) fn build_hot_blocks(
     write_archive_v2_hot_block_index(&index_path, blob_offset, level, 0, &rows)?;
     if include_access {
         write_archive_v2_block_access_index(&access_index_path, access_offset, 0, &access_rows)?;
+    }
+    // The metadata footer is the completion marker for this archive. Publish and
+    // durably sync the complete timestamp index and its derived gap sidecar first,
+    // so a failed publication can never leave an apparently complete archive.
+    if let Some(index) = blockhash_index_v3 {
+        index.publish(rows.len() as u64)?;
     }
     write_hot_meta(
         &mut meta_writer,
@@ -1558,6 +1570,8 @@ pub(crate) fn build_hot_blocks_first_seen(
     let shredding_path = output_dir.join(SHREDDING_FILE);
     let vote_hash_registry_path = output_dir.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE);
     let first_seen_manifest_path = output_dir.join(FIRST_SEEN_REGISTRY_MANIFEST_FILE);
+    let blockhash_index_v3_path = output_dir.join(BLOCKHASH_INDEX_V3_FILE);
+    let block_time_gap_path = output_dir.join(BLOCK_TIME_GAP_FILE);
     let next_seed_path = output_dir.join(FIRST_SEEN_HOT_SEED_FILE);
     let previous_tail_path = output_dir.join(PREV_BLOCKHASH_TAIL_FILE);
     let scan_complete_path =
@@ -1568,6 +1582,8 @@ pub(crate) fn build_hot_blocks_first_seen(
         &registry_counts_path,
         &registry_index_path,
         &blockhash_registry_path,
+        &blockhash_index_v3_path,
+        &block_time_gap_path,
         &blocks_path,
         &index_path,
         &access_path,
@@ -1681,6 +1697,7 @@ pub(crate) fn build_hot_blocks_first_seen(
     let mut first_seen_access_pubkeys = Vec::<ArchiveV2BlockAccessPubkey>::new();
     let mut blockhashes = Vec::<[u8; 32]>::new();
 
+    let mut blockhash_index_v3 = full_blockhash_index_v3_publisher(output_dir, max_blocks)?;
     let prefetch_bytes = car_zstd_prefetch_mib << 20;
     let mut scanner = if prefetch_bytes == 0 {
         RawCarScanner::open_with_buffer(input, BLOCKHASH_SCAN_BUFFER_SIZE)?
@@ -1794,6 +1811,7 @@ pub(crate) fn build_hot_blocks_first_seen(
                     Some(&mut first_seen_signatures),
                 )?;
                 let slot = pending.last_slot;
+                let block_time = record.header.compact.block_time;
 
                 let intern_started = timings.detail_timer();
                 first_seen_access_pubkeys.clear();
@@ -1916,6 +1934,9 @@ pub(crate) fn build_hot_blocks_first_seen(
                 blockhash_writer
                     .write_all(&sidecar.blockhash)
                     .with_context(|| format!("write {}", blockhash_tmp.display()))?;
+                if let Some(index) = blockhash_index_v3.as_mut() {
+                    index.push(slot, &sidecar.blockhash, block_time)?;
+                }
                 blockhashes.push(sidecar.blockhash);
                 timings.hot_poh_write += poh_started.elapsed();
 
@@ -2180,6 +2201,9 @@ pub(crate) fn build_hot_blocks_first_seen(
             blockhash_registry_path.display()
         )
     })?;
+    if let Some(index) = blockhash_index_v3 {
+        index.publish(completed_blocks as u64)?;
+    }
     let registry_write_elapsed = registry_finalize_started.elapsed();
     let next_seed_started = Instant::now();
     let (next_seed_keys, next_seed_hash) =
@@ -2535,6 +2559,10 @@ pub(crate) fn build_hot_blocks_pre_hot(
         "--registry-dir is not supported with --pre-hot because the PreHot pass builds the registry while decoding CAR"
     );
     anyhow::ensure!(
+        !(reuse_pre_hot && max_blocks.is_some()),
+        "--reuse-pre-hot cannot be combined with --max-blocks because a reused spool must represent a complete epoch"
+    );
+    anyhow::ensure!(
         level >= 0,
         "zstd compression level must be non-negative, got {level}"
     );
@@ -2559,13 +2587,15 @@ pub(crate) fn build_hot_blocks_pre_hot(
         && crate::file_nonempty(&registry_path)
         && crate::file_nonempty(&registry_counts_path)
         && crate::file_nonempty(&blockhash_registry_path)
-        && crate::file_nonempty(&poh_path);
+        && crate::file_nonempty(&poh_path)
+        && crate::file_nonempty(&output_dir.join(BLOCKHASH_INDEX_V3_FILE));
     if reuse_pre_hot {
         anyhow::ensure!(
             can_resume_spool,
-            "--reuse-pre-hot requires a non-empty spool, registry/counts, blockhash registry, and PoH sidecar in {}",
+            "--reuse-pre-hot requires a non-empty spool, registry/counts, blockhash registry, PoH sidecar, and complete V3 timestamp index in {}",
             output_dir.display()
         );
+        ensure_default_block_time_gaps(output_dir)?;
         info!("Reusing completed PreHot spool: {}", pre_hot_path.display());
     } else {
         build_pre_hot_spool(
@@ -2622,6 +2652,10 @@ fn build_pre_hot_spool(
     registry_capacity: usize,
 ) -> Result<()> {
     let started = Instant::now();
+    let output_dir = blockhash_registry_path
+        .parent()
+        .context("PreHot blockhash registry path has no output directory")?;
+    let mut blockhash_index_v3 = full_blockhash_index_v3_publisher(output_dir, max_blocks)?;
     let pre_hot_tmp = pre_hot_tmp_path(pre_hot_path);
     let registry_tmp = pre_hot_tmp_path(registry_path);
     let registry_counts_tmp = pre_hot_tmp_path(registry_counts_path);
@@ -2743,6 +2777,7 @@ fn build_pre_hot_spool(
                     None,
                 )?;
                 let slot = pending.last_slot;
+                let block_time = record.header.compact.block_time;
                 crate::pre_hot::count_registry_pubkeys(&record, |key| counter.add32(key))
                     .with_context(|| format!("slot {slot} count PreHot registry pubkeys"))?;
                 let raw_pubkey_refs = crate::pre_hot::count_all_raw_pubkey_refs(&record)
@@ -2768,6 +2803,9 @@ fn build_pre_hot_spool(
                     .with_context(|| {
                         format!("write {} block_id {block_id}", blockhash_tmp.display())
                     })?;
+                if let Some(index) = blockhash_index_v3.as_mut() {
+                    index.push(slot, &sidecar.blockhash, block_time)?;
+                }
                 let current_block_id = i32::try_from(archive_block_id)
                     .context("PreHot blockhash id exceeds i32::MAX")?;
                 rolling_blockhashes.insert(sidecar.blockhash, current_block_id, slot)?;
@@ -2838,6 +2876,9 @@ fn build_pre_hot_spool(
             pre_hot_path.display()
         )
     })?;
+    if let Some(index) = blockhash_index_v3 {
+        index.publish(spool_stats.blocks)?;
+    }
     progress.final_report();
     info!(
         "Archive V2 PreHot extract complete in {:.2}s: blocks={} txs={} keys={} raw_pubkey_refs={} spool_uncompressed={} spool_compressed={} ratio_pct={:.2} max_record_uncompressed={} max_record_compressed={} registry_sort_write={:.3}s path={}",
@@ -8541,8 +8582,8 @@ pub(crate) fn build_blockhash_registry(
     force: bool,
 ) -> Result<()> {
     let external_blockhashes = load_external_blockhash_overrides(external_blockhashes_path)?;
-    build_blockhash_registry_with_tail(input, output_dir, force, 0, &external_blockhashes)
-        .map(|_| ())
+    build_blockhash_registry_with_tail(input, output_dir, force, 0, &external_blockhashes)?;
+    ensure_default_block_time_gaps(output_dir)
 }
 
 fn build_blockhash_registry_with_tail(
@@ -11136,6 +11177,11 @@ fn write_first_seen_manifest(
     writeln!(writer, "count_semantics=all_compact_pubkey_refs_v1")?;
     writeln!(writer, "fingerprint=gxhash128_random_seed_full_key_v1")?;
     writeln!(writer, "reference_audit=wrapping_u128_halves_le_v1")?;
+    writeln!(
+        writer,
+        "timestamp_artifacts={}",
+        crate::first_seen_finalization::FIRST_SEEN_TIMESTAMP_ARTIFACTS_VALUE
+    )?;
     writeln!(writer, "input={}", input.display())?;
     writeln!(
         writer,
@@ -17306,6 +17352,160 @@ fn write_blockhash_index_v3_row<W: Write>(
     Ok(())
 }
 
+/// Transactional V3 timestamp-index publication shared by full Archive V2 compactors.
+///
+/// Rows are accumulated during the compactor's existing CAR pass. Partial `--max-blocks`
+/// builds never create this writer, so a published V3 index always describes the complete
+/// source epoch and can immediately become the source of `block-time-gaps.bin`.
+struct BlockhashIndexV3Publisher {
+    output_dir: PathBuf,
+    path: PathBuf,
+    temp_path: PathBuf,
+    writer: BufWriter<File>,
+    rows: u64,
+}
+
+impl BlockhashIndexV3Publisher {
+    fn create(output_dir: &Path) -> Result<Self> {
+        let path = output_dir.join(BLOCKHASH_INDEX_V3_FILE);
+        let temp_path = output_dir.join(format!("{BLOCKHASH_INDEX_V3_FILE}.tmp"));
+
+        // Invalidate the old source first and sync that deletion before touching
+        // any other artifact. In particular, a crashed PreHot rebuild must not be
+        // reusable with a new spool and an old-but-valid V3/gap pair.
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("remove stale {}", path.display()))?;
+            crate::first_seen_finalization::sync_directory(output_dir)?;
+        }
+        let mut removed_derived_artifact = false;
+        for stale_path in [output_dir.join(BLOCK_TIME_GAP_FILE), temp_path.clone()] {
+            if stale_path.exists() {
+                std::fs::remove_file(&stale_path)
+                    .with_context(|| format!("remove stale {}", stale_path.display()))?;
+                removed_derived_artifact = true;
+            }
+        }
+        if removed_derived_artifact {
+            crate::first_seen_finalization::sync_directory(output_dir)?;
+        }
+        let file =
+            File::create(&temp_path).with_context(|| format!("create {}", temp_path.display()))?;
+        let mut writer = BufWriter::with_capacity(1 << 20, file);
+        write_blockhash_index_v3_header(&mut writer, 0)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        Ok(Self {
+            output_dir: output_dir.to_path_buf(),
+            path,
+            temp_path,
+            writer,
+            rows: 0,
+        })
+    }
+
+    fn push(&mut self, slot: u64, blockhash: &[u8; 32], block_time: Option<i64>) -> Result<()> {
+        write_blockhash_index_v3_row(&mut self.writer, slot, blockhash, block_time.unwrap_or(0))
+            .with_context(|| format!("write {} row {}", self.temp_path.display(), self.rows))?;
+        self.rows = self
+            .rows
+            .checked_add(1)
+            .context("blockhash index V3 row count overflow")?;
+        Ok(())
+    }
+
+    fn publish(mut self, expected_rows: u64) -> Result<()> {
+        anyhow::ensure!(
+            self.rows == expected_rows,
+            "blockhash index V3 collected {} rows but compactor completed {expected_rows}",
+            self.rows
+        );
+        self.writer
+            .flush()
+            .with_context(|| format!("flush {}", self.temp_path.display()))?;
+        self.writer
+            .seek(SeekFrom::Start(
+                (ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC.len() + 2 + 2) as u64,
+            ))
+            .with_context(|| format!("seek {}", self.temp_path.display()))?;
+        self.writer
+            .write_all(&self.rows.to_le_bytes())
+            .with_context(|| format!("write row count {}", self.temp_path.display()))?;
+        self.writer
+            .flush()
+            .with_context(|| format!("flush row count {}", self.temp_path.display()))?;
+        self.writer
+            .get_ref()
+            .sync_all()
+            .with_context(|| format!("sync {}", self.temp_path.display()))?;
+        drop(self.writer);
+        std::fs::rename(&self.temp_path, &self.path).with_context(|| {
+            format!(
+                "publish blockhash index V3 {} -> {}",
+                self.temp_path.display(),
+                self.path.display()
+            )
+        })?;
+        crate::first_seen_finalization::sync_directory(&self.output_dir)?;
+        ensure_default_block_time_gaps(&self.output_dir)?;
+        info!(
+            "Published default block-time gap artifacts: rows={} v3={} gaps={}",
+            self.rows,
+            self.path.display(),
+            self.output_dir.join(BLOCK_TIME_GAP_FILE).display()
+        );
+        Ok(())
+    }
+}
+
+fn full_blockhash_index_v3_publisher(
+    output_dir: &Path,
+    max_blocks: Option<u64>,
+) -> Result<Option<BlockhashIndexV3Publisher>> {
+    if max_blocks.is_some() {
+        let mut removed = false;
+        for path in [
+            output_dir.join(BLOCKHASH_INDEX_V3_FILE),
+            output_dir.join(BLOCK_TIME_GAP_FILE),
+            output_dir.join(format!("{BLOCKHASH_INDEX_V3_FILE}.tmp")),
+        ] {
+            if path.exists() {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!(
+                        "remove complete-epoch artifact from bounded compaction {}",
+                        path.display()
+                    )
+                })?;
+                removed = true;
+            }
+        }
+        if removed {
+            crate::first_seen_finalization::sync_directory(output_dir)?;
+            info!(
+                "Removed complete-epoch timestamp artifacts before bounded --max-blocks compaction: {}",
+                output_dir.display()
+            );
+        }
+        return Ok(None);
+    }
+    BlockhashIndexV3Publisher::create(output_dir).map(Some)
+}
+
+pub(crate) fn ensure_default_block_time_gaps(output_dir: &Path) -> Result<()> {
+    crate::block_time_gaps::build_block_time_gaps(
+        crate::block_time_gaps::BuildBlockTimeGapsConfig {
+            input: output_dir,
+            epoch: None,
+            output: None,
+            // This is a deterministic derived artifact. Automatic compaction may safely repair
+            // a stale or interrupted prior sidecar once the complete V3 source is validated.
+            force: true,
+            source: crate::block_time_gaps::BuildBlockTimeGapsSource::Auto,
+            progress_json: None,
+        },
+    )?;
+    Ok(())
+}
+
 fn build_block_record(
     pending: &mut PendingBlock,
     block: RawBlockNode,
@@ -20445,20 +20645,7 @@ mod tests {
         let _ = std::fs::remove_file(&lock_path);
 
         build_hot_blocks_first_seen(
-            &fixture,
-            &root,
-            None,
-            None,
-            1,
-            Some(1),
-            false,
-            false,
-            None,
-            65_536,
-            100_000,
-            1,
-            0,
-            true,
+            &fixture, &root, None, None, 1, None, false, false, None, 65_536, 100_000, 1, 0, true,
         )
         .unwrap();
 
@@ -20466,6 +20653,8 @@ mod tests {
             root.join(crate::first_seen_finalization::FIRST_SEEN_SCAN_COMPLETE_FILE)
                 .is_file()
         );
+        assert!(root.join(BLOCKHASH_INDEX_V3_FILE).is_file());
+        assert!(root.join(BLOCK_TIME_GAP_FILE).is_file());
         assert!(!root.join(REGISTRY_INDEX_FILE).exists());
         assert!(!root.join(ARCHIVE_V2_META_FILE).exists());
         assert!(pre_hot_tmp_path(&root.join(ARCHIVE_V2_META_FILE)).is_file());
@@ -22646,6 +22835,66 @@ mod tests {
         assert_eq!(known.system, stable.system);
         drop(registry);
         std::fs::remove_file(registry_path).unwrap();
+    }
+
+    #[test]
+    fn full_compaction_timestamp_index_publishes_gap_sidecar() {
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-v3-gap-publisher-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let epoch = 314;
+        let base = epoch * crate::SLOTS_PER_EPOCH;
+        std::fs::write(root.join(BLOCKHASH_INDEX_V3_FILE), b"stale-v3").unwrap();
+        std::fs::write(root.join(BLOCK_TIME_GAP_FILE), b"stale-gaps").unwrap();
+        let mut publisher = BlockhashIndexV3Publisher::create(&root).unwrap();
+        assert!(!root.join(BLOCKHASH_INDEX_V3_FILE).exists());
+        assert!(!root.join(BLOCK_TIME_GAP_FILE).exists());
+        publisher.push(base, &[1; 32], Some(100)).unwrap();
+        publisher.push(base + 3, &[2; 32], Some(103)).unwrap();
+        publisher.publish(2).unwrap();
+
+        let sidecar = blockzilla_format::read_block_time_gap_sidecar(
+            File::open(root.join(BLOCK_TIME_GAP_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar.header.epoch, epoch);
+        assert_eq!(sidecar.header.block_count, 2);
+        assert_eq!(sidecar.header.missing_slot_count, 2);
+        assert_eq!(sidecar.rows.len(), 1);
+        assert!(root.join(BLOCKHASH_INDEX_V3_FILE).is_file());
+        assert!(!root.join(format!("{BLOCKHASH_INDEX_V3_FILE}.tmp")).exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partial_compaction_does_not_start_timestamp_index() {
+        let root = std::env::temp_dir().join(format!(
+            "blockzilla-partial-v3-gap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(BLOCKHASH_INDEX_V3_FILE), b"stale-v3").unwrap();
+        std::fs::write(root.join(BLOCK_TIME_GAP_FILE), b"stale-gaps").unwrap();
+        assert!(
+            full_blockhash_index_v3_publisher(&root, Some(1))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.join(BLOCKHASH_INDEX_V3_FILE).exists());
+        assert!(!root.join(BLOCK_TIME_GAP_FILE).exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn test_hex_bytes(hex: &str) -> Vec<u8> {

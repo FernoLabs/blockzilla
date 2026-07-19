@@ -9,3 +9,4 @@ pub mod layout;
 pub mod repair;
 pub mod rpc;
 pub mod source;
+pub mod supervisor;

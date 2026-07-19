@@ -3,10 +3,12 @@ resolver = "2"
 members = [
     "blockzilla",
     "services/hivezilla",
+    "services/blockzilla-archive-gateway",
     "services/blockzilla-get-block",
     "services/old-faithful-get-block",
     "crates/blockzilla-format",
     "crates/blockzilla-log-parser",
+    "crates/blockzilla-read-sdk",
     "crates/old-faithful/car-reader",
     "crates/old-faithful/slot-ranges",
     "examples/token-api",

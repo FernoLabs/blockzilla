@@ -10,6 +10,12 @@ before writing an independent reader.
 The `compact` and `split_compact` modules remain for compatibility with older
 readers. The current CLI writes Archive V2.
 
+The versioned `block-time-gaps.bin` codec is also public. It stores sparse slot
+and whole-second time discontinuities, their archived boundary times, and a
+source SHA-256. Consumers should present these as archive observations rather
+than confirmed network outages. See the
+[binary format reference](../../docs/reference/block-time-gap-sidecar.md).
+
 ## Check
 
 ```bash
