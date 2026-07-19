@@ -216,8 +216,20 @@ class PublicWatcherProxyHandler(BaseHTTPRequestHandler):
             self.send_header(key, value)
 
     def log_message(self, message, *args):
+        status = next(
+            (
+                code
+                for value in args
+                if str(value).isdigit()
+                for code in [int(value)]
+                if 400 <= code <= 599
+            ),
+            None,
+        )
+        if status is None:
+            return
         try:
-            print("watcher proxy: " + message % args, file=sys.stderr, flush=True)
+            print("watcher proxy: HTTP {}".format(status), file=sys.stderr, flush=True)
         except OSError:
             pass
 
