@@ -81,6 +81,9 @@ jobs:
       - name: Test watcher data handling
         working-directory: services/blockzilla-watcher
         run: npm test
+      - name: Test watcher operational helpers
+        working-directory: services/blockzilla-watcher
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check watcher UI
         working-directory: services/blockzilla-watcher
         run: npm run check

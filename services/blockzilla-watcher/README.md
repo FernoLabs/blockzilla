@@ -105,6 +105,24 @@ python3 scripts/publish-runtime-operations.py \
   --output /path/to/ui/api/v1/sidecars/runtime-operations/status.json
 ```
 
+## Public deployment
+
+The scheduler keeps full filesystem paths internally. Its JSON serializers
+publish only safe artifact basenames. When an older scheduler must remain in
+service, place `scripts/public-status-proxy.py` on the public boundary instead:
+
+```sh
+python3 scripts/public-status-proxy.py \
+  --listen 127.0.0.1:8787 \
+  --upstream 127.0.0.1:8786
+```
+
+The proxy is read-only, preserves the status and SSE contracts, and strips
+absolute storage paths from full snapshots, sidecar JSON, and real-time
+patches. Keep the upstream on loopback. The listener may use loopback or the
+explicit private address targeted by the tunnel; wildcard and public binds are
+rejected.
+
 Raw WAL capture is labeled as capture, not indexing. Archive materialization
 remains a separate Blockzilla task. A completed CAR transfer undergoing SHA-256
 is shown as `CAR verification`, rather than continuing to claim it is a
