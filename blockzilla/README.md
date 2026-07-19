@@ -5,8 +5,9 @@ CAR.ZST files into indexed Archive V2 directories and reads them back.
 
 The local CAR-to-Archive V2 path works today. The CLI and format are pre-1.0;
 pin the producing Git revision. The CLI can finalize captured live input, but
-continuous production ingestion, scheduling, replication, and indexer
-streaming remain roadmap work.
+continuous production ingestion, replication, and indexer streaming remain
+roadmap work. A recovered finite-work scheduler is available for experimental
+deployments.
 
 ## Try it
 
@@ -21,6 +22,7 @@ The main commands are:
 
 | Command | Purpose |
 | --- | --- |
+| `scheduler` | Observe archive inventory and optionally schedule finite build, repair, and finalization jobs. |
 | `preflight-car` | Verify that a CAR can be streamed to clean EOF. |
 | `build-block-time-gaps` | Build a sparse local slot-gap and block-time sidecar without RPC. |
 | `build-archive-v2-hot-blocks` | Build compressed blocks, indexes, metadata, and serving sidecars. |
@@ -28,6 +30,27 @@ The main commands are:
 
 Other commands are advanced repair, analysis, migration, or benchmark tools;
 use `--help` as the authoritative command reference.
+
+### Scheduler
+
+The scheduler requires explicit CAR, archive, and live roots and starts in
+observer mode. Its status and SSE endpoints are read-only and bind to
+`127.0.0.1:8787` by default. Add `--execute` only after reviewing the detected
+inventory and resource settings.
+
+```bash
+blockzilla scheduler \
+  --car-root ./cars \
+  --archive-root ./archive-v2 \
+  --live-root ./live
+```
+
+Mutation routes are absent unless `--management-bind` is supplied. That bind is
+restricted to a loopback address; expose the read-only status API, never the
+management listener, to a separate watcher or reverse proxy. Scheduler state
+defaults to the relative `blockzilla-scheduler-state/` directory. Existing
+durable ownership markers keep their historical filename so upgraded
+deployments can adopt work safely.
 
 ### Block-time gap sidecars
 

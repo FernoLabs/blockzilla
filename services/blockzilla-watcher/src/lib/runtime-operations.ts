@@ -197,7 +197,6 @@ function isProcessIoEntry(value: unknown) {
     typeof process.id === 'string' && process.id.trim().length > 0 &&
     positiveInteger(process.pid) !== null &&
     typeof process.name === 'string' && process.name.trim().length > 0 &&
-    (process.user === undefined || process.user === null || typeof process.user === 'string') &&
     optionalNonNegativeNumber(process.read_mib_per_sec) &&
     optionalNonNegativeNumber(process.write_mib_per_sec) &&
     optionalNonNegativeNumber(process.cpu_percent) &&

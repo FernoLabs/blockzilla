@@ -3,15 +3,19 @@
 Hivezilla is the live-input boundary for Blockzilla. It captures Solana network
 data and retains a recoverable raw copy so storage outages do not create gaps.
 
-Hivezilla is currently a prototype. It includes:
+Hivezilla is under active development. The repository currently includes:
 
-- Yellowstone gRPC observation and capture;
-- a checksummed raw spool with inspection and materialization tools; and
-- configuration validation and RPC repair helpers.
+- Yellowstone gRPC observation, capture, and durable raw recording;
+- a checksummed, segmented spool with inspection, replay, repair, and
+  materialization tools;
+- mTLS receiver, push replication, pull replication, and receiver-to-spool
+  bridging; and
+- bounded supervision, disk admission, rotation, retention, and monitoring
+  helpers.
 
-Multi-instance failover, shred capture, downstream commit acknowledgement, and
-automatic retention cleanup are not production-ready. The generic `run`
-command supports `--dry-run` only.
+Canonical multi-source selection, automatic multi-instance failover, and shred
+capture remain planned. The generic `run` command still supports `--dry-run`
+only; use the explicit commands below for implemented data paths.
 
 ## Try it
 
@@ -31,6 +35,7 @@ The main command groups are:
 | --- | --- |
 | Observe | `probe-grpc`, `watch-epochs-grpc` |
 | Retain | `record-grpc-raw`, `inspect-grpc-raw`, `verify-grpc-raw-poh`, `materialize-grpc-raw` |
+| Replicate | `serve-ingest-receiver`, `replicate-grpc-raw`, `pull-grpc-raw`, `serve-grpc-raw-pull-source`, `bridge-receiver-grpc-raw` |
 | Capture | `capture-grpc`, `inspect-capture` |
 | Repair | `sync-rpc-epoch`, `backfill-rpc`, `prepare-epoch-repair` |
 | Operate | `supervise`, `notify-supervisor` |
@@ -38,6 +43,10 @@ The main command groups are:
 Use command-specific `--help` before starting a networked or disk-writing task.
 Examples reference credentials through environment variables or files; do not
 place secret values in them.
+
+The `scripts/` directory contains portable launch, PKI, object-storage, and
+monitoring helpers. They intentionally contain no deployment manifest or real
+host topology. See [scripts/README.md](scripts/README.md) before using them.
 
 `record-grpc-raw` performs bounded live recovery: it validates the handoff
 journal tail, that row's exact WAL frame, and the active WAL segment. It does
@@ -73,8 +82,12 @@ Rapid failures are fenced as `crash_loop`; they are never retried forever.
 Optional tokenized readiness and heartbeat notifications are described in the
 [portable-supervisor design](../../docs/design/portable-supervisor.md).
 
+Replication advances cleanup authority only after the receiver has durably
+stored the exact prefix and the source has durably recorded the matching signed
+acknowledgement. Object-store upload receipts alone never authorize deletion.
+
 The durability model and unfinished work are described in the
-[live-ingest design](../../docs/design/live-ingest-redundancy.md). Keep raw spools
-until downstream storage is independently verified, and never commit provider
-URLs, tokens, captures, journals, or incident artifacts. See the repository
-[security policy](../../SECURITY.md).
+[live-ingest design](../../docs/design/live-ingest-redundancy.md). Keep raw
+spools until downstream storage is independently verified, and never commit
+provider URLs, tokens, captures, journals, or incident artifacts. See the
+repository [security policy](../../SECURITY.md).

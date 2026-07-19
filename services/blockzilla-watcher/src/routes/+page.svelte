@@ -2269,7 +2269,7 @@
                       <td>
                         <div class="process-name">
                           <strong>{process.name}</strong>
-                          <span>PID {process.pid}{process.user ? ` · ${process.user}` : ''}</span>
+                          <span>PID {process.pid}</span>
                         </div>
                       </td>
                       <td class="process-io-cell">

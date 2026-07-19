@@ -2,7 +2,6 @@ export type ProcessIoEntry = {
   id: string;
   pid: number;
   name: string;
-  user?: string | null;
   read_mib_per_sec?: number | null;
   write_mib_per_sec?: number | null;
   cpu_percent?: number | null;

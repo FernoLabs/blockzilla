@@ -132,8 +132,8 @@ Snapshots may also include a `process_io` sample:
 - `state`: `collecting`, `ready`, or `unavailable`.
 - `sampled_unix_secs`, `sample_window_secs`, `active_count`,
   `inaccessible_count`, and `truncated` describe the bounded sample.
-- `processes` contains stable `id`, `pid`, `/proc/<pid>/comm` `name`, optional
-  `user`, `read_mib_per_sec`, `write_mib_per_sec`, and optional `cpu_percent`,
+- `processes` contains stable `id`, `pid`, `/proc/<pid>/comm` `name`,
+  `read_mib_per_sec`, `write_mib_per_sec`, and optional `cpu_percent`,
   `rss_bytes`, and `blockzilla_owned`. Raw command-line arguments must not be
   exposed because they can contain secrets.
 

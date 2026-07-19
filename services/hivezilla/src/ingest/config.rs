@@ -10,7 +10,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 /// The only ingest configuration schema understood by this implementation.
-pub const INGEST_CONFIG_SCHEMA_VERSION: u32 = 1;
+pub const INGEST_CONFIG_SCHEMA_VERSION: u32 = 2;
+/// Reserved protobuf envelope space above the compressed payload in each streamed record.
+pub const REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES: u64 = 64 * 1024;
+/// Conservative heap allowance for IDs, offers, Vec entries, and allocator metadata per record.
+pub const REPLICATION_RECORD_MEMORY_RESERVE_BYTES: u64 = 64 * 1024;
+/// The replication cursor verifies one bounded raw protobuf digest without Prost-decoding it.
+pub const REPLICATION_RAW_VERIFY_MEMORY_MULTIPLIER: u64 = 1;
 
 /// Complete configuration for redundant live ingestion.
 ///
@@ -23,7 +29,7 @@ pub struct IngestConfig {
     pub schema_version: u32,
     /// Stable chain/cluster identity (for example the genesis hash or an operator-controlled id).
     pub cluster_id: String,
-    /// Process-wide weighted-semaphore ceiling across all enabled source queues.
+    /// Process-wide memory ceiling across enabled source queues and decoded listener requests.
     pub max_total_queue_bytes: u64,
     /// Process-wide item ceiling; complements the byte budget for tiny events.
     pub max_total_queue_events: usize,
@@ -55,14 +61,34 @@ pub struct ReplicaListenerConfig {
     pub server_private_key_file: PathBuf,
     pub client_ca_file: PathBuf,
     pub allowed_nodes_file: PathBuf,
+    /// Durable primary leadership term used to reject stale senders after failover.
+    pub primary_term_file: PathBuf,
     pub receipt_signing_key_id: String,
     pub receipt_signing_key: SecretRef,
+    /// Hard tonic/protobuf decoding ceiling for one streamed record, including wire metadata.
+    pub max_wire_request_bytes: u64,
+    pub max_batch_events: usize,
+    pub max_batch_compressed_bytes: u64,
+    pub max_batch_uncompressed_bytes: u64,
+    pub max_compressed_event_bytes: u64,
+    pub max_uncompressed_event_bytes: u64,
+    pub max_concurrent_requests: usize,
+    pub max_open_streams: usize,
+    /// Persistent on-disk journal cap; prevents journal-id cycling from exhausting inodes.
+    pub max_known_streams: usize,
+    pub tls_handshake_timeout_ms: u64,
+    pub request_idle_timeout_ms: u64,
+    pub request_total_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplicaUpstreamConfig {
     pub endpoint: String,
+    /// Application identity expected in every signed cumulative ACK.
+    pub expected_primary_id: String,
+    /// Local durable journal for verified cumulative ACKs and primary-term fencing.
+    pub cumulative_ack_wal_file: PathBuf,
     pub tls: ClientTlsConfig,
     pub auth: ReplicaAuthConfig,
     /// Public keys accepted for durable deletion receipts. Keep old and new keys during rotation.
@@ -83,6 +109,12 @@ pub struct TrustedReceiptKeyConfig {
 pub struct ReplicaBatchLimits {
     pub max_events: usize,
     pub max_bytes: u64,
+    /// Hard cumulative uncompressed-size ceiling for one streamed RPC batch.
+    pub max_uncompressed_bytes: u64,
+    /// Hard compressed-payload ceiling for one source WAL record.
+    pub max_compressed_event_bytes: u64,
+    /// Hard decompressed protobuf ceiling used before allocation and decoding.
+    pub max_uncompressed_event_bytes: u64,
     pub ack_timeout_ms: u64,
 }
 
@@ -255,11 +287,33 @@ pub struct RedactedIngestConfigSummary {
     pub role: &'static str,
     pub node_id: String,
     pub accepts_replicas: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replica_listener: Option<RedactedReplicaListenerSummary>,
     pub source_count: usize,
     pub enabled_source_count: usize,
     pub spool_max_bytes: u64,
     pub spool_segment_bytes: u64,
     pub sources: Vec<RedactedSourceSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedactedReplicaListenerSummary {
+    pub max_wire_request_bytes: u64,
+    pub max_batch_events: usize,
+    pub max_batch_compressed_bytes: u64,
+    pub max_batch_uncompressed_bytes: u64,
+    pub max_compressed_event_bytes: u64,
+    pub max_uncompressed_event_bytes: u64,
+    pub max_concurrent_requests: usize,
+    pub max_open_streams: usize,
+    pub max_known_streams: usize,
+    pub tls_handshake_timeout_ms: u64,
+    pub request_idle_timeout_ms: u64,
+    pub request_total_timeout_ms: u64,
+    pub max_in_flight_events: usize,
+    /// Worst-case buffered batch, record metadata, decoded wire record, and decompression buffer.
+    pub max_in_flight_memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -366,10 +420,20 @@ impl IngestConfig {
         self.validate_role(&mut issues);
         self.spool.validate("spool", &mut issues);
 
+        let (replica_listener, replica_upstream) = match &self.role {
+            IngestRoleConfig::Primary {
+                replica_listener, ..
+            } => (replica_listener.as_ref(), None),
+            IngestRoleConfig::Replica { upstream, .. } => (None, Some(upstream)),
+        };
         if self.sources.is_empty() {
-            issues.push("sources must contain at least one input".to_string());
-        }
-        if !self.sources.iter().any(|source| source.enabled) {
+            if replica_listener.is_none() && replica_upstream.is_none() {
+                issues.push(
+                    "sources may be empty only for role.replica or a primary with role.replica_listener"
+                        .to_string(),
+                );
+            }
+        } else if !self.sources.iter().any(|source| source.enabled) {
             issues.push("sources must contain at least one enabled input".to_string());
         }
 
@@ -416,6 +480,75 @@ impl IngestConfig {
             None => issues.push("enabled source queue event sum overflows usize".to_string()),
             Some(_) => {}
         }
+        if let Some(listener) = replica_listener {
+            if let (Some(source_bytes), Some(listener_bytes)) =
+                (enabled_queue_bytes, listener.max_in_flight_memory_bytes())
+            {
+                match source_bytes.checked_add(listener_bytes) {
+                    Some(total) if total > self.max_total_queue_bytes => issues.push(format!(
+                        "enabled source queues plus replica listener request/decompression memory {total} exceed max_total_queue_bytes {}",
+                        self.max_total_queue_bytes
+                    )),
+                    None => issues.push(
+                        "enabled source queue and replica listener byte sum overflows u64"
+                            .to_string(),
+                    ),
+                    Some(_) => {}
+                }
+            }
+            if let (Some(source_events), Some(listener_events)) =
+                (enabled_queue_events, listener.max_in_flight_events())
+            {
+                match source_events.checked_add(listener_events) {
+                    Some(total) if total > self.max_total_queue_events => issues.push(format!(
+                        "enabled source queues plus replica listener request events {total} exceed max_total_queue_events {}",
+                        self.max_total_queue_events
+                    )),
+                    None => issues.push(
+                        "enabled source queue and replica listener event sum overflows usize"
+                            .to_string(),
+                    ),
+                    Some(_) => {}
+                }
+            }
+        }
+        if let Some(upstream) = replica_upstream {
+            match (
+                enabled_queue_bytes,
+                upstream.batch.max_in_flight_memory_bytes(),
+            ) {
+                (Some(source_bytes), Some(sender_bytes)) => {
+                    match source_bytes.checked_add(sender_bytes) {
+                        Some(total) if total > self.max_total_queue_bytes => issues.push(format!(
+                            "enabled source queues plus replica sender batch memory {total} exceed max_total_queue_bytes {}",
+                            self.max_total_queue_bytes
+                        )),
+                        None => issues.push(
+                            "enabled source queue and replica sender batch byte sum overflows u64"
+                                .to_string(),
+                        ),
+                        Some(_) => {}
+                    }
+                }
+                (_, None) => issues.push(format!(
+                    "role.upstream.batch bounded payload, wire, metadata, or raw verification workspace memory overflows u64"
+                )),
+                (None, Some(_)) => {}
+            }
+            if let Some(source_events) = enabled_queue_events {
+                match source_events.checked_add(upstream.batch.max_events) {
+                    Some(total) if total > self.max_total_queue_events => issues.push(format!(
+                        "enabled source queues plus replica sender batch events {total} exceed max_total_queue_events {}",
+                        self.max_total_queue_events
+                    )),
+                    None => issues.push(
+                        "enabled source queue and replica sender batch event sum overflows usize"
+                            .to_string(),
+                    ),
+                    Some(_) => {}
+                }
+            }
+        }
 
         if issues.is_empty() {
             Ok(())
@@ -425,13 +558,14 @@ impl IngestConfig {
     }
 
     pub fn redacted_summary(&self) -> RedactedIngestConfigSummary {
-        let (role, node_id, accepts_replicas) = match &self.role {
+        let (role, node_id, replica_listener) = match &self.role {
             IngestRoleConfig::Primary {
                 node_id,
                 replica_listener,
-            } => ("primary", node_id.clone(), replica_listener.is_some()),
-            IngestRoleConfig::Replica { node_id, .. } => ("replica", node_id.clone(), false),
+            } => ("primary", node_id.clone(), replica_listener.as_ref()),
+            IngestRoleConfig::Replica { node_id, .. } => ("replica", node_id.clone(), None),
         };
+        let replica_listener = replica_listener.map(ReplicaListenerConfig::redacted_summary);
         let sources = self
             .sources
             .iter()
@@ -467,7 +601,8 @@ impl IngestConfig {
                 }),
             role,
             node_id,
-            accepts_replicas,
+            accepts_replicas: replica_listener.is_some(),
+            replica_listener,
             source_count: self.sources.len(),
             enabled_source_count: self.sources.iter().filter(|source| source.enabled).count(),
             spool_max_bytes: self.spool.max_bytes,
@@ -484,7 +619,13 @@ impl IngestConfig {
             } => {
                 validate_stable_id(node_id, "role.node_id", issues);
                 if let Some(listener) = replica_listener {
-                    listener.validate("role.replica_listener", issues);
+                    listener.validate(
+                        "role.replica_listener",
+                        &self.spool,
+                        self.max_total_queue_bytes,
+                        self.max_total_queue_events,
+                        issues,
+                    );
                 }
             }
             IngestRoleConfig::Replica { node_id, upstream } => {
@@ -496,15 +637,28 @@ impl IngestConfig {
 }
 
 impl ReplicaListenerConfig {
-    fn validate(&self, prefix: &str, issues: &mut Vec<String>) {
+    fn validate(
+        &self,
+        prefix: &str,
+        spool: &SpoolConfig,
+        max_total_queue_bytes: u64,
+        max_total_queue_events: usize,
+        issues: &mut Vec<String>,
+    ) {
         validate_socket_addr(&self.bind, &format!("{prefix}.bind"), issues);
         for (name, path) in [
             ("server_certificate_file", &self.server_certificate_file),
             ("server_private_key_file", &self.server_private_key_file),
             ("client_ca_file", &self.client_ca_file),
             ("allowed_nodes_file", &self.allowed_nodes_file),
+            ("primary_term_file", &self.primary_term_file),
         ] {
             validate_absolute_file(path, &format!("{prefix}.{name}"), issues);
+            if path.starts_with(&spool.root) {
+                issues.push(format!(
+                    "{prefix}.{name} must be outside spool.root; the spool is an exclusive journal tree"
+                ));
+            }
         }
         validate_stable_id(
             &self.receipt_signing_key_id,
@@ -513,19 +667,246 @@ impl ReplicaListenerConfig {
         );
         self.receipt_signing_key
             .validate(&format!("{prefix}.receipt_signing_key"), issues);
+        if !matches!(self.receipt_signing_key, SecretRef::File { .. }) {
+            issues.push(format!(
+                "{prefix}.receipt_signing_key must use a private file, not an environment value"
+            ));
+        } else if let SecretRef::File { path } = &self.receipt_signing_key
+            && path.starts_with(&spool.root)
+        {
+            issues.push(format!(
+                "{prefix}.receipt_signing_key.path must be outside spool.root; the spool is an exclusive journal tree"
+            ));
+        }
+        validate_nonzero_u64(
+            self.max_wire_request_bytes,
+            &format!("{prefix}.max_wire_request_bytes"),
+            issues,
+        );
+        validate_nonzero_usize(
+            self.max_batch_events,
+            &format!("{prefix}.max_batch_events"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_batch_compressed_bytes,
+            &format!("{prefix}.max_batch_compressed_bytes"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_batch_uncompressed_bytes,
+            &format!("{prefix}.max_batch_uncompressed_bytes"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_compressed_event_bytes,
+            &format!("{prefix}.max_compressed_event_bytes"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_uncompressed_event_bytes,
+            &format!("{prefix}.max_uncompressed_event_bytes"),
+            issues,
+        );
+        validate_nonzero_usize(
+            self.max_concurrent_requests,
+            &format!("{prefix}.max_concurrent_requests"),
+            issues,
+        );
+        validate_nonzero_usize(
+            self.max_open_streams,
+            &format!("{prefix}.max_open_streams"),
+            issues,
+        );
+        validate_nonzero_usize(
+            self.max_known_streams,
+            &format!("{prefix}.max_known_streams"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.tls_handshake_timeout_ms,
+            &format!("{prefix}.tls_handshake_timeout_ms"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.request_idle_timeout_ms,
+            &format!("{prefix}.request_idle_timeout_ms"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.request_total_timeout_ms,
+            &format!("{prefix}.request_total_timeout_ms"),
+            issues,
+        );
+        if self.request_total_timeout_ms < self.request_idle_timeout_ms {
+            issues.push(format!(
+                "{prefix}.request_total_timeout_ms must be >= {prefix}.request_idle_timeout_ms"
+            ));
+        }
+        if self.max_open_streams > 4_096 {
+            issues.push(format!("{prefix}.max_open_streams must be <= 4096"));
+        }
+        if self.max_known_streams > 65_536 {
+            issues.push(format!("{prefix}.max_known_streams must be <= 65536"));
+        }
+        if self.max_known_streams < self.max_open_streams {
+            issues.push(format!(
+                "{prefix}.max_known_streams must be >= {prefix}.max_open_streams"
+            ));
+        }
+        for (name, value) in [
+            ("max_wire_request_bytes", self.max_wire_request_bytes),
+            (
+                "max_compressed_event_bytes",
+                self.max_compressed_event_bytes,
+            ),
+            (
+                "max_uncompressed_event_bytes",
+                self.max_uncompressed_event_bytes,
+            ),
+        ] {
+            if usize::try_from(value).is_err() {
+                issues.push(format!(
+                    "{prefix}.{name} exceeds this process address space"
+                ));
+            }
+        }
+        if self.max_compressed_event_bytes > self.max_batch_compressed_bytes {
+            issues.push(format!(
+                "{prefix}.max_compressed_event_bytes must be <= {prefix}.max_batch_compressed_bytes"
+            ));
+        }
+        if self.max_uncompressed_event_bytes > self.max_batch_uncompressed_bytes {
+            issues.push(format!(
+                "{prefix}.max_uncompressed_event_bytes must be <= {prefix}.max_batch_uncompressed_bytes"
+            ));
+        }
+        if self
+            .max_compressed_event_bytes
+            .checked_add(REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES)
+            .is_none_or(|minimum| minimum > self.max_wire_request_bytes)
+        {
+            issues.push(format!(
+                "{prefix}.max_wire_request_bytes must reserve at least {REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES} bytes above {prefix}.max_compressed_event_bytes for protobuf metadata"
+            ));
+        }
+        if self.max_compressed_event_bytes > spool.segment_bytes {
+            issues.push(format!(
+                "{prefix}.max_compressed_event_bytes exceeds spool.segment_bytes"
+            ));
+        }
+        if self.max_wire_request_bytes > max_total_queue_bytes {
+            issues.push(format!(
+                "{prefix}.max_wire_request_bytes exceeds max_total_queue_bytes"
+            ));
+        }
+        if self.max_batch_events > max_total_queue_events {
+            issues.push(format!(
+                "{prefix}.max_batch_events exceeds max_total_queue_events"
+            ));
+        }
+        match self.max_in_flight_memory_bytes() {
+            Some(total) if total > max_total_queue_bytes => issues.push(format!(
+                "{prefix} in-flight request/decompression memory {total} exceeds max_total_queue_bytes {max_total_queue_bytes}"
+            )),
+            None => issues.push(format!(
+                "({prefix}.max_batch_compressed_bytes + per-record metadata reserve + {prefix}.max_wire_request_bytes + {prefix}.max_uncompressed_event_bytes) * {prefix}.max_concurrent_requests overflows u64"
+            )),
+            Some(_) => {}
+        }
+        match self.max_in_flight_events() {
+            Some(total) if total > max_total_queue_events => issues.push(format!(
+                "{prefix} in-flight batch events {total} exceed max_total_queue_events {max_total_queue_events}"
+            )),
+            None => issues.push(format!(
+                "{prefix}.max_batch_events * {prefix}.max_concurrent_requests overflows usize"
+            )),
+            Some(_) => {}
+        }
+    }
+
+    fn max_in_flight_memory_bytes(&self) -> Option<u64> {
+        let concurrent_requests = u64::try_from(self.max_concurrent_requests).ok()?;
+        let batch_records = u64::try_from(self.max_batch_events).ok()?;
+        let record_metadata = batch_records.checked_mul(REPLICATION_RECORD_MEMORY_RESERVE_BYTES)?;
+        self.max_batch_compressed_bytes
+            .checked_add(record_metadata)?
+            .checked_add(self.max_wire_request_bytes)?
+            .checked_add(self.max_uncompressed_event_bytes)?
+            .checked_mul(concurrent_requests)
+    }
+
+    fn max_in_flight_events(&self) -> Option<usize> {
+        self.max_batch_events
+            .checked_mul(self.max_concurrent_requests)
+    }
+
+    fn redacted_summary(&self) -> RedactedReplicaListenerSummary {
+        RedactedReplicaListenerSummary {
+            max_wire_request_bytes: self.max_wire_request_bytes,
+            max_batch_events: self.max_batch_events,
+            max_batch_compressed_bytes: self.max_batch_compressed_bytes,
+            max_batch_uncompressed_bytes: self.max_batch_uncompressed_bytes,
+            max_compressed_event_bytes: self.max_compressed_event_bytes,
+            max_uncompressed_event_bytes: self.max_uncompressed_event_bytes,
+            max_concurrent_requests: self.max_concurrent_requests,
+            max_open_streams: self.max_open_streams,
+            max_known_streams: self.max_known_streams,
+            tls_handshake_timeout_ms: self.tls_handshake_timeout_ms,
+            request_idle_timeout_ms: self.request_idle_timeout_ms,
+            request_total_timeout_ms: self.request_total_timeout_ms,
+            max_in_flight_events: self.max_in_flight_events().unwrap_or(usize::MAX),
+            max_in_flight_memory_bytes: self.max_in_flight_memory_bytes().unwrap_or(u64::MAX),
+        }
     }
 }
 
 impl ReplicaUpstreamConfig {
     fn validate(&self, prefix: &str, spool: &SpoolConfig, issues: &mut Vec<String>) {
         validate_secure_stream_endpoint(&self.endpoint, &format!("{prefix}.endpoint"), issues);
+        validate_stable_id(
+            &self.expected_primary_id,
+            &format!("{prefix}.expected_primary_id"),
+            issues,
+        );
+        validate_absolute_file(
+            &self.cumulative_ack_wal_file,
+            &format!("{prefix}.cumulative_ack_wal_file"),
+            issues,
+        );
+        validate_outside_spool(
+            &self.cumulative_ack_wal_file,
+            &format!("{prefix}.cumulative_ack_wal_file"),
+            spool,
+            issues,
+        );
         self.tls.validate(&format!("{prefix}.tls"), issues);
+        for (name, path) in [
+            ("ca_file", self.tls.ca_file.as_ref()),
+            (
+                "client_certificate_file",
+                self.tls.client_certificate_file.as_ref(),
+            ),
+            (
+                "client_private_key_file",
+                self.tls.client_private_key_file.as_ref(),
+            ),
+        ] {
+            if let Some(path) = path {
+                validate_outside_spool(path, &format!("{prefix}.tls.{name}"), spool, issues);
+            }
+        }
         self.reconnect
             .validate(&format!("{prefix}.reconnect"), issues);
         self.batch.validate(&format!("{prefix}.batch"), issues);
         if self.batch.max_bytes > spool.segment_bytes {
             issues.push(format!(
                 "{prefix}.batch.max_bytes exceeds spool.segment_bytes"
+            ));
+        }
+        if self.batch.max_compressed_event_bytes > spool.segment_bytes {
+            issues.push(format!(
+                "{prefix}.batch.max_compressed_event_bytes exceeds spool.segment_bytes"
             ));
         }
         match &self.auth {
@@ -540,6 +921,9 @@ impl ReplicaUpstreamConfig {
             }
             ReplicaAuthConfig::Bearer { credential } => {
                 credential.validate(&format!("{prefix}.auth.credential"), issues);
+                issues.push(format!(
+                    "{prefix}.auth.method must be mutual_tls for the raw replication protocol"
+                ));
             }
             ReplicaAuthConfig::Ed25519 {
                 key_id,
@@ -553,6 +937,9 @@ impl ReplicaUpstreamConfig {
                     &format!("{prefix}.auth.upstream_public_key_file"),
                     issues,
                 );
+                issues.push(format!(
+                    "{prefix}.auth.method must be mutual_tls for the raw replication protocol"
+                ));
             }
         }
 
@@ -570,6 +957,12 @@ impl ReplicaUpstreamConfig {
                 &format!("{key_prefix}.public_key_file"),
                 issues,
             );
+            validate_outside_spool(
+                &key.public_key_file,
+                &format!("{key_prefix}.public_key_file"),
+                spool,
+                issues,
+            );
             if !key_ids.insert(key.key_id.as_str()) {
                 issues.push(format!(
                     "{key_prefix}.key_id duplicates trusted receipt key id {:?}",
@@ -585,10 +978,66 @@ impl ReplicaBatchLimits {
         validate_nonzero_usize(self.max_events, &format!("{prefix}.max_events"), issues);
         validate_nonzero_u64(self.max_bytes, &format!("{prefix}.max_bytes"), issues);
         validate_nonzero_u64(
+            self.max_uncompressed_bytes,
+            &format!("{prefix}.max_uncompressed_bytes"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_compressed_event_bytes,
+            &format!("{prefix}.max_compressed_event_bytes"),
+            issues,
+        );
+        validate_nonzero_u64(
+            self.max_uncompressed_event_bytes,
+            &format!("{prefix}.max_uncompressed_event_bytes"),
+            issues,
+        );
+        if self.max_compressed_event_bytes > self.max_bytes {
+            issues.push(format!(
+                "{prefix}.max_compressed_event_bytes must be <= {prefix}.max_bytes"
+            ));
+        }
+        if self.max_uncompressed_event_bytes > self.max_uncompressed_bytes {
+            issues.push(format!(
+                "{prefix}.max_uncompressed_event_bytes must be <= {prefix}.max_uncompressed_bytes"
+            ));
+        }
+        for (name, value) in [
+            (
+                "max_compressed_event_bytes",
+                self.max_compressed_event_bytes,
+            ),
+            (
+                "max_uncompressed_event_bytes",
+                self.max_uncompressed_event_bytes,
+            ),
+        ] {
+            if usize::try_from(value).is_err() {
+                issues.push(format!(
+                    "{prefix}.{name} exceeds this process address space"
+                ));
+            }
+        }
+        validate_nonzero_u64(
             self.ack_timeout_ms,
             &format!("{prefix}.ack_timeout_ms"),
             issues,
         );
+    }
+
+    fn max_in_flight_memory_bytes(&self) -> Option<u64> {
+        let records = u64::try_from(self.max_events).ok()?;
+        let metadata = records.checked_mul(REPLICATION_RECORD_MEMORY_RESERVE_BYTES)?;
+        let raw_verify_workspace = self
+            .max_uncompressed_event_bytes
+            .checked_mul(REPLICATION_RAW_VERIFY_MEMORY_MULTIPLIER)?;
+        let wire_workspace = self
+            .max_compressed_event_bytes
+            .checked_add(REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES)?;
+        self.max_bytes
+            .checked_add(metadata)?
+            .checked_add(raw_verify_workspace)?
+            .checked_add(wire_workspace)
     }
 }
 
@@ -929,6 +1378,14 @@ fn validate_absolute_directory(path: &Path, field: &str, issues: &mut Vec<String
     }
 }
 
+fn validate_outside_spool(path: &Path, field: &str, spool: &SpoolConfig, issues: &mut Vec<String>) {
+    if path.starts_with(&spool.root) {
+        issues.push(format!(
+            "{field} must be outside spool.root; the spool is an exclusive journal tree"
+        ));
+    }
+}
+
 fn validate_socket_addr(value: &str, field: &str, issues: &mut Vec<String>) {
     if SocketAddr::from_str(value).is_err() {
         issues.push(format!("{field} must be an IP socket address"));
@@ -1070,9 +1527,9 @@ mod tests {
 
     fn valid_primary_json() -> Value {
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "cluster_id": "solana-mainnet",
-            "max_total_queue_bytes": 536_870_912u64,
+            "max_total_queue_bytes": 1_073_741_824u64,
             "max_total_queue_events": 128,
             "role": {
                 "mode": "primary",
@@ -1083,11 +1540,24 @@ mod tests {
                     "server_private_key_file": "/etc/blockzilla/tls/server.key",
                     "client_ca_file": "/etc/blockzilla/tls/replica-ca.crt",
                     "allowed_nodes_file": "/etc/blockzilla/auth/replicas.json",
+                    "primary_term_file": "/var/lib/blockzilla/ingress-control/primary-term",
                     "receipt_signing_key_id": "receipt-2026-q3",
                     "receipt_signing_key": {
                         "provider": "file",
                         "path": "/etc/blockzilla/secrets/receipt-2026-q3.key"
-                    }
+                    },
+                    "max_wire_request_bytes": 41_943_040u64,
+                    "max_batch_events": 32,
+                    "max_batch_compressed_bytes": 67_108_864u64,
+                    "max_batch_uncompressed_bytes": 536_870_912u64,
+                    "max_compressed_event_bytes": 33_554_432u64,
+                    "max_uncompressed_event_bytes": 134_217_728u64,
+                    "max_concurrent_requests": 2,
+                    "max_open_streams": 64,
+                    "max_known_streams": 256,
+                    "tls_handshake_timeout_ms": 10_000,
+                    "request_idle_timeout_ms": 15_000,
+                    "request_total_timeout_ms": 60_000
                 }
             },
             "spool": {
@@ -1136,7 +1606,7 @@ mod tests {
                         "kind": "shred_udp",
                         "bind": "0.0.0.0:8001",
                         "multicast_group": "239.10.10.10",
-                        "interface": "192.168.1.45",
+                        "interface": "192.0.2.45",
                         "auth": {
                             "method": "hmac_sha256",
                             "key_id": "shred-key-2026-07",
@@ -1157,16 +1627,17 @@ mod tests {
             "mode": mode,
             "node_id": "backup-ingester-1",
             "upstream": {
-                "endpoint": "https://192.168.1.45:9555",
+                "endpoint": "https://192.0.2.45:9555",
+                "expected_primary_id": "nas-primary",
+                "cumulative_ack_wal_file": "/var/lib/blockzilla/replica-control/cumulative-ack.wal",
                 "tls": {
-                    "ca_file": "/etc/blockzilla/tls/primary-ca.crt"
+                    "ca_file": "/etc/blockzilla/tls/primary-ca.crt",
+                    "client_certificate_file": "/etc/blockzilla/tls/replica.crt",
+                    "client_private_key_file": "/etc/blockzilla/tls/replica.key",
+                    "server_name": "nas-primary"
                 },
                 "auth": {
-                    "method": "bearer",
-                    "credential": {
-                        "provider": "file",
-                        "path": "/etc/blockzilla/secrets/replication.token"
-                    }
+                    "method": "mutual_tls"
                 },
                 "trusted_receipt_keys": [
                     {
@@ -1182,10 +1653,14 @@ mod tests {
                 "batch": {
                     "max_events": 128,
                     "max_bytes": 67_108_864u64,
+                    "max_uncompressed_bytes": 134_217_728u64,
+                    "max_compressed_event_bytes": 67_108_864u64,
+                    "max_uncompressed_event_bytes": 134_217_728u64,
                     "ack_timeout_ms": 30_000
                 }
             }
         });
+        value["sources"] = json!([]);
         value
     }
 
@@ -1205,14 +1680,157 @@ mod tests {
     }
 
     #[test]
+    fn validated_primary_replica_listener_can_be_the_only_input() {
+        let mut value = valid_primary_json();
+        value["sources"] = json!([]);
+        let config = decode_and_validate(&value).unwrap();
+        let summary = config.redacted_summary();
+        assert!(summary.accepts_replicas);
+        assert_eq!(summary.source_count, 0);
+        assert_eq!(summary.enabled_source_count, 0);
+        assert_eq!(
+            summary.replica_listener.unwrap().max_in_flight_memory_bytes,
+            490_733_568
+        );
+    }
+
+    #[test]
+    fn empty_sources_are_valid_for_replica_or_primary_listener() {
+        let mut primary_without_listener = valid_primary_json();
+        primary_without_listener["role"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replica_listener");
+        primary_without_listener["sources"] = json!([]);
+        let error = validation_text(&primary_without_listener);
+        assert!(error.contains(
+            "sources may be empty only for role.replica or a primary with role.replica_listener"
+        ));
+
+        let replica = decode_and_validate(&valid_replica_json("replica")).unwrap();
+        assert!(replica.sources.is_empty());
+        assert_eq!(replica.redacted_summary().source_count, 0);
+
+        let mut invalid_listener = valid_primary_json();
+        invalid_listener["sources"] = json!([]);
+        invalid_listener["role"]["replica_listener"]["primary_term_file"] =
+            json!("relative/primary-term");
+        let error = validation_text(&invalid_listener);
+        assert!(error.contains("primary_term_file must be an absolute, unambiguous file path"));
+    }
+
+    #[test]
+    fn replica_sender_batch_must_fit_process_memory_and_event_budgets() {
+        let mut value = valid_replica_json("replica");
+        // 64 MiB batch + 8 MiB record metadata + one 128 MiB raw verification buffer + one
+        // 64 MiB/64 KiB wire message = 276,889,600 bytes of conservative peak memory.
+        value["max_total_queue_bytes"] = json!(276_889_599u64);
+        value["max_total_queue_events"] = json!(127);
+
+        let error = validation_text(&value);
+        assert!(error.contains(
+            "replica sender batch memory 276889600 exceed max_total_queue_bytes 276889599"
+        ));
+        assert!(
+            error.contains("replica sender batch events 128 exceed max_total_queue_events 127")
+        );
+    }
+
+    #[test]
+    fn replica_listener_control_files_must_stay_outside_the_journal_tree() {
+        let mut value = valid_primary_json();
+        value["role"]["replica_listener"]["primary_term_file"] =
+            json!("/var/lib/blockzilla/ingress-spool/primary-term");
+        value["role"]["replica_listener"]["receipt_signing_key"] = json!({
+            "provider": "file",
+            "path": "/var/lib/blockzilla/ingress-spool/receipt.key"
+        });
+        let error = validation_text(&value);
+        assert!(error.contains("primary_term_file must be outside spool.root"));
+        assert!(error.contains("receipt_signing_key.path must be outside spool.root"));
+    }
+
+    #[test]
+    fn replica_listener_limits_are_nonzero_and_fit_spool_and_process_budgets() {
+        let mut zero = valid_primary_json();
+        let zero_listener = &mut zero["role"]["replica_listener"];
+        zero_listener["max_wire_request_bytes"] = json!(0);
+        zero_listener["max_batch_events"] = json!(0);
+        zero_listener["max_batch_compressed_bytes"] = json!(0);
+        zero_listener["max_batch_uncompressed_bytes"] = json!(0);
+        zero_listener["max_compressed_event_bytes"] = json!(0);
+        zero_listener["max_uncompressed_event_bytes"] = json!(0);
+        zero_listener["max_concurrent_requests"] = json!(0);
+        zero_listener["max_open_streams"] = json!(0);
+        zero_listener["max_known_streams"] = json!(0);
+        zero_listener["tls_handshake_timeout_ms"] = json!(0);
+        zero_listener["request_idle_timeout_ms"] = json!(0);
+        zero_listener["request_total_timeout_ms"] = json!(0);
+        let error = validation_text(&zero);
+        assert!(error.contains("max_wire_request_bytes must be non-zero"));
+        assert!(error.contains("max_batch_events must be non-zero"));
+        assert!(error.contains("max_batch_compressed_bytes must be non-zero"));
+        assert!(error.contains("max_batch_uncompressed_bytes must be non-zero"));
+        assert!(error.contains("max_compressed_event_bytes must be non-zero"));
+        assert!(error.contains("max_uncompressed_event_bytes must be non-zero"));
+        assert!(error.contains("max_concurrent_requests must be non-zero"));
+        assert!(error.contains("max_open_streams must be non-zero"));
+        assert!(error.contains("max_known_streams must be non-zero"));
+        assert!(error.contains("tls_handshake_timeout_ms must be non-zero"));
+        assert!(error.contains("request_idle_timeout_ms must be non-zero"));
+        assert!(error.contains("request_total_timeout_ms must be non-zero"));
+
+        let mut incoherent = valid_primary_json();
+        let listener = &mut incoherent["role"]["replica_listener"];
+        listener["primary_term_file"] = json!("relative.term");
+        listener["receipt_signing_key"] = json!({
+            "provider": "env",
+            "variable": "BLOCKZILLA_RECEIPT_PRIVATE_KEY"
+        });
+        listener["max_wire_request_bytes"] = json!(1_200_000_000u64);
+        listener["max_batch_events"] = json!(100);
+        listener["max_batch_compressed_bytes"] = json!(1_300_000_000u64);
+        listener["max_batch_uncompressed_bytes"] = json!(1_300_000_000u64);
+        listener["max_compressed_event_bytes"] = json!(1_400_000_000u64);
+        listener["max_uncompressed_event_bytes"] = json!(1_400_000_000u64);
+        listener["max_concurrent_requests"] = json!(2);
+        listener["max_open_streams"] = json!(100);
+        listener["max_known_streams"] = json!(10);
+        listener["request_idle_timeout_ms"] = json!(60_000);
+        listener["request_total_timeout_ms"] = json!(30_000);
+        let error = validation_text(&incoherent);
+        assert!(error.contains("primary_term_file must be an absolute"));
+        assert!(error.contains("receipt_signing_key must use a private file"));
+        assert!(error.contains(
+            "max_compressed_event_bytes must be <= role.replica_listener.max_batch_compressed_bytes"
+        ));
+        assert!(error.contains("max_uncompressed_event_bytes must be <= role.replica_listener.max_batch_uncompressed_bytes"));
+        assert!(error.contains("max_wire_request_bytes must reserve at least 65536 bytes above role.replica_listener.max_compressed_event_bytes"));
+        assert!(error.contains("max_compressed_event_bytes exceeds spool.segment_bytes"));
+        assert!(error.contains("max_wire_request_bytes exceeds max_total_queue_bytes"));
+        assert!(error.contains("in-flight request/decompression memory"));
+        assert!(error.contains("in-flight batch events"));
+        assert!(
+            error.contains("max_known_streams must be >= role.replica_listener.max_open_streams")
+        );
+        assert!(error.contains(
+            "request_total_timeout_ms must be >= role.replica_listener.request_idle_timeout_ms"
+        ));
+        assert!(error.contains("plus replica listener request/decompression memory"));
+        assert!(error.contains("plus replica listener request events"));
+    }
+
+    #[test]
     fn redacted_summary_omits_endpoints_secret_refs_and_paths() {
         let config = decode_and_validate(&valid_primary_json()).unwrap();
         let summary = serde_json::to_string(&config.redacted_summary()).unwrap();
         assert!(!summary.contains("grpc.example.net"));
         assert!(!summary.contains("BLOCKZILLA_GRPC_PRIMARY_TOKEN"));
         assert!(!summary.contains("/etc/blockzilla"));
+        assert!(!summary.contains("primary-term"));
         assert!(summary.contains("yellowstone-primary"));
         assert!(summary.contains("x_token"));
+        assert!(summary.contains("\"max_in_flight_memory_bytes\":490733568"));
     }
 
     #[test]
@@ -1263,12 +1881,12 @@ mod tests {
     #[test]
     fn unsupported_schema_and_empty_enabled_set_are_rejected() {
         let mut value = valid_primary_json();
-        value["schema_version"] = json!(2);
+        value["schema_version"] = json!(1);
         for source in value["sources"].as_array_mut().unwrap() {
             source["enabled"] = json!(false);
         }
         let error = validation_text(&value);
-        assert!(error.contains("schema_version 2 is unsupported"));
+        assert!(error.contains("schema_version 1 is unsupported"));
         assert!(error.contains("at least one enabled input"));
     }
 
@@ -1313,6 +1931,79 @@ mod tests {
     }
 
     #[test]
+    fn replica_sender_control_plane_is_explicit_and_validated() {
+        let config = decode_and_validate(&valid_replica_json("replica")).unwrap();
+        let IngestRoleConfig::Replica { upstream, .. } = config.role else {
+            panic!("expected replica role");
+        };
+        assert_eq!(upstream.expected_primary_id, "nas-primary");
+        assert_eq!(
+            upstream.cumulative_ack_wal_file,
+            Path::new("/var/lib/blockzilla/replica-control/cumulative-ack.wal")
+        );
+
+        let mut invalid = valid_replica_json("replica");
+        invalid["role"]["upstream"]["expected_primary_id"] = json!("not a stable/id");
+        invalid["role"]["upstream"]["cumulative_ack_wal_file"] =
+            json!("relative/cumulative-ack.wal");
+        let error = validation_text(&invalid);
+        assert!(error.contains("expected_primary_id must be 1-64 ASCII characters"));
+        assert!(
+            error.contains("cumulative_ack_wal_file must be an absolute, unambiguous file path")
+        );
+    }
+
+    #[test]
+    fn replica_sender_files_must_stay_outside_the_journal_tree() {
+        let mut value = valid_replica_json("replica");
+        let spool_root = "/var/lib/blockzilla/ingress-spool";
+        value["role"]["upstream"]["cumulative_ack_wal_file"] =
+            json!(format!("{spool_root}/cumulative-ack.wal"));
+        value["role"]["upstream"]["tls"]["ca_file"] = json!(format!("{spool_root}/primary-ca.crt"));
+        value["role"]["upstream"]["tls"]["client_certificate_file"] =
+            json!(format!("{spool_root}/replica.crt"));
+        value["role"]["upstream"]["tls"]["client_private_key_file"] =
+            json!(format!("{spool_root}/replica.key"));
+        value["role"]["upstream"]["trusted_receipt_keys"][0]["public_key_file"] =
+            json!(format!("{spool_root}/receipt.pub"));
+
+        let error = validation_text(&value);
+        for field in [
+            "cumulative_ack_wal_file",
+            "tls.ca_file",
+            "tls.client_certificate_file",
+            "tls.client_private_key_file",
+            "trusted_receipt_keys[0].public_key_file",
+        ] {
+            assert!(
+                error.contains(&format!("{field} must be outside spool.root")),
+                "missing outside-spool validation for {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn replica_sender_control_plane_fields_are_required() {
+        let mut missing_primary = valid_replica_json("replica");
+        missing_primary["role"]["upstream"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_primary_id");
+        let error = decode_and_validate(&missing_primary)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing field `expected_primary_id`"));
+
+        let mut missing_wal = valid_replica_json("replica");
+        missing_wal["role"]["upstream"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cumulative_ack_wal_file");
+        let error = decode_and_validate(&missing_wal).unwrap_err().to_string();
+        assert!(error.contains("missing field `cumulative_ack_wal_file`"));
+    }
+
+    #[test]
     fn replica_structurally_requires_node_upstream_and_auth() {
         let mut value = valid_primary_json();
         value["role"] = json!({
@@ -1320,9 +2011,18 @@ mod tests {
             "node_id": "backup-1",
             "upstream": {
                 "endpoint": "https://primary.example.net",
+                "expected_primary_id": "nas-primary",
+                "cumulative_ack_wal_file": "/var/lib/blockzilla/replica-control/cumulative-ack.wal",
                 "tls": {},
                 "reconnect": reconnect_json(),
-                "batch": { "max_events": 1, "max_bytes": 1024, "ack_timeout_ms": 1000 }
+                "batch": {
+                    "max_events": 1,
+                    "max_bytes": 1024,
+                    "max_uncompressed_bytes": 2048,
+                    "max_compressed_event_bytes": 1024,
+                    "max_uncompressed_event_bytes": 2048,
+                    "ack_timeout_ms": 1000
+                }
             }
         });
         let error = decode_and_validate(&value).unwrap_err().to_string();
@@ -1343,9 +2043,36 @@ mod tests {
         let mut value = valid_replica_json("replica");
         value["role"]["upstream"]["endpoint"] = json!("http://primary.example.net");
         value["role"]["upstream"]["auth"] = json!({ "method": "mutual_tls" });
+        value["role"]["upstream"]["tls"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_certificate_file");
+        value["role"]["upstream"]["tls"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_private_key_file");
         let error = validation_text(&value);
         assert!(error.contains("must use https:// or grpcs://"));
         assert!(error.contains("requires TLS client certificate"));
+    }
+
+    #[test]
+    fn replica_rejects_non_mtls_authentication_modes() {
+        let mut bearer = valid_replica_json("replica");
+        bearer["role"]["upstream"]["auth"] = json!({
+            "method": "bearer",
+            "credential": { "provider": "file", "path": "/run/secrets/replica.token" }
+        });
+        assert!(validation_text(&bearer).contains("must be mutual_tls"));
+
+        let mut ed25519 = valid_replica_json("replica");
+        ed25519["role"]["upstream"]["auth"] = json!({
+            "method": "ed25519",
+            "key_id": "replica-key",
+            "signing_key": { "provider": "file", "path": "/run/secrets/replica.key" },
+            "upstream_public_key_file": "/etc/blockzilla/keys/primary.pub"
+        });
+        assert!(validation_text(&ed25519).contains("must be mutual_tls"));
     }
 
     #[test]

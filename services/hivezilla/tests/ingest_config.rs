@@ -38,7 +38,65 @@ fn shipped_primary_and_replica_examples_validate() {
             .unwrap();
 
     assert_eq!(primary.redacted_summary().role, "primary");
-    assert_eq!(primary.redacted_summary().enabled_source_count, 2);
+    assert_eq!(
+        primary.redacted_summary().schema_version,
+        ingest::INGEST_CONFIG_SCHEMA_VERSION
+    );
+    assert_eq!(primary.redacted_summary().source_count, 0);
+    assert_eq!(primary.redacted_summary().enabled_source_count, 0);
+    assert_eq!(
+        primary
+            .redacted_summary()
+            .replica_listener
+            .unwrap()
+            .max_concurrent_requests,
+        1
+    );
     assert_eq!(replica.redacted_summary().role, "replica");
-    assert_eq!(replica.redacted_summary().enabled_source_count, 1);
+    assert_eq!(
+        replica.redacted_summary().schema_version,
+        ingest::INGEST_CONFIG_SCHEMA_VERSION
+    );
+    assert!(replica.redacted_summary().replica_listener.is_none());
+    assert_eq!(replica.redacted_summary().source_count, 0);
+    assert_eq!(replica.redacted_summary().enabled_source_count, 0);
+    let ingest::IngestRoleConfig::Primary {
+        node_id: primary_id,
+        replica_listener: Some(listener),
+        ..
+    } = &primary.role
+    else {
+        panic!("expected primary role");
+    };
+    let ingest::IngestRoleConfig::Replica { upstream, .. } = &replica.role else {
+        panic!("expected replica role");
+    };
+    assert_eq!(
+        listener.server_private_key_file,
+        std::path::Path::new("/tmp/blockzilla-receiver/server-private-key.pem")
+    );
+    assert_eq!(listener.receipt_signing_key_id, "receipt-current");
+    assert_eq!(
+        listener.receipt_signing_key,
+        ingest::SecretRef::File {
+            path: "/tmp/blockzilla-receiver/receipt-signing-key.pem".into(),
+        }
+    );
+    assert_eq!(
+        upstream.tls.client_private_key_file.as_deref(),
+        Some(std::path::Path::new(
+            "/tmp/blockzilla-replicator/client-private-key.pem"
+        ))
+    );
+    assert_eq!(&upstream.expected_primary_id, primary_id);
+    assert!(upstream.batch.max_events <= listener.max_batch_events);
+    assert!(upstream.batch.max_bytes <= listener.max_batch_compressed_bytes);
+    assert!(upstream.batch.max_uncompressed_bytes <= listener.max_batch_uncompressed_bytes);
+    assert!(upstream.batch.max_compressed_event_bytes <= listener.max_compressed_event_bytes);
+    assert!(upstream.batch.max_uncompressed_event_bytes <= listener.max_uncompressed_event_bytes);
+    assert_eq!(upstream.expected_primary_id, "blockzilla-primary");
+    assert_eq!(
+        upstream.cumulative_ack_wal_file,
+        std::path::Path::new("/data/replication-control/cumulative-ack.wal")
+    );
 }

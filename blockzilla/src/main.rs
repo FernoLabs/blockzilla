@@ -15,6 +15,7 @@ mod car_preflight;
 mod first_seen_finalization;
 mod genesis_epoch0;
 mod pre_hot;
+mod scheduler;
 mod split_compact;
 mod token_events;
 
@@ -37,6 +38,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run the storage scheduler and its read-only status API.
+    Scheduler,
+
     /// Stream a CAR to clean EOF and atomically publish a bounded-memory structural receipt.
     PreflightCar {
         /// Input CAR or CAR.ZST file, including an in-progress `.car[.zst].part` path.
@@ -916,10 +920,22 @@ impl From<LiveRegistrySourceArg> for archive_v2::LiveRegistrySource {
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
+    // The archive CLI already has a large generated Clap tree. Parse scheduler
+    // options only when that subcommand is selected so unrelated commands do
+    // not build another large option graph on their stack.
+    if let Some(args) = scheduler_invocation_args() {
+        let config = scheduler::SchedulerArgs::parse_from(args).into_config()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(scheduler::run_scheduler(config));
+    }
+
     let cli = Cli::parse();
     let resume = cli.resume;
 
     match cli.command {
+        Commands::Scheduler => unreachable!("scheduler arguments are parsed before the main CLI"),
         Commands::PreflightCar {
             input,
             epoch,
@@ -1468,6 +1484,16 @@ fn main() -> Result<()> {
             archive_v2::find_poh_gaps(&input, output.as_deref())
         }
     }
+}
+
+fn scheduler_invocation_args() -> Option<Vec<std::ffi::OsString>> {
+    let mut args = std::env::args_os();
+    args.next()?;
+    (args.next()?.as_os_str() == std::ffi::OsStr::new("scheduler")).then(|| {
+        std::iter::once(std::ffi::OsString::from("blockzilla scheduler"))
+            .chain(args)
+            .collect()
+    })
 }
 
 pub(crate) fn file_nonempty(path: &Path) -> bool {

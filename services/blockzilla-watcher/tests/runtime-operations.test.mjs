@@ -51,7 +51,6 @@ function status(overrides = {}) {
         id: '43-100',
         pid: 43,
         name: 'sha256sum',
-        user: 'ach',
         read_mib_per_sec: 200,
         write_mib_per_sec: 0,
         cpu_percent: 30,

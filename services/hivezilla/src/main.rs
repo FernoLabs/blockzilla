@@ -16,10 +16,19 @@ use hivezilla::{
         inspect_capture, probe_grpc, watch_grpc_epoch_boundaries,
     },
     grpc_raw::{
-        GrpcRawMaterializeConfig, GrpcRawRecordConfig, inspect_grpc_raw_blocks,
-        materialize_grpc_raw_blocks, record_grpc_raw_blocks, verify_grpc_raw_poh,
+        GrpcRawCommittedCursor, GrpcRawCommittedReadLimits, GrpcRawLocalGcOutcome,
+        GrpcRawMaterializeConfig, GrpcRawRecordConfig, GrpcReceiverBridgeConfig,
+        bridge_receiver_grpc_raw, gc_one_acknowledged_grpc_raw_generation, inspect_grpc_raw_blocks,
+        materialize_grpc_raw_blocks, open_grpc_raw_replication_generation_cursors,
+        record_grpc_raw_blocks, seed_grpc_raw_generation, verify_grpc_raw_poh,
     },
-    ingest::IngestConfig,
+    ingest::{
+        CumulativeAckWal, IngestConfig, IngestRoleConfig, PullClientConfig, PullClientProtocol,
+        PullReplicationOutcome, RawReplicationPullClient, RawReplicationPullRuntimeConfig,
+        RawReplicationPullServerRuntime, RawReplicationServerRuntime, ReconnectConfig,
+        ReplicaUpstreamConfig, ReplicationSendOutcome, ReplicationSender,
+        ReplicationSenderErrorKind, ReplicationStreamId, load_ingest_receiver_config,
+    },
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
@@ -30,12 +39,24 @@ use hivezilla::{
         notify_supervisor, run_supervisor,
     },
 };
-use std::{collections::BTreeSet, ffi::OsString, time::Duration};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    ffi::OsString,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::Path,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Debug, Parser)]
 #[command(name = "hivezilla")]
-#[command(about = "Build Blockzilla archives from live feeds with CAR repair support")]
+#[command(about = "Capture and replicate durable live inputs for Blockzilla")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -54,8 +75,12 @@ enum Command {
     InspectGrpcRaw(InspectGrpcRawArgs),
     /// Replay a raw gRPC spool and require complete, reconstructable PoH entries in every block.
     VerifyGrpcRawPoh(VerifyGrpcRawPohArgs),
+    /// Seed an empty rolling generation with a stopped, verified generation's durable tail.
+    SeedGrpcRawGeneration(SeedGrpcRawGenerationArgs),
     /// Materialize one committed epoch slice from a stopped raw spool into a staged capture.
     MaterializeGrpcRaw(MaterializeGrpcRawArgs),
+    /// Copy the receiver's locally durable prefix into a separate standard raw-gRPC generation.
+    BridgeReceiverGrpcRaw(BridgeReceiverGrpcRawArgs),
     SyncRpcEpoch(SyncRpcEpochArgs),
     WatchEpochsGrpc(WatchEpochsGrpcArgs),
     PlanEpochBackfill(PlanEpochBackfillArgs),
@@ -68,6 +93,14 @@ enum Command {
     BenchFixture(BenchFixtureArgs),
     /// Validate a redundant-ingest JSON config and print only its redacted summary.
     ValidateIngestConfig(ValidateIngestConfigArgs),
+    /// Run the bounded, mTLS-only durable inbound replication receiver.
+    ServeIngestReceiver(ServeIngestReceiverArgs),
+    /// Replicate the local raw-gRPC hot queue to the configured primary.
+    ReplicateGrpcRaw(ReplicateGrpcRawArgs),
+    /// Pull server-selected raw batches into Blockzilla's durable local receiver.
+    PullGrpcRaw(PullGrpcRawArgs),
+    /// Serve the recorder's durable raw WAL over direct, mandatory mTLS pull replication.
+    ServeGrpcRawPullSource(ServeGrpcRawPullSourceArgs),
     /// Portably supervise one long-lived service with bounded restart and health policy.
     Supervise(SuperviseArgs),
     /// Notify a parent Hivezilla supervisor of readiness or one heartbeat.
@@ -208,6 +241,82 @@ impl From<SupervisorNotificationKindArg> for SupervisorNotificationKind {
 }
 
 #[derive(Debug, Args)]
+struct ServeIngestReceiverArgs {
+    /// Strict schema-v2 primary ingest configuration containing role.replica_listener.
+    #[arg(long)]
+    config: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ReplicateGrpcRawArgs {
+    /// Strict schema-v2 replica ingest configuration containing role.upstream.
+    #[arg(long)]
+    config: std::path::PathBuf,
+
+    /// Raw-gRPC hot-generation root; must lexically equal config.spool.root.
+    #[arg(long)]
+    cache_root: std::path::PathBuf,
+
+    /// Delay while the active generation is caught up and awaiting new durable rows or rotation.
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
+
+    /// Atomically publish a non-authoritative monitoring snapshot after each signed ACK WAL fsync.
+    #[arg(long)]
+    ack_status_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PullGrpcRawArgs {
+    /// Strict pull-client JSON. The client never supplies a source cursor or slot.
+    #[arg(long)]
+    config: std::path::PathBuf,
+
+    /// Delay while the source reports a clean, caught-up response stream.
+    #[arg(long, default_value_t = 1_000)]
+    poll_interval_ms: u64,
+
+    /// Override the config protocol for a controlled canary. Omitted means the config value,
+    /// whose backward-compatible default is v1.
+    #[arg(long, value_enum)]
+    protocol: Option<PullClientProtocolArg>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PullClientProtocolArg {
+    V1,
+    V2,
+}
+
+impl From<PullClientProtocolArg> for PullClientProtocol {
+    fn from(value: PullClientProtocolArg) -> Self {
+        match value {
+            PullClientProtocolArg::V1 => Self::V1,
+            PullClientProtocolArg::V2 => Self::V2,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct ServeGrpcRawPullSourceArgs {
+    /// Strict schema-v1 pull-source runtime JSON at an absolute, non-symlink path.
+    #[arg(long)]
+    config: std::path::PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplicationAckStatus {
+    schema_version: u32,
+    cluster_id: String,
+    origin_node_id: String,
+    source_id: String,
+    journal_id: String,
+    through_sequence: u64,
+    primary_term: u64,
+    updated_unix_secs: u64,
+}
+
+#[derive(Debug, Args)]
 struct ProbeGrpcArgs {
     #[arg(long)]
     endpoint: String,
@@ -232,6 +341,18 @@ struct CaptureGrpcArgs {
 
     #[arg(long, default_value_t = 60)]
     timeout_secs: u64,
+
+    /// Maximum time allowed to establish the Yellowstone transport.
+    #[arg(long, default_value_t = 30)]
+    connect_timeout_secs: u64,
+
+    /// Maximum time allowed to open the bidirectional Yellowstone subscription.
+    #[arg(long, default_value_t = 30)]
+    subscribe_timeout_secs: u64,
+
+    /// Reconnect after this many seconds without a fully flushed block append.
+    #[arg(long, default_value_t = 120)]
+    idle_timeout_secs: u64,
 
     #[arg(long)]
     from_slot: Option<u64>,
@@ -279,9 +400,17 @@ struct RecordGrpcRawArgs {
     #[arg(long)]
     from_slot: Option<u64>,
 
+    /// Never subscribe below this slot, even when the durable journal tail is older.
+    #[arg(long)]
+    min_resume_slot: Option<u64>,
+
     /// Atomically publish a secret-free JSON event if the provider skips the inclusive resume slot.
     #[arg(long)]
     resume_coverage_warning_file: Option<std::path::PathBuf>,
+
+    /// Exact replay-gap evidence file referenced by the supervisor's pending recovery floor.
+    #[arg(long)]
+    pending_replay_gap_file: Option<String>,
 
     #[arg(long, default_value_t = OLD_FAITHFUL_SLOTS_PER_EPOCH)]
     slots_per_epoch: u64,
@@ -300,6 +429,15 @@ struct RecordGrpcRawArgs {
     #[arg(long, default_value_t = 128 * 1024 * 1024)]
     max_record_bytes: u64,
 
+    /// Stop before this self-contained generation would exceed the limit. Zero disables.
+    #[arg(long, default_value_t = 0)]
+    max_generation_bytes: u64,
+
+    /// Keep the subscription open and atomically roll `<root>/active` into `<root>/sealed`.
+    /// The supervisor must recover any pre-existing `.rotation` transaction before startup.
+    #[arg(long)]
+    hot_generation_root: Option<std::path::PathBuf>,
+
     /// Stop cleanly before the filesystem falls below this many free bytes. Zero disables.
     #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
     min_free_bytes: u64,
@@ -311,11 +449,30 @@ struct RecordGrpcRawArgs {
     #[arg(long, default_value = "solana-mainnet")]
     cluster_id: String,
 
-    #[arg(long, default_value = "mac-bridge")]
+    /// Stable identity for the physical capture node. Required because it is persisted on disk.
+    #[arg(long)]
     origin_node_id: String,
 
     #[arg(long, default_value = "grpc-raw")]
     source_id: String,
+
+    /// Opt-in internal Yellowstone relay listener. Requires --relay-x-token-file.
+    #[arg(long)]
+    relay_bind: Option<std::net::SocketAddr>,
+
+    /// Dedicated downstream x-token file; never falls back to the upstream token/environment.
+    #[arg(long)]
+    relay_x_token_file: Option<std::path::PathBuf>,
+
+    #[arg(long, default_value_t = 128)]
+    relay_max_records: usize,
+
+    /// Retained protobuf byte cap; must be at least --max-record-bytes.
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    relay_max_encoded_bytes: usize,
+
+    #[arg(long, default_value_t = 4)]
+    relay_max_clients: usize,
 }
 
 #[derive(Debug, Args)]
@@ -345,6 +502,18 @@ struct VerifyGrpcRawPohArgs {
 }
 
 #[derive(Debug, Args)]
+struct SeedGrpcRawGenerationArgs {
+    #[arg(long)]
+    source_dir: std::path::PathBuf,
+
+    #[arg(long)]
+    target_dir: std::path::PathBuf,
+
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    max_record_bytes: u64,
+}
+
+#[derive(Debug, Args)]
 struct MaterializeGrpcRawArgs {
     /// Stopped raw-recorder directory or a filesystem snapshot of it.
     #[arg(long)]
@@ -367,6 +536,70 @@ struct MaterializeGrpcRawArgs {
 
     #[arg(long, default_value_t = 1000)]
     pubkey_hot_count: usize,
+}
+
+#[derive(Debug, Args)]
+struct BridgeReceiverGrpcRawArgs {
+    /// Canonical Blockzilla receiver spool root. It is opened read-only by the bridge.
+    #[arg(long)]
+    receiver_spool_root: std::path::PathBuf,
+
+    /// Separate derived standard raw-gRPC generation consumed by verify/materialize commands.
+    #[arg(long)]
+    output_dir: std::path::PathBuf,
+
+    #[arg(long)]
+    cluster_id: String,
+
+    #[arg(long)]
+    origin_node_id: String,
+
+    #[arg(long)]
+    source_id: String,
+
+    /// Immutable 32-hex-character receiver stream journal id.
+    #[arg(long, value_parser = parse_journal_id)]
+    journal_id: [u8; 16],
+
+    #[arg(long, default_value = "blockzilla-receiver-wal")]
+    endpoint_label: String,
+
+    #[arg(long, default_value_t = OLD_FAITHFUL_SLOTS_PER_EPOCH)]
+    slots_per_epoch: u64,
+
+    #[arg(long, default_value_t = 256 * 1024 * 1024)]
+    target_segment_bytes: u64,
+
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    max_compressed_record_bytes: u64,
+
+    #[arg(long, default_value_t = 512 * 1024 * 1024)]
+    max_uncompressed_record_bytes: u64,
+
+    /// Stop before the complete derived output tree exceeds this logical size.
+    #[arg(long, default_value_t = 8_u64 * 1024 * 1024 * 1024 * 1024)]
+    max_output_bytes: u64,
+
+    /// Preserve at least this many filesystem bytes after every projected append.
+    #[arg(long, default_value_t = 16_u64 * 1024 * 1024 * 1024)]
+    min_free_bytes: u64,
+
+    /// Maximum records copied in one invocation; rerun to continue.
+    #[arg(long, default_value_t = 4096)]
+    max_records: usize,
+}
+
+fn parse_journal_id(value: &str) -> std::result::Result<[u8; 16], String> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("journal id must be exactly 32 hexadecimal characters".to_string());
+    }
+    let mut journal_id = [0u8; 16];
+    for (index, output) in journal_id.iter_mut().enumerate() {
+        let offset = index * 2;
+        *output = u8::from_str_radix(&value[offset..offset + 2], 16)
+            .map_err(|_| "journal id contains invalid hexadecimal".to_string())?;
+    }
+    Ok(journal_id)
 }
 
 #[derive(Debug, Args)]
@@ -756,6 +989,9 @@ impl From<CaptureGrpcArgs> for GrpcCaptureConfig {
             archive_dir: value.archive_dir,
             max_blocks: value.max_blocks,
             timeout_secs: value.timeout_secs,
+            connect_timeout_secs: value.connect_timeout_secs,
+            subscribe_timeout_secs: value.subscribe_timeout_secs,
+            idle_timeout_secs: value.idle_timeout_secs,
             from_slot: value.from_slot,
             slots_per_epoch: value.slots_per_epoch,
             stop_at_epoch_boundary: value.stop_at_epoch_boundary,
@@ -776,17 +1012,26 @@ impl From<RecordGrpcRawArgs> for GrpcRawRecordConfig {
             timeout_secs: value.timeout_secs,
             idle_timeout_secs: value.idle_timeout_secs,
             from_slot: value.from_slot,
+            min_resume_slot: value.min_resume_slot,
             resume_coverage_warning_file: value.resume_coverage_warning_file,
+            pending_replay_gap_file: value.pending_replay_gap_file,
             slots_per_epoch: value.slots_per_epoch,
             stop_at_epoch_boundary: value.stop_at_epoch_boundary,
             compression_level: value.compression_level,
             segment_target_bytes: value.segment_target_bytes,
             max_record_bytes: value.max_record_bytes,
+            max_generation_bytes: value.max_generation_bytes,
+            hot_generation_root: value.hot_generation_root,
             min_free_bytes: value.min_free_bytes,
             require_complete_poh: value.require_complete_poh,
             cluster_id: value.cluster_id,
             origin_node_id: value.origin_node_id,
             source_id: value.source_id,
+            relay_bind: value.relay_bind,
+            relay_x_token_file: value.relay_x_token_file,
+            relay_max_records: value.relay_max_records,
+            relay_max_encoded_bytes: value.relay_max_encoded_bytes,
+            relay_max_clients: value.relay_max_clients,
         }
     }
 }
@@ -998,6 +1243,7 @@ impl std::str::FromStr for SlotRangeArg {
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     init_tracing();
+    tracing::debug!("Hivezilla CLI started");
 
     let cli = Cli::parse();
     match cli.command {
@@ -1042,6 +1288,11 @@ async fn main() -> Result<()> {
                 verify_grpc_raw_poh(args.output_dir, args.max_record_bytes, args.min_records)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Command::SeedGrpcRawGeneration(args) => {
+            let report =
+                seed_grpc_raw_generation(args.source_dir, args.target_dir, args.max_record_bytes)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::MaterializeGrpcRaw(args) => {
             let report = materialize_grpc_raw_blocks(GrpcRawMaterializeConfig {
                 input_dir: args.input_dir,
@@ -1050,6 +1301,27 @@ async fn main() -> Result<()> {
                 max_record_bytes: args.max_record_bytes,
                 pubkey_hot_registry_path: args.pubkey_hot_registry,
                 pubkey_hot_count: args.pubkey_hot_count,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::BridgeReceiverGrpcRaw(args) => {
+            let report = bridge_receiver_grpc_raw(GrpcReceiverBridgeConfig {
+                receiver_spool_root: args.receiver_spool_root,
+                stream: ReplicationStreamId {
+                    cluster_id: args.cluster_id,
+                    origin_node_id: args.origin_node_id,
+                    source_id: args.source_id,
+                    journal_id: args.journal_id,
+                },
+                output_dir: args.output_dir,
+                endpoint_label: args.endpoint_label,
+                slots_per_epoch: args.slots_per_epoch,
+                target_segment_bytes: args.target_segment_bytes,
+                max_compressed_record_bytes: args.max_compressed_record_bytes,
+                max_uncompressed_record_bytes: args.max_uncompressed_record_bytes,
+                max_output_bytes: args.max_output_bytes,
+                min_free_bytes: args.min_free_bytes,
+                max_records: args.max_records,
             })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -1114,12 +1386,1072 @@ async fn main() -> Result<()> {
             notify_supervisor(args.kind.into())?;
             println!("{{\"notified\":true}}");
         }
+        Command::ServeIngestReceiver(args) => {
+            let config = load_ingest_receiver_config(&args.config)?;
+            let runtime = RawReplicationServerRuntime::from_ingest_config(&config)?;
+            tracing::info!(
+                bind = %runtime.bind_address(),
+                primary_term = runtime.primary_term(),
+                "starting mTLS ingest replication receiver"
+            );
+            runtime.serve_with_shutdown(shutdown_signal()).await?;
+            tracing::info!("mTLS ingest replication receiver stopped cleanly");
+        }
+        Command::ReplicateGrpcRaw(args) => replicate_grpc_raw(args).await?,
+        Command::PullGrpcRaw(args) => pull_grpc_raw(args).await?,
+        Command::ServeGrpcRawPullSource(args) => {
+            let config: RawReplicationPullRuntimeConfig =
+                load_bounded_json_config(&args.config, "pull-source runtime config")?;
+            let runtime = RawReplicationPullServerRuntime::from_config(&config)?;
+            tracing::info!(
+                bind = %runtime.bind_address(),
+                gc_enabled = runtime.gc_enabled(),
+                "starting direct mTLS raw pull source"
+            );
+            runtime.serve_with_shutdown(shutdown_signal()).await?;
+            tracing::info!("direct mTLS raw pull source stopped cleanly");
+        }
     }
 
     Ok(())
 }
 
+fn load_bounded_json_config<T: DeserializeOwned>(path: &Path, label: &'static str) -> Result<T> {
+    const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+    anyhow::ensure!(
+        path.is_absolute() && path != Path::new("/"),
+        "{label} path must be absolute and non-root"
+    );
+    let link_metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} file {}", path.display()))?;
+    anyhow::ensure!(
+        link_metadata.is_file() && !link_metadata.file_type().is_symlink(),
+        "{label} must be a regular non-symlink file"
+    );
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .with_context(|| format!("open {label} file {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect opened {label} file {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= MAX_CONFIG_BYTES,
+        "{label} exceeds its bounded regular-file policy"
+    );
+
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {label} file {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_CONFIG_BYTES,
+        "{label} exceeds its size limit"
+    );
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("decode strict {label} JSON {}", path.display()))
+}
+
+const PULL_V2_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
+const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PullProgressState {
+    Active,
+    CaughtUp,
+}
+
+impl PullProgressState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::CaughtUp => "caught_up",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PullProgressSnapshot {
+    state: PullProgressState,
+    records: u64,
+    compressed_bytes: u64,
+    elapsed: Duration,
+    total_records: u64,
+    total_compressed_bytes: u64,
+    total_elapsed: Duration,
+    latest_sequence: Option<u64>,
+    replayed_acks: u64,
+}
+
+struct PullV2Progress {
+    started_at: Instant,
+    window_started_at: Instant,
+    window_records: u64,
+    window_compressed_bytes: u64,
+    total_records: u64,
+    total_compressed_bytes: u64,
+    latest_sequence: Option<u64>,
+    window_replayed_acks: u64,
+    at_head: bool,
+}
+
+impl PullV2Progress {
+    fn new(now: Instant) -> Self {
+        Self {
+            started_at: now,
+            window_started_at: now,
+            window_records: 0,
+            window_compressed_bytes: 0,
+            total_records: 0,
+            total_compressed_bytes: 0,
+            latest_sequence: None,
+            window_replayed_acks: 0,
+            at_head: false,
+        }
+    }
+
+    fn record_commit(
+        &mut self,
+        now: Instant,
+        records: usize,
+        compressed_bytes: u64,
+        through_sequence: u64,
+        replayed_ack: bool,
+    ) -> Option<PullProgressSnapshot> {
+        if self.at_head {
+            self.at_head = false;
+            self.window_started_at = now;
+        }
+        let records = u64::try_from(records).unwrap_or(u64::MAX);
+        self.window_records = self.window_records.saturating_add(records);
+        self.window_compressed_bytes = self
+            .window_compressed_bytes
+            .saturating_add(compressed_bytes);
+        self.total_records = self.total_records.saturating_add(records);
+        self.total_compressed_bytes = self.total_compressed_bytes.saturating_add(compressed_bytes);
+        self.latest_sequence = Some(through_sequence);
+        self.window_replayed_acks = self
+            .window_replayed_acks
+            .saturating_add(u64::from(replayed_ack));
+
+        (now.saturating_duration_since(self.window_started_at) >= PULL_V2_PROGRESS_INTERVAL)
+            .then(|| self.take_snapshot(now, PullProgressState::Active))
+    }
+
+    fn caught_up(&mut self, now: Instant) -> Option<PullProgressSnapshot> {
+        if self.at_head {
+            return None;
+        }
+        self.at_head = true;
+        Some(self.take_snapshot(now, PullProgressState::CaughtUp))
+    }
+
+    fn recovered(&mut self, now: Instant) {
+        // The recovery log carries cumulative totals. Start the next throughput window after the
+        // outage so downtime cannot make a healthy resumed stream look artificially slow.
+        self.window_started_at = now;
+        self.window_records = 0;
+        self.window_compressed_bytes = 0;
+        self.window_replayed_acks = 0;
+    }
+
+    fn take_snapshot(&mut self, now: Instant, state: PullProgressState) -> PullProgressSnapshot {
+        let snapshot = PullProgressSnapshot {
+            state,
+            records: self.window_records,
+            compressed_bytes: self.window_compressed_bytes,
+            elapsed: now.saturating_duration_since(self.window_started_at),
+            total_records: self.total_records,
+            total_compressed_bytes: self.total_compressed_bytes,
+            total_elapsed: now.saturating_duration_since(self.started_at),
+            latest_sequence: self.latest_sequence,
+            replayed_acks: self.window_replayed_acks,
+        };
+        self.window_started_at = now;
+        self.window_records = 0;
+        self.window_compressed_bytes = 0;
+        self.window_replayed_acks = 0;
+        snapshot
+    }
+}
+
+fn log_pull_v2_progress(snapshot: &PullProgressSnapshot) {
+    let elapsed_seconds = snapshot.elapsed.as_secs_f64();
+    let safe_elapsed_seconds = elapsed_seconds.max(0.001);
+    let data_mib = snapshot.compressed_bytes as f64 / BYTES_PER_MIB;
+    let total_data_mib = snapshot.total_compressed_bytes as f64 / BYTES_PER_MIB;
+    let records_per_second = snapshot.records as f64 / safe_elapsed_seconds;
+    let mib_per_second = data_mib / safe_elapsed_seconds;
+    tracing::info!(
+        protocol = "v2",
+        state = snapshot.state.label(),
+        records = snapshot.records,
+        data = %format!("{data_mib:.2} MiB"),
+        elapsed = %format!("{elapsed_seconds:.1}s"),
+        rate = %format!("{mib_per_second:.2} MiB/s"),
+        records_per_second = %format!("{records_per_second:.1}"),
+        latest_sequence = ?snapshot.latest_sequence,
+        replayed_acks = snapshot.replayed_acks,
+        total_records = snapshot.total_records,
+        total_data = %format!("{total_data_mib:.2} MiB"),
+        total_elapsed = %format!("{:.1}s", snapshot.total_elapsed.as_secs_f64()),
+        "durable raw pull progress"
+    );
+}
+
+fn log_pull_v2_recovered(
+    progress: &PullV2Progress,
+    disconnected_at: Instant,
+    recovered_at: Instant,
+) {
+    let total_data_mib = progress.total_compressed_bytes as f64 / BYTES_PER_MIB;
+    tracing::info!(
+        protocol = "v2",
+        downtime = %format!(
+            "{:.1}s",
+            recovered_at
+                .saturating_duration_since(disconnected_at)
+                .as_secs_f64()
+        ),
+        total_records = progress.total_records,
+        total_data = %format!("{total_data_mib:.2} MiB"),
+        latest_sequence = ?progress.latest_sequence,
+        "durable raw pull stream recovered"
+    );
+}
+
+#[cfg(test)]
+mod pull_progress_tests {
+    use super::*;
+
+    #[test]
+    fn v2_progress_aggregates_for_fifteen_seconds_with_human_scale_inputs() {
+        let started_at = Instant::now();
+        let mut progress = PullV2Progress::new(started_at);
+        assert!(
+            progress
+                .record_commit(
+                    started_at + Duration::from_secs(5),
+                    2,
+                    2 * 1024 * 1024,
+                    40,
+                    false,
+                )
+                .is_none()
+        );
+        let snapshot = progress
+            .record_commit(
+                started_at + PULL_V2_PROGRESS_INTERVAL,
+                3,
+                3 * 1024 * 1024,
+                43,
+                true,
+            )
+            .expect("fifteen-second progress report");
+        assert_eq!(snapshot.state, PullProgressState::Active);
+        assert_eq!(snapshot.records, 5);
+        assert_eq!(snapshot.compressed_bytes, 5 * 1024 * 1024);
+        assert_eq!(snapshot.elapsed, PULL_V2_PROGRESS_INTERVAL);
+        assert_eq!(snapshot.latest_sequence, Some(43));
+        assert_eq!(snapshot.replayed_acks, 1);
+    }
+
+    #[test]
+    fn v2_head_and_recovery_summaries_are_not_spammy_or_rate_skewing() {
+        let started_at = Instant::now();
+        let mut progress = PullV2Progress::new(started_at);
+        assert!(
+            progress
+                .record_commit(
+                    started_at + Duration::from_secs(2),
+                    4,
+                    1024 * 1024,
+                    50,
+                    false,
+                )
+                .is_none()
+        );
+        let caught_up = progress
+            .caught_up(started_at + Duration::from_secs(3))
+            .expect("first head summary");
+        assert_eq!(caught_up.state, PullProgressState::CaughtUp);
+        assert_eq!(caught_up.records, 4);
+        assert!(
+            progress
+                .caught_up(started_at + Duration::from_secs(18))
+                .is_none(),
+            "later heartbeats at the same head must stay quiet"
+        );
+
+        let recovered_at = started_at + Duration::from_secs(30);
+        progress.recovered(recovered_at);
+        assert!(
+            progress
+                .record_commit(recovered_at + Duration::from_secs(14), 1, 1024, 51, false,)
+                .is_none(),
+            "downtime must not count toward the resumed rate window"
+        );
+    }
+}
+
+async fn pull_grpc_raw(args: PullGrpcRawArgs) -> Result<()> {
+    anyhow::ensure!(
+        args.poll_interval_ms > 0,
+        "--poll-interval-ms must be non-zero"
+    );
+    let config: PullClientConfig = load_bounded_json_config(&args.config, "pull-client config")?;
+    let protocol = args
+        .protocol
+        .map(PullClientProtocol::from)
+        .unwrap_or(config.source.protocol);
+    let reconnect = config.local_sink.reconnect.clone();
+    let poll_interval = Duration::from_millis(args.poll_interval_ms);
+    let mut retry = ReplicationRetryBackoff::new(&reconnect);
+    let mut shutdown = replication_shutdown_receiver();
+    let mut v2_progress = PullV2Progress::new(Instant::now());
+    let mut disconnected_since = None;
+
+    tracing::info!(
+        poll_interval_ms = args.poll_interval_ms,
+        protocol = ?protocol,
+        "starting outbound durable raw pull client"
+    );
+
+    'client: loop {
+        if replication_shutdown_requested(&shutdown) {
+            break;
+        }
+        let mut client =
+            match RawReplicationPullClient::connect_with_protocol(&config, protocol).await {
+                Ok(client) => {
+                    if protocol == PullClientProtocol::V2
+                        && let Some(disconnected_at) = disconnected_since.take()
+                    {
+                        let recovered_at = Instant::now();
+                        log_pull_v2_recovered(&v2_progress, disconnected_at, recovered_at);
+                        v2_progress.recovered(recovered_at);
+                    }
+                    retry.reset();
+                    client
+                }
+                Err(error) if error.is_retryable() => {
+                    if protocol == PullClientProtocol::V2 {
+                        disconnected_since.get_or_insert_with(Instant::now);
+                    }
+                    let Some((attempt, delay)) = retry.next_delay() else {
+                        anyhow::bail!("durable raw pull connection retry limit exhausted");
+                    };
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        error_kind = ?error.kind(),
+                        "durable raw pull endpoints are unavailable; retrying"
+                    );
+                    if replication_wait_or_shutdown(delay, &mut shutdown).await {
+                        break;
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error_kind = ?error.kind(),
+                        "durable raw pull client connection failed closed"
+                    );
+                    return Err(anyhow::Error::new(error)
+                        .context("durable raw pull client failed closed during connection"));
+                }
+            };
+
+        loop {
+            if replication_shutdown_requested(&shutdown) {
+                break 'client;
+            }
+            match client.pull_once().await {
+                Ok(PullReplicationOutcome::CaughtUp) => {
+                    retry.reset();
+                    if replication_wait_or_shutdown(poll_interval, &mut shutdown).await {
+                        break 'client;
+                    }
+                }
+                Ok(PullReplicationOutcome::HeadHeartbeat { heartbeat_id }) => {
+                    retry.reset();
+                    if let Some(snapshot) = v2_progress.caught_up(Instant::now()) {
+                        log_pull_v2_progress(&snapshot);
+                    }
+                    tracing::trace!(
+                        protocol = ?PullClientProtocol::V2,
+                        heartbeat_id,
+                        "durable raw pull stream is live and caught up"
+                    );
+                }
+                Ok(PullReplicationOutcome::Committed {
+                    protocol,
+                    stream,
+                    records,
+                    compressed_bytes,
+                    uncompressed_bytes,
+                    through_sequence,
+                    sink_primary_term,
+                    source_ack_replayed,
+                }) => {
+                    retry.reset();
+                    if protocol == PullClientProtocol::V2
+                        && let Some(snapshot) = v2_progress.record_commit(
+                            Instant::now(),
+                            records,
+                            compressed_bytes,
+                            through_sequence,
+                            source_ack_replayed,
+                        )
+                    {
+                        log_pull_v2_progress(&snapshot);
+                    }
+                    tracing::debug!(
+                        cluster_id = %stream.cluster_id,
+                        origin_node_id = %stream.origin_node_id,
+                        source_id = %stream.source_id,
+                        protocol = ?protocol,
+                        records,
+                        compressed_bytes,
+                        uncompressed_bytes,
+                        through_sequence,
+                        sink_primary_term,
+                        source_ack_replayed,
+                        "Blockzilla durably acknowledged a pulled raw batch"
+                    );
+                }
+                Err(error) if error.is_retryable() => {
+                    if protocol == PullClientProtocol::V2 {
+                        disconnected_since.get_or_insert_with(Instant::now);
+                    }
+                    let Some((attempt, delay)) = retry.next_delay() else {
+                        anyhow::bail!("durable raw pull retry limit exhausted");
+                    };
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        error_kind = ?error.kind(),
+                        "durable raw pull did not commit; reconnecting without advancing"
+                    );
+                    if replication_wait_or_shutdown(delay, &mut shutdown).await {
+                        break 'client;
+                    }
+                    continue 'client;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error_kind = ?error.kind(),
+                        "durable raw pull batch failed closed"
+                    );
+                    return Err(
+                        anyhow::Error::new(error).context("durable raw pull client failed closed")
+                    );
+                }
+            }
+        }
+    }
+
+    tracing::info!("outbound durable raw pull client stopped cleanly");
+    Ok(())
+}
+
+struct PreparedGrpcRawGeneration {
+    cursor: GrpcRawCommittedCursor,
+    stream: ReplicationStreamId,
+    physical_stream: ReplicationStreamId,
+    discovered_sealed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicateGenerationOutcome {
+    SealedCaughtUp,
+    Shutdown,
+}
+
+struct ReplicationRetryBackoff {
+    reconnect: ReconnectConfig,
+    retries: u32,
+    next_delay_ms: u64,
+}
+
+impl ReplicationRetryBackoff {
+    fn new(reconnect: &ReconnectConfig) -> Self {
+        Self {
+            reconnect: reconnect.clone(),
+            retries: 0,
+            next_delay_ms: reconnect.initial_delay_ms,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.retries = 0;
+        self.next_delay_ms = self.reconnect.initial_delay_ms;
+    }
+
+    fn next_delay(&mut self) -> Option<(u32, Duration)> {
+        if self
+            .reconnect
+            .max_attempts
+            .is_some_and(|maximum| self.retries >= maximum)
+        {
+            return None;
+        }
+
+        self.retries = self.retries.saturating_add(1);
+        let base_delay_ms = self.next_delay_ms.min(self.reconnect.max_delay_ms);
+        let scaled = (u128::from(base_delay_ms)
+            .saturating_mul(u128::from(self.reconnect.backoff_factor_milli))
+            / 1_000)
+            .min(u128::from(self.reconnect.max_delay_ms));
+        self.next_delay_ms = scaled as u64;
+
+        let spread = u128::from(base_delay_ms)
+            .saturating_mul(u128::from(self.reconnect.jitter_percent))
+            / 100;
+        let delay_ms = if spread == 0 {
+            base_delay_ms
+        } else {
+            let entropy = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+                ^ (u128::from(std::process::id()) << 64)
+                ^ u128::from(self.retries);
+            let lower = u128::from(base_delay_ms).saturating_sub(spread);
+            let width = spread.saturating_mul(2).saturating_add(1);
+            (lower.saturating_add(entropy % width)).min(u128::from(self.reconnect.max_delay_ms))
+                as u64
+        };
+        Some((self.retries, Duration::from_millis(delay_ms.max(1))))
+    }
+}
+
+async fn replicate_grpc_raw(args: ReplicateGrpcRawArgs) -> Result<()> {
+    const MAX_ACK_GC_GENERATIONS_PER_PASS: usize = 64;
+
+    anyhow::ensure!(
+        args.poll_interval_ms > 0,
+        "--poll-interval-ms must be non-zero"
+    );
+
+    let config = load_ingest_receiver_config(&args.config)?;
+    let (node_id, upstream) = match &config.role {
+        IngestRoleConfig::Replica { node_id, upstream } => (node_id.clone(), upstream.clone()),
+        IngestRoleConfig::Primary { .. } => {
+            anyhow::bail!("replicate-grpc-raw requires role.mode=replica")
+        }
+    };
+    anyhow::ensure!(
+        args.cache_root == config.spool.root,
+        "--cache-root must lexically equal config.spool.root"
+    );
+    if let Some(status_file) = args.ack_status_file.as_deref() {
+        anyhow::ensure!(
+            status_file.is_absolute()
+                && status_file != Path::new("/")
+                && !status_file.starts_with(&args.cache_root),
+            "--ack-status-file must be an absolute non-root path outside the raw cache"
+        );
+    }
+
+    let read_limits = GrpcRawCommittedReadLimits {
+        max_compressed_record_bytes: upstream.batch.max_compressed_event_bytes,
+        max_uncompressed_record_bytes: upstream.batch.max_uncompressed_event_bytes,
+    };
+    let poll_interval = Duration::from_millis(args.poll_interval_ms);
+    let mut completed_sealed_generations = HashSet::new();
+    let mut shutdown = replication_shutdown_receiver();
+
+    tracing::info!(
+        node_id = %node_id,
+        cluster_id = %config.cluster_id,
+        poll_interval_ms = args.poll_interval_ms,
+        "starting raw gRPC replica"
+    );
+
+    'replication: loop {
+        if replication_shutdown_requested(&shutdown) {
+            break;
+        }
+
+        // Retire ACK-covered sealed generations before opening any source cursor. The ACK WAL is
+        // the outer lock/authority; GC then takes the uploader mutation lock and rotation lock in
+        // that fixed order. R2 receipts, disk pressure, and heartbeats never enter this path.
+        let (gc_batch_was_full, gc_was_busy) = {
+            let ack_wal = CumulativeAckWal::open(&upstream.cumulative_ack_wal_file)
+                .context("open cumulative ACK WAL for local generation retention")?;
+            let mut retired_generation_count = 0usize;
+            let mut busy = false;
+            for _ in 0..MAX_ACK_GC_GENERATIONS_PER_PASS {
+                match gc_one_acknowledged_grpc_raw_generation(
+                    &args.cache_root,
+                    &ack_wal,
+                    read_limits,
+                )
+                .context("retire oldest Blockzilla-acknowledged raw gRPC generation")?
+                {
+                    GrpcRawLocalGcOutcome::Retired {
+                        generation,
+                        through_sequence,
+                    } => {
+                        retired_generation_count += 1;
+                        tracing::info!(
+                            generation = %generation.display(),
+                            through_sequence,
+                            "retired oldest raw gRPC generation after durable Blockzilla ACK"
+                        );
+                    }
+                    GrpcRawLocalGcOutcome::Busy => {
+                        busy = true;
+                        tracing::debug!(
+                            "raw gRPC retention is busy with an object-store upload; retrying later"
+                        );
+                        break;
+                    }
+                    GrpcRawLocalGcOutcome::AckDoesNotCoverOldest {
+                        oldest_through_sequence,
+                        durable_through_sequence,
+                    } => {
+                        tracing::debug!(
+                            oldest_through_sequence,
+                            durable_through_sequence,
+                            "oldest raw gRPC generation is awaiting Blockzilla ACK"
+                        );
+                        break;
+                    }
+                    GrpcRawLocalGcOutcome::NoDurableAck => {
+                        tracing::debug!(
+                            "raw gRPC generations are awaiting the first Blockzilla ACK"
+                        );
+                        break;
+                    }
+                    GrpcRawLocalGcOutcome::NothingToRetire => break,
+                }
+            }
+            (
+                retired_generation_count == MAX_ACK_GC_GENERATIONS_PER_PASS,
+                busy,
+            )
+        };
+        if gc_batch_was_full {
+            // Never strand an ACK-covered generation merely because one maintenance batch hit
+            // its fairness cap. Re-enter GC before attaching to the active cursor, which may stay
+            // open indefinitely on a healthy live stream.
+            tokio::task::yield_now().await;
+            continue 'replication;
+        }
+
+        // Discovery and cursor opening share one rotation lock. Keeping each cursor alive pins
+        // its exact stream identity even if the active pathname rotates while older generations
+        // are still draining.
+        let prepared =
+            prepare_grpc_raw_generations(&args.cache_root, read_limits, &config.cluster_id)?;
+        let locally_durable_through = {
+            let ack_wal = CumulativeAckWal::open(&upstream.cumulative_ack_wal_file)
+                .context("open cumulative ACK WAL for generation coverage")?;
+            prepared
+                .iter()
+                .filter_map(|generation| {
+                    ack_wal
+                        .latest_stream_ack(&generation.stream)
+                        .map(|ack| (generation.stream.clone(), ack.through_sequence))
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let present_sealed_generations = prepared
+            .iter()
+            .filter(|generation| generation.discovered_sealed)
+            .map(|generation| generation.physical_stream.clone())
+            .collect::<HashSet<_>>();
+        completed_sealed_generations.retain(|stream| present_sealed_generations.contains(stream));
+
+        for generation in prepared {
+            if !generation.discovered_sealed && gc_was_busy {
+                // Sealed generations may still be read and ACKed while the uploader owns the
+                // mutation lock. Do not attach indefinitely to the active tail until GC gets a
+                // chance to consume those ACKs after the uploader releases it.
+                if replication_wait_or_shutdown(poll_interval, &mut shutdown).await {
+                    break 'replication;
+                }
+                continue 'replication;
+            }
+            if generation.discovered_sealed {
+                if let Some(through_sequence) = locally_durable_through.get(&generation.stream) {
+                    if generation
+                        .cursor
+                        .sealed_generation_is_covered_by(*through_sequence)
+                        .context("check sealed generation against local durable ACK")?
+                    {
+                        tracing::debug!(
+                            origin_node_id = %generation.stream.origin_node_id,
+                            source_id = %generation.stream.source_id,
+                            "sealed raw gRPC generation is already covered by the local durable ACK"
+                        );
+                        completed_sealed_generations.insert(generation.physical_stream);
+                        continue;
+                    }
+                }
+            }
+            if generation.discovered_sealed
+                && completed_sealed_generations.contains(&generation.physical_stream)
+            {
+                tracing::debug!(
+                    origin_node_id = %generation.stream.origin_node_id,
+                    source_id = %generation.stream.source_id,
+                    "sealed raw gRPC generation remains caught up"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                origin_node_id = %generation.stream.origin_node_id,
+                source_id = %generation.stream.source_id,
+                discovered_sealed = generation.discovered_sealed,
+                "replicating raw gRPC generation"
+            );
+            match replicate_grpc_raw_generation(
+                &generation,
+                &upstream,
+                poll_interval,
+                &mut shutdown,
+                args.ack_status_file.as_deref(),
+            )
+            .await?
+            {
+                ReplicateGenerationOutcome::SealedCaughtUp => {
+                    completed_sealed_generations.insert(generation.physical_stream);
+                    // The ACK that made this generation caught up was just fsynced. Re-enter the
+                    // oldest-first GC pass immediately instead of draining all later generations
+                    // and then polling the active tail forever.
+                    continue 'replication;
+                }
+                ReplicateGenerationOutcome::Shutdown => break 'replication,
+            }
+        }
+    }
+
+    tracing::info!("raw gRPC replica stopped cleanly");
+    Ok(())
+}
+
+fn prepare_grpc_raw_generations(
+    cache_root: &std::path::Path,
+    read_limits: GrpcRawCommittedReadLimits,
+    cluster_id: &str,
+) -> Result<Vec<PreparedGrpcRawGeneration>> {
+    let generations = open_grpc_raw_replication_generation_cursors(cache_root, read_limits)
+        .context("atomically discover and open raw gRPC replication generations")?;
+    let mut prepared = Vec::with_capacity(generations.len());
+    for generation in generations {
+        let cursor = generation.cursor;
+        let stream = cursor.stream();
+        let physical_stream = cursor.physical_stream();
+        anyhow::ensure!(
+            stream.cluster_id == cluster_id,
+            "raw gRPC generation stream.cluster_id does not match config.cluster_id"
+        );
+        prepared.push(PreparedGrpcRawGeneration {
+            cursor,
+            stream,
+            physical_stream,
+            discovered_sealed: generation.sealed,
+        });
+    }
+    Ok(prepared)
+}
+
+async fn replicate_grpc_raw_generation(
+    generation: &PreparedGrpcRawGeneration,
+    upstream: &ReplicaUpstreamConfig,
+    poll_interval: Duration,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    ack_status_file: Option<&Path>,
+) -> Result<ReplicateGenerationOutcome> {
+    let mut retry = ReplicationRetryBackoff::new(&upstream.reconnect);
+    let mut sender = loop {
+        let connection = tokio::select! {
+            biased;
+            _ = replication_shutdown_notified(shutdown) => {
+                return Ok(ReplicateGenerationOutcome::Shutdown);
+            }
+            connection = ReplicationSender::connect_preopened(
+                generation.cursor.clone(),
+                upstream,
+            ) => {
+                connection
+            }
+        };
+        match connection {
+            Ok(sender) => {
+                anyhow::ensure!(
+                    sender.stream().cluster_id == generation.stream.cluster_id,
+                    "connected raw gRPC stream cluster differs from the pre-opened generation"
+                );
+                if sender.stream() != &generation.stream {
+                    if generation.discovered_sealed {
+                        anyhow::bail!(
+                            "sealed raw gRPC generation identity changed before connection"
+                        );
+                    }
+                    // The active path rotated after it was pre-opened but before connect fenced
+                    // it. Drop this successor and resolve the original cursor into sealed.
+                    drop(sender);
+                    tracing::debug!(
+                        "active raw gRPC generation rotated before sender binding; retrying its predecessor"
+                    );
+                    if replication_wait_or_shutdown(poll_interval, shutdown).await {
+                        return Ok(ReplicateGenerationOutcome::Shutdown);
+                    }
+                    continue;
+                }
+                retry.reset();
+                break sender;
+            }
+            Err(error) if error.kind() == ReplicationSenderErrorKind::Transport => {
+                let Some((attempt, delay)) = retry.next_delay() else {
+                    anyhow::bail!("raw gRPC connection transport retry limit exhausted");
+                };
+                tracing::warn!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    "raw gRPC primary is unavailable; retrying connection"
+                );
+                if replication_wait_or_shutdown(delay, shutdown).await {
+                    return Ok(ReplicateGenerationOutcome::Shutdown);
+                }
+            }
+            Err(error) => {
+                return Err(
+                    anyhow::Error::new(error).context("raw gRPC sender connection failed closed")
+                );
+            }
+        }
+    };
+
+    loop {
+        let outcome = tokio::select! {
+            biased;
+            _ = replication_shutdown_notified(shutdown) => {
+                return Ok(ReplicateGenerationOutcome::Shutdown);
+            }
+            outcome = sender.send_once() => outcome,
+        };
+        match outcome {
+            Ok(ReplicationSendOutcome::Advanced {
+                records,
+                compressed_bytes,
+                through_sequence,
+                primary_term,
+            }) => {
+                retry.reset();
+                if let Some(status_file) = ack_status_file {
+                    publish_replication_ack_status(
+                        status_file,
+                        &generation.stream,
+                        through_sequence,
+                        primary_term,
+                    )
+                    .context("publish durable receiver ACK monitoring status")?;
+                }
+                tracing::debug!(
+                    records,
+                    compressed_bytes,
+                    through_sequence,
+                    primary_term,
+                    "raw gRPC replication advanced"
+                );
+            }
+            Ok(ReplicationSendOutcome::CaughtUp) => {
+                retry.reset();
+                if sender
+                    .bound_generation_is_sealed()
+                    .context("resolve caught-up raw gRPC generation identity")?
+                {
+                    tracing::info!(
+                        next_sequence = sender.next_sequence(),
+                        "sealed raw gRPC generation is durably caught up"
+                    );
+                    return Ok(ReplicateGenerationOutcome::SealedCaughtUp);
+                }
+                tracing::debug!(
+                    next_sequence = sender.next_sequence(),
+                    "active raw gRPC generation is caught up; polling"
+                );
+                if replication_wait_or_shutdown(poll_interval, shutdown).await {
+                    return Ok(ReplicateGenerationOutcome::Shutdown);
+                }
+            }
+            Err(error) if error.kind() == ReplicationSenderErrorKind::Transport => {
+                let Some((attempt, delay)) = retry.next_delay() else {
+                    anyhow::bail!("raw gRPC send transport retry limit exhausted");
+                };
+                tracing::warn!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    "raw gRPC replication transport failed; retrying exact batch"
+                );
+                if replication_wait_or_shutdown(delay, shutdown).await {
+                    return Ok(ReplicateGenerationOutcome::Shutdown);
+                }
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("raw gRPC sender failed closed"));
+            }
+        }
+    }
+}
+
+fn publish_replication_ack_status(
+    path: &Path,
+    stream: &ReplicationStreamId,
+    through_sequence: u64,
+    primary_term: u64,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("replication ACK status path has no parent")?;
+    let parent_metadata = fs::symlink_metadata(parent).with_context(|| {
+        format!(
+            "inspect replication ACK status directory {}",
+            parent.display()
+        )
+    })?;
+    anyhow::ensure!(
+        parent_metadata.is_dir() && !parent_metadata.file_type().is_symlink(),
+        "replication ACK status parent must be a real directory"
+    );
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        anyhow::ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "replication ACK status destination must be a regular non-symlink file"
+        );
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock predates the Unix epoch")?;
+    let status = ReplicationAckStatus {
+        schema_version: 1,
+        cluster_id: stream.cluster_id.clone(),
+        origin_node_id: stream.origin_node_id.clone(),
+        source_id: stream.source_id.clone(),
+        journal_id: stream
+            .journal_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        through_sequence,
+        primary_term,
+        updated_unix_secs: now.as_secs(),
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("replication ACK status file name is not valid UTF-8")?;
+    let temporary = parent.join(format!(
+        ".{file_name}.{}-{}.tmp",
+        std::process::id(),
+        now.as_nanos()
+    ));
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = options.open(&temporary).with_context(|| {
+            format!(
+                "create replication ACK status temporary {}",
+                temporary.display()
+            )
+        })?;
+        serde_json::to_writer(&mut file, &status)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .with_context(|| format!("publish replication ACK status {}", path.display()))?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn replication_shutdown_receiver() -> tokio::sync::watch::Receiver<bool> {
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = sender.send(true);
+    });
+    receiver
+}
+
+fn replication_shutdown_requested(receiver: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *receiver.borrow()
+}
+
+async fn replication_shutdown_notified(receiver: &mut tokio::sync::watch::Receiver<bool>) {
+    if replication_shutdown_requested(receiver) {
+        return;
+    }
+    let _ = receiver.changed().await;
+}
+
+async fn replication_wait_or_shutdown(
+    delay: Duration,
+    receiver: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = replication_shutdown_notified(receiver) => true,
+        _ = tokio::time::sleep(delay) => false,
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    tracing::error!(%error, "failed to install SIGTERM handler");
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                }
+            };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "failed to await interrupt signal");
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(%error, "failed to await interrupt signal");
+    }
+}
+
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).init();
+    // Every report-producing command reserves stdout for its JSON contract.
+    // Operational diagnostics must never contaminate supervisor-parsed output.
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }

@@ -4,7 +4,7 @@
 The recorder is intentionally separate from the scheduler and maintenance
 workers. It observes their atomic status/control files and never signals a
 process. Private incidents contain process identity and resource samples; use
-publish-scheduler-activity.py to create the redacted public feed.
+publish-runtime-operations.py to create the redacted public feed.
 """
 
 from __future__ import annotations
@@ -459,7 +459,6 @@ def main():
         page_size = os.sysconf("SC_PAGE_SIZE")
         ring_size = max(2, int(math.ceil(args.ring_secs / args.interval_secs)) + 1)
         prelude = deque(maxlen=ring_size)
-        process_contexts = deque(maxlen=ring_size)
         prior_processes = {}
         prior_monotonic = time.monotonic()
 
@@ -484,7 +483,6 @@ def main():
             epoch = safe_int((backfill.get("current") or {}).get("epoch")) if isinstance(backfill.get("current"), dict) else None
             sample_summary = {"at_unix_secs": now, "backfill_state": backfill_state, **metrics}
             prelude.append(sample_summary)
-            process_contexts.append(context)
 
             if previous_backfill_state != backfill_state and backfill_state is not None:
                 at = safe_int(backfill.get("updated_unix_seconds")) or now

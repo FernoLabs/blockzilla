@@ -510,7 +510,6 @@ function isProcessIoEntryValue(value: unknown): value is ProcessIoEntry {
     Number(process.pid) > 0 &&
     typeof process.name === 'string' &&
     process.name.trim().length > 0 &&
-    (process.user === undefined || process.user === null || typeof process.user === 'string') &&
     optionalNonNegativeMetric(process.read_mib_per_sec) &&
     optionalNonNegativeMetric(process.write_mib_per_sec) &&
     optionalNonNegativeMetric(process.cpu_percent) &&

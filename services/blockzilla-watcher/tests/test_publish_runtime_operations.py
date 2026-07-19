@@ -18,7 +18,6 @@ def sample(pid, args, **overrides):
         "start_ticks": pid * 10,
         "start_unix_secs": 1_000,
         "name": Path(args[0]).name,
-        "user": "operator",
         "args": tuple(args),
         "rchar": 0,
         "read_bytes": 0,
@@ -101,6 +100,36 @@ class RuntimeOperationsPublisherTests(unittest.TestCase):
             self.assertNotIn("secret.example", serialized)
             self.assertNotIn(str(output), serialized)
 
+    def test_raw_capture_status_accepts_canonical_hivezilla_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "raw"
+            output.mkdir()
+            journal = output / "raw-blocks.jsonl"
+            journal.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "frame_id": 4,
+                    "slot": 433_719_121,
+                    "epoch": 1003,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            current = sample(
+                46,
+                [
+                    "/usr/local/bin/hivezilla",
+                    "record-grpc-raw",
+                    "--output-dir",
+                    str(output),
+                ],
+            )
+            status = publisher.build_status(
+                root / "proc", {46: current}, {}, 2, 0, int(journal.stat().st_mtime)
+            )
+            self.assertEqual(status["live_capture"]["state"], "capturing")
+            self.assertEqual(status["live_capture"]["last_slot"], 433_719_121)
+
     def test_process_output_is_bounded_and_hides_private_commands(self):
         current = sample(
             45,
@@ -120,6 +149,7 @@ class RuntimeOperationsPublisherTests(unittest.TestCase):
         self.assertEqual(result["state"], "ready")
         self.assertEqual(result["processes"][0]["name"], "sha256sum")
         self.assertEqual(result["processes"][0]["read_mib_per_sec"], 5)
+        self.assertNotIn("user", result["processes"][0])
         self.assertNotIn("secret-path", json.dumps(result))
 
 

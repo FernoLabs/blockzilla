@@ -14,7 +14,6 @@ import json
 import math
 import os
 from pathlib import Path
-import pwd
 import re
 import signal
 import time
@@ -33,7 +32,6 @@ class ProcessSample:
     start_ticks: int
     start_unix_secs: int
     name: str
-    user: str
     args: tuple
     rchar: int
     read_bytes: int
@@ -103,18 +101,12 @@ def process_sample(proc_root, pid, boot_unix_secs, clock_ticks, page_size):
     stat = parse_proc_stat((root / "stat").read_text(encoding="utf-8"))
     counters = parse_proc_io((root / "io").read_text(encoding="utf-8"))
     resident_pages = int((root / "statm").read_text(encoding="utf-8").split()[1])
-    uid = root.stat().st_uid
-    try:
-        user = pwd.getpwuid(uid).pw_name
-    except KeyError:
-        user = str(uid)
     return ProcessSample(
         pid=pid,
         ppid=stat["ppid"],
         start_ticks=stat["start_ticks"],
         start_unix_secs=boot_unix_secs + stat["start_ticks"] // clock_ticks,
         name=sanitize_name((root / "comm").read_text(encoding="utf-8")),
-        user=sanitize_name(user),
         args=process_args(root / "cmdline"),
         rchar=max(0, counters.get("rchar", 0)),
         read_bytes=max(0, counters.get("read_bytes", 0)),
@@ -190,7 +182,8 @@ def previous_sample(previous, sample):
 def live_capture_status(samples, previous, elapsed, now_unix_secs):
     candidates = [
         sample for sample in samples.values()
-        if command_has(sample, "blockzilla-live-producer", "record-grpc-raw")
+        if command_has(sample, "hivezilla", "record-grpc-raw")
+        or command_has(sample, "blockzilla-live-producer", "record-grpc-raw")
     ]
     candidates.sort(key=lambda sample: (sample.start_ticks, sample.pid), reverse=True)
     for sample in candidates:
@@ -392,7 +385,6 @@ def process_io_status(samples, previous, elapsed, inaccessible, now_unix_secs):
             "id": "{}-{}".format(sample.pid, sample.start_ticks),
             "pid": sample.pid,
             "name": sample.name,
-            "user": sample.user,
             "read_mib_per_sec": read_mib,
             "write_mib_per_sec": write_mib,
             "cpu_percent": bounded_rate(
