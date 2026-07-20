@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "cluster_id": "solana-mainnet",
+  "max_total_queue_bytes": 16777216,
+  "max_total_queue_events": 8192,
+  "role": {
+    "mode": "primary",
+    "node_id": "hivezilla-shred-01",
+    "replica_listener": null
+  },
+  "spool": {
+    "root": "/data/shred-ingest",
+    "max_bytes": 21474836480,
+    "segment_bytes": 268435456,
+    "reserve_free_bytes": 2147483648,
+    "sync": {
+      "max_delay_ms": 10,
+      "max_unsynced_bytes": 4194304
+    },
+    "full_policy": "fail_closed"
+  },
+  "sources": [
+    {
+      "id": "shred-reader-loopback",
+      "enabled": true,
+      "priority": 0,
+      "required_for_epoch_close": false,
+      "queue": {
+        "max_events": 8192,
+        "max_bytes": 16777216,
+        "max_event_bytes": 2048
+      },
+      "input": {
+        "kind": "shred_udp",
+        "bind": "127.0.0.1:18003",
+        "multicast_group": null,
+        "interface": null,
+        "auth": null
+      }
+    }
+  ]
+}
