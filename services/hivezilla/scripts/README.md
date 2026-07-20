@@ -15,7 +15,7 @@ specific server, provider account, or deployment system.
 | `generate-grpc-pull-pki.sh` | Add pull identities to an existing replication trust bundle |
 | `s3_multipart_upload.py` | Upload and verify bounded generations in an S3-compatible store; includes provider-specific retention support |
 | `pull_ack_telegram_monitor.py` | Alert when signed receiver acknowledgements stop advancing |
-| `ingest_status_server.py` | Serve a bounded, secret-free capture and signed-ACK status snapshot for the watcher UI |
+| `shred_status_server.py` | Combine loopback shred-reader metrics with Hivezilla post-fsync status into a bounded public snapshot |
 
 The launch wrappers expect a dedicated UID and file-backed secrets. Override
 their documented `BLOCKZILLA_*` environment variables for your deployment; do
@@ -86,12 +86,19 @@ The object-store helper requires Python 3.11 or newer and the dependency in
 python3 -m pip install -r services/hivezilla/scripts/requirements.txt
 python3 services/hivezilla/scripts/test_s3_multipart_upload.py
 python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
-python3 services/hivezilla/scripts/test_ingest_status_server.py
+python3 services/hivezilla/scripts/test_shred_status_server.py
 bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
 bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
 bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh
 bash services/hivezilla/scripts/test-generate-grpc-replication-pki.sh
 ```
+
+The shred status collector accepts only an explicit loopback receiver URL and
+an absolute Hivezilla status path. For a split host-network/public deployment,
+pass `--output-file` in the same private status volume and serve only that
+atomic output from the public container. `--cors-origin` accepts one exact
+origin and rejects wildcards. Neither source URLs nor filesystem paths appear
+in the emitted document.
 
 Review every filesystem limit, TLS identity, retention threshold, and cleanup
 policy before operating against real data. Upload success is not permission to

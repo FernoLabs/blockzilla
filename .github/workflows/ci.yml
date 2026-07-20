@@ -116,7 +116,7 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/hivezilla-python" \
             python3 services/hivezilla/scripts/test_s3_multipart_upload.py
           python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
-          python3 services/hivezilla/scripts/test_ingest_status_server.py
+          python3 services/hivezilla/scripts/test_shred_status_server.py
       - name: Test shell operational helpers
         run: |
           bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh

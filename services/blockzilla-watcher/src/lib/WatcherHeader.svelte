@@ -24,7 +24,7 @@
     <h1><a href={resolve('/')}>Blockzilla Watcher</a></h1>
     <nav aria-label="Watcher pages">
       <a href={resolve('/')} aria-current={overviewActive ? 'page' : undefined}>Overview</a>
-      <a href={resolve('/ingest')} aria-current={ingestActive ? 'page' : undefined}>Ingest</a>
+      <a href={resolve('/ingest')} aria-current={ingestActive ? 'page' : undefined}>Shred ingest</a>
       <a href={resolve('/history')} aria-current={historyActive ? 'page' : undefined}>History</a>
     </nav>
     {#if observerMode}

@@ -1,4 +1,5 @@
 import { createContext } from 'svelte';
+import * as publicEnv from '$env/static/public';
 import {
   asRecord,
   integerValue,
@@ -20,24 +21,28 @@ import {
   type RuntimeOperations
 } from '$lib/runtime-operations';
 import {
-  parseIngestPipelineStatus,
-  type IngestPipelineStatus
-} from '$lib/ingest-pipeline-status';
+  parseShredIngestStatus,
+  type ShredIngestStatus
+} from '$lib/shred-ingest-status';
 
 export type ConnectionState = 'connecting' | 'live' | 'retrying' | 'offline';
-export type IngestFeedState = 'loading' | 'live' | 'retrying' | 'unavailable';
+export type ShredIngestFeedState = 'loading' | 'live' | 'retrying' | 'unavailable';
 
 const STATUS_REQUEST_TIMEOUT_MS = 5_000;
 const STATUS_RETRY_INTERVAL_MS = 10_000;
-const INGEST_REQUEST_TIMEOUT_MS = 4_000;
+const SHRED_INGEST_REQUEST_TIMEOUT_MS = 4_000;
+const SHRED_INGEST_POLL_INTERVAL_MS = 5_000;
+const SHRED_INGEST_STATUS_FALLBACK_URL =
+  'https://hivezilla-shred-status-8dafe7-188-245-147-127.sslip.io/api/v1/sidecars/shred-ingest/status.json';
+const SHRED_INGEST_STATUS_URL = configuredShredIngestStatusUrl();
 
 export class WatcherClient {
   snapshot = $state.raw<PipelineSnapshot | null>(null);
   blockTimeGapBackfill = $state.raw<BlockTimeGapBackfill | null>(null);
   runtimeOperations = $state.raw<RuntimeOperations | null>(null);
-  ingestPipeline = $state.raw<IngestPipelineStatus | null>(null);
-  ingestFeedState = $state<IngestFeedState>('loading');
-  ingestFeedMessage = $state('Loading ingest status');
+  shredIngestStatus = $state.raw<ShredIngestStatus | null>(null);
+  shredIngestFeedState = $state<ShredIngestFeedState>('loading');
+  shredIngestFeedMessage = $state('Loading shred ingest status');
   connectionState = $state<ConnectionState>('connecting');
   connectionMessage = $state('Connecting');
 
@@ -51,8 +56,8 @@ export class WatcherClient {
     let statusFetchInFlight = false;
     let backfillFetchInFlight = false;
     let runtimeFetchInFlight = false;
-    let ingestFetchInFlight = false;
-    let ingestRequestController: AbortController | null = null;
+    let shredIngestFetchInFlight = false;
+    let shredIngestRequestController: AbortController | null = null;
 
     const acceptPayload = (value: unknown, sequence?: number) => {
       const normalized = parsePipelineSnapshot(value);
@@ -188,46 +193,39 @@ export class WatcherClient {
       }
     };
 
-    const refreshIngestPipeline = async () => {
-      if (ingestFetchInFlight) return;
-      ingestFetchInFlight = true;
+    const refreshShredIngestStatus = async () => {
+      if (shredIngestFetchInFlight) return;
+      shredIngestFetchInFlight = true;
       const controller = new AbortController();
-      ingestRequestController = controller;
+      shredIngestRequestController = controller;
       const requestTimeout = window.setTimeout(
         () => controller.abort(),
-        INGEST_REQUEST_TIMEOUT_MS
+        SHRED_INGEST_REQUEST_TIMEOUT_MS
       );
       try {
-        const response = await fetch('/api/v1/sidecars/ingest-pipeline/status.json', {
+        const response = await fetch(SHRED_INGEST_STATUS_URL, {
           cache: 'no-store',
           headers: { accept: 'application/json' },
           signal: controller.signal
         });
+        if (!response.ok) throw new Error(`shred ingest status ${response.status}`);
+        const status = parseShredIngestStatus(await response.json());
+        if (!status) throw new Error('invalid shred ingest status');
         if (disposed) return;
-        if (response.status === 404) {
-          this.ingestPipeline = null;
-          this.ingestFeedState = 'unavailable';
-          this.ingestFeedMessage = 'Ingest status publisher is not installed';
-          return;
-        }
-        if (!response.ok) throw new Error(`ingest status ${response.status}`);
-        const status = parseIngestPipelineStatus(await response.json());
-        if (!status) throw new Error('invalid ingest status');
-        if (disposed) return;
-        this.ingestPipeline = status;
-        this.ingestFeedState = 'live';
-        this.ingestFeedMessage = 'Ingest status is updating';
+        this.shredIngestStatus = status;
+        this.shredIngestFeedState = 'live';
+        this.shredIngestFeedMessage = 'Shred ingest status is updating';
       } catch (error) {
         if (!disposed) {
-          this.ingestFeedState = this.ingestPipeline ? 'retrying' : 'unavailable';
-          this.ingestFeedMessage = controller.signal.aborted
-            ? 'Ingest status timed out; retrying'
-            : `Ingest status unavailable: ${errorMessage(error)}`;
+          this.shredIngestFeedState = this.shredIngestStatus ? 'retrying' : 'unavailable';
+          this.shredIngestFeedMessage = controller.signal.aborted
+            ? 'Shred ingest status timed out; retrying'
+            : `Shred ingest status unavailable: ${errorMessage(error)}`;
         }
       } finally {
         window.clearTimeout(requestTimeout);
-        if (ingestRequestController === controller) ingestRequestController = null;
-        ingestFetchInFlight = false;
+        if (shredIngestRequestController === controller) shredIngestRequestController = null;
+        shredIngestFetchInFlight = false;
       }
     };
 
@@ -240,8 +238,11 @@ export class WatcherClient {
     const backfillPoll = window.setInterval(refreshBlockTimeGapBackfill, 15_000);
     void refreshRuntimeOperations();
     const runtimePoll = window.setInterval(refreshRuntimeOperations, 5_000);
-    void refreshIngestPipeline();
-    const ingestPoll = window.setInterval(refreshIngestPipeline, 5_000);
+    void refreshShredIngestStatus();
+    const shredIngestPoll = window.setInterval(
+      refreshShredIngestStatus,
+      SHRED_INGEST_POLL_INTERVAL_MS
+    );
     events.onopen = () => {
       if (disposed) return;
       // The service sequence is process-local and restarts from zero. Reset
@@ -311,9 +312,9 @@ export class WatcherClient {
       window.clearInterval(statusPoll);
       window.clearInterval(backfillPoll);
       window.clearInterval(runtimePoll);
-      window.clearInterval(ingestPoll);
-      ingestRequestController?.abort();
-      ingestRequestController = null;
+      window.clearInterval(shredIngestPoll);
+      shredIngestRequestController?.abort();
+      shredIngestRequestController = null;
       this.#disconnect = null;
     };
     this.#disconnect = disconnect;
@@ -328,4 +329,12 @@ export const provideWatcherClient = watcherContext[1];
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function configuredShredIngestStatusUrl() {
+  const configured = Object.entries(publicEnv)
+    .find(([name]) => name === 'PUBLIC_HIVEZILLA_SHRED_STATUS_URL')?.[1];
+  return typeof configured === 'string' && configured.trim().length > 0
+    ? configured.trim()
+    : SHRED_INGEST_STATUS_FALLBACK_URL;
 }

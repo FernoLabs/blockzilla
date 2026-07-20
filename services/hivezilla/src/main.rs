@@ -27,7 +27,8 @@ use hivezilla::{
         PullReplicationOutcome, RawReplicationPullClient, RawReplicationPullRuntimeConfig,
         RawReplicationPullServerRuntime, RawReplicationServerRuntime, ReconnectConfig,
         ReplicaUpstreamConfig, ReplicationSendOutcome, ReplicationSender,
-        ReplicationSenderErrorKind, ReplicationStreamId, load_ingest_receiver_config,
+        ReplicationSenderErrorKind, ReplicationStreamId, ShredUdpRecordConfig,
+        load_ingest_receiver_config, record_shred_udp,
     },
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
@@ -93,6 +94,8 @@ enum Command {
     BenchFixture(BenchFixtureArgs),
     /// Validate a redundant-ingest JSON config and print only its redacted summary.
     ValidateIngestConfig(ValidateIngestConfigArgs),
+    /// Durably record byte-for-byte Solana shred datagrams from one configured UDP source.
+    RecordShredUdp(RecordShredUdpArgs),
     /// Run the bounded, mTLS-only durable inbound replication receiver.
     ServeIngestReceiver(ServeIngestReceiverArgs),
     /// Replicate the local raw-gRPC hot queue to the configured primary.
@@ -120,6 +123,25 @@ struct RunArgs {
 struct ValidateIngestConfigArgs {
     #[arg(long)]
     config: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct RecordShredUdpArgs {
+    /// Strict schema-v2 ingest configuration containing the enabled shred_udp source.
+    #[arg(long)]
+    config: std::path::PathBuf,
+
+    /// Stable source id selected from config.sources.
+    #[arg(long)]
+    source_id: String,
+
+    /// Stable 16-byte physical journal id as 32 hex digits.
+    #[arg(long, value_parser = parse_journal_id)]
+    journal_id: [u8; 16],
+
+    /// Optional secret-free atomic status snapshot for a read-only monitoring sidecar.
+    #[arg(long)]
+    status_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1373,6 +1395,18 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&config.redacted_summary())?
             );
+        }
+        Command::RecordShredUdp(args) => {
+            let json = std::fs::read_to_string(&args.config)
+                .with_context(|| format!("read ingest config {}", args.config.display()))?;
+            let ingest = IngestConfig::from_json(&json)?;
+            record_shred_udp(ShredUdpRecordConfig {
+                ingest,
+                source_id: args.source_id,
+                journal_id: args.journal_id,
+                status_file: args.status_file,
+            })
+            .await?;
         }
         Command::Supervise(args) => {
             let report = run_supervisor(args.into_config()?).await?;

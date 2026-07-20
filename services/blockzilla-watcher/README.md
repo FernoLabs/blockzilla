@@ -5,7 +5,10 @@ NAS health. Its default view keeps the live epoch, active task ETAs, runnable
 queue ETA, compact epoch timeline, NAS resources, recent errors, and external
 disk I/O visible; deeper worker and live-pipeline details remain collapsible.
 Completed compactions and recorded run durations live on the separate
-`/history` page.
+`/history` page. The `/ingest` page reports independent evidence for gossip
+observation, TVU datagram receipt, local forwarding attempts, and Hivezilla
+post-`fsync` recording. It does not label UDP as connected or claim that raw
+shreds have been reconstructed into indexed blocks.
 
 This directory contains the UI client only. The current
 [`services/hivezilla`](../hivezilla/README.md) capture service does not provide
@@ -28,6 +31,14 @@ The production build uses same-origin `/api` requests:
 npm test
 npm run check
 npm run build
+```
+
+Shred telemetry is the exception: set the public, read-only sidecar endpoint at
+build time when it is not served by the watcher origin:
+
+```bash
+PUBLIC_HIVEZILLA_SHRED_STATUS_URL=https://status.example/api/v1/sidecars/shred-ingest/status.json \
+  npm run build
 ```
 
 The static build uses `index.html` as its SPA fallback. Production hosting must
@@ -96,13 +107,12 @@ The client reads:
   lines, endpoints, tokens, or filesystem paths. The fallback process sampler
   is deliberately limited to processes owned by the publisher's Unix user and
   excludes Blockzilla/Hivezilla work already represented elsewhere in the UI.
-- Optionally, `GET /api/v1/sidecars/ingest-pipeline/status.json` for the focused
-  `/ingest` page. This feed reports only secret-free capture, local retention,
-  signed receiver-ACK, indexer, R2, fallback, continuity, and incident fields.
-  The client polls it every five seconds and marks samples older than 30 seconds
-  stale. A receiver ACK proves durable backup storage; it must not be presented
-  as an indexer watermark. Indexing remains `unavailable` until its own durable
-  post-commit status is published.
+- `GET /api/v1/sidecars/shred-ingest/status.json`, or the absolute
+  `PUBLIC_HIVEZILLA_SHRED_STATUS_URL`, for sanitized shred-boundary evidence.
+  The client polls every five seconds, rejects unknown fields and contradictory
+  counters, and marks the aggregate stale after 30 seconds. A forwarding
+  success is described only as a completed local send attempt; Hivezilla's
+  separate durable sequence is the receipt-and-`fsync` evidence.
 
 The standard-library-only runtime publisher can write that sidecar beside the
 built UI:
