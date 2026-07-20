@@ -21,11 +21,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim AS runtime
 
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates sed \
-    && useradd --create-home --uid 10001 app \
-    && install --directory --owner app --group app /data /status /control \
-    && rm -rf /var/lib/apt/lists/*
+# Runtime image deliberately avoids an apt transaction. The Hetzner builder host currently
+# rejects Debian InRelease signatures, while bookworm-slim already contains the only runtime
+# utilities required here (sed, useradd, and install). Rustls is configured with the explicit
+# private CA mounted by Compose, so the OS certificate bundle is not consulted.
+RUN useradd --create-home --uid 10001 app \
+    && install --directory --owner app --group app /data /status /control
 
 COPY --from=builder /tmp/hivezilla /usr/local/bin/hivezilla
 COPY services/hivezilla/config/ingest-shred-udp.example.json /etc/hivezilla/ingest.json
