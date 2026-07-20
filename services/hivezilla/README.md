@@ -6,6 +6,7 @@ data and retains a recoverable raw copy so storage outages do not create gaps.
 Hivezilla is under active development. The repository currently includes:
 
 - Yellowstone gRPC observation, capture, and durable raw recording;
+- byte-for-byte Solana shred UDP recording into the common durable ingress spool;
 - a checksummed, segmented spool with inspection, replay, repair, and
   materialization tools;
 - mTLS receiver, push replication, pull replication, and receiver-to-spool
@@ -14,7 +15,7 @@ Hivezilla is under active development. The repository currently includes:
   helpers.
 
 Canonical multi-source selection, automatic multi-instance failover, and shred
-capture remain planned. The generic `run` command still supports `--dry-run`
+reconstruction remain planned. The generic `run` command still supports `--dry-run`
 only; use the explicit commands below for implemented data paths.
 
 ## Try it
@@ -34,7 +35,7 @@ The main command groups are:
 | Area | Commands |
 | --- | --- |
 | Observe | `probe-grpc`, `watch-epochs-grpc` |
-| Retain | `record-grpc-raw`, `inspect-grpc-raw`, `verify-grpc-raw-poh`, `materialize-grpc-raw` |
+| Retain | `record-grpc-raw`, `record-shred-udp`, `inspect-grpc-raw`, `verify-grpc-raw-poh`, `materialize-grpc-raw` |
 | Replicate | `serve-ingest-receiver`, `replicate-grpc-raw`, `pull-grpc-raw`, `serve-grpc-raw-pull-source`, `bridge-receiver-grpc-raw` |
 | Capture | `capture-grpc`, `inspect-capture` |
 | Repair | `sync-rpc-epoch`, `backfill-rpc`, `prepare-epoch-repair` |
@@ -43,6 +44,24 @@ The main command groups are:
 Use command-specific `--help` before starting a networked or disk-writing task.
 Examples reference credentials through environment variables or files; do not
 place secret values in them.
+
+The first shred adapter is intentionally narrow: `record-shred-udp` selects one
+enabled `shred_udp` source from the schema-v2 ingest config, parses the stable
+Solana common shred header, and syncs the exact datagram through `SpoolWriter`
+before accepting the next observation. Transport duplicates are preserved.
+Raw unauthenticated UDP should remain on loopback or a trusted private network;
+the adapter rejects configured authentication until a versioned authenticated
+envelope exists.
+
+```bash
+hivezilla record-shred-udp \
+  --config services/hivezilla/config/ingest-shred-udp.example.json \
+  --source-id shred-reader-loopback \
+  --journal-id 0123456789abcdef0123456789abcdef
+```
+
+Keep the journal id stable with the spool volume across restarts. Generate a
+new id whenever a new physical journal is intentionally created.
 
 The `scripts/` directory contains portable launch, PKI, object-storage, and
 monitoring helpers. They intentionally contain no deployment manifest or real
