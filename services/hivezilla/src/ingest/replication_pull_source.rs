@@ -42,7 +42,7 @@ use super::{
     decode_stored_shred, parse_shred_header, read_spool_committed_snapshot_after,
     verify_cumulative_ack, wire,
 };
-use crate::ingest::shred_udp::ZSTD_SOLANA_SHRED_V1;
+use crate::ingest::shred_udp::{RAW_SOLANA_SHRED_V1, ZSTD_SOLANA_SHRED_V1};
 
 const PULL_CONTROL_MAX_DECODING_BYTES: usize = 64 * 1024;
 const PULL_RECORD_WIRE_RESERVE_BYTES: u64 = 64 * 1024;
@@ -831,11 +831,26 @@ impl PullSourceBackend for ShredSpoolPullBackend {
 }
 
 fn shred_spool_record_to_transport(record: &SpoolRecord) -> anyhow::Result<RawReplicationRecord> {
-    anyhow::ensure!(
-        record.metadata.payload_format_version == ZSTD_SOLANA_SHRED_V1,
-        "unexpected raw-shred spool format"
-    );
-    let raw = decode_stored_shred(&record.payload)?;
+    // The initial Hetzner recorder used uncompressed raw shred frames (v3). Newer recorders
+    // store the same datagram in an independent zstd frame (v4). Both are lossless and retain
+    // the exact Solana shred bytes; accept v3 only as a read-compatibility path for an existing
+    // durable spool, while all new recordings use v4.
+    let (raw, compressed_payload) = match record.metadata.payload_format_version {
+        // Replay historical frames as the current canonical wire/spool format.  The NAS receiver
+        // intentionally accepts only independently zstd-compressed shreds, so forwarding v3 as
+        // raw bytes would make an otherwise valid historical spool permanently unreplicable.
+        RAW_SOLANA_SHRED_V1 => {
+            let raw = record.payload.clone();
+            let compressed = zstd::bulk::compress(&raw, 1)
+                .context("compress historical raw shred for durable replication")?;
+            (raw, compressed)
+        }
+        ZSTD_SOLANA_SHRED_V1 => (
+            decode_stored_shred(&record.payload)?,
+            record.payload.clone(),
+        ),
+        _ => anyhow::bail!("unexpected raw-shred spool format"),
+    };
     let header = parse_shred_header(&raw).context("parse stored raw shred")?;
     let expected = LogicalKey::Shred {
         slot: header.slot,
@@ -855,12 +870,18 @@ fn shred_spool_record_to_transport(record: &SpoolRecord) -> anyhow::Result<RawRe
             record: record.metadata.observation.clone(),
             source_id: record.metadata.source_id.clone(),
             logical_key: record.metadata.logical_key.clone(),
-            content_digest: record.metadata.content_digest,
-            payload_len: record.metadata.payload_len,
-            payload_format_version: record.metadata.payload_format_version,
+            content_digest: super::compute_content_digest(
+                &record.metadata.cluster_id,
+                &record.metadata.logical_key,
+                ZSTD_SOLANA_SHRED_V1,
+                &compressed_payload,
+            ),
+            payload_len: u64::try_from(compressed_payload.len())
+                .context("compressed raw shred length overflow")?,
+            payload_format_version: ZSTD_SOLANA_SHRED_V1,
             commitment: CommitmentEvidence::Unknown,
         },
-        compressed_payload: record.payload.clone(),
+        compressed_payload,
         raw_protobuf_sha256: raw_hash,
         uncompressed_len: u64::try_from(raw.len()).context("stored raw shred length overflow")?,
     })
