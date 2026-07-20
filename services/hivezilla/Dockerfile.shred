@@ -24,12 +24,12 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
     && useradd --create-home --uid 10001 app \
-    && install --directory --owner app --group app /data \
+    && install --directory --owner app --group app /data /status \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /tmp/hivezilla /usr/local/bin/hivezilla
 COPY services/hivezilla/config/ingest-shred-udp.example.json /etc/hivezilla/ingest.json
 
 USER app
-VOLUME ["/data"]
+VOLUME ["/data", "/status"]
 ENTRYPOINT ["/usr/local/bin/hivezilla"]

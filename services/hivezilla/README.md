@@ -57,11 +57,27 @@ envelope exists.
 hivezilla record-shred-udp \
   --config services/hivezilla/config/ingest-shred-udp.example.json \
   --source-id shred-reader-loopback \
-  --journal-id 0123456789abcdef0123456789abcdef
+  --journal-id 0123456789abcdef0123456789abcdef \
+  --status-file /var/lib/hivezilla-status/recorder.json
 ```
 
 Keep the journal id stable with the spool volume across restarts. Generate a
-new id whenever a new physical journal is intentionally created.
+new id whenever a new physical journal is intentionally created. The optional
+status file is replaced atomically every five seconds and after a clean stop.
+It contains post-`fsync` counters, the durable sequence, freshness timestamps,
+and storage capacity only; it must live outside the quota-accounted spool.
+
+`scripts/shred_status_server.py` can combine that file with a shred-reader
+loopback metrics endpoint. It selects a fixed, public-safe schema and can write
+an atomic snapshot for a separate read-only web container. The supplied
+`docker-compose.hivezilla-shred.dokploy.yml` uses this split so the metrics
+source stays on host loopback, the collector mounts recorder status read-only,
+and the public container can expose only the separate sanitized JSON volume.
+
+This deployment is a bounded raw shred recorder, not block reconstruction or
+indexing. Its example spool fails closed at 20 GiB and has no deletion policy;
+capacity or a verified downstream replication/retention path must be added for
+indefinite operation.
 
 The `scripts/` directory contains portable launch, PKI, object-storage, and
 monitoring helpers. They intentionally contain no deployment manifest or real

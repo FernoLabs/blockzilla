@@ -1,0 +1,11 @@
+FROM python:3.13-slim-bookworm@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64
+
+RUN groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --create-home app \
+    && install --directory --owner app --group app /app /recorder-status /public-status
+
+COPY --chown=app:app services/hivezilla/scripts/shred_status_server.py /app/shred_status_server.py
+
+USER app
+VOLUME ["/recorder-status", "/public-status"]
+ENTRYPOINT ["python3", "/app/shred_status_server.py"]
