@@ -4,13 +4,15 @@
 //! Transport duplicates remain distinct observations while sharing a logical shred key.
 
 use std::{
-    fs, io,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
     net::{IpAddr, SocketAddr},
-    path::Path,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, ensure};
+use serde::Serialize;
 use tokio::net::UdpSocket;
 
 use super::{
@@ -28,12 +30,45 @@ const VERSION_OFFSET: usize = 77;
 const FEC_SET_INDEX_OFFSET: usize = 79;
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
 const QUOTA_ENTRY_MIN_BYTES: u64 = 4_096;
+const STATUS_SCHEMA_VERSION: u32 = 1;
+const STATUS_INTERVAL: Duration = Duration::from_secs(5);
+const RECEIVING_FRESHNESS: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct ShredUdpRecordConfig {
     pub ingest: IngestConfig,
     pub source_id: String,
     pub journal_id: [u8; 16],
+    pub status_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ShredRecorderState {
+    Waiting,
+    Receiving,
+    Stalled,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ShredRecorderStatus {
+    schema_version: u32,
+    updated_unix_secs: u64,
+    started_unix_secs: u64,
+    state: ShredRecorderState,
+    accepted_total: u64,
+    invalid_total: u64,
+    bytes_total: u64,
+    durable_through_sequence: Option<u64>,
+    latest_slot: Option<u64>,
+    shred_version: Option<u16>,
+    last_durable_unix_secs: Option<u64>,
+    spool_bytes: u64,
+    spool_max_bytes: u64,
+    filesystem_free_bytes: u64,
+    filesystem_total_bytes: u64,
+    reserve_free_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +95,16 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             == 1,
         "record-shred-udp currently requires exactly one enabled source per spool root"
     );
+    if let Some(status_file) = config.status_file.as_deref() {
+        ensure!(
+            status_file.is_absolute() && status_file != Path::new("/"),
+            "record-shred-udp status file must be an absolute non-root path"
+        );
+        ensure!(
+            !status_file.starts_with(&config.ingest.spool.root),
+            "record-shred-udp status file must live outside the quota-accounted spool root"
+        );
+    }
     let source = config
         .ingest
         .sources
@@ -111,6 +156,12 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             .checked_add(1)
             .context("shred UDP observation sequence exhausted")
     })?;
+    let recovered_header = spool
+        .last_record()
+        .map(|record| spool.read_record(record))
+        .transpose()
+        .context("read last recovered shred UDP observation")?
+        .and_then(|record| parse_shred_header(&record.payload));
 
     let bind_address: SocketAddr = bind.parse().context("parse shred UDP bind address")?;
     let socket = UdpSocket::bind(bind_address)
@@ -130,13 +181,81 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
     let mut accepted = 0u64;
     let mut invalid = 0u64;
     let mut bytes = 0u64;
+    let started_unix_secs = unix_time_secs()?;
+    let mut latest_slot = recovered_header.map(|header| header.slot);
+    let mut shred_version = recovered_header.map(|header| header.version);
+    let mut last_durable_unix_secs: Option<u64> = None;
+    let mut last_durable_at: Option<Instant> = None;
     let mut last_report = Instant::now();
+    publish_recorder_status(
+        config.status_file.as_deref(),
+        &config.ingest,
+        ShredRecorderStatusInput {
+            started_unix_secs,
+            state: ShredRecorderState::Waiting,
+            accepted_total: accepted,
+            invalid_total: invalid,
+            bytes_total: bytes,
+            next_sequence,
+            latest_slot,
+            shred_version,
+            last_durable_unix_secs,
+            spool_bytes,
+        },
+    )?;
+    let mut status_interval = tokio::time::interval(STATUS_INTERVAL);
+    status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    status_interval.tick().await;
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
-        let (length, peer) = tokio::select! {
-            received = socket.recv_from(&mut buffer) => received.context("receive shred UDP")?,
+        let received = tokio::select! {
+            received = socket.recv_from(&mut buffer) => Some(received.context("receive shred UDP")?),
+            _ = status_interval.tick() => {
+                let state = match last_durable_at {
+                    None => ShredRecorderState::Waiting,
+                    Some(last) if last.elapsed() <= RECEIVING_FRESHNESS => ShredRecorderState::Receiving,
+                    Some(_) => ShredRecorderState::Stalled,
+                };
+                if let Err(error) = publish_recorder_status(
+                    config.status_file.as_deref(),
+                    &config.ingest,
+                    ShredRecorderStatusInput {
+                        started_unix_secs,
+                        state,
+                        accepted_total: accepted,
+                        invalid_total: invalid,
+                        bytes_total: bytes,
+                        next_sequence,
+                        latest_slot,
+                        shred_version,
+                        last_durable_unix_secs,
+                        spool_bytes,
+                    },
+                ) {
+                    tracing::warn!(error = %format!("{error:#}"), "publish shred UDP recorder status");
+                }
+                None
+            }
             () = &mut shutdown => {
+                if let Err(error) = publish_recorder_status(
+                    config.status_file.as_deref(),
+                    &config.ingest,
+                    ShredRecorderStatusInput {
+                        started_unix_secs,
+                        state: ShredRecorderState::Stopped,
+                        accepted_total: accepted,
+                        invalid_total: invalid,
+                        bytes_total: bytes,
+                        next_sequence,
+                        latest_slot,
+                        shred_version,
+                        last_durable_unix_secs,
+                        spool_bytes,
+                    },
+                ) {
+                    tracing::warn!(error = %format!("{error:#}"), "publish stopped shred UDP recorder status");
+                }
                 tracing::info!(
                     source_id = %source.id,
                     accepted_total = accepted,
@@ -146,6 +265,9 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                 );
                 return Ok(());
             }
+        };
+        let Some((length, peer)) = received else {
+            continue;
         };
         if length as u64 > source.queue.max_event_bytes {
             invalid = invalid.saturating_add(1);
@@ -201,6 +323,10 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             .context("shred UDP observation sequence exhausted")?;
         accepted = accepted.saturating_add(1);
         bytes = bytes.saturating_add(length as u64);
+        latest_slot = Some(header.slot);
+        shred_version = Some(header.version);
+        last_durable_unix_secs = Some(unix_time_secs()?);
+        last_durable_at = Some(Instant::now());
 
         if last_report.elapsed() >= Duration::from_secs(10) {
             tracing::info!(
@@ -216,6 +342,103 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             last_report = Instant::now();
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShredRecorderStatusInput {
+    started_unix_secs: u64,
+    state: ShredRecorderState,
+    accepted_total: u64,
+    invalid_total: u64,
+    bytes_total: u64,
+    next_sequence: u64,
+    latest_slot: Option<u64>,
+    shred_version: Option<u16>,
+    last_durable_unix_secs: Option<u64>,
+    spool_bytes: u64,
+}
+
+fn publish_recorder_status(
+    path: Option<&Path>,
+    ingest: &IngestConfig,
+    input: ShredRecorderStatusInput,
+) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let (filesystem_free_bytes, filesystem_total_bytes) =
+        filesystem_capacity_bytes(&ingest.spool.root)?;
+    let status = ShredRecorderStatus {
+        schema_version: STATUS_SCHEMA_VERSION,
+        updated_unix_secs: unix_time_secs()?,
+        started_unix_secs: input.started_unix_secs,
+        state: input.state,
+        accepted_total: input.accepted_total,
+        invalid_total: input.invalid_total,
+        bytes_total: input.bytes_total,
+        durable_through_sequence: input.next_sequence.checked_sub(1),
+        latest_slot: input.latest_slot,
+        shred_version: input.shred_version,
+        last_durable_unix_secs: input.last_durable_unix_secs,
+        spool_bytes: input.spool_bytes,
+        spool_max_bytes: ingest.spool.max_bytes,
+        filesystem_free_bytes,
+        filesystem_total_bytes,
+        reserve_free_bytes: ingest.spool.reserve_free_bytes,
+    };
+    write_json_atomic(path, &status)
+}
+
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    let parent = path.parent().context("shred status file has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create shred status directory {}", parent.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("shred status file has an invalid name")?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_nanos();
+    let temporary = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .with_context(|| format!("create shred status temp {}", temporary.display()))?;
+        serde_json::to_writer(&mut file, value).context("encode shred recorder status")?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&temporary, path).with_context(|| {
+            format!(
+                "publish shred recorder status {} from {}",
+                path.display(),
+                temporary.display()
+            )
+        })?;
+        sync_parent_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn unix_time_secs() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs())
+}
+
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("open shred status directory {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync shred status directory {}", path.display()))
 }
 
 #[cfg(unix)]
@@ -272,7 +495,7 @@ fn spool_root_bytes(path: &Path) -> Result<u64> {
 }
 
 #[cfg(unix)]
-fn filesystem_available_bytes(path: &Path) -> Result<u64> {
+fn filesystem_capacity_bytes(path: &Path) -> Result<(u64, u64)> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
     let path = CString::new(path.as_os_str().as_bytes())
@@ -283,14 +506,22 @@ fn filesystem_available_bytes(path: &Path) -> Result<u64> {
     if result != 0 {
         return Err(io::Error::last_os_error()).context("read shred UDP filesystem free space");
     }
-    (stat.f_bavail as u64)
+    let available = (stat.f_bavail as u64)
         .checked_mul(stat.f_frsize as u64)
-        .context("shred UDP filesystem available byte count overflow")
+        .context("shred UDP filesystem available byte count overflow")?;
+    let total = (stat.f_blocks as u64)
+        .checked_mul(stat.f_frsize as u64)
+        .context("shred UDP filesystem total byte count overflow")?;
+    Ok((available, total))
 }
 
 #[cfg(not(unix))]
-fn filesystem_available_bytes(_path: &Path) -> Result<u64> {
-    Ok(u64::MAX)
+fn filesystem_capacity_bytes(_path: &Path) -> Result<(u64, u64)> {
+    Ok((u64::MAX, u64::MAX))
+}
+
+fn filesystem_available_bytes(path: &Path) -> Result<u64> {
+    filesystem_capacity_bytes(path).map(|(available, _)| available)
 }
 
 fn parse_shred_header(payload: &[u8]) -> Option<ParsedShredHeader> {
@@ -352,6 +583,17 @@ fn hex_journal_id(journal_id: [u8; 16]) -> String {
 mod tests {
     use super::*;
 
+    fn unique_temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "blockzilla-shred-status-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock")
+                .as_nanos()
+        ))
+    }
+
     #[test]
     fn parses_data_and_coding_shred_coordinates() {
         for (variant, kind) in [(0x90, ShredKind::Data), (0x6f, ShredKind::Coding)] {
@@ -380,5 +622,41 @@ mod tests {
     fn rejects_short_or_unknown_shreds() {
         assert_eq!(parse_shred_header(&[0; 82]), None);
         assert_eq!(parse_shred_header(&[0; COMMON_SHRED_HEADER_BYTES]), None);
+    }
+
+    #[test]
+    fn atomically_publishes_only_the_recorder_status_contract() {
+        let directory = unique_temp_dir();
+        let path = directory.join("recorder.json");
+        let status = ShredRecorderStatus {
+            schema_version: STATUS_SCHEMA_VERSION,
+            updated_unix_secs: 20,
+            started_unix_secs: 10,
+            state: ShredRecorderState::Receiving,
+            accepted_total: 8,
+            invalid_total: 1,
+            bytes_total: 9_600,
+            durable_through_sequence: Some(7),
+            latest_slot: Some(42),
+            shred_version: Some(50_093),
+            last_durable_unix_secs: Some(20),
+            spool_bytes: 12_345,
+            spool_max_bytes: 20_000,
+            filesystem_free_bytes: 30_000,
+            filesystem_total_bytes: 40_000,
+            reserve_free_bytes: 5_000,
+        };
+
+        write_json_atomic(&path, &status).expect("publish status");
+        let raw = fs::read_to_string(&path).expect("read status");
+        let actual: serde_json::Value = serde_json::from_str(&raw).expect("decode status");
+        assert_eq!(actual["state"], "receiving");
+        assert_eq!(actual["durable_through_sequence"], 7);
+        assert_eq!(actual.as_object().expect("object").len(), 16);
+        for forbidden in ["bind", "peer", "source_id", "journal_id", "token", "secret"] {
+            assert!(!raw.contains(forbidden));
+        }
+
+        fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

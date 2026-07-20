@@ -15,13 +15,16 @@
   } = $props();
 
   const historyActive = $derived(page.url.pathname.startsWith('/history'));
+  const ingestActive = $derived(page.url.pathname.startsWith('/ingest'));
+  const overviewActive = $derived(!historyActive && !ingestActive);
 </script>
 
 <header class="topbar">
   <div class="identity">
     <h1><a href={resolve('/')}>Blockzilla Watcher</a></h1>
     <nav aria-label="Watcher pages">
-      <a href={resolve('/')} aria-current={!historyActive ? 'page' : undefined}>Overview</a>
+      <a href={resolve('/')} aria-current={overviewActive ? 'page' : undefined}>Overview</a>
+      <a href={resolve('/ingest')} aria-current={ingestActive ? 'page' : undefined}>Shred ingest</a>
       <a href={resolve('/history')} aria-current={historyActive ? 'page' : undefined}>History</a>
     </nav>
     {#if observerMode}
