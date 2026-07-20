@@ -1,0 +1,26 @@
+services:
+  hivezilla-shred:
+    build:
+      context: .
+      dockerfile: services/hivezilla/Dockerfile.shred
+    command:
+      - record-shred-udp
+      - --config
+      - /etc/hivezilla/ingest.json
+      - --source-id
+      - shred-reader-loopback
+      - --journal-id
+      - ${SHRED_JOURNAL_ID:?SHRED_JOURNAL_ID must be a stable 32-character hex value}
+    network_mode: host
+    # Fail closed at the configured spool limit; do not crash-loop against a full journal.
+    restart: "no"
+    stop_grace_period: 15s
+    volumes:
+      - hivezilla-shred-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  hivezilla-shred-data:
