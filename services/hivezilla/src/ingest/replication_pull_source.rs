@@ -888,8 +888,12 @@ impl ShredSpoolPullSource {
             .checked_add(PULL_RECORD_WIRE_RESERVE_BYTES)
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| pull_error(PullSourceErrorKind::InvalidConfiguration))?;
-        let ack_wal = CumulativeAckWal::open(&config.cumulative_ack_wal_file)
-            .map_err(|_| pull_error(PullSourceErrorKind::AckWal))?;
+        let ack_wal = CumulativeAckWal::open(&config.cumulative_ack_wal_file).map_err(|error| {
+            // This is local filesystem state only; retain the detailed cause for operators while
+            // continuing to expose a redacted protocol error to callers.
+            tracing::error!(error = ?error, "open raw-shred pull ACK WAL failed");
+            pull_error(PullSourceErrorKind::AckWal)
+        })?;
         Ok(Self {
             inner: PullSourceCore {
                 backend: ShredSpoolPullBackend {
