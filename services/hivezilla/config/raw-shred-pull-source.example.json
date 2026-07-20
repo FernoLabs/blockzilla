@@ -16,8 +16,8 @@
   "recorder_status_file": "/status/recorder.json",
   "cumulative_ack_wal_file": "/control/nas-shred-ack.wal",
   "ack_status_file": "/control/nas-shred-ack-status.json",
-  "expected_primary_id": "blockzilla-primary",
-  "trusted_receipt_keys": [{"key_id":"receipt-2026-q3","public_key_file":"/run/secrets/blockzilla_receipt_public_key"}],
+  "expected_primary_id": "blockzilla-nas",
+  "trusted_receipt_keys": [{"key_id":"nas-receipt-current","public_key_file":"/run/secrets/blockzilla_receipt_public_key"}],
   "limits": {
     "max_records": 256,
     "max_batch_compressed_bytes": 1048576,

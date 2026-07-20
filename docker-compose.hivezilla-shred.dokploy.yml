@@ -43,9 +43,7 @@ services:
       - hivezilla-shred-status:/status:ro
       - hivezilla-shred-control:/control
       # Kept outside the Git checkout so Dokploy source refreshes cannot remove trust material.
-      - /etc/blockzilla/hivezilla-shred-pull/tls:/etc/hivezilla/tls:ro
-      - /etc/blockzilla/hivezilla-shred-pull/replication:/etc/hivezilla/replication:ro
-      - /etc/blockzilla/hivezilla-shred-pull/receipts:/etc/hivezilla/receipts:ro
+      # Names match the strict runtime config and the directory is owned by the unprivileged UID.
       - /etc/blockzilla/hivezilla-shred-pull/secrets:/run/secrets:ro
     security_opt:
       - no-new-privileges:true
