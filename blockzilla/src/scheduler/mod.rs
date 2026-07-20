@@ -14974,6 +14974,20 @@ mod tests {
         binary
     }
 
+    #[cfg(target_os = "linux")]
+    async fn wait_for_spawned_process(mut predicate: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if predicate() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            predicate(),
+            "spawned process did not publish its expected Linux identity"
+        );
+    }
+
     fn test_live_capture(
         root: &Path,
         id: &str,
@@ -19738,9 +19752,10 @@ mod tests {
         let mut managed = spawn_legacy_compact_reuse(&config, &epoch).await.unwrap();
         let managed_pid = managed.pid.unwrap();
         let managed_started = managed.started_unix_secs;
-        let (_, start_ticks) = process_stat_identity(managed_pid).unwrap();
+        wait_for_spawned_process(|| trusted_adopted_legacy_candidate(&config, 701).is_some()).await;
         let adopted = trusted_adopted_legacy_candidate(&config, 701)
             .expect("spawned worker is an exactly trusted restart survivor");
+        let start_ticks = adopted.process_start_ticks;
         let audit_identity = (
             701,
             managed_pid,
@@ -21749,6 +21764,7 @@ mod tests {
         let mut child = child.spawn().unwrap();
         let pid = child.id().unwrap();
         write_acquisition_marker(&config, 700, "car_download", pid, &expected, &receipt).unwrap();
+        wait_for_spawned_process(|| active_acquisition_marker(&config, 700).is_some()).await;
         assert_eq!(active_acquisition_marker(&config, 700).unwrap().pid, pid);
         // SAFETY: this test created pid as a dedicated process-group leader.
         let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };

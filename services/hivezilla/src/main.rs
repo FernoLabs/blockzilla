@@ -138,6 +138,10 @@ struct RecordShredUdpArgs {
     /// Stable 16-byte physical journal id as 32 hex digits.
     #[arg(long, value_parser = parse_journal_id)]
     journal_id: [u8; 16],
+
+    /// Optional secret-free atomic status snapshot for a read-only monitoring sidecar.
+    #[arg(long)]
+    status_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1400,6 +1404,7 @@ async fn main() -> Result<()> {
                 ingest,
                 source_id: args.source_id,
                 journal_id: args.journal_id,
+                status_file: args.status_file,
             })
             .await?;
         }
