@@ -13,6 +13,7 @@ pub mod replication_pull_source;
 pub mod replication_sender;
 pub mod replication_service;
 pub mod replication_wire;
+pub mod shred_udp;
 pub mod spool;
 
 pub use config::*;
@@ -28,4 +29,5 @@ pub use replication_pull_source::*;
 pub use replication_sender::*;
 pub use replication_service::*;
 pub use replication_wire::*;
+pub use shred_udp::*;
 pub use spool::*;

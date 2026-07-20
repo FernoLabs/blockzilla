@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+FROM rust:1.96-bookworm AS builder
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends cmake pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# gxhash requires the host AES/SIMD feature set. Dokploy builds and runs this image on the same
+# machine, so a native target is both portable across our build hosts and safe at runtime.
+ENV RUSTFLAGS="-C target-cpu=native"
+ENV CARGO_PROFILE_RELEASE_LTO="false"
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
+
+WORKDIR /app
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --locked --release --package hivezilla \
+    && cp target/release/hivezilla /tmp/hivezilla
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && useradd --create-home --uid 10001 app \
+    && install --directory --owner app --group app /data \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /tmp/hivezilla /usr/local/bin/hivezilla
+COPY services/hivezilla/config/ingest-shred-udp.example.json /etc/hivezilla/ingest.json
+
+USER app
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/local/bin/hivezilla"]
