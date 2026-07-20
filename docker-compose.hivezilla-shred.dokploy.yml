@@ -25,6 +25,34 @@ services:
     cap_drop:
       - ALL
 
+  # The NAS initiates an mTLS pull from this listener. ACKs advance replay only;
+  # this service never deletes or compacts the Hetzner shred spool.
+  hivezilla-shred-pull:
+    build:
+      context: .
+      dockerfile: services/hivezilla/Dockerfile.shred
+    entrypoint: ["/usr/local/bin/run-raw-shred-pull-source"]
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - hivezilla-shred
+    environment:
+      SHRED_JOURNAL_ID: ${SHRED_JOURNAL_ID:?SHRED_JOURNAL_ID must be a stable 32-character lowercase hex value}
+    volumes:
+      - hivezilla-shred-data:/data
+      - hivezilla-shred-status:/status:ro
+      - hivezilla-shred-control:/control
+    secrets:
+      - hetzner_pull_source_certificate
+      - hetzner_pull_source_private_key
+      - pull_client_ca
+      - pull_allowed_nodes
+      - blockzilla_receipt_public_key
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   shred-status-collector:
     build:
       context: .
@@ -82,3 +110,16 @@ volumes:
   hivezilla-shred-data:
   hivezilla-shred-status:
   hivezilla-shred-public-status:
+  hivezilla-shred-control:
+
+secrets:
+  hetzner_pull_source_certificate:
+    file: ${HETZNER_PULL_SOURCE_CERTIFICATE_HOST_FILE:-../files/hetzner-pull-source.crt}
+  hetzner_pull_source_private_key:
+    file: ${HETZNER_PULL_SOURCE_PRIVATE_KEY_HOST_FILE:-../files/hetzner-pull-source.key}
+  pull_client_ca:
+    file: ${PULL_CLIENT_CA_HOST_FILE:-../files/pull-client-ca.crt}
+  pull_allowed_nodes:
+    file: ./deploy/hivezilla-shred/pull-allowed-nodes.json
+  blockzilla_receipt_public_key:
+    file: ${BLOCKZILLA_RECEIPT_PUBLIC_KEY_HOST_FILE:-../files/blockzilla-receipt.pub}

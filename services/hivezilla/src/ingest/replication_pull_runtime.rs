@@ -33,7 +33,8 @@ use crate::grpc_raw::{GrpcRawCommittedReadLimits, GrpcRawLocalGcOutcome};
 use super::{
     ClientCertificateAllowlist, CumulativePrimaryAck, Ed25519ReceiptKeyring, PullSourceGcResult,
     RawReplicationPullCommitObserver, RawReplicationPullLimits, RawReplicationPullService,
-    RawReplicationPullSource, RawReplicationPullSourceConfig, load_mtls_server_material,
+    RawReplicationPullSource, RawReplicationPullSourceConfig, ShredSpoolPullSource,
+    ShredSpoolPullSourceConfig, SpoolJournalIdentity, load_mtls_server_material,
     mtls_only_server_tls_config,
 };
 
@@ -182,6 +183,41 @@ pub struct PullSourceRuntimeLimits {
     pub max_uncompressed_record_bytes: u64,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShredSpoolPullRuntimeConfig {
+    pub schema_version: u32,
+    pub bind: String,
+    pub tls: PullSourceServerTlsConfig,
+    pub allowed_nodes_file: PathBuf,
+    pub spool_root: PathBuf,
+    pub cluster_id: String,
+    pub origin_node_id: String,
+    pub source_id: String,
+    pub journal_id: String,
+    pub recorder_status_file: PathBuf,
+    pub cumulative_ack_wal_file: PathBuf,
+    pub ack_status_file: PathBuf,
+    pub expected_primary_id: String,
+    pub trusted_receipt_keys: Vec<PullSourceTrustedReceiptKeyConfig>,
+    pub limits: PullSourceRuntimeLimits,
+}
+
+impl fmt::Debug for ShredSpoolPullRuntimeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ShredSpoolPullRuntimeConfig")
+            .field("schema_version", &self.schema_version)
+            .field("bind", &self.bind)
+            .field("tls", &self.tls)
+            .field("stream", &"<configured raw shred stream>")
+            .field("spool_root", &"<redacted>")
+            .field("gc", &"disabled")
+            .field("limits", &self.limits)
+            .finish()
+    }
+}
+
 /// Listener-owning mTLS runtime. The pre-bound socket makes port conflicts fail before the ACK WAL
 /// is opened or initialized.
 pub struct RawReplicationPullServerRuntime {
@@ -191,6 +227,93 @@ pub struct RawReplicationPullServerRuntime {
     service: RawReplicationPullService,
     gc_enabled: bool,
     transport: PullSourceTransportPolicy,
+}
+
+pub struct ShredSpoolPullServerRuntime {
+    bind: SocketAddr,
+    listener: std::net::TcpListener,
+    tls: ServerTlsConfig,
+    service: RawReplicationPullService<ShredSpoolPullSource>,
+    transport: PullSourceTransportPolicy,
+}
+
+impl ShredSpoolPullServerRuntime {
+    pub fn from_config(config: &ShredSpoolPullRuntimeConfig) -> Result<Self> {
+        let (bind, identity) = validate_shred_spool_runtime_config(config)?;
+        let transport = PullSourceTransportPolicy::production().validate()?;
+        let (server_identity, client_ca_root) = load_mtls_server_material(
+            &config.tls.server_certificate_file,
+            &config.tls.server_private_key_file,
+            &config.tls.client_ca_file,
+        )?;
+        let tls = mtls_only_server_tls_config(
+            server_identity,
+            client_ca_root,
+            Duration::from_millis(config.tls.handshake_timeout_ms),
+        )?;
+        let _validated_tls = Server::builder()
+            .tls_config(tls.clone())
+            .context("validate raw-shred pull mTLS policy")?;
+        let allowlist = ClientCertificateAllowlist::load_json(&config.allowed_nodes_file)?;
+        let keyring = load_trusted_receipt_keys(&config.trusted_receipt_keys)?;
+        let listener = reserve_listener(bind)?;
+        let bind = listener
+            .local_addr()
+            .context("inspect raw-shred pull listener")?;
+        let status_publisher =
+            Arc::new(PullAckStatusPublisher::new(config.ack_status_file.clone())?);
+        let source = ShredSpoolPullSource::open(ShredSpoolPullSourceConfig {
+            spool_root: config.spool_root.clone(),
+            identity,
+            recorder_status_file: config.recorder_status_file.clone(),
+            cumulative_ack_wal_file: config.cumulative_ack_wal_file.clone(),
+            max_stored_record_bytes: config.limits.max_compressed_record_bytes,
+            batch_limits: RawReplicationPullLimits {
+                max_records: config.limits.max_records,
+                max_compressed_bytes: config.limits.max_batch_compressed_bytes,
+                max_uncompressed_bytes: config.limits.max_batch_uncompressed_bytes,
+            },
+            expected_primary_id: config.expected_primary_id.clone(),
+            trusted_receipt_keys: keyring,
+        })
+        .map_err(|error| anyhow!("open raw-shred pull source: {error}"))?;
+        Ok(Self {
+            bind,
+            listener,
+            tls,
+            service: RawReplicationPullService::new(source, allowlist)
+                .with_commit_observer(status_publisher),
+            transport,
+        })
+    }
+    pub fn bind_address(&self) -> SocketAddr {
+        self.bind
+    }
+    pub async fn serve_with_shutdown<F>(self, shutdown: F) -> Result<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let bind = self.bind;
+        let transport = self.transport;
+        let listener = tokio::net::TcpListener::from_std(self.listener)
+            .context("attach raw-shred pull listener to Tokio")?;
+        let incoming = futures::stream::try_unfold(listener, move |listener| async move {
+            let (stream, _) = listener.accept().await?;
+            stream.set_nodelay(true)?;
+            configure_pull_source_tcp_keepalive(&stream, transport)?;
+            Ok::<_, std::io::Error>(Some((stream, listener)))
+        });
+        Server::builder()
+            .tls_config(self.tls)
+            .context("install raw-shred pull mTLS policy")?
+            .tcp_nodelay(true)
+            .http2_keepalive_interval(Some(transport.http2_keepalive_interval))
+            .http2_keepalive_timeout(Some(transport.http2_keepalive_timeout))
+            .add_service(self.service.into_tonic_service())
+            .serve_with_incoming_shutdown(incoming, shutdown)
+            .await
+            .with_context(|| format!("serve mTLS raw-shred pull source on {bind}"))
+    }
 }
 
 impl RawReplicationPullServerRuntime {
@@ -436,6 +559,107 @@ fn validate_runtime_config(config: &RawReplicationPullRuntimeConfig) -> Result<S
         "pull-source limits are invalid"
     );
     Ok(bind)
+}
+
+fn validate_shred_spool_runtime_config(
+    config: &ShredSpoolPullRuntimeConfig,
+) -> Result<(SocketAddr, SpoolJournalIdentity)> {
+    ensure!(
+        config.schema_version == PULL_SOURCE_RUNTIME_SCHEMA_VERSION,
+        "unsupported raw-shred pull-source runtime schema version"
+    );
+    let bind: SocketAddr = config
+        .bind
+        .parse()
+        .context("parse raw-shred pull bind address")?;
+    ensure!(
+        config.tls.handshake_timeout_ms > 0,
+        "raw-shred pull TLS handshake timeout must be nonzero"
+    );
+    ensure!(
+        !config.trusted_receipt_keys.is_empty(),
+        "raw-shred pull source must trust at least one NAS receipt key"
+    );
+    validate_stable_id(&config.cluster_id, "cluster_id")?;
+    validate_stable_id(&config.origin_node_id, "origin_node_id")?;
+    validate_stable_id(&config.source_id, "source_id")?;
+    validate_stable_id(&config.expected_primary_id, "expected_primary_id")?;
+    let journal_id = parse_journal_id(&config.journal_id)?;
+    validate_real_cache_root(&config.spool_root)?;
+    for (label, path) in [
+        ("server certificate", &config.tls.server_certificate_file),
+        ("server private key", &config.tls.server_private_key_file),
+        ("client CA", &config.tls.client_ca_file),
+        ("client allowlist", &config.allowed_nodes_file),
+        ("recorder status", &config.recorder_status_file),
+        ("cumulative ACK WAL", &config.cumulative_ack_wal_file),
+        ("ACK status snapshot", &config.ack_status_file),
+    ] {
+        validate_control_path(path, &config.spool_root, label)?;
+    }
+    for trusted in &config.trusted_receipt_keys {
+        validate_control_path(
+            &trusted.public_key_file,
+            &config.spool_root,
+            "trusted receipt public key",
+        )?;
+    }
+    ensure!(
+        config.ack_status_file != config.cumulative_ack_wal_file,
+        "ACK status snapshot must be separate from the cumulative ACK WAL"
+    );
+    ensure!(
+        config.limits.max_records > 0
+            && config.limits.max_batch_compressed_bytes > 0
+            && config.limits.max_batch_uncompressed_bytes > 0
+            && config.limits.max_compressed_record_bytes > 0
+            && config.limits.max_uncompressed_record_bytes > 0
+            && config.limits.max_compressed_record_bytes
+                <= config.limits.max_batch_compressed_bytes
+            && config.limits.max_uncompressed_record_bytes
+                <= config.limits.max_batch_uncompressed_bytes,
+        "raw-shred pull limits are invalid"
+    );
+    Ok((
+        bind,
+        SpoolJournalIdentity {
+            cluster_id: config.cluster_id.clone(),
+            origin_node_id: config.origin_node_id.clone(),
+            source_id: config.source_id.clone(),
+            journal_id,
+        },
+    ))
+}
+
+fn parse_journal_id(value: &str) -> Result<[u8; 16]> {
+    ensure!(
+        value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+        "raw-shred journal_id must be 32 lowercase hex characters"
+    );
+    let mut output = [0u8; 16];
+    for (index, byte) in output.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&value[offset..offset + 2], 16)
+            .context("parse raw-shred journal_id")?;
+    }
+    Ok(output)
+}
+
+fn validate_stable_id(value: &str, label: &str) -> Result<()> {
+    let mut characters = value.chars();
+    ensure!(
+        characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+            && value.len() <= 64
+            && characters.all(|character| character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '_' | '.')),
+        "raw-shred {label} must be a stable identifier"
+    );
+    Ok(())
 }
 
 fn validate_real_cache_root(path: &Path) -> Result<()> {

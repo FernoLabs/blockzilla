@@ -1,7 +1,8 @@
 //! Minimal durable Solana shred UDP source.
 //!
-//! The adapter preserves each accepted UDP datagram byte-for-byte in the common ingress spool.
-//! Transport duplicates remain distinct observations while sharing a logical shred key.
+//! The adapter preserves each accepted UDP datagram in an independently compressed, lossless
+//! ingress frame. Transport duplicates remain distinct observations while sharing a logical shred
+//! key. The compressed representation is what is replicated to a remote durable spool.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -22,6 +23,8 @@ use super::{
 
 /// Uncompressed, byte-for-byte Solana shred datagram.
 pub const RAW_SOLANA_SHRED_V1: u16 = 3;
+/// Independently zstd-compressed, byte-for-byte Solana shred datagram.
+pub const ZSTD_SOLANA_SHRED_V1: u16 = 4;
 const COMMON_SHRED_HEADER_BYTES: usize = 83;
 const SHRED_VARIANT_OFFSET: usize = 64;
 const SLOT_OFFSET: usize = 65;
@@ -72,12 +75,12 @@ struct ShredRecorderStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ParsedShredHeader {
-    slot: u64,
-    index: u32,
-    version: u16,
-    fec_set_index: u32,
-    kind: ShredKind,
+pub(crate) struct ParsedShredHeader {
+    pub(crate) slot: u64,
+    pub(crate) index: u32,
+    pub(crate) version: u16,
+    pub(crate) fec_set_index: u32,
+    pub(crate) kind: ShredKind,
 }
 
 pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
@@ -161,7 +164,8 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
         .map(|record| spool.read_record(record))
         .transpose()
         .context("read last recovered shred UDP observation")?
-        .and_then(|record| parse_shred_header(&record.payload));
+        .and_then(|record| decode_stored_shred(&record.payload).ok())
+        .and_then(|payload| parse_shred_header(&payload));
 
     let bind_address: SocketAddr = bind.parse().context("parse shred UDP bind address")?;
     let socket = UdpSocket::bind(bind_address)
@@ -273,11 +277,17 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             invalid = invalid.saturating_add(1);
             continue;
         }
-        let payload = &buffer[..length];
-        let Some(header) = parse_shred_header(payload) else {
+        let datagram = &buffer[..length];
+        let Some(header) = parse_shred_header(datagram) else {
             invalid = invalid.saturating_add(1);
             continue;
         };
+        let payload = zstd::bulk::compress(datagram, 1)
+            .context("independently compress shred datagram for durable spool")?;
+        ensure!(
+            payload.len() as u64 <= source.queue.max_event_bytes,
+            "compressed shred datagram exceeds configured source maximum"
+        );
         let metadata = IngressRecordMeta::from_payload(
             config.ingest.cluster_id.clone(),
             ObservationId {
@@ -292,10 +302,10 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                 shred_index: header.index,
                 fec_set_index: Some(header.fec_set_index),
             },
-            RAW_SOLANA_SHRED_V1,
-            payload,
+            ZSTD_SOLANA_SHRED_V1,
+            &payload,
         );
-        let projected = spool.project_append(&metadata, payload)?;
+        let projected = spool.project_append(&metadata, &payload)?;
         ensure!(
             spool_bytes
                 .checked_add(projected.additional_bytes)
@@ -313,7 +323,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             "shred UDP filesystem reserve would be crossed"
         );
         spool
-            .append_and_sync(metadata, payload)
+            .append_and_sync(metadata, &payload)
             .context("durably append shred UDP observation")?;
         spool_bytes = spool_bytes
             .checked_add(projected.additional_bytes)
@@ -524,7 +534,12 @@ fn filesystem_available_bytes(path: &Path) -> Result<u64> {
     filesystem_capacity_bytes(path).map(|(available, _)| available)
 }
 
-fn parse_shred_header(payload: &[u8]) -> Option<ParsedShredHeader> {
+pub(crate) fn decode_stored_shred(payload: &[u8]) -> Result<Vec<u8>> {
+    zstd::bulk::decompress(payload, MAX_UDP_DATAGRAM_BYTES)
+        .context("decompress stored shred datagram")
+}
+
+pub(crate) fn parse_shred_header(payload: &[u8]) -> Option<ParsedShredHeader> {
     if payload.len() < COMMON_SHRED_HEADER_BYTES {
         return None;
     }

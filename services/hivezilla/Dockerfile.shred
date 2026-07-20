@@ -22,13 +22,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates \
+    && apt-get install --yes --no-install-recommends ca-certificates sed \
     && useradd --create-home --uid 10001 app \
     && install --directory --owner app --group app /data /status \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /tmp/hivezilla /usr/local/bin/hivezilla
 COPY services/hivezilla/config/ingest-shred-udp.example.json /etc/hivezilla/ingest.json
+COPY services/hivezilla/config/raw-shred-pull-source.example.json /etc/hivezilla/raw-shred-pull.json.template
+COPY services/hivezilla/scripts/run_raw_shred_pull_source.sh /usr/local/bin/run-raw-shred-pull-source
+RUN chmod 0755 /usr/local/bin/run-raw-shred-pull-source
 
 USER app
 VOLUME ["/data", "/status"]

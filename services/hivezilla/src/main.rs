@@ -27,8 +27,9 @@ use hivezilla::{
         PullReplicationOutcome, RawReplicationPullClient, RawReplicationPullRuntimeConfig,
         RawReplicationPullServerRuntime, RawReplicationServerRuntime, ReconnectConfig,
         ReplicaUpstreamConfig, ReplicationSendOutcome, ReplicationSender,
-        ReplicationSenderErrorKind, ReplicationStreamId, ShredUdpRecordConfig,
-        load_ingest_receiver_config, record_shred_udp,
+        ReplicationSenderErrorKind, ReplicationStreamId, ShredSpoolPullRuntimeConfig,
+        ShredSpoolPullServerRuntime, ShredUdpRecordConfig, load_ingest_receiver_config,
+        record_shred_udp,
     },
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
@@ -104,6 +105,8 @@ enum Command {
     PullGrpcRaw(PullGrpcRawArgs),
     /// Serve the recorder's durable raw WAL over direct, mandatory mTLS pull replication.
     ServeGrpcRawPullSource(ServeGrpcRawPullSourceArgs),
+    /// Serve Hetzner's fsynced raw shred spool for outbound NAS pull replication.
+    ServeShredSpoolPullSource(ServeShredSpoolPullSourceArgs),
     /// Portably supervise one long-lived service with bounded restart and health policy.
     Supervise(SuperviseArgs),
     /// Notify a parent Hivezilla supervisor of readiness or one heartbeat.
@@ -322,6 +325,12 @@ impl From<PullClientProtocolArg> for PullClientProtocol {
 #[derive(Debug, Args)]
 struct ServeGrpcRawPullSourceArgs {
     /// Strict schema-v1 pull-source runtime JSON at an absolute, non-symlink path.
+    #[arg(long)]
+    config: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ServeShredSpoolPullSourceArgs {
     #[arg(long)]
     config: std::path::PathBuf,
 }
@@ -1444,6 +1453,14 @@ async fn main() -> Result<()> {
             );
             runtime.serve_with_shutdown(shutdown_signal()).await?;
             tracing::info!("direct mTLS raw pull source stopped cleanly");
+        }
+        Command::ServeShredSpoolPullSource(args) => {
+            let config: ShredSpoolPullRuntimeConfig =
+                load_bounded_json_config(&args.config, "raw-shred pull-source runtime config")?;
+            let runtime = ShredSpoolPullServerRuntime::from_config(&config)?;
+            tracing::info!(bind = %runtime.bind_address(), "starting direct mTLS raw-shred pull source");
+            runtime.serve_with_shutdown(shutdown_signal()).await?;
+            tracing::info!("direct mTLS raw-shred pull source stopped cleanly");
         }
     }
 

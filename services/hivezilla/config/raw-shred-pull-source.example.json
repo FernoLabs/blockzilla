@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "bind": "0.0.0.0:18443",
+  "tls": {
+    "server_certificate_file": "/run/secrets/hetzner_pull_source_certificate",
+    "server_private_key_file": "/run/secrets/hetzner_pull_source_private_key",
+    "client_ca_file": "/run/secrets/pull_client_ca",
+    "handshake_timeout_ms": 10000
+  },
+  "allowed_nodes_file": "/run/secrets/pull_allowed_nodes",
+  "spool_root": "/data/shred-ingest",
+  "cluster_id": "solana-mainnet",
+  "origin_node_id": "hivezilla-shred-01",
+  "source_id": "shred-reader-loopback",
+  "journal_id": "__SHRED_JOURNAL_ID__",
+  "recorder_status_file": "/status/recorder.json",
+  "cumulative_ack_wal_file": "/control/nas-shred-ack.wal",
+  "ack_status_file": "/control/nas-shred-ack-status.json",
+  "expected_primary_id": "blockzilla-primary",
+  "trusted_receipt_keys": [{"key_id":"receipt-2026-q3","public_key_file":"/run/secrets/blockzilla_receipt_public_key"}],
+  "limits": {
+    "max_records": 256,
+    "max_batch_compressed_bytes": 1048576,
+    "max_batch_uncompressed_bytes": 1048576,
+    "max_compressed_record_bytes": 4096,
+    "max_uncompressed_record_bytes": 4096
+  }
+}

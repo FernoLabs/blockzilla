@@ -1,4 +1,4 @@
-//! Transport-independent durable receiver for the exact compressed Yellowstone block stream.
+//! Transport-independent durable receiver for exact compressed live-source records.
 //!
 //! Every new observation crosses two ordered durability boundaries: the exact compressed payload
 //! is first synced through [`SpoolWriter`], then its cumulative rolling-chain cursor is appended
@@ -21,15 +21,16 @@ use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::shred_udp::parse_shred_header;
 use super::{
     CommitmentEvidence, ContentDigest, CumulativePrimaryAck, DurableSpoolRecord, IngressRecordMeta,
     LogicalKey, REPLICATION_PROTOCOL_VERSION, ReceiptDisposition, ReplicationOffer,
     ReplicationStreamId, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
-    compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
+    ZSTD_SOLANA_SHRED_V1, compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
 };
 
-/// Exact format emitted by the raw recorder: one independent zstd frame containing a protobuf
-/// `SubscribeUpdate` envelope.
+/// Exact format emitted by the raw gRPC recorder: one independent zstd frame containing a
+/// protobuf `SubscribeUpdate` envelope.
 pub const RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1: u16 = 2;
 pub const RECEIVER_PROGRESS_WAL_FILE: &str = "receiver-progress.wal";
 
@@ -801,15 +802,17 @@ fn validate_offer_identity(offer: &ReplicationOffer, stream: &ReplicationStreamI
         ReplicationStreamId::from_offer(offer) == *stream,
         "receiver replication offer belongs to a different stream"
     );
-    ensure!(
-        offer.payload_format_version == RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1,
-        "unsupported receiver raw payload format {}",
-        offer.payload_format_version
-    );
-    ensure!(
-        offer.commitment == CommitmentEvidence::Confirmed,
-        "receiver accepts only confirmed raw block observations"
-    );
+    match offer.payload_format_version {
+        RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1 => ensure!(
+            offer.commitment == CommitmentEvidence::Confirmed,
+            "receiver accepts only confirmed raw gRPC block observations"
+        ),
+        ZSTD_SOLANA_SHRED_V1 => ensure!(
+            offer.commitment == CommitmentEvidence::Unknown,
+            "receiver accepts raw shred observations only with unknown commitment"
+        ),
+        format => anyhow::bail!("unsupported receiver raw payload format {format}"),
+    }
     Ok(())
 }
 
@@ -842,14 +845,29 @@ fn validate_decoded_record_with_raw(
         ) == offer.content_digest,
         "receiver replication offer content digest mismatch"
     );
-    let block = scan_subscribe_update_block(raw)?;
-    let logical_key = LogicalKey::Block {
-        slot: block.slot,
-        blockhash: block.blockhash,
+    let logical_key = match offer.payload_format_version {
+        RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1 => {
+            let block = scan_subscribe_update_block(raw)?;
+            LogicalKey::Block {
+                slot: block.slot,
+                blockhash: block.blockhash,
+            }
+        }
+        ZSTD_SOLANA_SHRED_V1 => {
+            let header =
+                parse_shred_header(raw).context("receiver raw shred has an invalid header")?;
+            LogicalKey::Shred {
+                slot: header.slot,
+                kind: header.kind,
+                shred_index: header.index,
+                fec_set_index: Some(header.fec_set_index),
+            }
+        }
+        _ => unreachable!("validate_offer_identity validates the payload format"),
     };
     ensure!(
         offer.logical_key == logical_key,
-        "receiver protobuf block identity differs from replication offer"
+        "receiver decoded record identity differs from replication offer"
     );
     Ok(IngressRecordMeta {
         cluster_id: offer.cluster_id.clone(),

@@ -19,7 +19,10 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use futures::{Stream, StreamExt};
+use serde::Deserialize;
+use sha2::Digest;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tonic::{Request, Response, Status};
 
@@ -30,12 +33,16 @@ use crate::grpc_raw::{
 };
 
 use super::{
-    AuthenticatedClient, ClientCertificateAllowlist, ContentDigest, CumulativeAckSignatureVerifier,
-    CumulativeAckWal, CumulativePrimaryAck, Ed25519ReceiptKeyring, ExpectedCumulativeAck,
-    RawReplicationRecord, ReplicationStreamId, ValidatedCommitAckResponse,
-    ValidatedPullBatchRequest, ValidatedPushRecord, VerifiedCumulativeAck, cumulative_chain_next,
-    cumulative_chain_seed, verify_cumulative_ack, wire,
+    AuthenticatedClient, ClientCertificateAllowlist, CommitmentEvidence, ContentDigest,
+    CumulativeAckSignatureVerifier, CumulativeAckWal, CumulativePrimaryAck,
+    DurableReplicationWitness, DurableSpoolRecord, Ed25519ReceiptKeyring, ExpectedCumulativeAck,
+    LogicalKey, RawReplicationRecord, ReplicationOffer, ReplicationStreamId, SpoolJournalIdentity,
+    SpoolLocation, SpoolRecord, ValidatedCommitAckResponse, ValidatedPullBatchRequest,
+    ValidatedPushRecord, VerifiedCumulativeAck, cumulative_chain_next, cumulative_chain_seed,
+    decode_stored_shred, parse_shred_header, read_spool_committed_snapshot_after,
+    verify_cumulative_ack, wire,
 };
+use crate::ingest::shred_udp::ZSTD_SOLANA_SHRED_V1;
 
 const PULL_CONTROL_MAX_DECODING_BYTES: usize = 64 * 1024;
 const PULL_RECORD_WIRE_RESERVE_BYTES: u64 = 64 * 1024;
@@ -592,6 +599,353 @@ impl PullSourceBackend for ProductionPullBackend {
     }
 }
 
+/// Immutable source settings for raw shred replication. The recorder status is used only to
+/// expose the writer's fsynced prefix; an ACK is never used to trim this spool.
+pub struct ShredSpoolPullSourceConfig {
+    pub spool_root: PathBuf,
+    pub identity: SpoolJournalIdentity,
+    pub recorder_status_file: PathBuf,
+    pub cumulative_ack_wal_file: PathBuf,
+    pub max_stored_record_bytes: u64,
+    pub batch_limits: RawReplicationPullLimits,
+    pub expected_primary_id: String,
+    pub trusted_receipt_keys: Ed25519ReceiptKeyring,
+}
+
+struct ShredSpoolReservation {
+    before: Option<SpoolLocation>,
+    after: SpoolLocation,
+    durable_through_sequence: u64,
+    record_count: usize,
+    records_digest: [u8; 32],
+    witness: DurableReplicationWitness,
+}
+
+struct ShredSpoolPullBackend {
+    spool_root: PathBuf,
+    identity: SpoolJournalIdentity,
+    recorder_status_file: PathBuf,
+    max_stored_record_bytes: u64,
+    ack_wal: CumulativeAckWal,
+    after: Option<SpoolLocation>,
+}
+
+impl ShredSpoolPullBackend {
+    fn durable_through_sequence(&self) -> Result<Option<u64>, PullSourceError> {
+        #[derive(Deserialize)]
+        struct RecorderStatus {
+            schema_version: u32,
+            durable_through_sequence: Option<u64>,
+        }
+
+        let bytes = std::fs::read(&self.recorder_status_file)
+            .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
+        let status: RecorderStatus = serde_json::from_slice(&bytes)
+            .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
+        if status.schema_version != 1 {
+            return Err(pull_error(PullSourceErrorKind::SourceCursor));
+        }
+        Ok(status.durable_through_sequence)
+    }
+
+    fn records_after(
+        &self,
+        after: Option<SpoolLocation>,
+        durable_through_sequence: u64,
+        max_records: usize,
+    ) -> Result<Vec<(RawReplicationRecord, DurableSpoolRecord, SpoolLocation)>, PullSourceError>
+    {
+        let mut records = Vec::new();
+        read_spool_committed_snapshot_after(
+            &self.spool_root,
+            self.identity.clone(),
+            self.max_stored_record_bytes,
+            after,
+            durable_through_sequence,
+            max_records,
+            |record| {
+                let transport = shred_spool_record_to_transport(&record)?;
+                let durable = DurableSpoolRecord::from_verified_committed_read(
+                    record.location,
+                    record.metadata,
+                );
+                records.push((transport, durable, record.location));
+                Ok(())
+            },
+        )
+        .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
+        Ok(records)
+    }
+
+    fn locate_sequence(
+        &self,
+        sequence: u64,
+        durable_through_sequence: u64,
+    ) -> Result<SpoolLocation, PullSourceError> {
+        let mut found = None;
+        read_spool_committed_snapshot_after(
+            &self.spool_root,
+            self.identity.clone(),
+            self.max_stored_record_bytes,
+            None,
+            durable_through_sequence,
+            usize::MAX,
+            |record| {
+                if record.metadata.observation.sequence == sequence {
+                    found = Some(record.location);
+                }
+                Ok(())
+            },
+        )
+        .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
+        found.ok_or_else(|| pull_error(PullSourceErrorKind::SourceCursor))
+    }
+}
+
+impl PullSourceBackend for ShredSpoolPullBackend {
+    type Reservation = ShredSpoolReservation;
+
+    fn reserve_next(
+        &mut self,
+        limits: RawReplicationPullLimits,
+    ) -> Result<Option<BackendReservedBatch<Self::Reservation>>, PullSourceError> {
+        let stream = ReplicationStreamId {
+            cluster_id: self.identity.cluster_id.clone(),
+            origin_node_id: self.identity.origin_node_id.clone(),
+            source_id: self.identity.source_id.clone(),
+            journal_id: self.identity.journal_id,
+        };
+        let previous_ack = self.ack_wal.latest_stream_ack(&stream).cloned();
+        let next_sequence = match previous_ack.as_ref() {
+            Some(ack) => ack
+                .through_sequence
+                .checked_add(1)
+                .ok_or_else(|| pull_error(PullSourceErrorKind::SourceCursor))?,
+            None => 0,
+        };
+        let Some(durable_through_sequence) = self.durable_through_sequence()? else {
+            return Ok(None);
+        };
+        if next_sequence > durable_through_sequence {
+            return Ok(None);
+        }
+        if self.after.is_none() && next_sequence > 0 {
+            self.after = Some(self.locate_sequence(next_sequence - 1, durable_through_sequence)?);
+        }
+        let entries =
+            self.records_after(self.after, durable_through_sequence, limits.max_records)?;
+        let Some((first, _, _)) = entries.first() else {
+            return Ok(None);
+        };
+        if first.offer.record.sequence != next_sequence {
+            return Err(pull_error(PullSourceErrorKind::SourceCursor));
+        }
+        let (records, tail_record, after) = entries.into_iter().fold(
+            (Vec::new(), None, None),
+            |(mut records, _tail, _after), (record, durable, location)| {
+                records.push(record);
+                (records, Some(durable), Some(location))
+            },
+        );
+        let tail_record =
+            tail_record.ok_or_else(|| pull_error(PullSourceErrorKind::SourceCursor))?;
+        let after = after.ok_or_else(|| pull_error(PullSourceErrorKind::SourceCursor))?;
+        let record_count = records.len();
+        let records_digest = digest_records(&records)?;
+        let tail = records
+            .last()
+            .ok_or_else(|| pull_error(PullSourceErrorKind::SourceCursor))?;
+        let witness = DurableReplicationWitness::from_verified_mapping(
+            &tail_record,
+            stream.clone(),
+            tail.offer.record.sequence,
+            tail.offer.content_digest,
+        )
+        .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
+        let minimum_primary_term = self
+            .ack_wal
+            .highest_primary_term(&stream.cluster_id)
+            .unwrap_or(0);
+        Ok(Some(BackendReservedBatch {
+            stream,
+            records,
+            reservation: ShredSpoolReservation {
+                before: self.after,
+                after,
+                durable_through_sequence,
+                record_count,
+                records_digest,
+                witness,
+            },
+            previous_ack,
+            minimum_primary_term,
+        }))
+    }
+
+    fn replay_pending(
+        &self,
+        reservation: &Self::Reservation,
+    ) -> Result<Vec<RawReplicationRecord>, PullSourceError> {
+        let entries = self.records_after(
+            reservation.before,
+            reservation.durable_through_sequence,
+            reservation.record_count,
+        )?;
+        let records = entries
+            .into_iter()
+            .map(|(record, _, _)| record)
+            .collect::<Vec<_>>();
+        if records.len() != reservation.record_count
+            || digest_records(&records)? != reservation.records_digest
+        {
+            return Err(pull_error(PullSourceErrorKind::PendingBatchChanged));
+        }
+        Ok(records)
+    }
+
+    fn commit_verified(
+        &mut self,
+        verified: VerifiedCumulativeAck,
+        reservation: &mut Self::Reservation,
+    ) -> Result<(), PullSourceError> {
+        self.ack_wal
+            .commit_verified_replication(verified, &reservation.witness)
+            .map_err(|_| pull_error(PullSourceErrorKind::AckWal))?;
+        self.after = Some(reservation.after);
+        Ok(())
+    }
+
+    fn latest_ack(&self, stream: &ReplicationStreamId) -> Option<CumulativePrimaryAck> {
+        self.ack_wal.latest_stream_ack(stream).cloned()
+    }
+
+    fn gc_one(&mut self) -> Result<GrpcRawLocalGcOutcome, PullSourceError> {
+        Ok(GrpcRawLocalGcOutcome::NothingToRetire)
+    }
+}
+
+fn shred_spool_record_to_transport(record: &SpoolRecord) -> anyhow::Result<RawReplicationRecord> {
+    anyhow::ensure!(
+        record.metadata.payload_format_version == ZSTD_SOLANA_SHRED_V1,
+        "unexpected raw-shred spool format"
+    );
+    let raw = decode_stored_shred(&record.payload)?;
+    let header = parse_shred_header(&raw).context("parse stored raw shred")?;
+    let expected = LogicalKey::Shred {
+        slot: header.slot,
+        kind: header.kind,
+        shred_index: header.index,
+        fec_set_index: Some(header.fec_set_index),
+    };
+    anyhow::ensure!(
+        record.metadata.logical_key == expected,
+        "stored raw shred key mismatch"
+    );
+    let raw_hash = sha2::Sha256::digest(&raw).into();
+    Ok(RawReplicationRecord {
+        offer: ReplicationOffer {
+            protocol_version: super::REPLICATION_PROTOCOL_VERSION,
+            cluster_id: record.metadata.cluster_id.clone(),
+            record: record.metadata.observation.clone(),
+            source_id: record.metadata.source_id.clone(),
+            logical_key: record.metadata.logical_key.clone(),
+            content_digest: record.metadata.content_digest,
+            payload_len: record.metadata.payload_len,
+            payload_format_version: record.metadata.payload_format_version,
+            commitment: CommitmentEvidence::Unknown,
+        },
+        compressed_payload: record.payload.clone(),
+        raw_protobuf_sha256: raw_hash,
+        uncompressed_len: u64::try_from(raw.len()).context("stored raw shred length overflow")?,
+    })
+}
+
+pub struct ShredSpoolPullSource {
+    inner: PullSourceCore<ShredSpoolPullBackend, Ed25519ReceiptKeyring>,
+    max_encoding_message_bytes: usize,
+}
+
+impl ShredSpoolPullSource {
+    pub fn open(config: ShredSpoolPullSourceConfig) -> Result<Self, PullSourceError> {
+        if !config.spool_root.is_absolute()
+            || !config.recorder_status_file.is_absolute()
+            || !config.cumulative_ack_wal_file.is_absolute()
+            || config.recorder_status_file.starts_with(&config.spool_root)
+            || config
+                .cumulative_ack_wal_file
+                .starts_with(&config.spool_root)
+            || config.max_stored_record_bytes == 0
+            || !valid_stable_id(&config.expected_primary_id)
+        {
+            return Err(pull_error(PullSourceErrorKind::InvalidConfiguration));
+        }
+        let limits = config.batch_limits.validate(GrpcRawCommittedReadLimits {
+            max_compressed_record_bytes: config.max_stored_record_bytes,
+            max_uncompressed_record_bytes: config.max_stored_record_bytes,
+        })?;
+        let max_encoding_message_bytes = config
+            .max_stored_record_bytes
+            .checked_add(PULL_RECORD_WIRE_RESERVE_BYTES)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| pull_error(PullSourceErrorKind::InvalidConfiguration))?;
+        let ack_wal = CumulativeAckWal::open(&config.cumulative_ack_wal_file)
+            .map_err(|_| pull_error(PullSourceErrorKind::AckWal))?;
+        Ok(Self {
+            inner: PullSourceCore {
+                backend: ShredSpoolPullBackend {
+                    spool_root: config.spool_root,
+                    identity: config.identity,
+                    recorder_status_file: config.recorder_status_file,
+                    max_stored_record_bytes: config.max_stored_record_bytes,
+                    ack_wal,
+                    after: None,
+                },
+                verifier: config.trusted_receipt_keys,
+                expected_primary_id: config.expected_primary_id,
+                limits,
+                pending: None,
+                gc_enabled: false,
+            },
+            max_encoding_message_bytes,
+        })
+    }
+}
+
+impl SyncPullSource for ShredSpoolPullSource {
+    fn source_batch_limits(&self) -> RawReplicationPullLimits {
+        self.inner.limits
+    }
+
+    fn source_max_encoding_message_bytes(&self) -> usize {
+        self.max_encoding_message_bytes
+    }
+
+    fn pull_for_sync(&mut self) -> Result<RawReplicationPullOutcome, PullSourceError> {
+        self.inner.pull_batch()
+    }
+
+    fn commit_for_sync(
+        &mut self,
+        ack: CumulativePrimaryAck,
+    ) -> Result<RawReplicationPullCommit, PullSourceError> {
+        self.inner.commit_ack(ack)
+    }
+
+    fn pending_stream_for_sync(&self) -> Option<&ReplicationStreamId> {
+        self.inner.pending_stream()
+    }
+
+    fn discard_new_pending_for_sync(&mut self, stream: &ReplicationStreamId) {
+        if self.inner.pending_stream() == Some(stream) {
+            self.inner.pending = None;
+        }
+    }
+
+    fn gc_for_sync(&mut self) -> PullSourceGcResult {
+        PullSourceGcResult::Disabled
+    }
+}
+
 fn digest_records(records: &[RawReplicationRecord]) -> Result<[u8; 32], PullSourceError> {
     use sha2::{Digest, Sha256};
 
@@ -707,7 +1061,19 @@ impl RawReplicationPullSource {
 /// Narrow adapter used by the protocol-v2 session driver. Production calls still enter the exact
 /// same source state machine as v1; keeping the driver generic makes its ordering and flow-control
 /// behavior testable without constructing a filesystem-backed WAL.
-trait SyncPullSource: Send + 'static {
+pub trait SyncPullSource: Send + 'static {
+    fn source_batch_limits(&self) -> RawReplicationPullLimits {
+        RawReplicationPullLimits {
+            max_records: 1,
+            max_compressed_bytes: 1,
+            max_uncompressed_bytes: 1,
+        }
+    }
+
+    fn source_max_encoding_message_bytes(&self) -> usize {
+        PULL_CONTROL_MAX_DECODING_BYTES
+    }
+
     fn pull_for_sync(&mut self) -> Result<RawReplicationPullOutcome, PullSourceError>;
     fn commit_for_sync(
         &mut self,
@@ -719,6 +1085,14 @@ trait SyncPullSource: Send + 'static {
 }
 
 impl SyncPullSource for RawReplicationPullSource {
+    fn source_batch_limits(&self) -> RawReplicationPullLimits {
+        self.batch_limits()
+    }
+
+    fn source_max_encoding_message_bytes(&self) -> usize {
+        self.max_encoding_message_bytes
+    }
+
     fn pull_for_sync(&mut self) -> Result<RawReplicationPullOutcome, PullSourceError> {
         self.pull_batch()
     }
@@ -766,8 +1140,8 @@ impl fmt::Debug for RawReplicationPullSource {
 /// mTLS-authenticated Tonic wrapper. Exactly one pull stream or CommitAck operation is admitted at
 /// a time, preventing concurrent retries from multiplying one batch's memory footprint.
 #[derive(Clone)]
-pub struct RawReplicationPullService {
-    source: Arc<Mutex<RawReplicationPullSource>>,
+pub struct RawReplicationPullService<S = RawReplicationPullSource> {
+    source: Arc<Mutex<S>>,
     allowlist: ClientCertificateAllowlist,
     admission: Arc<Semaphore>,
     sync_batch_limits: RawReplicationPullLimits,
@@ -782,10 +1156,13 @@ pub trait RawReplicationPullCommitObserver: Send + Sync {
     fn after_durable_commit(&self, ack: &CumulativePrimaryAck);
 }
 
-impl RawReplicationPullService {
-    pub fn new(source: RawReplicationPullSource, allowlist: ClientCertificateAllowlist) -> Self {
-        let max_encoding_message_bytes = source.max_encoding_message_bytes;
-        let sync_batch_limits = source.batch_limits();
+impl<S> RawReplicationPullService<S>
+where
+    S: SyncPullSource,
+{
+    pub fn new(source: S, allowlist: ClientCertificateAllowlist) -> Self {
+        let max_encoding_message_bytes = source.source_max_encoding_message_bytes();
+        let sync_batch_limits = source.source_batch_limits();
         Self {
             source: Arc::new(Mutex::new(source)),
             allowlist,
@@ -830,7 +1207,10 @@ fn acquire_replication_admission(
     })
 }
 
-impl fmt::Debug for RawReplicationPullService {
+impl<S> fmt::Debug for RawReplicationPullService<S>
+where
+    S: SyncPullSource,
+{
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RawReplicationPullService")
@@ -1231,7 +1611,10 @@ where
 }
 
 #[tonic::async_trait]
-impl wire::raw_replication_pull_server::RawReplicationPull for RawReplicationPullService {
+impl<S> wire::raw_replication_pull_server::RawReplicationPull for RawReplicationPullService<S>
+where
+    S: SyncPullSource,
+{
     type PullBatchStream = RawReplicationPullResponseStream;
     type SyncStream = RawReplicationSyncResponseStream;
 
@@ -1248,10 +1631,10 @@ impl wire::raw_replication_pull_server::RawReplicationPull for RawReplicationPul
             let mut source = source
                 .lock()
                 .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
-            let already_pending = source.pending_stream().is_some();
-            let outcome = source.pull_batch()?;
+            let already_pending = source.pending_stream_for_sync().is_some();
+            let outcome = source.pull_for_sync()?;
             let maintenance = if matches!(outcome, RawReplicationPullOutcome::CaughtUp) {
-                Some(source.gc_one_acknowledged_generation())
+                Some(source.gc_for_sync())
             } else {
                 None
             };
@@ -1276,7 +1659,7 @@ impl wire::raw_replication_pull_server::RawReplicationPull for RawReplicationPul
                             source
                                 .lock()
                                 .map_err(|_| ())?
-                                .discard_new_pending_for_unauthorized_stream(&selected_stream);
+                                .discard_new_pending_for_sync(&selected_stream);
                             Ok::<_, ()>(())
                         })
                         .await
@@ -1327,7 +1710,7 @@ impl wire::raw_replication_pull_server::RawReplicationPull for RawReplicationPul
             let result = source
                 .lock()
                 .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?
-                .commit_ack(ack);
+                .commit_for_sync(ack);
             observe_successful_durable_commit(result, &status_ack, commit_observer.as_deref())
         })
         .await
