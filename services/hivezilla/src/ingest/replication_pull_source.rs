@@ -673,7 +673,10 @@ impl ShredSpoolPullBackend {
                 Ok(())
             },
         )
-        .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
+        .map_err(|error| {
+            tracing::warn!(error = ?error, "read raw-shred pull spool snapshot failed");
+            pull_error(PullSourceErrorKind::SourceCursor)
+        })?;
         Ok(records)
     }
 
@@ -697,7 +700,10 @@ impl ShredSpoolPullBackend {
                 Ok(())
             },
         )
-        .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
+        .map_err(|error| {
+            tracing::warn!(error = ?error, "locate raw-shred pull spool sequence failed");
+            pull_error(PullSourceErrorKind::SourceCursor)
+        })?;
         found.ok_or_else(|| pull_error(PullSourceErrorKind::SourceCursor))
     }
 }
