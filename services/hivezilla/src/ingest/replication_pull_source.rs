@@ -761,12 +761,21 @@ impl PullSourceBackend for ShredSpoolPullBackend {
         let tail = records
             .last()
             .ok_or_else(|| pull_error(PullSourceErrorKind::SourceCursor))?;
-        let witness = DurableReplicationWitness::from_verified_mapping(
-            &tail_record,
-            stream.clone(),
-            tail.offer.record.sequence,
-            tail.offer.content_digest,
-        )
+        let witness = match tail_record.metadata().payload_format_version {
+            RAW_SOLANA_SHRED_V1 => DurableReplicationWitness::from_verified_transcoded_mapping(
+                &tail_record,
+                stream.clone(),
+                tail.offer.record.sequence,
+                tail.offer.content_digest,
+            ),
+            ZSTD_SOLANA_SHRED_V1 => DurableReplicationWitness::from_verified_mapping(
+                &tail_record,
+                stream.clone(),
+                tail.offer.record.sequence,
+                tail.offer.content_digest,
+            ),
+            _ => Err(anyhow::anyhow!("unexpected raw-shred spool format")),
+        }
         .map_err(|_| pull_error(PullSourceErrorKind::SourceCursor))?;
         let minimum_primary_term = self
             .ack_wal

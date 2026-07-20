@@ -1090,6 +1090,34 @@ impl DurableReplicationWitness {
         })
     }
 
+    /// Bind a durable ACK for a deterministic transport re-encoding of an immutable local frame.
+    ///
+    /// This is intentionally narrower than [`Self::from_verified_mapping`]: the caller has
+    /// already verified the local frame and may change only its transport representation (for
+    /// example, replaying a legacy uncompressed shred as the canonical zstd shred frame). The
+    /// physical frame, stream identity, and sequence remain bound exactly as written.
+    pub(crate) fn from_verified_transcoded_mapping(
+        local_record: &DurableSpoolRecord,
+        stream: ReplicationStreamId,
+        through_sequence: u64,
+        through_content_digest: ContentDigest,
+    ) -> AnyResult<Self> {
+        let metadata = local_record.metadata();
+        ensure!(
+            metadata.cluster_id == stream.cluster_id
+                && metadata.observation.origin_node_id == stream.origin_node_id
+                && metadata.source_id == stream.source_id
+                && metadata.observation.sequence == through_sequence,
+            "logical replication stream does not match its physical local WAL frame"
+        );
+        Ok(Self {
+            stream,
+            through_sequence,
+            through_content_digest,
+            local_binding: PhysicalLocalSpoolBinding::from_record(local_record),
+        })
+    }
+
     pub fn local_location(&self) -> SpoolLocation {
         self.local_binding.location
     }
