@@ -361,6 +361,7 @@ impl BlockzillaRawReceiver {
             .context("receiver batch produced no durable cumulative ACK")
     }
 
+    #[cfg(test)]
     fn push_batch_with_faults<F: ReceiverFaultInjector>(
         &mut self,
         records: Vec<RawReplicationRecord>,
@@ -780,12 +781,14 @@ impl BlockzillaRawReceiver {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 enum ReceiverFaultPoint {
     AfterValidationBeforeSpool,
     AfterSpoolSyncBeforeProgress,
     AfterProgressSync,
 }
 
+#[cfg(test)]
 trait ReceiverFaultInjector {
     fn check(&mut self, point: ReceiverFaultPoint, sequence: u64) -> Result<()>;
 }
