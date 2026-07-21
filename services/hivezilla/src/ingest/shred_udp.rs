@@ -1,8 +1,7 @@
 //! Minimal durable Solana shred UDP source.
 //!
 //! The adapter preserves each accepted UDP datagram in an independently compressed, lossless
-//! ingress frame. Transport duplicates remain distinct observations while sharing a logical shred
-//! key. The compressed representation is what is replicated to a remote durable spool.
+//! ingress frame. The compressed representation is what is replicated to a remote durable spool.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -72,6 +71,24 @@ struct ShredRecorderStatus {
     filesystem_free_bytes: u64,
     filesystem_total_bytes: u64,
     reserve_free_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct PendingShredBatch {
+    records: Vec<(IngressRecordMeta, Vec<u8>)>,
+    payload_bytes: u64,
+    raw_bytes: u64,
+    latest_header: Option<ParsedShredHeader>,
+    last_peer: Option<SocketAddr>,
+}
+
+#[derive(Debug)]
+struct ShredBatchCommit {
+    record_count: u64,
+    raw_bytes: u64,
+    additional_spool_bytes: u64,
+    latest_header: ParsedShredHeader,
+    last_peer: SocketAddr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +176,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             .checked_add(1)
             .context("shred UDP observation sequence exhausted")
     })?;
+    let mut durable_next_sequence = next_sequence;
     let recovered_header = spool
         .last_record()
         .map(|record| spool.read_record(record))
@@ -210,11 +228,118 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
     let mut status_interval = tokio::time::interval(STATUS_INTERVAL);
     status_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     status_interval.tick().await;
+    let sync_delay = Duration::from_millis(config.ingest.spool.sync.max_delay_ms);
+    let mut sync_interval = tokio::time::interval(sync_delay);
+    sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    sync_interval.tick().await;
+    let mut pending = PendingShredBatch::default();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
-        let received = tokio::select! {
-            received = socket.recv_from(&mut buffer) => Some(received.context("receive shred UDP")?),
+        tokio::select! {
+            received = socket.recv_from(&mut buffer) => {
+                let (length, peer) = received.context("receive shred UDP")?;
+                if length as u64 > source.queue.max_event_bytes {
+                    invalid = invalid.saturating_add(1);
+                    continue;
+                }
+                let datagram = &buffer[..length];
+                let Some(header) = parse_shred_header(datagram) else {
+                    invalid = invalid.saturating_add(1);
+                    continue;
+                };
+                let payload = zstd::bulk::compress(datagram, 1)
+                    .context("independently compress shred datagram for durable spool")?;
+                ensure!(
+                    payload.len() as u64 <= source.queue.max_event_bytes,
+                    "compressed shred datagram exceeds configured source maximum"
+                );
+                let metadata = IngressRecordMeta::from_payload(
+                    config.ingest.cluster_id.clone(),
+                    ObservationId {
+                        origin_node_id: origin_node_id.clone(),
+                        journal_id: config.journal_id,
+                        sequence: next_sequence,
+                    },
+                    source.id.clone(),
+                    LogicalKey::Shred {
+                        slot: header.slot,
+                        kind: header.kind,
+                        shred_index: header.index,
+                        fec_set_index: Some(header.fec_set_index),
+                    },
+                    ZSTD_SOLANA_SHRED_V1,
+                    &payload,
+                );
+                next_sequence = next_sequence
+                    .checked_add(1)
+                    .context("shred UDP observation sequence exhausted")?;
+                pending.payload_bytes = pending
+                    .payload_bytes
+                    .checked_add(payload.len() as u64)
+                    .context("pending shred batch byte accounting overflow")?;
+                pending.raw_bytes = pending.raw_bytes.saturating_add(length as u64);
+                pending.latest_header = Some(header);
+                pending.last_peer = Some(peer);
+                pending.records.push((metadata, payload));
+
+                if pending.payload_bytes >= config.ingest.spool.sync.max_unsynced_bytes {
+                    if let Some(commit) = flush_pending_shreds(
+                        &mut spool,
+                        &mut pending,
+                        &config.ingest,
+                        spool_bytes,
+                    )? {
+                        spool_bytes = spool_bytes
+                            .checked_add(commit.additional_spool_bytes)
+                            .context("shred UDP spool byte accounting overflow")?;
+                        durable_next_sequence = next_sequence;
+                        accepted = accepted.saturating_add(commit.record_count);
+                        bytes = bytes.saturating_add(commit.raw_bytes);
+                        latest_slot = Some(commit.latest_header.slot);
+                        shred_version = Some(commit.latest_header.version);
+                        last_durable_unix_secs = Some(unix_time_secs()?);
+                        last_durable_at = Some(Instant::now());
+                        maybe_report_metrics(
+                            &source.id,
+                            accepted,
+                            invalid,
+                            bytes,
+                            commit.latest_header,
+                            commit.last_peer,
+                            &mut last_report,
+                        );
+                    }
+                }
+            }
+            _ = sync_interval.tick(), if !pending.records.is_empty() => {
+                if let Some(commit) = flush_pending_shreds(
+                    &mut spool,
+                    &mut pending,
+                    &config.ingest,
+                    spool_bytes,
+                )? {
+                    spool_bytes = spool_bytes
+                        .checked_add(commit.additional_spool_bytes)
+                        .context("shred UDP spool byte accounting overflow")?;
+                    durable_next_sequence = next_sequence;
+                    accepted = accepted.saturating_add(commit.record_count);
+                    bytes = bytes.saturating_add(commit.raw_bytes);
+                    latest_slot = Some(commit.latest_header.slot);
+                    shred_version = Some(commit.latest_header.version);
+                    last_durable_unix_secs = Some(unix_time_secs()?);
+                    last_durable_at = Some(Instant::now());
+                    maybe_report_metrics(
+                        &source.id,
+                        accepted,
+                        invalid,
+                        bytes,
+                        commit.latest_header,
+                        commit.last_peer,
+                        &mut last_report,
+                    );
+                }
+            }
             _ = status_interval.tick() => {
                 let state = match last_durable_at {
                     None => ShredRecorderState::Waiting,
@@ -230,7 +355,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                         accepted_total: accepted,
                         invalid_total: invalid,
                         bytes_total: bytes,
-                        next_sequence,
+                        next_sequence: durable_next_sequence,
                         latest_slot,
                         shred_version,
                         last_durable_unix_secs,
@@ -239,9 +364,24 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                 ) {
                     tracing::warn!(error = %format!("{error:#}"), "publish shred UDP recorder status");
                 }
-                None
             }
             () = &mut shutdown => {
+                if let Some(commit) = flush_pending_shreds(
+                    &mut spool,
+                    &mut pending,
+                    &config.ingest,
+                    spool_bytes,
+                )? {
+                    spool_bytes = spool_bytes
+                        .checked_add(commit.additional_spool_bytes)
+                        .context("shred UDP spool byte accounting overflow")?;
+                    durable_next_sequence = next_sequence;
+                    accepted = accepted.saturating_add(commit.record_count);
+                    bytes = bytes.saturating_add(commit.raw_bytes);
+                    latest_slot = Some(commit.latest_header.slot);
+                    shred_version = Some(commit.latest_header.version);
+                    last_durable_unix_secs = Some(unix_time_secs()?);
+                }
                 if let Err(error) = publish_recorder_status(
                     config.status_file.as_deref(),
                     &config.ingest,
@@ -251,7 +391,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                         accepted_total: accepted,
                         invalid_total: invalid,
                         bytes_total: bytes,
-                        next_sequence,
+                        next_sequence: durable_next_sequence,
                         latest_slot,
                         shred_version,
                         last_durable_unix_secs,
@@ -269,88 +409,77 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                 );
                 return Ok(());
             }
-        };
-        let Some((length, peer)) = received else {
-            continue;
-        };
-        if length as u64 > source.queue.max_event_bytes {
-            invalid = invalid.saturating_add(1);
-            continue;
         }
-        let datagram = &buffer[..length];
-        let Some(header) = parse_shred_header(datagram) else {
-            invalid = invalid.saturating_add(1);
-            continue;
-        };
-        let payload = zstd::bulk::compress(datagram, 1)
-            .context("independently compress shred datagram for durable spool")?;
-        ensure!(
-            payload.len() as u64 <= source.queue.max_event_bytes,
-            "compressed shred datagram exceeds configured source maximum"
-        );
-        let metadata = IngressRecordMeta::from_payload(
-            config.ingest.cluster_id.clone(),
-            ObservationId {
-                origin_node_id: origin_node_id.clone(),
-                journal_id: config.journal_id,
-                sequence: next_sequence,
-            },
-            source.id.clone(),
-            LogicalKey::Shred {
-                slot: header.slot,
-                kind: header.kind,
-                shred_index: header.index,
-                fec_set_index: Some(header.fec_set_index),
-            },
-            ZSTD_SOLANA_SHRED_V1,
-            &payload,
-        );
-        let projected = spool.project_append(&metadata, &payload)?;
-        ensure!(
-            spool_bytes
-                .checked_add(projected.additional_bytes)
-                .is_some_and(|total| total <= config.ingest.spool.max_bytes),
-            "shred UDP spool capacity would be exceeded"
-        );
-        let available_bytes = filesystem_available_bytes(&config.ingest.spool.root)?;
-        ensure!(
-            config
-                .ingest
-                .spool
-                .reserve_free_bytes
-                .checked_add(projected.additional_bytes)
-                .is_some_and(|required| available_bytes >= required),
-            "shred UDP filesystem reserve would be crossed"
-        );
-        spool
-            .append_and_sync(metadata, &payload)
-            .context("durably append shred UDP observation")?;
-        spool_bytes = spool_bytes
-            .checked_add(projected.additional_bytes)
-            .context("shred UDP spool byte accounting overflow")?;
-        next_sequence = next_sequence
-            .checked_add(1)
-            .context("shred UDP observation sequence exhausted")?;
-        accepted = accepted.saturating_add(1);
-        bytes = bytes.saturating_add(length as u64);
-        latest_slot = Some(header.slot);
-        shred_version = Some(header.version);
-        last_durable_unix_secs = Some(unix_time_secs()?);
-        last_durable_at = Some(Instant::now());
+    }
+}
 
-        if last_report.elapsed() >= Duration::from_secs(10) {
-            tracing::info!(
-                source_id = %source.id,
-                accepted_total = accepted,
-                invalid_total = invalid,
-                bytes_total = bytes,
-                latest_slot = header.slot,
-                shred_version = header.version,
-                last_peer = %peer,
-                "shred UDP recorder metrics"
-            );
-            last_report = Instant::now();
-        }
+fn flush_pending_shreds(
+    spool: &mut SpoolWriter,
+    pending: &mut PendingShredBatch,
+    ingest: &IngestConfig,
+    spool_bytes: u64,
+) -> Result<Option<ShredBatchCommit>> {
+    if pending.records.is_empty() {
+        return Ok(None);
+    }
+    let projected = spool.project_batch(&pending.records)?;
+    ensure!(
+        spool_bytes
+            .checked_add(projected.additional_bytes)
+            .is_some_and(|total| total <= ingest.spool.max_bytes),
+        "shred UDP spool capacity would be exceeded"
+    );
+    let available_bytes = filesystem_available_bytes(&ingest.spool.root)?;
+    ensure!(
+        ingest
+            .spool
+            .reserve_free_bytes
+            .checked_add(projected.additional_bytes)
+            .is_some_and(|required| available_bytes >= required),
+        "shred UDP filesystem reserve would be crossed"
+    );
+
+    let batch = std::mem::take(pending);
+    let record_count = batch.records.len() as u64;
+    let latest_header = batch
+        .latest_header
+        .context("pending shred batch has no latest header")?;
+    let last_peer = batch
+        .last_peer
+        .context("pending shred batch has no last peer")?;
+    spool
+        .append_batch_and_sync(batch.records)
+        .context("durably append shred UDP batch")?;
+    Ok(Some(ShredBatchCommit {
+        record_count,
+        raw_bytes: batch.raw_bytes,
+        additional_spool_bytes: projected.additional_bytes,
+        latest_header,
+        last_peer,
+    }))
+}
+
+fn maybe_report_metrics(
+    source_id: &str,
+    accepted: u64,
+    invalid: u64,
+    bytes: u64,
+    header: ParsedShredHeader,
+    peer: SocketAddr,
+    last_report: &mut Instant,
+) {
+    if last_report.elapsed() >= Duration::from_secs(10) {
+        tracing::info!(
+            source_id,
+            accepted_total = accepted,
+            invalid_total = invalid,
+            bytes_total = bytes,
+            latest_slot = header.slot,
+            shred_version = header.version,
+            last_peer = %peer,
+            "shred UDP recorder metrics"
+        );
+        *last_report = Instant::now();
     }
 }
 

@@ -32,6 +32,9 @@ services:
       context: .
       dockerfile: services/hivezilla/Dockerfile.shred
     entrypoint: ["/usr/local/bin/run-raw-shred-pull-source"]
+    # Dokploy bind-mounts the host trust directory with root-owned 0600 private keys. This
+    # container keeps every capability dropped and only needs uid 0 to read those mounted files.
+    user: "0:0"
     network_mode: host
     restart: unless-stopped
     depends_on:

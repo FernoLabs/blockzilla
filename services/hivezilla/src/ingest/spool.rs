@@ -86,6 +86,12 @@ pub struct SpoolAppendProjection {
     pub additional_bytes: u64,
 }
 
+/// Exact logical-file growth for a prospective group commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpoolBatchProjection {
+    pub additional_bytes: u64,
+}
+
 /// Proof that one raw event has crossed the local filesystem durability boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableSpoolRecord {
@@ -495,6 +501,7 @@ impl SpoolWriter {
         payload: &[u8],
     ) -> Result<SpoolAppendProjection> {
         let prepared = self.prepare_append(metadata, payload)?;
+        self.ensure_follows_last(metadata)?;
         if self.should_rotate(prepared.frame_len) {
             let segment_id = self
                 .segment_id
@@ -523,6 +530,41 @@ impl SpoolWriter {
         }
     }
 
+    /// Project a group commit without changing the journal.
+    pub fn project_batch(
+        &self,
+        records: &[(IngressRecordMeta, Vec<u8>)],
+    ) -> Result<SpoolBatchProjection> {
+        let mut previous = self.last_record.as_ref().map(DurableSpoolRecord::metadata);
+        let mut projected_segment_len = self.segment_len;
+        let mut additional_bytes = 0u64;
+
+        for (metadata, payload) in records {
+            if let Some(previous) = previous {
+                ensure_observation_follows(previous, metadata)?;
+            }
+            let prepared = self.prepare_append(metadata, payload)?;
+            if projected_segment_len > SEGMENT_HEADER_LEN
+                && projected_segment_len.saturating_add(prepared.frame_len)
+                    > self.options.segment_target_bytes
+            {
+                additional_bytes = additional_bytes
+                    .checked_add(SEGMENT_HEADER_LEN)
+                    .context("projected spool batch length overflow")?;
+                projected_segment_len = SEGMENT_HEADER_LEN;
+            }
+            additional_bytes = additional_bytes
+                .checked_add(prepared.frame_len)
+                .context("projected spool batch length overflow")?;
+            projected_segment_len = projected_segment_len
+                .checked_add(prepared.frame_len)
+                .context("projected spool segment length overflow")?;
+            previous = Some(metadata);
+        }
+
+        Ok(SpoolBatchProjection { additional_bytes })
+    }
+
     /// Append one complete event and sync it before returning a durability token.
     pub fn append_and_sync(
         &mut self,
@@ -530,6 +572,7 @@ impl SpoolWriter {
         payload: &[u8],
     ) -> Result<DurableSpoolRecord> {
         let prepared = self.prepare_append(&metadata, payload)?;
+        self.ensure_follows_last(&metadata)?;
         let PreparedSpoolAppend {
             metadata_bytes,
             metadata_len,
@@ -607,6 +650,78 @@ impl SpoolWriter {
         Ok(durable)
     }
 
+    /// Append a sequence of complete events and make one group commit before returning.
+    ///
+    /// Every frame is validated before the first byte is written. A returned durability token is
+    /// therefore backed by the final `sync_data`, while any ambiguous I/O failure poisons the
+    /// writer exactly like [`Self::append_and_sync`].
+    pub fn append_batch_and_sync(
+        &mut self,
+        records: Vec<(IngressRecordMeta, Vec<u8>)>,
+    ) -> Result<Vec<DurableSpoolRecord>> {
+        if records.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut previous = self.last_record.as_ref().map(DurableSpoolRecord::metadata);
+        let mut prepared = Vec::with_capacity(records.len());
+        for (metadata, payload) in &records {
+            if let Some(previous) = previous {
+                ensure_observation_follows(previous, metadata)?;
+            }
+            prepared.push(self.prepare_append(metadata, payload)?);
+            previous = Some(metadata);
+        }
+
+        self.poisoned = true;
+        let mut durable = Vec::with_capacity(records.len());
+        for ((metadata, payload), prepared) in records.into_iter().zip(prepared) {
+            let PreparedSpoolAppend {
+                metadata_bytes,
+                metadata_len,
+                frame_len,
+            } = prepared;
+            if self.should_rotate(frame_len) {
+                self.rotate()?;
+            }
+            let frame_offset = self.segment_len;
+            write_frame(
+                &mut self.writer,
+                &metadata,
+                &payload,
+                &metadata_bytes,
+                metadata_len,
+            )?;
+            self.segment_len = self
+                .segment_len
+                .checked_add(frame_len)
+                .context("spool segment length overflow")?;
+            durable.push(DurableSpoolRecord {
+                location: SpoolLocation {
+                    segment_id: self.segment_id,
+                    frame_offset,
+                    frame_len,
+                },
+                metadata,
+            });
+        }
+        self.writer.flush().context("flush spool segment")?;
+        self.writer
+            .get_ref()
+            .sync_data()
+            .context("sync spool segment")?;
+        self.poisoned = false;
+        self.last_record = durable.last().cloned();
+        Ok(durable)
+    }
+
+    fn ensure_follows_last(&self, metadata: &IngressRecordMeta) -> Result<()> {
+        if let Some(previous) = self.last_record.as_ref() {
+            ensure_observation_follows(&previous.metadata, metadata)?;
+        }
+        Ok(())
+    }
+
     fn prepare_append(
         &self,
         metadata: &IngressRecordMeta,
@@ -660,9 +775,6 @@ impl SpoolWriter {
                 ),
             "metadata content digest does not match canonical payload digest"
         );
-        if let Some(previous) = self.last_record.as_ref() {
-            ensure_observation_follows(&previous.metadata, &metadata)?;
-        }
         let metadata_bytes = serde_json::to_vec(&metadata).context("encode ingress metadata")?;
         ensure!(
             metadata_bytes.len() <= MAX_METADATA_BYTES,
@@ -720,6 +832,53 @@ struct PreparedSpoolAppend {
     metadata_bytes: Vec<u8>,
     metadata_len: u32,
     frame_len: u64,
+}
+
+fn write_frame(
+    writer: &mut BufWriter<File>,
+    metadata: &IngressRecordMeta,
+    payload: &[u8],
+    metadata_bytes: &[u8],
+    metadata_len: u32,
+) -> Result<()> {
+    let version_bytes = FRAME_VERSION.to_le_bytes();
+    let metadata_len_bytes = metadata_len.to_le_bytes();
+    let payload_len_bytes = metadata.payload_len.to_le_bytes();
+    let mut header_crc = Crc32c::new();
+    header_crc.update(FRAME_MAGIC);
+    header_crc.update(&version_bytes);
+    header_crc.update(&metadata_len_bytes);
+    header_crc.update(&payload_len_bytes);
+    let mut payload_crc = Crc32c::new();
+    payload_crc.update(metadata_bytes);
+    payload_crc.update(payload);
+
+    writer
+        .write_all(FRAME_MAGIC)
+        .context("write spool frame magic")?;
+    writer
+        .write_all(&version_bytes)
+        .context("write spool frame version")?;
+    writer
+        .write_all(&metadata_len_bytes)
+        .context("write spool metadata length")?;
+    writer
+        .write_all(&payload_len_bytes)
+        .context("write spool payload length")?;
+    writer
+        .write_all(&header_crc.finish().to_le_bytes())
+        .context("write spool frame header checksum")?;
+    writer
+        .write_all(metadata_bytes)
+        .context("write spool metadata")?;
+    writer.write_all(payload).context("write spool payload")?;
+    writer
+        .write_all(&payload_crc.finish().to_le_bytes())
+        .context("write spool frame checksum")?;
+    writer
+        .write_all(COMMIT_MAGIC)
+        .context("write spool commit marker")?;
+    Ok(())
 }
 
 fn open_and_recover_segment(
@@ -1710,6 +1869,58 @@ mod tests {
             second_location.frame_offset,
             first_location.frame_offset + first_location.frame_len
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn group_commit_projects_writes_and_recovers_a_contiguous_batch() {
+        let root = temp_root("group-commit");
+        let options = SpoolOptions {
+            segment_target_bytes: 1024 * 1024,
+            max_record_bytes: 1024,
+        };
+        let records = vec![
+            (metadata(1, b"first"), b"first".to_vec()),
+            (metadata(2, b"second"), b"second".to_vec()),
+            (metadata(3, b"third"), b"third".to_vec()),
+        ];
+        let (projected, durable_end) = {
+            let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+            let projected = spool.project_batch(&records).unwrap();
+            let durable = spool.append_batch_and_sync(records).unwrap();
+            assert_eq!(durable.len(), 3);
+            assert_eq!(durable.last().unwrap().metadata().observation.sequence, 3);
+            let last = durable.last().unwrap().location();
+            (projected, last.frame_offset + last.frame_len)
+        };
+        let spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+        assert_eq!(
+            spool.last_record().unwrap().metadata().observation.sequence,
+            3
+        );
+        assert_eq!(durable_end, SEGMENT_HEADER_LEN + projected.additional_bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn group_commit_rejects_sequence_reuse_before_writing() {
+        let root = temp_root("group-reuse");
+        let options = SpoolOptions {
+            segment_target_bytes: 1024 * 1024,
+            max_record_bytes: 1024,
+        };
+        let mut spool = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+        let active_segment = segment_path(spool.journal_dir(), spool.current_segment_id());
+        let bytes_before = fs::metadata(&active_segment).unwrap().len();
+        let records = vec![
+            (metadata(1, b"first"), b"first".to_vec()),
+            (metadata(1, b"conflict"), b"conflict".to_vec()),
+        ];
+        assert!(spool.project_batch(&records).is_err());
+        assert!(spool.append_batch_and_sync(records).is_err());
+        assert!(!spool.is_poisoned());
+        assert!(spool.last_record().is_none());
+        assert_eq!(fs::metadata(active_segment).unwrap().len(), bytes_before);
         fs::remove_dir_all(root).unwrap();
     }
 
