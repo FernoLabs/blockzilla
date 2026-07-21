@@ -1330,7 +1330,12 @@ enum ReceiverManagerErrorKind {
     UnsafeExistingStream,
     Probe,
     KnownRegistry,
-    Open,
+    OpenCapacity,
+    OpenLock,
+    OpenSpoolProgressDivergence,
+    OpenProgress,
+    OpenSpool,
+    OpenOther,
     InitialIdentity,
     InitialSequence,
     InitialLimit,
@@ -1357,7 +1362,7 @@ fn manager_error_kind(error: &ReceiverManagerError) -> ReceiverManagerErrorKind 
         }
         ReceiverManagerError::Probe(_) => ReceiverManagerErrorKind::Probe,
         ReceiverManagerError::KnownRegistry(_) => ReceiverManagerErrorKind::KnownRegistry,
-        ReceiverManagerError::Open(_) => ReceiverManagerErrorKind::Open,
+        ReceiverManagerError::Open(error) => open_error_kind(error),
         ReceiverManagerError::InitialValidation(error) => initial_validation_error_kind(error),
         ReceiverManagerError::Push(error) if is_capacity_error(error) => {
             ReceiverManagerErrorKind::PushCapacity
@@ -1367,6 +1372,31 @@ fn manager_error_kind(error: &ReceiverManagerError) -> ReceiverManagerErrorKind 
         }
         ReceiverManagerError::Push(_) => ReceiverManagerErrorKind::PushOther,
     }
+}
+
+fn open_error_kind(error: &anyhow::Error) -> ReceiverManagerErrorKind {
+    for cause in error.chain() {
+        let message = cause.to_string();
+        if message.contains("capacity")
+            || message.contains("reserve")
+            || message.contains("maximum")
+        {
+            return ReceiverManagerErrorKind::OpenCapacity;
+        }
+        if message.contains("lock") {
+            return ReceiverManagerErrorKind::OpenLock;
+        }
+        if message.contains("spool") && message.contains("progress") {
+            return ReceiverManagerErrorKind::OpenSpoolProgressDivergence;
+        }
+        if message.contains("progress") {
+            return ReceiverManagerErrorKind::OpenProgress;
+        }
+        if message.contains("spool") || message.contains("segment") {
+            return ReceiverManagerErrorKind::OpenSpool;
+        }
+    }
+    ReceiverManagerErrorKind::OpenOther
 }
 
 fn initial_validation_error_kind(error: &anyhow::Error) -> ReceiverManagerErrorKind {
@@ -2287,7 +2317,16 @@ mod tests {
     fn mapped_errors_do_not_disclose_underlying_paths_or_payloads() {
         let error =
             ReceiverManagerError::Open(anyhow!("secret path /private/key and token hunter2"));
-        assert_eq!(manager_error_kind(&error), ReceiverManagerErrorKind::Open);
+        assert_eq!(
+            manager_error_kind(&error),
+            ReceiverManagerErrorKind::OpenOther
+        );
+        assert_eq!(
+            manager_error_kind(&ReceiverManagerError::Open(anyhow!(
+                "receiver spool/progress divergence is larger than one record"
+            ))),
+            ReceiverManagerErrorKind::OpenSpoolProgressDivergence
+        );
         let error = ReceiverManagerError::InitialValidation(anyhow!(
             "receiver block transaction count does not match"
         ));
