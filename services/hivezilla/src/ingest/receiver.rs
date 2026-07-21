@@ -27,6 +27,7 @@ use super::{
     LogicalKey, REPLICATION_PROTOCOL_VERSION, ReceiptDisposition, ReplicationOffer,
     ReplicationStreamId, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
     ZSTD_SOLANA_SHRED_V1, compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
+    read_spool_committed_snapshot_after,
 };
 
 /// Exact format emitted by the raw gRPC recorder: one independent zstd frame containing a
@@ -322,7 +323,42 @@ impl BlockzillaRawReceiver {
         &mut self,
         records: Vec<RawReplicationRecord>,
     ) -> Result<CumulativePrimaryAck> {
-        self.push_batch_with_faults(records, &mut NoReceiverFaults)
+        ensure!(
+            !self.is_poisoned(),
+            "receiver is fail-stop after an ambiguous durability failure; reopen to recover"
+        );
+        let validated = self.validate_batch(records)?;
+        let plan = self.plan_batch(validated)?;
+        let first_new = plan.iter().position(|record| !record.already_durable);
+        if let Some(first_new) = first_new {
+            let _capacity_guard = ReceiverCapacityGuard::acquire(
+                self.capacity_lock
+                    .try_clone()
+                    .context("clone receiver capacity lock")?,
+            )?;
+            let new_records = &plan[first_new..];
+            self.admit_new_records(new_records)?;
+            let spool_records = new_records
+                .iter()
+                .map(|planned| {
+                    (
+                        planned.validated.metadata.clone(),
+                        planned.validated.compressed_payload.clone(),
+                    )
+                })
+                .collect();
+
+            self.poisoned = true;
+            let durable = self.spool.append_batch_and_sync(spool_records)?;
+            ensure!(
+                durable.len() == new_records.len(),
+                "receiver spool group commit returned the wrong durable-record count"
+            );
+            self.progress.append_batch_and_sync(new_records, &durable)?;
+            self.poisoned = false;
+        }
+        self.get_ack()
+            .context("receiver batch produced no durable cumulative ACK")
     }
 
     fn push_batch_with_faults<F: ReceiverFaultInjector>(
@@ -599,13 +635,7 @@ impl BlockzillaRawReceiver {
             (None, Some(_)) => Err(anyhow!(
                 "receiver progress is ahead of an empty raw spool; refusing startup"
             )),
-            (Some(durable), None) => {
-                ensure!(
-                    durable.metadata().observation.sequence == 0,
-                    "receiver raw spool is more than one record ahead of empty progress"
-                );
-                self.repair_progress_from_spool(durable, None)
-            }
+            (Some(durable), None) => self.repair_progress_suffix_from_spool(durable, None),
             (Some(durable), Some(progress)) => {
                 let spool_sequence = durable.metadata().observation.sequence;
                 let progress_sequence = progress.offer.record.sequence;
@@ -616,18 +646,75 @@ impl BlockzillaRawReceiver {
                         "receiver spool and progress tails disagree"
                     );
                     Ok(())
-                } else if progress_sequence
-                    .checked_add(1)
-                    .is_some_and(|next| spool_sequence == next)
-                {
-                    self.repair_progress_from_spool(durable, Some(progress))
+                } else if spool_sequence > progress_sequence {
+                    self.repair_progress_suffix_from_spool(durable, Some(progress))
                 } else {
                     Err(anyhow!(
-                        "receiver spool/progress divergence is larger than one record: spool {spool_sequence}, progress {progress_sequence}"
+                        "receiver progress is ahead of the raw spool: spool {spool_sequence}, progress {progress_sequence}"
                     ))
                 }
             }
         }
+    }
+
+    fn repair_progress_suffix_from_spool(
+        &mut self,
+        spool_tail: DurableSpoolRecord,
+        progress_tail: Option<StoredProgressFrame>,
+    ) -> Result<()> {
+        let durable_through_sequence = spool_tail.metadata().observation.sequence;
+        let after = progress_tail
+            .as_ref()
+            .map(|progress| progress.spool_location);
+        let identity = SpoolJournalIdentity {
+            cluster_id: self.config.stream.cluster_id.clone(),
+            origin_node_id: self.config.stream.origin_node_id.clone(),
+            source_id: self.config.stream.source_id.clone(),
+            journal_id: self.config.stream.journal_id,
+        };
+        let maximum = self
+            .config
+            .limits
+            .max_batch_records
+            .checked_add(1)
+            .context("receiver recovery batch limit overflow")?;
+        let mut recovered = Vec::new();
+        // Unlike a live reader, startup owns the spool writer and has already recovered its
+        // exclusive durable tail.  That tail is therefore the safe boundary for rebuilding the
+        // progress suffix left by a crash between the spool and progress group commits.
+        let report = read_spool_committed_snapshot_after(
+            &self.config.spool_root,
+            identity,
+            self.config.spool_options.max_record_bytes,
+            after,
+            durable_through_sequence,
+            maximum,
+            |record| {
+                recovered.push(record);
+                Ok(())
+            },
+        )
+        .context("read receiver group-commit recovery suffix")?;
+        ensure!(
+            report.reached_durable_tail
+                && !recovered.is_empty()
+                && recovered.len() <= self.config.limits.max_batch_records,
+            "receiver spool/progress divergence exceeds one bounded group commit"
+        );
+
+        for record in recovered {
+            let durable =
+                DurableSpoolRecord::from_verified_committed_read(record.location, record.metadata);
+            let previous = self.progress.latest().cloned();
+            self.repair_progress_from_spool(durable, previous)?;
+        }
+        ensure!(
+            self.progress.latest().is_some_and(|progress| {
+                progress.offer.record.sequence == durable_through_sequence
+            }),
+            "receiver group-commit recovery did not reach the durable spool tail"
+        );
+        Ok(())
     }
 
     fn repair_progress_from_spool(
@@ -701,14 +788,6 @@ enum ReceiverFaultPoint {
 
 trait ReceiverFaultInjector {
     fn check(&mut self, point: ReceiverFaultPoint, sequence: u64) -> Result<()>;
-}
-
-struct NoReceiverFaults;
-
-impl ReceiverFaultInjector for NoReceiverFaults {
-    fn check(&mut self, _point: ReceiverFaultPoint, _sequence: u64) -> Result<()> {
-        Ok(())
-    }
 }
 
 fn validate_record_against_stream(
@@ -1543,6 +1622,80 @@ impl ReceiverProgressWal {
             .checked_add(1)
             .context("receiver progress frame count overflow")?;
         self.record(frame);
+        if self.frames_in_file > self.compaction_threshold()? {
+            self.compact_and_sync()?;
+        }
+        self.poisoned = false;
+        Ok(())
+    }
+
+    fn append_batch_and_sync(
+        &mut self,
+        planned: &[PlannedRawRecord],
+        durable: &[DurableSpoolRecord],
+    ) -> Result<()> {
+        ensure!(
+            !self.poisoned,
+            "receiver progress WAL writer is poisoned; reopen receiver to recover"
+        );
+        ensure!(
+            !planned.is_empty() && planned.len() == durable.len(),
+            "receiver progress group commit requires matching non-empty batches"
+        );
+
+        let first_lsn = self.latest.as_ref().map_or(Ok(1), |latest| {
+            latest
+                .durable_lsn
+                .checked_add(1)
+                .context("receiver durable LSN exhausted")
+        })?;
+        let mut previous = self.latest.clone();
+        let mut frames = Vec::with_capacity(planned.len());
+        for (index, (planned, durable)) in planned.iter().zip(durable).enumerate() {
+            ensure!(
+                !planned.already_durable,
+                "receiver progress group commit contains an already-durable record"
+            );
+            ensure!(
+                durable.metadata() == &planned.validated.metadata,
+                "receiver progress metadata differs from durable spool record"
+            );
+            let frame = StoredProgressFrame {
+                checkpoint: false,
+                stream: self.stream.clone(),
+                offer: planned.validated.offer.clone(),
+                raw_protobuf_sha256: planned.validated.raw_protobuf_sha256,
+                uncompressed_len: planned.validated.uncompressed_len,
+                previous_chain_digest: planned.previous_chain_digest,
+                rolling_chain_digest: planned.rolling_chain_digest,
+                spool_location: durable.location(),
+                durable_lsn: first_lsn
+                    .checked_add(u64::try_from(index).context("receiver batch index overflow")?)
+                    .context("receiver durable LSN exhausted")?,
+            };
+            validate_progress_transition(previous.as_ref(), &frame, &self.stream)?;
+            previous = Some(frame.clone());
+            frames.push(frame);
+        }
+
+        self.poisoned = true;
+        for frame in &frames {
+            write_progress_frame(&mut self.writer, frame, &self.path)?;
+        }
+        self.writer
+            .flush()
+            .with_context(|| format!("flush receiver progress WAL {}", self.path.display()))?;
+        self.writer
+            .get_ref()
+            .sync_data()
+            .with_context(|| format!("sync receiver progress WAL {}", self.path.display()))?;
+        self.frames_in_file = self
+            .frames_in_file
+            .checked_add(frames.len())
+            .context("receiver progress frame count overflow")?;
+        for frame in frames {
+            self.record(frame);
+        }
         if self.frames_in_file > self.compaction_threshold()? {
             self.compact_and_sync()?;
         }
@@ -2999,8 +3152,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_rejects_spool_more_than_one_record_ahead() {
-        let root = TestRoot::new("divergence");
+    fn recovery_repairs_one_bounded_spool_group_commit() {
+        let root = TestRoot::new("group-commit-recovery");
         let configuration = config(&root, 8);
         fs::create_dir_all(&root.0).unwrap();
         let identity = SpoolJournalIdentity {
@@ -3010,15 +3163,56 @@ mod tests {
             journal_id: configuration.stream.journal_id,
         };
         let mut spool = SpoolWriter::open(&root.0, identity, configuration.spool_options).unwrap();
-        for input in [record(0, 50, 50), record(1, 51, 51)] {
-            let validated =
-                validate_record_against_stream(input, &configuration.stream, configuration.limits)
-                    .unwrap();
-            spool
-                .append_and_sync(validated.metadata, &validated.compressed_payload)
+        let records = (0..8u64)
+            .map(|sequence| {
+                let validated = validate_record_against_stream(
+                    record(sequence, 50 + sequence, sequence as u8 + 1),
+                    &configuration.stream,
+                    configuration.limits,
+                )
                 .unwrap();
-        }
+                (validated.metadata, validated.compressed_payload)
+            })
+            .collect();
+        spool.append_batch_and_sync(records).unwrap();
         drop(spool);
+
+        assert_eq!(
+            BlockzillaRawReceiver::open(configuration)
+                .unwrap()
+                .get_ack()
+                .unwrap()
+                .through_sequence,
+            7
+        );
+    }
+
+    #[test]
+    fn recovery_rejects_more_than_one_bounded_spool_group_commit() {
+        let root = TestRoot::new("group-commit-too-large");
+        let configuration = config(&root, 8);
+        fs::create_dir_all(&root.0).unwrap();
+        let identity = SpoolJournalIdentity {
+            cluster_id: configuration.stream.cluster_id.clone(),
+            origin_node_id: configuration.stream.origin_node_id.clone(),
+            source_id: configuration.stream.source_id.clone(),
+            journal_id: configuration.stream.journal_id,
+        };
+        let mut spool = SpoolWriter::open(&root.0, identity, configuration.spool_options).unwrap();
+        let records = (0..9u64)
+            .map(|sequence| {
+                let validated = validate_record_against_stream(
+                    record(sequence, 50 + sequence, sequence as u8 + 1),
+                    &configuration.stream,
+                    configuration.limits,
+                )
+                .unwrap();
+                (validated.metadata, validated.compressed_payload)
+            })
+            .collect();
+        spool.append_batch_and_sync(records).unwrap();
+        drop(spool);
+
         assert!(BlockzillaRawReceiver::open(configuration).is_err());
     }
 
