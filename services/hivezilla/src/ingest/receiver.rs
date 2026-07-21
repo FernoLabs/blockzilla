@@ -652,6 +652,10 @@ impl BlockzillaRawReceiver {
     fn validated_spool_tail(&self, durable: &DurableSpoolRecord) -> Result<ValidatedRawRecord> {
         let stored = self.spool.read_record(durable)?;
         let metadata = &stored.metadata;
+        let commitment = match metadata.payload_format_version {
+            ZSTD_SOLANA_SHRED_V1 => CommitmentEvidence::Unknown,
+            _ => CommitmentEvidence::Confirmed,
+        };
         let record = RawReplicationRecord {
             offer: ReplicationOffer {
                 protocol_version: REPLICATION_PROTOCOL_VERSION,
@@ -662,7 +666,7 @@ impl BlockzillaRawReceiver {
                 content_digest: metadata.content_digest,
                 payload_len: metadata.payload_len,
                 payload_format_version: metadata.payload_format_version,
-                commitment: CommitmentEvidence::Confirmed,
+                commitment,
             },
             compressed_payload: stored.payload,
             raw_protobuf_sha256: [0; 32],
@@ -2403,7 +2407,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::ingest::ObservationId;
+    use crate::ingest::{ObservationId, ShredKind};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -2609,6 +2613,49 @@ mod tests {
         }
     }
 
+    fn shred_record(sequence: u64, slot: u64) -> RawReplicationRecord {
+        let mut raw = vec![0u8; 83];
+        raw[64] = 0x90;
+        raw[65..73].copy_from_slice(&slot.to_le_bytes());
+        raw[73..77].copy_from_slice(&7u32.to_le_bytes());
+        raw[77..79].copy_from_slice(&50_093u16.to_le_bytes());
+        raw[79..83].copy_from_slice(&3u32.to_le_bytes());
+        let compressed_payload = zstd::bulk::compress(&raw, 1).expect("compress test shred");
+        let stream = stream();
+        let logical_key = LogicalKey::Shred {
+            slot,
+            kind: ShredKind::Data,
+            shred_index: 7,
+            fec_set_index: Some(3),
+        };
+        let content_digest = compute_content_digest(
+            &stream.cluster_id,
+            &logical_key,
+            ZSTD_SOLANA_SHRED_V1,
+            &compressed_payload,
+        );
+        RawReplicationRecord {
+            offer: ReplicationOffer {
+                protocol_version: REPLICATION_PROTOCOL_VERSION,
+                cluster_id: stream.cluster_id.clone(),
+                record: ObservationId {
+                    origin_node_id: stream.origin_node_id,
+                    journal_id: stream.journal_id,
+                    sequence,
+                },
+                source_id: stream.source_id,
+                logical_key,
+                content_digest,
+                payload_len: compressed_payload.len() as u64,
+                payload_format_version: ZSTD_SOLANA_SHRED_V1,
+                commitment: CommitmentEvidence::Unknown,
+            },
+            compressed_payload,
+            raw_protobuf_sha256: Sha256::digest(&raw).into(),
+            uncompressed_len: raw.len() as u64,
+        }
+    }
+
     #[test]
     fn stateless_new_stream_validation_never_creates_storage() {
         let root = TestRoot::new("stateless-validation");
@@ -2722,6 +2769,30 @@ mod tests {
         assert!(ack.signing_key_id.is_empty());
         assert!(ack.signature.is_empty());
         assert_eq!(receiver.get_ack(), Some(ack));
+    }
+
+    #[test]
+    fn raw_shred_journal_reopens_with_unknown_commitment() {
+        let root = TestRoot::new("shred-restart");
+        let configuration = config(&root, 8);
+        let mut receiver = BlockzillaRawReceiver::open(configuration.clone()).unwrap();
+        assert_eq!(
+            receiver
+                .push_batch(vec![shred_record(0, 1_002)])
+                .unwrap()
+                .through_sequence,
+            0
+        );
+        drop(receiver);
+
+        assert_eq!(
+            BlockzillaRawReceiver::open(configuration)
+                .unwrap()
+                .get_ack()
+                .unwrap()
+                .through_sequence,
+            0
+        );
     }
 
     #[test]
