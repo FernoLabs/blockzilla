@@ -8,7 +8,8 @@ RUN apt-get update \
 # Production images default to the build host's CPU because Dokploy builds and runs them on the
 # same machine. Override this for portable diagnostics or binaries copied to another host.
 ARG RUST_TARGET_CPU=native
-ENV RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU}"
+ARG RUST_TARGET_FEATURES
+ENV RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU} ${RUST_TARGET_FEATURES}"
 ENV CARGO_PROFILE_RELEASE_LTO="false"
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
 
