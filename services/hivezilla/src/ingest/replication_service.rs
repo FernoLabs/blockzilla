@@ -1335,6 +1335,10 @@ enum ReceiverManagerErrorKind {
     OpenSpoolProgressDivergence,
     OpenProgress,
     OpenSpool,
+    OpenStreamIdentity,
+    OpenPrimaryConfiguration,
+    OpenLimits,
+    OpenFilesystem,
     OpenOther,
     InitialIdentity,
     InitialSequence,
@@ -1394,6 +1398,30 @@ fn open_error_kind(error: &anyhow::Error) -> ReceiverManagerErrorKind {
         }
         if message.contains("spool") || message.contains("segment") {
             return ReceiverManagerErrorKind::OpenSpool;
+        }
+        if message.contains("stream identity")
+            || message.contains("cluster id")
+            || message.contains("origin node")
+            || message.contains("source id")
+            || message.contains("journal id")
+        {
+            return ReceiverManagerErrorKind::OpenStreamIdentity;
+        }
+        if message.contains("primary id") || message.contains("primary term") {
+            return ReceiverManagerErrorKind::OpenPrimaryConfiguration;
+        }
+        if message.contains("batch")
+            || message.contains("record limit")
+            || message.contains("compressed")
+            || message.contains("uncompressed")
+        {
+            return ReceiverManagerErrorKind::OpenLimits;
+        }
+        if message.contains("directory")
+            || message.contains("file")
+            || message.contains("permission")
+        {
+            return ReceiverManagerErrorKind::OpenFilesystem;
         }
     }
     ReceiverManagerErrorKind::OpenOther
