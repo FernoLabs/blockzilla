@@ -5,9 +5,10 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends cmake pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# gxhash requires the host AES/SIMD feature set. Dokploy builds and runs this image on the same
-# machine, so a native target is both portable across our build hosts and safe at runtime.
-ENV RUSTFLAGS="-C target-cpu=native"
+# Production images default to the build host's CPU because Dokploy builds and runs them on the
+# same machine. Override this for portable diagnostics or binaries copied to another host.
+ARG RUST_TARGET_CPU=native
+ENV RUSTFLAGS="-C target-cpu=${RUST_TARGET_CPU}"
 ENV CARGO_PROFILE_RELEASE_LTO="false"
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
 
