@@ -816,7 +816,9 @@ mod tests {
         leader: &Keypair,
     ) -> Shred {
         let mut payload = vec![0u8; 1_228];
-        payload[64] = 0x60; // MerkleCode { proof_size: 0, resigned: false }
+        // A fixed 32+32 FEC has 64 Merkle leaves, so even this synthetic fixture needs a
+        // six-entry proof. The zeroed siblings are sufficient because we sign the resulting root.
+        payload[64] = 0x66; // MerkleCode { proof_size: 6, resigned: false }
         payload[65..73].copy_from_slice(&slot.to_le_bytes());
         payload[73..77].copy_from_slice(&(first_coding_index + u32::from(position)).to_le_bytes());
         payload[77..79].copy_from_slice(&VERSION.to_le_bytes());
