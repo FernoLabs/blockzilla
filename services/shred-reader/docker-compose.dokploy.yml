@@ -1,0 +1,54 @@
+name: shred-reader
+
+services:
+  receiver:
+    image: ${SHRED_READER_IMAGE:?SHRED_READER_IMAGE must be pinned to an immutable digest}
+    pull_policy: always
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      APP_ENV: production
+      RUST_LOG: ${RUST_LOG:-shred_reader=info,solana_gossip=warn,solana_streamer=warn}
+      SOLANA_ENTRYPOINTS: ${SOLANA_ENTRYPOINTS:-entrypoint.mainnet-beta.solana.com:8001,entrypoint2.mainnet-beta.solana.com:8001,entrypoint3.mainnet-beta.solana.com:8001}
+      IDENTITY_PATH: /data/identity.json
+      BIND_IP: 0.0.0.0
+      GOSSIP_PORT: ${GOSSIP_PORT:-18001}
+      TVU_PORT: ${TVU_PORT:-18002}
+      METRICS_ADDR: ${METRICS_ADDR:-127.0.0.1:19090}
+      ADVERTISED_IP: ${ADVERTISED_IP:-}
+      SHRED_VERSION: ${SHRED_VERSION:-}
+      REQUIRE_REACHABILITY: ${REQUIRE_REACHABILITY:-true}
+      UDP_RECV_BUFFER_BYTES: ${UDP_RECV_BUFFER_BYTES:-67108864}
+      DEDUP_CAPACITY: ${DEDUP_CAPACITY:-500000}
+      FORWARD_QUEUE_CAPACITY: ${FORWARD_QUEUE_CAPACITY:-16384}
+      METRICS_INTERVAL_SECS: ${METRICS_INTERVAL_SECS:-10}
+      SAMPLE_INTERVAL_SECS: ${SAMPLE_INTERVAL_SECS:-15}
+      LOSS_TELEMETRY_INTERFACES: ${LOSS_TELEMETRY_INTERFACES:-eth0}
+      SHRED_FORWARD_ADDRS: ${SHRED_FORWARD_ADDRS:?SHRED_FORWARD_ADDRS must be set to the NAS receiver address}
+      REPAIR_ENABLED: ${REPAIR_ENABLED:-true}
+      REPAIR_RPC_URL: ${REPAIR_RPC_URL:-https://api.mainnet-beta.solana.com}
+      REPAIR_WAL_PATH: ${REPAIR_WAL_PATH:-/data/accepted.repair.wal}
+      REPAIR_WAL_MAX_BYTES: ${REPAIR_WAL_MAX_BYTES:-268435456}
+      REPAIR_MAX_PEERS: ${REPAIR_MAX_PEERS:-8}
+      REPAIR_OBSERVATION_QUEUE_CAPACITY: ${REPAIR_OBSERVATION_QUEUE_CAPACITY:-32768}
+    volumes:
+      - receiver-data:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:19090/readyz"]
+      interval: 15s
+      timeout: 3s
+      start_period: 120s
+      retries: 3
+
+volumes:
+  receiver-data:

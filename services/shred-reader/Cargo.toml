@@ -1,0 +1,29 @@
+[package]
+name = "shred-reader"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight Solana Turbine shred receiver"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+bincode = "1.3.3"
+lru = "0.16"
+serde = { version = "1.0", features = ["derive"] }
+socket2 = "0.6"
+solana-gossip = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-hash = { version = "4.3.0", features = ["serde"] }
+solana-keypair = "=3.1.2"
+solana-ledger = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-net-utils = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-pubkey = { version = "4.2.0", features = ["serde"] }
+solana-rpc-client = "=4.1.2"
+# Agave 4.1.2's storage proto does not yet handle the 3.3.0 enum expansion.
+solana-transaction-error = "=3.2.0"
+tokio = { version = "1.52", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3.23"

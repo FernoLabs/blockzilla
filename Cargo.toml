@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "blockzilla",
     "services/hivezilla",
+    "services/shred-reader",
     "services/blockzilla-archive-gateway",
     "services/blockzilla-get-block",
     "services/old-faithful-get-block",
