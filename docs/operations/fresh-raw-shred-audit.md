@@ -55,7 +55,10 @@ rechecks the actual hash instead of trusting this historical value.
 
 ## 1. Open an operator shell and set constants
 
-Run the following in one Bash session on the NAS after the new Hetzner deployment is healthy:
+Run the following in one persistent Bash session on the NAS after the new Hetzner deployment is
+healthy. The verified current access path is `ssh ach@192.168.1.45`; start `tmux new -s
+fresh-shred-audit` before the commands below, and reattach with `tmux attach -t fresh-shred-audit`
+if the operator connection drops.
 
 ```bash
 set -euo pipefail
@@ -72,6 +75,12 @@ AUDIT_BIN=/volume1/@home/ach/dev/hivezilla-shred-pull/target/release/shred-epoch
 STATUS_URL=https://hivezilla-shred-status-8dafe7-188-245-147-127.sslip.io/api/v1/sidecars/shred-ingest/status.json
 RPC_URL=https://api.mainnet-beta.solana.com
 
+# Blockzilla-00 currently has a local libcurl override that is incompatible with /usr/bin/curl.
+# Scope the system-library path to curl only; never export LD_LIBRARY_PATH for the audit process.
+audit_curl() {
+  LD_LIBRARY_PATH=/lib/x86_64-linux-gnu /usr/bin/curl "$@"
+}
+
 # Set this to the immutable Dokploy deployment/revision identifier being measured.
 ROLLOUT_ID=${ROLLOUT_ID:?export ROLLOUT_ID before starting the audit}
 case "$ROLLOUT_ID" in
@@ -83,6 +92,7 @@ mkdir -m 700 "$AUDIT_DIR"
 
 test -r "$PROGRESS"
 test -x "$AUDIT_BIN"
+audit_curl --version >/dev/null
 test "$(findmnt -n -o TARGET --target "$JDIR")" = /volume1
 df -h "$JDIR" "$AUDIT_DIR"
 ```
@@ -199,11 +209,21 @@ than `A` and whose source durable sequence covers `A`.
 P="$(snapshot_progress)"
 
 while :; do
-  S="$(curl -fsS --max-time 10 "$STATUS_URL")"
+  if ! S="$(audit_curl -fsS --max-time 10 "$STATUS_URL")"; then
+    printf 'status fetch failed; retrying baseline sample\n' >&2
+    sleep 2
+    continue
+  fi
+  if ! jq -e 'type == "object"' <<<"$S" >/dev/null; then
+    printf 'status response was not a JSON object; retrying baseline sample\n' >&2
+    sleep 2
+    continue
+  fi
   if jq -en --argjson p "$P" --argjson s "$S" '
     $s.tvu.state == "receiving"
     and $s.forwarding.state == "sending"
     and $s.hivezilla.state == "receiving"
+    and $s.hivezilla.status_fresh == true
     and $s.tvu.seconds_since_last_packet <= 5
     and $s.gossip.receiver_uptime_secs >= 60
     and $s.tvu.updated_unix_secs >= $p.captured_unix_secs
@@ -226,8 +246,8 @@ jq -n \
   --arg audit_sha "$AUDIT_SHA" \
   --argjson progress "$P" \
   --argjson status "$S" \
-  --argjson start "$START" \
-  --argjson end "$END" \
+  --argjson start_slot "$START" \
+  --argjson end_slot "$END" \
   '{
     schema_version: 1,
     rollout_id: $rollout_id,
@@ -237,8 +257,8 @@ jq -n \
     progress: $progress,
     reader_status: $status,
     boundary: {
-      start_slot: $start,
-      end_slot: $end,
+      start_slot: $start_slot,
+      end_slot: $end_slot,
       slot_count: 10000,
       safety_slots_after_reader_max: 128,
       assertion_no_target_record_at_or_before_anchor: true
@@ -262,7 +282,33 @@ GUARD=$((END + 512))
 
 while :; do
   P_END="$(snapshot_progress)"
-  S_END="$(curl -fsS --max-time 10 "$STATUS_URL")"
+  if ! S_END="$(audit_curl -fsS --max-time 10 "$STATUS_URL")"; then
+    printf 'status fetch failed; retrying guarded sample\n' >&2
+    sleep 15
+    continue
+  fi
+  if ! jq -e 'type == "object"' <<<"$S_END" >/dev/null; then
+    printf 'status response was not a JSON object; retrying guarded sample\n' >&2
+    sleep 15
+    continue
+  fi
+
+  if ! jq -en \
+    --argjson baseline "$S" \
+    --argjson current "$S_END" '
+      ($baseline.updated_unix_secs - $baseline.gossip.receiver_uptime_secs) as $baseline_start
+      | ($current.updated_unix_secs - $current.gossip.receiver_uptime_secs) as $current_start
+      | $current.gossip.receiver_uptime_secs >= $baseline.gossip.receiver_uptime_secs
+      and $current.tvu.packets_total >= $baseline.tvu.packets_total
+      and $current.forwarding.successful_datagrams_total
+        >= $baseline.forwarding.successful_datagrams_total
+      and $current_start >= ($baseline_start - 2)
+      and $current_start <= ($baseline_start + 2)
+    ' >/dev/null; then
+    printf 'reader restart or counter reset detected; abandon %s and begin a new run\n' \
+      "$AUDIT_DIR" >&2
+    exit 1
+  fi
 
   if jq -en \
     --argjson p "$P_END" \
@@ -271,6 +317,7 @@ while :; do
       $s.tvu.state == "receiving"
       and $s.forwarding.state == "sending"
       and $s.hivezilla.state == "receiving"
+      and $s.hivezilla.status_fresh == true
       and $s.tvu.seconds_since_last_packet <= 5
       and $s.tvu.updated_unix_secs >= $p.captured_unix_secs
       and $s.hivezilla.durable_through_sequence >= $p.through_sequence
@@ -304,9 +351,17 @@ was requested.
 ```bash
 while :; do
   SLOT_REQUEST='{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"finalized"}]}'
-  FINALIZED="$(curl -fsS --max-time 15 \
-    -H 'content-type: application/json' "$RPC_URL" -d "$SLOT_REQUEST")"
-  FINALIZED_SLOT="$(jq -er '.result' <<<"$FINALIZED")"
+  if ! FINALIZED="$(audit_curl -fsS --max-time 15 \
+    -H 'content-type: application/json' "$RPC_URL" -d "$SLOT_REQUEST")"; then
+    printf 'getSlot request failed; retrying\n' >&2
+    sleep 15
+    continue
+  fi
+  if ! FINALIZED_SLOT="$(jq -er '.result | numbers' <<<"$FINALIZED")"; then
+    printf 'getSlot response had no numeric result; retrying\n' >&2
+    sleep 15
+    continue
+  fi
   [ "$FINALIZED_SLOT" -ge "$END" ] && break
   sleep 15
 done
@@ -315,19 +370,24 @@ printf '%s\n' "$SLOT_REQUEST" > "$AUDIT_DIR/getSlot-request.json"
 printf '%s\n' "$FINALIZED" > "$AUDIT_DIR/getSlot-finalized.json"
 
 BLOCKS_REQUEST="$(jq -nc \
-  --argjson start "$START" --argjson end "$END" \
+  --argjson start_slot "$START" --argjson end_slot "$END" \
   '{jsonrpc:"2.0",id:1,method:"getBlocks",
-    params:[$start,$end,{commitment:"finalized"}]}')"
+    params:[$start_slot,$end_slot,{commitment:"finalized"}]}')"
 
-BLOCKS="$(curl -fsS --max-time 60 \
-  -H 'content-type: application/json' "$RPC_URL" -d "$BLOCKS_REQUEST")"
-
-jq -e --argjson start "$START" --argjson end "$END" '
-  .error == null
-  and (.result | type == "array")
-  and all(.result[]; . >= $start and . <= $end)
-  and ((.result | unique | length) == (.result | length))
-' <<<"$BLOCKS" >/dev/null
+while :; do
+  if BLOCKS="$(audit_curl -fsS --max-time 60 \
+    -H 'content-type: application/json' "$RPC_URL" -d "$BLOCKS_REQUEST")" \
+    && jq -e --argjson start_slot "$START" --argjson end_slot "$END" '
+      .error == null
+      and (.result | type == "array")
+      and all(.result[]; . >= $start_slot and . <= $end_slot)
+      and ((.result | unique | length) == (.result | length))
+    ' <<<"$BLOCKS" >/dev/null; then
+    break
+  fi
+  printf 'getBlocks request or response validation failed; retrying\n' >&2
+  sleep 15
+done
 
 printf '%s\n' "$BLOCKS_REQUEST" > "$AUDIT_DIR/getBlocks-request.json"
 printf '%s\n' "$BLOCKS" > "$AUDIT_DIR/getBlocks-finalized.json"
