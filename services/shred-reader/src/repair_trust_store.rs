@@ -680,9 +680,9 @@ fn valid_fixed_fec_layout(shred: &Shred) -> bool {
     let fec_set_index = shred.fec_set_index();
     let fec_width = DATA_SHREDS_PER_FEC_BLOCK as u32;
     if !fec_set_index.is_multiple_of(fec_width)
-        || !fec_set_index
+        || fec_set_index
             .checked_add(fec_width)
-            .is_some_and(|end| end <= MAX_DATA_SHREDS_PER_SLOT as u32)
+            .is_none_or(|end| end > MAX_DATA_SHREDS_PER_SLOT as u32)
     {
         return false;
     }
