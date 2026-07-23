@@ -279,6 +279,7 @@ fn select_repair_peers(cluster_info: &ClusterInfo, slot: u64, maximum: usize) ->
         .filter_map(|contact| {
             contact
                 .serve_repair(Protocol::UDP)
+                .filter(SocketAddr::is_ipv4)
                 .map(|repair_addr| RepairPeer {
                     pubkey: *contact.pubkey(),
                     repair_addr,
