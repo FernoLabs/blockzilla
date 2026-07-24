@@ -504,7 +504,17 @@ async fn run_attempt(
                     .runtime
                     .service_responses(now, unix_millis())
                     .await
-                    .context("drain bounded repair responses")?;
+                    .context("drain bounded repair responses");
+                // Snapshot attempt-local monotonic counters even when the runtime is about to
+                // fail. The supervisor resets the per-attempt delta baseline before restarting,
+                // so delaying this update until after `?` would permanently hide final drops.
+                let poll = match poll {
+                    Ok(poll) => poll,
+                    Err(error) => {
+                        update_metrics(&metrics, components, &config);
+                        return Err(error);
+                    }
+                };
                 for accepted in poll.accepted {
                     components.tracker.observe(&accepted.shred, now);
                 }
@@ -525,7 +535,14 @@ async fn run_attempt(
                     .runtime
                     .service_tracker_requests(requests, now, unix_millis())
                     .await
-                    .context("service bounded repair requests")?;
+                    .context("service bounded repair requests");
+                let poll = match poll {
+                    Ok(poll) => poll,
+                    Err(error) => {
+                        update_metrics(&metrics, components, &config);
+                        return Err(error);
+                    }
+                };
                 for accepted in poll.accepted {
                     components.tracker.observe(&accepted.shred, now);
                 }
@@ -551,7 +568,16 @@ async fn shutdown_components(
         .runtime
         .shutdown_orderly(Instant::now(), unix_millis(), REPAIR_STAGED_DRAIN_BUDGET)
         .await
-        .context("orderly repair ingress/WAL shutdown")?;
+        .context("orderly repair ingress/WAL shutdown");
+    // Shutdown failures can carry the most important final socket-overflow or queue-drop sample.
+    // Publish it before propagating the error and discarding this attempt's delta baseline.
+    let summary = match summary {
+        Ok(summary) => summary,
+        Err(error) => {
+            update_metrics(metrics, components, config);
+            return Err(error);
+        }
+    };
     update_metrics(metrics, components, config);
     info!(
         staged_datagrams_processed = summary.staged_datagrams_processed,

@@ -940,9 +940,11 @@ fn filesystem_available_bytes(path: &Path) -> io::Result<u64> {
     }
     // SAFETY: statvfs returned success and initialized the output structure.
     let status = unsafe { status.assume_init() };
-    (status.f_bavail as u64)
-        .checked_mul(status.f_frsize)
-        .ok_or_else(|| io::Error::new(ErrorKind::StorageFull, "filesystem size overflow"))
+    let available = u128::from(status.f_bavail)
+        .checked_mul(u128::from(status.f_frsize))
+        .ok_or_else(|| io::Error::new(ErrorKind::StorageFull, "filesystem size overflow"))?;
+    u64::try_from(available)
+        .map_err(|_| io::Error::new(ErrorKind::StorageFull, "filesystem size overflow"))
 }
 
 #[cfg(not(unix))]

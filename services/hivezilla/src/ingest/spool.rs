@@ -2376,8 +2376,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn io_failure_poisons_writer_until_reopen() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = temp_root("poison");
         let options = SpoolOptions {
             segment_target_bytes: 200,
@@ -2388,9 +2386,25 @@ mod tests {
             .append_and_sync(metadata(1, &[1; 64]), &[1; 64])
             .unwrap();
         let journal_dir = spool.journal_dir().to_path_buf();
-        fs::set_permissions(&journal_dir, fs::Permissions::from_mode(0o500)).unwrap();
-        let result = spool.append_and_sync(metadata(2, &[2; 64]), &[2; 64]);
-        fs::set_permissions(&journal_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let detached_journal_dir = journal_dir.with_extension("detached");
+        let next = metadata(2, &[2; 64]);
+        assert_eq!(
+            spool
+                .project_append(&next, &[2; 64])
+                .unwrap()
+                .location
+                .segment_id,
+            spool.current_segment_id() + 1
+        );
+
+        // Replacing the open journal path with a regular file is a deterministic failure
+        // injection on Unix, including when the tests run as root in a container. The pending
+        // rotation can sync the open segment but cannot create a child below the sentinel.
+        fs::rename(&journal_dir, &detached_journal_dir).unwrap();
+        fs::write(&journal_dir, b"not-a-directory").unwrap();
+        let result = spool.append_and_sync(next, &[2; 64]);
+        fs::remove_file(&journal_dir).unwrap();
+        fs::rename(&detached_journal_dir, &journal_dir).unwrap();
 
         assert!(result.is_err());
         assert!(spool.is_poisoned());
@@ -2402,6 +2416,16 @@ mod tests {
                 .contains("poisoned")
         );
         drop(spool);
+
+        let reopened = SpoolWriter::open(&root, journal_identity(), options).unwrap();
+        assert!(!reopened.is_poisoned());
+        assert_eq!(
+            reopened
+                .last_record()
+                .map(|record| record.metadata.observation.sequence),
+            Some(1)
+        );
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 
