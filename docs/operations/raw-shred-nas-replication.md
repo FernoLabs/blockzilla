@@ -46,8 +46,12 @@ merge it into an in-place Dokploy update. The recorder Compose rejects mutable a
 set
 `HIVEZILLA_SHRED_IMAGE_DIGEST` and `HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST` to the exact tested
 `sha256:` artifacts, set `SHRED_JOURNAL_ID` to the active journal ID, and point
-`HIVEZILLA_INGEST_CONFIG_PATH` at the reviewed private runtime config. A same-host green project
-must additionally use distinct bind/status ports and a distinct journal/volume set.
+`HIVEZILLA_INGEST_CONFIG_PATH` at the reviewed private runtime config. The optional
+`HIVEZILLA_SHRED_SOURCE_ID` defaults to the incumbent `shred-reader-loopback`; a same-host green
+project must set it to the distinct source ID declared in its private config and additionally use
+distinct bind/status ports and a distinct journal/volume set. Reserve both green
+`127.0.0.1:18104` and final `127.0.0.1:18204` durable-source addresses before starting that
+recorder.
 
 Render the source and client examples as private regular files. The sidecar mounts TLS material,
 the allowlist, and the NAS receipt key through Compose secrets under `/run/secrets`. Before launch,

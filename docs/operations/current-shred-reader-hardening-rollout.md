@@ -56,6 +56,32 @@ repeatable, while Debian packages installed by `apt-get` are intentionally not c
 bit-for-bit rebuildable. Record and deploy the resulting application image digest; a later rebuild
 of the same commit is a new artifact and must pass the gates again.
 
+### Publishing the reviewed images
+
+The manual `.github/workflows/publish-current-shred-images.yml` workflow is the release boundary
+for this rollout. GitHub enables `workflow_dispatch` only after the workflow file exists on the
+repository's default branch. Merge and review the workflow itself first, select `main` as the
+workflow definition when dispatching it, and supply the exact lowercase 40-character candidate
+commit in its `revision` input. The jobs explicitly check out and verify that SHA; do not publish a
+branch name or mutable tag.
+
+Each publishing job receives only `contents: read` and `packages: write` and authenticates to GHCR
+with the job-scoped `GITHUB_TOKEN`; no long-lived package-write secret belongs in the repository.
+It publishes exactly these Linux/amd64 SHA tags and then verifies their embedded revision labels by
+digest:
+
+- `ghcr.io/fernolabs/blockzilla-shred-reader:<revision>`;
+- `ghcr.io/fernolabs/blockzilla-hivezilla-shred:<revision>`;
+- `ghcr.io/fernolabs/blockzilla-hivezilla-shred-status:<revision>`.
+
+The final job writes `published-image-digests.json`, uploads it as the
+`current-shred-image-digests-<revision>` Actions artifact, and repeats the three digests in the job
+summary. Preserve that artifact with the rollout evidence. Copy only its `sha256:` values into
+`SHRED_READER_IMAGE_DIGEST`, `HIVEZILLA_SHRED_IMAGE_DIGEST`, and
+`HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST`; never deploy the SHA tag itself. If the GHCR packages are not
+public, configure the Nuremberg Docker/Dokploy registry once with a least-privilege classic PAT
+having `read:packages`; do not place that token in Compose environment variables.
+
 ## Host socket ceiling
 
 Install `services/shred-reader/host/90-shred-reader-sockets.conf` as
@@ -136,7 +162,9 @@ avoidable capture hole. Use a same-host recorder overlap for this first upgrade:
 1. Start `hivezilla-green` on `127.0.0.1:18013` with a separate Compose project, data volume,
    status path, node/source identity, journal ID, and pull-source port. Its allowlist must contain
    `green=127.0.0.1:18104` and reserve `final=127.0.0.1:18204` before it starts. Never point two
-   recorder writers at one spool.
+   recorder writers at one spool. Set `HIVEZILLA_SHRED_SOURCE_ID` to the distinct source ID in the
+   private green ingest config; leaving it unset deliberately preserves the incumbent
+   `shred-reader-loopback` identity.
 2. Start the green bridge receiver with
    `SHRED_FORWARD_BIND_ADDR=127.0.0.1:18104` and both forwarding targets
    `127.0.0.1:18003,127.0.0.1:18013`. One forwarding socket sends each accepted datagram to both

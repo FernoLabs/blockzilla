@@ -1,0 +1,328 @@
+name: Publish current shred images
+
+# GitHub only enables workflow_dispatch after this file exists on the default branch. Run the
+# workflow definition from `main`, then pass the exact reviewed 40-character candidate commit as
+# `revision`; each build checks out that SHA explicitly.
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact reviewed 40-character Blockzilla commit SHA to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-current-shred-images-${{ inputs.revision }}
+  cancel-in-progress: false
+
+env:
+  REVISION: ${{ inputs.revision }}
+  SHRED_READER_IMAGE: ghcr.io/fernolabs/blockzilla-shred-reader
+  HIVEZILLA_SHRED_IMAGE: ghcr.io/fernolabs/blockzilla-hivezilla-shred
+  HIVEZILLA_SHRED_STATUS_IMAGE: ghcr.io/fernolabs/blockzilla-hivezilla-shred-status
+
+jobs:
+  shred-reader:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - name: Validate exact revision input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "revision must be an exact lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$REVISION"
+
+      - name: Reclaim runner disk for Agave build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish shred-reader
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: services/shred-reader/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BUILD_REVISION=${{ inputs.revision }}
+          cache-from: type=gha,scope=publish-shred-reader
+          cache-to: type=gha,mode=max,scope=publish-shred-reader
+          tags: ${{ env.SHRED_READER_IMAGE }}:${{ inputs.revision }}
+
+      - name: Verify published shred-reader by digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="${SHRED_READER_IMAGE}@${DIGEST}"
+          docker pull "$image"
+          docker run --rm --entrypoint ldd "$image" /usr/local/bin/shred-reader \
+            | tee "$RUNNER_TEMP/shred-reader-ldd.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/shred-reader-ldd.txt"; then
+            exit 1
+          fi
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$REVISION"
+
+  hivezilla-shred:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - name: Validate exact revision input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "revision must be an exact lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$REVISION"
+
+      - name: Reclaim runner disk for Hivezilla build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish Hivezilla shred recorder/source
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: services/hivezilla/Dockerfile.shred
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BUILD_REVISION=${{ inputs.revision }}
+          cache-from: type=gha,scope=publish-hivezilla-shred
+          cache-to: type=gha,mode=max,scope=publish-hivezilla-shred
+          tags: ${{ env.HIVEZILLA_SHRED_IMAGE }}:${{ inputs.revision }}
+
+      - name: Verify published Hivezilla image by digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="${HIVEZILLA_SHRED_IMAGE}@${DIGEST}"
+          docker pull "$image"
+          docker run --rm --entrypoint ldd "$image" /usr/local/bin/hivezilla \
+            | tee "$RUNNER_TEMP/hivezilla-shred-ldd.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/hivezilla-shred-ldd.txt"; then
+            exit 1
+          fi
+          docker run --rm --entrypoint /usr/local/bin/hivezilla "$image" --help \
+            | grep -F 'serve-shred-spool-pull-source'
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          test "$(docker run --rm --entrypoint id "$image" -g)" = 10001
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$REVISION"
+
+  hivezilla-shred-status:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - name: Validate exact revision input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "revision must be an exact lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$REVISION"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish Hivezilla shred status collector
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: services/hivezilla/Dockerfile.shred-status
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BUILD_REVISION=${{ inputs.revision }}
+          cache-from: type=gha,scope=publish-hivezilla-shred-status
+          cache-to: type=gha,mode=max,scope=publish-hivezilla-shred-status
+          tags: ${{ env.HIVEZILLA_SHRED_STATUS_IMAGE }}:${{ inputs.revision }}
+
+      - name: Verify published status image by digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="${HIVEZILLA_SHRED_STATUS_IMAGE}@${DIGEST}"
+          docker pull "$image"
+          docker run --rm --entrypoint python3 "$image" \
+            /app/shred_status_server.py --help >/dev/null
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          test "$(docker run --rm --entrypoint id "$image" -g)" = 10001
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$REVISION"
+
+  capture-digests:
+    needs:
+      - shred-reader
+      - hivezilla-shred
+      - hivezilla-shred-status
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Write immutable deployment manifest
+        shell: bash
+        env:
+          SHRED_READER_DIGEST: ${{ needs.shred-reader.outputs.digest }}
+          HIVEZILLA_SHRED_DIGEST: ${{ needs.hivezilla-shred.outputs.digest }}
+          HIVEZILLA_SHRED_STATUS_DIGEST: ${{ needs.hivezilla-shred-status.outputs.digest }}
+        run: |
+          set -euo pipefail
+          validate_digest() {
+            local name="$1"
+            local digest="$2"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "$name is not an immutable sha256 digest" >&2
+              return 1
+            fi
+          }
+          validate_digest SHRED_READER_DIGEST "$SHRED_READER_DIGEST"
+          validate_digest HIVEZILLA_SHRED_DIGEST "$HIVEZILLA_SHRED_DIGEST"
+          validate_digest HIVEZILLA_SHRED_STATUS_DIGEST "$HIVEZILLA_SHRED_STATUS_DIGEST"
+
+          jq -n \
+            --arg revision "$REVISION" \
+            --arg shred_reader_repository "$SHRED_READER_IMAGE" \
+            --arg shred_reader_digest "$SHRED_READER_DIGEST" \
+            --arg hivezilla_shred_repository "$HIVEZILLA_SHRED_IMAGE" \
+            --arg hivezilla_shred_digest "$HIVEZILLA_SHRED_DIGEST" \
+            --arg hivezilla_shred_status_repository "$HIVEZILLA_SHRED_STATUS_IMAGE" \
+            --arg hivezilla_shred_status_digest "$HIVEZILLA_SHRED_STATUS_DIGEST" \
+            '{
+              schema_version: 1,
+              revision: $revision,
+              platform: "linux/amd64",
+              images: {
+                shred_reader: {
+                  repository: $shred_reader_repository,
+                  digest: $shred_reader_digest
+                },
+                hivezilla_shred: {
+                  repository: $hivezilla_shred_repository,
+                  digest: $hivezilla_shred_digest
+                },
+                hivezilla_shred_status: {
+                  repository: $hivezilla_shred_status_repository,
+                  digest: $hivezilla_shred_status_digest
+                }
+              }
+            }' > published-image-digests.json
+
+          {
+            echo '### Immutable shred image digests'
+            echo
+            echo "Revision: \`$REVISION\`"
+            echo
+            echo '| Image | Digest |'
+            echo '| --- | --- |'
+            echo "| \`$SHRED_READER_IMAGE\` | \`$SHRED_READER_DIGEST\` |"
+            echo "| \`$HIVEZILLA_SHRED_IMAGE\` | \`$HIVEZILLA_SHRED_DIGEST\` |"
+            echo "| \`$HIVEZILLA_SHRED_STATUS_IMAGE\` | \`$HIVEZILLA_SHRED_STATUS_DIGEST\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable deployment manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: current-shred-image-digests-${{ inputs.revision }}
+          path: published-image-digests.json
+          if-no-files-found: error
+          retention-days: 90

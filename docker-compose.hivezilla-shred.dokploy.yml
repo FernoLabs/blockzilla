@@ -7,7 +7,9 @@ services:
       - --config
       - /etc/hivezilla/ingest.json
       - --source-id
-      - shred-reader-loopback
+      # Keep the incumbent identity as the safe default while allowing an isolated green/final
+      # recorder to use a distinct source identity without rewriting this checked Compose file.
+      - ${HIVEZILLA_SHRED_SOURCE_ID:-shred-reader-loopback}
       - --journal-id
       - ${SHRED_JOURNAL_ID:?SHRED_JOURNAL_ID must be a stable 32-character hex value}
       - --status-file

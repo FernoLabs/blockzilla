@@ -6,6 +6,7 @@ on:
       - codex/current-shred-reader-hardening-20260724
     paths:
       - .github/workflows/current-shred-reader-linux-gate.yml
+      - .github/workflows/publish-current-shred-images.yml
       - .dockerignore
       - Cargo.lock
       - Cargo.toml
@@ -177,16 +178,49 @@ jobs:
           rendered="$(
             COMPOSE_PROJECT_NAME=hivezilla-green \
             SHRED_JOURNAL_ID=00000000000000000000000000000000 \
+            HIVEZILLA_SHRED_SOURCE_ID=shred-reader-green \
             HIVEZILLA_SHRED_IMAGE_DIGEST="$digest" \
             HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST="$digest" \
             SHRED_STATUS_LISTEN_ADDR=127.0.0.1:18791 \
             SHRED_READER_METRICS_ADDR=127.0.0.1:19190 \
               docker compose --file "$compose" config
           )"
+          rendered_json="$(
+            COMPOSE_PROJECT_NAME=hivezilla-green \
+            SHRED_JOURNAL_ID=00000000000000000000000000000000 \
+            HIVEZILLA_SHRED_SOURCE_ID=shred-reader-green \
+            HIVEZILLA_SHRED_IMAGE_DIGEST="$digest" \
+            HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST="$digest" \
+            SHRED_STATUS_LISTEN_ADDR=127.0.0.1:18791 \
+            SHRED_READER_METRICS_ADDR=127.0.0.1:19190 \
+              docker compose --file "$compose" config --format json
+          )"
           grep -F "ghcr.io/fernolabs/blockzilla-hivezilla-shred@$digest" <<<"$rendered"
           grep -F "ghcr.io/fernolabs/blockzilla-hivezilla-shred-status@$digest" <<<"$rendered"
           grep -F 'name: hivezilla-green' <<<"$rendered"
           grep -F 'hivezilla-green_hivezilla-shred-data' <<<"$rendered"
+          validate_green_command() {
+            jq -e '
+              .services["hivezilla-shred"].command == [
+                "record-shred-udp",
+                "--config",
+                "/etc/hivezilla/ingest.json",
+                "--source-id",
+                "shred-reader-green",
+                "--journal-id",
+                "00000000000000000000000000000000",
+                "--status-file",
+                "/status/recorder.json"
+              ]
+            ' >/dev/null
+          }
+          validate_green_command <<<"$rendered_json"
+          if jq \
+            '.services["hivezilla-shred"].command[4] = "shred-reader-green-evil"' \
+            <<<"$rendered_json" | validate_green_command; then
+            echo "exact green source-id assertion accepted a mutated source id" >&2
+            exit 1
+          fi
           grep -F '127.0.0.1:18791' <<<"$rendered"
           grep -F 'http://127.0.0.1:19190/metrics' <<<"$rendered"
 
@@ -200,6 +234,107 @@ jobs:
             services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json >/dev/null
           jq -e '.source.protocol == "v2"' \
             services/hivezilla/config/raw-shred-pull-client.example.json >/dev/null
+          ingest=services/hivezilla/config/ingest-shred-udp.example.json
+          validate_ingest_cutover_contract() {
+            jq -e '
+              [.sources[] | select(.enabled == true)] as $enabled
+              | ($enabled | length) == 1
+                and $enabled[0].id == "shred-reader-loopback"
+                and $enabled[0].input.kind == "shred_udp"
+                and $enabled[0].input.bind == "127.0.0.1:18003"
+                and (
+                  $enabled[0].input.durable_source_allowlist | sort_by(.name)
+                ) == [
+                  {"name": "blue", "address": "127.0.0.1:18004"},
+                  {"name": "final", "address": "127.0.0.1:18204"},
+                  {"name": "green", "address": "127.0.0.1:18104"}
+                ]
+            ' >/dev/null
+          }
+          validate_ingest_cutover_contract <"$ingest"
+          if jq \
+            '(.sources[0].input.durable_source_allowlist[]
+              | select(.name == "final").address) = "127.0.0.1:18205"' \
+            "$ingest" | validate_ingest_cutover_contract; then
+            echo "cutover allowlist assertion accepted a mutated final address" >&2
+            exit 1
+          fi
+
+      - name: Validate manual SHA-only image publisher contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          publisher=.github/workflows/publish-current-shred-images.yml
+          grep -F 'workflow_dispatch:' "$publisher"
+          grep -F 'packages: write' "$publisher"
+          grep -F 'published-image-digests.json' "$publisher"
+          for repository in \
+            ghcr.io/fernolabs/blockzilla-shred-reader \
+            ghcr.io/fernolabs/blockzilla-hivezilla-shred \
+            ghcr.io/fernolabs/blockzilla-hivezilla-shred-status; do
+            grep -F "$repository" "$publisher"
+          done
+          if grep -Eq ':(edge|latest)([^[:alnum:]_-]|$)' "$publisher"; then
+            echo "manual publisher contains a mutable edge/latest tag" >&2
+            exit 1
+          fi
+          validate_publisher_actions() {
+            local workflow="$1"
+            local action_ref action revision
+            local uses_count=0
+            while IFS= read -r action_ref; do
+              uses_count=$((uses_count + 1))
+              action="${action_ref%@*}"
+              revision="${action_ref##*@}"
+              case "$action" in
+                actions/checkout|actions/upload-artifact|\
+                docker/setup-buildx-action|docker/login-action|docker/build-push-action)
+                  ;;
+                *)
+                  echo "manual publisher uses an unapproved action: $action" >&2
+                  return 1
+                  ;;
+              esac
+              if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "manual publisher action is not pinned by a full commit SHA: $action_ref" >&2
+                return 1
+              fi
+            done < <(
+              sed -nE \
+                's/^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*([^[:space:]#]+).*/\1/p' \
+                "$workflow"
+            )
+            if (( uses_count == 0 )); then
+              echo "manual publisher contains no validated action references" >&2
+              return 1
+            fi
+            local declared_count
+            declared_count="$(
+              grep -Ec '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*' "$workflow"
+            )"
+            if (( uses_count != declared_count )); then
+              echo "manual publisher contains an action reference the validator could not parse" >&2
+              return 1
+            fi
+          }
+          validate_publisher_actions "$publisher"
+          mutated_publisher="$RUNNER_TEMP/publisher-unpinned.yml"
+          awk '
+            !replaced && /uses:[[:space:]]+actions\/checkout@/ {
+              sub(/@[0-9a-f]+/, "@latest")
+              replaced = 1
+            }
+            { print }
+            END {
+              if (!replaced) {
+                exit 1
+              }
+            }
+          ' "$publisher" >"$mutated_publisher"
+          if validate_publisher_actions "$mutated_publisher"; then
+            echo "action validator accepted a mutable action reference" >&2
+            exit 1
+          fi
 
       - name: Validate the non-deleting pull-source sidecar
         shell: bash
@@ -287,6 +422,8 @@ jobs:
           fi
           docker run --rm --entrypoint /usr/local/bin/hivezilla "$image" --help \
             | grep -F 'serve-shred-spool-pull-source'
+          docker run --rm --entrypoint /usr/local/bin/hivezilla "$image" \
+            validate-ingest-config --config /etc/hivezilla/ingest.json >/dev/null
           test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
           test "$(docker run --rm --entrypoint id "$image" -g)" = 10001
 
