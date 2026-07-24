@@ -225,7 +225,7 @@ jobs:
               docker compose --file "$compose" config
           )"
           grep -F "ghcr.io/fernolabs/blockzilla-hivezilla-shred@$digest" <<<"$rendered"
-          grep -F 'user: 0:0' <<<"$rendered"
+          grep -F 'user: "0:0"' <<<"$rendered"
           grep -A2 -F 'group_add:' <<<"$rendered" | grep -F '10001'
           grep -F 'name: live-data' <<<"$rendered"
           grep -F 'name: live-status' <<<"$rendered"
