@@ -7,8 +7,7 @@ services:
     pull_policy: always
     network_mode: host
     restart: unless-stopped
-    # The process gives repair up to 45 seconds to persist/report its staged response prefix.
-    # Leave Docker additional time to finish the rest of the orderly shutdown before SIGKILL.
+    # Forwarding (20s) and repair (45s) drain concurrently; leave time for remaining joins.
     stop_grace_period: 60s
     environment:
       APP_ENV: production

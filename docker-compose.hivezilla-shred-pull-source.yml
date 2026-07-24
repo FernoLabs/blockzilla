@@ -1,0 +1,63 @@
+services:
+  hivezilla-shred-pull-source:
+    image: ${HIVEZILLA_SHRED_IMAGE_REPOSITORY:-ghcr.io/fernolabs/blockzilla-hivezilla-shred}@${HIVEZILLA_SHRED_IMAGE_DIGEST:?HIVEZILLA_SHRED_IMAGE_DIGEST must be an immutable sha256 digest}
+    pull_policy: always
+    command:
+      - serve-shred-spool-pull-source
+      - --config
+      - /etc/hivezilla/raw-shred-pull.json
+    # Root owns the protected ACK namespace. Recorder access is supplied only as a supplementary
+    # group so ACK compaction files remain root:root while spool files remain readable/writable
+    # through the recorder GID. The recorder process itself remains UID/GID 10001.
+    user: "0:0"
+    group_add:
+      - "10001"
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+    volumes:
+      # The first cutover is mechanically non-deleting even if its config is accidentally changed.
+      - hivezilla-shred-data:/data:ro
+      - hivezilla-shred-status:/status:ro
+      - hivezilla-shred-control:/control
+      - ${HIVEZILLA_SHRED_PULL_CONFIG_PATH:?HIVEZILLA_SHRED_PULL_CONFIG_PATH is required}:/etc/hivezilla/raw-shred-pull.json:ro
+    secrets:
+      - hivezilla_shred_pull_server_certificate
+      - hivezilla_shred_pull_server_private_key
+      - hivezilla_shred_pull_client_ca
+      - hivezilla_shred_pull_allowed_nodes
+      - hivezilla_shred_pull_receipt_public_key
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Required to read recorder-owned mode-0600 spool segments while all write capabilities stay
+    # absent. The first deployment still mounts /data read-only.
+    cap_add:
+      - DAC_READ_SEARCH
+
+volumes:
+  hivezilla-shred-data:
+    external: true
+    name: ${HIVEZILLA_SHRED_DATA_VOLUME:?HIVEZILLA_SHRED_DATA_VOLUME must be the inspected live volume}
+  hivezilla-shred-status:
+    external: true
+    name: ${HIVEZILLA_SHRED_STATUS_VOLUME:?HIVEZILLA_SHRED_STATUS_VOLUME must be the inspected live volume}
+  hivezilla-shred-control:
+    external: true
+    name: ${HIVEZILLA_SHRED_CONTROL_VOLUME:?HIVEZILLA_SHRED_CONTROL_VOLUME must contain the incumbent ACK WAL}
+
+secrets:
+  hivezilla_shred_pull_server_certificate:
+    file: ${HIVEZILLA_SHRED_PULL_SERVER_CERTIFICATE_PATH:?HIVEZILLA_SHRED_PULL_SERVER_CERTIFICATE_PATH is required}
+  hivezilla_shred_pull_server_private_key:
+    file: ${HIVEZILLA_SHRED_PULL_SERVER_PRIVATE_KEY_PATH:?HIVEZILLA_SHRED_PULL_SERVER_PRIVATE_KEY_PATH is required}
+  hivezilla_shred_pull_client_ca:
+    file: ${HIVEZILLA_SHRED_PULL_CLIENT_CA_PATH:?HIVEZILLA_SHRED_PULL_CLIENT_CA_PATH is required}
+  hivezilla_shred_pull_allowed_nodes:
+    file: ${HIVEZILLA_SHRED_PULL_ALLOWED_NODES_PATH:?HIVEZILLA_SHRED_PULL_ALLOWED_NODES_PATH is required}
+  hivezilla_shred_pull_receipt_public_key:
+    file: ${HIVEZILLA_SHRED_PULL_RECEIPT_PUBLIC_KEY_PATH:?HIVEZILLA_SHRED_PULL_RECEIPT_PUBLIC_KEY_PATH is required}

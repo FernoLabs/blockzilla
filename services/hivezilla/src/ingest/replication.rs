@@ -1090,6 +1090,34 @@ impl DurableReplicationWitness {
         })
     }
 
+    /// Bind a durable ACK for a deterministic transport re-encoding of an immutable local frame.
+    ///
+    /// Historical shred journals stored the exact datagram uncompressed. The pull source may
+    /// replay that verified frame as the canonical independently-zstd-compressed representation;
+    /// only the transport digest changes, while stream identity, sequence, and the physical local
+    /// binding remain exact.
+    pub(crate) fn from_verified_transcoded_mapping(
+        local_record: &DurableSpoolRecord,
+        stream: ReplicationStreamId,
+        through_sequence: u64,
+        through_content_digest: ContentDigest,
+    ) -> AnyResult<Self> {
+        let metadata = local_record.metadata();
+        ensure!(
+            metadata.cluster_id == stream.cluster_id
+                && metadata.observation.origin_node_id == stream.origin_node_id
+                && metadata.source_id == stream.source_id
+                && metadata.observation.sequence == through_sequence,
+            "logical replication stream does not match its physical local WAL frame"
+        );
+        Ok(Self {
+            stream,
+            through_sequence,
+            through_content_digest,
+            local_binding: PhysicalLocalSpoolBinding::from_record(local_record),
+        })
+    }
+
     pub fn local_location(&self) -> SpoolLocation {
         self.local_binding.location
     }
@@ -1245,19 +1273,39 @@ impl CumulativeAckWalState {
 pub struct CumulativeAckWal {
     path: PathBuf,
     /// Stable exclusion survives atomic WAL replacement during compaction.
-    _lock_file: File,
+    lock_file: File,
     writer: BufWriter<File>,
     state: CumulativeAckWalState,
     compacted_baseline_bytes: u64,
     poisoned: bool,
+    /// Present only for the raw-shred production source. Protected recovery is required because
+    /// recovered frames intentionally rely on signature trust established before their append.
+    protected_control_uid: Option<u32>,
 }
 
 impl CumulativeAckWal {
     pub fn open(path: impl AsRef<Path>) -> AnyResult<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_with_protection(path.as_ref(), None)
+    }
+
+    /// Open a precreated ACK WAL inside a protected control namespace.
+    ///
+    /// Unlike the generic recorder path, this refuses to create the directory, WAL, or stable
+    /// lock. It is the production raw-shred cursor boundary and must be used before recovered ACKs
+    /// can decide replay position or authorize deletion.
+    pub fn open_protected(path: impl AsRef<Path>, control_uid: u32) -> AnyResult<Self> {
+        Self::open_with_protection(path.as_ref(), Some(control_uid))
+    }
+
+    fn open_with_protection(path: &Path, protected_control_uid: Option<u32>) -> AnyResult<Self> {
+        let path = path.to_path_buf();
         let parent = durable_parent(&path);
-        create_dir_all_durable(&parent)?;
         let lock_path = cumulative_ack_lock_path(&path);
+        if let Some(control_uid) = protected_control_uid {
+            validate_protected_cumulative_ack_namespace(&path, control_uid, true)?;
+        } else {
+            create_dir_all_durable(&parent)?;
+        }
         let lock_file = open_cumulative_ack_lock_file(&lock_path)?;
         try_lock_cumulative_ack_wal(&lock_file, &lock_path)?;
         remove_orphaned_cumulative_ack_compaction(&path)?;
@@ -1276,14 +1324,50 @@ impl CumulativeAckWal {
         file.seek(std::io::SeekFrom::End(0))
             .with_context(|| format!("seek cumulative ACK WAL {}", path.display()))?;
         let compacted_baseline_bytes = cumulative_ack_compacted_length(&recovered.state)?;
-        Ok(Self {
+        let wal = Self {
             path,
-            _lock_file: lock_file,
+            lock_file,
             writer: BufWriter::new(file),
             state: recovered.state,
             compacted_baseline_bytes,
             poisoned: false,
-        })
+            protected_control_uid,
+        };
+        wal.revalidate_protected_storage()?;
+        Ok(wal)
+    }
+
+    /// Revalidate the current WAL and stable-lock descriptors against their protected paths.
+    /// Compaction may legitimately replace the WAL inode, so this compares the current writer
+    /// descriptor rather than pinning the startup inode forever.
+    pub fn revalidate_protected_storage(&self) -> AnyResult<()> {
+        self.revalidate_protected_storage_with_temp(false)
+    }
+
+    fn revalidate_protected_storage_with_temp(
+        &self,
+        allow_secure_compaction_temp: bool,
+    ) -> AnyResult<()> {
+        let Some(control_uid) = self.protected_control_uid else {
+            return Ok(());
+        };
+        validate_protected_cumulative_ack_namespace(
+            &self.path,
+            control_uid,
+            allow_secure_compaction_temp,
+        )?;
+        validate_protected_cumulative_ack_open_file(
+            &self.path,
+            self.writer.get_ref(),
+            control_uid,
+            "WAL",
+        )?;
+        validate_protected_cumulative_ack_open_file(
+            &cumulative_ack_lock_path(&self.path),
+            &self.lock_file,
+            control_uid,
+            "stable lock",
+        )
     }
 
     pub fn path(&self) -> &Path {
@@ -1296,6 +1380,12 @@ impl CumulativeAckWal {
 
     pub fn highest_primary_term(&self, cluster_id: &str) -> Option<u64> {
         self.state.highest_primary_terms.get(cluster_id).copied()
+    }
+
+    /// Whether this durable WAL already belongs to at least one logical replication stream.
+    /// A source which expects a fresh stream must reject a non-empty WAL lacking its exact id.
+    pub fn contains_any_stream_ack(&self) -> bool {
+        !self.state.latest_stream_acks.is_empty()
     }
 
     /// Latest cumulative ACK that previously crossed this WAL's fsync boundary for `stream`.
@@ -1315,6 +1405,7 @@ impl CumulativeAckWal {
         &self,
         stream: &ReplicationStreamId,
     ) -> AnyResult<Option<DurableGcAuthorization>> {
+        self.revalidate_protected_storage()?;
         ensure!(
             !self.poisoned,
             "cumulative ACK WAL is poisoned; reopen it before requesting GC authority"
@@ -1404,6 +1495,7 @@ impl CumulativeAckWal {
         ack: VerifiedCumulativeAck,
         local_binding: PhysicalLocalSpoolBinding,
     ) -> AnyResult<DurableCumulativeAck> {
+        self.revalidate_protected_storage()?;
         ensure!(
             !self.poisoned,
             "cumulative ACK WAL writer is poisoned; reopen it to recover before appending"
@@ -1464,6 +1556,15 @@ impl CumulativeAckWal {
                 )
             })?;
             try_lock_cumulative_ack_wal(&file, &temporary)?;
+            if let Some(control_uid) = self.protected_control_uid {
+                validate_protected_cumulative_ack_open_file(
+                    &temporary,
+                    &file,
+                    control_uid,
+                    "compaction temporary",
+                )?;
+                self.revalidate_protected_storage_with_temp(true)?;
+            }
             file.write_all(CUMULATIVE_ACK_WAL_MAGIC)?;
 
             let mut latest = self.state.latest_stream_acks.values().collect::<Vec<_>>();
@@ -1489,6 +1590,15 @@ impl CumulativeAckWal {
             file.sync_data().with_context(|| {
                 format!("sync cumulative ACK compacted WAL {}", temporary.display())
             })?;
+            if let Some(control_uid) = self.protected_control_uid {
+                self.revalidate_protected_storage_with_temp(true)?;
+                validate_protected_cumulative_ack_open_file(
+                    &temporary,
+                    &file,
+                    control_uid,
+                    "compaction temporary",
+                )?;
+            }
             let compacted_len = file
                 .metadata()
                 .with_context(|| {
@@ -1505,6 +1615,21 @@ impl CumulativeAckWal {
                 )
             })?;
             sync_directory(&parent)?;
+            if let Some(control_uid) = self.protected_control_uid {
+                validate_protected_cumulative_ack_namespace(&self.path, control_uid, false)?;
+                validate_protected_cumulative_ack_open_file(
+                    &self.path,
+                    &file,
+                    control_uid,
+                    "compacted WAL",
+                )?;
+                validate_protected_cumulative_ack_open_file(
+                    &cumulative_ack_lock_path(&self.path),
+                    &self.lock_file,
+                    control_uid,
+                    "stable lock",
+                )?;
+            }
             file.seek(std::io::SeekFrom::End(0))?;
             Ok((BufWriter::new(file), compacted_len))
         })();
@@ -1774,6 +1899,155 @@ fn cumulative_ack_compaction_path(path: &Path) -> AnyResult<PathBuf> {
         .context("cumulative ACK WAL has no file name")?
         .to_string_lossy();
     Ok(parent.join(format!(".{file_name}.compact.tmp")))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_protected_cumulative_ack_namespace(
+    path: &Path,
+    control_uid: u32,
+    allow_secure_orphaned_compaction: bool,
+) -> AnyResult<()> {
+    // SAFETY: `geteuid` has no preconditions and does not mutate process state.
+    let effective_uid = unsafe { libc::geteuid() };
+    ensure!(
+        control_uid == 0 && effective_uid == control_uid,
+        "protected cumulative ACK control requires effective UID 0"
+    );
+    ensure!(
+        path.is_absolute() && path != Path::new("/"),
+        "protected cumulative ACK WAL path must be absolute and non-root"
+    );
+    let parent = path
+        .parent()
+        .context("protected cumulative ACK WAL has no parent")?;
+    ensure!(
+        parent != Path::new("/"),
+        "protected cumulative ACK WAL requires a dedicated control directory"
+    );
+    for ancestor in parent.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor).with_context(|| {
+            format!(
+                "inspect protected cumulative ACK directory {}",
+                ancestor.display()
+            )
+        })?;
+        ensure!(
+            metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == 0
+                && metadata.mode() & 0o700 == 0o700
+                && metadata.mode() & 0o022 == 0,
+            "protected cumulative ACK directory ownership or permissions are unsafe: {}",
+            ancestor.display()
+        );
+        if ancestor == parent {
+            ensure!(
+                metadata.mode() & 0o777 == 0o700,
+                "protected cumulative ACK control directory must be mode 0700: {}",
+                ancestor.display()
+            );
+        }
+    }
+
+    validate_protected_cumulative_ack_path(path, control_uid, "WAL")?;
+    validate_protected_cumulative_ack_path(
+        &cumulative_ack_lock_path(path),
+        control_uid,
+        "stable lock",
+    )?;
+    let temporary = cumulative_ack_compaction_path(path)?;
+    match fs::symlink_metadata(&temporary) {
+        Ok(_) if allow_secure_orphaned_compaction => {
+            validate_protected_cumulative_ack_path(&temporary, control_uid, "orphaned compaction")?;
+        }
+        Ok(_) => {
+            anyhow::bail!(
+                "unexpected cumulative ACK compaction temporary in protected namespace: {}",
+                temporary.display()
+            );
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect protected cumulative ACK compaction {}",
+                    temporary.display()
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_protected_cumulative_ack_namespace(
+    path: &Path,
+    control_uid: u32,
+    allow_secure_orphaned_compaction: bool,
+) -> AnyResult<()> {
+    let _ = (path, control_uid, allow_secure_orphaned_compaction);
+    anyhow::bail!("protected cumulative ACK control requires Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn validate_protected_cumulative_ack_path(
+    path: &Path,
+    control_uid: u32,
+    label: &str,
+) -> AnyResult<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "inspect protected cumulative ACK {label} {}",
+            path.display()
+        )
+    })?;
+    ensure!(
+        metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == control_uid
+            && metadata.gid() == 0
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o777 == 0o600,
+        "protected cumulative ACK {label} ownership or permissions are unsafe: {}",
+        path.display()
+    );
+    Ok(metadata)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_protected_cumulative_ack_open_file(
+    path: &Path,
+    file: &File,
+    control_uid: u32,
+    label: &str,
+) -> AnyResult<()> {
+    let linked = validate_protected_cumulative_ack_path(path, control_uid, label)?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect opened protected cumulative ACK {label}"))?;
+    ensure!(
+        opened.is_file()
+            && opened.uid() == control_uid
+            && opened.gid() == 0
+            && opened.nlink() == 1
+            && opened.mode() & 0o777 == 0o600
+            && opened.dev() == linked.dev()
+            && opened.ino() == linked.ino(),
+        "opened protected cumulative ACK {label} no longer matches {}",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_protected_cumulative_ack_open_file(
+    path: &Path,
+    file: &File,
+    control_uid: u32,
+    label: &str,
+) -> AnyResult<()> {
+    let _ = (path, file, control_uid, label);
+    anyhow::bail!("protected cumulative ACK control requires Linux")
 }
 
 fn remove_orphaned_cumulative_ack_compaction(path: &Path) -> AnyResult<()> {
@@ -2314,6 +2588,117 @@ mod tests {
 
     fn cumulative_ack_wal_path(label: &str) -> PathBuf {
         receipt_wal_path(&format!("cumulative-{label}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn protected_cumulative_ack_wal_rejects_replaceable_control_state() {
+        // SAFETY: credential accessors have no preconditions and do not mutate process state.
+        let effective_uid = unsafe { libc::geteuid() };
+        if effective_uid != 0 {
+            let path = cumulative_ack_wal_path("protected-nonroot");
+            drop(CumulativeAckWal::open(&path).unwrap());
+            assert!(CumulativeAckWal::open_protected(&path, effective_uid).is_err());
+            fs::remove_file(cumulative_ack_lock_path(&path)).unwrap();
+            fs::remove_file(path).unwrap();
+            return;
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = PathBuf::from("/root").join(format!(
+            "hivezilla-protected-ack-{}-{unique}",
+            std::process::id()
+        ));
+        let control = root.join("control");
+        fs::create_dir_all(&control).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = control.join("nas-shred-ack.wal");
+        let lock_path = cumulative_ack_lock_path(&path);
+        for leaf in [&path, &lock_path] {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(leaf)
+                .unwrap();
+        }
+
+        let (spool_root, local_record) =
+            durable_spool_record("protected-cumulative-compaction-record");
+        let mut wal = CumulativeAckWal::open_protected(&path, 0).unwrap();
+        wal.revalidate_protected_storage().unwrap();
+
+        let expected = wal
+            .commit_verified(verified_cumulative_ack(5), &local_record)
+            .unwrap()
+            .ack()
+            .clone();
+        wal.writer.flush().unwrap();
+        let compact_at = wal
+            .compacted_baseline_bytes
+            .checked_add(CUMULATIVE_ACK_COMPACT_GROWTH_BYTES)
+            .unwrap();
+        wal.writer.get_mut().set_len(compact_at).unwrap();
+        wal.compact_if_needed().unwrap();
+        let compacted = fs::metadata(&path).unwrap();
+        assert_eq!(compacted.uid(), 0);
+        assert_eq!(compacted.gid(), 0);
+        assert_eq!(compacted.mode() & 0o777, 0o600);
+        wal.revalidate_protected_storage().unwrap();
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+        assert!(wal.revalidate_protected_storage().is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let extra_link = control.join("extra-wal-link");
+        fs::hard_link(&path, &extra_link).unwrap();
+        assert!(wal.revalidate_protected_storage().is_err());
+        fs::remove_file(extra_link).unwrap();
+
+        fs::set_permissions(&control, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(wal.revalidate_protected_storage().is_err());
+        fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let displaced_wal = control.join("displaced.wal");
+        fs::rename(&path, &displaced_wal).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        assert!(wal.revalidate_protected_storage().is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(&displaced_wal, &path).unwrap();
+        wal.revalidate_protected_storage().unwrap();
+
+        let displaced_lock = control.join("displaced.lock");
+        fs::rename(&lock_path, &displaced_lock).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .unwrap();
+        assert!(wal.revalidate_protected_storage().is_err());
+        fs::remove_file(&lock_path).unwrap();
+        fs::rename(&displaced_lock, &lock_path).unwrap();
+        wal.revalidate_protected_storage().unwrap();
+
+        drop(wal);
+        let reopened = CumulativeAckWal::open_protected(&path, 0).unwrap();
+        assert_eq!(
+            reopened.latest_stream_ack(&expected.stream),
+            Some(&expected)
+        );
+        reopened.revalidate_protected_storage().unwrap();
+        drop(reopened);
+        fs::remove_dir_all(spool_root).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn durable_spool_record(label: &str) -> (PathBuf, DurableSpoolRecord) {

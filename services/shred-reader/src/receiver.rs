@@ -415,6 +415,10 @@ pub async fn run(config: Config) -> Result<()> {
         }
     };
 
+    // Repair observes the same shutdown watch as the TVU receiver. Bound the whole concurrent
+    // shutdown interval from this point, rather than granting a fresh 45 seconds only after the
+    // forwarding queue has drained.
+    let repair_shutdown_deadline = tokio::time::Instant::now() + REPAIR_SHUTDOWN_TIMEOUT;
     let _ = shutdown_tx.send(true);
     exit.store(true, Ordering::Relaxed);
 
@@ -438,7 +442,7 @@ pub async fn run(config: Config) -> Result<()> {
         );
     }
     if let Some(mut repair_task) = repair_task {
-        match tokio::time::timeout(REPAIR_SHUTDOWN_TIMEOUT, &mut repair_task).await {
+        match tokio::time::timeout_at(repair_shutdown_deadline, &mut repair_task).await {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(error))) => {
                 let detail = format!("{error:#}");
@@ -988,8 +992,10 @@ async fn receive_and_forward_shreds(
     let forward_metrics = metrics.clone();
     let mut forward_task = tokio::spawn(async move {
         while let Some(payload) = forward_rx.recv().await {
-            forward_metrics.record_forward_dequeued();
             forwarder.forward(&payload, &forward_metrics).await;
+            // Keep the depth nonzero while a datagram is in flight so shutdown telemetry counts
+            // both queued and currently forwarding work.
+            forward_metrics.record_forward_dequeued();
         }
     });
 
@@ -1003,20 +1009,34 @@ async fn receive_and_forward_shreds(
         shutdown,
     )
     .await;
-    match tokio::time::timeout(FORWARD_DRAIN_TIMEOUT, &mut forward_task).await {
-        Ok(result) => result.context("shred forwarding task panicked")?,
+    let drain_result = drain_forward_task(&mut forward_task, &metrics, FORWARD_DRAIN_TIMEOUT).await;
+    let mut result = receive_result;
+    record_first_error(&mut result, drain_result);
+    result
+}
+
+async fn drain_forward_task(
+    forward_task: &mut tokio::task::JoinHandle<()>,
+    metrics: &Metrics,
+    timeout: Duration,
+) -> Result<()> {
+    match tokio::time::timeout(timeout, &mut *forward_task).await {
+        Ok(result) => result.context("shred forwarding task panicked"),
         Err(_) => {
-            let queued_datagrams = metrics.forward_queue_depth();
+            let unfinished_datagrams = metrics.forward_queue_depth();
             forward_task.abort();
             let _ = forward_task.await;
-            warn!(
-                queued_datagrams,
-                timeout_seconds = FORWARD_DRAIN_TIMEOUT.as_secs(),
+            error!(
+                unfinished_datagrams,
+                timeout_seconds = timeout.as_secs_f64(),
                 "timed out draining shred forwarding queue during shutdown"
             );
+            bail!(
+                "shred forwarding queue did not drain within {:.3} seconds; unfinished_datagrams={unfinished_datagrams}",
+                timeout.as_secs_f64(),
+            )
         }
     }
-    receive_result
 }
 
 async fn log_metrics(
@@ -1260,6 +1280,39 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(&received[..size], expected);
+    }
+
+    #[tokio::test]
+    async fn forward_drain_timeout_is_a_terminal_error() {
+        let metrics = Metrics::new(1).unwrap();
+        metrics.record_forward_queued();
+        let mut task = tokio::spawn(std::future::pending::<()>());
+
+        let error = drain_forward_task(&mut task, &metrics, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("did not drain"));
+        assert!(error.to_string().contains("unfinished_datagrams=1"));
+        assert!(task.is_finished());
+        assert_eq!(metrics.forward_queue_depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_forward_drain_clears_the_unfinished_depth() {
+        let metrics = Arc::new(Metrics::new(1).unwrap());
+        metrics.record_forward_queued();
+        let worker_metrics = Arc::clone(&metrics);
+        let mut task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            worker_metrics.record_forward_dequeued();
+        });
+
+        drain_forward_task(&mut task, &metrics, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(metrics.forward_queue_depth(), 0);
     }
 
     #[tokio::test]

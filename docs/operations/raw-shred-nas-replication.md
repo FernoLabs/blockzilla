@@ -1,8 +1,10 @@
 # Raw shred capture: Hetzner to NAS
 
 This rollout records and durably replicates shreds only. It does not reconstruct blocks, compact
-records, or publish archives. After the NAS has fsynced and signed a cumulative ACK, Hetzner may
-retire older sealed spool segments while retaining the exact ACK segment as a restart anchor.
+records, or publish archives. ACK/replay and deletion are separate stages: the new source defaults
+to `gc.enabled=false`, so a NAS ACK advances only the fsynced cumulative-ACK WAL until the protected
+retention namespace has passed its own canary. The incumbent source currently retires ACK-covered
+segments; never run that marker-unaware deleter concurrently with the new source.
 
 ```text
 Solana gossip / TVU
@@ -22,25 +24,46 @@ keeps crash recovery and NAS replay exact without paying one disk flush per UDP 
 cannot request an arbitrary cursor. The source selects its oldest unacknowledged durable records,
 and repeats the same batch until the NAS has fsynced its copy and returned a signed cumulative ACK.
 
-An ACK first advances the Hetzner replay cursor stored in its fsynced ACK WAL. Only after that
-durability boundary may one older sealed source segment be retired. The active segment, the
-segment containing the ACK, and every unacknowledged record remain on Hetzner.
+An ACK first advances the Hetzner replay cursor stored in its fsynced ACK WAL. When GC is separately
+enabled after its privilege and crash-safety gates, only one older sealed segment may retire per
+bounded pass. The active segment, the segment containing the ACK, and every unacknowledged record
+remain on Hetzner.
 
 ## Deployment inputs
 
 Prepare the two examples as private regular files, never as symlinks:
 
-- Hetzner: [raw-shred-pull-source.example.json](/Users/augustin/Developement/ferno/blockzilla-v1/services/hivezilla/config/raw-shred-pull-source.example.json)
-- NAS client: [raw-shred-pull-client.example.json](/Users/augustin/Developement/ferno/blockzilla-v1/services/hivezilla/config/raw-shred-pull-client.example.json)
+- Hetzner: [raw-shred-pull-source.example.json](../../services/hivezilla/config/raw-shred-pull-source.example.json)
+- NAS client: [raw-shred-pull-client.example.json](../../services/hivezilla/config/raw-shred-pull-client.example.json)
 
-The Hetzner Dokploy Compose file is
-[docker-compose.hivezilla-shred.dokploy.yml](/Users/augustin/Developement/ferno/blockzilla-v1/docker-compose.hivezilla-shred.dokploy.yml).
-It runs the recorder and its public-status sidecars; the mTLS pull source remains a separate
-service over the same spool. The Compose deployment rejects mutable application tags: set
+The Hetzner recorder remains managed by
+[docker-compose.hivezilla-shred.dokploy.yml](../../docker-compose.hivezilla-shred.dokploy.yml).
+It runs the recorder and its public-status sidecars. The incumbent mTLS pull source is a host
+systemd service. Its replacement is the separately invoked, digest-pinned
+[pull-source sidecar Compose](../../docker-compose.hivezilla-shred-pull-source.yml); it reuses the
+three inspected live Docker volumes and does not consume another Dokploy application slot. Do not
+merge it into an in-place Dokploy update. The recorder Compose rejects mutable application tags:
+set
 `HIVEZILLA_SHRED_IMAGE_DIGEST` and `HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST` to the exact tested
 `sha256:` artifacts, set `SHRED_JOURNAL_ID` to the active journal ID, and point
 `HIVEZILLA_INGEST_CONFIG_PATH` at the reviewed private runtime config. A same-host green project
 must additionally use distinct bind/status ports and a distinct journal/volume set.
+
+Render the source and client examples as private regular files. The sidecar mounts TLS material,
+the allowlist, and the NAS receipt key through Compose secrets under `/run/secrets`. Before launch,
+resolve the incumbent data, status, and control volume names with `docker volume inspect`; set the
+three required `HIVEZILLA_SHRED_*_VOLUME` values to those exact names. `/control` must be the live
+persistent volume containing the incumbent cumulative-ACK WAL. An ephemeral volume, a new empty
+WAL, or a copied WAL that is not the live inode is a cutover failure. The checked sidecar mounts
+the recorder data and status volumes read-only, so the first `gc.enabled=false` launch is
+mechanically non-deleting. Every `*_PATH` passed to the sidecar must be absolute; a relative path
+without `./` is parsed as a named volume by Compose.
+
+If the incumbent systemd unit uses an ordinary host directory rather than an existing local Docker
+volume, create an external bind-backed local volume whose `device` is that exact canonical control
+directory. Inspect the volume's `Options.device`, then compare WAL and `.lock` device/inode/size/
+mode/owner/hash from the host and a one-shot container before cutover. This maps the same inodes; it
+does not copy them. Never initialize a normal empty named volume as a substitute.
 
 The TLS layout needs two independent mTLS relationships:
 
@@ -51,20 +74,89 @@ The receiver must permit the exact stream `(solana-mainnet, hivezilla-shred-01,
 shred-reader-loopback, SHRED_JOURNAL_ID)` and use a `4 KiB` record limit. The same NAS receipt
 public key is placed on Hetzner so it can authenticate the ACK before recording it.
 
-## Startup order
+## Sequential source handoff
 
 1. Start `record-shred-udp` on Hetzner and wait for `/status/recorder.json` to report a non-null
    `durable_through_sequence`.
-2. Start `serve-shred-spool-pull-source --config /etc/hivezilla/raw-shred-pull.json` on Hetzner.
-   It listens on `18443` in the example. Allow this port only from the NAS egress IP.
+2. Record the incumbent stream identity, resolved ACK-WAL and lock paths, owner/mode/inode, SHA-256,
+   durable ACK sequence, marker, retained segment manifest, and current holder PID. The new source
+   must use this exact ACK WAL.
 3. Start the NAS durable receiver first, then run
    `pull-grpc-raw --config /etc/hivezilla/raw-shred-pull-client.json --protocol v2` on the NAS.
-4. Confirm the Hetzner ACK status advances and the NAS spool sequence matches it.
+4. For a source upgrade, stop and fence only the incumbent pull source; leave the recorder and NAS
+   receiver live. Prove both the ACK-WAL sidecar lock and WAL lock are released. Simultaneous
+   blue/green pull sources are impossible because the ACK WAL is exclusively locked. The final
+   source runs as UID/GID `0:0`, adds recorder GID `10001` only as a supplementary group, and has
+   only `DAC_READ_SEARCH`: prove the exact control directory is `root:root` mode `0700` and the
+   existing WAL plus `${WAL}.lock` are one-link, non-symlink
+   `root:root` mode `0600` regular files. If either leaf has another owner, change ownership only
+   after fencing the incumbent; preserve and record each device+inode, type, link count, mode,
+   length, and WAL SHA-256 before/after, then fsync the directory. Never copy, recreate, truncate,
+   or replace either file. Production startup validates this namespace before trusting recovered
+   ACKs, even with GC off, and re-verifies the recovered expected-stream ACK signature and primary
+   identity against the configured receipt key before it uses that cursor.
+5. Before stopping the incumbent deleter, measure compressed spool growth for a representative
+   interval. Require `free space >= configured reserve + (measured bytes/second × worst-case
+   candidate+rollback seconds) + two segment targets`; otherwise abort. The first candidate is
+   GC-off and the live rate can consume the remaining disk in well under an hour.
+6. Start the sidecar Compose with a unique project name, the exact inspected external volume names,
+   immutable image digest, private config, and secret paths. Keep `gc.enabled=false` and `/data`
+   read-only. Its startup preflight must validate the recorder durable cursor, exact ACK anchor,
+   next sequence, stream identity, recovered ACK signature, and retained-prefix marker before the
+   listener serves. It
+   listens on `18443`; allow this port only from the NAS egress IP.
+7. Confirm the first offered sequence is exactly durable ACK + 1, then confirm the Hetzner ACK
+   status and NAS durable sequence both advance. A cursor reset to zero is an immediate rollback.
 
 Deploy the prefix-marker-aware recorder and pull source as one compatibility unit. Once a durable
-ACK covers a later segment, startup maintenance drains all older sealed segments before serving;
-caught-up sessions continue bounded maintenance. Never roll the recorder back to a binary that
-requires segment zero after the first prefix marker is published.
+ACK covers a later segment, keep GC disabled until the separate retention gate below passes. Never
+roll the recorder back to a binary that requires segment zero after a schema-v2 prefix marker is
+published.
+
+### Retention enablement gate
+
+The checked live sidecar cannot delete because `/data` is read-only. Do not run a GC canary against
+the live journal yet: publishing a schema-v2 marker would make rollback to the marker-unaware
+incumbent unsafe, while no reviewed steady-state replacement exists. For storage validation only,
+use the checked
+[GC canary override](../../docker-compose.hivezilla-shred-pull-source-gc-canary.yml) together with
+the [one-segment config](../../services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json)
+against exact frozen clone data, status, and control volumes after all of these protections pass:
+
+- the source runs as UID/GID `0:0` with supplementary recorder GID `10001`, while the recorder
+  remains the image-pinned unprivileged UID/GID `10001`;
+- every ancestor above the configured spool root is root/control-owned, non-symlink, traversable by
+  recorder GID `10001`, and either non-writable by untrusted users or protected by sticky-directory
+  ownership semantics;
+- every directory from the spool root through the source-id parent is `root:10001`, readable and
+  traversable by the recorder group, and not group/world writable;
+- the exact journal leaf is `root:10001` mode `03770` (setgid + sticky);
+- `.retention.lock` already exists as a root-owned, one-link, non-symlink `root:10001` mode `0640`
+  regular file; the optional marker must have the same boundary;
+- the cumulative-ACK directory remains `root:root` mode `0700`; its WAL and stable `.lock` remain
+  `root:root` mode `0600`, one-link regular files. The source checks descriptor/path identity at
+  startup and revalidates it before every destructive pass.
+
+The source revalidates this namespace before every destructive pass. For a clone-only one-segment
+canary, render both Compose files with three explicit `*_CLONE_VOLUME` names; the override changes
+only cloned `/data` to read-write and `restart` to `"no"`. Its config sets
+`"gc":{"enabled":true,"control_uid":0,"recorder_gid":10001,"max_retirements_per_process":1}`.
+The budget is shared by startup, CommitAck, and caught-up maintenance, but resets after a process
+restart; automatic restart is therefore forbidden during the canary. Prove exactly one oldest
+fully ACK-covered sealed segment disappeared and store the clone report. This does not authorize a
+live canary. Live GC and normal cadence are a later reviewed rollout, not an extension of this test.
+
+There is intentionally no steady-state read-write GC artifact yet. A finite process budget would
+eventually exhaust and silently growing spool would be unsafe; automatic restart would renew a
+small budget. Keep the incumbent proven deleter in service until a later rollout adds durable or
+explicitly unlimited renewal semantics plus a visible budget-exhaustion metric and alert. The
+read-only live candidate may be exercised only inside the disk-runway window above, then rolled
+back before the incumbent is restarted. It must never publish a marker or delete a live segment.
+
+A 2026-07-24 live sample checked 164 retained records and found only format v4. This was not an
+exhaustive retained-prefix scan. Pin one exact source image digest until an exhaustive format scan
+proves no v3 remains or all pre-cutover data is durably acknowledged; v3 transport recompression
+must not vary between retries.
 
 ## Failure behavior
 

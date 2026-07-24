@@ -36,7 +36,7 @@ The main command groups are:
 | --- | --- |
 | Observe | `probe-grpc`, `watch-epochs-grpc` |
 | Retain | `record-grpc-raw`, `record-shred-udp`, `inspect-grpc-raw`, `verify-grpc-raw-poh`, `materialize-grpc-raw` |
-| Replicate | `serve-ingest-receiver`, `replicate-grpc-raw`, `pull-grpc-raw`, `serve-grpc-raw-pull-source`, `bridge-receiver-grpc-raw` |
+| Replicate | `serve-ingest-receiver`, `replicate-grpc-raw`, `pull-grpc-raw`, `serve-grpc-raw-pull-source`, `serve-shred-spool-pull-source`, `bridge-receiver-grpc-raw` |
 | Capture | `capture-grpc`, `inspect-capture` |
 | Repair | `sync-rpc-epoch`, `backfill-rpc`, `prepare-epoch-repair` |
 | Operate | `supervise`, `notify-supervisor` |
@@ -75,9 +75,12 @@ source stays on host loopback, the collector mounts recorder status read-only,
 and the public container can expose only the separate sanitized JSON volume.
 
 This deployment is a bounded raw shred recorder, not block reconstruction or
-indexing. Its example spool fails closed at 20 GiB and has no deletion policy;
-capacity or a verified downstream replication/retention path must be added for
-indefinite operation.
+indexing. Its example spool fails closed at 20 GiB. The separate
+`serve-shred-spool-pull-source` command can replay that fsynced spool to the NAS;
+its deletion mode defaults off and requires both a signed durable NAS ACK and a
+privilege-separated retention namespace. Follow
+[the raw-shred replication runbook](../../docs/operations/raw-shred-nas-replication.md)
+before changing retention.
 
 The `scripts/` directory contains portable launch, PKI, object-storage, and
 monitoring helpers. They intentionally contain no deployment manifest or real

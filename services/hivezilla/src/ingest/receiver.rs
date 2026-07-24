@@ -1,4 +1,4 @@
-//! Transport-independent durable receiver for the exact compressed Yellowstone block stream.
+//! Transport-independent durable receiver for exact compressed block or shred streams.
 //!
 //! Every new observation crosses two ordered durability boundaries: the exact compressed payload
 //! is first synced through [`SpoolWriter`], then its cumulative rolling-chain cursor is appended
@@ -25,7 +25,8 @@ use super::{
     CommitmentEvidence, ContentDigest, CumulativePrimaryAck, DurableSpoolRecord, IngressRecordMeta,
     LogicalKey, REPLICATION_PROTOCOL_VERSION, ReceiptDisposition, ReplicationOffer,
     ReplicationStreamId, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
-    compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
+    ZSTD_SOLANA_SHRED_V1, compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
+    decode_stored_shred, parse_shred_header,
 };
 
 /// Exact format emitted by the raw recorder: one independent zstd frame containing a protobuf
@@ -155,6 +156,7 @@ pub fn validate_raw_replication_batch(
     let mut compressed_total = 0u64;
     let mut uncompressed_total = 0u64;
     let mut previous_sequence: Option<u64> = None;
+    let mut payload_profile = None;
     for record in records {
         compressed_total = compressed_total
             .checked_add(record.compressed_payload.len() as u64)
@@ -183,6 +185,15 @@ pub fn validate_raw_replication_batch(
         }
         previous_sequence = Some(record.offer.record.sequence);
         validate_raw_replication_record(record, stream, limits)?;
+        let next_profile = receiver_payload_profile(&record.offer)?;
+        if let Some(expected) = payload_profile {
+            ensure!(
+                next_profile == expected,
+                "receiver batch cannot mix payload profiles"
+            );
+        } else {
+            payload_profile = Some(next_profile);
+        }
     }
     Ok(())
 }
@@ -471,6 +482,11 @@ impl BlockzillaRawReceiver {
         let mut uncompressed_total = 0u64;
         let mut validated = Vec::with_capacity(records.len());
         let mut previous_sequence: Option<u64> = None;
+        let mut payload_profile = self
+            .progress
+            .latest()
+            .map(|frame| receiver_payload_profile(&frame.offer))
+            .transpose()?;
         for record in records {
             compressed_total = compressed_total
                 .checked_add(record.compressed_payload.len() as u64)
@@ -498,7 +514,17 @@ impl BlockzillaRawReceiver {
                 );
             }
             previous_sequence = Some(record.offer.record.sequence);
-            validated.push(self.validate_record(record)?);
+            let validated_record = self.validate_record(record)?;
+            let next_profile = receiver_payload_profile(&validated_record.offer)?;
+            if let Some(expected) = payload_profile {
+                ensure!(
+                    next_profile == expected,
+                    "receiver stream payload profile changed"
+                );
+            } else {
+                payload_profile = Some(next_profile);
+            }
+            validated.push(validated_record);
         }
         Ok(validated)
     }
@@ -651,6 +677,13 @@ impl BlockzillaRawReceiver {
     fn validated_spool_tail(&self, durable: &DurableSpoolRecord) -> Result<ValidatedRawRecord> {
         let stored = self.spool.read_record(durable)?;
         let metadata = &stored.metadata;
+        let commitment = match (&metadata.logical_key, metadata.payload_format_version) {
+            (LogicalKey::Block { .. }, RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1) => {
+                CommitmentEvidence::Confirmed
+            }
+            (LogicalKey::Shred { .. }, ZSTD_SOLANA_SHRED_V1) => CommitmentEvidence::Unknown,
+            _ => return Err(anyhow!("unsupported recovered receiver payload profile")),
+        };
         let record = RawReplicationRecord {
             offer: ReplicationOffer {
                 protocol_version: REPLICATION_PROTOCOL_VERSION,
@@ -661,7 +694,7 @@ impl BlockzillaRawReceiver {
                 content_digest: metadata.content_digest,
                 payload_len: metadata.payload_len,
                 payload_format_version: metadata.payload_format_version,
-                commitment: CommitmentEvidence::Confirmed,
+                commitment,
             },
             compressed_payload: stored.payload,
             raw_protobuf_sha256: [0; 32],
@@ -742,8 +775,11 @@ fn validate_raw_replication_record(
     );
     let capacity = usize::try_from(record.uncompressed_len)
         .context("receiver uncompressed record length exceeds addressable memory")?;
-    let raw = zstd::bulk::decompress(&record.compressed_payload, capacity)
-        .context("decompress receiver raw protobuf")?;
+    let raw = decode_receiver_payload(
+        record.offer.payload_format_version,
+        &record.compressed_payload,
+        capacity,
+    )?;
     validate_decoded_record_with_raw(
         &record.offer,
         &record.compressed_payload,
@@ -770,8 +806,11 @@ fn validate_recovered_record(
     );
     let maximum = usize::try_from(limits.max_uncompressed_record_bytes)
         .context("receiver uncompressed limit exceeds addressable memory")?;
-    let raw = zstd::bulk::decompress(&record.compressed_payload, maximum)
-        .context("decompress recovered receiver protobuf")?;
+    let raw = decode_receiver_payload(
+        record.offer.payload_format_version,
+        &record.compressed_payload,
+        maximum,
+    )?;
     record.uncompressed_len = raw.len() as u64;
     record.raw_protobuf_sha256 = Sha256::digest(&raw).into();
     let metadata = validate_decoded_record_with_raw(
@@ -801,16 +840,56 @@ fn validate_offer_identity(offer: &ReplicationOffer, stream: &ReplicationStreamI
         ReplicationStreamId::from_offer(offer) == *stream,
         "receiver replication offer belongs to a different stream"
     );
-    ensure!(
-        offer.payload_format_version == RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1,
-        "unsupported receiver raw payload format {}",
-        offer.payload_format_version
-    );
-    ensure!(
-        offer.commitment == CommitmentEvidence::Confirmed,
-        "receiver accepts only confirmed raw block observations"
-    );
+    match receiver_payload_profile(offer)? {
+        ReceiverPayloadProfile::GrpcBlock => ensure!(
+            offer.commitment == CommitmentEvidence::Confirmed,
+            "receiver accepts only confirmed raw block observations"
+        ),
+        ReceiverPayloadProfile::SolanaShred => ensure!(
+            offer.commitment == CommitmentEvidence::Unknown,
+            "receiver accepts only uncommitted raw shred observations"
+        ),
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverPayloadProfile {
+    GrpcBlock,
+    SolanaShred,
+}
+
+fn receiver_payload_profile(offer: &ReplicationOffer) -> Result<ReceiverPayloadProfile> {
+    match (&offer.logical_key, offer.payload_format_version) {
+        (LogicalKey::Block { .. }, RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1) => {
+            Ok(ReceiverPayloadProfile::GrpcBlock)
+        }
+        (LogicalKey::Shred { .. }, ZSTD_SOLANA_SHRED_V1) => Ok(ReceiverPayloadProfile::SolanaShred),
+        _ => Err(anyhow!(
+            "unsupported receiver logical-key/payload-format combination"
+        )),
+    }
+}
+
+fn decode_receiver_payload(
+    payload_format_version: u16,
+    compressed_payload: &[u8],
+    maximum_uncompressed_bytes: usize,
+) -> Result<Vec<u8>> {
+    let raw = match payload_format_version {
+        RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1 => {
+            zstd::bulk::decompress(compressed_payload, maximum_uncompressed_bytes)
+                .context("decompress receiver raw protobuf")?
+        }
+        ZSTD_SOLANA_SHRED_V1 => decode_stored_shred(ZSTD_SOLANA_SHRED_V1, compressed_payload)
+            .context("decompress receiver raw shred")?,
+        _ => return Err(anyhow!("unsupported receiver raw payload format")),
+    };
+    ensure!(
+        raw.len() <= maximum_uncompressed_bytes,
+        "receiver decompressed payload exceeds configured maximum"
+    );
+    Ok(raw)
 }
 
 fn validate_decoded_record_with_raw(
@@ -842,14 +921,35 @@ fn validate_decoded_record_with_raw(
         ) == offer.content_digest,
         "receiver replication offer content digest mismatch"
     );
-    let block = scan_subscribe_update_block(raw)?;
-    let logical_key = LogicalKey::Block {
-        slot: block.slot,
-        blockhash: block.blockhash,
+    let logical_key = match &offer.logical_key {
+        LogicalKey::Block { .. } => {
+            let block = scan_subscribe_update_block(raw)?;
+            LogicalKey::Block {
+                slot: block.slot,
+                blockhash: block.blockhash,
+            }
+        }
+        LogicalKey::Shred {
+            slot,
+            kind,
+            shred_index,
+            fec_set_index,
+        } => {
+            let header = parse_shred_header(raw).context("receiver shred header is malformed")?;
+            ensure!(
+                header.slot == *slot
+                    && header.kind == *kind
+                    && header.index == *shred_index
+                    && Some(header.fec_set_index) == *fec_set_index,
+                "receiver shred identity differs from replication offer"
+            );
+            offer.logical_key.clone()
+        }
+        _ => return Err(anyhow!("unsupported receiver logical key")),
     };
     ensure!(
         offer.logical_key == logical_key,
-        "receiver protobuf block identity differs from replication offer"
+        "receiver decoded identity differs from replication offer"
     );
     Ok(IngressRecordMeta {
         cluster_id: offer.cluster_id.clone(),
@@ -2591,6 +2691,49 @@ mod tests {
         }
     }
 
+    fn shred_record(sequence: u64, slot: u64, index: u32) -> RawReplicationRecord {
+        let mut raw = vec![0u8; 83];
+        raw[64] = 0x90;
+        raw[65..73].copy_from_slice(&slot.to_le_bytes());
+        raw[73..77].copy_from_slice(&index.to_le_bytes());
+        raw[77..79].copy_from_slice(&50093u16.to_le_bytes());
+        raw[79..83].copy_from_slice(&(index / 32 * 32).to_le_bytes());
+        let compressed_payload = zstd::bulk::compress(&raw, 1).expect("compress test shred");
+        let stream = stream();
+        let logical_key = LogicalKey::Shred {
+            slot,
+            kind: crate::ingest::ShredKind::Data,
+            shred_index: index,
+            fec_set_index: Some(index / 32 * 32),
+        };
+        let content_digest = compute_content_digest(
+            &stream.cluster_id,
+            &logical_key,
+            ZSTD_SOLANA_SHRED_V1,
+            &compressed_payload,
+        );
+        RawReplicationRecord {
+            offer: ReplicationOffer {
+                protocol_version: REPLICATION_PROTOCOL_VERSION,
+                cluster_id: stream.cluster_id.clone(),
+                record: ObservationId {
+                    origin_node_id: stream.origin_node_id,
+                    journal_id: stream.journal_id,
+                    sequence,
+                },
+                source_id: stream.source_id,
+                logical_key,
+                content_digest,
+                payload_len: compressed_payload.len() as u64,
+                payload_format_version: ZSTD_SOLANA_SHRED_V1,
+                commitment: CommitmentEvidence::Unknown,
+            },
+            compressed_payload,
+            raw_protobuf_sha256: Sha256::digest(&raw).into(),
+            uncompressed_len: raw.len() as u64,
+        }
+    }
+
     #[test]
     fn stateless_new_stream_validation_never_creates_storage() {
         let root = TestRoot::new("stateless-validation");
@@ -2704,6 +2847,96 @@ mod tests {
         assert!(ack.signing_key_id.is_empty());
         assert!(ack.signature.is_empty());
         assert_eq!(receiver.get_ack(), Some(ack));
+    }
+
+    #[test]
+    fn shred_stream_crosses_both_durability_boundaries_and_recovers() {
+        let root = TestRoot::new("shred-success-recovery");
+        let configuration = config(&root, 8);
+        let first = shred_record(0, 1002, 7);
+        let second = shred_record(1, 1002, 8);
+        let mut receiver = BlockzillaRawReceiver::open(configuration.clone()).unwrap();
+        let ack = receiver
+            .push_batch(vec![first.clone(), second.clone()])
+            .unwrap();
+        assert_eq!(ack.through_sequence, 1);
+        assert_eq!(ack.through_content_digest, second.offer.content_digest);
+        assert_eq!(ack.durable_lsn, 2);
+        drop(receiver);
+
+        let mut recovered = BlockzillaRawReceiver::open(configuration).unwrap();
+        assert_eq!(recovered.get_ack(), Some(ack));
+        assert_eq!(
+            recovered
+                .push_batch(vec![first, second])
+                .unwrap()
+                .through_sequence,
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_or_misidentified_shreds_never_mutate_the_receiver() {
+        let root = TestRoot::new("shred-invalid");
+        let mut receiver = BlockzillaRawReceiver::open(config(&root, 8)).unwrap();
+        let before = spool_segment_bytes(receiver.spool_journal_dir());
+
+        let mut bad_zstd = shred_record(0, 1002, 7);
+        bad_zstd.compressed_payload[0] ^= 0x80;
+        assert!(receiver.push_batch(vec![bad_zstd]).is_err());
+
+        let mut wrong_key = shred_record(0, 1002, 7);
+        if let LogicalKey::Shred { slot, .. } = &mut wrong_key.offer.logical_key {
+            *slot += 1;
+        }
+        wrong_key.offer.content_digest = compute_content_digest(
+            &wrong_key.offer.cluster_id,
+            &wrong_key.offer.logical_key,
+            wrong_key.offer.payload_format_version,
+            &wrong_key.compressed_payload,
+        );
+        assert!(receiver.push_batch(vec![wrong_key]).is_err());
+
+        let mut wrong_commitment = shred_record(0, 1002, 7);
+        wrong_commitment.offer.commitment = CommitmentEvidence::Confirmed;
+        assert!(receiver.push_batch(vec![wrong_commitment]).is_err());
+
+        let mut wrong_format = shred_record(0, 1002, 7);
+        wrong_format.offer.payload_format_version = RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1;
+        wrong_format.offer.content_digest = compute_content_digest(
+            &wrong_format.offer.cluster_id,
+            &wrong_format.offer.logical_key,
+            wrong_format.offer.payload_format_version,
+            &wrong_format.compressed_payload,
+        );
+        assert!(receiver.push_batch(vec![wrong_format]).is_err());
+
+        assert!(receiver.get_ack().is_none());
+        assert_eq!(spool_segment_bytes(receiver.spool_journal_dir()), before);
+    }
+
+    #[test]
+    fn receiver_stream_payload_profile_is_pinned_by_its_first_durable_record() {
+        let root = TestRoot::new("payload-profile-pin");
+        let configuration = config(&root, 8);
+        let mut receiver = BlockzillaRawReceiver::open(configuration.clone()).unwrap();
+        receiver.push_batch(vec![shred_record(0, 1002, 7)]).unwrap();
+        assert!(receiver.push_batch(vec![record(1, 1003, 9)]).is_err());
+        assert_eq!(receiver.get_ack().unwrap().through_sequence, 0);
+        drop(receiver);
+
+        let mut recovered = BlockzillaRawReceiver::open(configuration).unwrap();
+        assert!(recovered.push_batch(vec![record(1, 1003, 9)]).is_err());
+        assert_eq!(recovered.get_ack().unwrap().through_sequence, 0);
+        assert!(
+            validate_raw_replication_batch(
+                &[shred_record(0, 1002, 7), record(1, 1003, 9)],
+                &stream(),
+                config(&root, 8).limits,
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]

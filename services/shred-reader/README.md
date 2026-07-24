@@ -208,6 +208,12 @@ repeated large scans or disk thrash. `repair_state`, bounded last-error text, re
 success time expose that lifecycle. Repair health deliberately does not participate in `/readyz`:
 raw Turbine receive and forwarding remain the primary service boundary.
 
+Forward shutdown is also fail-closed. `forward_queue_depth` counts every unfinished datagram,
+including at most one datagram currently awaiting its configured destinations. Shutdown permits a
+20-second forward drain; a timeout aborts the worker and returns a non-clean process result with the
+unfinished count. The forwarding and repair ceilings run concurrently (20 and 45 seconds), so the
+production 60-second container grace leaves roughly 15 seconds for the remaining orderly joins.
+
 Repair remains quarantined from the live raw journal and archive promotion path. The release
 `shred-epoch-audit` can now opt in to a frozen accepted-repair prefix, independently revalidate its
 provenance, and report raw-only versus raw-plus-repair reconstruction. Promotion and repair-segment

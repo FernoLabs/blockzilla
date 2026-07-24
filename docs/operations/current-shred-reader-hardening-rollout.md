@@ -35,6 +35,13 @@ Do not deploy a candidate until all of these gates pass:
 5. The candidate exposes TVU and repair-socket `SO_RXQ_OVFL` separately.
 6. The segmented repair WAL opens a legacy v2 journal and rolls safely without truncating,
    overwriting, renumbering, or deleting a segment.
+7. The shred pull source fails startup with an empty/wrong ACK WAL for a retained nonzero prefix and
+   resumes at exactly durable ACK + 1 with the incumbent WAL.
+8. `gc.enabled` remains false unless the control-owned sticky retention namespace and one-segment
+   canary in `raw-shred-nas-replication.md` have both passed.
+9. Before stopping the incumbent ACK-driven deleter, measured spool growth times the complete
+   GC-off candidate/rollback window, plus two segment targets and the configured filesystem
+   reserve, fits in current free space. Abort rather than relying on an optimistic cutover time.
 
 The branch-only workflow
 `.github/workflows/current-shred-reader-linux-gate.yml` is deliberately read-only: it tests the
@@ -63,6 +70,25 @@ Expected value for both maxima: `134217728`. Leave `net.core.rmem_default` uncha
 ceiling does not resize an existing socket; a newly started receiver must log an effective receive
 buffer of at least `134217728` after requesting 64 MiB.
 
+## Pull-source compatibility boundary
+
+The recorder/receiver overlap below does not authorize two pull sources. The incumbent and
+candidate exclusively lock the same cumulative-ACK WAL, so their handoff is sequential while raw
+recording remains live. Preserve and reuse the exact incumbent ACK-WAL inode/path and stream
+identity; never initialize a replacement WAL. Stop/fence only the incumbent source, prove its WAL
+and sidecar locks are released, then start the candidate with GC off. Startup must prove the exact
+retained ACK anchor and next sequence before accepting traffic. If it cannot, restart the unchanged
+incumbent rather than moving or deleting ingest data.
+
+The incumbent deleter does not honor the candidate retention lock. It must be fully stopped before
+any new-GC canary. New GC additionally requires a precreated control-owned lock, protected
+non-writable identity parents, and a control-owned mode-`03770` journal leaf. Do not enable it merely
+because ACK replay succeeds. The first candidate uses the checked sidecar Compose, exact incumbent
+external data/status/control volume names, a read-only data mount, and `gc.enabled=false`; this does
+not require another Dokploy application. GC canary restart must be disabled because its explicit
+one-segment process budget resets on restart. That canary is clone-only; do not publish a marker or
+delete a segment in the live journal until a steady-state replacement and rollback boundary exist.
+
 ## Start green before stopping blue
 
 A direct replacement creates wholly unseen slots during restart and is forbidden. Start a second
@@ -81,8 +107,10 @@ receiver process on this same host while the current process remains live:
 
 Before `up`, render the Compose model and verify that the project, container, and volume names all
 contain `shred-reader-green`; abort if the volume resolves to the blue receiver's volume. The
-production Compose stop grace must remain longer than the receiver's 45-second repair shutdown
-ceiling (currently 60 seconds).
+production Compose stop grace must remain longer than the concurrent 20-second forwarding and
+45-second repair shutdown ceilings (currently 60 seconds, leaving roughly 15 seconds for remaining
+orderly joins). `forward_queue_depth` includes queued datagrams plus at most one in-flight datagram;
+a drain timeout must produce a non-clean exit with the unfinished count.
 
 Duplicate shreds during overlap are semantically safe: Hivezilla preserves observations and its
 reconstruction path resolves exact duplicates later. They still double receiver-to-Hivezilla load,

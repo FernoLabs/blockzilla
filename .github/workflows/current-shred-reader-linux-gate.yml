@@ -11,6 +11,8 @@ on:
       - Cargo.toml
       - rust-toolchain.toml
       - docker-compose.hivezilla-shred.dokploy.yml
+      - docker-compose.hivezilla-shred-pull-source.yml
+      - docker-compose.hivezilla-shred-pull-source-gc-canary.yml
       - crates/blockzilla-format/**
       - crates/blockzilla-log-parser/**
       - crates/old-faithful/car-reader/**
@@ -188,6 +190,77 @@ jobs:
           grep -F '127.0.0.1:18791' <<<"$rendered"
           grep -F 'http://127.0.0.1:19190/metrics' <<<"$rendered"
 
+      - name: Validate raw-shred pull examples remain non-deleting v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.gc == {"enabled": false}' \
+            services/hivezilla/config/raw-shred-pull-source.example.json >/dev/null
+          jq -e '.gc == {"enabled": true, "control_uid": 0, "recorder_gid": 10001, "max_retirements_per_process": 1}' \
+            services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json >/dev/null
+          jq -e '.source.protocol == "v2"' \
+            services/hivezilla/config/raw-shred-pull-client.example.json >/dev/null
+
+      - name: Validate the non-deleting pull-source sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose=docker-compose.hivezilla-shred-pull-source.yml
+          if docker compose --file "$compose" config --quiet 2>/dev/null; then
+            echo "pull source accepted missing immutable image, volumes, or credentials" >&2
+            exit 1
+          fi
+          digest="sha256:$(printf '0%.0s' {1..64})"
+          rendered="$(
+            HIVEZILLA_SHRED_IMAGE_DIGEST="$digest" \
+            HIVEZILLA_SHRED_DATA_VOLUME=live-data \
+            HIVEZILLA_SHRED_STATUS_VOLUME=live-status \
+            HIVEZILLA_SHRED_CONTROL_VOLUME=live-control \
+            HIVEZILLA_SHRED_PULL_CONFIG_PATH=./services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_SERVER_CERTIFICATE_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_SERVER_PRIVATE_KEY_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_CLIENT_CA_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_ALLOWED_NODES_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_RECEIPT_PUBLIC_KEY_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+              docker compose --file "$compose" config
+          )"
+          grep -F "ghcr.io/fernolabs/blockzilla-hivezilla-shred@$digest" <<<"$rendered"
+          grep -F 'user: 0:0' <<<"$rendered"
+          grep -A2 -F 'group_add:' <<<"$rendered" | grep -F '10001'
+          grep -F 'name: live-data' <<<"$rendered"
+          grep -F 'name: live-status' <<<"$rendered"
+          grep -F 'name: live-control' <<<"$rendered"
+          grep -F 'DAC_READ_SEARCH' <<<"$rendered"
+          data_mount="$(grep -A4 -F 'source: hivezilla-shred-data' <<<"$rendered")"
+          grep -F 'read_only: true' <<<"$data_mount"
+
+          canary="$(
+            HIVEZILLA_SHRED_IMAGE_DIGEST="$digest" \
+            HIVEZILLA_SHRED_DATA_VOLUME=live-data \
+            HIVEZILLA_SHRED_STATUS_VOLUME=live-status \
+            HIVEZILLA_SHRED_CONTROL_VOLUME=live-control \
+            HIVEZILLA_SHRED_GC_CANARY_DATA_CLONE_VOLUME=clone-data \
+            HIVEZILLA_SHRED_GC_CANARY_STATUS_CLONE_VOLUME=clone-status \
+            HIVEZILLA_SHRED_GC_CANARY_CONTROL_CLONE_VOLUME=clone-control \
+            HIVEZILLA_SHRED_PULL_CONFIG_PATH=./services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json \
+            HIVEZILLA_SHRED_PULL_SERVER_CERTIFICATE_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_SERVER_PRIVATE_KEY_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_CLIENT_CA_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_ALLOWED_NODES_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+            HIVEZILLA_SHRED_PULL_RECEIPT_PUBLIC_KEY_PATH=services/hivezilla/config/raw-shred-pull-source.example.json \
+              docker compose --file "$compose" \
+                --file docker-compose.hivezilla-shred-pull-source-gc-canary.yml config
+          )"
+          grep -F 'restart: "no"' <<<"$canary"
+          grep -F 'name: clone-data' <<<"$canary"
+          grep -F 'name: clone-status' <<<"$canary"
+          grep -F 'name: clone-control' <<<"$canary"
+          canary_data_mount="$(grep -A4 -F 'source: hivezilla-shred-data' <<<"$canary")"
+          if grep -F 'read_only: true' <<<"$canary_data_mount"; then
+            echo "GC canary data mount unexpectedly remained read-only" >&2
+            exit 1
+          fi
+
       - name: Reclaim runner disk for Hivezilla build
         shell: bash
         run: |
@@ -213,8 +286,51 @@ jobs:
             exit 1
           fi
           docker run --rm --entrypoint /usr/local/bin/hivezilla "$image" --help \
-            >/dev/null
+            | grep -F 'serve-shred-spool-pull-source'
           test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          test "$(docker run --rm --entrypoint id "$image" -g)" = 10001
+
+          data_volume="hivezilla-source-data-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          control_volume="hivezilla-source-control-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup_source_fixtures() {
+            docker volume rm --force "$data_volume" "$control_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup_source_fixtures EXIT
+          docker volume create "$data_volume" >/dev/null
+          docker volume create "$control_volume" >/dev/null
+          docker run --rm --user 0:0 \
+            --volume "$data_volume:/fixture" \
+            --entrypoint /bin/sh "$image" -c \
+            'umask 077; printf spool-fixture > /fixture/segment.wal; chown 10001:10001 /fixture/segment.wal; chmod 0600 /fixture/segment.wal'
+          if docker run --rm --user 0:0 --group-add 10001 --cap-drop ALL \
+            --volume "$data_volume:/fixture:ro" \
+            --entrypoint /bin/sh "$image" -c 'grep -qx spool-fixture /fixture/segment.wal'; then
+            echo "capability-free source unexpectedly read recorder-owned mode-0600 data" >&2
+            exit 1
+          fi
+          docker run --rm --user 0:0 --group-add 10001 --cap-drop ALL --cap-add DAC_READ_SEARCH \
+            --security-opt no-new-privileges:true \
+            --volume "$data_volume:/fixture:ro" \
+            --entrypoint /bin/sh "$image" -c 'grep -qx spool-fixture /fixture/segment.wal'
+
+          docker run --rm --user 0:0 \
+            --volume "$control_volume:/control" \
+            --entrypoint /bin/sh "$image" -c \
+            'umask 077; printf wrong-owner > /control/wrong.wal; chown 10001:10001 /control/wrong.wal; printf root-owner > /control/good.wal; chmod 0600 /control/*.wal'
+          if docker run --rm --user 0:0 --group-add 10001 --cap-drop ALL --cap-add DAC_READ_SEARCH \
+            --security-opt no-new-privileges:true \
+            --volume "$control_volume:/control" \
+            --entrypoint /bin/sh "$image" -c 'printf x >> /control/wrong.wal'; then
+            echo "source unexpectedly wrote a recorder-owned mode-0600 ACK WAL" >&2
+            exit 1
+          fi
+          docker run --rm --user 0:0 --group-add 10001 --cap-drop ALL --cap-add DAC_READ_SEARCH \
+            --security-opt no-new-privileges:true \
+            --volume "$control_volume:/control" \
+            --entrypoint /bin/sh "$image" -c \
+            'printf x >> /control/good.wal; umask 077; : > /control/new.tmp; test "$(stat -c %u:%g /control/new.tmp)" = 0:0'
+          cleanup_source_fixtures
+          trap - EXIT
           revision="$(docker inspect \
             --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
             "$image")"

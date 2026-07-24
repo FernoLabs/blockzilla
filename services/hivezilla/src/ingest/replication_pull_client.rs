@@ -1397,6 +1397,16 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_raw_shred_pull_client_example_is_semantically_valid_v2() {
+        let config: PullClientConfig = serde_json::from_str(include_str!(
+            "../../config/raw-shred-pull-client.example.json"
+        ))
+        .expect("decode checked-in raw-shred pull client example");
+        assert_eq!(config.source.protocol, PullClientProtocol::V2);
+        validate_config(&config).expect("validate checked-in raw-shred pull client example");
+    }
+
+    #[test]
     fn sync_hello_must_fit_local_limits_and_beat_the_idle_deadline() {
         let hello = wire::SyncServerHello {
             protocol_version: PULL_SYNC_PROTOCOL_VERSION,

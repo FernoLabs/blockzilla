@@ -1,0 +1,18 @@
+services:
+  hivezilla-shred-pull-source:
+    # A bounded GC canary must never receive a fresh budget through automatic restart.
+    restart: "no"
+    volumes:
+      - hivezilla-shred-data:/data:rw
+
+# Clone-only: never inherit the live external volumes from the base sidecar definition.
+volumes:
+  hivezilla-shred-data:
+    external: true
+    name: ${HIVEZILLA_SHRED_GC_CANARY_DATA_CLONE_VOLUME:?HIVEZILLA_SHRED_GC_CANARY_DATA_CLONE_VOLUME must be a frozen clone}
+  hivezilla-shred-status:
+    external: true
+    name: ${HIVEZILLA_SHRED_GC_CANARY_STATUS_CLONE_VOLUME:?HIVEZILLA_SHRED_GC_CANARY_STATUS_CLONE_VOLUME must be a frozen clone}
+  hivezilla-shred-control:
+    external: true
+    name: ${HIVEZILLA_SHRED_GC_CANARY_CONTROL_CLONE_VOLUME:?HIVEZILLA_SHRED_GC_CANARY_CONTROL_CLONE_VOLUME must be a frozen clone}

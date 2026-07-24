@@ -33,8 +33,9 @@ use crate::grpc_raw::{GrpcRawCommittedReadLimits, GrpcRawLocalGcOutcome};
 use super::{
     ClientCertificateAllowlist, CumulativePrimaryAck, Ed25519ReceiptKeyring, PullSourceGcResult,
     RawReplicationPullCommitObserver, RawReplicationPullLimits, RawReplicationPullService,
-    RawReplicationPullSource, RawReplicationPullSourceConfig, load_mtls_server_material,
-    mtls_only_server_tls_config,
+    RawReplicationPullSource, RawReplicationPullSourceConfig, ShredSpoolPullSource,
+    ShredSpoolPullSourceConfig, SpoolGcNamespacePolicy, SpoolJournalIdentity,
+    load_mtls_server_material, mtls_only_server_tls_config,
 };
 
 pub const PULL_SOURCE_RUNTIME_SCHEMA_VERSION: u32 = 1;
@@ -170,6 +171,49 @@ pub struct PullSourceGcConfig {
     /// Disabled for the canary. When enabled, one oldest proof-covered generation may be retired
     /// only after CommitAck has crossed the local cumulative-ACK WAL fsync boundary.
     pub enabled: bool,
+    /// UID which owns the protected raw-spool namespace and runs the pull source.
+    #[serde(default)]
+    pub control_uid: Option<u32>,
+    /// Recorder group allowed to traverse the namespace and append in the sticky journal leaf.
+    #[serde(default)]
+    pub recorder_gid: Option<u32>,
+}
+
+impl Default for PullSourceGcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            control_uid: None,
+            recorder_gid: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShredSpoolGcConfig {
+    /// Disabled during the first source cutover. No raw-spool segment can be retired while false.
+    pub enabled: bool,
+    /// UID which owns the protected raw-spool namespace and runs the pull source.
+    #[serde(default)]
+    pub control_uid: Option<u32>,
+    /// Recorder group allowed to read/traverse parents and append in the sticky journal leaf.
+    #[serde(default)]
+    pub recorder_gid: Option<u32>,
+    /// Process-wide bound shared by startup, CommitAck, and caught-up maintenance paths.
+    #[serde(default)]
+    pub max_retirements_per_process: usize,
+}
+
+impl Default for ShredSpoolGcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            control_uid: None,
+            recorder_gid: None,
+            max_retirements_per_process: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +226,49 @@ pub struct PullSourceRuntimeLimits {
     pub max_uncompressed_record_bytes: u64,
 }
 
+/// Strict runtime configuration for serving the raw Hetzner shred spool to an outbound NAS pull
+/// client. ACK-driven deletion is a separate, default-off rollout: when explicitly enabled, only
+/// sealed segments strictly before the verified, durable NAS acknowledgement anchor may retire.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShredSpoolPullRuntimeConfig {
+    pub schema_version: u32,
+    pub bind: String,
+    pub tls: PullSourceServerTlsConfig,
+    pub allowed_nodes_file: PathBuf,
+    pub spool_root: PathBuf,
+    pub cluster_id: String,
+    pub origin_node_id: String,
+    pub source_id: String,
+    /// Lowercase hexadecimal, 16-byte source journal identity.
+    pub journal_id: String,
+    /// Recorder status written after the source spool's fsync boundary.
+    pub recorder_status_file: PathBuf,
+    pub cumulative_ack_wal_file: PathBuf,
+    pub ack_status_file: PathBuf,
+    pub expected_primary_id: String,
+    pub trusted_receipt_keys: Vec<PullSourceTrustedReceiptKeyConfig>,
+    /// Legacy live configs omit this field; omission is deliberately non-deleting.
+    #[serde(default)]
+    pub gc: ShredSpoolGcConfig,
+    pub limits: PullSourceRuntimeLimits,
+}
+
+impl fmt::Debug for ShredSpoolPullRuntimeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ShredSpoolPullRuntimeConfig")
+            .field("schema_version", &self.schema_version)
+            .field("bind", &self.bind)
+            .field("tls", &self.tls)
+            .field("stream", &"<configured raw shred stream>")
+            .field("spool_root", &"<redacted>")
+            .field("gc", &self.gc)
+            .field("limits", &self.limits)
+            .finish()
+    }
+}
+
 /// Listener-owning mTLS runtime. The pre-bound socket makes port conflicts fail before the ACK WAL
 /// is opened or initialized.
 pub struct RawReplicationPullServerRuntime {
@@ -191,6 +278,116 @@ pub struct RawReplicationPullServerRuntime {
     service: RawReplicationPullService,
     gc_enabled: bool,
     transport: PullSourceTransportPolicy,
+}
+
+/// Listener-owning runtime for a raw shred spool. It exposes only the mTLS pull protocol and
+/// retires sealed source segments only after a verified, durable NAS acknowledgement.
+pub struct ShredSpoolPullServerRuntime {
+    bind: SocketAddr,
+    listener: std::net::TcpListener,
+    tls: ServerTlsConfig,
+    service: RawReplicationPullService<ShredSpoolPullSource>,
+    gc_enabled: bool,
+    transport: PullSourceTransportPolicy,
+}
+
+impl ShredSpoolPullServerRuntime {
+    pub fn from_config(config: &ShredSpoolPullRuntimeConfig) -> Result<Self> {
+        let (bind, identity) = validate_shred_spool_runtime_config(config)?;
+        let transport = PullSourceTransportPolicy::production().validate()?;
+        let (server_identity, client_ca_root) = load_mtls_server_material(
+            &config.tls.server_certificate_file,
+            &config.tls.server_private_key_file,
+            &config.tls.client_ca_file,
+        )?;
+        let tls = mtls_only_server_tls_config(
+            server_identity,
+            client_ca_root,
+            Duration::from_millis(config.tls.handshake_timeout_ms),
+        )?;
+        let _validated_tls = Server::builder()
+            .tls_config(tls.clone())
+            .context("validate raw-shred pull mTLS policy")?;
+        let allowlist = ClientCertificateAllowlist::load_json(&config.allowed_nodes_file)?;
+        let keyring = load_trusted_receipt_keys(&config.trusted_receipt_keys)?;
+        let listener = reserve_listener(bind)?;
+        let bind = listener
+            .local_addr()
+            .context("inspect raw-shred pull listener")?;
+        let status_publisher =
+            Arc::new(PullAckStatusPublisher::new(config.ack_status_file.clone())?);
+        let mut source = ShredSpoolPullSource::open(ShredSpoolPullSourceConfig {
+            spool_root: config.spool_root.clone(),
+            identity,
+            recorder_status_file: config.recorder_status_file.clone(),
+            cumulative_ack_wal_file: config.cumulative_ack_wal_file.clone(),
+            max_stored_record_bytes: config.limits.max_compressed_record_bytes,
+            max_uncompressed_record_bytes: config.limits.max_uncompressed_record_bytes,
+            batch_limits: RawReplicationPullLimits {
+                max_records: config.limits.max_records,
+                max_compressed_bytes: config.limits.max_batch_compressed_bytes,
+                max_uncompressed_bytes: config.limits.max_batch_uncompressed_bytes,
+            },
+            expected_primary_id: config.expected_primary_id.clone(),
+            trusted_receipt_keys: keyring,
+            ack_control_uid: 0,
+            gc_enabled: config.gc.enabled,
+            gc_max_retirements_per_process: config.gc.max_retirements_per_process,
+            gc_namespace_policy: config.gc.control_uid.zip(config.gc.recorder_gid).map(
+                |(control_uid, recorder_gid)| SpoolGcNamespacePolicy {
+                    control_uid,
+                    recorder_gid,
+                },
+            ),
+        })
+        .map_err(|error| anyhow!("open raw-shred pull source: {error}"))?;
+        if config.gc.enabled {
+            drain_startup_gc_with(|| source.gc_one_acknowledged_generation());
+        }
+        Ok(Self {
+            bind,
+            listener,
+            tls,
+            service: RawReplicationPullService::new(source, allowlist)
+                .with_commit_observer(status_publisher),
+            gc_enabled: config.gc.enabled,
+            transport,
+        })
+    }
+
+    pub fn bind_address(&self) -> SocketAddr {
+        self.bind
+    }
+
+    pub fn gc_enabled(&self) -> bool {
+        self.gc_enabled
+    }
+
+    pub async fn serve_with_shutdown<F>(self, shutdown: F) -> Result<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let bind = self.bind;
+        let transport = self.transport;
+        let listener = tokio::net::TcpListener::from_std(self.listener)
+            .context("attach raw-shred pull listener to Tokio")?;
+        let incoming = futures::stream::try_unfold(listener, move |listener| async move {
+            let (stream, _) = listener.accept().await?;
+            stream.set_nodelay(true)?;
+            configure_pull_source_tcp_keepalive(&stream, transport)?;
+            Ok::<_, std::io::Error>(Some((stream, listener)))
+        });
+        Server::builder()
+            .tls_config(self.tls)
+            .context("install raw-shred pull mTLS policy")?
+            .tcp_nodelay(true)
+            .http2_keepalive_interval(Some(transport.http2_keepalive_interval))
+            .http2_keepalive_timeout(Some(transport.http2_keepalive_timeout))
+            .add_service(self.service.into_tonic_service())
+            .serve_with_incoming_shutdown(incoming, shutdown)
+            .await
+            .with_context(|| format!("serve mTLS raw-shred pull source on {bind}"))
+    }
 }
 
 impl RawReplicationPullServerRuntime {
@@ -438,6 +635,118 @@ fn validate_runtime_config(config: &RawReplicationPullRuntimeConfig) -> Result<S
     Ok(bind)
 }
 
+fn validate_shred_spool_runtime_config(
+    config: &ShredSpoolPullRuntimeConfig,
+) -> Result<(SocketAddr, SpoolJournalIdentity)> {
+    ensure!(
+        config.schema_version == PULL_SOURCE_RUNTIME_SCHEMA_VERSION,
+        "unsupported raw-shred pull-source runtime schema version"
+    );
+    let bind: SocketAddr = config
+        .bind
+        .parse()
+        .context("parse raw-shred pull bind address")?;
+    ensure!(
+        config.tls.handshake_timeout_ms > 0,
+        "raw-shred pull TLS handshake timeout must be nonzero"
+    );
+    ensure!(
+        !config.trusted_receipt_keys.is_empty(),
+        "raw-shred pull source must trust at least one NAS receipt key"
+    );
+    validate_stable_id(&config.cluster_id, "cluster_id")?;
+    validate_stable_id(&config.origin_node_id, "origin_node_id")?;
+    validate_stable_id(&config.source_id, "source_id")?;
+    validate_stable_id(&config.expected_primary_id, "expected_primary_id")?;
+    let journal_id = parse_journal_id(&config.journal_id)?;
+    validate_real_cache_root(&config.spool_root)?;
+    for (label, path) in [
+        ("server certificate", &config.tls.server_certificate_file),
+        ("server private key", &config.tls.server_private_key_file),
+        ("client CA", &config.tls.client_ca_file),
+        ("client allowlist", &config.allowed_nodes_file),
+        ("recorder status", &config.recorder_status_file),
+        ("cumulative ACK WAL", &config.cumulative_ack_wal_file),
+        ("ACK status snapshot", &config.ack_status_file),
+    ] {
+        validate_control_path(path, &config.spool_root, label)?;
+    }
+    for trusted in &config.trusted_receipt_keys {
+        validate_control_path(
+            &trusted.public_key_file,
+            &config.spool_root,
+            "trusted receipt public key",
+        )?;
+    }
+    ensure!(
+        config.ack_status_file != config.cumulative_ack_wal_file,
+        "ACK status snapshot must be separate from the cumulative ACK WAL"
+    );
+    ensure!(
+        (!config.gc.enabled
+            && config.gc.control_uid.is_none()
+            && config.gc.recorder_gid.is_none()
+            && config.gc.max_retirements_per_process == 0)
+            || (config.gc.enabled
+                && config.gc.control_uid == Some(0)
+                && config.gc.recorder_gid.is_some_and(|gid| gid != 0)
+                && config.gc.max_retirements_per_process > 0),
+        "raw-shred GC requires control_uid 0, an explicit recorder_gid, and a nonzero process retirement budget; disabled GC accepts none"
+    );
+    ensure!(
+        config.limits.max_records > 0
+            && config.limits.max_batch_compressed_bytes > 0
+            && config.limits.max_batch_uncompressed_bytes > 0
+            && config.limits.max_compressed_record_bytes > 0
+            && config.limits.max_uncompressed_record_bytes > 0
+            && config.limits.max_compressed_record_bytes
+                <= config.limits.max_batch_compressed_bytes
+            && config.limits.max_uncompressed_record_bytes
+                <= config.limits.max_batch_uncompressed_bytes,
+        "raw-shred pull limits are invalid"
+    );
+    Ok((
+        bind,
+        SpoolJournalIdentity {
+            cluster_id: config.cluster_id.clone(),
+            origin_node_id: config.origin_node_id.clone(),
+            source_id: config.source_id.clone(),
+            journal_id,
+        },
+    ))
+}
+
+fn parse_journal_id(value: &str) -> Result<[u8; 16]> {
+    ensure!(
+        value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+        "raw-shred journal_id must be 32 lowercase hex characters"
+    );
+    let mut output = [0u8; 16];
+    for (index, byte) in output.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&value[offset..offset + 2], 16)
+            .context("parse raw-shred journal_id")?;
+    }
+    Ok(output)
+}
+
+fn validate_stable_id(value: &str, label: &str) -> Result<()> {
+    let mut characters = value.chars();
+    ensure!(
+        characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+            && value.len() <= 64
+            && characters.all(|character| character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '_' | '.')),
+        "raw-shred {label} must be a stable identifier"
+    );
+    Ok(())
+}
+
 fn validate_real_cache_root(path: &Path) -> Result<()> {
     ensure!(
         path.is_absolute() && path != Path::new("/"),
@@ -563,7 +872,9 @@ where
                     );
                     return retired;
                 }
-                PullSourceGcResult::Disabled => return retired,
+                PullSourceGcResult::Disabled | PullSourceGcResult::BudgetExhausted => {
+                    return retired;
+                }
                 PullSourceGcResult::Failed => {
                     tracing::warn!(
                         retired_generations = retired,
@@ -727,6 +1038,19 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    fn runtime_cache_root(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "hivezilla-pull-runtime-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create runtime cache root");
+        root
+    }
+
     fn aligned_json(extra: &str) -> String {
         format!(
             r#"{{
@@ -760,6 +1084,43 @@ mod tests {
         )
     }
 
+    fn shred_aligned_json(gc_field: &str) -> String {
+        format!(
+            r#"{{
+                "schema_version": 1,
+                "bind": "0.0.0.0:18443",
+                "tls": {{
+                    "server_certificate_file": "/run/secrets/source-node_pull_source_certificate",
+                    "server_private_key_file": "/tmp/blockzilla-pull-source/server-private-key.pem",
+                    "client_ca_file": "/run/secrets/pull_client_ca",
+                    "handshake_timeout_ms": 10000
+                }},
+                "allowed_nodes_file": "/run/secrets/pull_allowed_nodes",
+                "spool_root": "/source-data/shreds",
+                "cluster_id": "solana-mainnet",
+                "origin_node_id": "hivezilla-nuremberg",
+                "source_id": "tvu-shreds",
+                "journal_id": "0123456789abcdef0123456789abcdef",
+                "recorder_status_file": "/control/recorder-status.json",
+                "cumulative_ack_wal_file": "/control/shred-pull-cumulative-ack.wal",
+                "ack_status_file": "/control/shred-pull-ack-status.json",
+                "expected_primary_id": "blockzilla-primary",
+                "trusted_receipt_keys": [{{
+                    "key_id": "blockzilla-receiver-2026-07",
+                    "public_key_file": "/run/secrets/blockzilla_receipt_public_key"
+                }}],
+                "limits": {{
+                    "max_records": 1024,
+                    "max_batch_compressed_bytes": 134217728,
+                    "max_batch_uncompressed_bytes": 134217728,
+                    "max_compressed_record_bytes": 2097152,
+                    "max_uncompressed_record_bytes": 2097152
+                }}
+                {gc_field}
+            }}"#
+        )
+    }
+
     #[test]
     fn strict_schema_matches_standalone_deployment_paths() {
         let config: RawReplicationPullRuntimeConfig =
@@ -773,6 +1134,102 @@ mod tests {
         );
         assert!(!config.gc.enabled);
         assert_eq!(config.limits.max_records, 1);
+    }
+
+    #[test]
+    fn shred_runtime_omitted_gc_defaults_off_and_requires_explicit_enablement() {
+        let root = runtime_cache_root("shred-gc-config");
+        let mut omitted: ShredSpoolPullRuntimeConfig =
+            serde_json::from_str(&shred_aligned_json("")).expect("decode legacy shred config");
+        omitted.spool_root = root.clone();
+        assert!(!omitted.gc.enabled);
+        validate_shred_spool_runtime_config(&omitted).expect("validate default-off shred config");
+
+        let mut enabled: ShredSpoolPullRuntimeConfig = serde_json::from_str(&shred_aligned_json(
+            ", \"gc\": { \"enabled\": true, \"control_uid\": 0, \"recorder_gid\": 10001, \"max_retirements_per_process\": 1 }",
+        ))
+        .expect("decode explicitly enabled shred config");
+        enabled.spool_root = root.clone();
+        assert!(enabled.gc.enabled);
+        assert_eq!(enabled.gc.control_uid, Some(0));
+        assert_eq!(enabled.gc.recorder_gid, Some(10001));
+        assert_eq!(enabled.gc.max_retirements_per_process, 1);
+        validate_shred_spool_runtime_config(&enabled)
+            .expect("validate explicitly enabled shred config");
+
+        let mut missing_ids: ShredSpoolPullRuntimeConfig =
+            serde_json::from_str(&shred_aligned_json(
+                ", \"gc\": { \"enabled\": true, \"max_retirements_per_process\": 1 }",
+            ))
+            .expect("decode shred config missing GC namespace IDs");
+        missing_ids.spool_root = root.clone();
+        assert!(validate_shred_spool_runtime_config(&missing_ids).is_err());
+
+        let mut stray_id: ShredSpoolPullRuntimeConfig = serde_json::from_str(&shred_aligned_json(
+            ", \"gc\": { \"enabled\": false, \"control_uid\": 0 }",
+        ))
+        .expect("decode disabled shred GC config with a stray namespace ID");
+        stray_id.spool_root = root.clone();
+        assert!(validate_shred_spool_runtime_config(&stray_id).is_err());
+
+        let mut nonroot_control: ShredSpoolPullRuntimeConfig =
+            serde_json::from_str(&shred_aligned_json(
+                ", \"gc\": { \"enabled\": true, \"control_uid\": 10002, \"recorder_gid\": 10001, \"max_retirements_per_process\": 1 }",
+            ))
+            .expect("decode non-root shred GC control config");
+        nonroot_control.spool_root = root.clone();
+        assert!(validate_shred_spool_runtime_config(&nonroot_control).is_err());
+
+        let mut root_group: ShredSpoolPullRuntimeConfig =
+            serde_json::from_str(&shred_aligned_json(
+                ", \"gc\": { \"enabled\": true, \"control_uid\": 0, \"recorder_gid\": 0, \"max_retirements_per_process\": 1 }",
+            ))
+            .expect("decode root-group shred GC config");
+        root_group.spool_root = root.clone();
+        assert!(validate_shred_spool_runtime_config(&root_group).is_err());
+        fs::remove_dir_all(root).expect("remove runtime cache root");
+    }
+
+    #[test]
+    fn checked_in_raw_shred_pull_source_example_is_semantically_valid_and_non_deleting() {
+        let root = runtime_cache_root("checked-in-shred-source");
+        let rendered = include_str!("../../config/raw-shred-pull-source.example.json")
+            .replace("__SHRED_JOURNAL_ID__", "0123456789abcdef0123456789abcdef");
+        let mut config: ShredSpoolPullRuntimeConfig =
+            serde_json::from_str(&rendered).expect("decode checked-in raw-shred source example");
+        config.spool_root = root.clone();
+        assert!(!config.gc.enabled);
+        assert_eq!(config.gc.max_retirements_per_process, 0);
+        validate_shred_spool_runtime_config(&config)
+            .expect("validate checked-in raw-shred source example");
+
+        let canary = include_str!("../../config/raw-shred-pull-source-gc-canary.example.json")
+            .replace("__SHRED_JOURNAL_ID__", "0123456789abcdef0123456789abcdef");
+        let mut canary: ShredSpoolPullRuntimeConfig = serde_json::from_str(&canary)
+            .expect("decode checked-in raw-shred source GC canary example");
+        canary.spool_root = root.clone();
+        assert!(canary.gc.enabled);
+        assert_eq!(canary.gc.control_uid, Some(0));
+        assert_eq!(canary.gc.recorder_gid, Some(10001));
+        assert_eq!(canary.gc.max_retirements_per_process, 1);
+        validate_shred_spool_runtime_config(&canary)
+            .expect("validate checked-in raw-shred source GC canary example");
+        fs::remove_dir_all(root).expect("remove runtime cache root");
+    }
+
+    #[test]
+    fn raw_replication_gc_config_remains_backward_compatible() {
+        let root = runtime_cache_root("raw-gc-config");
+        let mut config: RawReplicationPullRuntimeConfig =
+            serde_json::from_str(&aligned_json("").replace(
+                r#""gc": { "enabled": false }"#,
+                r#""gc": { "enabled": true }"#,
+            ))
+            .expect("decode legacy raw replication GC config");
+        config.cache_root = root.clone();
+        assert!(config.gc.enabled);
+        validate_runtime_config(&config).expect("validate legacy raw replication GC config");
+        fs::remove_dir_all(root).expect("remove runtime cache root");
     }
 
     #[test]
@@ -943,6 +1400,18 @@ mod tests {
         });
         assert_eq!(retired, 0);
         assert_eq!(calls, 1);
+
+        let mut canary_outcomes = VecDeque::from([
+            PullSourceGcResult::Completed(GrpcRawLocalGcOutcome::Retired {
+                generation: PathBuf::from("redacted-canary"),
+                through_sequence: 40,
+            }),
+            PullSourceGcResult::BudgetExhausted,
+        ]);
+        let retired =
+            drain_startup_gc_with(|| canary_outcomes.pop_front().expect("bounded outcome"));
+        assert_eq!(retired, 1);
+        assert!(canary_outcomes.is_empty());
     }
 
     #[test]

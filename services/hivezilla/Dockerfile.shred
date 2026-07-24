@@ -47,7 +47,8 @@ RUN apt-get update \
         libstdc++6 \
         libudev1 \
         zlib1g \
-    && useradd --create-home --uid 10001 app \
+    && groupadd --gid 10001 app \
+    && useradd --create-home --uid 10001 --gid 10001 app \
     && install --directory --owner app --group app /data /status \
     && rm -rf /var/lib/apt/lists/*
 
