@@ -13,6 +13,8 @@ pub mod replication_pull_source;
 pub mod replication_sender;
 pub mod replication_service;
 pub mod replication_wire;
+#[cfg(feature = "shred-reconstruction")]
+pub mod shred_compact;
 pub mod shred_udp;
 pub mod spool;
 
@@ -29,5 +31,7 @@ pub use replication_pull_source::*;
 pub use replication_sender::*;
 pub use replication_service::*;
 pub use replication_wire::*;
+#[cfg(feature = "shred-reconstruction")]
+pub use shred_compact::*;
 pub use shred_udp::*;
 pub use spool::*;

@@ -1,8 +1,7 @@
 services:
   hivezilla-shred:
-    build:
-      context: .
-      dockerfile: services/hivezilla/Dockerfile.shred
+    image: ${HIVEZILLA_SHRED_IMAGE_REPOSITORY:-ghcr.io/fernolabs/blockzilla-hivezilla-shred}@${HIVEZILLA_SHRED_IMAGE_DIGEST:?HIVEZILLA_SHRED_IMAGE_DIGEST must be an immutable sha256 digest}
+    pull_policy: always
     command:
       - record-shred-udp
       - --config
@@ -16,26 +15,26 @@ services:
     network_mode: host
     # Fail closed at the configured spool limit; do not crash-loop against a full journal.
     restart: "no"
-    stop_grace_period: 15s
+    stop_grace_period: 90s
     volumes:
       - hivezilla-shred-data:/data
       - hivezilla-shred-status:/status
+      - ${HIVEZILLA_INGEST_CONFIG_PATH:-./services/hivezilla/config/ingest-shred-udp.example.json}:/etc/hivezilla/ingest.json:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
 
   shred-status-collector:
-    build:
-      context: .
-      dockerfile: services/hivezilla/Dockerfile.shred-status
+    image: ${HIVEZILLA_SHRED_STATUS_IMAGE_REPOSITORY:-ghcr.io/fernolabs/blockzilla-hivezilla-shred-status}@${HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST:?HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST must be an immutable sha256 digest}
+    pull_policy: always
     command:
       - --listen
-      - 127.0.0.1:18790
+      - ${SHRED_STATUS_LISTEN_ADDR:-127.0.0.1:18790}
       - --hivezilla-status-file
       - /recorder-status/recorder.json
       - --receiver-metrics-url
-      - http://127.0.0.1:19090/metrics
+      - http://${SHRED_READER_METRICS_ADDR:-127.0.0.1:19090}/metrics
       - --output-file
       - /public-status/public.json
       - --cors-origin

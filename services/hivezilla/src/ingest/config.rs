@@ -17,6 +17,9 @@ pub const REPLICATION_WIRE_ENVELOPE_RESERVE_BYTES: u64 = 64 * 1024;
 pub const REPLICATION_RECORD_MEMORY_RESERVE_BYTES: u64 = 64 * 1024;
 /// The replication cursor verifies one bounded raw protobuf digest without Prost-decoding it.
 pub const REPLICATION_RAW_VERIFY_MEMORY_MULTIPLIER: u64 = 1;
+/// Public-safe source labels are deliberately bounded so recorder status cannot become an
+/// unbounded peer inventory.
+pub const MAX_SHRED_UDP_DURABLE_SOURCES: usize = 4;
 
 /// Complete configuration for redundant live ingestion.
 ///
@@ -168,6 +171,10 @@ pub enum SourceInputConfig {
         interface: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth: Option<SourceAuthConfig>,
+        /// Optional operator-defined names for exact UDP senders. These names are used only for
+        /// post-fsync status attribution; unnamed senders remain accepted and anonymous.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        durable_source_allowlist: Vec<ShredUdpDurableSourceConfig>,
     },
     ShredQuic {
         endpoint: String,
@@ -177,6 +184,15 @@ pub enum SourceInputConfig {
         reconnect: ReconnectConfig,
         resume_overlap_events: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShredUdpDurableSourceConfig {
+    /// Short public-safe name such as `blue` or `green`.
+    pub name: String,
+    /// Exact UDP source IP and port. It is never copied into public status.
+    pub address: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1087,6 +1103,7 @@ impl SourceInputConfig {
                 multicast_group,
                 interface,
                 auth,
+                durable_source_allowlist,
             } => {
                 validate_socket_addr(bind, &format!("{prefix}.bind"), issues);
                 validate_udp_multicast(
@@ -1103,6 +1120,11 @@ impl SourceInputConfig {
                         ));
                     }
                 }
+                validate_shred_udp_durable_sources(
+                    durable_source_allowlist,
+                    &format!("{prefix}.durable_source_allowlist"),
+                    issues,
+                );
             }
             Self::ShredQuic {
                 endpoint,
@@ -1337,6 +1359,50 @@ fn validate_stable_id(value: &str, field: &str, issues: &mut Vec<String>) {
         issues.push(format!(
             "{field} must be 1-64 ASCII characters, start alphanumeric, and contain only alphanumeric, '-', '_' or '.'"
         ));
+    }
+}
+
+fn validate_shred_udp_durable_sources(
+    sources: &[ShredUdpDurableSourceConfig],
+    prefix: &str,
+    issues: &mut Vec<String>,
+) {
+    if sources.len() > MAX_SHRED_UDP_DURABLE_SOURCES {
+        issues.push(format!(
+            "{prefix} may contain at most {MAX_SHRED_UDP_DURABLE_SOURCES} entries"
+        ));
+    }
+    let mut names = HashSet::with_capacity(sources.len());
+    let mut addresses = HashSet::with_capacity(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        let entry = format!("{prefix}[{index}]");
+        let mut characters = source.name.chars();
+        let first_is_letter = characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic());
+        let rest_is_public_safe = characters
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+        if source.name.len() > 32 || !first_is_letter || !rest_is_public_safe {
+            issues.push(format!(
+                "{entry}.name must be 1-32 ASCII characters, start with a letter, and contain only alphanumeric, '-' or '_'"
+            ));
+        }
+        if !names.insert(source.name.as_str()) {
+            issues.push(format!(
+                "{entry}.name duplicates durable source name {:?}",
+                source.name
+            ));
+        }
+        match SocketAddr::from_str(&source.address) {
+            Ok(address) => {
+                if !addresses.insert(address) {
+                    issues.push(format!(
+                        "{entry}.address duplicates another durable source address"
+                    ));
+                }
+            }
+            Err(_) => issues.push(format!("{entry}.address must be an IP socket address")),
+        }
     }
 }
 
@@ -1841,6 +1907,41 @@ mod tests {
         let error = validation_text(&value);
         assert!(error.contains("start alphanumeric"));
         assert!(error.contains("duplicates source id"));
+    }
+
+    #[test]
+    fn shred_udp_durable_source_allowlist_is_optional_and_strictly_bounded() {
+        let legacy = decode_and_validate(&valid_primary_json()).expect("legacy UDP config");
+        let SourceInputConfig::ShredUdp {
+            durable_source_allowlist,
+            ..
+        } = &legacy.sources[1].input
+        else {
+            panic!("second source must be shred UDP");
+        };
+        assert!(durable_source_allowlist.is_empty());
+
+        let mut valid = valid_primary_json();
+        valid["sources"][1]["input"]["durable_source_allowlist"] = json!([
+            {"name": "blue", "address": "127.0.0.1:18004"},
+            {"name": "green", "address": "127.0.0.1:18104"}
+        ]);
+        decode_and_validate(&valid).expect("bounded named UDP senders");
+
+        let mut invalid = valid_primary_json();
+        invalid["sources"][1]["input"]["durable_source_allowlist"] = json!([
+            {"name": "green", "address": "127.0.0.1:18104"},
+            {"name": "green", "address": "127.0.0.1:18105"},
+            {"name": "looks.like.ip", "address": "not-an-address"},
+            {"name": "third", "address": "127.0.0.1:18104"},
+            {"name": "fourth", "address": "127.0.0.1:18106"}
+        ]);
+        let error = validation_text(&invalid);
+        assert!(error.contains("may contain at most 4 entries"));
+        assert!(error.contains("duplicates durable source name"));
+        assert!(error.contains("contain only alphanumeric"));
+        assert!(error.contains("must be an IP socket address"));
+        assert!(error.contains("duplicates another durable source address"));
     }
 
     #[test]

@@ -6,9 +6,11 @@ mod metrics;
 mod receiver;
 pub mod repair_runtime;
 mod repair_service;
+mod repair_socket;
 pub mod repair_tracker;
 mod repair_trust_store;
 pub mod repair_wal;
+mod repair_wal_worker;
 pub mod repair_wire;
 
 use anyhow::Result;

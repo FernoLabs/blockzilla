@@ -1,4 +1,5 @@
 use std::{
+    io,
     net::{IpAddr, SocketAddr, TcpListener, ToSocketAddrs, UdpSocket},
     sync::{
         Arc,
@@ -8,6 +9,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(target_os = "linux")]
+use socket2::SockAddrStorage;
 use socket2::{Domain, Protocol as SocketProtocol, SockAddr, Socket, Type};
 use solana_gossip::{
     cluster_info::ClusterInfo,
@@ -25,7 +28,7 @@ use tokio::{
     sync::{mpsc, watch},
     time::MissedTickBehavior,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     config::{Config, public_ipv4},
@@ -36,8 +39,66 @@ use crate::{
 };
 
 const MAX_UDP_DATAGRAM_SIZE: usize = 2_048;
+const TVU_SOCKET_DRAIN_BURST_MAX_RECORDS: usize = 64;
+const TVU_SOCKET_OVERFLOW_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const FORWARD_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
-const REPAIR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(25);
+// Exceeds repair_service's 40-second attempt safeguard so the inner path can report any exact
+// staged-datagram remainder before this raw-capture-independent final bound is reached.
+const REPAIR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+
+#[derive(Clone, Copy, Debug)]
+struct ReceivedTvuDatagram {
+    length: usize,
+    source: SocketAddr,
+    socket_rxq_overflow: Option<u32>,
+    truncated: bool,
+}
+
+struct TvuSocketOverflowTracker {
+    previous: u32,
+    unlogged: u64,
+    total: u64,
+    last_log: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TvuSocketOverflowUpdate {
+    dropped: u64,
+    log: Option<(u64, u64)>,
+}
+
+impl TvuSocketOverflowTracker {
+    fn new() -> Self {
+        Self {
+            previous: 0,
+            unlogged: 0,
+            total: 0,
+            // Report the first observed overflow immediately, then aggregate subsequent loss.
+            last_log: Instant::now()
+                .checked_sub(TVU_SOCKET_OVERFLOW_LOG_INTERVAL)
+                .unwrap_or_else(Instant::now),
+        }
+    }
+
+    fn observe(&mut self, current: u32, now: Instant) -> TvuSocketOverflowUpdate {
+        let dropped = crate::loss_telemetry::socket_rxq_overflow_delta(current, self.previous);
+        self.previous = current;
+        if dropped == 0 {
+            return TvuSocketOverflowUpdate::default();
+        }
+
+        self.total = self.total.saturating_add(dropped);
+        self.unlogged = self.unlogged.saturating_add(dropped);
+        let log = (now.saturating_duration_since(self.last_log)
+            >= TVU_SOCKET_OVERFLOW_LOG_INTERVAL)
+            .then_some((self.unlogged, self.total));
+        if log.is_some() {
+            self.unlogged = 0;
+            self.last_log = now;
+        }
+        TvuSocketOverflowUpdate { dropped, log }
+    }
+}
 
 struct ShredForwarder {
     socket: tokio::net::UdpSocket,
@@ -52,14 +113,39 @@ struct ReceivePipeline {
 }
 
 impl ShredForwarder {
-    async fn bind(bind_ip: IpAddr, targets: Vec<SocketAddr>) -> Result<Option<Self>> {
+    async fn bind(
+        default_bind_ip: IpAddr,
+        configured_bind_addr: Option<SocketAddr>,
+        targets: Vec<SocketAddr>,
+    ) -> Result<Option<Self>> {
         if targets.is_empty() {
+            if configured_bind_addr.is_some() {
+                bail!(
+                    "SHRED_FORWARD_BIND_ADDR requires at least one SHRED_FORWARD_ADDRS destination"
+                );
+            }
             return Ok(None);
         }
-        let socket = tokio::net::UdpSocket::bind(SocketAddr::new(bind_ip, 0))
+        let bind_addr = configured_bind_addr.unwrap_or(SocketAddr::new(default_bind_ip, 0));
+        if configured_bind_addr.is_some() && bind_addr.port() == 0 {
+            bail!("SHRED_FORWARD_BIND_ADDR must use a nonzero fixed source port");
+        }
+        if targets
+            .iter()
+            .any(|target| target.is_ipv4() != bind_addr.is_ipv4())
+        {
+            bail!(
+                "forwarding bind address {bind_addr} and every destination must use the same IP address family"
+            );
+        }
+        let socket = tokio::net::UdpSocket::bind(bind_addr)
             .await
-            .context("failed to bind shred forwarding socket")?;
+            .with_context(|| format!("failed to bind shred forwarding socket at {bind_addr}"))?;
         Ok(Some(Self { socket, targets }))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
     }
 
     async fn forward(&self, payload: &[u8], metrics: &Metrics) {
@@ -80,6 +166,14 @@ enum FinishedTask {
     Receiver,
     Metrics,
     MetricsLogger,
+}
+
+struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 pub async fn run(config: Config) -> Result<()> {
@@ -111,7 +205,8 @@ pub async fn run(config: Config) -> Result<()> {
         .with_context(|| format!("failed to bind gossip UDP socket at {gossip_bind}"))?;
     let gossip_tcp = TcpListener::bind(gossip_bind)
         .with_context(|| format!("failed to bind gossip TCP socket at {gossip_bind}"))?;
-    let (tvu_udp, effective_recv_buffer) = bind_tvu_socket(tvu_bind, config.udp_recv_buffer_bytes)?;
+    let (tvu_udp, effective_recv_buffer, tvu_socket_rxq_overflow_supported) =
+        bind_tvu_socket(tvu_bind, config.udp_recv_buffer_bytes)?;
 
     let (gossip_udp, gossip_tcp, tvu_udp) = if config.require_reachability {
         let verification_entrypoints = entrypoints.clone();
@@ -159,8 +254,17 @@ pub async fn run(config: Config) -> Result<()> {
     // example, the metrics port is already occupied, returning here is then a clean exit rather
     // than a process kept alive by a detached gossip thread.
     let metrics = Arc::new(Metrics::new(config.dedup_capacity)?);
-    let forwarder =
-        ShredForwarder::bind(config.bind_ip, config.shred_forward_addrs.clone()).await?;
+    metrics.set_tvu_socket_rxq_overflow_supported(tvu_socket_rxq_overflow_supported);
+    let forwarder = ShredForwarder::bind(
+        config.bind_ip,
+        config.shred_forward_bind_addr,
+        config.shred_forward_addrs.clone(),
+    )
+    .await?;
+    let forward_sender_addr = forwarder
+        .as_ref()
+        .map(ShredForwarder::local_addr)
+        .transpose()?;
     let service_state = ServiceState {
         metrics: metrics.clone(),
         cluster_info: cluster_info.clone(),
@@ -170,6 +274,7 @@ pub async fn run(config: Config) -> Result<()> {
         tvu_port: config.tvu_port,
         shred_version,
         forward_targets: config.shred_forward_addrs.len(),
+        forward_sender_addr: forward_sender_addr.map(|address| address.to_string()),
         repair_enabled: config.repair_enabled,
     };
     let metrics_listener = tokio::net::TcpListener::bind(config.metrics_addr)
@@ -197,8 +302,10 @@ pub async fn run(config: Config) -> Result<()> {
         shred_version,
         requested_udp_recv_buffer = config.udp_recv_buffer_bytes,
         effective_udp_recv_buffer = effective_recv_buffer,
+        tvu_socket_rxq_overflow_supported,
         metrics_addr = %config.metrics_addr,
         forward_targets = ?config.shred_forward_addrs,
+        forward_sender_addr = ?forward_sender_addr,
         "gossip and TVU receiver started"
     );
 
@@ -220,16 +327,23 @@ pub async fn run(config: Config) -> Result<()> {
             rpc_url: config.repair_rpc_url.clone(),
             wal_path: config.repair_wal_path.clone(),
             wal_max_bytes: config.repair_wal_max_bytes,
+            wal_total_warning_bytes: config.repair_wal_total_warning_bytes,
+            wal_total_critical_bytes: config.repair_wal_total_critical_bytes,
+            wal_total_hard_bytes: config.repair_wal_total_hard_bytes,
+            wal_filesystem_reserve_bytes: config.repair_wal_filesystem_reserve_bytes,
             max_peers: config.repair_max_peers,
             shred_version,
+            observation_queue_capacity: config.repair_observation_queue_capacity,
+            udp_recv_buffer_bytes: config.repair_udp_recv_buffer_bytes,
+            response_queue_capacity: config.repair_response_queue_capacity,
         };
         let repair_cluster_info = cluster_info.clone();
         let repair_metrics = metrics.clone();
         let repair_shutdown = shutdown_rx.clone();
+        // Repair is intentionally outside the receiver's terminal select. It supervises bounded
+        // attempts internally; even its terminal failure disables only this side path because raw
+        // forwarding is the primary durability boundary.
         let supervisor = tokio::spawn(async move {
-            // Repair is intentionally outside the receiver's terminal select. Any RPC, trust,
-            // transport, or repair-WAL failure disables only this side path; raw forwarding must
-            // remain live because it is the primary durability boundary.
             let worker = tokio::spawn(repair_service::run(
                 repair_config,
                 repair_cluster_info,
@@ -237,24 +351,34 @@ pub async fn run(config: Config) -> Result<()> {
                 repair_rx,
                 repair_shutdown.clone(),
             ));
+            // Aborting this monitor during bounded process shutdown must also abort the actual
+            // supervisor rather than detach it with the repair WAL still open.
+            let _worker_guard = AbortTaskOnDrop(worker.abort_handle());
             match worker.await {
-                Ok(Ok(())) if *repair_shutdown.borrow() => {}
+                Ok(Ok(())) if *repair_shutdown.borrow() => Ok(()),
                 Ok(Ok(())) => {
-                    repair_metrics.record_repair_error();
-                    warn!(
-                        "bounded repair stopped unexpectedly; raw capture and forwarding continue"
+                    repair_metrics.record_repair_runtime_error(
+                        "bounded repair supervisor stopped unexpectedly",
                     );
+                    warn!(
+                        "bounded repair supervisor stopped unexpectedly; raw capture remains live"
+                    );
+                    bail!("bounded repair supervisor stopped unexpectedly")
                 }
                 Ok(Err(error)) => {
-                    repair_metrics.record_repair_error();
-                    warn!(%error, "bounded repair disabled; raw capture and forwarding continue");
+                    let detail = format!("{error:#}");
+                    repair_metrics.record_repair_runtime_error(&detail);
+                    warn!(error = %detail, "bounded repair supervisor failed; raw capture remains live");
+                    Err(error).context("bounded repair supervisor failed")
                 }
                 Err(error) => {
-                    repair_metrics.record_repair_error();
-                    warn!(%error, "bounded repair task panicked; raw capture and forwarding continue");
+                    repair_metrics.record_repair_runtime_error(&format!(
+                        "bounded repair supervisor panicked: {error}"
+                    ));
+                    warn!(%error, "bounded repair supervisor panicked; raw capture remains live");
+                    Err(anyhow!(error)).context("bounded repair supervisor task panicked")
                 }
             }
-            repair_metrics.mark_repair_inactive();
         });
         (Some(repair_tx), Some(supervisor))
     } else {
@@ -313,19 +437,49 @@ pub async fn run(config: Config) -> Result<()> {
             task_result("metrics logger", log_task.await, false),
         );
     }
-    if let Some(mut repair_task) = repair_task
-        && tokio::time::timeout(REPAIR_SHUTDOWN_TIMEOUT, &mut repair_task)
-            .await
-            .is_err()
-    {
-        repair_task.abort();
-        let _ = repair_task.await;
-        metrics.record_repair_error();
-        metrics.mark_repair_inactive();
-        warn!(
-            timeout_seconds = REPAIR_SHUTDOWN_TIMEOUT.as_secs(),
-            "timed out stopping bounded repair; raw capture was already stopped"
-        );
+    if let Some(mut repair_task) = repair_task {
+        match tokio::time::timeout(REPAIR_SHUTDOWN_TIMEOUT, &mut repair_task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                let detail = format!("{error:#}");
+                metrics.record_repair_runtime_error(&detail);
+                warn!(error = %detail, "bounded repair supervisor failed; raw capture remained independent");
+                record_first_error(
+                    &mut result,
+                    Err(error).context("bounded repair supervisor failed during receiver shutdown"),
+                );
+            }
+            Ok(Err(error)) => {
+                metrics.record_repair_runtime_error(&format!(
+                    "bounded repair supervisor panicked: {error}"
+                ));
+                warn!(%error, "bounded repair supervisor panicked; raw capture remained independent");
+                record_first_error(
+                    &mut result,
+                    Err(anyhow!(error))
+                        .context("bounded repair supervisor panicked during receiver shutdown"),
+                );
+            }
+            Err(_) => {
+                repair_task.abort();
+                let _ = repair_task.await;
+                metrics.record_repair_runtime_error(
+                    "bounded repair supervisor timed out during shutdown",
+                );
+                metrics.mark_repair_inactive();
+                warn!(
+                    timeout_seconds = REPAIR_SHUTDOWN_TIMEOUT.as_secs(),
+                    "timed out stopping bounded repair; raw capture was already stopped"
+                );
+                record_first_error(
+                    &mut result,
+                    Err(anyhow!(
+                        "bounded repair supervisor did not stop within the {}-second receiver shutdown timeout",
+                        REPAIR_SHUTDOWN_TIMEOUT.as_secs()
+                    )),
+                );
+            }
+        }
     }
 
     let gossip_result = tokio::task::spawn_blocking(move || gossip_service.join())
@@ -474,14 +628,24 @@ fn bootstrap_network(
     )
 }
 
-fn bind_tvu_socket(address: SocketAddr, requested_buffer: usize) -> Result<(UdpSocket, usize)> {
+fn bind_tvu_socket(
+    address: SocketAddr,
+    requested_buffer: usize,
+) -> Result<(UdpSocket, usize, bool)> {
     let domain = Domain::for_address(address);
     let socket = Socket::new(domain, Type::DGRAM, Some(SocketProtocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(target_os = "linux")]
-    if let Err(error) = crate::loss_telemetry::enable_socket_rxq_overflow(&socket) {
-        warn!(%error, "kernel socket-overflow telemetry could not be enabled");
-    }
+    let socket_rxq_overflow_supported =
+        match crate::loss_telemetry::enable_socket_rxq_overflow(&socket) {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(%error, "kernel socket-overflow telemetry could not be enabled");
+                false
+            }
+        };
+    #[cfg(not(target_os = "linux"))]
+    let socket_rxq_overflow_supported = false;
     if let Err(error) = socket.set_recv_buffer_size(requested_buffer) {
         warn!(
             requested_buffer,
@@ -491,7 +655,139 @@ fn bind_tvu_socket(address: SocketAddr, requested_buffer: usize) -> Result<(UdpS
     }
     socket.bind(&SockAddr::from(address))?;
     let effective_buffer = socket.recv_buffer_size()?;
-    Ok((socket.into(), effective_buffer))
+    Ok((
+        socket.into(),
+        effective_buffer,
+        socket_rxq_overflow_supported,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+async fn receive_tvu_datagram(
+    socket: &tokio::net::UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<ReceivedTvuDatagram> {
+    socket
+        .async_io(tokio::io::Interest::READABLE, || {
+            recvmsg_tvu_datagram(socket, buffer)
+        })
+        .await
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn receive_tvu_datagram(
+    socket: &tokio::net::UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<ReceivedTvuDatagram> {
+    let (length, source) = socket.recv_from(buffer).await?;
+    Ok(ReceivedTvuDatagram {
+        length,
+        source,
+        socket_rxq_overflow: None,
+        truncated: false,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn try_receive_tvu_datagram(
+    socket: &tokio::net::UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<ReceivedTvuDatagram> {
+    socket.try_io(tokio::io::Interest::READABLE, || {
+        recvmsg_tvu_datagram(socket, buffer)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_receive_tvu_datagram(
+    socket: &tokio::net::UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<ReceivedTvuDatagram> {
+    let (length, source) = socket.try_recv_from(buffer)?;
+    Ok(ReceivedTvuDatagram {
+        length,
+        source,
+        socket_rxq_overflow: None,
+        truncated: false,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn recvmsg_tvu_datagram(
+    socket: &tokio::net::UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<ReceivedTvuDatagram> {
+    use std::{mem, os::fd::AsRawFd, ptr};
+
+    let mut io_vector = libc::iovec {
+        iov_base: buffer.as_mut_ptr().cast(),
+        iov_len: buffer.len(),
+    };
+    let mut source_storage = SockAddrStorage::zeroed();
+    // A usize array gives cmsghdr its required native alignment. SO_RXQ_OVFL contains one u32;
+    // the extra space tolerates native padding without allocating for each datagram.
+    let mut control = [0usize; 8];
+    // SAFETY: all pointers in the message reference writable storage that remains alive for the
+    // syscall. MSG_DONTWAIT preserves Tokio's readiness contract, while MSG_TRUNC lets the
+    // caller reject an oversized datagram without accepting a partial shred.
+    let mut message = unsafe { mem::zeroed::<libc::msghdr>() };
+    let source_address = unsafe { source_storage.view_as::<libc::sockaddr_storage>() };
+    message.msg_name = ptr::from_mut(source_address).cast::<libc::c_void>();
+    message.msg_namelen = source_storage.size_of();
+    message.msg_iov = &mut io_vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = mem::size_of_val(&control);
+    let received = unsafe {
+        libc::recvmsg(
+            socket.as_raw_fd(),
+            &mut message,
+            libc::MSG_DONTWAIT | libc::MSG_TRUNC,
+        )
+    };
+    if received < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let length = usize::try_from(received)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative TVU UDP length"))?;
+    let truncated = length > buffer.len() || message.msg_flags & libc::MSG_TRUNC != 0;
+
+    let mut socket_rxq_overflow = None;
+    if message.msg_flags & libc::MSG_CTRUNC == 0 {
+        // SAFETY: recvmsg initialized the control region and its reported length. The CMSG
+        // helpers bounds-check each header, and the native u32 payload is copied unaligned.
+        unsafe {
+            let mut header = libc::CMSG_FIRSTHDR(&message);
+            while !header.is_null() {
+                if (*header).cmsg_level == libc::SOL_SOCKET
+                    && (*header).cmsg_type == libc::SO_RXQ_OVFL
+                    && (*header).cmsg_len
+                        >= libc::CMSG_LEN(mem::size_of::<u32>() as libc::c_uint) as usize
+                {
+                    socket_rxq_overflow =
+                        Some(ptr::read_unaligned(libc::CMSG_DATA(header).cast::<u32>()));
+                    break;
+                }
+                header = libc::CMSG_NXTHDR(&message, header);
+            }
+        }
+    }
+
+    // SAFETY: recvmsg initialized the address family, storage, and length for this datagram.
+    let source = unsafe { SockAddr::new(source_storage, message.msg_namelen) }
+        .as_socket()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "TVU UDP datagram had a non-IP source address",
+            )
+        })?;
+    Ok(ReceivedTvuDatagram {
+        length,
+        source,
+        socket_rxq_overflow,
+        truncated,
+    })
 }
 
 async fn receive_shreds(
@@ -504,77 +800,168 @@ async fn receive_shreds(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut buffer = [0u8; MAX_UDP_DATAGRAM_SIZE];
+    let mut socket_overflow = TvuSocketOverflowTracker::new();
     let mut last_sample = Instant::now()
         .checked_sub(sample_interval)
         .unwrap_or_else(Instant::now);
 
     loop {
-        tokio::select! {
+        let received = tokio::select! {
+            biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     return Ok(());
                 }
+                continue;
             }
-            received = socket.recv_from(&mut buffer) => {
-                let (size, source) = received.context("TVU UDP receive failed")?;
-                metrics.record_packet(size, source.ip());
-                let Ok(shred) = Shred::new_from_serialized_shred(buffer[..size].to_vec()) else {
-                    metrics.record_invalid();
-                    continue;
-                };
-                if shred.version() != shred_version {
-                    metrics.record_version_mismatch();
-                    continue;
-                }
-                let _ = metrics.record_shred(shred.id(), shred.is_data());
-                // Forwarding is deliberately independent from deduplication. UDP send success is
-                // not a recorder acknowledgement, so every valid Turbine copy remains eligible to
-                // recover an earlier kernel or recorder-queue loss. Every copy also reaches the
-                // repair trust verifier: unauthenticated ShredId deduplication must never let a
-                // forged preplay suppress a later, genuinely leader-signed Turbine packet.
-                let forward_permit = forward_queue.as_ref().and_then(|queue| {
-                    match queue.try_reserve() {
-                        Ok(permit) => Some(permit),
-                        Err(_) => {
-                            metrics.record_forward_queue_drop();
-                            None
-                        }
-                    }
-                });
-                let repair_permit = repair_observation_queue.as_ref().and_then(|queue| {
-                    match queue.try_reserve() {
-                        Ok(permit) => Some(permit),
-                        Err(_) => {
-                            metrics.record_repair_observation_queue_drop();
-                            None
-                        }
-                    }
-                });
-                if forward_permit.is_some() || repair_permit.is_some() {
-                    let payload: Arc<[u8]> = Arc::from(&buffer[..size]);
-                    if let Some(permit) = forward_permit {
-                        metrics.record_forward_queued();
-                        permit.send(payload.clone());
-                    }
-                    if let Some(permit) = repair_permit {
-                        permit.send(payload);
-                    }
-                }
-                if last_sample.elapsed() >= sample_interval {
-                    info!(
-                        source = %source,
-                        slot = shred.slot(),
-                        index = shred.index(),
-                        fec_set_index = shred.fec_set_index(),
-                        shred_type = ?shred.shred_type(),
-                        last_in_slot = shred.last_in_slot(),
-                        "received shred sample"
-                    );
-                    last_sample = Instant::now();
-                }
+            received = receive_tvu_datagram(&socket, &mut buffer) => {
+                received.context("TVU UDP receive failed")?
             }
+        };
+        observe_tvu_socket_overflow(received, &mut socket_overflow, &metrics);
+        process_tvu_datagram(
+            &buffer,
+            received,
+            shred_version,
+            &metrics,
+            sample_interval,
+            &forward_queue,
+            &repair_observation_queue,
+            &mut last_sample,
+        );
+
+        // Tokio readiness is edge-triggered. Drain a bounded immediately available burst before
+        // yielding so one wake-up amortizes readiness and syscall overhead without starving
+        // shutdown or the forwarding task indefinitely.
+        for _ in 1..TVU_SOCKET_DRAIN_BURST_MAX_RECORDS {
+            let received = match try_receive_tvu_datagram(&socket, &mut buffer) {
+                Ok(received) => received,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error).context("drain available TVU UDP datagrams"),
+            };
+            observe_tvu_socket_overflow(received, &mut socket_overflow, &metrics);
+            process_tvu_datagram(
+                &buffer,
+                received,
+                shred_version,
+                &metrics,
+                sample_interval,
+                &forward_queue,
+                &repair_observation_queue,
+                &mut last_sample,
+            );
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_tvu_datagram(
+    buffer: &[u8; MAX_UDP_DATAGRAM_SIZE],
+    received: ReceivedTvuDatagram,
+    shred_version: u16,
+    metrics: &Metrics,
+    sample_interval: Duration,
+    forward_queue: &Option<mpsc::Sender<Arc<[u8]>>>,
+    repair_observation_queue: &Option<mpsc::Sender<Arc<[u8]>>>,
+    last_sample: &mut Instant,
+) {
+    metrics.record_packet(received.length, received.source.ip());
+    if received.truncated {
+        metrics.record_invalid();
+        return;
+    }
+    let payload = &buffer[..received.length];
+    let Ok(shred) = Shred::new_from_serialized_shred(payload.to_vec()) else {
+        metrics.record_invalid();
+        return;
+    };
+    if shred.version() != shred_version {
+        metrics.record_version_mismatch();
+        return;
+    }
+    let _ = metrics.record_shred(shred.id(), shred.is_data());
+    // Forwarding is deliberately independent from deduplication. UDP send success is not a
+    // recorder acknowledgement, so every valid Turbine copy remains eligible to recover an
+    // earlier kernel or recorder-queue loss. Every copy also reaches the repair trust verifier:
+    // unauthenticated ShredId deduplication must never let a forged preplay suppress a later,
+    // genuinely leader-signed Turbine packet.
+    let forward_permit = forward_queue
+        .as_ref()
+        .and_then(|queue| match queue.try_reserve() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                metrics.record_forward_queue_drop();
+                None
+            }
+        });
+    let repair_permit =
+        repair_observation_queue
+            .as_ref()
+            .and_then(|queue| match queue.try_reserve() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    metrics.record_repair_observation_queue_drop();
+                    None
+                }
+            });
+    if forward_permit.is_some() || repair_permit.is_some() {
+        let payload: Arc<[u8]> = Arc::from(payload);
+        if let Some(permit) = forward_permit {
+            metrics.record_forward_queued();
+            permit.send(payload.clone());
+        }
+        if let Some(permit) = repair_permit {
+            permit.send(payload);
         }
     }
+    if last_sample.elapsed() >= sample_interval {
+        info!(
+            source = %received.source,
+            slot = shred.slot(),
+            index = shred.index(),
+            fec_set_index = shred.fec_set_index(),
+            shred_type = ?shred.shred_type(),
+            last_in_slot = shred.last_in_slot(),
+            "received shred sample"
+        );
+        *last_sample = Instant::now();
+    }
+}
+
+fn observe_tvu_socket_overflow(
+    received: ReceivedTvuDatagram,
+    overflow: &mut TvuSocketOverflowTracker,
+    metrics: &Metrics,
+) {
+    observe_tvu_socket_overflow_at(received, overflow, metrics, Instant::now());
+}
+
+fn observe_tvu_socket_overflow_at(
+    received: ReceivedTvuDatagram,
+    overflow: &mut TvuSocketOverflowTracker,
+    metrics: &Metrics,
+    now: Instant,
+) {
+    let Some(current) = received.socket_rxq_overflow else {
+        return;
+    };
+    let update = overflow.observe(current, now);
+    if update.dropped == 0 {
+        return;
+    }
+    // Account every kernel-reported delta immediately, even when the corresponding error log is
+    // being held for aggregation.
+    metrics.record_tvu_socket_rxq_overflow(update.dropped);
+    let Some((unlogged, total)) = update.log else {
+        return;
+    };
+    error!(
+        tvu_socket_rxq_overflow_delta = unlogged,
+        tvu_socket_rxq_overflow_total = total,
+        source = %received.source,
+        "Linux reported Turbine datagrams dropped from the first-hop TVU socket receive queue"
+    );
 }
 
 async fn receive_and_forward_shreds(
@@ -676,11 +1063,14 @@ async fn log_metrics(
                     invalid_total = snapshot.invalid_total,
                     version_mismatch_total = snapshot.version_mismatch_total,
                     forward_targets = snapshot.forward_targets,
+                    forward_sender_addr = ?snapshot.forward_sender_addr,
                     forwarded_datagrams_total = snapshot.forwarded_datagrams_total,
                     forward_errors_total = snapshot.forward_errors_total,
                     forward_send_errors_total = snapshot.forward_send_errors_total,
                     forward_queue_dropped_total = snapshot.forward_queue_dropped_total,
                     forward_queue_depth = snapshot.forward_queue_depth,
+                    tvu_socket_rxq_overflow_supported = snapshot.tvu_socket_rxq_overflow_supported,
+                    tvu_socket_rxq_overflow_total = ?snapshot.tvu_socket_rxq_overflow_total,
                     tracked_sources = snapshot.tracked_sources,
                     latest_slot = snapshot.latest_slot,
                     seconds_since_last_packet = ?snapshot.seconds_since_last_packet,
@@ -689,10 +1079,24 @@ async fn log_metrics(
                     seconds_since_last_forward_error = ?snapshot.seconds_since_last_forward_error,
                     repair_enabled = snapshot.repair_enabled,
                     repair_active = snapshot.repair_active,
+                    repair_state = ?snapshot.repair_state,
+                    repair_last_error = ?snapshot.repair_last_error,
+                    repair_restart_count = snapshot.repair_restart_count,
+                    repair_last_success_unix_ms = ?snapshot.repair_last_success_unix_ms,
+                    seconds_since_repair_success = ?snapshot.seconds_since_repair_success,
                     repair_peers = snapshot.repair_peers,
                     repair_tracked_slots = snapshot.repair_tracked_slots,
                     repair_outstanding = snapshot.repair_outstanding,
                     repair_observation_queue_dropped_total = snapshot.repair_observation_queue_dropped_total,
+                    repair_socket_datagrams_received_total = snapshot.repair_socket_datagrams_received_total,
+                    repair_response_datagrams_processed_total = snapshot.repair_response_datagrams_processed_total,
+                    repair_socket_requested_recv_buffer_bytes = snapshot.repair_socket_requested_recv_buffer_bytes,
+                    repair_socket_effective_recv_buffer_bytes = snapshot.repair_socket_effective_recv_buffer_bytes,
+                    repair_socket_rxq_overflow_supported = snapshot.repair_socket_rxq_overflow_supported,
+                    repair_socket_rxq_overflow_total = ?snapshot.repair_socket_rxq_overflow_total,
+                    repair_response_queue_capacity = snapshot.repair_response_queue_capacity,
+                    repair_response_queue_depth = snapshot.repair_response_queue_depth,
+                    repair_response_queue_dropped_total = snapshot.repair_response_queue_dropped_total,
                     repair_requests_sent_total = snapshot.repair_requests_sent_total,
                     repair_retries_sent_total = snapshot.repair_retries_sent_total,
                     repair_requests_exhausted_total = snapshot.repair_requests_exhausted_total,
@@ -702,8 +1106,24 @@ async fn log_metrics(
                     repair_shreds_accepted_total = snapshot.repair_shreds_accepted_total,
                     repair_root_anchored_shreds_accepted_total = snapshot.repair_root_anchored_shreds_accepted_total,
                     repair_wal_bytes_total = snapshot.repair_wal_bytes_total,
+                    repair_wal_retained_bytes = snapshot.repair_wal_retained_bytes,
                     repair_wal_max_bytes = snapshot.repair_wal_max_bytes,
                     repair_wal_remaining_bytes = snapshot.repair_wal_remaining_bytes,
+                    repair_wal_active_segment_id = snapshot.repair_wal_active_segment_id,
+                    repair_wal_segment_count = snapshot.repair_wal_segment_count,
+                    repair_wal_active_segment_bytes = snapshot.repair_wal_active_segment_bytes,
+                    repair_wal_rollovers_total = snapshot.repair_wal_rollovers_total,
+                    repair_wal_durable_through_sequence = ?snapshot.repair_wal_durable_through_sequence,
+                    repair_wal_total_warning = snapshot.repair_wal_total_warning,
+                    repair_wal_total_critical = snapshot.repair_wal_total_critical,
+                    repair_wal_total_hard = snapshot.repair_wal_total_hard,
+                    repair_wal_total_hard_bytes = snapshot.repair_wal_total_hard_bytes,
+                    repair_wal_filesystem_reserve_bytes = snapshot.repair_wal_filesystem_reserve_bytes,
+                    repair_wal_filesystem_available_bytes = ?snapshot.repair_wal_filesystem_available_bytes,
+                    repair_wal_filesystem_reserve_breached = snapshot.repair_wal_filesystem_reserve_breached,
+                    repair_wal_admission_blocked = snapshot.repair_wal_admission_blocked,
+                    repair_wal_v3_sealed = snapshot.repair_wal_v3_sealed,
+                    repair_wal_last_error = ?snapshot.repair_wal_last_error,
                     repair_errors_total = snapshot.repair_errors_total,
                     udp_in_errors_delta = ?loss_delta.udp.in_errors,
                     udp_no_ports_delta = ?loss_delta.udp.no_ports,
@@ -767,11 +1187,63 @@ mod tests {
         payload
     }
 
+    #[test]
+    fn overflow_deltas_remain_exact_while_logs_are_aggregated() {
+        let start = Instant::now();
+        let mut overflow = TvuSocketOverflowTracker {
+            previous: 0,
+            unlogged: 0,
+            total: 0,
+            last_log: start,
+        };
+
+        assert_eq!(
+            overflow.observe(4, start),
+            TvuSocketOverflowUpdate {
+                dropped: 4,
+                log: None,
+            }
+        );
+        assert_eq!(
+            overflow.observe(7, start + Duration::from_secs(1)),
+            TvuSocketOverflowUpdate {
+                dropped: 3,
+                log: None,
+            }
+        );
+        assert_eq!(
+            overflow.observe(9, start + TVU_SOCKET_OVERFLOW_LOG_INTERVAL),
+            TvuSocketOverflowUpdate {
+                dropped: 2,
+                log: Some((9, 9)),
+            }
+        );
+        assert_eq!(overflow.unlogged, 0);
+
+        assert_eq!(
+            overflow.observe(
+                12,
+                start + TVU_SOCKET_OVERFLOW_LOG_INTERVAL + Duration::from_secs(1),
+            ),
+            TvuSocketOverflowUpdate {
+                dropped: 3,
+                log: None,
+            }
+        );
+        assert_eq!(
+            overflow.observe(15, start + TVU_SOCKET_OVERFLOW_LOG_INTERVAL * 2),
+            TvuSocketOverflowUpdate {
+                dropped: 3,
+                log: Some((6, 15)),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn forwards_exact_datagram_to_configured_destination() {
         let destination = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let target = destination.local_addr().unwrap();
-        let forwarder = ShredForwarder::bind("127.0.0.1".parse().unwrap(), vec![target])
+        let forwarder = ShredForwarder::bind("127.0.0.1".parse().unwrap(), None, vec![target])
             .await
             .unwrap()
             .unwrap();
@@ -788,6 +1260,70 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(&received[..size], expected);
+    }
+
+    #[tokio::test]
+    async fn configured_green_source_address_is_used_exactly() {
+        let destination = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = destination.local_addr().unwrap();
+        let configured: SocketAddr = "127.0.0.1:18104".parse().unwrap();
+        let forwarder =
+            ShredForwarder::bind("0.0.0.0".parse().unwrap(), Some(configured), vec![target])
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(forwarder.local_addr().unwrap(), configured);
+
+        let expected = b"green-durable-source-proof";
+        forwarder.forward(expected, &Metrics::new(1).unwrap()).await;
+        let mut received = [0u8; 64];
+        let (size, source) =
+            tokio::time::timeout(Duration::from_secs(1), destination.recv_from(&mut received))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(source, configured);
+        assert_eq!(&received[..size], expected);
+    }
+
+    #[tokio::test]
+    async fn forwarder_rejects_bind_and_target_address_family_mismatch() {
+        let result = ShredForwarder::bind(
+            "0.0.0.0".parse().unwrap(),
+            Some("[::1]:18104".parse().unwrap()),
+            vec!["127.0.0.1:18003".parse().unwrap()],
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("mismatched address families must be rejected before binding"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("same IP address family"));
+    }
+
+    #[tokio::test]
+    async fn tvu_receive_backend_preserves_source_and_payload() {
+        let (socket, _, _) = bind_tvu_socket("127.0.0.1:0".parse().unwrap(), 1 << 20).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let receiver = tokio::net::UdpSocket::from_std(socket).unwrap();
+        let receiver_addr = receiver.local_addr().unwrap();
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender_addr = sender.local_addr().unwrap();
+        let expected = b"ancillary-aware-tvu-datagram";
+        sender.send_to(expected, receiver_addr).await.unwrap();
+
+        let mut buffer = [0u8; 128];
+        let received = tokio::time::timeout(
+            Duration::from_secs(1),
+            receive_tvu_datagram(&receiver, &mut buffer),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(received.source, sender_addr);
+        assert_eq!(&buffer[..received.length], expected);
+        assert!(!received.truncated);
     }
 
     #[tokio::test]

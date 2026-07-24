@@ -34,8 +34,10 @@ MAX_SOURCE_JSON_BYTES = 64 * 1024
 MAX_PUBLIC_JSON_BYTES = 64 * 1024
 MAX_SAFE_INTEGER = (1 << 53) - 1
 MAX_HTTP_REQUESTS = 32
+MAX_DURABLE_SOURCES = 4
 REQUEST_HEADER_TIMEOUT_SECS = 5.0
 HIVEZILLA_STATES = {"waiting", "receiving", "stalled", "stopped"}
+REPAIR_STATES = {"disabled", "inactive", "starting", "active", "backoff", "stopping"}
 SOURCE_ERRORS = (
     OSError,
     UnicodeError,
@@ -141,6 +143,91 @@ def _required(source: dict, key: str, name: str):
     return source[key]
 
 
+def _public_source_name(value) -> bool:
+    if type(value) is not str or not (1 <= len(value) <= 32):
+        return False
+    if not (value[0].isascii() and value[0].isalpha()):
+        return False
+    return all(
+        character.isascii()
+        and (character.isalnum() or character in {"-", "_"})
+        for character in value[1:]
+    )
+
+
+def _parse_durable_sources(
+    source: dict,
+    *,
+    accepted: int,
+    updated: int,
+    started: int,
+    durable_sequence: int | None,
+    latest_slot: int | None,
+):
+    if "durable_sources" not in source:
+        return {}
+    values = _record(source["durable_sources"], "durable_sources")
+    if len(values) > MAX_DURABLE_SOURCES:
+        raise ValueError("durable_sources exceeds its bounded entry limit")
+    expected_keys = {
+        "committed_datagrams_total",
+        "last_durable_unix_secs",
+        "last_durable_sequence",
+        "last_durable_slot",
+    }
+    parsed = {}
+    committed_sum = 0
+    for name, raw_status in values.items():
+        if not _public_source_name(name):
+            raise ValueError("durable source name is not public-safe")
+        status = _record(raw_status, f"durable_sources.{name}")
+        if set(status) != expected_keys:
+            raise ValueError(f"durable_sources.{name} has an invalid status contract")
+        committed = _integer(
+            status["committed_datagrams_total"],
+            f"durable_sources.{name}.committed_datagrams_total",
+        )
+        timestamp = _integer(
+            status["last_durable_unix_secs"],
+            f"durable_sources.{name}.last_durable_unix_secs",
+            nullable=True,
+            positive=True,
+        )
+        sequence = _integer(
+            status["last_durable_sequence"],
+            f"durable_sources.{name}.last_durable_sequence",
+            nullable=True,
+        )
+        slot = _integer(
+            status["last_durable_slot"],
+            f"durable_sources.{name}.last_durable_slot",
+            nullable=True,
+        )
+        tail = (timestamp, sequence, slot)
+        if committed == 0 and any(value is not None for value in tail):
+            raise ValueError(f"durable_sources.{name} has a tail without committed datagrams")
+        if committed > 0 and not all(value is not None for value in tail):
+            raise ValueError(f"durable_sources.{name} has incomplete durable evidence")
+        if timestamp is not None and not (started <= timestamp <= updated):
+            raise ValueError(f"durable_sources.{name} timestamp is outside this recorder session")
+        if sequence is not None and (
+            durable_sequence is None or sequence > durable_sequence
+        ):
+            raise ValueError(f"durable_sources.{name} sequence exceeds the durable tail")
+        if slot is not None and (latest_slot is None or slot > latest_slot):
+            raise ValueError(f"durable_sources.{name} slot exceeds the durable high-water")
+        committed_sum += committed
+        parsed[name] = {
+            "committed_datagrams_total": committed,
+            "last_durable_unix_secs": timestamp,
+            "last_durable_sequence": sequence,
+            "last_durable_slot": slot,
+        }
+    if committed_sum > accepted:
+        raise ValueError("durable source counts exceed Hivezilla accepted shreds")
+    return parsed
+
+
 def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
     source = _record(value, "Hivezilla status")
     if source.get("schema_version") != 1:
@@ -215,6 +302,88 @@ def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
         _required(source, "reserve_free_bytes", "Hivezilla status"),
         "reserve_free_bytes",
     )
+    extended_keys = (
+        "udp_received_total",
+        "udp_received_bytes_total",
+        "ingest_queue_depth_events",
+        "ingest_queue_depth_bytes",
+        "ingest_queue_high_water_events",
+        "ingest_queue_high_water_bytes",
+        "ingest_queue_capacity_events",
+        "ingest_queue_capacity_bytes",
+        "ingest_queue_backpressure_events_total",
+        "ingest_queue_backpressure_micros_total",
+        "ingest_queue_backpressured",
+        "socket_rxq_overflow_supported",
+        "socket_rxq_overflow_total",
+    )
+    extended_present = [key in source for key in extended_keys]
+    if any(extended_present) and not all(extended_present):
+        raise ValueError("Hivezilla extended ingest telemetry is incomplete")
+
+    if all(extended_present):
+        udp_received = _integer(source["udp_received_total"], "udp_received_total")
+        udp_received_bytes = _integer(
+            source["udp_received_bytes_total"], "udp_received_bytes_total"
+        )
+        queue_depth_events = _integer(
+            source["ingest_queue_depth_events"], "ingest_queue_depth_events"
+        )
+        queue_depth_bytes = _integer(
+            source["ingest_queue_depth_bytes"], "ingest_queue_depth_bytes"
+        )
+        queue_high_water_events = _integer(
+            source["ingest_queue_high_water_events"], "ingest_queue_high_water_events"
+        )
+        queue_high_water_bytes = _integer(
+            source["ingest_queue_high_water_bytes"], "ingest_queue_high_water_bytes"
+        )
+        queue_capacity_events = _integer(
+            source["ingest_queue_capacity_events"],
+            "ingest_queue_capacity_events",
+            positive=True,
+        )
+        queue_capacity_bytes = _integer(
+            source["ingest_queue_capacity_bytes"],
+            "ingest_queue_capacity_bytes",
+            positive=True,
+        )
+        queue_backpressure_events = _integer(
+            source["ingest_queue_backpressure_events_total"],
+            "ingest_queue_backpressure_events_total",
+        )
+        queue_backpressure_micros = _integer(
+            source["ingest_queue_backpressure_micros_total"],
+            "ingest_queue_backpressure_micros_total",
+        )
+        queue_backpressured = source["ingest_queue_backpressured"]
+        if type(queue_backpressured) is not bool:
+            raise ValueError("ingest_queue_backpressured must be a boolean")
+        socket_overflow_supported = source["socket_rxq_overflow_supported"]
+        if type(socket_overflow_supported) is not bool:
+            raise ValueError("socket_rxq_overflow_supported must be a boolean")
+        socket_overflow = _integer(
+            source["socket_rxq_overflow_total"],
+            "socket_rxq_overflow_total",
+            nullable=True,
+        )
+    else:
+        # Keep the incumbent recorder visible while the candidate status collector overlaps it.
+        # Loss/queue telemetry is unknown until the recorder itself is upgraded; do not infer
+        # zero loss from the older schema.
+        udp_received = None
+        udp_received_bytes = None
+        queue_depth_events = None
+        queue_depth_bytes = None
+        queue_high_water_events = None
+        queue_high_water_bytes = None
+        queue_capacity_events = None
+        queue_capacity_bytes = None
+        queue_backpressure_events = None
+        queue_backpressure_micros = None
+        queue_backpressured = None
+        socket_overflow_supported = False
+        socket_overflow = None
 
     if started > updated:
         raise ValueError("Hivezilla start timestamp is after its update")
@@ -226,6 +395,20 @@ def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
         raise ValueError("Hivezilla spool usage exceeds its configured maximum")
     if filesystem_free > filesystem_total or reserve_free > filesystem_total:
         raise ValueError("Hivezilla filesystem counters are contradictory")
+    if all(extended_present):
+        if accepted + invalid > udp_received or payload_bytes > udp_received_bytes:
+            raise ValueError("Hivezilla UDP counters are contradictory")
+        if (
+            queue_depth_events > queue_capacity_events
+            or queue_high_water_events > queue_capacity_events
+            or queue_depth_events > queue_high_water_events
+            or queue_depth_bytes > queue_capacity_bytes
+            or queue_high_water_bytes > queue_capacity_bytes
+            or queue_depth_bytes > queue_high_water_bytes
+        ):
+            raise ValueError("Hivezilla ingest queue counters are contradictory")
+        if socket_overflow_supported != (socket_overflow is not None):
+            raise ValueError("Hivezilla socket-overflow support and counter disagree")
 
     durable_tail = (durable_sequence, latest_slot, shred_version)
     has_durable_tail = any(child is not None for child in durable_tail)
@@ -241,6 +424,15 @@ def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
         raise ValueError("Hivezilla accepted count lacks durable evidence")
     if accepted == 0 and payload_bytes != 0:
         raise ValueError("Hivezilla payload bytes exist without accepted shreds")
+
+    durable_sources = _parse_durable_sources(
+        source,
+        accepted=accepted,
+        updated=updated,
+        started=started,
+        durable_sequence=durable_sequence,
+        latest_slot=latest_slot,
+    )
 
     fresh = (
         updated <= now_unix_secs + config.max_future_skew_secs
@@ -264,6 +456,20 @@ def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
         "filesystem_free_bytes": filesystem_free,
         "filesystem_total_bytes": filesystem_total,
         "reserve_free_bytes": reserve_free,
+        "udp_received_total": udp_received,
+        "udp_received_bytes_total": udp_received_bytes,
+        "ingest_queue_depth_events": queue_depth_events,
+        "ingest_queue_depth_bytes": queue_depth_bytes,
+        "ingest_queue_high_water_events": queue_high_water_events,
+        "ingest_queue_high_water_bytes": queue_high_water_bytes,
+        "ingest_queue_capacity_events": queue_capacity_events,
+        "ingest_queue_capacity_bytes": queue_capacity_bytes,
+        "ingest_queue_backpressure_events_total": queue_backpressure_events,
+        "ingest_queue_backpressure_micros_total": queue_backpressure_micros,
+        "ingest_queue_backpressured": queue_backpressured,
+        "socket_rxq_overflow_supported": socket_overflow_supported,
+        "socket_rxq_overflow_total": socket_overflow,
+        "durable_sources": durable_sources,
     }
 
 
@@ -286,6 +492,189 @@ def unavailable_hivezilla_status():
         "filesystem_free_bytes": None,
         "filesystem_total_bytes": None,
         "reserve_free_bytes": None,
+        "udp_received_total": None,
+        "udp_received_bytes_total": None,
+        "ingest_queue_depth_events": None,
+        "ingest_queue_depth_bytes": None,
+        "ingest_queue_high_water_events": None,
+        "ingest_queue_high_water_bytes": None,
+        "ingest_queue_capacity_events": None,
+        "ingest_queue_capacity_bytes": None,
+        "ingest_queue_backpressure_events_total": None,
+        "ingest_queue_backpressure_micros_total": None,
+        "ingest_queue_backpressured": None,
+        "socket_rxq_overflow_supported": None,
+        "socket_rxq_overflow_total": None,
+        "durable_sources": {},
+    }
+
+
+def unavailable_repair_status():
+    return {
+        "availability": "unavailable",
+        "enabled": None,
+        "active": None,
+        "state": "unavailable",
+        "restart_count": None,
+        "seconds_since_last_success": None,
+        "peers": None,
+        "tracked_slots": None,
+        "outstanding": None,
+        "observation_queue_dropped_total": None,
+        "requests_sent_total": None,
+        "requests_exhausted_total": None,
+        "shreds_accepted_total": None,
+        "socket_datagrams_received_total": None,
+        "response_datagrams_processed_total": None,
+        "socket_requested_recv_buffer_bytes": None,
+        "socket_effective_recv_buffer_bytes": None,
+        "socket_rxq_overflow_supported": None,
+        "socket_rxq_overflow_total": None,
+        "response_queue_capacity": None,
+        "response_queue_depth": None,
+        "response_queue_dropped_total": None,
+        "wal_retained_bytes": None,
+        "wal_segment_count": None,
+        "wal_rollovers_total": None,
+        "wal_durable_through_sequence": None,
+        "wal_warning_bytes": None,
+        "wal_critical_bytes": None,
+        "wal_hard_bytes": None,
+        "wal_filesystem_reserve_bytes": None,
+        "wal_filesystem_available_bytes": None,
+        "wal_warning": None,
+        "wal_critical": None,
+        "wal_hard": None,
+        "wal_filesystem_reserve_breached": None,
+        "wal_admission_blocked": None,
+        "updated_unix_secs": None,
+    }
+
+
+def parse_repair_metrics(source, sampled_unix_secs: int):
+    def counter(key: str):
+        return _integer(
+            _required(source, key, "shred-reader metrics"),
+            f"shred-reader metrics.{key}",
+        )
+
+    enabled = _required(source, "repair_enabled", "shred-reader metrics")
+    active = _required(source, "repair_active", "shred-reader metrics")
+    if type(enabled) is not bool or type(active) is not bool:
+        raise ValueError("shred-reader repair enabled/active fields must be booleans")
+    state = _required(source, "repair_state", "shred-reader metrics")
+    if type(state) is not str or state not in REPAIR_STATES:
+        raise ValueError("unsupported shred-reader repair state")
+
+    socket_overflow_supported = _required(
+        source, "repair_socket_rxq_overflow_supported", "shred-reader metrics"
+    )
+    if type(socket_overflow_supported) is not bool:
+        raise ValueError("shred-reader repair socket-overflow support must be a boolean")
+    socket_overflow = _integer(
+        _required(source, "repair_socket_rxq_overflow_total", "shred-reader metrics"),
+        "shred-reader metrics.repair_socket_rxq_overflow_total",
+        nullable=True,
+    )
+    queue_capacity = counter("repair_response_queue_capacity")
+    queue_depth = counter("repair_response_queue_depth")
+    warning_bytes = counter("repair_wal_total_warning_bytes")
+    critical_bytes = counter("repair_wal_total_critical_bytes")
+    hard_bytes = counter("repair_wal_total_hard_bytes")
+
+    storage_flags = {}
+    for key in (
+        "repair_wal_total_warning",
+        "repair_wal_total_critical",
+        "repair_wal_total_hard",
+        "repair_wal_filesystem_reserve_breached",
+        "repair_wal_admission_blocked",
+    ):
+        flag = _required(source, key, "shred-reader metrics")
+        if type(flag) is not bool:
+            raise ValueError(f"shred-reader metrics.{key} must be a boolean")
+        storage_flags[key] = flag
+
+    if socket_overflow_supported != (socket_overflow is not None):
+        raise ValueError("shred-reader repair socket-overflow support and counter disagree")
+    if queue_depth > queue_capacity:
+        raise ValueError("shred-reader repair response queue depth exceeds capacity")
+    if enabled:
+        if state == "disabled":
+            raise ValueError("enabled shred repair cannot report disabled state")
+        if warning_bytes >= critical_bytes:
+            raise ValueError("shred-reader repair WAL warning threshold is not below critical")
+        if critical_bytes >= hard_bytes:
+            raise ValueError("shred-reader repair WAL critical threshold is not below hard")
+    elif active or state != "disabled":
+        raise ValueError("disabled shred repair reports an active lifecycle")
+
+    return {
+        "availability": "available",
+        "enabled": enabled,
+        "active": active,
+        "state": state,
+        "restart_count": counter("repair_restart_count"),
+        "seconds_since_last_success": _integer(
+            _required(source, "seconds_since_repair_success", "shred-reader metrics"),
+            "shred-reader metrics.seconds_since_repair_success",
+            nullable=True,
+        ),
+        "peers": counter("repair_peers"),
+        "tracked_slots": counter("repair_tracked_slots"),
+        "outstanding": counter("repair_outstanding"),
+        "observation_queue_dropped_total": counter(
+            "repair_observation_queue_dropped_total"
+        ),
+        "requests_sent_total": counter("repair_requests_sent_total"),
+        "requests_exhausted_total": counter("repair_requests_exhausted_total"),
+        "shreds_accepted_total": counter("repair_shreds_accepted_total"),
+        "socket_datagrams_received_total": counter(
+            "repair_socket_datagrams_received_total"
+        ),
+        "response_datagrams_processed_total": counter(
+            "repair_response_datagrams_processed_total"
+        ),
+        "socket_requested_recv_buffer_bytes": counter(
+            "repair_socket_requested_recv_buffer_bytes"
+        ),
+        "socket_effective_recv_buffer_bytes": counter(
+            "repair_socket_effective_recv_buffer_bytes"
+        ),
+        "socket_rxq_overflow_supported": socket_overflow_supported,
+        "socket_rxq_overflow_total": socket_overflow,
+        "response_queue_capacity": queue_capacity,
+        "response_queue_depth": queue_depth,
+        "response_queue_dropped_total": counter("repair_response_queue_dropped_total"),
+        "wal_retained_bytes": counter("repair_wal_retained_bytes"),
+        "wal_segment_count": counter("repair_wal_segment_count"),
+        "wal_rollovers_total": counter("repair_wal_rollovers_total"),
+        "wal_durable_through_sequence": _integer(
+            _required(
+                source, "repair_wal_durable_through_sequence", "shred-reader metrics"
+            ),
+            "shred-reader metrics.repair_wal_durable_through_sequence",
+            nullable=True,
+        ),
+        "wal_warning_bytes": warning_bytes,
+        "wal_critical_bytes": critical_bytes,
+        "wal_hard_bytes": hard_bytes,
+        "wal_filesystem_reserve_bytes": counter("repair_wal_filesystem_reserve_bytes"),
+        "wal_filesystem_available_bytes": _integer(
+            _required(
+                source, "repair_wal_filesystem_available_bytes", "shred-reader metrics"
+            ),
+            "shred-reader metrics.repair_wal_filesystem_available_bytes",
+            nullable=True,
+        ),
+        "wal_warning": storage_flags["repair_wal_total_warning"],
+        "wal_critical": storage_flags["repair_wal_total_critical"],
+        "wal_hard": storage_flags["repair_wal_total_hard"],
+        "wal_filesystem_reserve_breached": storage_flags[
+            "repair_wal_filesystem_reserve_breached"
+        ],
+        "wal_admission_blocked": storage_flags["repair_wal_admission_blocked"],
+        "updated_unix_secs": sampled_unix_secs,
     }
 
 
@@ -322,11 +711,30 @@ def parse_receiver_metrics(value, sampled_unix_secs: int, config: StatusConfig):
         "shred-reader metrics.seconds_since_last_packet",
         nullable=True,
     )
-
+    if "tvu_socket_rxq_overflow_supported" not in source:
+        # Preserve raw visibility while the status collector overlaps the incumbent reader. The
+        # candidate must report this field explicitly before it can pass the Linux loss gate.
+        socket_overflow_supported = False
+        socket_overflow = None
+    else:
+        socket_overflow_supported = _required(
+            source, "tvu_socket_rxq_overflow_supported", "shred-reader metrics"
+        )
+        if type(socket_overflow_supported) is not bool:
+            raise ValueError(
+                "shred-reader metrics.tvu_socket_rxq_overflow_supported must be a boolean"
+            )
+        socket_overflow = _integer(
+            _required(source, "tvu_socket_rxq_overflow_total", "shred-reader metrics"),
+            "shred-reader metrics.tvu_socket_rxq_overflow_total",
+            nullable=True,
+        )
     if recent_peers > known_peers:
         raise ValueError("recent gossip peer count exceeds known peer count")
     if targets == 0 and (forwarded != 0 or forward_errors != 0):
         raise ValueError("forwarding counters exist without a forwarding target")
+    if socket_overflow_supported != (socket_overflow is not None):
+        raise ValueError("shred-reader TVU socket-overflow support and counter disagree")
     attempts = forwarded + forward_errors
     if attempts > MAX_SAFE_INTEGER:
         raise ValueError("forwarding attempt count exceeds the public integer limit")
@@ -350,6 +758,13 @@ def parse_receiver_metrics(value, sampled_unix_secs: int, config: StatusConfig):
     else:
         forwarding_state = "waiting"
 
+    try:
+        repair = parse_repair_metrics(source, sampled_unix_secs)
+    except SOURCE_ERRORS:
+        # Repair is an isolated side path. Malformed or not-yet-initialized repair telemetry must
+        # not hide a healthy raw TVU/forwarding boundary from operators.
+        repair = unavailable_repair_status()
+
     return {
         "gossip": {
             "state": gossip_state,
@@ -371,6 +786,8 @@ def parse_receiver_metrics(value, sampled_unix_secs: int, config: StatusConfig):
             "duplicates_total": duplicates,
             "data_total": data,
             "code_total": code,
+            "socket_rxq_overflow_supported": socket_overflow_supported,
+            "socket_rxq_overflow_total": socket_overflow,
             "latest_slot": latest_slot_raw if parsed > 0 else None,
             "seconds_since_last_packet": seconds_since_packet,
             "updated_unix_secs": sampled_unix_secs,
@@ -383,6 +800,7 @@ def parse_receiver_metrics(value, sampled_unix_secs: int, config: StatusConfig):
             "errors_total": forward_errors,
             "updated_unix_secs": sampled_unix_secs,
         },
+        "repair": repair,
     }
 
 
@@ -408,6 +826,8 @@ def unavailable_receiver_status():
             "duplicates_total": None,
             "data_total": None,
             "code_total": None,
+            "socket_rxq_overflow_supported": None,
+            "socket_rxq_overflow_total": None,
             "latest_slot": None,
             "seconds_since_last_packet": None,
             "updated_unix_secs": None,
@@ -420,6 +840,7 @@ def unavailable_receiver_status():
             "errors_total": None,
             "updated_unix_secs": None,
         },
+        "repair": unavailable_repair_status(),
     }
 
 
@@ -506,6 +927,7 @@ def build_status(
         "gossip": receiver["gossip"],
         "tvu": receiver["tvu"],
         "forwarding": receiver["forwarding"],
+        "repair": receiver["repair"],
         "hivezilla": hivezilla,
     }
 

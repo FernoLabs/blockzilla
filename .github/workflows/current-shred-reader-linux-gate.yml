@@ -1,0 +1,327 @@
+name: Current shred-reader Linux gate
+
+on:
+  push:
+    branches:
+      - codex/current-shred-reader-hardening-20260724
+    paths:
+      - .github/workflows/current-shred-reader-linux-gate.yml
+      - .dockerignore
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - docker-compose.hivezilla-shred.dokploy.yml
+      - crates/blockzilla-format/**
+      - crates/blockzilla-log-parser/**
+      - crates/old-faithful/car-reader/**
+      - services/blockzilla-watcher/**
+      - services/hivezilla/**
+      - services/shred-reader/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: current-shred-reader-linux-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shred-reader:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate digest-only production compose
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose=services/shred-reader/docker-compose.dokploy.yml
+          if SHRED_FORWARD_ADDRS=127.0.0.1:18003 \
+            docker compose --file "$compose" config --quiet 2>/dev/null; then
+            echo "compose accepted a deployment without an immutable image digest" >&2
+            exit 1
+          fi
+          digest="sha256:$(printf '0%.0s' {1..64})"
+          image="$(
+            SHRED_FORWARD_ADDRS=127.0.0.1:18003 \
+            METRICS_ADDR=127.0.0.1:19190 \
+            SHRED_READER_IMAGE_DIGEST="$digest" \
+              docker compose --file "$compose" config --images
+          )"
+          test "$image" = "ghcr.io/fernolabs/blockzilla-shred-reader@$digest"
+          healthcheck="$(
+            SHRED_FORWARD_ADDRS=127.0.0.1:18003 \
+            METRICS_ADDR=127.0.0.1:19190 \
+            SHRED_READER_IMAGE_DIGEST="$digest" \
+              docker compose --file "$compose" config \
+              | sed -n '/healthcheck:/,/interval:/p'
+          )"
+          grep -F 'http://$${METRICS_ADDR}/readyz' <<<"$healthcheck"
+          grep -F 'METRICS_ADDR: 127.0.0.1:19190' <(
+            SHRED_FORWARD_ADDRS=127.0.0.1:18003 \
+            METRICS_ADDR=127.0.0.1:19190 \
+            SHRED_READER_IMAGE_DIGEST="$digest" \
+              docker compose --file "$compose" config
+          )
+
+      - name: Reclaim runner disk for Agave build
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+
+      - name: Test Bookworm receiver build
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --target test \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --file services/shred-reader/Dockerfile \
+            .
+
+      - name: Build and inspect local runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="shred-reader-ci:$GITHUB_SHA"
+          DOCKER_BUILDKIT=1 docker build \
+            --target runtime \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$image" \
+            --file services/shred-reader/Dockerfile \
+            .
+          docker run --rm --entrypoint ldd "$image" /usr/local/bin/shred-reader \
+            | tee "$RUNNER_TEMP/shred-reader-ldd.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/shred-reader-ldd.txt"; then
+            exit 1
+          fi
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$GITHUB_SHA"
+
+      - name: Smoke-test the actual receiver runtime and orderly stop
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="shred-reader-ci:$GITHUB_SHA"
+          container="shred-reader-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm --force "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach \
+            --name "$container" \
+            --network none \
+            --tmpfs /data:rw,noexec,nosuid,size=16m,uid=10001,gid=10001,mode=0700 \
+            --env APP_ENV=production \
+            --env SOLANA_ENTRYPOINTS=127.0.0.1:8001 \
+            --env ADVERTISED_IP=1.1.1.1 \
+            --env SHRED_VERSION=50093 \
+            --env REQUIRE_REACHABILITY=false \
+            --env SHRED_FORWARD_ADDRS=127.0.0.1:18003 \
+            --env REPAIR_ENABLED=false \
+            "$image"
+          for _ in {1..60}; do
+            if docker exec "$container" curl --fail --silent \
+              http://127.0.0.1:19090/healthz >/dev/null 2>&1; then
+              break
+            fi
+            if test "$(docker inspect --format '{{.State.Running}}' "$container")" != true; then
+              docker logs "$container"
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec "$container" curl --fail --silent \
+            http://127.0.0.1:19090/healthz >/dev/null
+          test "$(docker exec "$container" id -u)" = 10001
+          docker exec "$container" test -s /data/identity.json
+          # No gossip peer or shred traffic is injected in this offline smoke test, so readiness
+          # must fail closed even while process health is good.
+          test "$(docker exec "$container" curl --silent --output /dev/null \
+            --write-out '%{http_code}' http://127.0.0.1:19090/readyz)" = 503
+          timeout --signal=KILL 60s docker stop --time 59 "$container" >/dev/null
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
+
+  hivezilla-recorder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Verify the explicit recorder CPU floor
+        run: grep -qw aes /proc/cpuinfo
+
+      - name: Validate immutable, project-isolated Hivezilla Compose
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose=docker-compose.hivezilla-shred.dokploy.yml
+          if SHRED_JOURNAL_ID=00000000000000000000000000000000 \
+            docker compose --file "$compose" config --quiet 2>/dev/null; then
+            echo "compose accepted a deployment without immutable application image digests" >&2
+            exit 1
+          fi
+          digest="sha256:$(printf '0%.0s' {1..64})"
+          rendered="$(
+            COMPOSE_PROJECT_NAME=hivezilla-green \
+            SHRED_JOURNAL_ID=00000000000000000000000000000000 \
+            HIVEZILLA_SHRED_IMAGE_DIGEST="$digest" \
+            HIVEZILLA_SHRED_STATUS_IMAGE_DIGEST="$digest" \
+            SHRED_STATUS_LISTEN_ADDR=127.0.0.1:18791 \
+            SHRED_READER_METRICS_ADDR=127.0.0.1:19190 \
+              docker compose --file "$compose" config
+          )"
+          grep -F "ghcr.io/fernolabs/blockzilla-hivezilla-shred@$digest" <<<"$rendered"
+          grep -F "ghcr.io/fernolabs/blockzilla-hivezilla-shred-status@$digest" <<<"$rendered"
+          grep -F 'name: hivezilla-green' <<<"$rendered"
+          grep -F 'hivezilla-green_hivezilla-shred-data' <<<"$rendered"
+          grep -F '127.0.0.1:18791' <<<"$rendered"
+          grep -F 'http://127.0.0.1:19190/metrics' <<<"$rendered"
+
+      - name: Reclaim runner disk for Hivezilla build
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+
+      - name: Build and inspect the production Hivezilla recorder image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="hivezilla-shred-ci:$GITHUB_SHA"
+          DOCKER_BUILDKIT=1 docker build \
+            --target runtime \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$image" \
+            --file services/hivezilla/Dockerfile.shred \
+            .
+          docker run --rm --entrypoint ldd "$image" /usr/local/bin/hivezilla \
+            | tee "$RUNNER_TEMP/hivezilla-shred-ldd.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/hivezilla-shred-ldd.txt"; then
+            exit 1
+          fi
+          docker run --rm --entrypoint /usr/local/bin/hivezilla "$image" --help \
+            >/dev/null
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$GITHUB_SHA"
+
+      - name: Build and inspect the immutable status collector image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="hivezilla-shred-status-ci:$GITHUB_SHA"
+          DOCKER_BUILDKIT=1 docker build \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$image" \
+            --file services/hivezilla/Dockerfile.shred-status \
+            .
+          docker run --rm --entrypoint python3 "$image" \
+            /app/shred_status_server.py --help >/dev/null
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$GITHUB_SHA"
+
+  reconstruction-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Reclaim runner disk for reconstruction build
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+
+      - name: Test Bookworm reconstruction build
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --target test \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --file services/hivezilla/Dockerfile.shred-audit \
+            .
+
+      - name: Build and inspect local reconstruction image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="shred-audit-ci:$GITHUB_SHA"
+          DOCKER_BUILDKIT=1 docker build \
+            --target runtime \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$image" \
+            --file services/hivezilla/Dockerfile.shred-audit \
+            .
+          for binary in shred-epoch-audit repair-wal-inspect; do
+            docker run --rm --entrypoint ldd "$image" "/usr/local/bin/$binary" \
+              | tee "$RUNNER_TEMP/$binary-ldd.txt"
+            if grep -q 'not found' "$RUNNER_TEMP/$binary-ldd.txt"; then
+              exit 1
+            fi
+            docker run --rm --entrypoint "/usr/local/bin/$binary" "$image" --help \
+              >/dev/null
+          done
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$GITHUB_SHA"
+
+      - name: Test public status contract
+        run: python3 services/hivezilla/scripts/test_shred_status_server.py
+
+  watcher-status:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: services/blockzilla-watcher/package-lock.json
+
+      - name: Install watcher dependencies
+        working-directory: services/blockzilla-watcher
+        run: npm ci
+
+      - name: Test watcher status handling
+        working-directory: services/blockzilla-watcher
+        run: npm test
+
+      - name: Check watcher UI
+        working-directory: services/blockzilla-watcher
+        run: npm run check
+
+      - name: Build watcher UI
+        working-directory: services/blockzilla-watcher
+        run: npm run build

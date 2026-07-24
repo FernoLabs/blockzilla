@@ -323,8 +323,7 @@ unsafe extern "C" {
 }
 
 /// Computes the increase between cumulative `SO_RXQ_OVFL` values, including `u32` wraparound.
-#[cfg(test)]
-pub fn socket_rxq_overflow_delta(current: u32, previous: u32) -> u64 {
+pub(crate) fn socket_rxq_overflow_delta(current: u32, previous: u32) -> u64 {
     current.wrapping_sub(previous) as u64
 }
 

@@ -21,13 +21,19 @@ use tokio::net::UdpSocket;
 use tracing::debug;
 
 use crate::{
+    repair_socket::{RepairSocket, RepairSocketConfig},
     repair_tracker::RepairRequest,
     repair_wal::{RepairProvenance, RepairWal},
+    repair_wal_worker::RepairWalWorker,
     repair_wire::{
         RepairNonce, ShredRepairRequest, decode_matching_shred_response, encode_pong,
         encode_shred_repair_request, parse_verified_ping, split_shred_response,
     },
 };
+
+/// `service_responses` runs every 5 ms. Filesystem telemetry belongs on the blocking WAL worker,
+/// but probing at that cadence would still create needless command and syscall pressure.
+const FILESYSTEM_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepairPeer {
@@ -75,10 +81,11 @@ pub trait RepairTrust: Send + Sync + 'static {
     fn expected_fec_identity(&self, slot: u64, fec_set_index: u32) -> Option<TrustedFecIdentity>;
 
     /// Called after every wire, version, leader-signature, and Merkle-root check, immediately
-    /// before the synchronous WAL append. Stateful trust stores atomically reserve an exact
+    /// before the ordered WAL append. Stateful trust stores atomically reserve an exact
     /// `(root, chained-root)` identity here so a neighbor conflict is rejected before persistence.
-    /// No await or packet processing occurs between this reservation and the append; an append
-    /// error terminates the isolated repair task before the reservation can authorize more work.
+    /// No packet processing occurs between this reservation and the durable worker acknowledgement;
+    /// an append error terminates the isolated repair attempt before the reservation can authorize
+    /// more work.
     fn reserve_repair_commitment(&self, _shred: &Shred) -> bool {
         true
     }
@@ -92,6 +99,10 @@ pub struct RepairRuntimeConfig {
     pub max_new_requests_per_tick: usize,
     pub max_packets_per_tick: usize,
     pub max_packet_bytes: usize,
+    /// Requested `SO_RCVBUF` for the dedicated repair-response UDP socket.
+    pub recv_buffer_bytes: usize,
+    /// Strict bound on datagrams copied out of the kernel while validation or WAL fsync is busy.
+    pub response_queue_capacity: usize,
     pub max_suppressed_requests: usize,
     pub request_timeout: Duration,
     /// Cooldown after a request consumes its full retry budget. This prevents a still-missing
@@ -110,6 +121,8 @@ impl RepairRuntimeConfig {
             || self.max_new_requests_per_tick == 0
             || self.max_packets_per_tick == 0
             || self.max_packet_bytes == 0
+            || self.recv_buffer_bytes == 0
+            || self.response_queue_capacity == 0
             || self.max_suppressed_requests == 0
             || self.request_timeout.is_zero()
             || self.exhaustion_cooldown.is_zero()
@@ -119,10 +132,22 @@ impl RepairRuntimeConfig {
                 "repair runtime bounds and request timeout must be nonzero",
             ));
         }
-        if self.max_packet_bytes < 1_280 {
+        if !(1_280..=2_048).contains(&self.max_packet_bytes) {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
-                "repair max_packet_bytes must be at least 1280",
+                "repair max_packet_bytes must be between 1280 and 2048",
+            ));
+        }
+        if self.recv_buffer_bytes < self.max_packet_bytes {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "repair recv_buffer_bytes must be at least max_packet_bytes",
+            ));
+        }
+        if self.response_queue_capacity > 16_384 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "repair response_queue_capacity must not exceed 16384",
             ));
         }
         Ok(self)
@@ -138,6 +163,14 @@ pub struct RepairRuntimeStats {
     pub requests_cooldown_deferred: u64,
     pub requests_exhausted: u64,
     pub packets_received: u64,
+    pub socket_datagrams_received: u64,
+    pub socket_requested_recv_buffer_bytes: u64,
+    pub socket_effective_recv_buffer_bytes: u64,
+    pub socket_rxq_overflow_supported: bool,
+    pub socket_rxq_overflow: u64,
+    pub response_queue_capacity: u64,
+    pub response_queue_depth: u64,
+    pub response_queue_dropped: u64,
     pub packets_rejected: u64,
     pub pings_answered: u64,
     pub shreds_accepted: u64,
@@ -147,6 +180,15 @@ pub struct RepairRuntimeStats {
     pub root_anchored_shreds_accepted: u64,
     pub repair_wal_bytes: u64,
     pub repair_wal_max_bytes: u64,
+    pub repair_wal_total_hard_bytes: u64,
+    pub repair_wal_filesystem_reserve_bytes: u64,
+    pub repair_wal_filesystem_available_bytes: Option<u64>,
+    pub repair_wal_v3_sealed: bool,
+    pub repair_wal_active_segment_bytes: u64,
+    pub repair_wal_segment_count: u64,
+    pub repair_wal_active_segment_id: u64,
+    pub repair_wal_rollovers: u64,
+    pub repair_wal_durable_through_sequence: Option<u64>,
     pub repair_wal_syncs: u64,
 }
 
@@ -212,6 +254,13 @@ pub struct RepairPoll {
     pub events: Vec<RepairRuntimeEvent>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RepairShutdownSummary {
+    pub staged_datagrams_processed: u64,
+    pub accepted_shreds: u64,
+    pub remaining_staged_datagrams: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutstandingRepair {
     pub nonce: RepairNonce,
@@ -242,18 +291,20 @@ impl From<ShredRepairRequest> for RequestKey {
 }
 
 pub struct RepairRuntime<T: RepairTrust> {
-    socket: UdpSocket,
+    socket: RepairSocket,
     identity: Arc<Keypair>,
     trust: T,
     peers: Vec<RepairPeer>,
     config: RepairRuntimeConfig,
-    repair_wal: RepairWal,
+    repair_wal: RepairWalWorker,
     outstanding: BTreeMap<RepairNonce, OutstandingRepair>,
     request_nonces: BTreeMap<RequestKey, RepairNonce>,
     suppressed_until: BTreeMap<RequestKey, Instant>,
     next_nonce: RepairNonce,
     next_peer: usize,
-    recv_buffer: Vec<u8>,
+    next_filesystem_refresh_at: Instant,
+    filesystem_available_valid: bool,
+    filesystem_refresh_error: Option<String>,
     stats: RepairRuntimeStats,
 }
 
@@ -274,16 +325,48 @@ impl<T: RepairTrust> RepairRuntime<T> {
             )
         })?;
         let socket = UdpSocket::bind(address).await?;
-        Self::from_socket(socket, identity, trust, peers, config, repair_wal)
+        let repair_wal = RepairWalWorker::from_wal(repair_wal).await?;
+        Self::from_socket_with_wal_worker(socket, identity, trust, peers, config, repair_wal)
     }
 
-    pub fn from_socket(
+    pub async fn from_socket(
         socket: UdpSocket,
         identity: Arc<Keypair>,
         trust: T,
         peers: Vec<RepairPeer>,
         config: RepairRuntimeConfig,
         repair_wal: RepairWal,
+    ) -> io::Result<Self> {
+        let repair_wal = RepairWalWorker::from_wal(repair_wal).await?;
+        Self::from_socket_with_wal_worker(socket, identity, trust, peers, config, repair_wal)
+    }
+
+    pub(crate) async fn bind_with_wal_worker<A: ToSocketAddrs>(
+        bind_addr: A,
+        identity: Arc<Keypair>,
+        trust: T,
+        peers: Vec<RepairPeer>,
+        config: RepairRuntimeConfig,
+        repair_wal: RepairWalWorker,
+    ) -> io::Result<Self> {
+        let mut addresses = bind_addr.to_socket_addrs()?;
+        let address = addresses.next().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "repair bind address did not resolve",
+            )
+        })?;
+        let socket = UdpSocket::bind(address).await?;
+        Self::from_socket_with_wal_worker(socket, identity, trust, peers, config, repair_wal)
+    }
+
+    fn from_socket_with_wal_worker(
+        socket: UdpSocket,
+        identity: Arc<Keypair>,
+        trust: T,
+        peers: Vec<RepairPeer>,
+        config: RepairRuntimeConfig,
+        repair_wal: RepairWalWorker,
     ) -> io::Result<Self> {
         let config = config.validate()?;
         if peers.is_empty() {
@@ -311,9 +394,38 @@ impl<T: RepairTrust> RepairRuntime<T> {
             ));
         }
 
+        let socket = RepairSocket::new(
+            socket,
+            RepairSocketConfig {
+                requested_recv_buffer_bytes: config.recv_buffer_bytes,
+                max_packet_bytes: config.max_packet_bytes,
+                response_queue_capacity: config.response_queue_capacity,
+            },
+        )?;
+        let socket_snapshot = socket.snapshot();
+        let wal_snapshot = repair_wal.snapshot();
+        let now = Instant::now();
         let stats = RepairRuntimeStats {
-            repair_wal_bytes: repair_wal.file_len(),
-            repair_wal_max_bytes: repair_wal.max_file_bytes(),
+            socket_datagrams_received: socket_snapshot.socket_datagrams_received,
+            socket_requested_recv_buffer_bytes: socket_snapshot.requested_recv_buffer_bytes,
+            socket_effective_recv_buffer_bytes: socket_snapshot.effective_recv_buffer_bytes,
+            socket_rxq_overflow_supported: socket_snapshot.socket_rxq_overflow_supported,
+            socket_rxq_overflow: socket_snapshot.socket_rxq_overflow,
+            response_queue_capacity: socket_snapshot.response_queue_capacity,
+            response_queue_depth: socket_snapshot.response_queue_depth,
+            response_queue_dropped: socket_snapshot.response_queue_dropped,
+            repair_wal_bytes: wal_snapshot.retained_bytes,
+            repair_wal_max_bytes: wal_snapshot.max_file_bytes,
+            repair_wal_total_hard_bytes: wal_snapshot.max_retained_bytes,
+            repair_wal_filesystem_reserve_bytes: wal_snapshot.filesystem_reserve_bytes,
+            repair_wal_filesystem_available_bytes: Some(wal_snapshot.filesystem_available_bytes),
+            repair_wal_v3_sealed: wal_snapshot.v3_sealed,
+            repair_wal_active_segment_bytes: wal_snapshot.active_segment_bytes,
+            repair_wal_segment_count: wal_snapshot.segment_count,
+            repair_wal_active_segment_id: wal_snapshot.active_segment_id,
+            repair_wal_rollovers: wal_snapshot.rollovers,
+            repair_wal_durable_through_sequence: wal_snapshot.durable_through_sequence,
+            repair_wal_syncs: wal_snapshot.syncs,
             ..RepairRuntimeStats::default()
         };
         Ok(Self {
@@ -328,7 +440,9 @@ impl<T: RepairTrust> RepairRuntime<T> {
             suppressed_until: BTreeMap::new(),
             next_nonce: config.initial_nonce,
             next_peer: 0,
-            recv_buffer: vec![0; config.max_packet_bytes],
+            next_filesystem_refresh_at: next_filesystem_refresh_at(now),
+            filesystem_available_valid: true,
+            filesystem_refresh_error: None,
             stats,
         })
     }
@@ -338,11 +452,26 @@ impl<T: RepairTrust> RepairRuntime<T> {
     }
 
     pub fn stats(&self) -> RepairRuntimeStats {
-        self.stats
+        let socket = self.socket.snapshot();
+        RepairRuntimeStats {
+            socket_datagrams_received: socket.socket_datagrams_received,
+            socket_requested_recv_buffer_bytes: socket.requested_recv_buffer_bytes,
+            socket_effective_recv_buffer_bytes: socket.effective_recv_buffer_bytes,
+            socket_rxq_overflow_supported: socket.socket_rxq_overflow_supported,
+            socket_rxq_overflow: socket.socket_rxq_overflow,
+            response_queue_capacity: socket.response_queue_capacity,
+            response_queue_depth: socket.response_queue_depth,
+            response_queue_dropped: socket.response_queue_dropped,
+            ..self.stats
+        }
     }
 
     pub fn outstanding_count(&self) -> usize {
         self.outstanding.len()
+    }
+
+    pub fn filesystem_refresh_error(&self) -> Option<&str> {
+        self.filesystem_refresh_error.as_deref()
     }
 
     /// Startup snapshot used for deterministic peer rotation. Live gossip refresh can construct a
@@ -356,12 +485,13 @@ impl<T: RepairTrust> RepairRuntime<T> {
         self.outstanding.values().copied().collect()
     }
 
-    pub fn repair_wal(&self) -> &RepairWal {
-        &self.repair_wal
+    pub fn repair_wal_next_sequence(&self) -> u64 {
+        self.repair_wal.snapshot().next_sequence
     }
 
-    /// Drives retries, admits newly due tracker work, and drains at most the configured number of
-    /// currently queued UDP packets. The caller controls cadence; this method never sleeps.
+    /// Drives retries, admits newly due tracker work, and consumes at most the configured number
+    /// of already-staged response datagrams. The socket task drains the kernel independently; the
+    /// caller controls validation/request cadence and this method never sleeps on network input.
     pub async fn service_tracker_requests<I>(
         &mut self,
         requests: I,
@@ -401,14 +531,144 @@ impl<T: RepairTrust> RepairRuntime<T> {
         self.retry_expired(now, unix_ms, &mut poll).await?;
         self.enqueue_new(requests, &completed_this_tick, now, unix_ms)
             .await?;
-        if self.repair_wal.sync_if_due(now)? {
-            self.stats.repair_wal_syncs = self.stats.repair_wal_syncs.saturating_add(1);
-        }
+        self.repair_wal.sync_if_due(now).await?;
+        self.refresh_repair_wal_stats();
+        self.refresh_filesystem_if_due(now).await;
         Ok(poll)
     }
 
-    pub fn flush_repair_wal(&mut self, now: Instant) -> io::Result<()> {
-        self.repair_wal.flush_and_sync(now)
+    /// Drains responses independently from the slower request-planning cadence. The dedicated
+    /// socket task has already copied these datagrams out of the kernel; this method preserves one
+    /// ordered validator/WAL consumer and therefore never acknowledges ahead of durable storage.
+    pub async fn service_responses(
+        &mut self,
+        now: Instant,
+        unix_ms: u64,
+    ) -> io::Result<RepairPoll> {
+        let mut poll = RepairPoll::default();
+        self.drain_packets(now, unix_ms, &mut poll).await?;
+        self.repair_wal.sync_if_due(now).await?;
+        self.refresh_repair_wal_stats();
+        self.refresh_filesystem_if_due(now).await;
+        Ok(poll)
+    }
+
+    pub async fn flush_repair_wal(&mut self, now: Instant) -> io::Result<()> {
+        self.repair_wal.flush(now).await?;
+        self.refresh_repair_wal_stats();
+        Ok(())
+    }
+
+    /// Closes repair ingress, validates and durably handles every datagram already staged by the
+    /// receive owner, then flushes the ordered WAL. The budget is checked only between datagrams:
+    /// an in-flight `EveryRecord` append is never cancelled after it may have reached durable
+    /// storage. Any failure reports the exact queue remainder and whether one dequeued datagram
+    /// could not complete its normal processing path.
+    pub async fn shutdown_orderly(
+        &mut self,
+        now: Instant,
+        unix_ms: u64,
+        drain_budget: Duration,
+    ) -> io::Result<RepairShutdownSummary> {
+        let started = Instant::now();
+        let ingress_error = self.socket.stop_ingress().await.err();
+        let mut summary = RepairShutdownSummary::default();
+
+        loop {
+            let remaining = self.socket.snapshot().response_queue_depth;
+            if remaining == 0 {
+                break;
+            }
+            if started.elapsed() >= drain_budget {
+                let error = io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                        "repair orderly shutdown drain budget of {} ms expired",
+                        drain_budget.as_millis()
+                    ),
+                );
+                return self
+                    .finish_failed_shutdown(error, false, summary, Instant::now())
+                    .await;
+            }
+
+            let datagram = match self.socket.try_recv() {
+                Ok(Some(datagram)) => datagram,
+                Ok(None) => {
+                    let error = io::Error::other(
+                        "repair response queue depth was nonzero after ingress stopped, but no datagram was available",
+                    );
+                    return self
+                        .finish_failed_shutdown(error, false, summary, Instant::now())
+                        .await;
+                }
+                Err(error) => {
+                    return self
+                        .finish_failed_shutdown(error, false, summary, Instant::now())
+                        .await;
+                }
+            };
+            summary.staged_datagrams_processed =
+                summary.staged_datagrams_processed.saturating_add(1);
+            let mut poll = RepairPoll::default();
+            if let Err(error) = self
+                .process_datagram(datagram, Instant::now(), unix_ms, &mut poll)
+                .await
+            {
+                return self
+                    .finish_failed_shutdown(error, true, summary, Instant::now())
+                    .await;
+            }
+            summary.accepted_shreds = summary
+                .accepted_shreds
+                .saturating_add(poll.accepted.len() as u64);
+        }
+
+        if let Err(error) = self.repair_wal.flush(now).await {
+            return self
+                .finish_failed_shutdown(error, false, summary, Instant::now())
+                .await;
+        }
+        self.refresh_repair_wal_stats();
+        summary.remaining_staged_datagrams = self.socket.snapshot().response_queue_depth;
+        debug_assert_eq!(summary.remaining_staged_datagrams, 0);
+
+        if let Some(error) = ingress_error {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "repair ingress failed before orderly shutdown completed: {error}; remaining_staged_datagrams=0; current_datagram_unpersisted=0"
+                ),
+            ));
+        }
+        Ok(summary)
+    }
+
+    async fn finish_failed_shutdown(
+        &mut self,
+        error: io::Error,
+        current_datagram_unpersisted: bool,
+        mut summary: RepairShutdownSummary,
+        now: Instant,
+    ) -> io::Result<RepairShutdownSummary> {
+        summary.remaining_staged_datagrams = self.socket.snapshot().response_queue_depth;
+        let current = u64::from(current_datagram_unpersisted);
+        let unpersisted = summary.remaining_staged_datagrams.saturating_add(current);
+        let flush_error = self.repair_wal.flush(now).await.err();
+        self.refresh_repair_wal_stats();
+        let flush_context = flush_error
+            .map(|flush| format!("; final_flush_error={flush}"))
+            .unwrap_or_default();
+        Err(io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; remaining_staged_datagrams={}; current_datagram_unpersisted={current}; total_unpersisted_datagrams={unpersisted}; staged_datagrams_processed={}; accepted_shreds={}{}",
+                summary.remaining_staged_datagrams,
+                summary.staged_datagrams_processed,
+                summary.accepted_shreds,
+                flush_context,
+            ),
+        ))
     }
 
     async fn retry_expired(
@@ -611,21 +871,39 @@ impl<T: RepairTrust> RepairRuntime<T> {
         poll: &mut RepairPoll,
     ) -> io::Result<()> {
         for _ in 0..self.config.max_packets_per_tick {
-            let (len, source) = match self.socket.try_recv_from(&mut self.recv_buffer) {
-                Ok(received) => received,
-                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                Err(error) => return Err(error),
+            let Some(datagram) = self.socket.try_recv()? else {
+                break;
             };
-            self.stats.packets_received = self.stats.packets_received.saturating_add(1);
-            if len == self.recv_buffer.len() {
-                self.reject(source, RepairRejectReason::PacketAtReceiveLimit, poll);
-                continue;
-            }
-            let packet = self.recv_buffer[..len].to_vec();
-            self.process_packet(&packet, source, now, unix_ms, poll)
-                .await?;
+            self.process_datagram(datagram, now, unix_ms, poll).await?;
         }
         Ok(())
+    }
+
+    async fn process_datagram(
+        &mut self,
+        datagram: crate::repair_socket::RepairDatagram,
+        now: Instant,
+        unix_ms: u64,
+        poll: &mut RepairPoll,
+    ) -> io::Result<()> {
+        self.stats.packets_received = self.stats.packets_received.saturating_add(1);
+        if datagram.truncated {
+            self.reject(
+                datagram.source,
+                RepairRejectReason::PacketAtReceiveLimit,
+                poll,
+            );
+            return Ok(());
+        }
+        self.process_packet(
+            &datagram.payload,
+            datagram.source,
+            now,
+            unix_ms,
+            datagram.received_at_unix_ms,
+            poll,
+        )
+        .await
     }
 
     async fn process_packet(
@@ -634,6 +912,7 @@ impl<T: RepairTrust> RepairRuntime<T> {
         source: SocketAddr,
         now: Instant,
         unix_ms: u64,
+        received_at_unix_ms: u64,
         poll: &mut RepairPoll,
     ) -> io::Result<()> {
         if let Some(ping) = parse_verified_ping(packet) {
@@ -832,7 +1111,7 @@ impl<T: RepairTrust> RepairRuntime<T> {
         }
 
         let provenance = RepairProvenance {
-            received_at_unix_ms: unix_ms,
+            received_at_unix_ms,
             nonce: attempt.nonce,
             request: attempt.request,
             peer_addr: source.to_string(),
@@ -849,16 +1128,18 @@ impl<T: RepairTrust> RepairRuntime<T> {
             leader_signature: *shred.signature(),
         };
         // Persist before removing the nonce or exposing the shred. A disk error is fatal to this
-        // service call and leaves the request outstanding for a bounded retry; no accepted shred
-        // can bypass the provenance WAL.
-        let append = self.repair_wal.append(&provenance, shred.payload(), now)?;
-        self.stats.repair_wal_bytes = self
-            .stats
-            .repair_wal_bytes
-            .saturating_add(append.frame_bytes as u64);
-        if append.synced {
-            self.stats.repair_wal_syncs = self.stats.repair_wal_syncs.saturating_add(1);
-        }
+        // supervised attempt; fresh trust state is required after restart, and no accepted shred
+        // can bypass the provenance WAL acknowledgement.
+        let append = self
+            .repair_wal
+            .append(provenance.clone(), shred.payload().to_vec(), now)
+            .await?;
+        // WAL admission performs its own statvfs check immediately before the write, so a
+        // successful durable append is also a fresh filesystem-availability observation.
+        self.filesystem_available_valid = true;
+        self.filesystem_refresh_error = None;
+        self.next_filesystem_refresh_at = next_filesystem_refresh_at(now);
+        self.refresh_repair_wal_stats();
         self.remove_outstanding(attempt.nonce);
         self.stats.shreds_accepted = self.stats.shreds_accepted.saturating_add(1);
         if learned_chained_merkle_root {
@@ -881,6 +1162,48 @@ impl<T: RepairTrust> RepairRuntime<T> {
             repair_wal_sequence: append.sequence,
         });
         Ok(())
+    }
+
+    fn refresh_repair_wal_stats(&mut self) {
+        let snapshot = self.repair_wal.snapshot();
+        self.stats.repair_wal_bytes = snapshot.retained_bytes;
+        self.stats.repair_wal_max_bytes = snapshot.max_file_bytes;
+        self.stats.repair_wal_total_hard_bytes = snapshot.max_retained_bytes;
+        self.stats.repair_wal_filesystem_reserve_bytes = snapshot.filesystem_reserve_bytes;
+        self.stats.repair_wal_filesystem_available_bytes = self
+            .filesystem_available_valid
+            .then_some(snapshot.filesystem_available_bytes);
+        self.stats.repair_wal_v3_sealed = snapshot.v3_sealed;
+        self.stats.repair_wal_active_segment_bytes = snapshot.active_segment_bytes;
+        self.stats.repair_wal_segment_count = snapshot.segment_count;
+        self.stats.repair_wal_active_segment_id = snapshot.active_segment_id;
+        self.stats.repair_wal_rollovers = snapshot.rollovers;
+        self.stats.repair_wal_durable_through_sequence = snapshot.durable_through_sequence;
+        self.stats.repair_wal_syncs = snapshot.syncs;
+    }
+
+    async fn refresh_filesystem_if_due(&mut self, now: Instant) {
+        if now < self.next_filesystem_refresh_at {
+            return;
+        }
+        self.next_filesystem_refresh_at = next_filesystem_refresh_at(now);
+        match self.repair_wal.refresh_filesystem_available().await {
+            Ok(()) => {
+                self.filesystem_available_valid = true;
+                self.filesystem_refresh_error = None;
+            }
+            Err(error) => {
+                // This telemetry failure must not backpressure raw capture or restart repair by
+                // itself. New repair writes remain fail-closed because admission repeats statvfs.
+                // Until a later refresh succeeds, expose storage as unknown instead of replaying a
+                // stale value that may predate raw-spool growth.
+                self.filesystem_available_valid = false;
+                self.filesystem_refresh_error = Some(format!(
+                    "cannot refresh repair WAL filesystem availability: {error}"
+                ));
+            }
+        }
+        self.refresh_repair_wal_stats();
     }
 
     fn reject(&mut self, source: SocketAddr, reason: RepairRejectReason, poll: &mut RepairPoll) {
@@ -909,6 +1232,10 @@ impl<T: RepairTrust> RepairRuntime<T> {
             "repair nonce space is unexpectedly exhausted",
         ))
     }
+}
+
+fn next_filesystem_refresh_at(now: Instant) -> Instant {
+    now.checked_add(FILESYSTEM_REFRESH_INTERVAL).unwrap_or(now)
 }
 
 fn tracker_request_to_wire(request: RepairRequest) -> ShredRepairRequest {
@@ -993,6 +1320,8 @@ mod tests {
             max_new_requests_per_tick: 8,
             max_packets_per_tick: 8,
             max_packet_bytes: 2_048,
+            recv_buffer_bytes: 64 * 1_024,
+            response_queue_capacity: 64,
             max_suppressed_requests: 64,
             request_timeout: Duration::from_millis(100),
             exhaustion_cooldown: Duration::from_secs(12),
@@ -1007,10 +1336,122 @@ mod tests {
                 path: directory.path().join("runtime.repair.wal"),
                 fsync: RepairWalFsyncPolicy::EveryRecord,
                 max_file_bytes: 1024 * 1024,
+                max_retained_bytes: 8 * 1024 * 1024,
+                filesystem_reserve_bytes: 1,
             },
             Instant::now(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn repair_response_staging_has_a_fixed_memory_ceiling() {
+        let mut runtime = config();
+        runtime.response_queue_capacity = 16_385;
+        assert_eq!(
+            runtime.validate().unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+
+        runtime = config();
+        runtime.max_packet_bytes = 2_049;
+        assert_eq!(
+            runtime.validate().unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+
+    #[tokio::test]
+    async fn periodic_filesystem_refresh_exposes_unknown_then_recovers() {
+        struct NoTrust;
+        impl RepairTrust for NoTrust {
+            fn peer_is_authorized(&self, _peer: &RepairPeer, _source: SocketAddr) -> bool {
+                false
+            }
+
+            fn request_response_is_authorized(
+                &self,
+                _peer: &RepairPeer,
+                _request: ShredRepairRequest,
+                _shred: &Shred,
+            ) -> bool {
+                false
+            }
+
+            fn expected_shred_version(&self, _slot: u64) -> Option<u16> {
+                None
+            }
+
+            fn expected_slot_leader(&self, _slot: u64) -> Option<Pubkey> {
+                None
+            }
+
+            fn expected_fec_identity(
+                &self,
+                _slot: u64,
+                _fec_set_index: u32,
+            ) -> Option<TrustedFecIdentity> {
+                None
+            }
+        }
+
+        let directory = tempdir().unwrap();
+        let active = directory.path().join("active");
+        let moved = directory.path().join("moved");
+        std::fs::create_dir(&active).unwrap();
+        let wal = RepairWal::open(
+            RepairWalConfig {
+                path: active.join("runtime.repair.wal"),
+                fsync: RepairWalFsyncPolicy::EveryRecord,
+                max_file_bytes: 1024 * 1024,
+                max_retained_bytes: 8 * 1024 * 1024,
+                filesystem_reserve_bytes: 1,
+            },
+            Instant::now(),
+        )
+        .unwrap();
+        let peer = RepairPeer {
+            pubkey: Keypair::new().pubkey(),
+            repair_addr: "127.0.0.1:1".parse().unwrap(),
+        };
+        let mut runtime = RepairRuntime::bind(
+            "127.0.0.1:0",
+            Arc::new(Keypair::new()),
+            NoTrust,
+            vec![peer],
+            config(),
+            wal,
+        )
+        .await
+        .unwrap();
+
+        std::fs::rename(&active, &moved).unwrap();
+        let due = runtime.next_filesystem_refresh_at;
+        let before_due = due.checked_sub(Duration::from_millis(1)).unwrap();
+        runtime.service_responses(before_due, 1_000).await.unwrap();
+        assert!(
+            runtime
+                .stats()
+                .repair_wal_filesystem_available_bytes
+                .is_some(),
+            "the 5 ms response loop must not issue statvfs before the bounded cadence"
+        );
+        assert_eq!(runtime.filesystem_refresh_error(), None);
+
+        runtime.service_responses(due, 1_001).await.unwrap();
+        assert_eq!(runtime.stats().repair_wal_filesystem_available_bytes, None);
+        assert!(runtime.filesystem_refresh_error().is_some());
+
+        std::fs::rename(&moved, &active).unwrap();
+        let later = due + FILESYSTEM_REFRESH_INTERVAL;
+        runtime.service_responses(later, 1_002).await.unwrap();
+        assert!(
+            runtime
+                .stats()
+                .repair_wal_filesystem_available_bytes
+                .is_some()
+        );
+        assert_eq!(runtime.filesystem_refresh_error(), None);
     }
 
     fn signed_test_data_shred(slot: u64, index: u32, version: u16, leader: &Keypair) -> Shred {
@@ -1087,12 +1528,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             runtime.stats().repair_wal_bytes,
-            runtime.repair_wal().file_len(),
+            runtime.repair_wal.snapshot().active_segment_bytes,
             "WAL metrics must include bytes recovered at open"
         );
         assert_eq!(
             runtime.stats().repair_wal_max_bytes,
-            runtime.repair_wal().max_file_bytes()
+            runtime.repair_wal.snapshot().max_file_bytes
         );
         let local_addr = runtime.local_addr().unwrap();
         let now = Instant::now();
@@ -1397,7 +1838,7 @@ mod tests {
                 ..
             }]
         ));
-        assert_eq!(runtime.repair_wal().next_sequence(), 0);
+        assert_eq!(runtime.repair_wal_next_sequence(), 0);
         assert_eq!(runtime.outstanding_count(), 1);
     }
 
@@ -1440,6 +1881,8 @@ mod tests {
                     path: wal_path.clone(),
                     fsync: RepairWalFsyncPolicy::EveryRecord,
                     max_file_bytes: 1024 * 1024,
+                    max_retained_bytes: 8 * 1024 * 1024,
+                    filesystem_reserve_bytes: 1,
                 },
                 Instant::now(),
             )
@@ -1477,7 +1920,7 @@ mod tests {
             }]
         ));
         assert_eq!(runtime.outstanding_count(), 1);
-        assert_eq!(runtime.repair_wal().next_sequence(), 0);
+        assert_eq!(runtime.repair_wal_next_sequence(), 0);
 
         let mut response = shred.payload().to_vec();
         response.extend_from_slice(&attempt.nonce.to_le_bytes());
@@ -1495,7 +1938,7 @@ mod tests {
         assert_eq!(poll.accepted[0].shred.id(), shred.id());
         assert_eq!(runtime.outstanding_count(), 0);
         assert_eq!(runtime.stats().shreds_accepted, 1);
-        runtime.flush_repair_wal(Instant::now()).unwrap();
+        runtime.flush_repair_wal(Instant::now()).await.unwrap();
         drop(runtime);
         let entries = RepairWal::read_all(&wal_path).unwrap();
         assert_eq!(entries.len(), 1);
@@ -1503,6 +1946,184 @@ mod tests {
         assert_eq!(
             entries[0].shred_payload.as_slice(),
             shred.payload().as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn orderly_shutdown_persists_all_queued_valid_responses_in_receive_order() {
+        struct MultiSlotTrust {
+            peer: RepairPeer,
+            version: u16,
+            leader: Pubkey,
+            fec_by_slot: BTreeMap<u64, TrustedFecIdentity>,
+        }
+
+        impl RepairTrust for MultiSlotTrust {
+            fn peer_is_authorized(&self, peer: &RepairPeer, source: SocketAddr) -> bool {
+                peer == &self.peer && source == self.peer.repair_addr
+            }
+
+            fn request_response_is_authorized(
+                &self,
+                _peer: &RepairPeer,
+                request: ShredRepairRequest,
+                shred: &Shred,
+            ) -> bool {
+                matches!(
+                    request,
+                    ShredRepairRequest::Shred { slot, shred_index }
+                        if slot == shred.slot() && shred_index == u64::from(shred.index())
+                )
+            }
+
+            fn expected_shred_version(&self, _slot: u64) -> Option<u16> {
+                Some(self.version)
+            }
+
+            fn expected_slot_leader(&self, _slot: u64) -> Option<Pubkey> {
+                Some(self.leader)
+            }
+
+            fn expected_fec_identity(
+                &self,
+                slot: u64,
+                _fec_set_index: u32,
+            ) -> Option<TrustedFecIdentity> {
+                self.fec_by_slot.get(&slot).copied()
+            }
+        }
+
+        let directory = tempdir().unwrap();
+        let wal_path = directory.path().join("shutdown-order.repair.wal");
+        let peer_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_key = Keypair::new();
+        let peer = RepairPeer {
+            pubkey: peer_key.pubkey(),
+            repair_addr: peer_socket.local_addr().unwrap(),
+        };
+        let leader = Keypair::new();
+        let version = 50_093;
+        let first = signed_test_data_shred(123, 0, version, &leader);
+        let second = signed_test_data_shred(124, 0, version, &leader);
+        let fec_by_slot = [&first, &second]
+            .into_iter()
+            .map(|shred| {
+                (
+                    shred.slot(),
+                    TrustedFecIdentity {
+                        merkle_root: shred.merkle_root().unwrap(),
+                        chained_merkle_root: ChainedMerkleRootExpectation::Exact(
+                            shred.chained_merkle_root().ok(),
+                        ),
+                        trust_anchor_fec_set_index: shred.fec_set_index(),
+                    },
+                )
+            })
+            .collect();
+        let trust = MultiSlotTrust {
+            peer: peer.clone(),
+            version,
+            leader: leader.pubkey(),
+            fec_by_slot,
+        };
+        let mut runtime = RepairRuntime::bind(
+            "127.0.0.1:0",
+            Arc::new(Keypair::new()),
+            trust,
+            vec![peer],
+            config(),
+            RepairWal::open(
+                RepairWalConfig {
+                    path: wal_path.clone(),
+                    fsync: RepairWalFsyncPolicy::EveryRecord,
+                    max_file_bytes: 1024 * 1024,
+                    max_retained_bytes: 8 * 1024 * 1024,
+                    filesystem_reserve_bytes: 1,
+                },
+                Instant::now(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let first_request = ShredRepairRequest::Shred {
+            slot: first.slot(),
+            shred_index: u64::from(first.index()),
+        };
+        let second_request = ShredRepairRequest::Shred {
+            slot: second.slot(),
+            shred_index: u64::from(second.index()),
+        };
+        runtime
+            .service_requests([first_request, second_request], Instant::now(), 1_000)
+            .await
+            .unwrap();
+
+        let mut outbound = [0u8; 512];
+        peer_socket.recv_from(&mut outbound).await.unwrap();
+        peer_socket.recv_from(&mut outbound).await.unwrap();
+        let attempts = runtime.outstanding_repairs();
+        let first_nonce = attempts
+            .iter()
+            .find(|attempt| attempt.request == first_request)
+            .unwrap()
+            .nonce;
+        let second_nonce = attempts
+            .iter()
+            .find(|attempt| attempt.request == second_request)
+            .unwrap()
+            .nonce;
+
+        // Deliberately stage the reverse of request order. The WAL must follow receive/channel
+        // order, not nonce or request-map order, even though shutdown triggers the drain.
+        let mut second_response = second.payload().to_vec();
+        second_response.extend_from_slice(&second_nonce.to_le_bytes());
+        let mut first_response = first.payload().to_vec();
+        first_response.extend_from_slice(&first_nonce.to_le_bytes());
+        peer_socket
+            .send_to(&second_response, runtime.local_addr().unwrap())
+            .await
+            .unwrap();
+        peer_socket
+            .send_to(&first_response, runtime.local_addr().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.socket.snapshot().response_queue_depth != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let summary = runtime
+            .shutdown_orderly(Instant::now(), 1_001, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            summary,
+            RepairShutdownSummary {
+                staged_datagrams_processed: 2,
+                accepted_shreds: 2,
+                remaining_staged_datagrams: 0,
+            }
+        );
+        assert_eq!(runtime.outstanding_count(), 0);
+        drop(runtime);
+
+        let entries = RepairWal::read_all(&wal_path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sequence, 0);
+        assert_eq!(entries[0].provenance.request, second_request);
+        assert_eq!(
+            entries[0].shred_payload.as_slice(),
+            second.payload().as_ref()
+        );
+        assert_eq!(entries[1].sequence, 1);
+        assert_eq!(entries[1].provenance.request, first_request);
+        assert_eq!(
+            entries[1].shred_payload.as_slice(),
+            first.payload().as_ref()
         );
     }
 }

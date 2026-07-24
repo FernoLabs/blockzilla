@@ -41,6 +41,19 @@ def hivezilla_status(now=2_000, **overrides):
         "filesystem_free_bytes": 42_949_672_960,
         "filesystem_total_bytes": 64_424_509_440,
         "reserve_free_bytes": 2_147_483_648,
+        "udp_received_total": 503,
+        "udp_received_bytes_total": 618_096,
+        "ingest_queue_depth_events": 3,
+        "ingest_queue_depth_bytes": 3_696,
+        "ingest_queue_high_water_events": 64,
+        "ingest_queue_high_water_bytes": 78_848,
+        "ingest_queue_capacity_events": 16_384,
+        "ingest_queue_capacity_bytes": 67_108_864,
+        "ingest_queue_backpressure_events_total": 0,
+        "ingest_queue_backpressure_micros_total": 0,
+        "ingest_queue_backpressured": False,
+        "socket_rxq_overflow_supported": True,
+        "socket_rxq_overflow_total": 0,
     }
     value.update(overrides)
     return value
@@ -69,9 +82,62 @@ def receiver_metrics(**overrides):
         "forward_targets": 1,
         "forwarded_datagrams_total": 985,
         "forward_errors_total": 5,
+        "tvu_socket_rxq_overflow_supported": True,
+        "tvu_socket_rxq_overflow_total": 0,
         "tracked_sources": 22,
         "latest_slot": 433_735_944,
         "seconds_since_last_packet": 2,
+        "repair_enabled": True,
+        "repair_active": True,
+        "repair_state": "active",
+        "repair_last_error": None,
+        "repair_restart_count": 1,
+        "repair_last_success_unix_ms": 1_999_000,
+        "seconds_since_repair_success": 1,
+        "repair_peers": 8,
+        "repair_tracked_slots": 4,
+        "repair_outstanding": 12,
+        "repair_observation_queue_dropped_total": 3,
+        "repair_requests_sent_total": 400,
+        "repair_retries_sent_total": 50,
+        "repair_requests_exhausted_total": 7,
+        "repair_requests_cooldown_deferred_total": 9,
+        "repair_packets_rejected_total": 2,
+        "repair_pings_answered_total": 6,
+        "repair_shreds_accepted_total": 125,
+        "repair_root_anchored_shreds_accepted_total": 5,
+        "repair_socket_datagrams_received_total": 180,
+        "repair_response_datagrams_processed_total": 125,
+        "repair_socket_requested_recv_buffer_bytes": 67_108_864,
+        "repair_socket_effective_recv_buffer_bytes": 134_217_728,
+        "repair_socket_rxq_overflow_supported": True,
+        "repair_socket_rxq_overflow_total": 0,
+        "repair_response_queue_capacity": 2_048,
+        "repair_response_queue_depth": 3,
+        "repair_response_queue_dropped_total": 0,
+        "repair_wal_bytes_total": 300_000_000,
+        "repair_wal_retained_bytes": 300_000_000,
+        "repair_wal_max_bytes": 268_435_456,
+        "repair_wal_remaining_bytes": 236_870_912,
+        "repair_wal_active_segment_bytes": 31_564_544,
+        "repair_wal_segment_count": 2,
+        "repair_wal_active_segment_id": 1,
+        "repair_wal_rollovers_total": 1,
+        "repair_wal_durable_through_sequence": 199_999,
+        "repair_wal_total_warning_bytes": 1_073_741_824,
+        "repair_wal_total_critical_bytes": 2_147_483_648,
+        "repair_wal_total_hard_bytes": 4_294_967_296,
+        "repair_wal_filesystem_reserve_bytes": 8_589_934_592,
+        "repair_wal_filesystem_available_bytes": 12_884_901_888,
+        "repair_wal_v3_sealed": True,
+        "repair_wal_total_warning": False,
+        "repair_wal_total_critical": False,
+        "repair_wal_total_hard": False,
+        "repair_wal_filesystem_reserve_breached": False,
+        "repair_wal_admission_blocked": False,
+        "repair_wal_last_error": None,
+        "repair_wal_syncs_total": 125,
+        "repair_errors_total": 1,
     }
     value.update(overrides)
     return value
@@ -175,6 +241,8 @@ class ShredStatusTests(unittest.TestCase):
             token="receiver-token-must-not-leak",
             peers=["198.51.100.2:8001"],
             config_path="/data/receiver/config.json",
+            repair_last_error="repair secret /data/accepted.repair.wal",
+            repair_wal_last_error="repair WAL secret peer 198.51.100.3",
         )
         hivezilla = hivezilla_status(
             journal_id="deadbeef",
@@ -189,11 +257,20 @@ class ShredStatusTests(unittest.TestCase):
         self.assertEqual(public["gossip"]["recent_peer_count"], 37)
         self.assertEqual(public["tvu"]["state"], "receiving")
         self.assertEqual(public["tvu"]["latest_slot"], 433_735_944)
+        self.assertTrue(public["tvu"]["socket_rxq_overflow_supported"])
+        self.assertEqual(public["tvu"]["socket_rxq_overflow_total"], 0)
         self.assertEqual(public["forwarding"]["state"], "sending")
         self.assertEqual(public["forwarding"]["attempts_total"], 990)
+        self.assertEqual(public["repair"]["state"], "active")
+        self.assertEqual(public["repair"]["shreds_accepted_total"], 125)
+        self.assertEqual(public["repair"]["wal_retained_bytes"], 300_000_000)
+        self.assertEqual(public["repair"]["socket_effective_recv_buffer_bytes"], 134_217_728)
+        self.assertEqual(public["repair"]["socket_rxq_overflow_total"], 0)
         self.assertEqual(public["hivezilla"]["availability"], "available")
         self.assertTrue(public["hivezilla"]["status_fresh"])
         self.assertEqual(public["hivezilla"]["durable_through_sequence"], 7_499)
+        self.assertEqual(public["hivezilla"]["socket_rxq_overflow_total"], 0)
+        self.assertEqual(public["hivezilla"]["ingest_queue_high_water_events"], 64)
 
         encoded = status_server.encode_public_status(public).decode("ascii")
         for forbidden in (
@@ -206,8 +283,217 @@ class ShredStatusTests(unittest.TestCase):
             "127.0.0.1:44444",
             "/data/shred-ingest",
             "hivezilla-secret",
+            "repair secret",
+            "repair WAL secret",
+            "198.51.100.3",
         ):
             self.assertNotIn(forbidden, encoded)
+
+    def test_first_and_second_hop_socket_overflow_are_separate(self):
+        public = self.build(
+            receiver=receiver_metrics(tvu_socket_rxq_overflow_total=7),
+            hivezilla=hivezilla_status(socket_rxq_overflow_total=3),
+        )
+
+        self.assertEqual(public["tvu"]["socket_rxq_overflow_total"], 7)
+        self.assertEqual(public["hivezilla"]["socket_rxq_overflow_total"], 3)
+
+        unsupported_first_hop = self.build(
+            receiver=receiver_metrics(
+                tvu_socket_rxq_overflow_supported=False,
+                tvu_socket_rxq_overflow_total=None,
+            )
+        )
+        self.assertFalse(
+            unsupported_first_hop["tvu"]["socket_rxq_overflow_supported"]
+        )
+        self.assertIsNone(unsupported_first_hop["tvu"]["socket_rxq_overflow_total"])
+
+        incumbent_metrics = receiver_metrics()
+        del incumbent_metrics["tvu_socket_rxq_overflow_supported"]
+        del incumbent_metrics["tvu_socket_rxq_overflow_total"]
+        incumbent = self.build(receiver=incumbent_metrics)
+        self.assertEqual(incumbent["tvu"]["state"], "receiving")
+        self.assertFalse(incumbent["tvu"]["socket_rxq_overflow_supported"])
+        self.assertIsNone(incumbent["tvu"]["socket_rxq_overflow_total"])
+
+    def test_incumbent_hivezilla_status_remains_visible(self):
+        incumbent_status = hivezilla_status()
+        for key in (
+            "udp_received_total",
+            "udp_received_bytes_total",
+            "ingest_queue_depth_events",
+            "ingest_queue_depth_bytes",
+            "ingest_queue_high_water_events",
+            "ingest_queue_high_water_bytes",
+            "ingest_queue_capacity_events",
+            "ingest_queue_capacity_bytes",
+            "ingest_queue_backpressure_events_total",
+            "ingest_queue_backpressure_micros_total",
+            "ingest_queue_backpressured",
+            "socket_rxq_overflow_supported",
+            "socket_rxq_overflow_total",
+        ):
+            del incumbent_status[key]
+
+        public = self.build(hivezilla=incumbent_status)
+
+        self.assertEqual(public["hivezilla"]["availability"], "available")
+        self.assertEqual(public["hivezilla"]["state"], "receiving")
+        self.assertEqual(public["hivezilla"]["durable_through_sequence"], 7_499)
+        self.assertIsNone(public["hivezilla"]["udp_received_total"])
+        self.assertIsNone(public["hivezilla"]["ingest_queue_depth_events"])
+        self.assertFalse(public["hivezilla"]["socket_rxq_overflow_supported"])
+        self.assertIsNone(public["hivezilla"]["socket_rxq_overflow_total"])
+
+        partial_status = dict(incumbent_status, udp_received_total=503)
+        partial = self.build(hivezilla=partial_status)
+        self.assertEqual(partial["hivezilla"]["availability"], "unavailable")
+
+    def test_old_current_and_named_durable_source_status_are_compatible(self):
+        old_status = hivezilla_status()
+        for key in (
+            "udp_received_total",
+            "udp_received_bytes_total",
+            "ingest_queue_depth_events",
+            "ingest_queue_depth_bytes",
+            "ingest_queue_high_water_events",
+            "ingest_queue_high_water_bytes",
+            "ingest_queue_capacity_events",
+            "ingest_queue_capacity_bytes",
+            "ingest_queue_backpressure_events_total",
+            "ingest_queue_backpressure_micros_total",
+            "ingest_queue_backpressured",
+            "socket_rxq_overflow_supported",
+            "socket_rxq_overflow_total",
+        ):
+            del old_status[key]
+        self.assertEqual(self.build(hivezilla=old_status)["hivezilla"]["durable_sources"], {})
+        self.assertEqual(
+            self.build(hivezilla=hivezilla_status())["hivezilla"]["durable_sources"],
+            {},
+        )
+
+        named = hivezilla_status(
+            durable_sources={
+                "blue": {
+                    "committed_datagrams_total": 300,
+                    "last_durable_unix_secs": 2_000,
+                    "last_durable_sequence": 7_498,
+                    "last_durable_slot": 433_735_943,
+                },
+                "green": {
+                    "committed_datagrams_total": 200,
+                    "last_durable_unix_secs": 2_000,
+                    "last_durable_sequence": 7_499,
+                    "last_durable_slot": 433_735_944,
+                },
+            },
+            durable_source_allowlist=[
+                {"name": "blue", "address": "127.0.0.1:18004"},
+                {"name": "green", "address": "127.0.0.1:18104"},
+            ],
+        )
+        public = self.build(hivezilla=named)
+        self.assertEqual(
+            public["hivezilla"]["durable_sources"]["green"]["committed_datagrams_total"],
+            200,
+        )
+        encoded = status_server.encode_public_status(public).decode("ascii")
+        self.assertNotIn("127.0.0.1", encoded)
+        self.assertNotIn("18104", encoded)
+
+    def test_invalid_durable_source_status_is_rejected_as_hivezilla_only(self):
+        invalid_values = [
+            {
+                "bad.name": {
+                    "committed_datagrams_total": 1,
+                    "last_durable_unix_secs": 2_000,
+                    "last_durable_sequence": 7_499,
+                    "last_durable_slot": 433_735_944,
+                }
+            },
+            {
+                "green": {
+                    "committed_datagrams_total": 1,
+                    "last_durable_unix_secs": None,
+                    "last_durable_sequence": 7_499,
+                    "last_durable_slot": 433_735_944,
+                }
+            },
+            {
+                "green": {
+                    "committed_datagrams_total": 501,
+                    "last_durable_unix_secs": 2_000,
+                    "last_durable_sequence": 7_499,
+                    "last_durable_slot": 433_735_944,
+                }
+            },
+            {
+                f"source{index}": {
+                    "committed_datagrams_total": 0,
+                    "last_durable_unix_secs": None,
+                    "last_durable_sequence": None,
+                    "last_durable_slot": None,
+                }
+                for index in range(5)
+            },
+        ]
+        for durable_sources in invalid_values:
+            with self.subTest(durable_sources=durable_sources):
+                public = self.build(
+                    hivezilla=hivezilla_status(durable_sources=durable_sources)
+                )
+                self.assertEqual(public["hivezilla"]["availability"], "unavailable")
+                self.assertEqual(public["tvu"]["state"], "receiving")
+
+    def test_repair_backoff_and_storage_pressure_are_explicit_without_error_text(self):
+        public = self.build(
+            receiver=receiver_metrics(
+                repair_active=False,
+                repair_state="backoff",
+                repair_last_error="private repair failure /data/accepted.repair.wal",
+                repair_wal_retained_bytes=1_200_000_000,
+                repair_wal_total_warning=True,
+            )
+        )
+
+        repair = public["repair"]
+        self.assertEqual(repair["availability"], "available")
+        self.assertEqual(repair["state"], "backoff")
+        self.assertFalse(repair["active"])
+        self.assertTrue(repair["wal_warning"])
+        self.assertFalse(repair["wal_admission_blocked"])
+        self.assertNotIn(
+            "private repair failure",
+            status_server.encode_public_status(public).decode("ascii"),
+        )
+
+    def test_invalid_repair_contract_is_isolated_from_raw_capture_status(self):
+        queue_invalid = self.build(
+            receiver=receiver_metrics(
+                repair_response_queue_capacity=2,
+                repair_response_queue_depth=3,
+            )
+        )
+        self.assertEqual(queue_invalid["repair"]["availability"], "unavailable")
+        self.assertEqual(queue_invalid["tvu"]["state"], "receiving")
+        self.assertEqual(queue_invalid["forwarding"]["state"], "sending")
+
+        overflow_invalid = self.build(
+            receiver=receiver_metrics(
+                repair_socket_rxq_overflow_supported=False,
+                repair_socket_rxq_overflow_total=1,
+            )
+        )
+        self.assertEqual(overflow_invalid["repair"]["availability"], "unavailable")
+        self.assertEqual(overflow_invalid["tvu"]["state"], "receiving")
+
+        starting_metrics = receiver_metrics()
+        del starting_metrics["repair_wal_total_warning_bytes"]
+        starting = self.build(receiver=starting_metrics)
+        self.assertEqual(starting["repair"]["availability"], "unavailable")
+        self.assertEqual(starting["tvu"]["state"], "receiving")
 
     def test_receiver_and_hivezilla_fail_independently(self):
         def unavailable():
@@ -222,6 +508,7 @@ class ShredStatusTests(unittest.TestCase):
         self.assertEqual(receiver_missing["gossip"]["state"], "unavailable")
         self.assertEqual(receiver_missing["tvu"]["state"], "unavailable")
         self.assertEqual(receiver_missing["forwarding"]["state"], "unavailable")
+        self.assertEqual(receiver_missing["repair"]["availability"], "unavailable")
         self.assertEqual(receiver_missing["hivezilla"]["availability"], "available")
 
         hivezilla_missing = status_server.build_status(
@@ -302,6 +589,9 @@ class ShredStatusTests(unittest.TestCase):
             hivezilla_status(spool_bytes=30_000_000_000),
             hivezilla_status(filesystem_free_bytes=70_000_000_000),
             hivezilla_status(last_durable_unix_secs=None),
+            hivezilla_status(udp_received_total=501),
+            hivezilla_status(ingest_queue_depth_events=17_000),
+            hivezilla_status(socket_rxq_overflow_supported=False),
         ]
         for value in cases:
             with self.subTest(value=value):
@@ -312,6 +602,10 @@ class ShredStatusTests(unittest.TestCase):
         self.assertEqual(invalid_receiver["gossip"]["state"], "unavailable")
         invalid_forwarding = self.build(receiver=receiver_metrics(forward_targets=0))
         self.assertEqual(invalid_forwarding["forwarding"]["state"], "unavailable")
+        invalid_first_hop_overflow = self.build(
+            receiver=receiver_metrics(tvu_socket_rxq_overflow_supported=False)
+        )
+        self.assertEqual(invalid_first_hop_overflow["tvu"]["state"], "unavailable")
 
     def test_unsafe_or_duplicate_json_is_rejected(self):
         duplicate = b'{"schema_version":1,"schema_version":1}'

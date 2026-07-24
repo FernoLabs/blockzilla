@@ -9,9 +9,32 @@ services, NAS progress WAL, and raw-shred spool. It creates files only below a n
 directory.
 
 > [!IMPORTANT]
-> The current `shred-epoch-audit` reads the replicated raw Turbine journal and performs local FEC
-> recovery. It does **not** merge the separate repair-provenance WAL. This run therefore measures
-> raw reception plus local Reed-Solomon recovery, not the final effectiveness of live repair.
+> `shred-epoch-audit` remains raw-only unless both `--repair-wal` and the receiver's frozen,
+> inclusive `--repair-durable-through-sequence` are supplied. A raw-only run measures Turbine plus
+> local Reed-Solomon recovery; an opt-in repair run twice verifies the exact accepted-repair prefix
+> and reports the raw baseline, unique repair additions, conflicts, and incremental reconstructions.
+
+Before an opt-in repair run, copy the stopped or otherwise frozen repair WAL generation into the
+audit directory and verify its checksum. The generation includes the base, every matching
+`*.segment-<20-digit-id>.repair.wal`, and both exact adjacent `${base}.v3-seal` and
+`${base}.v3-head` sidecars for a v3 generation; a `*.repair.wal` glob alone omits the controls and is
+not a complete copy. Legacy v2 input has neither control. A v3 seal without its head, a transitional
+head without its seal, or a head that differs from the exact terminal segment/length/sequence/chain
+digest is rejected. Discover the exact terminal cursor read-only:
+
+```bash
+repair-wal-inspect \
+  --repair-wal "$AUDIT_DIR/repair-input/accepted.repair.wal" \
+  --min-slot "$START" \
+  --max-slot "$END" \
+  >"$AUDIT_DIR/repair-inspect.json"
+REPAIR_B="$(jq -er .durable_through_sequence "$AUDIT_DIR/repair-inspect.json")"
+```
+
+`repair-wal-inspect` holds a nonblocking exclusive lock on the base for the complete scan and
+refuses a WAL owned by an active writer. Do not derive the boundary from counters or scan a live
+file. Pass the resulting inclusive `REPAIR_B` to both audit passes with
+`--repair-durable-through-sequence "$REPAIR_B"`.
 
 ## Safety model
 

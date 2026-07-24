@@ -88,6 +88,22 @@ its own replay/conflict decision.
 SHRED_FORWARD_ADDRS=127.0.0.1:18003,192.0.2.20:18003 cargo run --release
 ```
 
+By default the forwarding socket keeps the existing wildcard-IP, ephemeral-port behavior. For the
+green cutover durability proof, give green a source port that no other local sender uses and target
+the same-host Hivezilla listener:
+
+```bash
+SHRED_FORWARD_BIND_ADDR=127.0.0.1:18104
+SHRED_FORWARD_ADDRS=127.0.0.1:18003
+```
+
+Reserve `127.0.0.1:18104` for green for the full proof window; blue must use a different port. The
+downstream recorder should allowlist the complete source address, not merely the port. A fixed bind
+must have a nonzero port and use the same IP family as every destination. Leave it unset when the
+destination is remote or fixed attribution is not required. The effective sender address is logged
+at startup and exposed as `forward_sender_addr` in the metrics JSON, including the chosen ephemeral
+port when no fixed bind is configured.
+
 The TVU loop puts each valid datagram into a bounded forwarding queue and immediately resumes
 receiving. A dedicated task waits for UDP socket readiness, so a temporarily slow destination
 does not stall TVU reception until that queue is exhausted. Repeated Turbine observations are
@@ -102,12 +118,12 @@ both services run on the same Hetzner host. `FORWARD_QUEUE_CAPACITY` defaults to
 
 ## Bounded live repair
 
-When `REPAIR_ENABLED=true`, one isolated task observes every valid original Turbine copy, waits 200 ms
-for normal delivery and local FEC recovery opportunity, then sends bounded Agave `WindowIndex` or
-`HighestWindowIndex` requests to a maximum of eight gossip-discovered repair peers. Responses are
-accepted only when the peer address and identity, request nonce, shred version, scheduled slot
-leader signature, and exact Merkle/chained-Merkle FEC identity all match evidence learned from the
-original Turbine path.
+When `REPAIR_ENABLED=true` (the live Compose default), an isolated supervisor observes every valid
+original Turbine copy, waits 200 ms for normal delivery and local FEC recovery opportunity, then
+sends bounded Agave `WindowIndex` or `HighestWindowIndex` requests to a maximum of eight
+gossip-discovered repair peers. Responses are accepted only when the peer address and identity,
+request nonce, shred version, scheduled slot leader signature, and exact Merkle/chained-Merkle FEC
+identity all match evidence learned from the original Turbine path.
 
 A wholly absent fixed 32-data + 32-coding FEC has no local root of its own. Chained Merkle shreds
 solve this only in one safe direction: a directly trusted successor commits the exact missing FEC
@@ -116,24 +132,96 @@ anchor the preceding FEC, allowing consecutive gaps to be repaired strictly back
 `repair_root_anchored_shreds_accepted_total` counter and per-accept debug fields make this path
 observable. Unchained, forward-inferred, conflicting, or unverified roots fail closed.
 
-Accepted responses are fsynced to `REPAIR_WAL_PATH`, whose filename must end in `.repair.wal` and
-whose canary hard cap is 256 MiB. This WAL has its own header, checksum, lock, sequence, and source
-provenance. It never mutates the raw shred journal or its replication ACK. If RPC lookup, peer
-selection, the repair socket, verification, or this WAL fails, repair becomes inactive while raw
-capture and forwarding continue. Repair counters and queue loss are exposed through the normal
-metrics endpoint.
+Accepted responses are fsynced to the segmented journal rooted at `REPAIR_WAL_PATH`, whose filename
+must end in `.repair.wal`. `REPAIR_WAL_MAX_BYTES` is a per-segment rotation target (256 MiB by
+default), not a lifetime cap. Segment zero keeps the configured legacy path and v2 header. Later
+segments are adjacent files named `<stem>.segment-<20-digit-id>.repair.wal`; the highest id is the
+active segment and all lower ids are immutable. Frame sequences are global and contiguous. Each v3
+segment header binds its id and first sequence to the preceding segment's final sequence and
+SHA-256 chain digest, while every unchanged v2 frame retains its own CRC and complete source
+provenance. Startup validates every retained byte. An incomplete frame, including one that could be
+either an interrupted write or a corrupted length prefix, fails closed without truncating or
+changing the file; recovery requires an explicit offline proof. New headers are synced under an
+ignored staging name and atomically published without replacement, so a crash cannot expose a
+partial next segment and an existing destination is never overwritten.
 
-This first repair deployment is deliberately provenance-only: the NAS raw-shred audit does not yet
-merge repair WAL records into its reconstruction result. That merger and an explicit promotion
-policy require a separate validation step.
+The writer never overwrites or deletes a sealed segment. Consequently rotation prevents the first
+256 MiB boundary from disabling repair, but it does not make disk capacity infinite. Total retained
+bytes have warning, critical, and hard thresholds: 1 GiB
+(`REPAIR_WAL_TOTAL_WARNING_BYTES`), 2 GiB (`REPAIR_WAL_TOTAL_CRITICAL_BYTES`), and 4 GiB
+(`REPAIR_WAL_TOTAL_HARD_BYTES`) by default, in strictly increasing order. Every append reserves its
+entire frame/rollover cost before writing and must also leave
+`REPAIR_WAL_FILESYSTEM_RESERVE_BYTES` free (8 GiB by default) for raw capture and other writers on
+the shared filesystem. Crossing the hard ceiling or filesystem reserve stops only repair; it never
+deletes sealed data or compromises the raw forwarding readiness path.
+
+The metrics endpoint is initialized from a read-only WAL inventory before peer/leader readiness, so
+an oversized or corrupt generation cannot appear as zero bytes or a healthy admission state. It
+reports retained and active bytes, segment count/id, rollover count, warning/critical/hard state,
+filesystem availability/reserve state, validation/open error, and the exact inclusive
+`repair_wal_durable_through_sequence`. NAS replication must copy and verify frames only through that
+durable sequence; deletion remains forbidden until a durable consumer ACK retirement protocol is
+implemented.
+
+Read-only consumers discover one base file plus the exact sibling pattern above, reject symlinks or
+segment-id gaps, verify each header/digest and frame CRC, and stop at the supplied inclusive durable
+sequence. The writer-wide `<base>.writer.lock` plus the legacy base-file lock prevent a concurrent
+cooperative writer while the process is active; locks alone provide no post-exit downgrade safety.
+Before publishing segment 1, the writer first atomically publishes `<base>.v3-head`, then creates
+`<base>.v3-seal`, which binds the legacy base's terminal sequence and full chain digest, and makes
+segment zero read-only. The head is a CRC-protected checkpoint containing the active segment id,
+exact active-file length, next global sequence, and terminal SHA-256 chain digest. After every WAL
+sync, the writer writes and syncs a same-directory temporary head, atomically renames it, and syncs
+the parent directory before returning the durable ACK. This detects deletion of the highest
+segment and clean frame-boundary truncation rather than silently rolling back and reusing sequence
+numbers. On restart, only the exclusive writer may preserve a fully proven WAL-ahead crash tail and
+advance the head; read-only inspection requires an exact terminal match. A head without a seal is
+the one recoverable transition state. A seal without a head, a missing/behind segment, an orphan
+control file, or any digest/length mismatch fails closed without truncation. The production image
+runs as unprivileged UID 10001 with capabilities dropped, so an older v2 binary cannot reopen the
+base for append after the transition. Segment zero remains readable, but downgrading to a v2 writer
+is unsupported and requires an explicit offline migration; do not treat file locks as a downgrade
+gate.
+
+All WAL discovery, validation, append, and fsync work runs on one ordered dedicated thread. A repair
+shred is acknowledged to the async runtime only after its durable WAL append completes. The
+repair UDP socket is drained continuously by a separate receive-only Tokio task into a bounded
+`REPAIR_RESPONSE_QUEUE_CAPACITY` channel (4,096 datagrams by default). Parsing, nonce correlation,
+peer/leader/FEC trust, and WAL admission remain serialized in the repair runtime; the receive task
+cannot accept a shred. A full userspace channel drops only that repair response and increments
+`repair_response_queue_dropped_total`, without backpressuring raw TVU capture. The repair socket
+requests `REPAIR_UDP_RECV_BUFFER_BYTES` (64 MiB by default), reports the effective kernel value,
+and on Linux reports its own `SO_RXQ_OVFL` counter separately from host-wide UDP loss. Responses
+are serviced every 5 ms independently of the 50 ms request-planning cadence, while every accepted
+record still waits for its ordered durable WAL acknowledgement. On shutdown, repair ingress is
+closed first, the fixed staged queue is drained through that same serialized validation and
+fsync-before-accept path, and the WAL is flushed. The drain has a 15-second between-record budget;
+if it cannot finish, the shutdown error reports the exact staged remainder (and any dequeued
+unresolved datagram) and propagates to the process as a non-clean shutdown instead of silently
+discarding the queue. Filesystem availability is refreshed by the blocking WAL worker at most once
+every five seconds even when repair is idle, so raw-spool growth on the shared filesystem is
+reflected without blocking TVU receive. A failed refresh exposes availability as unknown and keeps
+the WAL error visible until a later check or admitted append succeeds. The supervisor retries transient
+initialization/runtime failures with exponential backoff from 1 to 60
+seconds; storage-full, invalid-data, and permission failures use a 15-minute held retry to avoid
+repeated large scans or disk thrash. `repair_state`, bounded last-error text, restart count, and last
+success time expose that lifecycle. Repair health deliberately does not participate in `/readyz`:
+raw Turbine receive and forwarding remain the primary service boundary.
+
+Repair remains quarantined from the live raw journal and archive promotion path. The release
+`shred-epoch-audit` can now opt in to a frozen accepted-repair prefix, independently revalidate its
+provenance, and report raw-only versus raw-plus-repair reconstruction. Promotion and repair-segment
+retirement still require an explicit policy and durable consumer acknowledgement.
 
 ## Dokploy
 
 Deploy [docker-compose.dokploy.yml](docker-compose.dokploy.yml) from the Blockzilla monorepo as a
 **Git-backed** Compose application. The production compose pulls a CI-built GHCR runtime image so
-the live Hetzner disk never has to hold Agave's large Rust build tree. `SHRED_READER_IMAGE` is
-required and must contain the verified manifest digest, not a mutable tag. Keep the named
-`receiver-data` volume across redeployments because identity stability improves gossip visibility.
+the live Hetzner disk never has to hold Agave's large Rust build tree.
+`SHRED_READER_IMAGE_DIGEST` is required and is appended after `@`, so Docker rejects a mutable
+tag-only deployment. `SHRED_READER_IMAGE_REPOSITORY` defaults to the production GHCR repository.
+Keep the named `receiver-data` volume across redeployments because identity stability improves
+gossip visibility.
 
 Before starting it:
 

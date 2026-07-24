@@ -2,11 +2,14 @@ name: shred-reader
 
 services:
   receiver:
-    image: ${SHRED_READER_IMAGE:?SHRED_READER_IMAGE must be pinned to an immutable digest}
+    # Keeping the digest after `@` makes Docker reject a mutable tag-only deployment.
+    image: ${SHRED_READER_IMAGE_REPOSITORY:-ghcr.io/fernolabs/blockzilla-shred-reader}@${SHRED_READER_IMAGE_DIGEST:?SHRED_READER_IMAGE_DIGEST must be an immutable sha256 digest}
     pull_policy: always
     network_mode: host
     restart: unless-stopped
-    stop_grace_period: 30s
+    # The process gives repair up to 45 seconds to persist/report its staged response prefix.
+    # Leave Docker additional time to finish the rest of the orderly shutdown before SIGKILL.
+    stop_grace_period: 60s
     environment:
       APP_ENV: production
       RUST_LOG: ${RUST_LOG:-shred_reader=info,solana_gossip=warn,solana_streamer=warn}
@@ -25,13 +28,20 @@ services:
       METRICS_INTERVAL_SECS: ${METRICS_INTERVAL_SECS:-10}
       SAMPLE_INTERVAL_SECS: ${SAMPLE_INTERVAL_SECS:-15}
       LOSS_TELEMETRY_INTERFACES: ${LOSS_TELEMETRY_INTERFACES:-eth0}
-      SHRED_FORWARD_ADDRS: ${SHRED_FORWARD_ADDRS:?SHRED_FORWARD_ADDRS must be set to the NAS receiver address}
+      SHRED_FORWARD_ADDRS: ${SHRED_FORWARD_ADDRS:?SHRED_FORWARD_ADDRS must be set to the downstream receiver address}
+      SHRED_FORWARD_BIND_ADDR: ${SHRED_FORWARD_BIND_ADDR:-}
       REPAIR_ENABLED: ${REPAIR_ENABLED:-true}
       REPAIR_RPC_URL: ${REPAIR_RPC_URL:-https://api.mainnet-beta.solana.com}
       REPAIR_WAL_PATH: ${REPAIR_WAL_PATH:-/data/accepted.repair.wal}
       REPAIR_WAL_MAX_BYTES: ${REPAIR_WAL_MAX_BYTES:-268435456}
+      REPAIR_WAL_TOTAL_WARNING_BYTES: ${REPAIR_WAL_TOTAL_WARNING_BYTES:-1073741824}
+      REPAIR_WAL_TOTAL_CRITICAL_BYTES: ${REPAIR_WAL_TOTAL_CRITICAL_BYTES:-2147483648}
+      REPAIR_WAL_TOTAL_HARD_BYTES: ${REPAIR_WAL_TOTAL_HARD_BYTES:-4294967296}
+      REPAIR_WAL_FILESYSTEM_RESERVE_BYTES: ${REPAIR_WAL_FILESYSTEM_RESERVE_BYTES:-8589934592}
       REPAIR_MAX_PEERS: ${REPAIR_MAX_PEERS:-8}
       REPAIR_OBSERVATION_QUEUE_CAPACITY: ${REPAIR_OBSERVATION_QUEUE_CAPACITY:-32768}
+      REPAIR_UDP_RECV_BUFFER_BYTES: ${REPAIR_UDP_RECV_BUFFER_BYTES:-67108864}
+      REPAIR_RESPONSE_QUEUE_CAPACITY: ${REPAIR_RESPONSE_QUEUE_CAPACITY:-4096}
     volumes:
       - receiver-data:/data
     cap_drop:
@@ -44,7 +54,8 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:19090/readyz"]
+      # Expand inside the container so a same-host green receiver never probes blue's port.
+      test: ["CMD-SHELL", "curl --fail --silent \"http://$${METRICS_ADDR}/readyz\" || exit 1"]
       interval: 15s
       timeout: 3s
       start_period: 120s

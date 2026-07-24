@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { formatBytes } from '$lib/format';
+  import { formatStorageBytes } from '$lib/format';
   import {
     shredIngestStatusIsFresh,
     type ShredForwardingState,
     type ShredGossipState,
     type ShredTvuState,
-    type HivezillaShredState
+    type HivezillaShredState,
+    type ShredIngestStatus
   } from '$lib/shred-ingest-status';
   import { useWatcherClient } from '$lib/watcher-client.svelte';
 
@@ -21,6 +22,18 @@
     secondary: string;
     observedUnixSecs: number | null;
     timeKind: 'sampled' | 'last packet' | 'last durable write';
+  };
+  type RepairSummary = {
+    tone: Tone;
+    label: string;
+    detail: string;
+  };
+  type SocketLossRow = {
+    id: 'tvu' | 'repair' | 'hivezilla';
+    name: string;
+    detail: string;
+    tone: Tone;
+    result: string;
   };
 
   const watcher = useWatcherClient();
@@ -40,6 +53,9 @@
         status.hivezilla.durable_through_sequence !== null
     ].filter(Boolean).length;
   });
+  const durableSourceProof = $derived(
+    status ? formatDurableSourceProof(status.hivezilla.durable_sources) : null
+  );
   const stages = $derived.by<Stage[]>(() => {
     if (!status) return [];
     const lastPacketUnixSecs = status.tvu.seconds_since_last_packet === null ||
@@ -79,7 +95,7 @@
               : 'No TVU datagram observed yet',
         secondary: status.tvu.packets_total === null
           ? 'Receipt details unavailable'
-          : `${formatInteger(status.tvu.packets_total)} datagrams · ${formatBytes(status.tvu.bytes_total)} · ${slotLabel(status.tvu.latest_slot)}`,
+          : `${formatInteger(status.tvu.packets_total)} datagrams · ${formatStorageBytes(status.tvu.bytes_total)} · ${slotLabel(status.tvu.latest_slot)}`,
         observedUnixSecs: lastPacketUnixSecs,
         timeKind: 'last packet'
       },
@@ -133,6 +149,49 @@
     return rows.map((stage) => stage.tone === 'error'
       ? { ...stage, state: `${stage.state} · sample stale` }
       : { ...stage, tone: 'unknown', state: 'status stale' });
+  });
+  const repairSummary = $derived.by<RepairSummary>(() => {
+    if (!status) {
+      return {
+        tone: 'unknown',
+        label: 'Repair status unavailable',
+        detail: 'Raw capture health is reported separately.'
+      };
+    }
+    if (!fresh) {
+      return {
+        tone: 'unknown',
+        label: 'Repair status stale',
+        detail: 'The last sample is visible below, but it is not current.'
+      };
+    }
+    return describeRepair(status.repair);
+  });
+  const socketLossRows = $derived.by<SocketLossRow[]>(() => {
+    if (!status) return [];
+    return [
+      socketLossRow(
+        'tvu',
+        'Hetzner TVU socket',
+        'Before the receiver can parse a shred',
+        status.tvu.socket_rxq_overflow_supported,
+        status.tvu.socket_rxq_overflow_total
+      ),
+      socketLossRow(
+        'repair',
+        'Repair socket',
+        'Before a repair response can be checked',
+        status.repair.socket_rxq_overflow_supported,
+        status.repair.socket_rxq_overflow_total
+      ),
+      socketLossRow(
+        'hivezilla',
+        'Hivezilla socket',
+        'Before a forwarded shred enters the disk queue',
+        status.hivezilla.socket_rxq_overflow_supported,
+        status.hivezilla.socket_rxq_overflow_total
+      )
+    ];
   });
   const overallTone = $derived.by<Tone>(() => {
     if (!status) return 'unknown';
@@ -234,8 +293,128 @@
     return labels[state];
   }
 
+  function describeRepair(repair: ShredIngestStatus['repair']): RepairSummary {
+    if (repair.availability === 'unavailable') {
+      return {
+        tone: 'unknown',
+        label: 'Repair status unavailable',
+        detail: 'Raw capture can still be healthy; only the recovery path is unknown.'
+      };
+    }
+    if (repair.enabled === false || repair.state === 'disabled') {
+      return {
+        tone: 'warning',
+        label: 'Repair is off',
+        detail: 'Raw capture continues, but missing shreds cannot be requested.'
+      };
+    }
+    if (
+      repair.wal_admission_blocked ||
+      repair.wal_hard ||
+      repair.wal_filesystem_reserve_breached
+    ) {
+      return {
+        tone: 'error',
+        label: 'Repair is paused: disk limit',
+        detail: `${formatStorageBytes(repair.wal_retained_bytes)} retained · ${formatStorageBytes(repair.wal_filesystem_available_bytes)} disk free`
+      };
+    }
+    if (repair.state === 'backoff') {
+      return {
+        tone: 'warning',
+        label: 'Repair is restarting',
+        detail: 'It will retry automatically. Raw capture continues.'
+      };
+    }
+    if (repair.state === 'starting') {
+      return {
+        tone: 'warning',
+        label: 'Repair is starting',
+        detail: 'Waiting for the repair socket and peers.'
+      };
+    }
+    if (repair.state === 'stopping') {
+      return {
+        tone: 'warning',
+        label: 'Repair is stopping',
+        detail: 'Raw capture continues independently.'
+      };
+    }
+    if (repair.wal_critical) {
+      return {
+        tone: 'warning',
+        label: 'Repair is working: disk nearly full',
+        detail: `${formatStorageBytes(repair.wal_retained_bytes)} retained before the ${formatStorageBytes(repair.wal_hard_bytes)} limit`
+      };
+    }
+    if (repair.wal_warning) {
+      return {
+        tone: 'warning',
+        label: 'Repair is working: storage filling up',
+        detail: `${formatStorageBytes(repair.wal_retained_bytes)} retained before the ${formatStorageBytes(repair.wal_hard_bytes)} limit`
+      };
+    }
+    if (repair.active && repair.state === 'active') {
+      return {
+        tone: 'healthy',
+        label: 'Repair is working',
+        detail: `${formatInteger(repair.peers)} peers · ${formatInteger(repair.outstanding)} requests waiting`
+      };
+    }
+    return {
+      tone: 'warning',
+      label: 'Repair is idle',
+      detail: 'Raw capture continues; no repair request is active.'
+    };
+  }
+
+  function socketLossRow(
+    id: SocketLossRow['id'],
+    name: string,
+    detail: string,
+    supported: boolean | null,
+    total: number | null
+  ): SocketLossRow {
+    if (supported === null) {
+      return { id, name, detail, tone: 'unknown', result: 'Status unavailable' };
+    }
+    if (!supported || total === null) {
+      return { id, name, detail, tone: 'unknown', result: 'Kernel drop counter unavailable' };
+    }
+    if (total === 0) {
+      return { id, name, detail, tone: 'healthy', result: 'No kernel drops observed' };
+    }
+    return {
+      id,
+      name,
+      detail,
+      tone: 'warning',
+      result: `${formatInteger(total)} kernel ${total === 1 ? 'drop' : 'drops'} recorded`
+    };
+  }
+
+  function repairLastSuccessLabel(seconds: number | null) {
+    if (seconds === null) return 'No successful repair recorded';
+    if (seconds < 10) return 'Now';
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    return `${Math.floor(minutes / 60)}h ago`;
+  }
+
   function formatInteger(value: number | null | undefined) {
     return value === null || value === undefined ? '—' : value.toLocaleString('en-US');
+  }
+
+  function formatDurableSourceProof(
+    sources: ShredIngestStatus['hivezilla']['durable_sources']
+  ) {
+    const entries = Object.entries(sources);
+    if (entries.length === 0) return null;
+    return entries.map(([name, source]) => source.committed_datagrams_total === 0
+      ? `${name}: waiting for first fsync`
+      : `${name}: ${formatInteger(source.committed_datagrams_total)} fsynced · ${slotLabel(source.last_durable_slot)}`
+    ).join(' · ');
   }
 
   function slotLabel(slot: number | null) {
@@ -257,7 +436,7 @@
   <title>Shred ingest · Blockzilla Watcher</title>
   <meta
     name="description"
-    content="Observed Solana gossip, TVU shred receipt, loopback forwarding attempts, and Hivezilla durable recording."
+    content="Observed Solana gossip, TVU shred receipt, repair status, socket loss, and Hivezilla durable recording."
   />
 </svelte:head>
 
@@ -312,7 +491,7 @@
     </ol>
 
     <p class="boundary-note">
-      A completed loopback send means the local UDP send call accepted the datagram. It does not confirm Hivezilla receipt; only the durable recorder evidence does.
+      A completed loopback send only means the local send call accepted the datagram. Hivezilla's durable write is the receipt proof. Repair is a separate recovery path and does not change raw capture health.
     </p>
 
     <div class="details">
@@ -347,21 +526,100 @@
         <dl>
           <div>
             <dt>Spool</dt>
-            <dd>{formatBytes(status.hivezilla.spool_bytes)} of {formatBytes(status.hivezilla.spool_max_bytes)}</dd>
+            <dd>{formatStorageBytes(status.hivezilla.spool_bytes)} of {formatStorageBytes(status.hivezilla.spool_max_bytes)}</dd>
           </div>
           <div>
             <dt>Filesystem</dt>
-            <dd>{formatBytes(status.hivezilla.filesystem_free_bytes)} free of {formatBytes(status.hivezilla.filesystem_total_bytes)}</dd>
+            <dd>{formatStorageBytes(status.hivezilla.filesystem_free_bytes)} free of {formatStorageBytes(status.hivezilla.filesystem_total_bytes)}</dd>
           </div>
           <div>
             <dt>Free-space reserve</dt>
-            <dd>{formatBytes(status.hivezilla.reserve_free_bytes)}</dd>
+            <dd>{formatStorageBytes(status.hivezilla.reserve_free_bytes)}</dd>
+          </div>
+          {#if durableSourceProof}
+            <div>
+              <dt>Named source proof</dt>
+              <dd>{durableSourceProof}</dd>
+            </div>
+          {/if}
+          <div>
+            <dt>Disk queue</dt>
+            <dd>
+              {#if status.hivezilla.ingest_queue_capacity_events === null}
+                Queue telemetry unavailable
+              {:else}
+                {formatInteger(status.hivezilla.ingest_queue_depth_events)} of {formatInteger(status.hivezilla.ingest_queue_capacity_events)} shreds · {formatStorageBytes(status.hivezilla.ingest_queue_depth_bytes)} of {formatStorageBytes(status.hivezilla.ingest_queue_capacity_bytes)}
+              {/if}
+            </dd>
           </div>
           <div>
-            <dt>Recorder shred version</dt>
-            <dd>{formatInteger(status.hivezilla.shred_version)}</dd>
+            <dt>Queue pressure</dt>
+            <dd>
+              {status.hivezilla.ingest_queue_backpressured === null
+                ? 'Queue telemetry unavailable'
+                : status.hivezilla.ingest_queue_backpressured
+                  ? 'Waiting for disk now'
+                  : `${formatInteger(status.hivezilla.ingest_queue_backpressure_events_total)} waits recorded`}
+            </dd>
           </div>
         </dl>
+      </section>
+    </div>
+
+    <div class="operational-details">
+      <section aria-labelledby="repair-title">
+        <div class="section-heading">
+          <h3 id="repair-title">Repair</h3>
+          <span class={`inline-state tone-${repairSummary.tone}`}>
+            <span class="status-mark" aria-hidden="true"></span>
+            {repairSummary.label}
+          </span>
+        </div>
+        <p class="section-summary">{repairSummary.detail}</p>
+        {#if status.repair.availability === 'available'}
+          <dl>
+            <div>
+              <dt>Recovered shreds</dt>
+              <dd>{formatInteger(status.repair.shreds_accepted_total)}</dd>
+            </div>
+            <div>
+              <dt>Last success</dt>
+              <dd>{repairLastSuccessLabel(status.repair.seconds_since_last_success)}</dd>
+            </div>
+            <div>
+              <dt>Response queue</dt>
+              <dd>{formatInteger(status.repair.response_queue_depth)} of {formatInteger(status.repair.response_queue_capacity)} · {formatInteger(status.repair.response_queue_dropped_total)} dropped</dd>
+            </div>
+            <div>
+              <dt>Repair storage</dt>
+              <dd>{formatStorageBytes(status.repair.wal_retained_bytes)} of {formatStorageBytes(status.repair.wal_hard_bytes)} · {formatInteger(status.repair.wal_segment_count)} files</dd>
+            </div>
+            <div>
+              <dt>Disk safety</dt>
+              <dd>{formatStorageBytes(status.repair.wal_filesystem_available_bytes)} free · {formatStorageBytes(status.repair.wal_filesystem_reserve_bytes)} reserved</dd>
+            </div>
+          </dl>
+        {/if}
+      </section>
+
+      <section aria-labelledby="socket-loss-title">
+        <div class="section-heading">
+          <h3 id="socket-loss-title">Socket loss</h3>
+        </div>
+        <ul class="loss-list">
+          {#each socketLossRows as row (row.id)}
+            <li>
+              <span class="loss-name">
+                <strong>{row.name}</strong>
+                <span>{row.detail}</span>
+              </span>
+              <span class={`loss-result tone-${row.tone}`}>
+                <span class="status-mark" aria-hidden="true"></span>
+                {row.result}
+              </span>
+            </li>
+          {/each}
+        </ul>
       </section>
     </div>
   {:else}
@@ -383,7 +641,9 @@
   .page-heading,
   .section-heading,
   .overall,
-  .stage-state {
+  .stage-state,
+  .inline-state,
+  .loss-result {
     display: flex;
     align-items: center;
   }
@@ -551,6 +811,7 @@
   }
 
   .details section,
+  .operational-details section,
   .unavailable {
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -558,6 +819,8 @@
   }
 
   .section-heading {
+    justify-content: space-between;
+    gap: 16px;
     min-height: 43px;
     padding: 0 14px;
     border-bottom: 1px solid var(--border);
@@ -588,6 +851,60 @@
     margin: 0;
     font-size: 12px;
     font-variant-numeric: tabular-nums;
+  }
+
+  .operational-details {
+    display: grid;
+    gap: 16px;
+    margin-top: 16px;
+  }
+
+  .inline-state,
+  .loss-result {
+    gap: 7px;
+    font-size: 12px;
+  }
+
+  .section-summary {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .loss-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .loss-list li {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto;
+    align-items: center;
+    gap: 16px;
+    min-height: 58px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .loss-list li:last-child {
+    border-bottom: 0;
+  }
+
+  .loss-name {
+    display: grid;
+    gap: 2px;
+  }
+
+  .loss-name strong {
+    font-size: 12px;
+    font-weight: 640;
+  }
+
+  .loss-name > span {
+    color: var(--muted);
+    font-size: 11px;
   }
 
   .unavailable {
@@ -660,6 +977,19 @@
 
     dl > div {
       grid-template-columns: 120px 1fr;
+    }
+
+    .section-heading {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 5px;
+      padding-top: 9px;
+      padding-bottom: 9px;
+    }
+
+    .loss-list li {
+      grid-template-columns: 1fr;
+      gap: 7px;
     }
   }
 </style>
