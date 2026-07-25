@@ -18,6 +18,7 @@ use std::os::{
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -507,9 +508,8 @@ impl BlockzillaRawReceiver {
         );
         let mut compressed_total = 0u64;
         let mut uncompressed_total = 0u64;
-        let mut validated = Vec::with_capacity(records.len());
         let mut previous_sequence: Option<u64> = None;
-        for record in records {
+        for record in &records {
             compressed_total = compressed_total
                 .checked_add(record.compressed_payload.len() as u64)
                 .context("receiver batch compressed-byte accounting overflow")?;
@@ -536,13 +536,18 @@ impl BlockzillaRawReceiver {
                 );
             }
             previous_sequence = Some(record.offer.record.sequence);
-            validated.push(self.validate_record(record)?);
         }
-        Ok(validated)
-    }
 
-    fn validate_record(&self, record: RawReplicationRecord) -> Result<ValidatedRawRecord> {
-        validate_record_against_stream(record, &self.config.stream, self.config.limits)
+        // Payload decompression, digest verification, and shred parsing are independent for each
+        // record and dominate large catch-up batches. Validate them in parallel while Rayon keeps
+        // the indexed input order stable. Sequence continuity and the cumulative rolling chain
+        // remain checked serially above and in `plan_batch`, respectively.
+        let stream = &self.config.stream;
+        let limits = self.config.limits;
+        records
+            .into_par_iter()
+            .map(|record| validate_record_against_stream(record, stream, limits))
+            .collect()
     }
 
     fn plan_batch(&self, validated: Vec<ValidatedRawRecord>) -> Result<Vec<PlannedRawRecord>> {

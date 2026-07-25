@@ -1575,6 +1575,7 @@ dependencies = [
  "of-car-reader",
  "prost",
  "protoc-bin-vendored",
+ "rayon",
  "reqwest",
  "rustc-hash",
  "rustls",
