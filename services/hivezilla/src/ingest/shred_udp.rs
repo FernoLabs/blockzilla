@@ -165,8 +165,12 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
         segment_target_bytes: config.ingest.spool.segment_bytes,
         max_record_bytes: source.queue.max_event_bytes,
     };
-    let mut spool = SpoolWriter::open(&config.ingest.spool.root, identity, options)
-        .context("open shred UDP ingress spool")?;
+    // The mTLS pull source is the sole owner of prefix retirement and deletes only sealed
+    // segments covered by a verified, fsynced NAS ACK. A recorder restart must therefore accept
+    // a non-zero first physical segment while still validating every retained frame and chain.
+    let mut spool =
+        SpoolWriter::open_after_ack_retirement(&config.ingest.spool.root, identity, options)
+            .context("open shred UDP ingress spool after ACK-authorized prefix retirement")?;
     let mut spool_bytes = spool_root_bytes(&config.ingest.spool.root)?;
     let mut next_sequence = spool.last_record().map_or(Ok(0), |record| {
         record

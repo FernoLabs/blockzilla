@@ -196,7 +196,7 @@ impl LockedSpoolAudit {
         let journal_lock = open_regular_file_read_only(&lock_path)?;
         try_lock_exclusive(&journal_lock, &lock_path)?;
 
-        let segment_ids = segment_ids(&journal_dir)?;
+        let segment_ids = segment_ids(&journal_dir, false)?;
         ensure!(
             !segment_ids.is_empty(),
             "spool journal has no segments: {}",
@@ -283,6 +283,27 @@ impl SpoolWriter {
         identity: SpoolJournalIdentity,
         options: SpoolOptions,
     ) -> Result<Self> {
+        Self::open_with_retained_prefix(spool_root, identity, options, false)
+    }
+
+    /// Open a journal whose sealed prefix was retired by the signed-ACK pull source.
+    ///
+    /// Every retained sealed segment and the active tail are validated before append. The only
+    /// relaxed invariant is that the first retained physical segment may be greater than zero.
+    pub fn open_after_ack_retirement(
+        spool_root: impl AsRef<Path>,
+        identity: SpoolJournalIdentity,
+        options: SpoolOptions,
+    ) -> Result<Self> {
+        Self::open_with_retained_prefix(spool_root, identity, options, true)
+    }
+
+    fn open_with_retained_prefix(
+        spool_root: impl AsRef<Path>,
+        identity: SpoolJournalIdentity,
+        options: SpoolOptions,
+        allow_retired_prefix: bool,
+    ) -> Result<Self> {
         let options = options.validate()?;
         validate_path_component(&identity.cluster_id, "cluster id")?;
         validate_path_component(&identity.origin_node_id, "origin node id")?;
@@ -302,7 +323,7 @@ impl SpoolWriter {
             sync_directory(&journal_dir)?;
         }
 
-        let segment_ids = segment_ids(&journal_dir)?;
+        let segment_ids = segment_ids(&journal_dir, allow_retired_prefix)?;
         let mut last_record = None;
         if segment_ids.len() > 1 {
             for segment_id in &segment_ids[..segment_ids.len() - 1] {
@@ -377,7 +398,7 @@ impl SpoolWriter {
             sync_directory(&journal_dir)?;
         }
 
-        let segment_ids = segment_ids(&journal_dir)?;
+        let segment_ids = segment_ids(&journal_dir, false)?;
         ensure!(
             checkpoint.is_some() || segment_ids.len() <= 1,
             "a handoff checkpoint is required to resume a multi-segment spool; run the offline raw-spool audit"
@@ -1354,7 +1375,7 @@ where
         "spool snapshot record limit must be non-zero"
     );
     let journal_dir = spool_journal_dir_path(spool_root, &identity)?;
-    let segment_ids = segment_ids(&journal_dir)?;
+    let segment_ids = segment_ids(&journal_dir, false)?;
     ensure!(
         !segment_ids.is_empty(),
         "spool journal has no segments: {}",
@@ -1589,7 +1610,7 @@ fn read_exact_or_incomplete_tail<R: Read>(
     }
 }
 
-fn segment_ids(journal_dir: &Path) -> Result<Vec<u64>> {
+fn segment_ids(journal_dir: &Path, allow_retired_prefix: bool) -> Result<Vec<u64>> {
     let mut ids = Vec::new();
     for entry in fs::read_dir(journal_dir)
         .with_context(|| format!("list spool journal {}", journal_dir.display()))?
@@ -1618,7 +1639,7 @@ fn segment_ids(journal_dir: &Path) -> Result<Vec<u64>> {
     }
     ids.sort_unstable();
     ids.dedup();
-    if let Some(first) = ids.first() {
+    if let Some(first) = ids.first().filter(|_| !allow_retired_prefix) {
         ensure!(
             *first == 0,
             "spool segment sequence starts at {}, expected 0 in {}",
