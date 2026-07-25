@@ -149,6 +149,7 @@ const LEGACY_TUNER_PAUSE_PREFIX: &str = "throughput probe rejected:";
 const LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX: &str = "throughput tuner downshift:";
 const LEGACY_TUNER_GUARD_PAUSE_PREFIX: &str = "throughput tuner hard guard:";
 const LEGACY_COMPACT_OWNERSHIP_KIND: &str = "historical_compact_reuse";
+const VANISHED_LEGACY_RETRY_BACKOFF_SECS: [u64; 3] = [30, 120, 600];
 const LEGACY_BLOCKHASH_LOCK_DIR: &str = ".blockhash.lock";
 const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
 const REGISTRY_INDEX_VERSION: u16 = 2;
@@ -920,7 +921,17 @@ struct RuntimeState {
     archive_device_io_sample: Option<BlockDeviceIoSample>,
     legacy_throughput_tuner: LegacyThroughputTuner,
     legacy_tuner_profiles: LegacyTunerProfiles,
+    vanished_legacy_retries: BTreeMap<u64, VanishedLegacyRetry>,
     inventory_generation: u64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct VanishedLegacyRetry {
+    attempts: u8,
+    failed_owner_updated_unix_secs: u64,
+    next_retry_unix_secs: u64,
+    #[serde(default)]
+    exhausted_reported: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2304,6 +2315,168 @@ fn empty_snapshot(observer_mode: bool) -> PipelineSnapshot {
     }
 }
 
+/// Recover only the fail-safe case where a scheduler-owned legacy compactor
+/// disappeared while its durable marker still names a now-dead PID. Data or
+/// validation failures continue to require explicit operator review.
+fn reconcile_vanished_legacy_retries(
+    config: &SchedulerConfig,
+    snapshot: &PipelineSnapshot,
+    runtime: &mut RuntimeState,
+    now: u64,
+) -> bool {
+    let complete = snapshot
+        .epochs
+        .iter()
+        .filter(|epoch| epoch.state == HistoricalState::Complete)
+        .map(|epoch| epoch.epoch)
+        .collect::<Vec<_>>();
+    let mut state_changed = false;
+    for epoch in complete {
+        state_changed |= runtime.vanished_legacy_retries.remove(&epoch).is_some();
+    }
+
+    for epoch in snapshot.epochs.iter().filter(|epoch| {
+        epoch.state == HistoricalState::Failed
+            && epoch.message.as_deref().is_some_and(|message| {
+                message.starts_with("pipeline-owned process is no longer running")
+            })
+    }) {
+        let output = config.archive_root.join(format!("epoch-{}", epoch.epoch));
+        let Some(owner) = read_ownership(&output) else {
+            continue;
+        };
+        if owner.kind != LEGACY_COMPACT_OWNERSHIP_KIND
+            || owner.id != epoch.epoch.to_string()
+            || owner.state != "compact_reuse"
+            || owner.pid.is_none()
+            || owner
+                .pid
+                .is_some_and(|pid| process_cmdline_contains(pid, &output))
+        {
+            continue;
+        }
+
+        let mut scheduled_message = None;
+        {
+            let retry = runtime
+                .vanished_legacy_retries
+                .entry(epoch.epoch)
+                .or_default();
+            if retry.failed_owner_updated_unix_secs != owner.updated_unix_secs {
+                retry.failed_owner_updated_unix_secs = owner.updated_unix_secs;
+                retry.exhausted_reported = false;
+                if (retry.attempts as usize) < VANISHED_LEGACY_RETRY_BACKOFF_SECS.len() {
+                    let delay = VANISHED_LEGACY_RETRY_BACKOFF_SECS[retry.attempts as usize];
+                    retry.next_retry_unix_secs = now.saturating_add(delay);
+                    scheduled_message = Some(format!(
+                        "compact_reuse:{} vanished; automatic retry {}/{} scheduled in {}s",
+                        epoch.epoch,
+                        retry.attempts.saturating_add(1),
+                        VANISHED_LEGACY_RETRY_BACKOFF_SECS.len(),
+                        delay
+                    ));
+                }
+                state_changed = true;
+            }
+        }
+        if let Some(message) = scheduled_message {
+            record_error(config, runtime, "automatic_retry", message);
+        }
+
+        let (attempts, next_retry_unix_secs, exhausted_reported) = {
+            let retry = runtime
+                .vanished_legacy_retries
+                .get(&epoch.epoch)
+                .expect("vanished retry state exists");
+            (
+                retry.attempts,
+                retry.next_retry_unix_secs,
+                retry.exhausted_reported,
+            )
+        };
+        if (attempts as usize) >= VANISHED_LEGACY_RETRY_BACKOFF_SECS.len() {
+            if !exhausted_reported {
+                runtime
+                    .vanished_legacy_retries
+                    .get_mut(&epoch.epoch)
+                    .expect("vanished retry state exists")
+                    .exhausted_reported = true;
+                record_error(
+                    config,
+                    runtime,
+                    "automatic_retry",
+                    format!(
+                        "compact_reuse:{} automatic retry budget exhausted after {} attempts; operator review required",
+                        epoch.epoch, attempts
+                    ),
+                );
+                state_changed = true;
+            }
+            continue;
+        }
+        if now < next_retry_unix_secs {
+            continue;
+        }
+
+        let attempt = attempts.saturating_add(1);
+        if !legacy_owned_retry_shape(&output) {
+            set_runtime_failure(
+                config,
+                runtime,
+                format!("compact_reuse:{}", epoch.epoch),
+                "automatic retry refused because the resumable output shape is no longer safe"
+                    .to_string(),
+            );
+            continue;
+        }
+        let mut retry_owner = owner.clone();
+        retry_owner.state = "retry_ready".to_string();
+        retry_owner.pid = None;
+        retry_owner.updated_unix_secs = now;
+        retry_owner.message = Some(format!(
+            "automatic retry {attempt}/{} after scheduler-owned process disappeared",
+            VANISHED_LEGACY_RETRY_BACKOFF_SECS.len()
+        ));
+        if let Err(error) = publish_ownership_marker(&output, &retry_owner) {
+            record_error(
+                config,
+                runtime,
+                "automatic_retry",
+                format!(
+                    "compact_reuse:{} retry publication failed: {error:#}",
+                    epoch.epoch
+                ),
+            );
+            continue;
+        }
+        let _ = fs::remove_file(historical_progress_path(&config.state_root, epoch.epoch));
+        clear_runtime_failure(config, runtime, &format!("compact_reuse:{}", epoch.epoch));
+        runtime
+            .paused_jobs
+            .remove(&format!("compact_reuse:{}", epoch.epoch));
+        if let Some(retry) = runtime.vanished_legacy_retries.get_mut(&epoch.epoch) {
+            retry.attempts = attempt;
+            retry.next_retry_unix_secs = 0;
+        }
+        let _ = append_control_event(
+            config,
+            "automatic_retry",
+            &format!("historical_compact_reuse/{} attempt {attempt}", epoch.epoch),
+        );
+        state_changed = true;
+    }
+
+    if state_changed && let Err(error) = persist_control_state(config, runtime) {
+        record_error(
+            config,
+            runtime,
+            "automatic_retry",
+            format!("persist automatic retry state: {error:#}"),
+        );
+    }
+    state_changed
+}
+
 async fn reconcile_and_schedule(state: &Arc<AppState>) {
     let mut runtime = state.runtime.lock().await;
     reap_children(state, &mut runtime).await;
@@ -2313,6 +2486,11 @@ async fn reconcile_and_schedule(state: &Arc<AppState>) {
     let inventory_generation = runtime.inventory_generation;
 
     let mut snapshot = reconcile_filesystem(&state.config, &runtime, inventory_generation);
+    if state.config.execute
+        && reconcile_vanished_legacy_retries(&state.config, &snapshot, &mut runtime, unix_now())
+    {
+        snapshot = reconcile_filesystem(&state.config, &runtime, inventory_generation);
+    }
     if legacy_tuning_enabled(&state.config) {
         let context = legacy_tuner_context(&runtime, &snapshot);
         if runtime.legacy_throughput_tuner.context != Some(context) {
@@ -3856,7 +4034,26 @@ fn classify_epoch_with_context(
             ) && owner.pid.is_some()
                 && !owner_process_active
             {
-                Some("pipeline-owned process is no longer running".to_string())
+                Some(match runtime.vanished_legacy_retries.get(&epoch) {
+                    Some(retry)
+                        if retry.attempts as usize
+                            >= VANISHED_LEGACY_RETRY_BACKOFF_SECS.len() =>
+                    {
+                        format!(
+                            "pipeline-owned process is no longer running; automatic retry budget exhausted ({}/{})",
+                            retry.attempts,
+                            VANISHED_LEGACY_RETRY_BACKOFF_SECS.len()
+                        )
+                    }
+                    Some(retry) => format!(
+                        "pipeline-owned process is no longer running; automatic retry {}/{} is scheduled in {}s",
+                        retry.attempts.saturating_add(1),
+                        VANISHED_LEGACY_RETRY_BACKOFF_SECS.len(),
+                        retry.next_retry_unix_secs.saturating_sub(now)
+                    ),
+                    None => "pipeline-owned process is no longer running; automatic retry is being scheduled"
+                        .to_string(),
+                })
             } else {
                 None
             }
@@ -14524,6 +14721,8 @@ struct PersistedControlState {
     legacy_last_adaptive_action_reason: Option<String>,
     #[serde(default)]
     legacy_tuner_profiles: LegacyTunerProfiles,
+    #[serde(default)]
+    vanished_legacy_retries: BTreeMap<u64, VanishedLegacyRetry>,
 }
 
 fn persist_control_state(config: &SchedulerConfig, runtime: &RuntimeState) -> Result<()> {
@@ -14535,6 +14734,7 @@ fn persist_control_state(config: &SchedulerConfig, runtime: &RuntimeState) -> Re
         legacy_last_adaptive_action_unix_secs: runtime.legacy_last_adaptive_action_unix_secs,
         legacy_last_adaptive_action_reason: runtime.legacy_last_adaptive_action_reason.clone(),
         legacy_tuner_profiles: runtime.legacy_tuner_profiles.clone(),
+        vanished_legacy_retries: runtime.vanished_legacy_retries.clone(),
     };
     let path = config.state_root.join("control-state.json");
     let temp = config
@@ -14565,6 +14765,7 @@ async fn load_control_state(state: &Arc<AppState>) -> Result<()> {
     runtime.legacy_last_adaptive_action_unix_secs = saved.legacy_last_adaptive_action_unix_secs;
     runtime.legacy_last_adaptive_action_reason = saved.legacy_last_adaptive_action_reason;
     runtime.legacy_tuner_profiles = saved.legacy_tuner_profiles;
+    runtime.vanished_legacy_retries = saved.vanished_legacy_retries;
     Ok(())
 }
 
@@ -17929,6 +18130,65 @@ mod tests {
 
         fs::write(output.join("block-time-gaps.bin.tmp"), b"unknown").unwrap();
         assert!(!legacy_owned_retry_shape(&output));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vanished_legacy_worker_is_retried_after_persisted_backoff() {
+        let root = temp_root("vanished-legacy-auto-retry");
+        let mut config = test_config(&root);
+        config.execute = true;
+        fs::create_dir_all(&config.state_root).unwrap();
+        fs::create_dir_all(&config.car_root).unwrap();
+        fs::write(config.car_root.join("epoch-700.car.zst"), b"car").unwrap();
+        let output = config.archive_root.join("epoch-700");
+        write_legacy_registry_sidecars(&output, true);
+        write_ownership(
+            &output,
+            LEGACY_COMPACT_OWNERSHIP_KIND,
+            "700",
+            "compact_reuse",
+            Some("worker started".to_string()),
+        )
+        .unwrap();
+        set_ownership_pid(&output, Some(u32::MAX)).unwrap();
+
+        let now = 10_000;
+        let mut runtime = RuntimeState::default();
+        let mut snapshot = empty_snapshot(false);
+        snapshot
+            .epochs
+            .push(classify_epoch(&config, &runtime, 700, now));
+        assert_eq!(snapshot.epochs[0].state, HistoricalState::Failed);
+
+        assert!(reconcile_vanished_legacy_retries(
+            &config,
+            &snapshot,
+            &mut runtime,
+            now,
+        ));
+        let retry = runtime.vanished_legacy_retries.get(&700).unwrap();
+        assert_eq!(retry.attempts, 0);
+        assert_eq!(retry.next_retry_unix_secs, now + 30);
+        assert!(config.state_root.join("control-state.json").is_file());
+
+        assert!(!reconcile_vanished_legacy_retries(
+            &config,
+            &snapshot,
+            &mut runtime,
+            now + 29,
+        ));
+        assert!(reconcile_vanished_legacy_retries(
+            &config,
+            &snapshot,
+            &mut runtime,
+            now + 30,
+        ));
+        let owner = read_ownership(&output).unwrap();
+        assert_eq!(owner.state, "retry_ready");
+        assert_eq!(owner.pid, None);
+        assert_eq!(runtime.vanished_legacy_retries[&700].attempts, 1);
+        assert!(legacy_owned_retry_shape(&output));
         fs::remove_dir_all(root).unwrap();
     }
 
