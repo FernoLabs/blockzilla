@@ -5,6 +5,7 @@ RUN groupadd --gid 10001 app \
     && install --directory --owner app --group app /app /recorder-status /public-status
 
 COPY --chown=app:app services/hivezilla/scripts/shred_status_server.py /app/shred_status_server.py
+COPY --chown=app:app services/hivezilla/scripts/pull_ack_telegram_monitor.py /app/pull_ack_telegram_monitor.py
 
 USER app
 VOLUME ["/recorder-status", "/public-status"]

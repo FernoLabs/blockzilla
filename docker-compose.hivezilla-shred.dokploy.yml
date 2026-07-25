@@ -14,8 +14,9 @@ services:
       - --status-file
       - /status/recorder.json
     network_mode: host
-    # Fail closed at the configured spool limit; do not crash-loop against a full journal.
-    restart: "no"
+    # Disk admission remains fail-closed. Retry so ACK-driven retention can release a sealed
+    # segment and let this same journal resume without requiring an operator restart.
+    restart: unless-stopped
     stop_grace_period: 15s
     volumes:
       - hivezilla-shred-data:/data
@@ -25,8 +26,8 @@ services:
     cap_drop:
       - ALL
 
-  # The NAS initiates an mTLS pull from this listener. ACKs advance replay only;
-  # this service never deletes or compacts the Hetzner shred spool.
+  # The NAS initiates an mTLS pull from this listener. A verified durable NAS ACK advances replay
+  # and permits bounded oldest-first retirement of sealed ACK-covered source segments.
   hivezilla-shred-pull:
     build:
       context: .
@@ -48,6 +49,34 @@ services:
       # Kept outside the Git checkout so Dokploy source refreshes cannot remove trust material.
       # Names match the strict runtime config and the directory is owned by the unprivileged UID.
       - /etc/blockzilla/hivezilla-shred-pull/secrets:/run/secrets:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  shred-ack-alert:
+    build:
+      context: .
+      dockerfile: services/hivezilla/Dockerfile.shred-status
+    entrypoint: ["python3", "/app/pull_ack_telegram_monitor.py"]
+    restart: unless-stopped
+    depends_on:
+      - hivezilla-shred-pull
+    environment:
+      BLOCKZILLA_PULL_ACK_STATUS_FILE: /control/nas-shred-ack-status.json
+      BLOCKZILLA_PULL_ACK_ALERT_STATE_FILE: /alert-state/shred-ack-alert.json
+      BLOCKZILLA_TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_bot_token
+      BLOCKZILLA_TELEGRAM_CHAT_ID: ${BLOCKZILLA_TELEGRAM_CHAT_ID:?set the Telegram destination chat ID}
+      BLOCKZILLA_PULL_ACK_STALE_AFTER_SECS: ${BLOCKZILLA_PULL_ACK_STALE_AFTER_SECS:-180}
+      BLOCKZILLA_PULL_ACK_STARTUP_GRACE_SECS: ${BLOCKZILLA_PULL_ACK_STARTUP_GRACE_SECS:-120}
+      BLOCKZILLA_PULL_ACK_MONITOR_INTERVAL_SECS: ${BLOCKZILLA_PULL_ACK_MONITOR_INTERVAL_SECS:-15}
+    volumes:
+      - hivezilla-shred-control:/control:ro
+      - hivezilla-shred-alert-state:/alert-state
+      - ${BLOCKZILLA_TELEGRAM_BOT_TOKEN_HOST_FILE:?set the host Telegram token file}:/run/secrets/telegram_bot_token:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -111,3 +140,4 @@ volumes:
   hivezilla-shred-status:
   hivezilla-shred-public-status:
   hivezilla-shred-control:
+  hivezilla-shred-alert-state:
