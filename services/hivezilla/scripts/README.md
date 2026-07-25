@@ -104,3 +104,9 @@ Review every filesystem limit, TLS identity, retention threshold, and cleanup
 policy before operating against real data. Upload success is not permission to
 delete a source generation: cleanup additionally requires a verified durable
 receiver acknowledgement.
+`hivezilla-segment-source.sh` and `hivezilla-segment-pull.sh` implement the
+fast raw-shred WAL path. The NAS pulls only sealed segments, verifies every
+SHA-256 digest, fsyncs an immutable receipt, and only then asks the source to
+retire the exact manifest. The source rechecks every digest while the recorder
+is stopped and selects the recorder by its exact Compose service label before
+deleting anything. The active WAL segment is never offered.
