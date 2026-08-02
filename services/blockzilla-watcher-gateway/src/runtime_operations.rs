@@ -880,6 +880,8 @@ fn has_blockzilla_command_marker(sample: &ProcessSample) -> bool {
     {
         return true;
     }
+    // Detection-only tombstone: surface a stale pre-migration process so an
+    // operator can kill it. Nothing in the repository executes this basename.
     sample.args.iter().skip(1).any(|item| {
         Path::new(item).file_name().and_then(|name| name.to_str())
             == Some("publish-runtime-operations.py")

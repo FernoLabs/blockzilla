@@ -73,7 +73,7 @@ generation_cache_enabled() {
 }
 GENERATION_CREDENTIALS_FILE=${BLOCKZILLA_RAW_OBJECT_STORE_CREDENTIALS_FILE:-$OBJECT_STORE_DEFAULT_CREDENTIALS_FILE}
 GENERATION_REMOTE_PREFIX=${BLOCKZILLA_RAW_OBJECT_STORE_REMOTE_PREFIX:-$OBJECT_STORE_DEFAULT_REMOTE_PREFIX}
-GENERATION_PYTHON_BIN=${BLOCKZILLA_RAW_GENERATION_PYTHON_BIN:-python3}
+RECORDER_SUPPORT_BIN=${BLOCKZILLA_RAW_SUPPORT_BIN:-$BIN}
 B2_USAGE_ALERT_ENABLED=${BLOCKZILLA_B2_USAGE_ALERT_ENABLED:-false}
 B2_USAGE_ALLOWANCE_BYTES=${BLOCKZILLA_B2_USAGE_ALLOWANCE_BYTES:-10000000000}
 B2_USAGE_WARNING_BYTES=${BLOCKZILLA_B2_USAGE_WARNING_BYTES:-8000000000}
@@ -822,26 +822,11 @@ flock_lock_fd() {
     flock -w "$flock_wait_secs" "$flock_fd"
     return $?
   fi
-  # macOS does not ship the flock CLI, but Python exposes the same
-  # kernel-released advisory lock. The inherited descriptor keeps the lock
-  # owned by this shell after the helper exits.
-  "$GENERATION_PYTHON_BIN" - "$flock_fd" "$flock_wait_secs" <<'PY'
-import fcntl
-import sys
-import time
-
-fd = int(sys.argv[1])
-deadline = time.monotonic() + float(sys.argv[2])
-while True:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        break
-    except BlockingIOError:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise SystemExit(1)
-        time.sleep(min(0.05, remaining))
-PY
+  # macOS does not ship the flock CLI. The native helper locks the inherited
+  # descriptor's shared open-file description, so the shell retains ownership
+  # after the short-lived helper exits.
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support flock-lock-fd \
+    "$flock_fd" "$flock_wait_secs"
 }
 
 flock_unlock_fd() {
@@ -850,35 +835,14 @@ flock_unlock_fd() {
     flock -u "$flock_fd"
     return $?
   fi
-  "$GENERATION_PYTHON_BIN" - "$flock_fd" <<'PY'
-import fcntl
-import sys
-
-fcntl.flock(int(sys.argv[1]), fcntl.LOCK_UN)
-PY
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support flock-unlock-fd "$flock_fd"
 }
 
 validate_private_lock_fd_path() {
   lock_fd=$1
   lock_path=$2
-  "$GENERATION_PYTHON_BIN" - "$lock_fd" "$lock_path" <<'PY'
-import os
-import stat
-import sys
-
-descriptor = int(sys.argv[1])
-path = sys.argv[2]
-opened = os.fstat(descriptor)
-linked = os.lstat(path)
-if not stat.S_ISREG(linked.st_mode):
-    raise SystemExit("cache retention lock is not a regular file")
-if (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino):
-    raise SystemExit("cache retention lock changed while it was opened")
-if opened.st_uid not in {0, os.geteuid()}:
-    raise SystemExit("cache retention lock has an untrusted owner")
-if stat.S_IMODE(opened.st_mode) & 0o077:
-    raise SystemExit("cache retention lock must be private")
-PY
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    validate-private-lock-fd-path "$lock_fd" "$lock_path"
 }
 
 alert_flock_lock_fd() {
@@ -1383,76 +1347,20 @@ receiver_ack_has_pending_local_data() {
   ack_path=$1
   [ -s "$JOURNAL_FILE" ] || return 1
   [ -f "$IDENTITY_FILE" ] && [ ! -L "$IDENTITY_FILE" ] && [ -r "$IDENTITY_FILE" ] || return 2
-  ack_compare_python='import json, os, sys
-
-ack_path, identity_path, journal_path = sys.argv[1:]
-
-def fail():
-    raise ValueError("invalid receiver ACK monitoring input")
-
-def journal_hex(value):
-    if isinstance(value, str) and len(value) == 32:
-        int(value, 16)
-        return value.lower()
-    if not isinstance(value, list) or len(value) != 16:
-        fail()
-    if any(not isinstance(byte, int) or byte < 0 or byte > 255 for byte in value):
-        fail()
-    return "".join(f"{byte:02x}" for byte in value)
-
-with open(ack_path, "r", encoding="utf-8") as file:
-    ack = json.load(file)
-with open(identity_path, "r", encoding="utf-8") as file:
-    identity = json.load(file)
-
-if ack.get("schema_version") != 1:
-    fail()
-for field in ("cluster_id", "origin_node_id", "source_id"):
-    if not isinstance(ack.get(field), str) or ack[field] != identity.get(field):
-        fail()
-
-replication_journal = identity.get("replication_journal_id")
-replication_base = identity.get("replication_sequence_base")
-if replication_journal is None and replication_base is None:
-    replication_journal = identity.get("journal_id")
-    replication_base = 0
-if replication_journal is None or not isinstance(replication_base, int) or replication_base < 0:
-    fail()
-if ack.get("journal_id") != journal_hex(replication_journal):
-    fail()
-
-with open(journal_path, "rb") as file:
-    size = os.fstat(file.fileno()).st_size
-    window = min(size, 2 * 1024 * 1024)
-    file.seek(size - window)
-    data = file.read(window)
-if not data:
-    sys.exit(1)
-if not data.endswith(b"\n"):
-    marker = data.rfind(b"\n")
-    if marker < 0:
-        fail()
-    data = data[:marker + 1]
-lines = [line for line in data.splitlines() if line.strip()]
-if not lines:
-    fail()
-row = json.loads(lines[-1])
-frame_id = row.get("frame_id")
-through_sequence = ack.get("through_sequence")
-if not isinstance(frame_id, int) or frame_id < 0:
-    fail()
-if not isinstance(through_sequence, int) or through_sequence < 0:
-    fail()
-local_sequence = replication_base + frame_id
-sys.exit(0 if through_sequence < local_sequence else 1)'
+  ack_state=
   if generation_cache_enabled; then
-    flock -s "$GENERATION_ROTATION_LOCK" \
-      "$GENERATION_PYTHON_BIN" -c "$ack_compare_python" \
-      "$ack_path" "$IDENTITY_FILE" "$JOURNAL_FILE"
+    ack_state=$(flock -s "$GENERATION_ROTATION_LOCK" \
+      "$RECORDER_SUPPORT_BIN" raw-recorder-support receiver-ack-state \
+      "$ack_path" "$IDENTITY_FILE" "$JOURNAL_FILE") || return 2
   else
-    "$GENERATION_PYTHON_BIN" -c "$ack_compare_python" \
-      "$ack_path" "$IDENTITY_FILE" "$JOURNAL_FILE"
+    ack_state=$("$RECORDER_SUPPORT_BIN" raw-recorder-support receiver-ack-state \
+      "$ack_path" "$IDENTITY_FILE" "$JOURNAL_FILE") || return 2
   fi
+  case "$ack_state" in
+    pending) return 0 ;;
+    caught-up) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 monitor_disk_alerts() {
@@ -1702,103 +1610,8 @@ load_resume_coverage_event() {
   if [ "$resume_event_bytes" -gt 4096 ]; then
     return 1
   fi
-  if ! resume_event_fields=$("$GENERATION_PYTHON_BIN" - \
-    "$ACTIVE_RESUME_COVERAGE_EVENT_FILE" 2>/dev/null <<'PY'
-import hashlib
-import json
-import os
-import stat
-import struct
-import sys
-
-path = sys.argv[1]
-if not hasattr(os, "O_NOFOLLOW"):
-    raise SystemExit(1)
-flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-fd = os.open(path, flags)
-try:
-    before = os.fstat(fd)
-    if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 4096:
-        raise ValueError("invalid event file")
-    payload = bytearray()
-    while len(payload) <= before.st_size:
-        chunk = os.read(fd, before.st_size + 1 - len(payload))
-        if not chunk:
-            break
-        payload.extend(chunk)
-    after = os.fstat(fd)
-finally:
-    os.close(fd)
-if (
-    len(payload) != before.st_size
-    or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-):
-    raise ValueError("event changed while reading")
-
-def unique_object(pairs):
-    value = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError("duplicate JSON key")
-        value[key] = item
-    return value
-
-def invalid_constant(value):
-    raise ValueError(f"invalid JSON constant: {value}")
-
-event = json.loads(
-    payload.decode("utf-8"),
-    object_pairs_hook=unique_object,
-    parse_constant=invalid_constant,
-)
-if (
-    not isinstance(event, dict)
-    or type(event.get("schema_version")) is not int
-    or event["schema_version"] != 1
-):
-    raise ValueError("invalid event schema")
-expected_fields = {
-    "event_id",
-    "schema_version",
-    "requested_overlap_slot",
-    "first_delivered_slot",
-    "observed_later_slot",
-    "written_unix_secs",
-}
-if set(event) != expected_fields:
-    raise ValueError("unexpected event fields")
-numeric_fields = (
-    "requested_overlap_slot",
-    "first_delivered_slot",
-    "observed_later_slot",
-    "written_unix_secs",
-)
-for field in numeric_fields:
-    value = event.get(field)
-    if type(value) is not int or not 0 <= value <= (1 << 64) - 1:
-        raise ValueError("invalid numeric field")
-requested = event["requested_overlap_slot"]
-first = event["first_delivered_slot"]
-observed = event["observed_later_slot"]
-if requested >= observed:
-    raise ValueError("event does not advance")
-event_id = event.get("event_id")
-if (
-    not isinstance(event_id, str)
-    or len(event_id) != 64
-    or any(character not in "0123456789abcdef" for character in event_id)
-):
-    raise ValueError("invalid event ID")
-expected = hashlib.sha256(
-    b"blockzilla-grpc-resume-coverage-warning-v1"
-    + struct.pack("<QQQ", requested, first, observed)
-).hexdigest()
-if event_id != expected:
-    raise ValueError("event ID mismatch")
-print(f"{event_id}:{requested}:{first}:{observed}")
-PY
-  ); then
+  if ! resume_event_fields=$("$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    parse-resume-coverage-event "$ACTIVE_RESUME_COVERAGE_EVENT_FILE" 2>/dev/null); then
     return 1
   fi
   resume_event_id=${resume_event_fields%%:*}
@@ -2199,56 +2012,8 @@ load_replay_recovery_floor() {
 
 strict_replay_report_fields() {
   replay_report_path=$1
-  "$GENERATION_PYTHON_BIN" - "$replay_report_path" <<'PY'
-import json
-import os
-import stat
-import sys
-
-
-def reject_duplicates(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-try:
-    path = sys.argv[1]
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < 1 or metadata.st_size > 65536:
-            raise ValueError("invalid report file")
-        payload = os.read(descriptor, 65537)
-        if len(payload) != metadata.st_size:
-            raise ValueError("report changed while reading")
-    finally:
-        os.close(descriptor)
-    report = json.loads(payload.decode("utf-8"), object_pairs_hook=reject_duplicates)
-    if not isinstance(report, dict) or report.get("replay_unavailable") is not True:
-        raise ValueError("not a replay-unavailable report")
-    names = (
-        "resume_overlap_slot",
-        "replay_unavailable_requested_slot",
-        "replay_available_slot",
-        "effective_from_slot",
-        "frames_seen",
-        "frames_written",
-    )
-    values = []
-    for name in names:
-        value = report.get(name)
-        if type(value) is not int or value < 0 or value >= 10**18:
-            raise ValueError(f"invalid {name}")
-        values.append(value)
-    print(" ".join(str(value) for value in values))
-except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(1)
-PY
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    strict-replay-report-fields "$replay_report_path"
 }
 
 replay_gap_payload() {
@@ -3015,54 +2780,13 @@ validate_generation_receipt() {
     ''|*[!0-9]*|0) return 1 ;;
   esac
   [ "$receipt_bytes" -le 1048576 ] || return 1
-  "$GENERATION_PYTHON_BIN" - "$receipt_path" "$receipt_generation_id" \
-    "$receipt_remote_prefix" "$receipt_expected_predecessor" <<'PY'
-import json
-import re
-import sys
-
-try:
-    path, generation_id, prefix, expected_predecessor = sys.argv[1:]
-    with open(path, "r", encoding="utf-8") as stream:
-        receipt = json.load(stream)
-    hex64 = re.compile(r"[0-9a-f]{64}").fullmatch
-    def version_id(value):
-        return (
-            type(value) is str
-            and 0 < len(value.encode("utf-8")) <= 1024
-            and not any(ord(character) < 0x20 or ord(character) == 0x7f for character in value)
-        )
-    assert type(receipt.get("schema_version")) is int and receipt["schema_version"] == 1
-    assert receipt.get("generation_id") == generation_id
-    assert receipt.get("remote_prefix") == prefix
-    assert receipt.get("manifest_key") == prefix + "/manifest.json"
-    assert receipt.get("commit_key") == prefix + "/_COMMITTED"
-    assert hex64(receipt.get("manifest_sha256", ""))
-    assert hex64(receipt.get("commit_sha256", ""))
-    assert version_id(receipt.get("manifest_version_id"))
-    assert version_id(receipt.get("commit_version_id"))
-    assert type(receipt.get("file_count")) is int and receipt["file_count"] >= 1
-    assert type(receipt.get("total_bytes")) is int and receipt["total_bytes"] > 0
-    assert type(receipt.get("verified_unix_secs")) is int and receipt["verified_unix_secs"] > 0
-    predecessor = receipt.get("predecessor_manifest_sha256")
-    if expected_predecessor == "-":
-        assert predecessor is None
-    elif expected_predecessor != "*":
-        assert predecessor == expected_predecessor
-    if predecessor is not None:
-        assert hex64(predecessor)
-except (AssertionError, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(1)
-PY
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support validate-generation-receipt \
+    "$receipt_path" "$receipt_generation_id" "$receipt_remote_prefix" \
+    "$receipt_expected_predecessor"
 }
 
 receipt_manifest_hash() {
-  "$GENERATION_PYTHON_BIN" - "$1" <<'PY'
-import json
-import sys
-with open(sys.argv[1], "r", encoding="utf-8") as stream:
-    print(json.load(stream)["manifest_sha256"])
-PY
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support receipt-manifest-hash "$1"
 }
 
 publish_upload_chain() {
@@ -3094,9 +2818,12 @@ commit_uploaded_generation() {
   else
     expected_predecessor=-
   fi
-  validate_generation_receipt "$committed_receipt" "$committed_id" \
-    "$committed_prefix" "$expected_predecessor" || return 1
-  committed_hash=$(receipt_manifest_hash "$committed_receipt") || return 1
+  # Validation and hash extraction must bind the same opened receipt inode.
+  # Reopening here would let a path replacement split the authority check from
+  # the hash subsequently published as the durable local chain head.
+  committed_hash=$("$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    validate-generation-receipt-hash "$committed_receipt" "$committed_id" \
+    "$committed_prefix" "$expected_predecessor") || return 1
   if [ "$UPLOAD_CHAIN_ID" = "$committed_id" ]; then
     [ "$UPLOAD_CHAIN_HASH" = "$committed_hash" ] || return 1
   else
@@ -3122,143 +2849,10 @@ load_generation_retention_state() {
     return 1
   fi
   retention_base=$(normalized_generation_base_prefix) || return 1
-  retention_scan=$("$GENERATION_PYTHON_BIN" - \
-    "$SEALED_GENERATION_DIR" "$GENERATION_RECEIPT_DIR" \
-    "$retention_base" "$CLUSTER_ID" "$ORIGIN_NODE_ID" \
-    "$retention_target_id" <<'PY'
-import json
-import os
-import re
-import stat
-import sys
-
-sealed_dir, receipt_dir, base_prefix, cluster_id, origin_node_id, target_id = sys.argv[1:]
-generation_id_pattern = re.compile(r"slot-[0-9]{20}").fullmatch
-receipt_name_pattern = re.compile(r"slot-[0-9]{20}\.json").fullmatch
-hex64 = re.compile(r"[0-9a-f]{64}").fullmatch
-
-def valid_version_id(value):
-    return (
-        type(value) is str
-        and 0 < len(value.encode("utf-8")) <= 1024
-        and not any(ord(c) < 0x20 or ord(c) == 0x7f for c in value)
-    )
-
-try:
-    sealed_ids = []
-    with os.scandir(sealed_dir) as entries:
-        for entry in entries:
-            if not entry.name.startswith("slot-"):
-                continue
-            if not generation_id_pattern(entry.name):
-                raise ValueError("invalid sealed generation name")
-            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
-                raise ValueError("sealed generation is not a real directory")
-            sealed_ids.append(entry.name)
-    sealed_ids.sort()
-
-    receipts_by_hash = {}
-    with os.scandir(receipt_dir) as entries:
-        for entry in entries:
-            if not (entry.name.startswith("slot-") and entry.name.endswith(".json")):
-                continue
-            if not receipt_name_pattern(entry.name):
-                raise ValueError("invalid generation receipt name")
-            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
-                raise ValueError("generation receipt is not a real file")
-            size = entry.stat(follow_symlinks=False).st_size
-            if size <= 0 or size > 1048576:
-                # An uploader may have stopped before publishing a valid local
-                # receipt. It remains an uncommitted object-store upload.
-                continue
-            generation_id = entry.name[:-5]
-            prefix = f"{base_prefix}/{cluster_id}/{origin_node_id}/{generation_id}"
-            try:
-                with open(entry.path, "r", encoding="utf-8") as stream:
-                    receipt = json.load(stream)
-                if type(receipt) is not dict:
-                    raise ValueError("generation receipt is not an object")
-                if type(receipt.get("schema_version")) is not int or receipt["schema_version"] != 1:
-                    raise ValueError("unsupported generation receipt")
-                if receipt.get("generation_id") != generation_id:
-                    raise ValueError("generation receipt ID mismatch")
-                if receipt.get("remote_prefix") != prefix:
-                    raise ValueError("generation receipt prefix mismatch")
-                if receipt.get("manifest_key") != prefix + "/manifest.json":
-                    raise ValueError("generation manifest key mismatch")
-                if receipt.get("commit_key") != prefix + "/_COMMITTED":
-                    raise ValueError("generation commit key mismatch")
-                manifest_hash = receipt.get("manifest_sha256", "")
-                if not hex64(manifest_hash) or not hex64(receipt.get("commit_sha256", "")):
-                    raise ValueError("invalid generation digest")
-                if not valid_version_id(receipt.get("manifest_version_id")):
-                    raise ValueError("invalid manifest version")
-                if not valid_version_id(receipt.get("commit_version_id")):
-                    raise ValueError("invalid commit version")
-                if type(receipt.get("file_count")) is not int or receipt["file_count"] < 1:
-                    raise ValueError("invalid generation file count")
-                if type(receipt.get("total_bytes")) is not int or receipt["total_bytes"] <= 0:
-                    raise ValueError("invalid generation byte count")
-                if type(receipt.get("verified_unix_secs")) is not int or receipt["verified_unix_secs"] <= 0:
-                    raise ValueError("invalid generation verification time")
-                predecessor = receipt.get("predecessor_manifest_sha256")
-                if predecessor is not None and not hex64(predecessor):
-                    raise ValueError("invalid predecessor hash")
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                # Invalid or partially written off-chain receipts do not prove
-                # an object-store commit. If .chain references one, traversal
-                # fails below.
-                continue
-            if manifest_hash in receipts_by_hash:
-                raise ValueError("duplicate generation manifest hash")
-            receipts_by_hash[manifest_hash] = (generation_id, predecessor)
-
-    committed_ids = set()
-    chain_path = os.path.join(receipt_dir, ".chain")
-    try:
-        chain_stat = os.lstat(chain_path)
-    except FileNotFoundError:
-        chain_stat = None
-    if chain_stat is not None:
-        if not stat.S_ISREG(chain_stat.st_mode) or chain_stat.st_size <= 0 or chain_stat.st_size > 256:
-            raise ValueError("invalid receipt chain file")
-        with open(chain_path, "r", encoding="ascii") as stream:
-            chain_parts = stream.read().split()
-        if len(chain_parts) != 2:
-            raise ValueError("invalid receipt chain record")
-        chain_generation_id, current_hash = chain_parts
-        if not generation_id_pattern(chain_generation_id) or not hex64(current_hash):
-            raise ValueError("invalid receipt chain head")
-        seen_hashes = set()
-        first = True
-        while current_hash is not None:
-            if current_hash in seen_hashes or current_hash not in receipts_by_hash:
-                raise ValueError("receipt chain is incomplete or cyclic")
-            seen_hashes.add(current_hash)
-            generation_id, current_hash = receipts_by_hash[current_hash]
-            if first and generation_id != chain_generation_id:
-                raise ValueError("receipt chain head ID mismatch")
-            first = False
-            if generation_id in committed_ids:
-                raise ValueError("duplicate generation in receipt chain")
-            committed_ids.add(generation_id)
-
-    uncommitted_ids = [item for item in sealed_ids if item not in committed_ids]
-    committed_local_ids = [item for item in sealed_ids if item in committed_ids]
-    first_uncommitted = uncommitted_ids[0] if uncommitted_ids else "-"
-    first_committed = committed_local_ids[0] if committed_local_ids else "-"
-    target_committed = "1" if target_id != "-" and target_id in committed_ids else "0"
-    print(
-        len(sealed_ids),
-        len(uncommitted_ids),
-        first_uncommitted,
-        first_committed,
-        target_committed,
-    )
-except (OSError, TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(1)
-PY
-  ) || return 1
+  retention_scan=$("$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    scan-generation-retention "$SEALED_GENERATION_DIR" \
+    "$GENERATION_RECEIPT_DIR" "$retention_base" "$CLUSTER_ID" \
+    "$ORIGIN_NODE_ID" "$retention_target_id") || return 1
   IFS=' ' read -r GENERATION_RETAINED_COUNT GENERATION_UNCOMMITTED_COUNT \
     FIRST_UNCOMMITTED_GENERATION FIRST_COMMITTED_GENERATION \
     TARGET_GENERATION_COMMITTED retention_extra <<EOF
@@ -3834,21 +3428,8 @@ b2_usage_report_bytes() {
     ''|*[!0-9]*|0) return 1 ;;
   esac
   [ "$usage_report_size" -le 65536 ] || return 1
-  "$GENERATION_PYTHON_BIN" - "$usage_report" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    report = json.load(handle)
-if not isinstance(report, dict):
-    raise SystemExit("usage report must be an object")
-if report.get("schema_version") != 1 or report.get("scope_complete") is not True:
-    raise SystemExit("usage report is incomplete or has an unsupported schema")
-stored_bytes = report.get("total_stored_bytes")
-if isinstance(stored_bytes, bool) or not isinstance(stored_bytes, int) or stored_bytes < 0:
-    raise SystemExit("usage report has invalid total_stored_bytes")
-print(stored_bytes)
-PY
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    b2-usage-report-bytes "$usage_report"
 }
 
 run_b2_usage_scan() {
@@ -3992,37 +3573,8 @@ start_b2_usage_worker() {
 }
 
 r2_receipt_directory_state() {
-  "$GENERATION_PYTHON_BIN" - "$GENERATION_RECEIPT_DIR" <<'PY'
-import os
-import stat
-import sys
-
-path = sys.argv[1]
-flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-flags |= getattr(os, "O_DIRECTORY", 0)
-descriptor = None
-try:
-    descriptor = os.open(path, flags)
-    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-        raise ValueError("receipt path is not a directory")
-    with os.scandir(descriptor) as entries:
-        entries = list(entries)
-    if not entries:
-        print("empty")
-    else:
-        chain_entries = [entry for entry in entries if entry.name == ".chain"]
-        if len(chain_entries) != 1:
-            raise ValueError("non-empty receipt directory has no chain head")
-        chain = chain_entries[0]
-        if chain.is_symlink() or not chain.is_file(follow_symlinks=False):
-            raise ValueError("receipt chain head is not a regular file")
-        print("chained")
-except (OSError, ValueError):
-    raise SystemExit(1)
-finally:
-    if descriptor is not None:
-        os.close(descriptor)
-PY
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    r2-receipt-directory-state "$GENERATION_RECEIPT_DIR"
 }
 
 r2_receipt_ledger_bytes() {
@@ -4056,111 +3608,12 @@ parse_r2_retention_result() {
   retention_expected_target=$3
   retention_expected_prefix=$4
   retention_expected_maximum_slot=$5
-  retention_parsed=$("$GENERATION_PYTHON_BIN" - \
-    "$retention_result_file" "$retention_expected_mode" \
-    "$retention_expected_target" "$retention_expected_prefix" \
-    "$retention_expected_maximum_slot" \
+  retention_parsed=$("$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    parse-r2-retention-result "$retention_result_file" \
+    "$retention_expected_mode" "$retention_expected_target" \
+    "$retention_expected_prefix" "$retention_expected_maximum_slot" \
     "$R2_RETENTION_MINIMUM_AGE_SECS" \
-    "$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS" <<'PY'
-import json
-import re
-import sys
-
-(
-    path,
-    expected_mode,
-    expected_target,
-    expected_prefix,
-    expected_maximum_slot,
-    expected_minimum_age,
-    expected_minimum_generations,
-) = sys.argv[1:]
-
-def strict_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-def invalid_constant(_value):
-    raise ValueError("non-finite JSON number")
-
-def integer(record, name, minimum=0):
-    value = record.get(name)
-    if type(value) is not int or value < minimum or value > (1 << 63) - 1:
-        raise ValueError(f"invalid {name}")
-    return value
-
-try:
-    with open(path, "r", encoding="utf-8") as stream:
-        result = json.load(
-            stream,
-            object_pairs_hook=strict_object,
-            parse_constant=invalid_constant,
-        )
-    if type(result) is not dict:
-        raise ValueError("retention result is not an object")
-    target = int(expected_target)
-    minimum_age = int(expected_minimum_age)
-    minimum_generations = int(expected_minimum_generations)
-    maximum_slot = int(expected_maximum_slot)
-    if (
-        result.get("schema_version") != 1
-        or result.get("storage_provider") != "r2"
-        or result.get("mode") != expected_mode
-        or result.get("remote_prefix") != expected_prefix
-        or result.get("target_bytes") != target
-        or result.get("maximum_generation_slot") != maximum_slot
-        or result.get("minimum_age_secs") != minimum_age
-        or result.get("minimum_retained_generations") != minimum_generations
-    ):
-        raise ValueError("retention result scope mismatch")
-    before = integer(result, "retained_payload_bytes_before")
-    after = integer(result, "retained_payload_bytes_after")
-    before_count = integer(result, "retained_generation_count_before")
-    after_count = integer(result, "retained_generation_count_after")
-    selected_bytes = integer(result, "selected_payload_bytes")
-    selected = result.get("selected_generation_ids")
-    if type(selected) is not list or any(
-        type(value) is not str
-        or re.fullmatch(r"slot-[0-9]{20}", value) is None
-        for value in selected
-    ):
-        raise ValueError("invalid selected generation IDs")
-    if len(set(selected)) != len(selected):
-        raise ValueError("duplicate selected generation ID")
-    if (
-        after > before
-        or selected_bytes != before - after
-        or after_count > before_count
-        or before_count - after_count != len(selected)
-        or type(result.get("target_satisfied")) is not bool
-    ):
-        raise ValueError("inconsistent retention totals")
-    if expected_mode == "dry-run" and target == (1 << 63) - 1 and (
-        selected or before != after or result["target_satisfied"] is not True
-    ):
-        raise ValueError("accounting dry-run unexpectedly selected data")
-    first = selected[0] if selected else "-"
-    last = selected[-1] if selected else "-"
-except (OSError, TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(1)
-
-print(
-    before,
-    after,
-    before_count,
-    after_count,
-    len(selected),
-    selected_bytes,
-    1 if result["target_satisfied"] else 0,
-    first,
-    last,
-)
-PY
-  ) || return 1
+    "$R2_RETENTION_MINIMUM_RETAINED_GENERATIONS") || return 1
   # Every emitted field is constrained above to digits, a fixed generation ID,
   # or '-'. Shell splitting therefore cannot reinterpret uploader-controlled
   # content as syntax.
@@ -4570,8 +4023,8 @@ if generation_cache_enabled; then
     echo "generation cluster, origin, and source IDs must be non-empty and use safe path characters" >&2
     exit 2
   fi
-  if ! command -v "$GENERATION_PYTHON_BIN" >/dev/null 2>&1; then
-    echo "generation receipt validator is missing" >&2
+  if ! command -v "$RECORDER_SUPPORT_BIN" >/dev/null 2>&1; then
+    echo "native raw recorder support command is missing" >&2
     exit 2
   fi
 fi

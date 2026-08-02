@@ -2,9 +2,17 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+workspace_root=$(cd "$repo_root/../.." && pwd)
 supervisor=$repo_root/scripts/linux-raw-grpc-recorder.sh
 fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/blockzilla-cache-test.XXXXXX")
 trap 'rm -rf "$fixture_root"' EXIT
+
+support_bin=${BLOCKZILLA_RAW_SUPPORT_BIN:-$workspace_root/target/debug/hivezilla}
+if [ ! -x "$support_bin" ]; then
+  echo "native Hivezilla recorder support binary is missing: $support_bin" >&2
+  exit 1
+fi
+export BLOCKZILLA_RAW_SUPPORT_BIN=$support_bin
 
 export BLOCKZILLA_RAW_CACHE_MODE=b2-generations
 export BLOCKZILLA_RAW_OBJECT_STORE=backblaze
@@ -275,7 +283,6 @@ CLUSTER_ID=solana-mainnet
 ORIGIN_NODE_ID=source-node-test
 SOURCE_ID=grpc-raw-test
 GENERATION_REMOTE_PREFIX=grpc-raw/v1
-GENERATION_PYTHON_BIN=${PYTHON_BIN:-python3}
 REPLAY_RESUME_HEADROOM_SLOTS=0
 B2_CAP_RETRY_SECS=3600
 
@@ -754,20 +761,13 @@ rm -f "$GENERATION_RETENTION_LOCK"
 MOCK_UPLOAD_RESULT=failure
 export MOCK_UPLOAD_RESULT
 retention_holder_ready=$fixture_root/retention-holder-ready
-"$GENERATION_PYTHON_BIN" - "$GENERATION_RETENTION_LOCK" \
-  "$retention_holder_ready" <<'PY' &
-import fcntl
-import os
-import sys
-import time
-
-descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
-fcntl.flock(descriptor, fcntl.LOCK_EX)
-with open(sys.argv[2], "w", encoding="ascii") as marker:
-    marker.write("ready\n")
-time.sleep(1)
-os.close(descriptor)
-PY
+(
+  exec 8<>"$GENERATION_RETENTION_LOCK"
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support flock-lock-fd 8 0
+  printf '%s\n' ready > "$retention_holder_ready"
+  sleep 1
+  "$RECORDER_SUPPORT_BIN" raw-recorder-support flock-unlock-fd 8
+) &
 retention_holder_pid=$!
 for _ in $(seq 1 100); do
   [ -s "$retention_holder_ready" ] && break
@@ -899,7 +899,8 @@ load_upload_chain
 test "$UPLOAD_CHAIN_ID" = "$second_upload_id"
 second_manifest_hash=$(printf '%064s' "${second_upload_id#slot-}" | tr ' ' 0)
 test "$UPLOAD_CHAIN_HASH" = "$second_manifest_hash"
-test "$("$GENERATION_PYTHON_BIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["predecessor_manifest_sha256"])' \
+test "$("$RECORDER_SUPPORT_BIN" raw-recorder-support \
+  receipt-predecessor-hash \
   "$GENERATION_RECEIPT_DIR/$second_upload_id.json")" = "$first_manifest_hash"
 
 # Pressure draining is strictly FIFO even if directories were created in the

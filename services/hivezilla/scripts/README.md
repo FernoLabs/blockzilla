@@ -17,14 +17,20 @@ complete node-owned cloud-overflow lifecycle.
 | `run-grpc-receiver-bridge.sh` | Copy a receiver's durable prefix into a standard raw generation without mutating the receiver tree |
 | `generate-grpc-replication-pki.sh` | Create an offline CA and push-replication identities |
 | `generate-grpc-pull-pki.sh` | Add pull identities to an existing replication trust bundle |
-| `s3_multipart_upload.py` | Upload and verify bounded generations in an S3-compatible store; includes provider-specific retention support |
-| `pull_ack_telegram_monitor.py` | Alert when signed receiver acknowledgements stop advancing |
-| `ingest_status_server.py` | Serve a bounded, secret-free capture and signed-ACK status snapshot for the watcher UI |
 
-The production shred-status collector is now the Rust command
-`hivezilla serve-shred-status`. `shred_status_server.py` is frozen and retained
-only as a differential test oracle until the first live Rust-container rollout
-is verified; no Docker or Compose entrypoint executes it.
+Object-store upload, immutable readback verification, Backblaze usage
+reporting, and crash-safe R2 retention are implemented by the workspace Rust
+binary `blockzilla-s3-upload`. The recorder defaults to
+`/usr/local/bin/blockzilla-s3-upload`; deployments may select an exact installed
+binary with `BLOCKZILLA_RAW_GENERATION_UPLOADER_BIN`.
+
+Both public status collectors are native Rust commands:
+`hivezilla serve-ingest-status` and `hivezilla serve-shred-status`. Their
+superseded Python implementations and tests have been removed.
+The receiver-ACK Telegram monitor is also native:
+`hivezilla monitor-pull-ack-telegram`. It keeps the existing `BLOCKZILLA_*`
+environment interface for deployment compatibility, while explicit CLI flags
+take precedence. Its bot token remains file-backed and is never logged.
 
 The launch wrappers expect a dedicated UID and file-backed secrets. Override
 their documented `BLOCKZILLA_*` environment variables for your deployment; do
@@ -88,20 +94,37 @@ the supervisor's authenticated `ready` notification only after validating its
 state and writing its startup marker. The recorder exits if that notification
 fails, allowing the bounded supervisor policy to retry or fence the crash loop.
 
-The object-store helper requires Python 3.11 or newer and the dependency in
-`requirements.txt`. Its tests and all shell tests use local fixtures only:
+Build both native operational binaries before running the shell suites. The
+object-store and shell tests use local fixtures only:
 
 ```bash
-python3 -m pip install -r services/hivezilla/scripts/requirements.txt
-python3 services/hivezilla/scripts/test_s3_multipart_upload.py
-python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
-python3 services/hivezilla/scripts/test_ingest_status_server.py
-python3 services/hivezilla/scripts/test_shred_status_server.py
+cargo build --locked -p hivezilla --bin hivezilla
+cargo build --locked -p hivezilla-object-store --bin blockzilla-s3-upload
+cargo test --locked -p hivezilla-object-store --all-targets
 bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
 bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
 bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh
 bash services/hivezilla/scripts/test-generate-grpc-replication-pki.sh
 ```
+
+Start ACK alerting with explicit paths or the equivalent historical
+`BLOCKZILLA_PULL_ACK_*` and `BLOCKZILLA_TELEGRAM_*` environment variables:
+
+```bash
+hivezilla monitor-pull-ack-telegram \
+  --ack-status-file /control/pull-ack-status.json \
+  --state-file /alert-state/pull-ack-alert.json \
+  --token-file /run/secrets/telegram_bot_token \
+  --chat-id -100123456 \
+  --stale-after-secs 300 \
+  --startup-grace-secs 300 \
+  --interval-secs 30
+```
+
+The alert-state directory must be owned by the monitor UID and must not be
+group/world writable. A durable `opening` or `recovery` phase is intentionally
+treated as delivered after restart: if shutdown or a network timeout makes the
+Telegram result unknowable, the monitor suppresses a duplicate notification.
 
 Review every filesystem limit, TLS identity, retention threshold, and cleanup
 policy before operating against real data. The current helper's generation
@@ -130,7 +153,7 @@ subscriber can acknowledge raw custody.
 
 ## Read-only ingest status
 
-`ingest_status_server.py` reads only the raw cache and the monitoring copy of
+`hivezilla serve-ingest-status` reads only the raw cache and the monitoring copy of
 the signed receiver ACK. It selects public counters into a cached JSON document
 and never publishes endpoints, identities, journal IDs, block hashes, object
 keys, receipt hashes, alert text, tokens, command lines, or paths. It has no
@@ -147,7 +170,7 @@ Run it behind an authenticated same-origin reverse proxy. Bind it to loopback
 or an explicit private address; wildcard and public listeners are rejected:
 
 ```bash
-python3 services/hivezilla/scripts/ingest_status_server.py \
+hivezilla serve-ingest-status \
   --listen 127.0.0.1:8790 \
   --cache-root /path/to/read-only/grpc-cache \
   --ack-status-file /path/to/read-only/pull-ack-status.json \

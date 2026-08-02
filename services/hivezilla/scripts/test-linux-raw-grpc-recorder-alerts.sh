@@ -2,9 +2,17 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+workspace_root=$(cd "$repo_root/../.." && pwd)
 supervisor=$repo_root/scripts/linux-raw-grpc-recorder.sh
 fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/blockzilla-alert-test.XXXXXX")
 trap 'rm -rf "$fixture_root"' EXIT
+
+support_bin=${BLOCKZILLA_RAW_SUPPORT_BIN:-$workspace_root/target/debug/hivezilla}
+if [ ! -x "$support_bin" ]; then
+  echo "native Hivezilla recorder support binary is missing: $support_bin" >&2
+  exit 1
+fi
+export BLOCKZILLA_RAW_SUPPORT_BIN=$support_bin
 
 export BLOCKZILLA_RAW_OUTPUT_DIR=$fixture_root/output
 export BLOCKZILLA_RAW_STATE_DIR=$fixture_root/state
@@ -39,18 +47,8 @@ make_event() {
   requested_slot=$1
   first_slot=$2
   observed_slot=$3
-  event_id=$("$GENERATION_PYTHON_BIN" - \
-    "$requested_slot" "$first_slot" "$observed_slot" <<'PY'
-import hashlib
-import struct
-import sys
-
-slots = tuple(int(value) for value in sys.argv[1:])
-print(hashlib.sha256(
-    b"blockzilla-grpc-resume-coverage-warning-v1" + struct.pack("<QQQ", *slots)
-).hexdigest())
-PY
-  )
+  event_id=$("$RECORDER_SUPPORT_BIN" raw-recorder-support \
+    resume-coverage-event-id "$requested_slot" "$first_slot" "$observed_slot")
   printf '{"event_id":"%s","schema_version":1,"requested_overlap_slot":%s,"first_delivered_slot":%s,"observed_later_slot":%s,"written_unix_secs":123}\n' \
     "$event_id" "$requested_slot" "$first_slot" "$observed_slot" \
     > "$ACTIVE_RESUME_COVERAGE_EVENT_FILE"

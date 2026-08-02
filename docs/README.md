@@ -44,7 +44,7 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 - [Rust runtime boundary](architecture/rust-runtime-boundary.md): ownership
   rule for production logic, the narrow external-tool exceptions, and the
-  migration order for remaining Python and shell implementations.
+  migration order for remaining shell implementations.
 - [Hivezilla convergence architecture](architecture/hivezilla-convergence.md):
   code-backed map of the current live paths, the target hive, retention model,
   alerts, and phased implementation plan.

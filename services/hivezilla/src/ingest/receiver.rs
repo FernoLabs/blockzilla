@@ -9,6 +9,7 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -25,7 +26,7 @@ use super::shred_udp::parse_shred_header;
 use super::{
     CommitmentEvidence, ContentDigest, CumulativePrimaryAck, DurableSpoolRecord, IngressRecordMeta,
     LogicalKey, REPLICATION_PROTOCOL_VERSION, ReceiptDisposition, ReplicationOffer,
-    ReplicationStreamId, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
+    ReplicationStreamId, ShredKind, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
     ZSTD_SOLANA_SHRED_V1, compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
 };
 
@@ -65,6 +66,22 @@ pub struct ReceiverDurableProgress {
     pub durable_lsn: u64,
     pub spool_location: SpoolLocation,
     pub unobserved_tail_bytes: u64,
+}
+
+/// Read-only audit projection of one fixed-length receiver progress-WAL snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReceiverProgressAuditSnapshot {
+    pub captured_unix_secs: u64,
+    pub through_sequence: u64,
+    pub durable_lsn: u64,
+    pub spool_location: SpoolLocation,
+    pub logical_slot: u64,
+    pub logical_kind: ShredKind,
+    pub logical_shred_index: u32,
+    pub progress_frames_validated: u64,
+    pub progress_wal_observed_bytes: u64,
+    pub progress_wal_valid_bytes: u64,
+    pub progress_wal_unobserved_tail_bytes: u64,
 }
 
 /// Independent memory and decompression limits enforced before a batch mutates durable state.
@@ -1461,7 +1478,7 @@ impl ReceiverProgressWal {
             sync_directory(path.parent().unwrap_or_else(|| Path::new(".")))?;
         }
         let file_len = file.metadata()?.len();
-        let recovered = recover_progress_wal(&mut file, &path, &stream, recent_capacity)?;
+        let recovered = recover_progress_wal(&mut file, &path, &stream, recent_capacity, file_len)?;
         if recovered.valid_len != file_len {
             file.set_len(recovered.valid_len)
                 .with_context(|| format!("truncate receiver progress WAL {}", path.display()))?;
@@ -1655,20 +1672,21 @@ impl ReceiverProgressWal {
 /// The descriptor is opened without a writer lock and without write permissions. Concurrent
 /// append is safe because only checksum-and-commit-complete frames are considered. Concurrent
 /// compaction is safe because the open descriptor continues to reference either the complete old
-/// inode or the complete atomically installed replacement. Bytes appended after this read reaches
-/// EOF are reported as unobserved tail and never enter the returned cursor.
+/// inode or the complete atomically installed replacement. The reader fixes the descriptor's
+/// initial length; a partial frame already inside that prefix is reported as unobserved tail, and
+/// later appends never enter the returned cursor.
 pub fn read_receiver_durable_progress(
     path: impl AsRef<Path>,
     stream: &ReplicationStreamId,
 ) -> Result<Option<ReceiverDurableProgress>> {
     let path = path.as_ref();
     let mut file = open_progress_descriptor_read_only(path)?;
-    let recovered = recover_progress_wal(&mut file, path, stream, 1)
-        .context("recover read-only receiver progress snapshot")?;
     let observed_len = file
         .metadata()
         .with_context(|| format!("inspect receiver progress WAL {}", path.display()))?
         .len();
+    let recovered = recover_progress_wal(&mut file, path, stream, 1, observed_len)
+        .context("recover read-only receiver progress snapshot")?;
     let unobserved_tail_bytes = observed_len.saturating_sub(recovered.valid_len);
     Ok(recovered.latest.map(|latest| ReceiverDurableProgress {
         stream: latest.stream,
@@ -1679,6 +1697,57 @@ pub fn read_receiver_durable_progress(
         spool_location: latest.spool_location,
         unobserved_tail_bytes,
     }))
+}
+
+/// Validate a fixed initial prefix of a live receiver progress WAL and return its shred cursor.
+///
+/// This is deliberately read-only and never takes the writer lock. Frames appended after the
+/// initial `fstat` are outside the bounded reader, while an atomic compaction cannot change the
+/// inode already held by the descriptor.
+pub fn read_receiver_progress_audit_snapshot(
+    path: impl AsRef<Path>,
+    stream: &ReplicationStreamId,
+) -> Result<ReceiverProgressAuditSnapshot> {
+    let path = path.as_ref();
+    let mut file = open_progress_descriptor_read_only(path)?;
+    let observed_len = file
+        .metadata()
+        .with_context(|| format!("inspect receiver progress WAL {}", path.display()))?
+        .len();
+    let recovered = recover_progress_wal(&mut file, path, stream, 1, observed_len)
+        .context("recover read-only receiver progress audit snapshot")?;
+    let latest = recovered
+        .latest
+        .context("receiver progress WAL has no committed progress frame")?;
+    let LogicalKey::Shred {
+        slot,
+        kind,
+        shred_index,
+        ..
+    } = latest.offer.logical_key
+    else {
+        anyhow::bail!("latest durable receiver record is not a shred");
+    };
+    // The timestamp is intentionally sampled after the cursor is validated. Audit callers use it
+    // as a lower bound when requiring a later public status sample.
+    let captured_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_secs();
+    Ok(ReceiverProgressAuditSnapshot {
+        captured_unix_secs,
+        through_sequence: latest.offer.record.sequence,
+        durable_lsn: latest.durable_lsn,
+        spool_location: latest.spool_location,
+        logical_slot: slot,
+        logical_kind: kind,
+        logical_shred_index: shred_index,
+        progress_frames_validated: u64::try_from(recovered.frames_in_file)
+            .context("receiver progress frame count exceeds u64")?,
+        progress_wal_observed_bytes: observed_len,
+        progress_wal_valid_bytes: recovered.valid_len,
+        progress_wal_unobserved_tail_bytes: observed_len.saturating_sub(recovered.valid_len),
+    })
 }
 
 fn validate_progress_transition(
@@ -1751,9 +1820,10 @@ fn recover_progress_wal(
     path: &Path,
     stream: &ReplicationStreamId,
     recent_capacity: usize,
+    observed_len: u64,
 ) -> Result<RecoveredProgressWal> {
     file.seek(std::io::SeekFrom::Start(0))?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take(observed_len));
     let mut wal_magic = [0u8; 8];
     reader
         .read_exact(&mut wal_magic)
@@ -2697,6 +2767,39 @@ mod tests {
         )
         .expect("validate raw shred");
         assert!(!root.0.exists());
+    }
+
+    #[test]
+    fn read_only_audit_snapshot_reports_the_committed_shred_cursor() {
+        let root = TestRoot::new("progress-audit-snapshot");
+        let configuration = config(&root, 4);
+        let expected_stream = configuration.stream.clone();
+        let mut receiver = BlockzillaRawReceiver::open(configuration).unwrap();
+        receiver.push_batch(vec![shred_record(0, 1234, 7)]).unwrap();
+
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let snapshot =
+            read_receiver_progress_audit_snapshot(receiver.progress.path(), &expected_stream)
+                .unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!((before..=after).contains(&snapshot.captured_unix_secs));
+        assert_eq!(snapshot.through_sequence, 0);
+        assert_eq!(snapshot.durable_lsn, 1);
+        assert_eq!(snapshot.logical_slot, 1234);
+        assert_eq!(snapshot.logical_kind, ShredKind::Data);
+        assert_eq!(snapshot.logical_shred_index, 7);
+        assert_eq!(snapshot.progress_frames_validated, 1);
+        assert_eq!(
+            snapshot.progress_wal_observed_bytes,
+            snapshot.progress_wal_valid_bytes
+        );
+        assert_eq!(snapshot.progress_wal_unobserved_tail_bytes, 0);
     }
 
     #[test]

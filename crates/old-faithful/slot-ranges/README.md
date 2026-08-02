@@ -43,6 +43,13 @@ For epochs after genesis, the seed directory must contain the previous epoch's
 blockhash registry; a one-off run can instead use `--seed-previous-blockhash`.
 `--require-seed` prevents an incomplete v2 index from being written.
 
+Validate a directory of raw indexes before or after an R2 sync with the native
+validator (the sync helper invokes this binary automatically):
+
+```bash
+cargo run --locked -p of-slot-ranges --bin of-validate-slot-index -- ./slot-index
+```
+
 ## Raw Format
 
 Each row is 12 bytes and is addressed by `slot % 432000`:

@@ -77,11 +77,32 @@ The main command groups are:
 | Replicate | `serve-ingest-receiver`, `replicate-grpc-raw`, `pull-grpc-raw`, `serve-grpc-raw-pull-source`, `serve-shred-spool-pull-source`, `bridge-receiver-grpc-raw` |
 | Capture | `capture-grpc`, `inspect-capture` |
 | Repair | `sync-rpc-epoch`, `backfill-rpc`, `prepare-epoch-repair` |
-| Operate | `serve-shred-status`, `supervise`, `notify-supervisor` |
+| Operate | `serve-ingest-status`, `serve-shred-status`, `monitor-pull-ack-telegram`, `supervise`, `notify-supervisor` |
 
 Use command-specific `--help` before starting a networked or disk-writing task.
 Examples reference credentials through environment variables or files; do not
 place secret values in them.
+
+### Native durable ACK alerts
+
+`monitor-pull-ack-telegram` sends one warning when the signed durable receiver
+ACK is missing or stale and one recovery after fresh ACK progress returns. Its
+four-phase state file makes ambiguous network outcomes at-most-once across
+shutdowns and restarts. It bounds every local read and Telegram response,
+rejects symlinks, never logs the token-bearing URL, and refuses a shared or
+group/world-writable state directory.
+
+```bash
+hivezilla monitor-pull-ack-telegram \
+  --ack-status-file /control/pull-ack-status.json \
+  --state-file /alert-state/pull-ack-alert.json \
+  --token-file /run/secrets/telegram_bot_token \
+  --chat-id -100123456
+```
+
+Explicit options override the existing `BLOCKZILLA_PULL_ACK_*` and
+`BLOCKZILLA_TELEGRAM_*` environment variables, so deployments can replace the
+retired Python process without changing secret mounts or thresholds.
 
 ### Offline ledger projection shadow
 
@@ -139,6 +160,27 @@ finalized slot; reconnects, catch-up range queries, and skipped-slot checks add 
 small overhead. These RPC blocks contain transactions and rewards but no Solana
 PoH entries. They are a transaction/block backup source, not an entry-complete
 replacement for the Yellowstone raw spool.
+
+### Native ingest status
+
+`serve-ingest-status` exposes one bounded, read-only projection of the durable
+raw cache and signed replication ACK. The collector is implemented in Rust; it
+does not execute Python, mount secrets, or expose mutation endpoints.
+
+```bash
+hivezilla serve-ingest-status \
+  --listen 127.0.0.1:8790 \
+  --cache-root /path/to/read-only/grpc-cache \
+  --ack-status-file /path/to/read-only/pull-ack-status.json \
+  --known-gaps-file services/hivezilla/config/known-ingest-gaps.mainnet.json \
+  --disk-critical-free-bytes 402653184 \
+  --disk-warning-free-bytes 805306368
+```
+
+Only `/healthz` and
+`/api/v1/sidecars/ingest-pipeline/status.json` are served. Bind the listener to
+loopback or an explicit private address and route only the status endpoint
+through the watcher gateway.
 
 ### Shred UDP recorder
 

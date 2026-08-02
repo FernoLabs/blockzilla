@@ -33,6 +33,9 @@ use hivezilla::{
         ShredSpoolPullRuntimeConfig, ShredSpoolPullServerRuntime, ShredUdpRecordConfig,
         SpoolJournalIdentity, bridge_shred_spool, load_ingest_receiver_config, record_shred_udp,
     },
+    ingest_status::{ServeIngestStatusArgs, serve_ingest_status},
+    pull_ack_monitor::{MonitorPullAckTelegramArgs, monitor_pull_ack_telegram},
+    raw_recorder_support::{RawRecorderSupportArgs, run_raw_recorder_support},
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
@@ -119,6 +122,13 @@ enum Command {
     ServeShredSpoolPullSource(ServeShredSpoolPullSourceArgs),
     /// Aggregate recorder and loopback receiver telemetry into a bounded public status service.
     ServeShredStatus(ServeShredStatusArgs),
+    /// Serve a bounded, secret-free view of the durable live-ingest pipeline.
+    ServeIngestStatus(ServeIngestStatusArgs),
+    /// Alert once when durable receiver ACK progress stalls and once when it recovers.
+    MonitorPullAckTelegram(MonitorPullAckTelegramArgs),
+    /// Internal native helpers for the raw-recorder shell supervisor.
+    #[command(hide = true)]
+    RawRecorderSupport(RawRecorderSupportArgs),
     /// Portably supervise one long-lived service with bounded restart and health policy.
     Supervise(SuperviseArgs),
     /// Notify a parent Hivezilla supervisor of readiness or one heartbeat.
@@ -1631,6 +1641,9 @@ async fn main() -> Result<()> {
             tracing::info!("direct mTLS raw-shred pull source stopped cleanly");
         }
         Command::ServeShredStatus(args) => serve_shred_status(args).await?,
+        Command::ServeIngestStatus(args) => serve_ingest_status(args).await?,
+        Command::MonitorPullAckTelegram(args) => monitor_pull_ack_telegram(args).await?,
+        Command::RawRecorderSupport(args) => run_raw_recorder_support(args)?,
     }
 
     Ok(())
