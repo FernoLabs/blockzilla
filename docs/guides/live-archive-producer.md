@@ -7,8 +7,8 @@ Status: historical design note for the prototype now named `hivezilla`.
 > target service-ownership specification. Hivezilla is a family of separate
 > Yellowstone gRPC and shred implementations, each with one or more independent
 > source instances and a per-instance identity, WAL/cursor, and failure
-> boundary. Those instances converge only at Blockzilla, which alone assigns
-> canonical archive state. See the
+> boundary. Those instances converge through Blockzilla-scheduled Hivezilla
+> workers; Blockzilla alone commits canonical archive state. See the
 > [system architecture](../architecture/system-overview.md).
 
 Blockzilla should be able to build its archive live from feeds we control or
@@ -17,14 +17,17 @@ path is not `CAR -> Blockzilla`; it is:
 
 ```text
 Yellowstone gRPC -> Hivezilla gRPC instance(s) ---+
-shred streams    -> Hivezilla shred instance(s) --+-> Blockzilla -> Archive V2
-Old Faithful CAR ---------------------------------+   build / repair
+shred streams    -> Hivezilla shred instance(s) --+-> Hivezilla compact worker
+Old Faithful CAR ---------------------------------+            |
+                                                    Archive V2 objects
+                                                            |
+                                              Blockzilla catalog commit
 ```
 
 The sections below use “producer” for the historical combined prototype. In the
-target architecture, Hivezilla owns source capture, native evidence WALs, and
-verified candidate production; Blockzilla owns cross-source repair, epoch work,
-and canonical archive writes.
+target architecture, Hivezilla owns source capture, native evidence WALs,
+verified candidate production, and the physical compact/upload job. Blockzilla
+owns scheduling, fencing, and the canonical archive catalog commit.
 
 The CAR lane is a backup and repair source, especially for fields that are not
 available from regular RPC responses, such as full PoH entry data or shred
@@ -216,9 +219,12 @@ shredding.wincode:
   }
 ```
 
-Live gRPC blocks can be written immediately with an empty block-header
-`shredding` field and `MissingShredding` in the journal. A later CAR repair job
-or raw-shred-derived repair job can append the sidecar record independently.
+The historical prototype wrote live gRPC blocks with an empty block-header
+`shredding` field and `MissingShredding` in its journal, then expected a repair
+job to append a sidecar record. This behavior is **not valid in the V1 target**:
+missing evidence must remain absent and a candidate cannot publish a
+verified-empty shredding sidecar. Repair produces a new immutable candidate/job
+result rather than changing committed bytes in place.
 
 ## Historical producer pipeline (superseded)
 

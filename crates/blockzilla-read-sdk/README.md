@@ -22,6 +22,8 @@ consume locally.
   agree;
 - metadata ends in a footer whose block and transaction totals agree with the
   index;
+- epoch-0 `genesis.bin`, when declared, is bounded, matches the inline length,
+  and hashes to the inline genesis identity; and
 - `signatures.bin`, when declared, has exactly 64 bytes per indexed signature.
 
 The default `ArchiveReader::open` uses `HashVerification::AllFiles`. That is the
@@ -91,12 +93,12 @@ for block in archive.scan(&filter)? {
 # Ok::<(), blockzilla_read_sdk::Error>(())
 ```
 
-`ControlFiles` hashes `registry.bin`, `archive-v2-blocks.index`, and
-`archive-v2-meta.wincode`, while only size-checking remote blocks and
-signatures. This avoids a full archive download before the first block. It
-assumes the generation URL is immutable and served through authenticated TLS.
-Run `AllFiles` after a complete download when end-to-end file hashing is
-required.
+`ControlFiles` hashes `registry.bin`, `archive-v2-blocks.index`,
+`archive-v2-meta.wincode`, and a declared `genesis.bin`, while only
+size-checking remote blocks and signatures. This avoids a full archive download
+before the first block. It assumes the generation URL is immutable and served
+through authenticated TLS. Run `AllFiles` after a complete download when
+end-to-end file hashing is required.
 
 Sequential `blocks()` and `scan()` calls coalesce adjacent compressed frames
 into bounded contiguous reads (64 MiB by default, matching the gateway cap).

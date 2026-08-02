@@ -11,6 +11,8 @@ pub const ARCHIVE_V2_RAW_BLOCKS_FILE: &str = "archive-v2-blocks.wincode";
 pub const ARCHIVE_V2_RAW_BLOCKS_ZSTD_FILE: &str = "archive-v2-blocks.wincode.zst";
 pub const ARCHIVE_V2_BLOCK_INDEX_FILE: &str = "archive-v2-blocks.index";
 pub const ARCHIVE_V2_META_FILE: &str = "archive-v2-meta.wincode";
+/// Exact launch `genesis.bin` bytes for epoch-0 runtime reconstruction.
+pub const ARCHIVE_V2_GENESIS_BIN_FILE: &str = "genesis.bin";
 pub const ARCHIVE_V2_SIGNATURES_FILE: &str = "signatures.bin";
 pub const ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE: &str = "vote_hash_registry.bin";
 pub const ARCHIVE_V2_POH_FILE: &str = "poh.wincode";

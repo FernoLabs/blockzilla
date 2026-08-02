@@ -10,9 +10,11 @@ use of_car_reader::{
 use serde::{Deserialize, Serialize};
 use wincode::{
     ReadResult, SchemaRead, SchemaWrite, WriteResult,
+    config::Config,
     error::invalid_value,
     int_encoding::{ByteOrder, IntEncoding},
     io::{Reader, Writer},
+    len::SeqLen,
 };
 
 use crate::CompactLogStream;
@@ -477,6 +479,99 @@ pub struct ArchiveV2HotBlockBlob {
     pub metadata_bytes: Vec<u8>,
 }
 
+/// A zero-copy view of the allocation-heavy fields in the current hot-block schema.
+///
+/// The header is decoded by value because rewards are structured data. Transaction rows remain
+/// in their canonical contiguous 28-byte wire representation and are decoded by value while
+/// iterating. Message and metadata regions borrow directly from the input frame.
+///
+/// This view recognizes only the current schema. Callers that support historical schemas should
+/// fall back to [`deserialize_archive_v2_hot_block_blob`] when this decoder returns an error.
+#[derive(Debug)]
+pub struct BorrowedArchiveV2HotBlockBlob<'a> {
+    pub header: ArchiveV2HotBlockHeader,
+    pub tx_count: u32,
+    tx_rows: &'a [[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
+    pub message_bytes: &'a [u8],
+    pub metadata_bytes: &'a [u8],
+}
+
+/// Replay-oriented zero-copy view of a current hot block.
+///
+/// Unlike [`BorrowedArchiveV2HotBlockBlob`], this view deliberately does not retain block rewards.
+/// The decoder still consumes and validates every reward field and element before lending the
+/// transaction rows and byte regions. This is intended only for consumers whose state projection
+/// does not use rewards.
+#[derive(Debug)]
+pub struct BorrowedArchiveV2HotBlockBlobWithoutRewards<'a> {
+    pub header: ArchiveV2HotBlockHeader,
+    pub tx_count: u32,
+    tx_rows: &'a [[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
+    pub message_bytes: &'a [u8],
+    pub metadata_bytes: &'a [u8],
+}
+
+impl BorrowedArchiveV2HotBlockBlobWithoutRewards<'_> {
+    #[inline]
+    pub fn tx_rows_len(&self) -> usize {
+        self.tx_rows.len()
+    }
+
+    #[inline]
+    pub fn tx_rows(&self) -> ArchiveV2HotTxRowIter<'_> {
+        ArchiveV2HotTxRowIter {
+            rows: self.tx_rows.iter(),
+        }
+    }
+}
+
+impl BorrowedArchiveV2HotBlockBlob<'_> {
+    #[inline]
+    pub fn tx_rows_len(&self) -> usize {
+        self.tx_rows.len()
+    }
+
+    #[inline]
+    pub fn tx_rows(&self) -> ArchiveV2HotTxRowIter<'_> {
+        ArchiveV2HotTxRowIter {
+            rows: self.tx_rows.iter(),
+        }
+    }
+}
+
+/// Exact iterator over borrowed hot-block transaction-row wire records.
+#[derive(Debug, Clone)]
+pub struct ArchiveV2HotTxRowIter<'a> {
+    rows: core::slice::Iter<'a, [u8; ARCHIVE_V2_HOT_TX_ROW_LEN]>,
+}
+
+impl Iterator for ArchiveV2HotTxRowIter<'_> {
+    type Item = ArchiveV2HotTxRow;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.rows.next().map(ArchiveV2HotTxRow::from_wire_bytes)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.rows.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for ArchiveV2HotTxRowIter<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.rows
+            .next_back()
+            .map(ArchiveV2HotTxRow::from_wire_bytes)
+    }
+}
+
+impl ExactSizeIterator for ArchiveV2HotTxRowIter<'_> {}
+
+impl core::iter::FusedIterator for ArchiveV2HotTxRowIter<'_> {}
+
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub struct ArchiveV2HotBlockHeader {
     pub slot: u64,
@@ -621,13 +716,104 @@ pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<Archive
     }
 }
 
+/// Decode the current hot-block schema while borrowing its large contiguous regions.
+///
+/// The tuple has the same field-by-field wire layout as [`ArchiveV2HotBlockBlob`]. Using byte
+/// arrays for transaction rows is safe on every target: they have alignment one and every bit
+/// pattern is valid. Row fields are converted from little-endian bytes only when iterated.
+pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
+    bytes: &[u8],
+) -> ReadResult<BorrowedArchiveV2HotBlockBlob<'_>> {
+    let (header, tx_count, tx_rows, message_bytes, metadata_bytes): (
+        ArchiveV2HotBlockHeader,
+        u32,
+        &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
+        &[u8],
+        &[u8],
+    ) = wincode::config::deserialize(bytes, wincode_leb128_config())?;
+    Ok(BorrowedArchiveV2HotBlockBlob {
+        header,
+        tx_count,
+        tx_rows,
+        message_bytes,
+        metadata_bytes,
+    })
+}
+
+#[derive(Debug, SchemaRead)]
+struct ArchiveV2HotBlockHeaderWithoutRewards {
+    slot: u64,
+    parent_slot: u64,
+    blockhash_id: u32,
+    previous_blockhash_id: u32,
+    block_time: Option<i64>,
+    block_height: Option<u64>,
+    _rewards: Option<DiscardedArchiveV2HotRewards>,
+}
+
+#[derive(Debug)]
+struct DiscardedArchiveV2HotRewards;
+
+// SAFETY: the implementation initializes the inhabited zero-sized destination exactly on success.
+// It uses the configured sequence-length decoder and `CompactReward`'s normal `SchemaRead`
+// implementation, so it consumes and validates the same wire fields as `Vec<CompactReward>`
+// without retaining the decoded elements.
+unsafe impl<'de, C: Config> SchemaRead<'de, C> for DiscardedArchiveV2HotRewards {
+    type Dst = Self;
+
+    #[inline]
+    fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
+        let _num_partitions = <Option<u64> as SchemaRead<'de, C>>::get(reader.by_ref())?;
+        let reward_count = <C::LengthEncoding as SeqLen<C>>::read_prealloc_check::<CompactReward>(
+            reader.by_ref(),
+        )?;
+        for _ in 0..reward_count {
+            let _reward = <CompactReward as SchemaRead<'de, C>>::get(reader.by_ref())?;
+        }
+        dst.write(Self);
+        Ok(())
+    }
+}
+
+/// Decode the current hot-block schema while borrowing its contiguous regions and discarding
+/// decoded rewards after validating their complete wire representation.
+///
+/// `header.rewards` is always `None` in the returned replay-only view, regardless of whether the
+/// source carried rewards. Use [`deserialize_archive_v2_hot_block_blob_borrowed_current`] when the
+/// caller needs reward values.
+pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
+    bytes: &[u8],
+) -> ReadResult<BorrowedArchiveV2HotBlockBlobWithoutRewards<'_>> {
+    let (header, tx_count, tx_rows, message_bytes, metadata_bytes): (
+        ArchiveV2HotBlockHeaderWithoutRewards,
+        u32,
+        &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
+        &[u8],
+        &[u8],
+    ) = wincode::config::deserialize_exact(bytes, wincode_leb128_config())?;
+    Ok(BorrowedArchiveV2HotBlockBlobWithoutRewards {
+        header: ArchiveV2HotBlockHeader {
+            slot: header.slot,
+            parent_slot: header.parent_slot,
+            blockhash_id: header.blockhash_id,
+            previous_blockhash_id: header.previous_blockhash_id,
+            block_time: header.block_time,
+            block_height: header.block_height,
+            rewards: None,
+        },
+        tx_count,
+        tx_rows,
+        message_bytes,
+        metadata_bytes,
+    })
+}
+
 #[cfg(test)]
 mod hot_block_slot_time_tests {
     use super::*;
 
-    #[test]
-    fn prefix_decoder_supports_current_hot_block_encoding() {
-        let block = ArchiveV2HotBlockBlob {
+    fn current_hot_block_fixture() -> ArchiveV2HotBlockBlob {
+        ArchiveV2HotBlockBlob {
             header: ArchiveV2HotBlockHeader {
                 slot: 123,
                 parent_slot: 122,
@@ -637,11 +823,67 @@ mod hot_block_slot_time_tests {
                 block_height: Some(120),
                 rewards: None,
             },
-            tx_count: 0,
-            tx_rows: Vec::new(),
-            message_bytes: Vec::new(),
-            metadata_bytes: Vec::new(),
-        };
+            tx_count: 2,
+            tx_rows: vec![
+                ArchiveV2HotTxRow {
+                    tx_index: 0,
+                    flags: 0x1234,
+                    message_offset: 0,
+                    message_len: 2,
+                    metadata_offset: 0,
+                    metadata_len: 1,
+                    signature_count: 2,
+                    reserved: [0; 3],
+                },
+                ArchiveV2HotTxRow {
+                    tx_index: 1,
+                    flags: 0x4321,
+                    message_offset: 2,
+                    message_len: 3,
+                    metadata_offset: 1,
+                    metadata_len: 2,
+                    signature_count: 1,
+                    reserved: [0; 3],
+                },
+            ],
+            message_bytes: vec![10, 11, 12, 13, 14],
+            metadata_bytes: vec![20, 21, 22],
+        }
+    }
+
+    fn reward_fixture(marker: u8) -> CompactReward {
+        CompactReward {
+            pubkey: CompactPubkey::raw([marker; 32]),
+            lamports: -i64::from(marker),
+            post_balance: 10_000 + u64::from(marker),
+            reward_type: i32::from(marker),
+            commission: Some(marker),
+        }
+    }
+
+    fn assert_replay_view_matches_owned(
+        replay: &BorrowedArchiveV2HotBlockBlobWithoutRewards<'_>,
+        owned: &ArchiveV2HotBlockBlob,
+    ) {
+        assert_eq!(replay.header.slot, owned.header.slot);
+        assert_eq!(replay.header.parent_slot, owned.header.parent_slot);
+        assert_eq!(replay.header.blockhash_id, owned.header.blockhash_id);
+        assert_eq!(
+            replay.header.previous_blockhash_id,
+            owned.header.previous_blockhash_id
+        );
+        assert_eq!(replay.header.block_time, owned.header.block_time);
+        assert_eq!(replay.header.block_height, owned.header.block_height);
+        assert!(replay.header.rewards.is_none());
+        assert_eq!(replay.tx_count, owned.tx_count);
+        assert_eq!(replay.tx_rows().collect::<Vec<_>>(), owned.tx_rows);
+        assert_eq!(replay.message_bytes, owned.message_bytes);
+        assert_eq!(replay.metadata_bytes, owned.metadata_bytes);
+    }
+
+    #[test]
+    fn prefix_decoder_supports_current_hot_block_encoding() {
+        let block = current_hot_block_fixture();
         let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
 
         assert_eq!(
@@ -703,6 +945,178 @@ mod hot_block_slot_time_tests {
             (789, Some(-42))
         );
     }
+
+    #[test]
+    fn borrowed_current_decoder_matches_owned_and_borrows_large_regions() {
+        let expected = current_hot_block_fixture();
+        let bytes = wincode::config::serialize(&expected, wincode_leb128_config()).unwrap();
+        let owned = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
+        let borrowed = deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).unwrap();
+
+        assert_eq!(borrowed.header.slot, owned.header.slot);
+        assert_eq!(borrowed.header.parent_slot, owned.header.parent_slot);
+        assert_eq!(borrowed.header.blockhash_id, owned.header.blockhash_id);
+        assert_eq!(
+            borrowed.header.previous_blockhash_id,
+            owned.header.previous_blockhash_id
+        );
+        assert_eq!(borrowed.header.block_time, owned.header.block_time);
+        assert_eq!(borrowed.header.block_height, owned.header.block_height);
+        assert!(borrowed.header.rewards.is_none());
+        assert_eq!(borrowed.tx_count, owned.tx_count);
+        assert_eq!(borrowed.tx_rows_len(), owned.tx_rows.len());
+        assert_eq!(borrowed.tx_rows().collect::<Vec<_>>(), owned.tx_rows);
+        assert_eq!(borrowed.message_bytes, owned.message_bytes);
+        assert_eq!(borrowed.metadata_bytes, owned.metadata_bytes);
+        assert_eq!(borrowed.tx_rows().len(), 2);
+        assert_eq!(borrowed.tx_rows().next_back().unwrap().tx_index, 1);
+
+        let frame_start = bytes.as_ptr() as usize;
+        let frame_end = frame_start.checked_add(bytes.len()).unwrap();
+        for region in [borrowed.message_bytes, borrowed.metadata_bytes] {
+            let region_start = region.as_ptr() as usize;
+            let region_end = region_start.checked_add(region.len()).unwrap();
+            assert!(region_start >= frame_start);
+            assert!(region_end <= frame_end);
+        }
+    }
+
+    #[test]
+    fn reward_discarding_decoder_matches_none_empty_and_populated_blocks() {
+        let mut fixtures = Vec::new();
+        fixtures.push(current_hot_block_fixture());
+
+        let mut empty = current_hot_block_fixture();
+        empty.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: Some(8),
+            decoded: Vec::new(),
+        });
+        fixtures.push(empty);
+
+        let mut populated = current_hot_block_fixture();
+        populated.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: vec![reward_fixture(17), reward_fixture(29)],
+        });
+        fixtures.push(populated);
+
+        for expected in fixtures {
+            let bytes = wincode::config::serialize(&expected, wincode_leb128_config()).unwrap();
+            let owned = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
+            let replay =
+                deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes)
+                    .unwrap();
+            assert_replay_view_matches_owned(&replay, &owned);
+
+            let frame_start = bytes.as_ptr() as usize;
+            let frame_end = frame_start.checked_add(bytes.len()).unwrap();
+            for region in [replay.message_bytes, replay.metadata_bytes] {
+                let region_start = region.as_ptr() as usize;
+                let region_end = region_start.checked_add(region.len()).unwrap();
+                assert!(region_start >= frame_start);
+                assert!(region_end <= frame_end);
+            }
+        }
+    }
+
+    #[test]
+    fn reward_discarding_decoder_validates_each_reward() {
+        let reward = reward_fixture(73);
+        let encoded_reward = wincode::config::serialize(&reward, wincode_leb128_config()).unwrap();
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: Some(3),
+            decoded: vec![reward],
+        });
+        let mut bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let reward_start = bytes
+            .windows(encoded_reward.len())
+            .position(|window| window == encoded_reward)
+            .expect("unique reward bytes occur in the block");
+        let commission_tag = reward_start + encoded_reward.len() - 2;
+        assert_eq!(bytes[commission_tag], 1);
+        bytes[commission_tag] = 2;
+
+        assert!(deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).is_err());
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes).is_err()
+        );
+    }
+
+    #[test]
+    fn reward_discarding_decoder_rejects_truncated_and_trailing_frames() {
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: vec![reward_fixture(41)],
+        });
+        let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&truncated)
+                .is_err()
+        );
+
+        let mut trailing = bytes;
+        trailing.push(0xff);
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&trailing)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn borrowed_and_owned_decoders_both_reject_a_truncated_current_block() {
+        let mut bytes =
+            wincode::config::serialize(&current_hot_block_fixture(), wincode_leb128_config())
+                .unwrap();
+        bytes.pop();
+
+        assert!(deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).is_err());
+        assert!(deserialize_archive_v2_hot_block_blob(&bytes).is_err());
+    }
+
+    #[test]
+    fn historical_shredding_schema_remains_an_owned_fallback() {
+        let block = ArchiveV2HotBlockBlobLegacyShredding {
+            header: ArchiveV2HotBlockHeaderLegacyShredding {
+                slot: 456,
+                parent_slot: 455,
+                blockhash_id: 9,
+                previous_blockhash_id: 8,
+                block_time: None,
+                block_height: Some(450),
+                // Length two is an invalid `Option` tag in the current schema, making the
+                // current-vs-legacy distinction deterministic for this fixture.
+                shredding: vec![
+                    CompactShredding {
+                        entry_end_idx: 3,
+                        shred_end_idx: 4,
+                    },
+                    CompactShredding {
+                        entry_end_idx: 5,
+                        shred_end_idx: 6,
+                    },
+                ],
+                rewards: None,
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+
+        assert!(deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).is_err());
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes).is_err()
+        );
+        let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
+        assert_eq!(decoded.header.slot, 456);
+        assert!(decoded.tx_rows.is_empty());
+    }
 }
 
 /// Per-block access sidecar for registry-free hot-path rendering.
@@ -761,6 +1175,22 @@ pub struct ArchiveV2HotTxRow {
     pub reserved: [u8; 3],
 }
 
+impl ArchiveV2HotTxRow {
+    #[inline]
+    fn from_wire_bytes(bytes: &[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]) -> Self {
+        Self {
+            tx_index: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            flags: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            message_offset: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            message_len: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            metadata_offset: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+            metadata_len: u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
+            signature_count: bytes[24],
+            reserved: [bytes[25], bytes[26], bytes[27]],
+        }
+    }
+}
+
 unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for ArchiveV2HotTxRow {
     type Src = Self;
 
@@ -789,16 +1219,7 @@ unsafe impl<'de, C: wincode::config::ConfigCore> SchemaRead<'de, C> for ArchiveV
     #[inline]
     fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
         let bytes = reader.take_array::<ARCHIVE_V2_HOT_TX_ROW_LEN>()?;
-        dst.write(Self {
-            tx_index: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
-            flags: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-            message_offset: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            message_len: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
-            metadata_offset: u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
-            metadata_len: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
-            signature_count: bytes[24],
-            reserved: [bytes[25], bytes[26], bytes[27]],
-        });
+        dst.write(Self::from_wire_bytes(&bytes));
         Ok(())
     }
 }

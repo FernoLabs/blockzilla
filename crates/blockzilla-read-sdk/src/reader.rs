@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Read};
+use std::{collections::HashSet, io::Read, ops::Range};
 
 use blockzilla_format::{
     ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
@@ -6,20 +6,24 @@ use blockzilla_format::{
     ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES,
     ARCHIVE_V2_TX_FLAG_HAS_METADATA, ARCHIVE_V2_TX_FLAG_MESSAGE_V0,
     ARCHIVE_V2_TX_FLAG_METADATA_RAW_FALLBACK, ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK,
-    ArchiveV2HotBlockBlob, ArchiveV2HotBlockIndex, ArchiveV2HotBlockIndexRow,
-    ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow, CompactMetaV1,
-    CompactPubkey, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
-    WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
-    WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-    WincodeArchiveV2Footer, deserialize_archive_v2_hot_block_blob, wincode_leb128_config,
+    ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndex,
+    ArchiveV2HotBlockIndexRow, ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord,
+    ArchiveV2HotTxRow, ArchiveV2HotTxRowIter, BorrowedArchiveV2HotBlockBlob,
+    BorrowedArchiveV2HotBlockBlobWithoutRewards, CompactMetaV1, CompactPubkey,
+    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
+    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
+    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
+    deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_hot_block_blob_borrowed_current,
+    deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards, wincode_leb128_config,
 };
 use sha2::{Digest, Sha256};
 
 use crate::{
     Error, Result,
     manifest::{
-        BLOCK_INDEX_FILE, BLOCKS_FILE, GENERATION_MANIFEST_FILE, GenerationManifest, META_FILE,
-        REGISTRY_FILE, REQUIRED_GENERATION_FILES, SIGNATURES_FILE, decode_sha256, hex_lower,
+        BLOCK_INDEX_FILE, BLOCKS_FILE, GENERATION_MANIFEST_FILE, GENESIS_BIN_FILE,
+        GenerationManifest, META_FILE, REGISTRY_FILE, REQUIRED_GENERATION_FILES, SIGNATURES_FILE,
+        decode_sha256, hex_lower,
     },
     source::{RangeSource, RangeSourceReader},
 };
@@ -31,7 +35,10 @@ const DEFAULT_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GATEWAY_RANGE_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_MAX_META_FRAME_BYTES: usize = 256 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_GENESIS_BIN_BYTES: usize = 10_000_000;
 const KNOWN_HOT_TX_FLAGS: u32 = (1 << 11) - 1;
+const ARCHIVE_V2_HOT_META_GENESIS_TAG: u8 = 1;
+const HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashVerification {
@@ -168,6 +175,133 @@ pub struct DecodedBlock {
     pub block: ArchiveV2HotBlockBlob,
 }
 
+/// One decoded block lent by [`BorrowedBlockStream`].
+///
+/// Current-schema blocks borrow transaction rows, messages and metadata from the stream's reused
+/// decompression buffer. Historical schemas use the existing owned decoder as a compatibility
+/// fallback. Holding this value prevents calling `next_block` again until it is dropped.
+#[derive(Debug)]
+pub struct BorrowedDecodedBlock<'a> {
+    pub index_row: ArchiveV2HotBlockIndexRow,
+    block: BorrowedDecodedBlockPayload<'a>,
+}
+
+#[derive(Debug)]
+enum BorrowedDecodedBlockPayload<'a> {
+    Current(BorrowedArchiveV2HotBlockBlob<'a>),
+    CurrentWithoutRewards(BorrowedArchiveV2HotBlockBlobWithoutRewards<'a>),
+    OwnedFallback(ArchiveV2HotBlockBlob),
+}
+
+impl BorrowedDecodedBlock<'_> {
+    #[inline]
+    pub fn header(&self) -> &ArchiveV2HotBlockHeader {
+        match &self.block {
+            BorrowedDecodedBlockPayload::Current(block) => &block.header,
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => &block.header,
+            BorrowedDecodedBlockPayload::OwnedFallback(block) => &block.header,
+        }
+    }
+
+    #[inline]
+    pub fn tx_count(&self) -> u32 {
+        match &self.block {
+            BorrowedDecodedBlockPayload::Current(block) => block.tx_count,
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => block.tx_count,
+            BorrowedDecodedBlockPayload::OwnedFallback(block) => block.tx_count,
+        }
+    }
+
+    #[inline]
+    pub fn tx_rows_len(&self) -> usize {
+        match &self.block {
+            BorrowedDecodedBlockPayload::Current(block) => block.tx_rows_len(),
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => block.tx_rows_len(),
+            BorrowedDecodedBlockPayload::OwnedFallback(block) => block.tx_rows.len(),
+        }
+    }
+
+    #[inline]
+    pub fn tx_rows(&self) -> BorrowedDecodedTxRowIter<'_> {
+        match &self.block {
+            BorrowedDecodedBlockPayload::Current(block) => {
+                BorrowedDecodedTxRowIter::Current(block.tx_rows())
+            }
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => {
+                BorrowedDecodedTxRowIter::Current(block.tx_rows())
+            }
+            BorrowedDecodedBlockPayload::OwnedFallback(block) => {
+                BorrowedDecodedTxRowIter::OwnedFallback(block.tx_rows.iter().copied())
+            }
+        }
+    }
+
+    #[inline]
+    pub fn message_bytes(&self) -> &[u8] {
+        match &self.block {
+            BorrowedDecodedBlockPayload::Current(block) => block.message_bytes,
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => block.message_bytes,
+            BorrowedDecodedBlockPayload::OwnedFallback(block) => &block.message_bytes,
+        }
+    }
+
+    #[inline]
+    pub fn metadata_bytes(&self) -> &[u8] {
+        match &self.block {
+            BorrowedDecodedBlockPayload::Current(block) => block.metadata_bytes,
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => block.metadata_bytes,
+            BorrowedDecodedBlockPayload::OwnedFallback(block) => &block.metadata_bytes,
+        }
+    }
+
+    /// Whether this block required the allocation-preserving historical-schema decoder.
+    #[inline]
+    pub fn uses_owned_fallback(&self) -> bool {
+        matches!(&self.block, BorrowedDecodedBlockPayload::OwnedFallback(_))
+    }
+}
+
+/// Exact transaction-row iterator for either a current borrowed block or a historical fallback.
+#[derive(Debug, Clone)]
+pub enum BorrowedDecodedTxRowIter<'a> {
+    Current(ArchiveV2HotTxRowIter<'a>),
+    OwnedFallback(std::iter::Copied<std::slice::Iter<'a, ArchiveV2HotTxRow>>),
+}
+
+impl Iterator for BorrowedDecodedTxRowIter<'_> {
+    type Item = ArchiveV2HotTxRow;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Current(rows) => rows.next(),
+            Self::OwnedFallback(rows) => rows.next(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Current(rows) => rows.size_hint(),
+            Self::OwnedFallback(rows) => rows.size_hint(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for BorrowedDecodedTxRowIter<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Current(rows) => rows.next_back(),
+            Self::OwnedFallback(rows) => rows.next_back(),
+        }
+    }
+}
+
+impl ExactSizeIterator for BorrowedDecodedTxRowIter<'_> {}
+
+impl std::iter::FusedIterator for BorrowedDecodedTxRowIter<'_> {}
+
 /// Structural publication audit shared by the gateway publisher and readers.
 ///
 /// The helper validates the candidate manifest, required object sizes/hashes,
@@ -176,6 +310,8 @@ pub struct DecodedBlock {
 #[derive(Debug)]
 pub struct ValidatedGeneration {
     pub index: ArchiveV2HotBlockIndex,
+    pub genesis: Option<WincodeArchiveV2Genesis>,
+    pub genesis_bin: Option<Vec<u8>>,
     pub metadata_footer: WincodeArchiveV2Footer,
     pub binding: GenerationBinding,
     pub registry_entries: u32,
@@ -188,6 +324,8 @@ pub struct ArchiveReader<S> {
     source: S,
     manifest: GenerationManifest,
     index: ArchiveV2HotBlockIndex,
+    genesis: Option<WincodeArchiveV2Genesis>,
+    genesis_bin: Option<Vec<u8>>,
     metadata_footer: WincodeArchiveV2Footer,
     binding: GenerationBinding,
     registry_entries: u32,
@@ -211,6 +349,8 @@ impl<S: RangeSource> ArchiveReader<S> {
             source,
             manifest,
             index: validated.index,
+            genesis: validated.genesis,
+            genesis_bin: validated.genesis_bin,
             metadata_footer: validated.metadata_footer,
             binding: validated.binding,
             registry_entries: validated.registry_entries,
@@ -234,6 +374,19 @@ impl<S: RangeSource> ArchiveReader<S> {
 
     pub fn metadata_footer(&self) -> &WincodeArchiveV2Footer {
         &self.metadata_footer
+    }
+
+    /// Return the epoch-0 genesis payload embedded in compact metadata.
+    ///
+    /// Completed generations for epochs after zero do not carry this record.
+    pub fn genesis(&self) -> Option<&WincodeArchiveV2Genesis> {
+        self.genesis.as_ref()
+    }
+
+    /// Return exact, digest-bound `genesis.bin` bytes when the epoch-0
+    /// generation publishes the backwards-compatible runtime sidecar.
+    pub fn genesis_bin(&self) -> Option<&[u8]> {
+        self.genesis_bin.as_deref()
     }
 
     pub fn binding(&self) -> GenerationBinding {
@@ -304,11 +457,114 @@ impl<S: RangeSource> ArchiveReader<S> {
         BlockIterator {
             archive: self,
             next: 0,
+            end: self.index.rows.len(),
             batch_first: 0,
             batch_end: 0,
             batch_offset: 0,
             batch: Vec::new(),
+            decompressor: None,
+            decompressed: Vec::new(),
         }
+    }
+
+    /// Iterate a bounded index-row range in archive order while coalescing
+    /// adjacent compressed frames into the configured prefetch buffer.
+    ///
+    /// Unlike calling [`Iterator::skip`] on [`Self::blocks`], rows before
+    /// `range.start` are neither fetched nor decoded.
+    pub fn blocks_range(&self, range: Range<usize>) -> Result<BlockIterator<'_, S>> {
+        let row_count = self.index.rows.len();
+        if range.start > range.end || range.end > row_count {
+            return Err(Error::InvalidIndex(format!(
+                "block row range {}..{} is outside 0..{row_count}",
+                range.start, range.end,
+            )));
+        }
+        Ok(BlockIterator {
+            archive: self,
+            next: range.start,
+            end: range.end,
+            batch_first: range.start,
+            batch_end: range.start,
+            batch_offset: 0,
+            batch: Vec::new(),
+            decompressor: None,
+            decompressed: Vec::new(),
+        })
+    }
+
+    /// Lend every block in archive order while reusing the prefetch and decompression buffers.
+    ///
+    /// Unlike [`Self::blocks`], this stream deliberately does not implement [`Iterator`]: the
+    /// returned block borrows from the stream and must be consumed before `next_block` is called
+    /// again.
+    pub fn borrowed_blocks(&self) -> BorrowedBlockStream<'_, S> {
+        BorrowedBlockStream {
+            archive: self,
+            discard_rewards: false,
+            next: 0,
+            end: self.index.rows.len(),
+            batch_first: 0,
+            batch_end: 0,
+            batch_offset: 0,
+            batch: Vec::new(),
+            decompressor: None,
+            decompressed: Vec::new(),
+        }
+    }
+
+    /// Lend a bounded index-row range while coalescing adjacent compressed-frame reads.
+    pub fn borrowed_blocks_range(&self, range: Range<usize>) -> Result<BorrowedBlockStream<'_, S>> {
+        let row_count = self.index.rows.len();
+        if range.start > range.end || range.end > row_count {
+            return Err(Error::InvalidIndex(format!(
+                "block row range {}..{} is outside 0..{row_count}",
+                range.start, range.end,
+            )));
+        }
+        Ok(BorrowedBlockStream {
+            archive: self,
+            discard_rewards: false,
+            next: range.start,
+            end: range.end,
+            batch_first: range.start,
+            batch_end: range.start,
+            batch_offset: 0,
+            batch: Vec::new(),
+            decompressor: None,
+            decompressed: Vec::new(),
+        })
+    }
+
+    /// Lend a bounded row range while decoding and validating, but not retaining, current-schema
+    /// block rewards.
+    ///
+    /// This is an execution-projection API for replay paths that intentionally do not apply
+    /// rewards. Existing borrowed block methods retain their full-reward behavior. Historical hot
+    /// schemas continue through the owned compatibility decoder.
+    pub fn borrowed_blocks_without_rewards_range(
+        &self,
+        range: Range<usize>,
+    ) -> Result<BorrowedBlockStream<'_, S>> {
+        let row_count = self.index.rows.len();
+        if range.start > range.end || range.end > row_count {
+            return Err(Error::InvalidIndex(format!(
+                "block row range {}..{} is outside 0..{row_count}",
+                range.start, range.end,
+            )));
+        }
+        Ok(BorrowedBlockStream {
+            archive: self,
+            discard_rewards: true,
+            next: range.start,
+            end: range.end,
+            batch_first: range.start,
+            batch_end: range.start,
+            batch_offset: 0,
+            batch: Vec::new(),
+            decompressor: None,
+            decompressed: Vec::new(),
+        })
     }
 
     pub fn scan<'a>(&'a self, filter: &'a CompiledPubkeyFilter) -> Result<ScanIterator<'a, S>> {
@@ -354,6 +610,98 @@ impl<S: RangeSource> ArchiveReader<S> {
                 message: format!("zstd frame: {error}"),
             }
         })?;
+        self.decode_uncompressed_block(row, &bytes)
+    }
+
+    fn decode_compressed_block_reusing(
+        &self,
+        row: ArchiveV2HotBlockIndexRow,
+        compressed: &[u8],
+        decompressor: &mut zstd::bulk::Decompressor<'static>,
+        decompressed: &mut Vec<u8>,
+    ) -> Result<DecodedBlock> {
+        if compressed.len() != row.compressed_len as usize {
+            return Err(Error::InvalidBlock {
+                slot: row.slot,
+                message: format!(
+                    "compressed frame is {} bytes, expected {}",
+                    compressed.len(),
+                    row.compressed_len
+                ),
+            });
+        }
+        let expected_length = row.uncompressed_len as usize;
+        decompressed.clear();
+        if decompressed.capacity() < expected_length {
+            // `reserve_exact` is relative to the current length, which is zero
+            // after `clear`, not relative to the retained capacity.
+            decompressed.reserve_exact(expected_length);
+        }
+        let written = decompressor
+            .decompress_to_buffer(compressed, decompressed)
+            .map_err(|error| Error::DecodeBlock {
+                slot: row.slot,
+                message: format!("zstd frame: {error}"),
+            })?;
+        if written != decompressed.len() {
+            return Err(Error::DecodeBlock {
+                slot: row.slot,
+                message: format!(
+                    "zstd reported {written} output bytes but exposed {}",
+                    decompressed.len()
+                ),
+            });
+        }
+        self.decode_uncompressed_block(row, decompressed)
+    }
+
+    fn decode_compressed_block_borrowed_reusing<'a>(
+        &self,
+        row: ArchiveV2HotBlockIndexRow,
+        compressed: &[u8],
+        decompressor: &mut zstd::bulk::Decompressor<'static>,
+        decompressed: &'a mut Vec<u8>,
+        discard_rewards: bool,
+    ) -> Result<BorrowedDecodedBlock<'a>> {
+        if compressed.len() != row.compressed_len as usize {
+            return Err(Error::InvalidBlock {
+                slot: row.slot,
+                message: format!(
+                    "compressed frame is {} bytes, expected {}",
+                    compressed.len(),
+                    row.compressed_len
+                ),
+            });
+        }
+        let expected_length = row.uncompressed_len as usize;
+        decompressed.clear();
+        if decompressed.capacity() < expected_length {
+            decompressed.reserve_exact(expected_length);
+        }
+        let written = decompressor
+            .decompress_to_buffer(compressed, &mut *decompressed)
+            .map_err(|error| Error::DecodeBlock {
+                slot: row.slot,
+                message: format!("zstd frame: {error}"),
+            })?;
+        if written != decompressed.len() {
+            return Err(Error::DecodeBlock {
+                slot: row.slot,
+                message: format!(
+                    "zstd reported {written} output bytes but exposed {}",
+                    decompressed.len()
+                ),
+            });
+        }
+        self.decode_uncompressed_block_borrowed(row, decompressed, discard_rewards)
+    }
+
+    fn decode_uncompressed_block(
+        &self,
+        row: ArchiveV2HotBlockIndexRow,
+        bytes: &[u8],
+    ) -> Result<DecodedBlock> {
+        let expected_length = row.uncompressed_len as usize;
         if bytes.len() != expected_length {
             return Err(Error::InvalidBlock {
                 slot: row.slot,
@@ -365,12 +713,54 @@ impl<S: RangeSource> ArchiveReader<S> {
             });
         }
         let block =
-            deserialize_archive_v2_hot_block_blob(&bytes).map_err(|error| Error::DecodeBlock {
+            deserialize_archive_v2_hot_block_blob(bytes).map_err(|error| Error::DecodeBlock {
                 slot: row.slot,
                 message: error.to_string(),
             })?;
         validate_decoded_block(&row, &block)?;
         Ok(DecodedBlock {
+            index_row: row,
+            block,
+        })
+    }
+
+    fn decode_uncompressed_block_borrowed<'a>(
+        &self,
+        row: ArchiveV2HotBlockIndexRow,
+        bytes: &'a [u8],
+        discard_rewards: bool,
+    ) -> Result<BorrowedDecodedBlock<'a>> {
+        let expected_length = row.uncompressed_len as usize;
+        if bytes.len() != expected_length {
+            return Err(Error::InvalidBlock {
+                slot: row.slot,
+                message: format!(
+                    "zstd output is {} bytes, expected {}",
+                    bytes.len(),
+                    expected_length
+                ),
+            });
+        }
+        let current = if discard_rewards {
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(bytes)
+                .map(BorrowedDecodedBlockPayload::CurrentWithoutRewards)
+        } else {
+            deserialize_archive_v2_hot_block_blob_borrowed_current(bytes)
+                .map(BorrowedDecodedBlockPayload::Current)
+        };
+        let block = match current {
+            Ok(block) => block,
+            Err(_) => BorrowedDecodedBlockPayload::OwnedFallback(
+                deserialize_archive_v2_hot_block_blob(bytes).map_err(|error| {
+                    Error::DecodeBlock {
+                        slot: row.slot,
+                        message: error.to_string(),
+                    }
+                })?,
+            ),
+        };
+        validate_borrowed_decoded_block(&row, &block)?;
+        Ok(BorrowedDecodedBlock {
             index_row: row,
             block,
         })
@@ -479,24 +869,27 @@ impl<S: RangeSource> ArchiveReader<S> {
 pub struct BlockIterator<'a, S> {
     archive: &'a ArchiveReader<S>,
     next: usize,
+    end: usize,
     batch_first: usize,
     batch_end: usize,
     batch_offset: u64,
     batch: Vec<u8>,
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    decompressed: Vec<u8>,
 }
 
 impl<S: RangeSource> Iterator for BlockIterator<'_, S> {
     type Item = Result<DecodedBlock>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.next == self.archive.index.rows.len() {
+        if self.next == self.end {
             return None;
         }
         if self.next < self.batch_first || self.next >= self.batch_end {
             match self.refill() {
                 Ok(()) => {}
                 Err(error) => {
-                    self.next = self.archive.index.rows.len();
+                    self.next = self.end;
                     return Some(Err(error));
                 }
             }
@@ -521,11 +914,32 @@ impl<S: RangeSource> Iterator for BlockIterator<'_, S> {
                 "prefetched block range is outside batch".into(),
             )));
         };
-        Some(self.archive.decode_compressed_block(row, compressed))
+        if self.decompressor.is_none() {
+            match zstd::bulk::Decompressor::new() {
+                Ok(decompressor) => self.decompressor = Some(decompressor),
+                Err(error) => {
+                    self.next = self.end;
+                    return Some(Err(Error::DecodeBlock {
+                        slot: row.slot,
+                        message: format!("create zstd decompressor: {error}"),
+                    }));
+                }
+            }
+        }
+        Some(
+            self.archive.decode_compressed_block_reusing(
+                row,
+                compressed,
+                self.decompressor
+                    .as_mut()
+                    .expect("decompressor was initialized above"),
+                &mut self.decompressed,
+            ),
+        )
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.archive.index.rows.len() - self.next;
+        let remaining = self.end - self.next;
         (remaining, Some(remaining))
     }
 }
@@ -538,7 +952,7 @@ impl<S: RangeSource> BlockIterator<'_, S> {
         let first = self.archive.index.rows[self.next];
         let mut end = self.next + 1;
         let mut length = first.compressed_len as usize;
-        while end < self.archive.index.rows.len() {
+        while end < self.end {
             let next_length = self.archive.index.rows[end].compressed_len as usize;
             let Some(combined) = length.checked_add(next_length) else {
                 break;
@@ -550,10 +964,133 @@ impl<S: RangeSource> BlockIterator<'_, S> {
             end += 1;
         }
         self.batch_offset = first.compressed_offset;
-        self.batch = self
-            .archive
-            .source
-            .read_range(BLOCKS_FILE, self.batch_offset, length)?;
+        self.archive.source.read_range_into(
+            BLOCKS_FILE,
+            self.batch_offset,
+            length,
+            &mut self.batch,
+        )?;
+        if self.batch.len() != length {
+            return Err(Error::InvalidIndex(format!(
+                "prefetched block range returned {} bytes, expected {length}",
+                self.batch.len()
+            )));
+        }
+        self.batch_end = end;
+        Ok(())
+    }
+}
+
+/// A lending block stream backed by reusable coalesced-read and decompression buffers.
+///
+/// This type intentionally does not implement [`Iterator`], because each returned block borrows
+/// the decompressed bytes held by the stream.
+pub struct BorrowedBlockStream<'a, S> {
+    archive: &'a ArchiveReader<S>,
+    discard_rewards: bool,
+    next: usize,
+    end: usize,
+    batch_first: usize,
+    batch_end: usize,
+    batch_offset: u64,
+    batch: Vec<u8>,
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    decompressed: Vec<u8>,
+}
+
+impl<S: RangeSource> BorrowedBlockStream<'_, S> {
+    /// Decode and lend the next block. The returned value must be dropped before this method can
+    /// be called again, which makes reuse of the decompression buffer safe without self-references.
+    pub fn next_block(&mut self) -> Option<Result<BorrowedDecodedBlock<'_>>> {
+        if self.next == self.end {
+            return None;
+        }
+        if self.next < self.batch_first || self.next >= self.batch_end {
+            match self.refill() {
+                Ok(()) => {}
+                Err(error) => {
+                    self.next = self.end;
+                    return Some(Err(error));
+                }
+            }
+        }
+        let row_number = self.next;
+        self.next += 1;
+        let row = self.archive.index.rows[row_number];
+        let relative_offset = match row.compressed_offset.checked_sub(self.batch_offset) {
+            Some(offset) => offset as usize,
+            None => {
+                return Some(Err(Error::InvalidIndex(
+                    "prefetched block offset underflow".into(),
+                )));
+            }
+        };
+        let end = match relative_offset.checked_add(row.compressed_len as usize) {
+            Some(end) => end,
+            None => return Some(Err(Error::Overflow("prefetched block range"))),
+        };
+        let Some(compressed) = self.batch.get(relative_offset..end) else {
+            return Some(Err(Error::InvalidIndex(
+                "prefetched block range is outside batch".into(),
+            )));
+        };
+        if self.decompressor.is_none() {
+            match zstd::bulk::Decompressor::new() {
+                Ok(decompressor) => self.decompressor = Some(decompressor),
+                Err(error) => {
+                    self.next = self.end;
+                    return Some(Err(Error::DecodeBlock {
+                        slot: row.slot,
+                        message: format!("create zstd decompressor: {error}"),
+                    }));
+                }
+            }
+        }
+        Some(
+            self.archive.decode_compressed_block_borrowed_reusing(
+                row,
+                compressed,
+                self.decompressor
+                    .as_mut()
+                    .expect("decompressor was initialized above"),
+                &mut self.decompressed,
+                self.discard_rewards,
+            ),
+        )
+    }
+
+    /// Number of blocks not yet requested from the stream.
+    pub fn len(&self) -> usize {
+        self.end - self.next
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.next == self.end
+    }
+
+    fn refill(&mut self) -> Result<()> {
+        self.batch_first = self.next;
+        let first = self.archive.index.rows[self.next];
+        let mut end = self.next + 1;
+        let mut length = first.compressed_len as usize;
+        while end < self.end {
+            let next_length = self.archive.index.rows[end].compressed_len as usize;
+            let Some(combined) = length.checked_add(next_length) else {
+                break;
+            };
+            if combined > self.archive.options.prefetch_bytes {
+                break;
+            }
+            length = combined;
+            end += 1;
+        }
+        self.batch_offset = first.compressed_offset;
+        self.archive.source.read_range_into(
+            BLOCKS_FILE,
+            self.batch_offset,
+            length,
+            &mut self.batch,
+        )?;
         if self.batch.len() != length {
             return Err(Error::InvalidIndex(format!(
                 "prefetched block range returned {} bytes, expected {length}",
@@ -653,7 +1190,8 @@ pub fn validate_generation_structure<S: RangeSource>(
         false
     };
 
-    let metadata_footer = validate_metadata(source, manifest, &index, options)?;
+    let (metadata_footer, genesis) = validate_metadata(source, manifest, &index, options)?;
+    let genesis_bin = validate_genesis_bin(source, manifest, genesis.as_ref())?;
     let binding = GenerationBinding {
         generation_digest: decode_sha256(&manifest.generation_digest)
             .map_err(Error::InvalidManifest)?,
@@ -661,6 +1199,8 @@ pub fn validate_generation_structure<S: RangeSource>(
     };
     Ok(ValidatedGeneration {
         index,
+        genesis,
+        genesis_bin,
         metadata_footer,
         binding,
         registry_entries,
@@ -710,7 +1250,7 @@ fn validate_manifest_files<S: RangeSource>(
             HashVerification::ControlFiles => {
                 matches!(
                     file.name.as_str(),
-                    BLOCK_INDEX_FILE | META_FILE | REGISTRY_FILE
+                    BLOCK_INDEX_FILE | META_FILE | REGISTRY_FILE | GENESIS_BIN_FILE
                 )
             }
             HashVerification::SizesOnly => false,
@@ -728,6 +1268,47 @@ fn validate_manifest_files<S: RangeSource>(
         }
     }
     Ok(())
+}
+
+fn validate_genesis_bin<S: RangeSource>(
+    source: &S,
+    manifest: &GenerationManifest,
+    inline: Option<&WincodeArchiveV2Genesis>,
+) -> Result<Option<Vec<u8>>> {
+    let Some(file) = manifest.file(GENESIS_BIN_FILE) else {
+        return Ok(None);
+    };
+    if manifest.epoch != 0 {
+        return Err(Error::InvalidMetadata(format!(
+            "{GENESIS_BIN_FILE} is only valid for epoch 0"
+        )));
+    }
+    let inline = inline.ok_or_else(|| {
+        Error::InvalidMetadata(format!(
+            "{GENESIS_BIN_FILE} is published without inline genesis metadata"
+        ))
+    })?;
+    let length = usize::try_from(file.size)
+        .map_err(|_| Error::InvalidMetadata("genesis.bin size exceeds usize".into()))?;
+    if length > MAX_GENESIS_BIN_BYTES {
+        return Err(Error::InvalidMetadata(format!(
+            "{GENESIS_BIN_FILE} is {length} bytes, above the {MAX_GENESIS_BIN_BYTES} byte limit"
+        )));
+    }
+    if file.size != inline.genesis_bin_len {
+        return Err(Error::InvalidMetadata(format!(
+            "{GENESIS_BIN_FILE} is {} bytes, inline genesis reports {}",
+            file.size, inline.genesis_bin_len
+        )));
+    }
+    let bytes = source.read_range(GENESIS_BIN_FILE, 0, length)?;
+    let hash: [u8; 32] = Sha256::digest(&bytes).into();
+    if hash != inline.genesis_hash {
+        return Err(Error::InvalidMetadata(format!(
+            "{GENESIS_BIN_FILE} hash does not match inline genesis metadata"
+        )));
+    }
+    Ok(Some(bytes))
 }
 
 fn hash_source_file<S: RangeSource>(
@@ -929,17 +1510,15 @@ fn validate_metadata<S: RangeSource>(
     manifest: &GenerationManifest,
     index: &ArchiveV2HotBlockIndex,
     options: &OpenOptions,
-) -> Result<WincodeArchiveV2Footer> {
+) -> Result<(WincodeArchiveV2Footer, Option<WincodeArchiveV2Genesis>)> {
     let meta = manifest.required_file(META_FILE)?;
     let mut reader = RangeSourceReader::new(source, META_FILE, meta.size, options.io_chunk_size);
     let mut position = 0usize;
     let mut saw_genesis = false;
+    let mut genesis = None;
     let mut footer = None;
-    while let Some(frame) = read_frame(&mut reader, options.max_meta_frame_bytes)? {
-        let record: ArchiveV2HotMetaRecord =
-            wincode::config::deserialize(&frame, wincode_leb128_config()).map_err(|error| {
-                Error::InvalidMetadata(format!("decode record {position}: {error}"))
-            })?;
+    while let Some(mut frame) = read_frame(&mut reader, options.max_meta_frame_bytes)? {
+        let record = decode_hot_metadata_record(&mut frame, manifest.epoch, position)?;
         if footer.is_some() {
             return Err(Error::InvalidMetadata(
                 "metadata contains records after its footer".into(),
@@ -982,13 +1561,14 @@ fn validate_metadata<S: RangeSource>(
             (_, ArchiveV2HotMetaRecord::Header(_)) => {
                 return Err(Error::InvalidMetadata("duplicate metadata header".into()));
             }
-            (_, ArchiveV2HotMetaRecord::Genesis(_)) => {
+            (_, ArchiveV2HotMetaRecord::Genesis(value)) => {
                 if saw_genesis || manifest.epoch != 0 {
                     return Err(Error::InvalidMetadata(
                         "unexpected or duplicate genesis metadata".into(),
                     ));
                 }
                 saw_genesis = true;
+                genesis = Some(value);
             }
             (_, ArchiveV2HotMetaRecord::Footer(value)) => footer = Some(value),
         }
@@ -1010,7 +1590,24 @@ fn validate_metadata<S: RangeSource>(
             transactions
         )));
     }
-    Ok(footer)
+    Ok((footer, genesis))
+}
+
+fn decode_hot_metadata_record(
+    frame: &mut [u8],
+    epoch: u64,
+    position: usize,
+) -> Result<ArchiveV2HotMetaRecord> {
+    // One historical epoch-0 Archive V2 generation encoded its Genesis record
+    // with discriminant 4. Interpret that byte only in the one position where
+    // Genesis is valid; unknown tags in every other context remain errors.
+    if epoch == 0 && position == 1 && frame.first() == Some(&HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG)
+    {
+        frame[0] = ARCHIVE_V2_HOT_META_GENESIS_TAG;
+    }
+
+    wincode::config::deserialize(frame, wincode_leb128_config())
+        .map_err(|error| Error::InvalidMetadata(format!("decode record {position}: {error}")))
 }
 
 fn read_frame(reader: &mut impl Read, max_length: usize) -> Result<Option<Vec<u8>>> {
@@ -1063,28 +1660,74 @@ fn validate_decoded_block(
     index: &ArchiveV2HotBlockIndexRow,
     block: &ArchiveV2HotBlockBlob,
 ) -> Result<()> {
+    validate_decoded_block_parts(
+        index,
+        &block.header,
+        block.tx_count,
+        block.tx_rows.len(),
+        block.tx_rows.iter().copied(),
+        &block.message_bytes,
+        &block.metadata_bytes,
+    )
+}
+
+fn validate_borrowed_decoded_block(
+    index: &ArchiveV2HotBlockIndexRow,
+    block: &BorrowedDecodedBlockPayload<'_>,
+) -> Result<()> {
+    match block {
+        BorrowedDecodedBlockPayload::Current(block) => validate_decoded_block_parts(
+            index,
+            &block.header,
+            block.tx_count,
+            block.tx_rows_len(),
+            block.tx_rows(),
+            block.message_bytes,
+            block.metadata_bytes,
+        ),
+        BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => validate_decoded_block_parts(
+            index,
+            &block.header,
+            block.tx_count,
+            block.tx_rows_len(),
+            block.tx_rows(),
+            block.message_bytes,
+            block.metadata_bytes,
+        ),
+        BorrowedDecodedBlockPayload::OwnedFallback(block) => validate_decoded_block(index, block),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_decoded_block_parts(
+    index: &ArchiveV2HotBlockIndexRow,
+    header: &ArchiveV2HotBlockHeader,
+    tx_count: u32,
+    tx_rows_len: usize,
+    tx_rows: impl ExactSizeIterator<Item = ArchiveV2HotTxRow>,
+    message_bytes: &[u8],
+    metadata_bytes: &[u8],
+) -> Result<()> {
     let fail = |message: String| Error::InvalidBlock {
         slot: index.slot,
         message,
     };
-    if block.header.slot != index.slot {
+    if header.slot != index.slot {
         return Err(fail(format!(
             "payload slot {} does not match index",
-            block.header.slot
+            header.slot
         )));
     }
-    if block.tx_count != index.tx_count || block.tx_rows.len() != index.tx_count as usize {
+    if tx_count != index.tx_count || tx_rows_len != index.tx_count as usize {
         return Err(fail(format!(
             "payload has tx_count {}/{} rows, index declares {}",
-            block.tx_count,
-            block.tx_rows.len(),
-            index.tx_count
+            tx_count, tx_rows_len, index.tx_count
         )));
     }
     let mut signatures = 0u32;
     let mut expected_message_offset = 0u32;
     let mut expected_metadata_offset = 0u32;
-    for (number, row) in block.tx_rows.iter().enumerate() {
+    for (number, row) in tx_rows.enumerate() {
         if row.tx_index != number as u32 {
             return Err(fail(format!(
                 "transaction row {number} has tx_index {}",
@@ -1111,7 +1754,7 @@ fn validate_decoded_block(
             )));
         }
         checked_region(
-            &block.message_bytes,
+            message_bytes,
             row.message_offset,
             row.message_len,
             "message",
@@ -1138,7 +1781,7 @@ fn validate_decoded_block(
                 )));
             }
             checked_region(
-                &block.metadata_bytes,
+                metadata_bytes,
                 row.metadata_offset,
                 row.metadata_len,
                 "metadata",
@@ -1154,10 +1797,10 @@ fn validate_decoded_block(
             .checked_add(u32::from(row.signature_count))
             .ok_or_else(|| fail("signature count overflow".into()))?;
     }
-    if expected_message_offset as usize != block.message_bytes.len() {
+    if expected_message_offset as usize != message_bytes.len() {
         return Err(fail("message region has unindexed trailing bytes".into()));
     }
-    if expected_metadata_offset as usize != block.metadata_bytes.len() {
+    if expected_metadata_offset as usize != metadata_bytes.len() {
         return Err(fail("metadata region has unindexed trailing bytes".into()));
     }
     if signatures != index.signature_count {
@@ -1365,8 +2008,9 @@ mod tests {
     use blockzilla_format::{
         ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
         ARCHIVE_V2_TX_FLAG_MESSAGE_V0, ArchiveV2HotBlockHeader, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotV0Message, CompactMessageHeader, OwnedCompactRecentBlockhash,
-        WincodeArchiveV2Header, write_archive_v2_hot_block_index,
+        ArchiveV2HotRewards, ArchiveV2HotV0Message, CompactMessageHeader, CompactReward,
+        CompactShredding, OwnedCompactRecentBlockhash, WincodeArchiveV2Header,
+        write_archive_v2_hot_block_index,
     };
     use tempfile::TempDir;
 
@@ -1413,7 +2057,16 @@ mod tests {
                     previous_blockhash_id: 0,
                     block_time: Some(1_700_000_001),
                     block_height: Some(1000),
-                    rewards: None,
+                    rewards: Some(ArchiveV2HotRewards {
+                        num_partitions: Some(2),
+                        decoded: vec![CompactReward {
+                            pubkey: CompactPubkey::Raw([91; 32]),
+                            lamports: -17,
+                            post_balance: 90_000,
+                            reward_type: 3,
+                            commission: Some(7),
+                        }],
+                    }),
                 },
                 tx_count: 2,
                 tx_rows: vec![
@@ -1690,6 +2343,235 @@ mod tests {
     }
 
     #[test]
+    fn lending_stream_matches_owned_blocks_and_coalesces_the_same_range() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        let owned = archive.blocks().collect::<Result<Vec<_>>>().unwrap();
+
+        source.clear();
+        let mut stream = archive.borrowed_blocks();
+        assert_eq!(stream.len(), owned.len());
+        let mut number = 0usize;
+        while let Some(block) = stream.next_block() {
+            let block = block.unwrap();
+            let expected = &owned[number];
+            assert!(!block.uses_owned_fallback());
+            assert_eq!(block.index_row.block_id, expected.index_row.block_id);
+            assert_eq!(block.index_row.slot, expected.index_row.slot);
+            assert_eq!(block.header().slot, expected.block.header.slot);
+            assert_eq!(
+                block.header().parent_slot,
+                expected.block.header.parent_slot
+            );
+            assert_eq!(block.tx_count(), expected.block.tx_count);
+            assert_eq!(block.tx_rows_len(), expected.block.tx_rows.len());
+            assert_eq!(block.tx_rows().collect::<Vec<_>>(), expected.block.tx_rows);
+            assert_eq!(block.message_bytes(), expected.block.message_bytes);
+            assert_eq!(block.metadata_bytes(), expected.block.metadata_bytes);
+            assert_eq!(
+                block
+                    .header()
+                    .rewards
+                    .as_ref()
+                    .map(|rewards| rewards.decoded.len()),
+                expected
+                    .block
+                    .header
+                    .rewards
+                    .as_ref()
+                    .map(|rewards| rewards.decoded.len())
+            );
+            number += 1;
+        }
+        assert_eq!(number, owned.len());
+        assert!(stream.is_empty());
+        assert_eq!(source.reads_for(BLOCKS_FILE).len(), 1);
+    }
+
+    #[test]
+    fn reward_discarding_lending_stream_preserves_block_projection_and_borrows_regions() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let owned = archive.blocks().collect::<Result<Vec<_>>>().unwrap();
+        assert!(owned[0].block.header.rewards.is_some());
+
+        let mut stream = archive
+            .borrowed_blocks_without_rewards_range(0..owned.len())
+            .unwrap();
+        let mut number = 0usize;
+        while let Some(block) = stream.next_block() {
+            let block = block.unwrap();
+            let expected = &owned[number];
+            assert!(!block.uses_owned_fallback());
+            assert!(block.header().rewards.is_none());
+            assert_eq!(block.header().slot, expected.block.header.slot);
+            assert_eq!(
+                block.header().parent_slot,
+                expected.block.header.parent_slot
+            );
+            assert_eq!(
+                block.header().blockhash_id,
+                expected.block.header.blockhash_id
+            );
+            assert_eq!(
+                block.header().previous_blockhash_id,
+                expected.block.header.previous_blockhash_id
+            );
+            assert_eq!(block.header().block_time, expected.block.header.block_time);
+            assert_eq!(
+                block.header().block_height,
+                expected.block.header.block_height
+            );
+            assert_eq!(block.tx_count(), expected.block.tx_count);
+            assert_eq!(block.tx_rows().collect::<Vec<_>>(), expected.block.tx_rows);
+            assert_eq!(block.message_bytes(), expected.block.message_bytes);
+            assert_eq!(block.metadata_bytes(), expected.block.metadata_bytes);
+            number += 1;
+        }
+        assert_eq!(number, owned.len());
+    }
+
+    #[test]
+    fn lending_and_owned_paths_apply_identical_structural_validation() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut decoded = archive.read_block(0).unwrap();
+        decoded.block.tx_rows[0].reserved[0] = 1;
+        let bytes = wincode::config::serialize(&decoded.block, wincode_leb128_config()).unwrap();
+        let mut row = decoded.index_row;
+        row.uncompressed_len = bytes.len() as u32;
+
+        let owned_error = archive.decode_uncompressed_block(row, &bytes).unwrap_err();
+        let borrowed_error = archive
+            .decode_uncompressed_block_borrowed(row, &bytes, false)
+            .unwrap_err();
+        assert_eq!(owned_error.to_string(), borrowed_error.to_string());
+        assert!(owned_error.to_string().contains("non-zero reserved bytes"));
+    }
+
+    #[test]
+    fn lending_stream_decoder_preserves_legacy_owned_fallback() {
+        #[derive(wincode::SchemaWrite)]
+        struct LegacyBlock {
+            header: LegacyHeader,
+            tx_count: u32,
+            tx_rows: Vec<ArchiveV2HotTxRow>,
+            message_bytes: Vec<u8>,
+            metadata_bytes: Vec<u8>,
+        }
+
+        #[derive(wincode::SchemaWrite)]
+        struct LegacyHeader {
+            slot: u64,
+            parent_slot: u64,
+            blockhash_id: u32,
+            previous_blockhash_id: u32,
+            block_time: Option<i64>,
+            block_height: Option<u64>,
+            shredding: Vec<CompactShredding>,
+            rewards: Option<ArchiveV2HotRewards>,
+        }
+
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let block = LegacyBlock {
+            header: LegacyHeader {
+                slot: 777,
+                parent_slot: 776,
+                blockhash_id: 3,
+                previous_blockhash_id: 2,
+                block_time: None,
+                block_height: Some(700),
+                shredding: vec![
+                    CompactShredding {
+                        entry_end_idx: 1,
+                        shred_end_idx: 2,
+                    },
+                    CompactShredding {
+                        entry_end_idx: 3,
+                        shred_end_idx: 4,
+                    },
+                ],
+                rewards: None,
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let row = ArchiveV2HotBlockIndexRow {
+            block_id: 9,
+            slot: 777,
+            compressed_offset: 0,
+            compressed_len: 0,
+            uncompressed_len: bytes.len() as u32,
+            tx_count: 0,
+            first_tx_ordinal: 0,
+            first_signature_ordinal: 0,
+            signature_count: 0,
+        };
+
+        for discard_rewards in [false, true] {
+            let decoded = archive
+                .decode_uncompressed_block_borrowed(row, &bytes, discard_rewards)
+                .unwrap();
+            assert!(decoded.uses_owned_fallback());
+            assert_eq!(decoded.header().slot, 777);
+            assert_eq!(decoded.tx_rows_len(), 0);
+        }
+    }
+
+    #[test]
+    fn bounded_sequential_iterator_fetches_only_the_requested_rows() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        let second_row = archive.index().rows[1];
+
+        source.clear();
+        let mut blocks = archive.blocks_range(1..2).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let decoded = blocks.next().unwrap().unwrap();
+        assert_eq!(decoded.index_row.block_id, second_row.block_id);
+        assert_eq!(decoded.index_row.slot, second_row.slot);
+        assert!(blocks.next().is_none());
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            vec![(
+                second_row.compressed_offset,
+                second_row.compressed_len as usize,
+            )]
+        );
+
+        source.clear();
+        let mut empty = archive.blocks_range(1..1).unwrap();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.next().is_none());
+        assert!(source.reads_for(BLOCKS_FILE).is_empty());
+
+        let reversed_start = archive.index().rows.len();
+        let reversed_end = reversed_start - 1;
+        assert!(matches!(
+            archive.blocks_range(reversed_start..reversed_end),
+            Err(Error::InvalidIndex(_))
+        ));
+        assert!(matches!(
+            archive.blocks_range(0..3),
+            Err(Error::InvalidIndex(_))
+        ));
+    }
+
+    #[test]
     fn control_file_policy_does_not_download_blocks_or_signatures_during_open() {
         let fixture = Fixture::build();
         let source = CountingSource::new(fixture.source());
@@ -1820,6 +2702,175 @@ mod tests {
             ArchiveReader::open(fixture.source()).unwrap_err(),
             Error::MissingFile(name) if name == META_FILE
         ));
+    }
+
+    #[test]
+    fn historical_epoch0_genesis_tag_is_accepted_only_at_record_one() {
+        let record = ArchiveV2HotMetaRecord::Genesis(compatibility_test_genesis());
+        let canonical = wincode::config::serialize(&record, wincode_leb128_config()).unwrap();
+        assert_eq!(canonical[0], ARCHIVE_V2_HOT_META_GENESIS_TAG);
+
+        let mut historical = canonical.clone();
+        historical[0] = HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG;
+        let decoded = decode_hot_metadata_record(&mut historical, 0, 1).unwrap();
+        let ArchiveV2HotMetaRecord::Genesis(genesis) = decoded else {
+            panic!("historical tag did not decode as Genesis");
+        };
+        assert_eq!(genesis.genesis_bin_len, 17);
+        assert_eq!(historical[0], ARCHIVE_V2_HOT_META_GENESIS_TAG);
+
+        for (epoch, position) in [(0, 0), (0, 2), (1, 1)] {
+            let mut out_of_scope = canonical.clone();
+            out_of_scope[0] = HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG;
+            assert!(matches!(
+                decode_hot_metadata_record(&mut out_of_scope, epoch, position),
+                Err(Error::InvalidMetadata(message))
+                    if message.contains(&format!("decode record {position}"))
+            ));
+            assert_eq!(out_of_scope[0], HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG);
+        }
+    }
+
+    #[test]
+    fn historical_epoch0_genesis_tag_does_not_accept_a_malformed_payload() {
+        let mut malformed = vec![HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG];
+        assert!(matches!(
+            decode_hot_metadata_record(&mut malformed, 0, 1),
+            Err(Error::InvalidMetadata(message)) if message.contains("decode record 1")
+        ));
+        assert_eq!(malformed[0], ARCHIVE_V2_HOT_META_GENESIS_TAG);
+    }
+
+    #[test]
+    fn exact_genesis_sidecar_is_bound_to_inline_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = b"launch-genesis-bytes";
+        fs::write(directory.path().join(GENESIS_BIN_FILE), bytes).unwrap();
+        let hash: [u8; 32] = Sha256::digest(bytes).into();
+        let inline = WincodeArchiveV2Genesis {
+            genesis_hash: hash,
+            genesis_bin_len: bytes.len() as u64,
+            creation_time_unix: 0,
+            cluster_id: 0,
+            ticks_per_slot: 64,
+            poh_params: blockzilla_format::WincodeArchiveV2GenesisPohParams {
+                tick_duration_secs: 0,
+                tick_duration_nanos: 400_000_000,
+                tick_count: None,
+                hashes_per_tick: Some(12_500),
+            },
+            fees: blockzilla_format::WincodeArchiveV2GenesisFeeParams {
+                target_lamports_per_sig: 10_000,
+                target_sigs_per_slot: 20_000,
+                min_lamports_per_sig: 5_000,
+                max_lamports_per_sig: 100_000,
+                burn_percent: 100,
+            },
+            rent: blockzilla_format::WincodeArchiveV2GenesisRentParams {
+                lamports_per_byte_year: 3_480,
+                exemption_threshold: 2.0,
+                burn_percent: 100,
+            },
+            inflation: blockzilla_format::WincodeArchiveV2GenesisInflationParams {
+                initial: 0.0,
+                terminal: 0.0,
+                taper: 0.0,
+                foundation: 0.0,
+                foundation_term: 0.0,
+                padding: 0.0f64.to_le_bytes(),
+            },
+            epoch_schedule: blockzilla_format::WincodeArchiveV2GenesisEpochSchedule {
+                slots_per_epoch: 432_000,
+                leader_schedule_slot_offset: 432_000,
+                warmup: false,
+                first_normal_epoch: 0,
+                first_normal_slot: 0,
+            },
+            accounts: Vec::new(),
+            builtins: Vec::new(),
+            reward_pools: Vec::new(),
+        };
+        let file = GenerationFile {
+            name: GENESIS_BIN_FILE.into(),
+            size: bytes.len() as u64,
+            sha256: hex_lower(&hash),
+        };
+        let manifest = GenerationManifest {
+            schema_version: 1,
+            cluster_id: "mainnet-beta".into(),
+            epoch: 0,
+            generation_id: "genesis-test".into(),
+            generation_digest: "0".repeat(64),
+            slots_per_epoch: 432_000,
+            complete: true,
+            files: vec![file],
+        };
+        let loaded = validate_genesis_bin(
+            &LocalRangeSource::new(directory.path()),
+            &manifest,
+            Some(&inline),
+        )
+        .unwrap();
+        assert_eq!(loaded.as_deref(), Some(bytes.as_slice()));
+
+        fs::write(
+            directory.path().join(GENESIS_BIN_FILE),
+            b"xaunch-genesis-bytes",
+        )
+        .unwrap();
+        let error = validate_genesis_bin(
+            &LocalRangeSource::new(directory.path()),
+            &manifest,
+            Some(&inline),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hash does not match"));
+    }
+
+    fn compatibility_test_genesis() -> WincodeArchiveV2Genesis {
+        WincodeArchiveV2Genesis {
+            genesis_hash: [9; 32],
+            genesis_bin_len: 17,
+            creation_time_unix: 1,
+            cluster_id: 2,
+            ticks_per_slot: 64,
+            poh_params: blockzilla_format::WincodeArchiveV2GenesisPohParams {
+                tick_duration_secs: 0,
+                tick_duration_nanos: 400_000_000,
+                tick_count: None,
+                hashes_per_tick: Some(12_500),
+            },
+            fees: blockzilla_format::WincodeArchiveV2GenesisFeeParams {
+                target_lamports_per_sig: 10_000,
+                target_sigs_per_slot: 20_000,
+                min_lamports_per_sig: 5_000,
+                max_lamports_per_sig: 100_000,
+                burn_percent: 100,
+            },
+            rent: blockzilla_format::WincodeArchiveV2GenesisRentParams {
+                lamports_per_byte_year: 3_480,
+                exemption_threshold: 2.0,
+                burn_percent: 100,
+            },
+            inflation: blockzilla_format::WincodeArchiveV2GenesisInflationParams {
+                initial: 0.0,
+                terminal: 0.0,
+                taper: 0.0,
+                foundation: 0.0,
+                foundation_term: 0.0,
+                padding: [0; 8],
+            },
+            epoch_schedule: blockzilla_format::WincodeArchiveV2GenesisEpochSchedule {
+                slots_per_epoch: 432_000,
+                leader_schedule_slot_offset: 432_000,
+                warmup: false,
+                first_normal_epoch: 0,
+                first_normal_slot: 0,
+            },
+            accounts: Vec::new(),
+            builtins: Vec::new(),
+            reward_pools: Vec::new(),
+        }
     }
 
     fn message_header() -> CompactMessageHeader {

@@ -9,6 +9,40 @@ use tracing::info;
 
 pub(crate) const GENESIS_FILE: &str = "genesis.tar.bz2";
 
+/// Persist exact genesis bytes beside a compact epoch-0 generation.
+///
+/// Inline Archive V2 Genesis records intentionally retain their V2 schema and
+/// omit one launch field (`slots_per_segment`).  This tiny sidecar is therefore
+/// the authoritative, backwards-compatible runtime input.
+pub(crate) fn write_compact_sidecar(dir: &Path, archive: &GenesisArchive) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE);
+    if path.exists() {
+        let existing = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        anyhow::ensure!(
+            existing == archive.genesis_bin,
+            "refusing to replace mismatched compact genesis sidecar {}",
+            path.display()
+        );
+        return Ok(path);
+    }
+
+    let tmp = dir.join(format!(
+        "{}.tmp",
+        blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE
+    ));
+    {
+        let mut file = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        file.write_all(&archive.genesis_bin)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        file.flush()
+            .with_context(|| format!("flush {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} to {}", tmp.display(), path.display()))?;
+    Ok(path)
+}
+
 pub(crate) fn maybe_load_for_input(input: &Path) -> Result<Option<GenesisArchive>> {
     if epoch_from_path(input) != Some(0) {
         return Ok(None);

@@ -15,7 +15,8 @@ pub use error::{Error, Result, SourceError};
 #[cfg(feature = "http")]
 pub use http::{HttpRangeSource, HttpRangeSourceOptions};
 pub use reader::{
-    ArchiveReader, BlockIterator, CompiledPubkeyFilter, DecodedBlock, GenerationBinding,
+    ArchiveReader, BlockIterator, BorrowedBlockStream, BorrowedDecodedBlock,
+    BorrowedDecodedTxRowIter, CompiledPubkeyFilter, DecodedBlock, GenerationBinding,
     HashVerification, IndeterminateReason, MetadataState, OpenOptions, ScanIterator, ScannedBlock,
     ScannedTransaction, SignatureReference, TransactionMatch, ValidatedGeneration,
     validate_generation_structure,

@@ -23,6 +23,22 @@ pub trait RangeSource: Send + Sync {
     /// Read exactly `length` bytes starting at `offset`.
     fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>>;
 
+    /// Read an exact range into reusable caller-owned storage.
+    ///
+    /// Remote and custom sources keep compatibility through this default.
+    /// Local sequential readers override it to retain allocation capacity
+    /// across adjacent prefetch batches.
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        destination: &mut Vec<u8>,
+    ) -> SourceResult<()> {
+        *destination = self.read_range(object, offset, length)?;
+        Ok(())
+    }
+
     fn read_all_bounded(&self, object: &str, max_length: usize) -> SourceResult<Vec<u8>> {
         let size = self
             .size(object)?
@@ -46,6 +62,16 @@ impl<T: RangeSource + ?Sized> RangeSource for Arc<T> {
 
     fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
         (**self).read_range(object, offset, length)
+    }
+
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        destination: &mut Vec<u8>,
+    ) -> SourceResult<()> {
+        (**self).read_range_into(object, offset, length, destination)
     }
 }
 
@@ -91,6 +117,18 @@ impl RangeSource for LocalRangeSource {
     }
 
     fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.read_range_into(object, offset, length, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        bytes: &mut Vec<u8>,
+    ) -> SourceResult<()> {
         let path = self.path(object)?;
         let file = File::open(&path).map_err(|source| {
             if source.kind() == io::ErrorKind::NotFound {
@@ -132,7 +170,14 @@ impl RangeSource for LocalRangeSource {
             });
         }
 
-        let mut bytes = vec![0u8; length];
+        // Preserve initialized storage across sequential range reads. Clearing
+        // before resizing would zero the entire reused batch even though the
+        // following `read_at` loop overwrites every requested byte.
+        if bytes.len() < length {
+            bytes.resize(length, 0);
+        } else {
+            bytes.truncate(length);
+        }
         let mut read = 0usize;
         while read < length {
             let read_offset = offset + read as u64;
@@ -151,7 +196,7 @@ impl RangeSource for LocalRangeSource {
             }
             read += count;
         }
-        Ok(bytes)
+        Ok(())
     }
 }
 
@@ -195,6 +240,22 @@ impl<P: RangeSource, F: RangeSource> RangeSource for OverlayRangeSource<P, F> {
             self.fallback.read_range(object, offset, length)
         }
     }
+
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        destination: &mut Vec<u8>,
+    ) -> SourceResult<()> {
+        if self.primary.size(object)?.is_some() {
+            self.primary
+                .read_range_into(object, offset, length, destination)
+        } else {
+            self.fallback
+                .read_range_into(object, offset, length, destination)
+        }
+    }
 }
 
 pub(crate) struct RangeSourceReader<'a, S: RangeSource> {
@@ -227,9 +288,8 @@ impl<'a, S: RangeSource> RangeSourceReader<'a, S> {
         let remaining = self.end - self.position;
         let length = usize::try_from(remaining.min(self.chunk_size as u64))
             .expect("chunk length is bounded by usize");
-        self.chunk = self
-            .source
-            .read_range(self.object, self.position, length)
+        self.source
+            .read_range_into(self.object, self.position, length, &mut self.chunk)
             .map_err(io::Error::other)?;
         if self.chunk.len() != length {
             return Err(io::Error::new(
@@ -278,6 +338,17 @@ mod tests {
         let source = LocalRangeSource::new(directory.path());
         assert_eq!(source.size("object.bin").unwrap(), Some(10));
         assert_eq!(source.read_range("object.bin", 3, 4).unwrap(), b"3456");
+        let mut reusable = Vec::with_capacity(16);
+        source
+            .read_range_into("object.bin", 1, 6, &mut reusable)
+            .unwrap();
+        let allocation = reusable.as_ptr();
+        assert_eq!(reusable, b"123456");
+        source
+            .read_range_into("object.bin", 7, 3, &mut reusable)
+            .unwrap();
+        assert_eq!(reusable.as_ptr(), allocation);
+        assert_eq!(reusable, b"789");
         assert!(source.read_range("../object.bin", 0, 1).is_err());
         assert!(source.read_range("object.bin", 9, 2).is_err());
     }
