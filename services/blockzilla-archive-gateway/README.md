@@ -20,8 +20,11 @@ An archive is invisible until an offline operator publishes
 - `archive-v2-meta.wincode`
 - `registry.bin`
 
-`signatures.bin` is included automatically when present. Additional immutable
-sidecars, such as `registry.mphf`, must be explicitly named with `--file`.
+`signatures.bin` is included automatically when present. For epoch 0,
+`genesis.bin` is also included automatically when present; replay treats those
+exact manifest-bound bytes as authoritative because the legacy inline V2
+genesis projection omits launch fields. Additional immutable sidecars, such as
+`registry.mphf`, must be explicitly named with `--file`.
 
 The generator validates every hot-index row and ordinal, dictionary-free zstd
 flags, metadata Header/Footer totals, and the exact optional signature length.

@@ -4,17 +4,21 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
     fmt::Write as _,
+    num::NonZeroU64,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{Level, info};
 
 mod archive_v2;
+mod block_time_gap_index;
 mod block_time_gaps;
+mod car_acquire;
 mod car_preflight;
 mod first_seen_finalization;
 mod genesis_epoch0;
 mod pre_hot;
+mod predecessor_tail_seed;
 mod scheduler;
 mod split_compact;
 mod token_events;
@@ -63,6 +67,89 @@ enum Commands {
         progress_json: Option<PathBuf>,
     },
 
+    /// Acquire, structurally validate, and durably publish one CAR through aria2c.
+    AcquireCar {
+        /// Source URL passed unchanged to aria2c.
+        #[arg(long)]
+        url: String,
+        /// Resumable download path, normally under `.downloads/`.
+        #[arg(long)]
+        part: PathBuf,
+        /// Final canonical CAR path. An existing entry is never replaced.
+        #[arg(long)]
+        canonical: PathBuf,
+        /// Alternate canonical suffix for the same epoch; it must remain absent.
+        #[arg(long)]
+        alternate: PathBuf,
+        /// Epoch expected for every block in the downloaded CAR.
+        #[arg(long)]
+        epoch: u64,
+        /// Atomic structural-preflight receipt path.
+        #[arg(long)]
+        receipt: PathBuf,
+        /// Optional atomic preflight progress JSON path.
+        #[arg(long)]
+        progress_json: Option<PathBuf>,
+        /// Exact final object size from trusted caller metadata. Used for
+        /// download telemetry and checked before structural preflight.
+        #[arg(long)]
+        expected_bytes: Option<NonZeroU64>,
+        /// aria2c executable or absolute path.
+        #[arg(long, default_value = "aria2c")]
+        aria2c: PathBuf,
+        /// Rust-supervised aria2c attempts. Partial regular files are retained.
+        #[arg(
+            long,
+            default_value_t = 3,
+            value_parser = clap::value_parser!(u8).range(1..=32)
+        )]
+        max_attempts: u8,
+        /// Minimum Linux MemAvailable required before structural preflight.
+        #[arg(long)]
+        required_memory_mib: u64,
+        /// Structural-preflight I/O buffer size.
+        #[arg(
+            long,
+            default_value_t = 8,
+            value_parser = clap::value_parser!(u16).range(1..=256)
+        )]
+        io_buffer_mib: u16,
+    },
+
+    /// Verify and seed predecessor blockhash tails for independent compaction workers.
+    SeedPreviousBlockhashTails {
+        /// Archive root containing `epoch-N` directories.
+        #[arg(long)]
+        archive_root: PathBuf,
+        /// Explicit positive target epochs. Each tail is sourced from epoch N-1.
+        #[arg(
+            long,
+            num_args = 1..,
+            conflicts_with = "discover",
+            required_unless_present = "discover"
+        )]
+        epochs: Vec<u64>,
+        /// Conservatively discover unowned registry-only targets in a bounded range.
+        #[arg(
+            long,
+            conflicts_with = "epochs",
+            requires_all = ["start_epoch", "end_epoch"]
+        )]
+        discover: bool,
+        /// First target epoch to inspect in discovery mode.
+        #[arg(long, requires = "discover")]
+        start_epoch: Option<u64>,
+        /// Last target epoch to inspect in discovery mode.
+        #[arg(long, requires = "discover")]
+        end_epoch: Option<u64>,
+        /// Directory for durable per-target verification receipts.
+        #[arg(long)]
+        receipt_dir: Option<PathBuf>,
+        /// Fully verify sources and targets without publishing tails or receipts.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Build a sparse slot-gap and block-time sidecar from a local Archive V2 timestamp index.
     BuildBlockTimeGaps {
         /// Input epoch directory or blockhash_index_v3.bin file. No RPC is used.
@@ -91,6 +178,24 @@ enum Commands {
         /// Optional expected epoch.
         #[arg(long)]
         epoch: Option<u64>,
+    },
+
+    /// Aggregate validated per-epoch gap sidecars into a compact calendar index.
+    BuildBlockTimeGapIndex {
+        /// Archive root containing epoch-N/block-time-gaps.bin sidecars.
+        archive_root: PathBuf,
+        /// Atomic JSON output path.
+        #[arg(long)]
+        output: PathBuf,
+        /// First epoch whose sidecar coverage should be audited.
+        #[arg(long, default_value_t = 0)]
+        start_epoch: u64,
+        /// Last epoch whose sidecar coverage should be audited.
+        #[arg(long)]
+        end_epoch: u64,
+        /// Minimum positive wall-clock gap included in the calendar index.
+        #[arg(long, default_value_t = 300)]
+        minimum_interruption_secs: u64,
     },
 
     /// Build semantic Solana Archive V2 with wincode/LEB128 records.
@@ -349,7 +454,7 @@ enum Commands {
         no_access: bool,
     },
 
-    /// Build hot-block Archive V2 from a Hivezilla capture directory.
+    /// Disabled legacy live finalizer; retained only to reject old invocations explicitly.
     BuildArchiveV2HotBlocksFromLive {
         /// Live producer capture directory.
         capture_dir: PathBuf,
@@ -950,6 +1055,61 @@ fn main() -> Result<()> {
             progress_json: progress_json.as_deref(),
         })
         .map(|_| ()),
+        Commands::AcquireCar {
+            url,
+            part,
+            canonical,
+            alternate,
+            epoch,
+            receipt,
+            progress_json,
+            expected_bytes,
+            aria2c,
+            max_attempts,
+            required_memory_mib,
+            io_buffer_mib,
+        } => car_acquire::acquire_car(car_acquire::CarAcquireConfig {
+            url: &url,
+            part: &part,
+            canonical: &canonical,
+            alternate: &alternate,
+            epoch,
+            receipt: &receipt,
+            progress_json: progress_json.as_deref(),
+            expected_bytes,
+            aria2c: &aria2c,
+            max_attempts,
+            required_memory_mib,
+            io_buffer_bytes: usize::from(io_buffer_mib) * 1024 * 1024,
+        }),
+        Commands::SeedPreviousBlockhashTails {
+            archive_root,
+            epochs,
+            discover,
+            start_epoch,
+            end_epoch,
+            receipt_dir,
+            dry_run,
+        } => {
+            let outcome = predecessor_tail_seed::seed_previous_blockhash_tails(
+                predecessor_tail_seed::SeedPreviousBlockhashTailsConfig {
+                    archive_root: &archive_root,
+                    epochs: &epochs,
+                    discover,
+                    start_epoch,
+                    end_epoch,
+                    receipt_dir: receipt_dir.as_deref(),
+                    dry_run,
+                },
+            )?;
+            if outcome.errors > 0 {
+                anyhow::bail!(
+                    "predecessor-tail discovery completed with {} failed candidate(s)",
+                    outcome.errors
+                );
+            }
+            Ok(())
+        }
         Commands::BuildBlockTimeGaps {
             input,
             epoch,
@@ -969,6 +1129,32 @@ fn main() -> Result<()> {
         Commands::VerifyBlockTimeGaps { input, epoch } => {
             block_time_gaps::verify_block_time_gaps(&input, epoch)
         }
+        Commands::BuildBlockTimeGapIndex {
+            archive_root,
+            output,
+            start_epoch,
+            end_epoch,
+            minimum_interruption_secs,
+        } => block_time_gap_index::build_block_time_gap_index(
+            block_time_gap_index::BuildBlockTimeGapIndexConfig {
+                archive_root: &archive_root,
+                output: &output,
+                start_epoch,
+                end_epoch,
+                minimum_interruption_secs,
+            },
+        )
+        .map(|summary| {
+            info!(
+                "Block-time gap aggregate index: output={} indexed_epochs={} missing_epochs={} interruptions={} interruption_days={} source_sidecar_bytes={}",
+                summary.output.display(),
+                summary.indexed_epochs,
+                summary.missing_epochs,
+                summary.interruptions,
+                summary.interruption_days,
+                summary.source_sidecar_bytes,
+            );
+        }),
         Commands::BuildArchiveV2 {
             input,
             output_dir,
@@ -1818,6 +2004,160 @@ mod cli_tests {
     }
 
     #[test]
+    fn acquire_car_cli_keeps_aria2_and_publication_paths_explicit() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "acquire-car",
+            "--url",
+            "https://files.example/epoch-900.car.zst",
+            "--part",
+            "/cars/.downloads/epoch-900.car.zst.part",
+            "--canonical",
+            "/cars/epoch-900.car.zst",
+            "--alternate",
+            "/cars/epoch-900.car",
+            "--epoch",
+            "900",
+            "--receipt",
+            "/state/preflight/epoch-900.json",
+            "--required-memory-mib",
+            "2560",
+        ])
+        .unwrap();
+        let Commands::AcquireCar {
+            url,
+            part,
+            canonical,
+            alternate,
+            epoch,
+            receipt,
+            progress_json,
+            expected_bytes,
+            aria2c,
+            max_attempts,
+            required_memory_mib,
+            io_buffer_mib,
+        } = cli.command
+        else {
+            panic!("expected acquire-car command");
+        };
+        assert_eq!(url, "https://files.example/epoch-900.car.zst");
+        assert_eq!(
+            part,
+            PathBuf::from("/cars/.downloads/epoch-900.car.zst.part")
+        );
+        assert_eq!(canonical, PathBuf::from("/cars/epoch-900.car.zst"));
+        assert_eq!(alternate, PathBuf::from("/cars/epoch-900.car"));
+        assert_eq!(epoch, 900);
+        assert_eq!(receipt, PathBuf::from("/state/preflight/epoch-900.json"));
+        assert!(progress_json.is_none());
+        assert!(expected_bytes.is_none());
+        assert_eq!(aria2c, PathBuf::from("aria2c"));
+        assert_eq!(max_attempts, 3);
+        assert_eq!(required_memory_mib, 2560);
+        assert_eq!(io_buffer_mib, 8);
+    }
+
+    #[test]
+    fn acquire_car_cli_expected_bytes_is_optional_but_must_be_positive() {
+        let arguments = [
+            "blockzilla",
+            "acquire-car",
+            "--url",
+            "https://files.example/epoch-900.car.zst",
+            "--part",
+            "/cars/.downloads/epoch-900.car.zst.part",
+            "--canonical",
+            "/cars/epoch-900.car.zst",
+            "--alternate",
+            "/cars/epoch-900.car",
+            "--epoch",
+            "900",
+            "--receipt",
+            "/state/preflight/epoch-900.json",
+            "--required-memory-mib",
+            "0",
+            "--expected-bytes",
+            "123456",
+        ];
+        let parsed = Cli::try_parse_from(arguments).unwrap();
+        let Commands::AcquireCar { expected_bytes, .. } = parsed.command else {
+            panic!("expected acquire-car command");
+        };
+        assert_eq!(expected_bytes.map(NonZeroU64::get), Some(123_456));
+
+        let mut invalid = arguments;
+        *invalid.last_mut().unwrap() = "0";
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+
+    #[test]
+    fn predecessor_tail_cli_supports_explicit_and_bounded_discovery_modes() {
+        let explicit = Cli::try_parse_from([
+            "blockzilla",
+            "seed-previous-blockhash-tails",
+            "--archive-root",
+            "/archive-v2",
+            "--epochs",
+            "799",
+            "713",
+            "799",
+            "--receipt-dir",
+            "/state/tail-receipts",
+        ])
+        .unwrap();
+        let Commands::SeedPreviousBlockhashTails {
+            archive_root,
+            epochs,
+            discover,
+            start_epoch,
+            end_epoch,
+            receipt_dir,
+            dry_run,
+        } = explicit.command
+        else {
+            panic!("expected seed-previous-blockhash-tails command");
+        };
+        assert_eq!(archive_root, PathBuf::from("/archive-v2"));
+        assert_eq!(epochs, [799, 713, 799]);
+        assert!(!discover);
+        assert_eq!(start_epoch, None);
+        assert_eq!(end_epoch, None);
+        assert_eq!(receipt_dir, Some(PathBuf::from("/state/tail-receipts")));
+        assert!(!dry_run);
+
+        let discovery = Cli::try_parse_from([
+            "blockzilla",
+            "seed-previous-blockhash-tails",
+            "--archive-root",
+            "/archive-v2",
+            "--discover",
+            "--start-epoch",
+            "713",
+            "--end-epoch",
+            "799",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Commands::SeedPreviousBlockhashTails {
+            epochs,
+            discover,
+            start_epoch,
+            end_epoch,
+            dry_run,
+            ..
+        } = discovery.command
+        else {
+            panic!("expected seed-previous-blockhash-tails command");
+        };
+        assert!(epochs.is_empty());
+        assert!(discover);
+        assert_eq!(start_epoch, Some(713));
+        assert_eq!(end_epoch, Some(799));
+        assert!(dry_run);
+    }
+
+    #[test]
     fn block_time_gap_cli_parses_local_source_and_output() {
         let cli = Cli::try_parse_from([
             "blockzilla",
@@ -1898,6 +2238,42 @@ mod cli_tests {
             PathBuf::from("/archive-v2/epoch-314/block-time-gaps.bin")
         );
         assert_eq!(epoch, Some(314));
+    }
+
+    #[test]
+    fn block_time_gap_index_cli_parses_audited_range_and_threshold() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "build-block-time-gap-index",
+            "/archive-v2",
+            "--output",
+            "/ui/api/v1/sidecars/block-time-gaps/index.json",
+            "--start-epoch",
+            "0",
+            "--end-epoch",
+            "1000",
+            "--minimum-interruption-secs",
+            "300",
+        ])
+        .unwrap();
+        let Commands::BuildBlockTimeGapIndex {
+            archive_root,
+            output,
+            start_epoch,
+            end_epoch,
+            minimum_interruption_secs,
+        } = cli.command
+        else {
+            panic!("expected build-block-time-gap-index command");
+        };
+        assert_eq!(archive_root, PathBuf::from("/archive-v2"));
+        assert_eq!(
+            output,
+            PathBuf::from("/ui/api/v1/sidecars/block-time-gaps/index.json")
+        );
+        assert_eq!(start_epoch, 0);
+        assert_eq!(end_epoch, 1000);
+        assert_eq!(minimum_interruption_secs, 300);
     }
 
     #[test]

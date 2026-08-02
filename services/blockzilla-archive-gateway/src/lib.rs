@@ -16,7 +16,7 @@ use axum::{
     routing::get,
 };
 use blockzilla_read_sdk::manifest::{
-    GENERATION_MANIFEST_FILE, GENERATION_MANIFEST_SCHEMA_VERSION, GenerationFile,
+    GENERATION_MANIFEST_FILE, GENERATION_MANIFEST_SCHEMA_VERSION, GENESIS_BIN_FILE, GenerationFile,
     GenerationManifest, REGISTRY_FILE, REQUIRED_GENERATION_FILES, SIGNATURES_FILE,
     compute_generation_digest,
 };
@@ -796,6 +796,10 @@ pub fn generate_manifest(options: GenerateManifestOptions) -> Result<PathBuf> {
     let signatures_path = root.join(SIGNATURES_FILE);
     if signatures_path.try_exists()? {
         names.insert(SIGNATURES_FILE.to_owned());
+    }
+    let genesis_path = root.join(GENESIS_BIN_FILE);
+    if options.epoch == 0 && genesis_path.try_exists()? {
+        names.insert(GENESIS_BIN_FILE.to_owned());
     }
     for name in options.additional_files {
         ensure!(

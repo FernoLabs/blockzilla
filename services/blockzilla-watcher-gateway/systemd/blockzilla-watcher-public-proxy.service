@@ -1,0 +1,24 @@
+[Unit]
+Description=Blockzilla Rust public watcher gateway
+After=network-online.target blockzilla-archive.service
+Wants=network-online.target blockzilla-archive.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/test -x /usr/local/bin/blockzilla-watcher-gateway
+ExecStart=/usr/local/bin/blockzilla-watcher-gateway serve --listen 127.0.0.1:8787 --upstream 127.0.0.1:8786 --ingest-upstream 127.0.0.1:8790 --max-requests 64 --max-json-transforms 1
+Restart=always
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+MemoryHigh=128M
+MemoryMax=256M
+TasksMax=128
+
+[Install]
+WantedBy=default.target
