@@ -2,10 +2,16 @@
 resolver = "2"
 members = [
     "blockzilla",
+    "crates/blockzilla-replay",
+    "crates/hivezilla-object-store",
     "services/hivezilla",
+    "services/shred-reader",
     "services/blockzilla-archive-gateway",
     "services/blockzilla-get-block",
+    "services/blockzilla-watcher-gateway",
     "services/old-faithful-get-block",
+    "crates/hivezilla-protocol",
+    "crates/blockzilla-compaction-protocol",
     "crates/blockzilla-format",
     "crates/blockzilla-log-parser",
     "crates/blockzilla-read-sdk",
@@ -34,3 +40,4 @@ overflow-checks = false
 [profile.release-debug]
 inherits = "release"
 debug = true
+strip = false

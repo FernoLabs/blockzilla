@@ -58,35 +58,61 @@ be enabled without readiness.
 A process supervisor cannot preserve an established outgoing Yellowstone gRPC
 connection across executable replacement. Docker cannot do that either. The
 portable continuity boundary is the Hivezilla WAL: reconnect resumes from the
-durable cursor with overlap, while Blockzilla deduplicates and performs finite
-offline validation.
+durable cursor with overlap, while downstream processing deduplicates and
+performs finite validation.
 
-For zero-downtime worker upgrades, keep the supervised Hivezilla source and WAL
-stable, start the new Blockzilla consumer from its own committed cursor, let it
-catch up and validate, then atomically promote it and drain the old consumer.
+For a terminal-consumer upgrade, keep the supervised source and WAL stable,
+fence the old consumer before its replacement takes the dataset writer lock,
+then resume from the dataset's committed cursor. The terminal store identity
+names the durable dataset, not one process instance; a replacement dataset must
+use a new identity and cannot inherit old ACK authority.
 
 Inbound APIs can later use a separate socket-broker mode that owns the listening
 socket while blue/green children change. That broker must not be confused with
 outgoing source-stream durability and is intentionally not part of this first
 supervisor implementation.
 
-## Cloud-backed source spools
+## Target: node-owned cloud overflow
 
-Remote Hivezilla instances may place sealed WAL generations in immutable object
-storage while Blockzilla is offline. The supervisor can manage the recorder and
-uploader processes, but its readiness or heartbeat is never a storage receipt.
+The supervisor behavior above is implemented. The following minimal V1 storage
+flow is a target contract and is not yet implemented end to end by the
+supervisor.
+
+Each source Hivezilla has its own private bucket or IAM-isolated namespace. It
+may move sealed WAL segments there when local disk is under pressure. This
+bucket is temporary overflow for that node's logical spool, not a second
+custodian and not Archive V2 storage. The supervisor can manage recorder and
+uploader processes, but readiness or heartbeat is never a storage receipt.
 Keep these transitions independent:
 
 ```text
 local WAL durable
-  -> cloud generation committed and version-pinned
-  -> Blockzilla downloads, verifies, installs, and fsyncs the generation
-  -> signed raw-durable ACK
-  -> retention policy may consider cloud cleanup
-  -> separate archive-committed receipt
+  -> sealed segment uploaded with verified end-to-end checksum and catalogued
+  -> local copy may be evicted under pressure; logical record is still live
+  -> terminal consumer reconnects live at cutover T
+  -> background fetches bounded record ranges [C, T) from disk/cloud
+  -> terminal writes permanent exact objects to independent policy targets
+  -> terminal persists a rebuildable range/copy index
+  -> terminal sends one cumulative ACK for the contiguous permanent prefix
+  -> source fsyncs ACK + retirement anchor, then deletes covered disk/cloud copies
 ```
 
-Local pressure eviction may use a verified cloud commit when policy permits,
-but an object-store credential, successful upload command, process heartbeat,
-or mutable cloud head is insufficient. The deletion decision must remain bound
-to the immutable generation identity and its durable receipt chain.
+Live and bulk transfer need separate resource budgets so catch-up cannot starve
+capture or the live lane. Bulk ranges may complete out of order, but the one
+configured terminal raw consumer may ACK only the exact contiguous prefix; a
+later chunk cannot jump a hole.
+
+A provider-verified end-to-end checksum (or verified read-back) plus the durable
+range catalog may authorize eviction of the corresponding local copy. It never
+retires the logical records.
+An object-store credential, successful upload command, process heartbeat,
+mutable cloud head, derived block, or archive commit cannot authorize deletion
+from both tiers. A persisted terminal ACK only makes covered data eligible; the
+source must then fsync its accepted-ACK receipt and the receipt-bound retirement
+checkpoint before deleting it.
+
+Archive work is separate from source supervision. In the V1 target, Blockzilla
+owns scheduling and the canonical catalog, while a Hivezilla compact worker
+executes one fenced job, uploads candidate Archive V2 objects, and waits for
+Blockzilla's conditional catalog commit. Neither that worker nor the commit is
+a raw-custody ACK.

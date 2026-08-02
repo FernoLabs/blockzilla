@@ -18,14 +18,17 @@ crate provides reusable storage and sink logic.
 ```mermaid
 flowchart LR
     LOCAL["verified local Archive V2"] --> STREAM["Blockzilla Streamer"]
-    EDGE["committed Edgezilla Archive V2<br/>R2 or selected B2 recovery"] --> STREAM
+    ONLINE["configured committed online Archive V2"] --> STREAM
+    RECOVERY["configured recovery target<br/>exact checkpoint + receipt mappings"] --> STREAM
     STREAM --> DB["local indexer / database"]
 ```
 
-Streamer does not connect to Hivezilla. Hivezilla feeds Blockzilla; Blockzilla
-repairs, validates, and commits the archive; Streamer reads only that committed
-result. The read-only Edgezilla Worker is a point-read RPC surface, not a bulk
-backfill source.
+Streamer does not connect to Hivezilla. A fenced Hivezilla compact worker reads
+terminal raw custody, repairs and validates the finite job, and uploads an
+immutable candidate object set. Blockzilla alone writes the reader-visible
+completion manifest and commits it to the canonical catalog. Streamer reads only
+that committed result. The read-only Edgezilla Worker is a point-read RPC
+surface, not a bulk backfill source.
 
 ## What works today
 
@@ -68,26 +71,39 @@ blockzilla stream <verified-local-archive> <indexer-sink>
 The proposed reader order is:
 
 1. a verified local canonical archive or cache;
-2. a committed R2 generation;
-3. an explicitly selected, independently verified B2 recovery generation.
+2. the configured committed online archive target; and
+3. the configured recovery target, but only through its exact recovery
+   checkpoint and predecessor-linked canonical-to-recovery receipt mappings.
 
-CAR, raw Yellowstone observations, Hivezilla compact deliveries, and shreds are
-not Streamer inputs. Blockzilla must turn them into a validated Archive V2
-generation first.
+R2 online plus B2 recovery is one possible deployment, not a protocol identity.
+A recovery reader starts at the configured checkpoint, verifies its target and
+catalog head, follows receipt links to the requested generation, and re-verifies
+every mapped object's length and SHA-256. Bucket listing, a numerically largest
+generation, or an unlinked independently verified object set is never a source
+selection rule.
 
-A source transition requires either the same committed generation manifest or
-an inclusive overlap whose cluster identity, slot, blockhash, and content
-digest agree. An unproven transition pauses rather than silently skipping data.
+CAR, raw Yellowstone observations, uncommitted Hivezilla candidate objects, and
+shreds are not Streamer inputs. They must first become a Blockzilla-committed
+Archive V2 generation.
+
+A source transition requires the same Blockzilla-committed completion-manifest
+identity and digest. Matching one overlap block is not proof that two otherwise
+different generations are interchangeable. An unproven transition pauses
+rather than silently skipping data.
 
 ## Delivery contract
 
-The sink receives deterministic blocks in ascending slot order for the selected
-archive view. Each delivery carries enough identity for idempotent application:
+The sink receives a deterministic canonical Archive V2 block projection. This
+contract is independent of Hivezilla's raw-shred and provisional
+block-observation wire feeds.
+
+Blocks arrive in ascending slot order for the selected archive view. Each
+delivery carries enough identity for idempotent application:
 
 - cluster/genesis identity;
 - slot, parent slot, blockhash, and previous blockhash;
 - archive generation and format version;
-- stable content digest or event identity;
+- a stable archive event identity and content digest;
 - completeness/provenance state required by the selected view.
 
 Initial delivery semantics are at least once:
@@ -122,8 +138,10 @@ reuse an incompatible checkpoint.
 
 After local replay works, Streamer can follow new Blockzilla generations:
 
-1. discover a new completion manifest in local or edge storage;
-2. pin and verify all referenced objects;
+1. discover a new Blockzilla-owned completion manifest through the committed
+   catalog;
+2. pin and verify all catalog-readable publication objects referenced directly
+   by the completion manifest, including its published finality manifest;
 3. make the generation visible in the local sync catalog;
 4. deliver blocks and wait for sink ACKs;
 5. poll for the next committed generation.
@@ -137,6 +155,8 @@ not bypass Blockzilla's archive authority.
 1. Replay the deterministic local fixture with per-block ACKs and an atomic
    checkpoint.
 2. Add the sink trait and one minimal indexer example.
-3. Add committed R2 sync/range reads.
-4. Add explicit B2 recovery selection.
+3. Add committed configured-online-target sync/range reads (R2 is the first
+   deployment adapter).
+4. Add recovery-target reads through the exact checkpoint and receipt mapping
+   (B2 is the first deployment adapter).
 5. Add committed-generation follow.

@@ -10,6 +10,7 @@
 /blockzilla-v2/
 /local-archive-v2-runs/
 /personal/
+/secrets/
 /piggy-analysis/
 /local-slices/
 .env
