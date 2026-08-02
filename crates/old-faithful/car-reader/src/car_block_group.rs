@@ -282,12 +282,29 @@ impl CarBlockGroup {
 
         let mut scratch = std::mem::take(&mut self.scratch);
         scratch.clear();
-        scratch.resize(payload_len, 0u8);
-
-        if let Err(e) = reader.read_exact(&mut scratch) {
+        scratch.reserve(payload_len);
+        let read = reader
+            .take(payload_len as u64)
+            .read_to_end(&mut scratch)
+            .map_err(|error| CarReadError::Io(error.to_string()));
+        let read = match read {
+            Ok(read) => read,
+            Err(error) => {
+                scratch.clear();
+                self.scratch = scratch;
+                return Err(error);
+            }
+        };
+        if read != payload_len {
             scratch.clear();
             self.scratch = scratch;
-            return Err(CarReadError::Io(e.to_string()));
+            return Err(CarReadError::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                )
+                .to_string(),
+            ));
         }
 
         let result = self.read_entry_payload_slice_with_cid_into(cid, &scratch, payload_len);
