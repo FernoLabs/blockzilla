@@ -57,6 +57,7 @@ use crate::{
         read_spool_record,
     },
     layout::ProducerLayout,
+    ledger::grpc::project_grpc_ledger_candidate,
 };
 
 mod receiver_bridge;
@@ -332,6 +333,8 @@ impl Default for GrpcRawRecordConfig {
             max_generation_bytes: 0,
             hot_generation_root: None,
             min_free_bytes: 16 * 1024 * 1024 * 1024,
+            // Raw custody preserves syntactically valid source evidence.
+            // Complete PoH is enforced later at candidate materialization.
             require_complete_poh: false,
             cluster_id: "solana-mainnet".to_string(),
             origin_node_id: "source-node-01".to_string(),
@@ -491,6 +494,22 @@ pub struct GrpcRawPohVerifyReport {
     pub wal_incomplete_tail_bytes: u64,
 }
 
+/// Deterministic counters from an offline, read-only ledger-projection shadow run.
+///
+/// This report intentionally contains no promotion, finality, publication, or ACK state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcRawLedgerShadowVerifyReport {
+    pub output_dir: PathBuf,
+    pub minimum_records: u64,
+    pub records_scanned: u64,
+    pub candidates_projected: u64,
+    pub signed_transactions_projected: u64,
+    pub signatures_projected: u64,
+    pub signed_message_bytes_projected: u64,
+    pub poh_entries_projected: u64,
+    pub wal_incomplete_tail_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpcRawMaterializeConfig {
     pub input_dir: PathBuf,
@@ -547,7 +566,7 @@ pub struct GrpcRawMaterializeReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CompletePohBlockStats {
+pub(crate) struct CompletePohBlockStats {
     entries: u64,
     transaction_references: u64,
     num_hashes: u128,
@@ -733,7 +752,9 @@ fn apply_raw_record_retry(report: &mut GrpcRawRecordReport, retry: RawRecordRetr
     report.action_required = retry.action_required;
 }
 
-fn validate_complete_poh_block(block: &SubscribeUpdateBlock) -> Result<CompletePohBlockStats> {
+pub(crate) fn validate_complete_poh_block(
+    block: &SubscribeUpdateBlock,
+) -> Result<CompletePohBlockStats> {
     ensure!(
         block.entries_count > 0,
         "slot {} contains no PoH entries",
@@ -757,6 +778,19 @@ fn validate_complete_poh_block(block: &SubscribeUpdateBlock) -> Result<CompleteP
         block.executed_transaction_count,
         transaction_count
     );
+    let mut transactions = block.transactions.iter().collect::<Vec<_>>();
+    transactions.sort_unstable_by_key(|transaction| transaction.index);
+    for (expected_index, transaction) in transactions.iter().enumerate() {
+        let expected_index =
+            u64::try_from(expected_index).context("gRPC transaction index exceeds u64")?;
+        ensure!(
+            transaction.index == expected_index,
+            "slot {} transaction index {}, expected {}",
+            block.slot,
+            transaction.index,
+            expected_index
+        );
+    }
 
     let mut entries = block.entries.iter().collect::<Vec<_>>();
     entries.sort_unstable_by_key(|entry| entry.index);
@@ -4573,6 +4607,12 @@ pub fn materialize_grpc_raw_blocks(
             let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
                 return Err(anyhow!("raw gRPC frame {} is not a block", row.frame_id));
             };
+            validate_complete_poh_block(block).with_context(|| {
+                format!(
+                    "refuse candidate materialization from incomplete PoH at raw gRPC frame {}",
+                    row.frame_id
+                )
+            })?;
             if writer.is_none() {
                 fs::create_dir(&staging_dir).with_context(|| {
                     format!(
@@ -5748,6 +5788,112 @@ pub fn verify_grpc_raw_poh(
         report.records_verified >= minimum_records,
         "raw gRPC PoH verification found {} records, below required minimum {}",
         report.records_verified,
+        minimum_records
+    );
+    Ok(report)
+}
+
+/// Replay a stopped raw spool (or filesystem snapshot) and project every block into the
+/// unpromoted ledger-candidate shape entirely in memory.
+///
+/// This is deliberately separate from [`verify_grpc_raw_poh`], which is used by live recorder
+/// rotation. A shadow projection failure therefore cannot change capture, retention, ACK, or
+/// publication behavior.
+pub fn verify_grpc_raw_ledger_shadow(
+    output_dir: PathBuf,
+    max_record_bytes: u64,
+    minimum_records: u64,
+) -> Result<GrpcRawLedgerShadowVerifyReport> {
+    let mut report = GrpcRawLedgerShadowVerifyReport {
+        output_dir: output_dir.clone(),
+        minimum_records,
+        records_scanned: 0,
+        candidates_projected: 0,
+        signed_transactions_projected: 0,
+        signatures_projected: 0,
+        signed_message_bytes_projected: 0,
+        poh_entries_projected: 0,
+        wal_incomplete_tail_bytes: 0,
+    };
+
+    let replay = replay_grpc_raw_blocks_audited(&output_dir, max_record_bytes, |row, update| {
+        let Some(UpdateOneof::Block(block)) = update.update_oneof.as_ref() else {
+            return Err(anyhow!("raw gRPC frame {} is not a block", row.frame_id));
+        };
+        let candidate = project_grpc_ledger_candidate(block).with_context(|| {
+            format!(
+                "shadow-project raw gRPC ledger candidate for frame {} slot {}",
+                row.frame_id, row.slot
+            )
+        })?;
+        let transactions = candidate
+            .transactions()
+            .context("gRPC ledger projection omitted its transaction section")?;
+        let poh_entries = candidate
+            .poh_entries()
+            .context("gRPC ledger projection omitted its PoH section")?;
+
+        let signed_transactions = u64::try_from(transactions.entries.len())
+            .context("projected signed-transaction count exceeds u64")?;
+        let poh_entries =
+            u64::try_from(poh_entries.len()).context("projected PoH-entry count exceeds u64")?;
+        let mut signatures = 0u64;
+        let mut signed_message_bytes = 0u64;
+        for transaction in &transactions.entries {
+            signatures = signatures
+                .checked_add(
+                    u64::try_from(transaction.signatures.len())
+                        .context("projected signature count exceeds u64")?,
+                )
+                .context("projected signature count overflow")?;
+            signed_message_bytes = signed_message_bytes
+                .checked_add(
+                    u64::try_from(transaction.signed_message_bytes.len())
+                        .context("projected signed-message byte count exceeds u64")?,
+                )
+                .context("projected signed-message byte count overflow")?;
+        }
+
+        report.records_scanned = report
+            .records_scanned
+            .checked_add(1)
+            .context("shadow-scanned raw gRPC record count overflow")?;
+        report.candidates_projected = report
+            .candidates_projected
+            .checked_add(1)
+            .context("projected raw gRPC ledger candidate count overflow")?;
+        report.signed_transactions_projected = report
+            .signed_transactions_projected
+            .checked_add(signed_transactions)
+            .context("projected signed-transaction count overflow")?;
+        report.signatures_projected = report
+            .signatures_projected
+            .checked_add(signatures)
+            .context("projected signature count overflow")?;
+        report.signed_message_bytes_projected = report
+            .signed_message_bytes_projected
+            .checked_add(signed_message_bytes)
+            .context("projected signed-message byte count overflow")?;
+        report.poh_entries_projected = report
+            .poh_entries_projected
+            .checked_add(poh_entries)
+            .context("projected PoH-entry count overflow")?;
+        Ok(())
+    })?;
+
+    ensure!(
+        replay.records == report.records_scanned,
+        "raw gRPC ledger shadow count differs from replay audit"
+    );
+    ensure!(
+        report.candidates_projected == report.records_scanned,
+        "raw gRPC ledger candidate count differs from scanned record count"
+    );
+    report.wal_incomplete_tail_bytes = replay.wal_incomplete_tail_bytes;
+    ensure!(
+        report.records_scanned >= minimum_records,
+        "raw gRPC ledger shadow found {} records, below required minimum {}",
+        report.records_scanned,
         minimum_records
     );
     Ok(report)
@@ -7067,6 +7213,7 @@ mod tests {
             slot,
             parent_slot: slot - 1,
             blockhash: "11111111111111111111111111111111".to_string(),
+            parent_blockhash: "11111111111111111111111111111111".to_string(),
             executed_transaction_count: 0,
             entries_count: 2,
             // Deliberately reverse source order. The entry index is the canonical order.
@@ -8554,14 +8701,21 @@ mod tests {
 
         let mut partitioned = complete_poh_block(500);
         partitioned.executed_transaction_count = 3;
-        partitioned.transactions = (0..3).map(|_| Default::default()).collect();
+        partitioned.transactions = (0..3)
+            .map(|index| {
+                let mut transaction =
+                    yellowstone_grpc_proto::prelude::SubscribeUpdateTransactionInfo::default();
+                transaction.index = index;
+                transaction
+            })
+            .collect();
         partitioned.entries[1].executed_transaction_count = 1;
         partitioned.entries[0].starting_transaction_index = 1;
         partitioned.entries[0].executed_transaction_count = 2;
         let partitioned_stats = validate_complete_poh_block(&partitioned).unwrap();
         assert_eq!(partitioned_stats.transaction_references, 3);
 
-        let mut invalid_partition = partitioned;
+        let mut invalid_partition = partitioned.clone();
         invalid_partition.entries[0].starting_transaction_index = 2;
         assert!(
             validate_complete_poh_block(&invalid_partition)
@@ -8595,6 +8749,15 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("PoH entry index 0, expected 1")
+        );
+
+        let mut duplicate_transaction_index = partitioned.clone();
+        duplicate_transaction_index.transactions[2].index = 1;
+        assert!(
+            validate_complete_poh_block(&duplicate_transaction_index)
+                .unwrap_err()
+                .to_string()
+                .contains("transaction index 1, expected 2")
         );
     }
 
@@ -8664,6 +8827,52 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ledger_shadow_projects_raw_wal_without_creating_artifacts() {
+        let root = temp_dir("ledger-shadow-projection");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let source = complete_poh_update(801);
+        let row = append_fixture(&mut spool, &identity, &source, 0);
+        append_handoff_record(&journal, &row).unwrap();
+        drop(spool);
+
+        let mut entries_before = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries_before.sort();
+        let report =
+            verify_grpc_raw_ledger_shadow(root.clone(), config.max_record_bytes, 1).unwrap();
+        let mut entries_after = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries_after.sort();
+
+        assert_eq!(report.records_scanned, 1);
+        assert_eq!(report.candidates_projected, 1);
+        assert_eq!(report.signed_transactions_projected, 0);
+        assert_eq!(report.signatures_projected, 0);
+        assert_eq!(report.signed_message_bytes_projected, 0);
+        assert_eq!(report.poh_entries_projected, 2);
+        assert_eq!(report.wal_incomplete_tail_bytes, 0);
+        assert_eq!(entries_after, entries_before);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9700,6 +9909,45 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(archive_one).unwrap();
         fs::remove_dir_all(archive_two).unwrap();
+    }
+
+    #[test]
+    fn candidate_materialization_rejects_incomplete_poh_before_publication() {
+        let root = temp_dir("materialize-incomplete-poh-source");
+        let archive = temp_dir("materialize-incomplete-poh-output");
+        fs::create_dir_all(&root).unwrap();
+        let config = test_config(root.clone());
+        let identity = load_or_create_identity(&config).unwrap();
+        let mut spool = SpoolWriter::open(
+            root.join(WAL_ROOT_DIR),
+            identity.spool_identity(),
+            SpoolOptions {
+                segment_target_bytes: config.segment_target_bytes,
+                max_record_bytes: config.max_record_bytes,
+            },
+        )
+        .unwrap();
+        let journal = root.join(HANDOFF_JOURNAL_FILE);
+        recover_handoff_journal(&journal).unwrap();
+        let source = update(800);
+        let row = append_fixture(&mut spool, &identity, &source, 0);
+        append_handoff_record(&journal, &row).unwrap();
+        drop(spool);
+
+        let error = materialize_grpc_raw_blocks(GrpcRawMaterializeConfig {
+            input_dir: root.clone(),
+            archive_dir: archive.clone(),
+            epoch: 0,
+            max_record_bytes: config.max_record_bytes,
+            pubkey_hot_registry_path: None,
+            pubkey_hot_count: 0,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("incomplete PoH"));
+        assert!(!archive.exists());
+        assert!(!materialization_staging_path(&archive).unwrap().exists());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
