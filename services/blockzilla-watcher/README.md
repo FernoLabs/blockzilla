@@ -114,24 +114,43 @@ The client reads:
   success is described only as a completed local send attempt; Hivezilla's
   separate durable sequence is the receipt-and-`fsync` evidence.
 
-The standard-library-only runtime publisher can write that sidecar beside the
-built UI:
+The native watcher gateway can write that sidecar beside the built UI:
 
 ```bash
-python3 scripts/publish-runtime-operations.py \
+blockzilla-watcher-gateway publish-runtime-operations \
   --output /path/to/ui/api/v1/sidecars/runtime-operations/status.json
 ```
+
+It also replaces the former Python block-time-gap status publisher and private
+scheduler incident recorder:
+
+```bash
+blockzilla-watcher-gateway publish-block-time-gap-backfill \
+  --source /path/to/private/block-time-gap-backfill.json \
+  --output /path/to/ui/api/v1/sidecars/block-time-gaps/status.json
+
+blockzilla-watcher-gateway record-scheduler-incidents \
+  --backfill-status /path/to/private/block-time-gap-backfill.json \
+  --control-events /path/to/private/control-events.jsonl \
+  --priority-lease /path/to/private/priority-lease.json \
+  --state-file /path/to/private/incidents/state.json \
+  --events-output /path/to/private/incidents/events.jsonl
+```
+
+The incident files are private evidence and must not be placed below the
+served UI root.
 
 ## Public deployment
 
 The scheduler keeps full filesystem paths internally. Its JSON serializers
-publish only safe artifact basenames. When an older scheduler must remain in
-service, place `scripts/public-status-proxy.py` on the public boundary instead:
+publish only safe artifact basenames. Place the native watcher gateway on the
+public boundary:
 
 ```sh
-python3 scripts/public-status-proxy.py \
+blockzilla-watcher-gateway serve \
   --listen 127.0.0.1:8787 \
-  --upstream 127.0.0.1:8786
+  --upstream 127.0.0.1:8786 \
+  --ingest-upstream 127.0.0.1:8790
 ```
 
 The proxy is read-only, preserves the status and SSE contracts, and strips

@@ -94,6 +94,7 @@ JID=${JID:?export the exact 32-hex journal ID}
 JDIR="$ROOT/$CLUSTER/$ORIGIN/$SOURCE/$JID"
 PROGRESS="$JDIR/receiver-progress.wal"
 AUDIT_BIN=${AUDIT_BIN:-/usr/local/bin/shred-epoch-audit}
+HIVEZILLA_BIN=${HIVEZILLA_BIN:-/usr/local/bin/hivezilla}
 STATUS_URL=${STATUS_URL:?export the authenticated shred-status URL}
 RPC_URL=https://api.mainnet-beta.solana.com
 
@@ -115,6 +116,7 @@ mkdir -m 700 "$AUDIT_DIR"
 
 test -r "$PROGRESS"
 test -x "$AUDIT_BIN"
+test -x "$HIVEZILLA_BIN"
 audit_curl --version >/dev/null
 test -n "$(findmnt -n -o TARGET --target "$JDIR")"
 df -h "$JDIR" "$AUDIT_DIR"
@@ -131,95 +133,8 @@ continuity, and returns the last committed cursor. It never opens the WAL for wr
 
 ```bash
 snapshot_progress() {
-  python3 - "$PROGRESS" "$CLUSTER" "$ORIGIN" "$SOURCE" "$JID" <<'PY'
-import json
-import os
-import struct
-import sys
-import time
-
-path, cluster, origin, source, journal_hex = sys.argv[1:]
-expected = (cluster, origin, source, list(bytes.fromhex(journal_hex)))
-
-def crc32c(data):
-    state = 0xffffffff
-    for byte in data:
-        state ^= byte
-        for _ in range(8):
-            state = (state >> 1) ^ (0x82f63b78 if state & 1 else 0)
-    return (~state) & 0xffffffff
-
-with open(path, "rb") as handle:
-    observed = os.fstat(handle.fileno()).st_size
-    if handle.read(8) != b"BZRPRG01":
-        raise SystemExit("invalid receiver progress WAL magic")
-
-    valid = 8
-    latest = None
-    previous = None
-    frames = 0
-
-    while valid + 14 <= observed:
-        header = handle.read(14)
-        if len(header) != 14:
-            break
-
-        magic, version, length, header_crc = struct.unpack("<4sHII", header)
-        if magic != b"BZRP" or version != 1 or length > 1024 * 1024:
-            raise SystemExit(f"invalid progress frame at {valid}")
-        if valid + 22 + length > observed:
-            break
-        if crc32c(header[:10]) != header_crc:
-            raise SystemExit(f"progress header CRC mismatch at {valid}")
-
-        payload = handle.read(length)
-        payload_crc, commit = struct.unpack("<I4s", handle.read(8))
-        if crc32c(payload) != payload_crc or commit != b"CMIT":
-            raise SystemExit(f"invalid progress frame trailer at {valid}")
-
-        frame = json.loads(payload)
-        stream = frame["stream"]
-        actual = (
-            stream["cluster_id"],
-            stream["origin_node_id"],
-            stream["source_id"],
-            stream["journal_id"],
-        )
-        if actual != expected:
-            raise SystemExit("progress stream identity mismatch")
-
-        sequence = frame["offer"]["record"]["sequence"]
-        if frame["durable_lsn"] != sequence + 1:
-            raise SystemExit("sequence/durable-LSN mismatch")
-        if previous is not None and sequence != previous + 1:
-            raise SystemExit("non-contiguous progress sequence")
-
-        previous = sequence
-        latest = frame
-        frames += 1
-        valid += 22 + length
-
-if latest is None:
-    raise SystemExit("no committed progress frame")
-
-key = latest["offer"]["logical_key"].get("Shred")
-if key is None:
-    raise SystemExit("latest durable record is not a shred")
-
-print(json.dumps({
-    "captured_unix_secs": int(time.time()),
-    "through_sequence": latest["offer"]["record"]["sequence"],
-    "durable_lsn": latest["durable_lsn"],
-    "spool_location": latest["spool_location"],
-    "logical_slot": key["slot"],
-    "logical_kind": key["kind"],
-    "logical_shred_index": key["shred_index"],
-    "progress_frames_validated": frames,
-    "progress_wal_observed_bytes": observed,
-    "progress_wal_valid_bytes": valid,
-    "progress_wal_unobserved_tail_bytes": observed - valid,
-}, sort_keys=True))
-PY
+  "$HIVEZILLA_BIN" raw-recorder-support snapshot-receiver-progress \
+    "$PROGRESS" "$CLUSTER" "$ORIGIN" "$SOURCE" "$JID"
 }
 ```
 

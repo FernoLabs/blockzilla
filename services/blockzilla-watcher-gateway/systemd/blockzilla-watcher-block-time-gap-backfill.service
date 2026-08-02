@@ -1,0 +1,27 @@
+[Unit]
+Description=Blockzilla Rust block-time-gap backfill status publisher
+After=local-fs.target blockzilla-archive.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Both variables must be absolute, whitespace-free paths.
+EnvironmentFile=%h/.config/blockzilla-watcher/block-time-gap-backfill.env
+ExecStartPre=/usr/bin/test -x /usr/local/bin/blockzilla-watcher-gateway
+ExecStartPre=/usr/bin/test -n "${BLOCKZILLA_BACKFILL_PRIVATE_STATUS}"
+ExecStartPre=/usr/bin/test -n "${BLOCKZILLA_BACKFILL_PUBLIC_STATUS}"
+ExecStart=/usr/local/bin/blockzilla-watcher-gateway publish-block-time-gap-backfill --source ${BLOCKZILLA_BACKFILL_PRIVATE_STATUS} --output ${BLOCKZILLA_BACKFILL_PUBLIC_STATUS} --interval-secs 15
+Restart=always
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+MemoryHigh=64M
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=default.target

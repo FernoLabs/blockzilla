@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+pub mod uploader;
+
 pub const MAX_OBJECT_KEY_BYTES: usize = 4_096;
 pub const MAX_OBJECT_VERSION_BYTES: usize = 4_096;
 

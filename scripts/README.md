@@ -11,10 +11,8 @@ sensitive artifacts. URLs and headers passed on the command line may also be
 visible to local users.
 
 - `bench-rpc-getblock.sh` prints its endpoint in TSV output.
-- `bench_rpc_epoch_report.py` stores the endpoint in reports, and
-  `compare_rpc_epoch_reports.py` embeds those reports.
-- `reference_rpc_matrix.py` stores endpoint labels instead of URLs, but keeps
-  response bodies and headers.
+- `rpc-epoch-bench` and `rpc-correctness-check` accept endpoints through
+  environment-variable references and write only endpoint labels to artifacts.
 - `run-rpc-correctness-matrix.sh` contacts several providers and requires
   multiple credentials.
 
@@ -28,16 +26,24 @@ review every artifact before publishing it. See the repository
 | --- | --- | --- |
 | `bench-car-registry-macos.sh` | Local, macOS | Compare CAR pubkey-registry strategies. |
 | `bench-rpc-getblock.sh` | Live network | Print repeated `getBlock` timings as TSV. |
-| `bench_rpc_epoch_report.py` | Live network | Plan and benchmark representative epoch slots. |
-| `compare_rpc_epoch_reports.py` | Offline | Compare two epoch benchmark reports. |
-| `reference_rpc_matrix.py` | Live network | Build a resumable multi-endpoint correctness corpus. |
-| `compare_reference_corpora.py` | Offline | Compare two saved correctness corpora. |
 | `run-rpc-correctness-matrix.sh` | Maintainer-only | Run the standard multi-provider correctness matrix. |
 | `sync-replay-compact.sh` | SSH transfer + local validation | Resume the replay-minimal Compact epoch-0/1 files from the NAS and publish local Archive V2 manifests. |
 | `test-sync-replay-compact.sh` | Offline | Exercise rsync, legacy-SCP fallback, interrupted transfers, and manifest guards. |
 | `run-replay-marathon.sh` | Local/NAS, bounded | Resume a sealed Compact chain for several hours with boundary checkpoints, replay metrics, and `pidstat` telemetry. |
 
 Use `--help` where available for prerequisites, inputs, and output paths.
+
+The maintained RPC benchmark and correctness implementations are native Rust
+binaries in `blockzilla-get-block`:
+
+```bash
+cargo run --locked -p blockzilla-get-block --bin rpc-epoch-bench -- --help
+cargo run --locked -p blockzilla-get-block --bin rpc-correctness-check -- --help
+```
+
+Both commands plan deterministic representative slots and support several
+provider labels in one run. The older Python report/corpus utilities were
+retired instead of retaining a second network stack and artifact format.
 
 ## Production predecessor-tail seeding
 
@@ -248,11 +254,11 @@ Create a reference plan without sending requests:
 
 ```bash
 export REFERENCE_RPC_URL='https://rpc.example'
-python3 scripts/reference_rpc_matrix.py \
-  --out-dir target/reference-rpc \
+cargo run --locked -p blockzilla-get-block --bin rpc-correctness-check -- \
   --endpoint reference=@REFERENCE_RPC_URL \
   --primary reference \
-  --epochs 700 \
+  --output-dir target/reference-rpc \
   --samples-per-epoch 1 \
-  --dry-run
+  --dry-run \
+  700
 ```
