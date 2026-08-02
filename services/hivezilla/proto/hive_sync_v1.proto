@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package hivezilla.sync.v1;
+
+service HiveSyncV1 {
+  rpc Sync(stream SyncClientFrameV1) returns (stream SyncServerFrameV1);
+  rpc FetchRange(FetchRangeRequestV1) returns (stream FetchRangePartWireV1);
+}
+
+message OpenWireV1 {
+  bytes stream_id = 1;
+  bytes terminal_store_id = 2;
+  bytes protected_cursor = 3;
+}
+
+message AckWireV1 {
+  bytes stream_id = 1;
+  bytes terminal_store_id = 2;
+  bytes stream_manifest_sha256 = 3;
+  bytes policy_id = 4;
+  bytes protected_cursor = 5;
+}
+
+message SyncClientFrameV1 {
+  oneof frame {
+    OpenWireV1 open = 1;
+    AckWireV1 ack = 2;
+  }
+}
+
+message ResumeWireV1 {
+  bytes stream = 1;
+  bytes session_id = 2;
+  bytes first_available = 3;
+  bytes bulk_start = 4;
+  bytes cutover = 5;
+  uint64 max_record_bytes = 6;
+  uint32 max_chunk_records = 7;
+  uint32 max_parallel_fetches = 8;
+}
+
+message RecordWireV1 {
+  bytes record = 1;
+}
+
+enum HiveSyncErrorCodeV1 {
+  HIVE_SYNC_ERROR_UNSPECIFIED = 0;
+  UNAUTHORIZED = 1;
+  CURSOR_MISMATCH = 2;
+  PREFIX_RETIRED = 3;
+  RECOVERY_INCOMPLETE = 4;
+  CHUNK_MISMATCH = 5;
+  TEMPORARILY_UNAVAILABLE = 6;
+  LIVE_BACKPRESSURE = 7;
+  LIMIT = 8;
+  STALE_SESSION = 9;
+}
+
+message HiveSyncErrorWireV1 {
+  HiveSyncErrorCodeV1 code = 1;
+}
+
+message SyncServerFrameV1 {
+  oneof frame {
+    ResumeWireV1 resume = 1;
+    RecordWireV1 record = 2;
+    HiveSyncErrorWireV1 error = 3;
+  }
+}
+
+message FetchRangeRequestV1 {
+  bytes session_id = 1;
+  bytes cutover = 2;
+  uint64 first_sequence = 3;
+  uint64 next_sequence = 4;
+}
+
+message TransferChunkCommitWireV1 {
+  bytes start = 1;
+  bytes end = 2;
+  uint64 encoded_len = 3;
+  bytes encoded_sha256 = 4;
+}
+
+message FetchRangePartWireV1 {
+  oneof part {
+    bytes chunk_bytes = 1;
+    TransferChunkCommitWireV1 commit = 2;
+    HiveSyncErrorWireV1 error = 3;
+  }
+}

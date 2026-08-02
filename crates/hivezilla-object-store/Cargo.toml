@@ -1,0 +1,15 @@
+[package]
+name = "hivezilla-object-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-neutral immutable object storage contract for Hivezilla"
+publish = false
+
+[dependencies]
+sha2 = "0.11.0"
+
+[dev-dependencies]
+tempfile = "3.23"
