@@ -20,21 +20,25 @@ use hivezilla::{
         GrpcRawMaterializeConfig, GrpcRawRecordConfig, GrpcReceiverBridgeConfig,
         bridge_receiver_grpc_raw, gc_one_acknowledged_grpc_raw_generation, inspect_grpc_raw_blocks,
         materialize_grpc_raw_blocks, open_grpc_raw_replication_generation_cursors,
-        record_grpc_raw_blocks, seed_grpc_raw_generation, verify_grpc_raw_poh,
+        record_grpc_raw_blocks, seed_grpc_raw_generation, verify_grpc_raw_ledger_shadow,
+        verify_grpc_raw_poh,
     },
+    helius::{HeliusBlockRecordConfig, record_helius_blocks},
     ingest::{
         CumulativeAckWal, IngestConfig, IngestRoleConfig, PullClientConfig, PullClientProtocol,
         PullReplicationOutcome, RawReplicationPullClient, RawReplicationPullRuntimeConfig,
         RawReplicationPullServerRuntime, RawReplicationServerRuntime, ReconnectConfig,
         ReplicaUpstreamConfig, ReplicationSendOutcome, ReplicationSender,
-        ReplicationSenderErrorKind, ReplicationStreamId, ShredUdpRecordConfig,
-        load_ingest_receiver_config, record_shred_udp,
+        ReplicationSenderErrorKind, ReplicationStreamId, ShredBridgeConfig,
+        ShredSpoolPullRuntimeConfig, ShredSpoolPullServerRuntime, ShredUdpRecordConfig,
+        SpoolJournalIdentity, bridge_shred_spool, load_ingest_receiver_config, record_shred_udp,
     },
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
         sync_epoch_info,
     },
+    shred_status::{ServeShredStatusArgs, serve_shred_status},
     supervisor::{
         BackoffPolicy, RestartPolicy, SupervisorConfig, SupervisorNotificationKind,
         notify_supervisor, run_supervisor,
@@ -70,12 +74,16 @@ enum Command {
     Run(RunArgs),
     ProbeGrpc(ProbeGrpcArgs),
     CaptureGrpc(CaptureGrpcArgs),
+    /// Record finalized Solana blocks using Helius root WebSockets plus getBlock RPC catch-up.
+    RecordHeliusBlocks(RecordHeliusBlocksArgs),
     /// Durably record confirmed protobuf update envelopes without archive conversion or sidecars.
     RecordGrpcRaw(RecordGrpcRawArgs),
     /// Inspect or fully validate an independently compressed raw gRPC spool.
     InspectGrpcRaw(InspectGrpcRawArgs),
     /// Replay a raw gRPC spool and require complete, reconstructable PoH entries in every block.
     VerifyGrpcRawPoh(VerifyGrpcRawPohArgs),
+    /// Offline, read-only projection of raw blocks into unpromoted ledger candidates.
+    VerifyGrpcRawLedgerShadow(VerifyGrpcRawLedgerShadowArgs),
     /// Seed an empty rolling generation with a stopped, verified generation's durable tail.
     SeedGrpcRawGeneration(SeedGrpcRawGenerationArgs),
     /// Materialize one committed epoch slice from a stopped raw spool into a staged capture.
@@ -96,6 +104,8 @@ enum Command {
     ValidateIngestConfig(ValidateIngestConfigArgs),
     /// Durably record byte-for-byte Solana shred datagrams from one configured UDP source.
     RecordShredUdp(RecordShredUdpArgs),
+    /// Copy committed raw shreds into a Blockzilla-owned spool with a durable cursor.
+    BridgeShredSpool(BridgeShredSpoolArgs),
     /// Run the bounded, mTLS-only durable inbound replication receiver.
     ServeIngestReceiver(ServeIngestReceiverArgs),
     /// Replicate the local raw-gRPC hot queue to the configured primary.
@@ -104,6 +114,11 @@ enum Command {
     PullGrpcRaw(PullGrpcRawArgs),
     /// Serve the recorder's durable raw WAL over direct, mandatory mTLS pull replication.
     ServeGrpcRawPullSource(ServeGrpcRawPullSourceArgs),
+    /// Serve Hetzner's fsynced raw shred spool for outbound NAS pull replication. Only sealed
+    /// segments strictly before the verified durable NAS ACK anchor may be retired.
+    ServeShredSpoolPullSource(ServeShredSpoolPullSourceArgs),
+    /// Aggregate recorder and loopback receiver telemetry into a bounded public status service.
+    ServeShredStatus(ServeShredStatusArgs),
     /// Portably supervise one long-lived service with bounded restart and health policy.
     Supervise(SuperviseArgs),
     /// Notify a parent Hivezilla supervisor of readiness or one heartbeat.
@@ -142,6 +157,33 @@ struct RecordShredUdpArgs {
     /// Optional secret-free atomic status snapshot for a read-only monitoring sidecar.
     #[arg(long)]
     status_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct BridgeShredSpoolArgs {
+    #[arg(long)]
+    source_spool_root: std::path::PathBuf,
+    #[arg(long)]
+    output_dir: std::path::PathBuf,
+    #[arg(long)]
+    cluster_id: String,
+    #[arg(long)]
+    origin_node_id: String,
+    #[arg(long)]
+    source_id: String,
+    #[arg(long, value_parser = parse_journal_id)]
+    journal_id: [u8; 16],
+    #[arg(long)]
+    durable_through_sequence: Option<u64>,
+    /// Recorder status JSON; its durable_through_sequence is read at invocation time.
+    #[arg(long, conflicts_with = "durable-through-sequence")]
+    durable_status_file: Option<std::path::PathBuf>,
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    max_record_bytes: u64,
+    #[arg(long, default_value_t = 256 * 1024 * 1024)]
+    segment_target_bytes: u64,
+    #[arg(long, default_value_t = 4096)]
+    max_records: usize,
 }
 
 #[derive(Debug, Args)]
@@ -326,6 +368,13 @@ struct ServeGrpcRawPullSourceArgs {
     config: std::path::PathBuf,
 }
 
+#[derive(Debug, Args)]
+struct ServeShredSpoolPullSourceArgs {
+    /// Strict schema-v1 raw-shred pull-source runtime JSON at an absolute, non-symlink path.
+    #[arg(long)]
+    config: std::path::PathBuf,
+}
+
 #[derive(Debug, Serialize)]
 struct ReplicationAckStatus {
     schema_version: u32,
@@ -401,6 +450,70 @@ struct CaptureGrpcArgs {
 }
 
 #[derive(Debug, Args)]
+struct RecordHeliusBlocksArgs {
+    /// File containing only the Helius API key. The key is never printed or persisted.
+    #[arg(long)]
+    api_key_file: std::path::PathBuf,
+
+    #[arg(long, default_value = "blockzilla-helius-raw")]
+    output_dir: std::path::PathBuf,
+
+    /// Initial finalized slot for a new output directory. Existing cursor state is authoritative.
+    #[arg(long)]
+    from_slot: Option<u64>,
+
+    /// Stop after this many newly recorded blocks. Zero keeps recording until timeout.
+    #[arg(long, default_value_t = 1)]
+    max_blocks: usize,
+
+    #[arg(long, default_value_t = 300)]
+    timeout_secs: u64,
+
+    /// Reconnect when no WebSocket message arrives within this time.
+    #[arg(long, default_value_t = 45)]
+    idle_timeout_secs: u64,
+
+    #[arg(long, default_value_t = 30)]
+    rpc_timeout_secs: u64,
+
+    /// Finalized slot range checked by each getBlocks request.
+    #[arg(long, default_value_t = 64)]
+    batch_slots: u64,
+
+    #[arg(long, default_value_t = 8)]
+    max_rpc_retries: u32,
+
+    #[arg(long, default_value_t = 1)]
+    compression_level: i32,
+
+    #[arg(long, default_value_t = OLD_FAITHFUL_SLOTS_PER_EPOCH)]
+    slots_per_epoch: u64,
+
+    /// Reject unexpectedly large JSON-RPC responses before allocating unbounded storage.
+    #[arg(long, default_value_t = 64 * 1024 * 1024)]
+    max_response_bytes: usize,
+}
+
+impl From<RecordHeliusBlocksArgs> for HeliusBlockRecordConfig {
+    fn from(value: RecordHeliusBlocksArgs) -> Self {
+        Self {
+            api_key_file: value.api_key_file,
+            output_dir: value.output_dir,
+            from_slot: value.from_slot,
+            max_blocks: value.max_blocks,
+            timeout_secs: value.timeout_secs,
+            idle_timeout_secs: value.idle_timeout_secs,
+            rpc_timeout_secs: value.rpc_timeout_secs,
+            batch_slots: value.batch_slots,
+            max_rpc_retries: value.max_rpc_retries,
+            compression_level: value.compression_level,
+            slots_per_epoch: value.slots_per_epoch,
+            max_response_bytes: value.max_response_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
 struct RecordGrpcRawArgs {
     #[arg(long)]
     endpoint: String,
@@ -464,7 +577,8 @@ struct RecordGrpcRawArgs {
     #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
     min_free_bytes: u64,
 
-    /// Reject a block unless its embedded entries form complete, reconstructable PoH.
+    /// Legacy diagnostic filter. V1 raw custody must leave this disabled and
+    /// enforce complete PoH only when promoting a candidate.
     #[arg(long)]
     require_complete_poh: bool,
 
@@ -519,6 +633,20 @@ struct VerifyGrpcRawPohArgs {
     max_record_bytes: u64,
 
     /// Fail unless at least this many complete records are verified. Zero permits an empty spool.
+    #[arg(long, default_value_t = 1)]
+    min_records: u64,
+}
+
+#[derive(Debug, Args)]
+struct VerifyGrpcRawLedgerShadowArgs {
+    /// Stopped raw-recorder directory or a filesystem snapshot of one.
+    #[arg(long, default_value = "blockzilla-grpc-raw")]
+    output_dir: std::path::PathBuf,
+
+    #[arg(long, default_value_t = 128 * 1024 * 1024)]
+    max_record_bytes: u64,
+
+    /// Fail unless at least this many records project. Zero permits an empty spool.
     #[arg(long, default_value_t = 1)]
     min_records: u64,
 }
@@ -1293,6 +1421,10 @@ async fn main() -> Result<()> {
             let report = capture_grpc_blocks(args.into()).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Command::RecordHeliusBlocks(args) => {
+            let report = record_helius_blocks(args.into()).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::RecordGrpcRaw(args) => {
             let report = record_grpc_raw_blocks(args.into()).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1308,6 +1440,14 @@ async fn main() -> Result<()> {
         Command::VerifyGrpcRawPoh(args) => {
             let report =
                 verify_grpc_raw_poh(args.output_dir, args.max_record_bytes, args.min_records)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::VerifyGrpcRawLedgerShadow(args) => {
+            let report = verify_grpc_raw_ledger_shadow(
+                args.output_dir,
+                args.max_record_bytes,
+                args.min_records,
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::SeedGrpcRawGeneration(args) => {
@@ -1408,6 +1548,39 @@ async fn main() -> Result<()> {
             })
             .await?;
         }
+        Command::BridgeShredSpool(args) => {
+            let durable_through_sequence =
+                match (args.durable_through_sequence, args.durable_status_file) {
+                    (Some(sequence), None) => sequence,
+                    (None, Some(path)) => {
+                        let json = std::fs::read_to_string(&path).with_context(|| {
+                            format!("read shred recorder status {}", path.display())
+                        })?;
+                        serde_json::from_str::<serde_json::Value>(&json)?
+                            .get("durable_through_sequence")
+                            .and_then(serde_json::Value::as_u64)
+                            .context("shred recorder status lacks durable_through_sequence")?
+                    }
+                    _ => anyhow::bail!(
+                        "provide exactly one of --durable-through-sequence or --durable-status-file"
+                    ),
+                };
+            let report = bridge_shred_spool(ShredBridgeConfig {
+                source_spool_root: args.source_spool_root,
+                identity: SpoolJournalIdentity {
+                    cluster_id: args.cluster_id,
+                    origin_node_id: args.origin_node_id,
+                    source_id: args.source_id,
+                    journal_id: args.journal_id,
+                },
+                output_dir: args.output_dir,
+                durable_through_sequence,
+                max_record_bytes: args.max_record_bytes,
+                segment_target_bytes: args.segment_target_bytes,
+                max_records: args.max_records,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Supervise(args) => {
             let report = run_supervisor(args.into_config()?).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1445,6 +1618,19 @@ async fn main() -> Result<()> {
             runtime.serve_with_shutdown(shutdown_signal()).await?;
             tracing::info!("direct mTLS raw pull source stopped cleanly");
         }
+        Command::ServeShredSpoolPullSource(args) => {
+            let config: ShredSpoolPullRuntimeConfig =
+                load_bounded_json_config(&args.config, "raw-shred pull-source runtime config")?;
+            let runtime = ShredSpoolPullServerRuntime::from_config(&config)?;
+            tracing::info!(
+                bind = %runtime.bind_address(),
+                gc_enabled = true,
+                "starting direct mTLS raw-shred pull source"
+            );
+            runtime.serve_with_shutdown(shutdown_signal()).await?;
+            tracing::info!("direct mTLS raw-shred pull source stopped cleanly");
+        }
+        Command::ServeShredStatus(args) => serve_shred_status(args).await?,
     }
 
     Ok(())

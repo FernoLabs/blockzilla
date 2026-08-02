@@ -14,12 +14,44 @@ services:
       - --status-file
       - /status/recorder.json
     network_mode: host
-    # Fail closed at the configured spool limit; do not crash-loop against a full journal.
-    restart: "no"
+    # The recorder still fails closed at the disk floor. Keep retrying so ACK-driven source GC can
+    # release a sealed segment and let the same journal resume without an operator race.
+    restart: unless-stopped
     stop_grace_period: 15s
     volumes:
       - hivezilla-shred-data:/data
       - hivezilla-shred-status:/status
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # The NAS initiates an mTLS pull from this listener. A verified, durable NAS ACK advances the
+  # replay cursor and permits old sealed segments to be retired. The segment containing the exact
+  # ACK is retained as the restart anchor; unacknowledged data is never removed.
+  hivezilla-shred-pull:
+    build:
+      context: .
+      dockerfile: services/hivezilla/Dockerfile.shred
+    entrypoint: ["/usr/local/bin/run-raw-shred-pull-source"]
+    # Dokploy bind-mounts the host trust directory with root-owned 0600 private keys. This
+    # container keeps every capability dropped and only needs uid 0 to read those mounted files.
+    user: "0:0"
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - hivezilla-shred
+    environment:
+      SHRED_JOURNAL_ID: ${SHRED_JOURNAL_ID:?SHRED_JOURNAL_ID must be a stable 32-character lowercase hex value}
+    volumes:
+      - hivezilla-shred-data:/data
+      - hivezilla-shred-status:/status:ro
+      - hivezilla-shred-control:/control
+      # Private deployment files; do not commit these directories or their credentials.
+      - ./deploy/hivezilla-shred/tls:/etc/hivezilla/tls:ro
+      - ./deploy/hivezilla-shred/replication:/etc/hivezilla/replication:ro
+      - ./deploy/hivezilla-shred/receipts:/etc/hivezilla/receipts:ro
+      - ./deploy/hivezilla-shred/secrets:/run/secrets:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -82,3 +114,4 @@ volumes:
   hivezilla-shred-data:
   hivezilla-shred-status:
   hivezilla-shred-public-status:
+  hivezilla-shred-control:

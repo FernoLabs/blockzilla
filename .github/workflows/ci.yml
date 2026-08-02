@@ -30,6 +30,11 @@ jobs:
         run: cargo check --locked -p blockzilla --features developer-tools --all-targets
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked
+      - name: Test Hivezilla shred reconstruction feature
+        run: |
+          cargo test --locked -p hivezilla --features shred-reconstruction --lib ingest::shred_compact::tests
+          cargo test --locked -p hivezilla --features shred-reconstruction --bin shred-fec-gap-trial
+          cargo test --locked -p hivezilla --features shred-reconstruction --bin shred-epoch-audit
       - name: Build and read the Archive V2 fixture
         run: |
           output="$RUNNER_TEMP/blockzilla-fixture"
@@ -116,6 +121,7 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/hivezilla-python" \
             python3 services/hivezilla/scripts/test_s3_multipart_upload.py
           python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
+          python3 services/hivezilla/scripts/test_ingest_status_server.py
           python3 services/hivezilla/scripts/test_shred_status_server.py
       - name: Test shell operational helpers
         run: |
