@@ -180,6 +180,7 @@ fn print_genesis(args: &Args) -> Result<()> {
     println!("  creation_time_unix: {}", genesis.creation_time_unix);
     println!("  cluster_id: {}", genesis.cluster_id);
     println!("  ticks_per_slot: {}", genesis.ticks_per_slot);
+    println!("  slots_per_segment: {}", genesis.slots_per_segment);
     println!(
         "  poh: tick_duration={}s+{}ns tick_count={:?} hashes_per_tick={:?}",
         genesis.poh_params.tick_duration_secs,
@@ -202,13 +203,13 @@ fn print_genesis(args: &Args) -> Result<()> {
         genesis.rent.burn_percent
     );
     println!(
-        "  inflation: initial={} terminal={} taper={} foundation={} foundation_term={} padding={}",
+        "  inflation: initial={} terminal={} taper={} foundation={} foundation_term={} storage={}",
         genesis.inflation.initial,
         genesis.inflation.terminal,
         genesis.inflation.taper,
         genesis.inflation.foundation,
         genesis.inflation.foundation_term,
-        bytes_to_hex(&genesis.inflation.padding)
+        genesis.inflation.storage
     );
     println!(
         "  epoch_schedule: slots_per_epoch={} leader_schedule_slot_offset={} warmup={} first_normal_epoch={} first_normal_slot={}",

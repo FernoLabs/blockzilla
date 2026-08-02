@@ -79,22 +79,35 @@ Possible improvements include:
 These changes affect the hot payload and therefore require a versioned schema,
 not an undocumented reinterpretation of current offsets.
 
-## Publication manifest
+## Publication manifest evolution
 
 The current file formats validate their own indexes and payloads, but file
-presence alone is not a complete publication protocol. A future Blockzilla
-generation manifest should bind:
+presence alone is not a complete publication protocol. The proposed V1 baseline
+is the centralized
+[Blockzilla compaction job protocol](blockzilla-compaction-job-v1.md): a
+Hivezilla worker uploads an immutable, non-canonical candidate object set and
+candidate manifest; Blockzilla verifies it, writes a distinct reader-visible
+completion manifest, and conditionally advances the canonical catalog. Readers
+trust only completion manifests reachable from that catalog.
+
+The completion manifest binds:
 
 - cluster/genesis and epoch identity;
 - Archive V2 and index versions;
 - the exact required and optional object set;
 - byte length and cryptographic digest for every object;
-- completeness and repair policy;
+- the frozen input, finality, completeness, repair, algorithm, and format
+  policy hashes;
 - the immutable generation identity.
 
-Blockzilla should upload data first and the destination manifest last. R2 and
-B2 need separate verified publication receipts even when they contain the same
-logical generation.
+The order is candidate objects, candidate manifest, Blockzilla-owned completion
+manifest, then catalog compare-and-swap. A completion manifest uploaded before a
+crash but not referenced by a successful CAS is an orphan, not a publication.
+The configured online provider is verified before catalog commit. An optional
+independent recovery provider uses the V1 canonical-to-recovery mapping,
+predecessor-linked receipt, and exact recovery checkpoint even when it contains
+the same logical generation; that state never replaces the catalog commit. R2
+online and B2 recovery are deployment examples, not object identity.
 
 ## Open questions
 

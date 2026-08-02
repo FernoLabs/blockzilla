@@ -16,6 +16,9 @@ pub struct GenesisArchive {
     pub archive_entries: Vec<GenesisArchiveEntry>,
     pub genesis_bin_len: usize,
     pub genesis_hash: [u8; 32],
+    /// Exact uncompressed `genesis.bin` bytes, retained for digest-bound
+    /// runtime reconstruction and compact archive sidecars.
+    pub genesis_bin: Vec<u8>,
     pub genesis: GenesisConfig,
 }
 
@@ -33,7 +36,9 @@ pub struct GenesisConfig {
     pub builtins: Vec<BuiltinProgram>,
     pub reward_pools: Vec<GenesisAccountEntry>,
     pub ticks_per_slot: u64,
+    pub slots_per_segment: u64,
     pub poh_params: PohParams,
+    pub backwards_compat_with_v0_23: u64,
     pub fees: FeeParams,
     pub rent: RentParams,
     pub inflation: InflationParams,
@@ -93,7 +98,7 @@ pub struct InflationParams {
     pub taper: f64,
     pub foundation: f64,
     pub foundation_term: f64,
-    pub padding: [u8; 8],
+    pub storage: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +213,7 @@ pub fn read_genesis_archive(reader: impl Read) -> CarReadResult<GenesisArchive> 
         archive_entries: entries,
         genesis_bin_len: genesis_bytes.len(),
         genesis_hash,
+        genesis_bin: genesis_bytes,
         genesis,
     })
 }
@@ -220,14 +226,10 @@ pub fn parse_genesis_bin(bytes: &[u8]) -> CarReadResult<GenesisConfig> {
         builtins: read_builtins(&mut reader)?,
         reward_pools: read_account_entries(&mut reader, "reward pools")?,
         ticks_per_slot: reader.u64()?,
-        poh_params: {
-            let _padding = reader.u64()?;
-            read_poh_params(&mut reader)?
-        },
-        fees: {
-            let _padding = reader.u64()?;
-            read_fee_params(&mut reader)?
-        },
+        slots_per_segment: reader.u64()?,
+        poh_params: read_poh_params(&mut reader)?,
+        backwards_compat_with_v0_23: reader.u64()?,
+        fees: read_fee_params(&mut reader)?,
         rent: read_rent_params(&mut reader)?,
         inflation: read_inflation_params(&mut reader)?,
         epoch_schedule: read_epoch_schedule(&mut reader)?,
@@ -383,7 +385,7 @@ fn read_inflation_params(reader: &mut BinReader<'_>) -> CarReadResult<InflationP
         taper: reader.f64()?,
         foundation: reader.f64()?,
         foundation_term: reader.f64()?,
-        padding: reader.array_8()?,
+        storage: reader.f64()?,
     })
 }
 
@@ -462,10 +464,6 @@ impl<'a> BinReader<'a> {
         Ok(f64::from_le_bytes(bytes))
     }
 
-    fn array_8(&mut self) -> CarReadResult<[u8; 8]> {
-        Ok(self.take(8)?.try_into().unwrap())
-    }
-
     fn array_32(&mut self) -> CarReadResult<[u8; 32]> {
         Ok(self.take(32)?.try_into().unwrap())
     }
@@ -524,7 +522,10 @@ mod tests {
         assert_eq!(archive.genesis.accounts[0].account.data, vec![1, 2, 3]);
         assert_eq!(archive.genesis.builtins[0].key, "solana_system_program");
         assert_eq!(archive.genesis.ticks_per_slot, 64);
+        assert_eq!(archive.genesis.slots_per_segment, 1_024);
+        assert_eq!(archive.genesis.backwards_compat_with_v0_23, 0);
         assert_eq!(archive.genesis.poh_params.hashes_per_tick, Some(12_500));
+        assert_eq!(archive.genesis.inflation.storage, 0.25);
         assert_eq!(archive.genesis.cluster_id, 1);
     }
 
@@ -560,7 +561,7 @@ mod tests {
 
         put_u64(&mut out, 0);
         put_u64(&mut out, 64);
-        put_u64(&mut out, 0);
+        put_u64(&mut out, 1_024);
         put_u64(&mut out, 0);
         put_u32(&mut out, 6_250_000);
         out.push(0);
@@ -581,7 +582,7 @@ mod tests {
         for value in [0.0, 0.0, 0.0, 0.0, 0.0] {
             put_f64(&mut out, value);
         }
-        out.extend_from_slice(&[0; 8]);
+        put_f64(&mut out, 0.25);
 
         put_u64(&mut out, 432_000);
         put_u64(&mut out, 432_000);

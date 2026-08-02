@@ -579,6 +579,9 @@ pub(crate) fn build(
 
     let previous_tail = load_or_build_previous_tail(output_dir, previous_car, resume)?;
     let genesis = genesis_epoch0::maybe_load_for_input(input)?;
+    if let Some(genesis) = &genesis {
+        genesis_epoch0::write_compact_sidecar(output_dir, genesis)?;
+    }
     let external_blockhashes = ExternalBlockhashOverrides::default();
 
     let registry_path = output_dir.join(REGISTRY_FILE);
@@ -838,6 +841,9 @@ pub(crate) fn build_hot_blocks(
 
     let previous_tail = load_or_build_previous_tail(output_dir, previous_car, resume)?;
     let genesis = genesis_epoch0::maybe_load_for_input(input)?;
+    if let Some(genesis) = &genesis {
+        genesis_epoch0::write_compact_sidecar(output_dir, genesis)?;
+    }
 
     let registry_path = output_dir.join(REGISTRY_FILE);
     let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
@@ -899,7 +905,6 @@ pub(crate) fn build_hot_blocks(
 
     let blocks_file =
         File::create(&blocks_path).with_context(|| format!("create {}", blocks_path.display()))?;
-    let mut blocks_writer = BufWriter::with_capacity(HOT_BLOCK_OUTPUT_BUFFER_SIZE, blocks_file);
     let meta_file =
         File::create(&meta_path).with_context(|| format!("create {}", meta_path.display()))?;
     let mut meta_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
@@ -932,8 +937,9 @@ pub(crate) fn build_hot_blocks(
         HOT_BLOCK_OUTPUT_BUFFER_SIZE,
         shredding_file,
     ));
-    let mut compressor = zstd::bulk::Compressor::new(level).context("create zstd compressor")?;
     let mut block_bytes = Vec::new();
+    // Kept empty for the shared memory-trimming helper. Compression scratch is
+    // owned by the bounded writer thread below.
     let mut compressed_buf = Vec::new();
     let mut access_bytes = Vec::new();
     let mut access_signature_bytes = Vec::new();
@@ -959,6 +965,16 @@ pub(crate) fn build_hot_blocks(
     let mut pending = PendingBlock::default();
     let mut footer = WincodeArchiveV2Footer::default();
     let mut timings = ArchiveV2Timings::from_env();
+    info!(
+        "Archive V2 registry-reuse async ordered zstd writer enabled (two-buffer pipeline, include_access={include_access})"
+    );
+    let mut async_blocks_writer = Some(OrderedAsyncBlockWriter::start(
+        blocks_file,
+        blocks_path.clone(),
+        level,
+        HOT_BLOCK_OUTPUT_BUFFER_SIZE,
+        timings.detailed,
+    )?);
     let mut progress = ProgressTracker::new("Archive V2 Hot Write");
     let mut block_id = 0u32;
     let mut rolling_blockhashes = RollingBlockhashIndex::new(ROLLING_BLOCKHASH_CAPACITY);
@@ -967,12 +983,8 @@ pub(crate) fn build_hot_blocks(
         rolling_blockhashes.insert(genesis.genesis_hash, 0, 0)?;
     }
 
-    let mut rows = Vec::new();
     let mut access_rows = Vec::new();
-    let mut blob_offset = 0u64;
     let mut access_offset = 0u64;
-    let mut uncompressed_bytes = 0u64;
-    let mut compressed_bytes = 0u64;
     let mut access_file_bytes = 0u64;
     let mut first_tx_ordinal = 0u64;
     let mut first_signature_ordinal = 0u64;
@@ -1081,28 +1093,18 @@ pub(crate) fn build_hot_blocks(
                     wincode_leb128_config(),
                 )?;
                 timings.hot_block_serialize += block_serialize_started.elapsed();
-                let uncompressed_len = u32::try_from(block_bytes.len())
-                    .context("hot archive v2 block payload exceeds u32::MAX")?;
-                let compress_bound = zstd::zstd_safe::compress_bound(block_bytes.len());
-                if compressed_buf.capacity() < compress_bound {
-                    compressed_buf.reserve(compress_bound.saturating_sub(compressed_buf.len()));
-                    timings.hot_zstd_buffer_reserves += 1;
-                }
-                timings.hot_zstd_buffer_capacity_max = timings
-                    .hot_zstd_buffer_capacity_max
-                    .max(compressed_buf.capacity());
-                let compress_started = timings.detail_timer();
-                compressor
-                    .compress_to_buffer(&block_bytes, &mut compressed_buf)
-                    .with_context(|| format!("zstd compress hot block_id {block_id}"))?;
-                timings.hot_zstd_compress += compress_started.elapsed();
-                let compressed_len = u32::try_from(compressed_buf.len())
-                    .context("compressed hot archive v2 block exceeds u32::MAX")?;
-                let write_started = timings.detail_timer();
-                blocks_writer
-                    .write_all(&compressed_buf)
-                    .with_context(|| format!("write {}", blocks_path.display()))?;
-                timings.hot_block_write += write_started.elapsed();
+                block_bytes = async_blocks_writer
+                    .as_mut()
+                    .context("ordered hot-block writer is missing")?
+                    .submit(OrderedBlockWriteJob {
+                        block_bytes,
+                        block_id,
+                        slot,
+                        tx_count,
+                        first_tx_ordinal,
+                        first_signature_ordinal,
+                        signature_count: block_signature_count,
+                    })?;
                 let poh_started = timings.detail_timer();
                 poh_writer.write(&WincodeArchiveV2PohRecord {
                     block_id,
@@ -1155,20 +1157,6 @@ pub(crate) fn build_hot_blocks(
                 timings.wincode_encode += encode_started.elapsed();
                 hot_block_buffers.recycle(hot_block);
 
-                rows.push(ArchiveV2HotBlockIndexRow {
-                    block_id,
-                    slot,
-                    compressed_offset: blob_offset,
-                    compressed_len,
-                    uncompressed_len,
-                    tx_count,
-                    first_tx_ordinal,
-                    first_signature_ordinal,
-                    signature_count: block_signature_count,
-                });
-                blob_offset += compressed_len as u64;
-                uncompressed_bytes += uncompressed_len as u64;
-                compressed_bytes += compressed_len as u64;
                 first_tx_ordinal += tx_count as u64;
                 first_signature_ordinal += block_signature_count as u64;
 
@@ -1189,7 +1177,7 @@ pub(crate) fn build_hot_blocks(
                     include_access.then_some(&mut access_signature_bytes),
                 );
                 hot_block_buffers.trim();
-                if max_blocks.is_some_and(|limit| rows.len() as u64 >= limit) {
+                if max_blocks.is_some_and(|limit| u64::from(block_id) >= limit) {
                     break;
                 }
                 continue;
@@ -1200,9 +1188,23 @@ pub(crate) fn build_hot_blocks(
         timings.classify += classify_started.elapsed();
     }
 
-    blocks_writer
-        .flush()
-        .with_context(|| format!("flush {}", blocks_path.display()))?;
+    // Close the CAR before joining the writer so its input buffers are not
+    // retained during output finalization.
+    drop(scanner);
+    let writer_summary = async_blocks_writer
+        .take()
+        .context("ordered hot-block writer is missing at finalization")?
+        .finish()?;
+    let rows = writer_summary.rows;
+    let blob_offset = writer_summary.blob_offset;
+    let uncompressed_bytes = writer_summary.uncompressed_bytes;
+    let compressed_bytes = writer_summary.compressed_bytes;
+    timings.hot_zstd_compress += writer_summary.zstd_compress;
+    timings.hot_block_write += writer_summary.block_write;
+    timings.hot_zstd_buffer_reserves += writer_summary.zstd_buffer_reserves;
+    timings.hot_zstd_buffer_capacity_max = timings
+        .hot_zstd_buffer_capacity_max
+        .max(writer_summary.zstd_buffer_capacity_max);
     signatures_writer
         .flush()
         .with_context(|| format!("flush {}", signatures_path.display()))?;
@@ -1307,7 +1309,7 @@ pub(crate) fn build_hot_blocks(
     Ok(())
 }
 
-struct FirstSeenBlockWriteJob {
+struct OrderedBlockWriteJob {
     block_bytes: Vec<u8>,
     block_id: u32,
     slot: u64,
@@ -1318,7 +1320,7 @@ struct FirstSeenBlockWriteJob {
 }
 
 #[derive(Default)]
-struct FirstSeenBlockWriteSummary {
+struct OrderedBlockWriteSummary {
     rows: Vec<ArchiveV2HotBlockIndexRow>,
     blob_offset: u64,
     uncompressed_bytes: u64,
@@ -1329,25 +1331,26 @@ struct FirstSeenBlockWriteSummary {
     zstd_buffer_capacity_max: usize,
 }
 
-/// A bounded, ordered compression stage for the first-seen builder.
+/// A bounded, ordered compression stage shared by hot-block builders.
 ///
 /// The producer and worker own one encoded block buffer each. Once the first
 /// block is submitted, CAR decode/encoding can fill the other buffer while the
 /// worker compresses and writes. The worker is deliberately single-threaded:
 /// it owns one reusable zstd context, one compressed buffer, and the sequential
 /// output writer, so output bytes and index order remain deterministic.
-struct FirstSeenAsyncBlockWriter {
-    jobs: Option<mpsc::SyncSender<FirstSeenBlockWriteJob>>,
+struct OrderedAsyncBlockWriter {
+    jobs: Option<mpsc::SyncSender<OrderedBlockWriteJob>>,
     recycled: mpsc::Receiver<Vec<u8>>,
     spare: Option<Vec<u8>>,
-    worker: Option<thread::JoinHandle<Result<FirstSeenBlockWriteSummary>>>,
+    worker: Option<thread::JoinHandle<Result<OrderedBlockWriteSummary>>>,
 }
 
-impl FirstSeenAsyncBlockWriter {
+impl OrderedAsyncBlockWriter {
     fn start(
         blocks_file: File,
         blocks_path: PathBuf,
         level: i32,
+        output_buffer_size: usize,
         detailed_timings: bool,
     ) -> Result<Self> {
         // One queued job plus one buffer being processed bounds the stage to
@@ -1357,18 +1360,19 @@ impl FirstSeenAsyncBlockWriter {
         // It still holds at most the two buffers owned by this pipeline.
         let (recycled_tx, recycled_rx) = mpsc::sync_channel(2);
         let worker = thread::Builder::new()
-            .name("first-seen-zstd".to_owned())
+            .name("ordered-hot-zstd".to_owned())
             .spawn(move || {
-                run_first_seen_block_writer(
+                run_ordered_block_writer(
                     blocks_file,
                     &blocks_path,
                     level,
+                    output_buffer_size,
                     detailed_timings,
                     jobs_rx,
                     recycled_tx,
                 )
             })
-            .context("spawn first-seen zstd writer")?;
+            .context("spawn ordered zstd writer")?;
         Ok(Self {
             jobs: Some(jobs_tx),
             recycled: recycled_rx,
@@ -1377,12 +1381,12 @@ impl FirstSeenAsyncBlockWriter {
         })
     }
 
-    fn submit(&mut self, job: FirstSeenBlockWriteJob) -> Result<Vec<u8>> {
+    fn submit(&mut self, job: OrderedBlockWriteJob) -> Result<Vec<u8>> {
         let Some(jobs) = self.jobs.as_ref() else {
-            bail!("first-seen zstd writer is already closed")
+            bail!("ordered zstd writer is already closed")
         };
         if jobs.send(job).is_err() {
-            return Err(self.worker_stopped_error("submit first-seen block"));
+            return Err(self.worker_stopped_error("submit ordered block"));
         }
 
         let mut next = if let Some(spare) = self.spare.take() {
@@ -1391,7 +1395,7 @@ impl FirstSeenAsyncBlockWriter {
             match self.recycled.recv() {
                 Ok(buffer) => buffer,
                 Err(_) => {
-                    return Err(self.worker_stopped_error("wait for first-seen encoded buffer"));
+                    return Err(self.worker_stopped_error("wait for ordered encoded buffer"));
                 }
             }
         };
@@ -1399,31 +1403,31 @@ impl FirstSeenAsyncBlockWriter {
         Ok(next)
     }
 
-    fn finish(mut self) -> Result<FirstSeenBlockWriteSummary> {
+    fn finish(mut self) -> Result<OrderedBlockWriteSummary> {
         self.jobs.take();
         self.join_worker()
     }
 
-    fn join_worker(&mut self) -> Result<FirstSeenBlockWriteSummary> {
+    fn join_worker(&mut self) -> Result<OrderedBlockWriteSummary> {
         let worker = self
             .worker
             .take()
-            .context("first-seen zstd writer join handle is missing")?;
+            .context("ordered zstd writer join handle is missing")?;
         worker
             .join()
-            .map_err(|_| anyhow!("first-seen zstd writer thread panicked"))?
+            .map_err(|_| anyhow!("ordered zstd writer thread panicked"))?
     }
 
     fn worker_stopped_error(&mut self, operation: &'static str) -> anyhow::Error {
         self.jobs.take();
         match self.join_worker() {
-            Ok(_) => anyhow!("{operation}: first-seen zstd writer exited early"),
+            Ok(_) => anyhow!("{operation}: ordered zstd writer exited early"),
             Err(error) => error.context(operation),
         }
     }
 }
 
-impl Drop for FirstSeenAsyncBlockWriter {
+impl Drop for OrderedAsyncBlockWriter {
     fn drop(&mut self) {
         // Ensure an error in CAR decode or a sidecar writer cannot leave a
         // detached compressor writing into an incomplete candidate archive.
@@ -1434,24 +1438,25 @@ impl Drop for FirstSeenAsyncBlockWriter {
     }
 }
 
-fn run_first_seen_block_writer(
+fn run_ordered_block_writer(
     blocks_file: File,
     blocks_path: &Path,
     level: i32,
+    output_buffer_size: usize,
     detailed_timings: bool,
-    jobs: mpsc::Receiver<FirstSeenBlockWriteJob>,
+    jobs: mpsc::Receiver<OrderedBlockWriteJob>,
     recycled: mpsc::SyncSender<Vec<u8>>,
-) -> Result<FirstSeenBlockWriteSummary> {
-    let mut writer = BufWriter::with_capacity(ARCHIVE_PRE_HOT_IO_BUFFER, blocks_file);
+) -> Result<OrderedBlockWriteSummary> {
+    let mut writer = BufWriter::with_capacity(output_buffer_size, blocks_file);
     let mut compressor =
-        zstd::bulk::Compressor::new(level).context("create first-seen zstd compressor")?;
+        zstd::bulk::Compressor::new(level).context("create ordered zstd compressor")?;
     let mut compressed = Vec::new();
-    let mut summary = FirstSeenBlockWriteSummary::default();
+    let mut summary = OrderedBlockWriteSummary::default();
 
     while let Ok(mut job) = jobs.recv() {
         let result = (|| -> Result<()> {
             let uncompressed_len = u32::try_from(job.block_bytes.len())
-                .context("first-seen hot archive block exceeds u32::MAX")?;
+                .context("hot archive block exceeds u32::MAX")?;
             compressed.clear();
             let compress_bound = zstd::zstd_safe::compress_bound(job.block_bytes.len());
             if compressed.capacity() < compress_bound {
@@ -1464,10 +1469,10 @@ fn run_first_seen_block_writer(
             let compress_started = DetailTimer::start(detailed_timings);
             compressor
                 .compress_to_buffer(&job.block_bytes, &mut compressed)
-                .with_context(|| format!("zstd compress first-seen block_id {}", job.block_id))?;
+                .with_context(|| format!("zstd compress ordered block_id {}", job.block_id))?;
             summary.zstd_compress += compress_started.elapsed();
-            let compressed_len = u32::try_from(compressed.len())
-                .context("compressed first-seen hot block exceeds u32::MAX")?;
+            let compressed_len =
+                u32::try_from(compressed.len()).context("compressed hot block exceeds u32::MAX")?;
 
             let write_started = DetailTimer::start(detailed_timings);
             writer
@@ -1723,10 +1728,11 @@ pub(crate) fn build_hot_blocks_first_seen(
     );
     let mut blocks_writer = None::<BufWriter<File>>;
     let mut compressor = None::<zstd::bulk::Compressor<'static>>;
-    let mut async_blocks_writer = Some(FirstSeenAsyncBlockWriter::start(
+    let mut async_blocks_writer = Some(OrderedAsyncBlockWriter::start(
         blocks_file,
         blocks_path.clone(),
         level,
+        ARCHIVE_PRE_HOT_IO_BUFFER,
         timings.detailed,
     )?);
     let mut progress = ProgressTracker::new("Archive V2 FirstSeen Hot Write");
@@ -1869,7 +1875,7 @@ pub(crate) fn build_hot_blocks_first_seen(
                 let uncompressed_len = u32::try_from(block_bytes.len())
                     .context("first-seen hot archive block exceeds u32::MAX")?;
                 if let Some(async_writer) = async_blocks_writer.as_mut() {
-                    block_bytes = async_writer.submit(FirstSeenBlockWriteJob {
+                    block_bytes = async_writer.submit(OrderedBlockWriteJob {
                         block_bytes,
                         block_id,
                         slot,
@@ -3575,12 +3581,6 @@ pub(crate) fn prepare_live_registry_from_runs(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LiveFinalizationSidecars {
-    Canonical,
-    DegradedRepair,
-}
-
 struct LiveHotBuildReport {
     blocks: u64,
     transactions: u64,
@@ -3590,23 +3590,16 @@ struct LiveHotBuildReport {
 }
 
 pub(crate) fn build_hot_blocks_from_live_capture(
-    capture_dir: &Path,
-    output_dir: &Path,
-    level: i32,
-    max_blocks: Option<u64>,
-    resume: bool,
-    registry_source: LiveRegistrySource,
+    _capture_dir: &Path,
+    _output_dir: &Path,
+    _level: i32,
+    _max_blocks: Option<u64>,
+    _resume: bool,
+    _registry_source: LiveRegistrySource,
 ) -> Result<()> {
-    build_hot_blocks_from_live_capture_inner(
-        capture_dir,
-        output_dir,
-        level,
-        max_blocks,
-        resume,
-        registry_source,
-        LiveFinalizationSidecars::Canonical,
+    anyhow::bail!(
+        "canonical Archive V2 publication from a legacy live capture is disabled: the capture has no verified shred-boundary evidence; use the Hivezilla V1 candidate/compaction path"
     )
-    .map(|_| ())
 }
 
 pub(crate) fn build_degraded_hot_blocks_from_repair(
@@ -3624,14 +3617,13 @@ pub(crate) fn build_degraded_hot_blocks_from_repair(
         );
         return Ok(());
     };
-    let report = build_hot_blocks_from_live_capture_inner(
+    let report = build_degraded_hot_blocks_inner(
         materialized_dir,
         &stage.path,
         level,
         max_blocks,
         false,
         LiveRegistrySource::Runs,
-        LiveFinalizationSidecars::DegradedRepair,
     )?;
     if max_blocks.is_some() {
         info!(
@@ -3663,14 +3655,13 @@ pub(crate) fn build_degraded_hot_blocks_from_repair(
     )
 }
 
-fn build_hot_blocks_from_live_capture_inner(
+fn build_degraded_hot_blocks_inner(
     capture_dir: &Path,
     output_dir: &Path,
     level: i32,
     max_blocks: Option<u64>,
     resume: bool,
     registry_source: LiveRegistrySource,
-    sidecars: LiveFinalizationSidecars,
 ) -> Result<LiveHotBuildReport> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
@@ -3683,7 +3674,6 @@ fn build_hot_blocks_from_live_capture_inner(
     let live_pubkey_runs_dir = capture_dir.join("index").join(LIVE_PUBKEY_RUNS_DIR);
     let live_blockhash_registry_path = capture_dir.join("index").join(BLOCKHASH_REGISTRY_FILE);
     let live_signatures_path = capture_dir.join("index").join(ARCHIVE_V2_SIGNATURES_FILE);
-    let live_poh_path = capture_dir.join("poh").join(POH_FILE);
     anyhow::ensure!(
         crate::file_nonempty(&live_blocks_path),
         "live block file missing or empty: {}",
@@ -3710,14 +3700,6 @@ fn build_hot_blocks_from_live_capture_inner(
         live_block_count,
         crate::SLOTS_PER_EPOCH
     );
-    if sidecars == LiveFinalizationSidecars::Canonical {
-        anyhow::ensure!(
-            crate::file_nonempty(&live_poh_path),
-            "live PoH sidecar missing or empty: {}",
-            live_poh_path.display()
-        );
-    }
-
     let registry_path = output_dir.join(REGISTRY_FILE);
     let registry_counts_path = output_dir.join(REGISTRY_COUNTS_FILE);
     if resume
@@ -3820,21 +3802,11 @@ fn build_hot_blocks_from_live_capture_inner(
         }
     }
     let poh_path = output_dir.join(POH_FILE);
-    if sidecars == LiveFinalizationSidecars::Canonical {
-        if !(resume && crate::file_nonempty(&poh_path)) {
-            if let Some(limit) = max_blocks {
-                copy_live_poh_prefix(&live_poh_path, &poh_path, limit)?;
-            } else {
-                link_or_copy_registry_sidecar(&live_poh_path, &poh_path)?;
-            }
-        }
-    } else {
-        anyhow::ensure!(
-            !poh_path.exists(),
-            "degraded repair finalization refuses canonical PoH output {}",
-            poh_path.display()
-        );
-    }
+    anyhow::ensure!(
+        !poh_path.exists(),
+        "degraded repair finalization refuses canonical PoH output {}",
+        poh_path.display()
+    );
 
     let registry_index_path = output_dir.join(REGISTRY_INDEX_FILE);
     let key_index = load_or_build_registry_key_index(&registry_path, &registry_index_path, resume)?;
@@ -3882,21 +3854,11 @@ fn build_hot_blocks_from_live_capture_inner(
                 signatures_file,
             ))
         };
-    let mut shredding_writer = if sidecars == LiveFinalizationSidecars::Canonical {
-        let shredding_file = File::create(&shredding_path)
-            .with_context(|| format!("create {}", shredding_path.display()))?;
-        Some(WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
-            LIVE_FINALIZER_IO_BUFFER_SIZE,
-            shredding_file,
-        )))
-    } else {
-        anyhow::ensure!(
-            !shredding_path.exists(),
-            "degraded repair finalization refuses canonical shredding output {}",
-            shredding_path.display()
-        );
-        None
-    };
+    anyhow::ensure!(
+        !shredding_path.exists(),
+        "degraded repair finalization refuses canonical shredding output {}",
+        shredding_path.display()
+    );
 
     write_hot_meta(
         &mut meta_writer,
@@ -3994,16 +3956,6 @@ fn build_hot_blocks_from_live_capture_inner(
             .write_all(&compressed_buf)
             .with_context(|| format!("write {}", blocks_path.display()))?;
         timings.hot_block_write += write_started.elapsed();
-        if let Some(shredding_writer) = shredding_writer.as_mut() {
-            let shredding_started = timings.detail_timer();
-            shredding_writer.write(&WincodeArchiveV2ShreddingRecord {
-                block_id,
-                slot,
-                shredding: Vec::new(),
-            })?;
-            timings.hot_poh_write += shredding_started.elapsed();
-        }
-
         rows.push(ArchiveV2HotBlockIndexRow {
             block_id,
             slot,
@@ -4073,9 +4025,6 @@ fn build_hot_blocks_from_live_capture_inner(
             expected_signature_bytes
         );
     }
-    if let Some(shredding_writer) = shredding_writer.as_mut() {
-        shredding_writer.flush()?;
-    }
     vote_hashes.write(&vote_hash_registry_path)?;
     write_archive_v2_hot_block_index(&index_path, blob_offset, level, 0, &rows)?;
     write_hot_meta(
@@ -4097,16 +4046,6 @@ fn build_hot_blocks_from_live_capture_inner(
     } else {
         0.0
     };
-    let poh_display = if sidecars == LiveFinalizationSidecars::Canonical {
-        poh_path.display().to_string()
-    } else {
-        "omitted_noncanonical".to_string()
-    };
-    let shredding_display = if sidecars == LiveFinalizationSidecars::Canonical {
-        shredding_path.display().to_string()
-    } else {
-        "omitted_noncanonical".to_string()
-    };
     info!(
         "Archive V2 live hot-block build complete in {:.2}s: blocks={} txs={} signatures={} level={} max_blocks={:?} uncompressed_bytes={} compressed_bytes={} ratio_pct={:.2} nonce_recent_blockhashes={} blocks_file={} index={} meta={} signatures={} vote_hash_registry={} poh={} shredding={}",
         started.elapsed().as_secs_f64(),
@@ -4124,8 +4063,8 @@ fn build_hot_blocks_from_live_capture_inner(
         meta_path.display(),
         signatures_path.display(),
         vote_hash_registry_path.display(),
-        poh_display,
-        shredding_display
+        "omitted_noncanonical",
+        "omitted_noncanonical"
     );
     info!(
         "Archive V2 live hot timings: optimize_no_registry_total={:.3}s tx_decode_compact={:.3}s metadata_decode_compact={:.3}s metadata_logs_decode_compact={:.3}s metadata_pubkey_compact={:.3}s rewards_decode_compact={:.3}s hot_message_build={:.3}s hot_message_encode={:.3}s hot_metadata_encode={:.3}s hot_signature_write={:.3}s hot_block_serialize={:.3}s hot_zstd_compress={:.3}s hot_block_write={:.3}s hot_shredding_write={:.3}s zstd_buffer_reserves={} zstd_buffer_capacity_max={}",
@@ -5813,40 +5752,6 @@ fn copy_file_prefix(source: &Path, target: &Path, bytes: u64) -> Result<()> {
     writer
         .flush()
         .with_context(|| format!("flush {}", target.display()))?;
-    Ok(())
-}
-
-fn copy_live_poh_prefix(source: &Path, target: &Path, records: u64) -> Result<()> {
-    if target.exists() {
-        std::fs::remove_file(target).with_context(|| format!("remove {}", target.display()))?;
-    }
-    let source_file = File::open(source).with_context(|| format!("open {}", source.display()))?;
-    let target_file =
-        File::create(target).with_context(|| format!("create {}", target.display()))?;
-    let mut reader = WincodeLeb128FramedReader::new(BufReader::with_capacity(
-        LIVE_FINALIZER_IO_BUFFER_SIZE,
-        source_file,
-    ));
-    let mut writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
-        LIVE_FINALIZER_IO_BUFFER_SIZE,
-        target_file,
-    ));
-    let mut copied = 0u64;
-    while copied < records {
-        let Some((_len, record)) = reader.read::<WincodeArchiveV2PohRecord>()? else {
-            break;
-        };
-        writer.write(&record)?;
-        copied += 1;
-    }
-    anyhow::ensure!(
-        copied == records,
-        "live PoH sidecar {} ended after {} records, expected at least {}",
-        source.display(),
-        copied,
-        records
-    );
-    writer.flush()?;
     Ok(())
 }
 
@@ -7665,38 +7570,17 @@ fn parse_hot_vote_instruction_data(
         .deserialize(data);
     let instruction = match instruction_result {
         Ok(instruction) => instruction,
-        Err(err) => {
+        Err(_) => {
             match try_parse_historical_tower_sync_instruction_data(
                 data,
                 slot_to_block_id,
                 vote_hashes,
-            )
-            .with_context(|| {
-                format!(
-                    "parse historical vote tower sync instruction variant={} len={} prefix={}",
-                    vote_instruction_variant_label(data),
-                    data.len(),
-                    hex_prefix(data, 32)
-                )
-            }) {
+            ) {
                 Ok(Some(parsed)) => return Ok(parsed),
-                Ok(None) if is_tower_sync_vote_variant(data) => {
+                Ok(None) | Err(_) => {
                     return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
                 }
-                Ok(None) => {}
-                Err(_) if is_tower_sync_vote_variant(data) => {
-                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
-                }
-                Err(historical_err) => return Err(historical_err),
             }
-            Err::<VoteInstruction, _>(err).with_context(|| {
-                format!(
-                    "canonical vote instruction decode failed: variant={} len={} prefix={}",
-                    vote_instruction_variant_label(data),
-                    data.len(),
-                    hex_prefix(data, 32)
-                )
-            })?
         }
     };
 
@@ -7706,10 +7590,7 @@ fn parse_hot_vote_instruction_data(
                 match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
                 {
                     Ok(update) => update,
-                    Err(err) if is_uncompactable_vote_update_error(&err) => {
-                        return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
-                    }
-                    Err(err) => return Err(err),
+                    Err(_) => return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec())),
                 };
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update)
         }
@@ -7718,10 +7599,7 @@ fn parse_hot_vote_instruction_data(
                 match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
                 {
                     Ok(update) => update,
-                    Err(err) if is_uncompactable_vote_update_error(&err) => {
-                        return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
-                    }
-                    Err(err) => return Err(err),
+                    Err(_) => return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec())),
                 };
             let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
@@ -7733,10 +7611,7 @@ fn parse_hot_vote_instruction_data(
             let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
             {
                 Ok(tower) => tower,
-                Err(err) if is_uncompactable_vote_update_error(&err) => {
-                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
-                }
-                Err(err) => return Err(err),
+                Err(_) => return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec())),
             };
             ArchiveV2HotInstructionData::VoteTowerSync(tower)
         }
@@ -7744,10 +7619,7 @@ fn parse_hot_vote_instruction_data(
             let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
             {
                 Ok(tower) => tower,
-                Err(err) if is_uncompactable_vote_update_error(&err) => {
-                    return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
-                }
-                Err(err) => return Err(err),
+                Err(_) => return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec())),
             };
             let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
             ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
@@ -7758,12 +7630,6 @@ fn parse_hot_vote_instruction_data(
         _ => ArchiveV2HotInstructionData::Raw(data.to_vec()),
     };
     Ok(parsed)
-}
-
-fn is_uncompactable_vote_update_error(err: &anyhow::Error) -> bool {
-    let message = format!("{err:#}");
-    message.contains("vote lockout history length")
-        && message.contains("exceeds MAX_LOCKOUT_HISTORY")
 }
 
 fn try_parse_historical_tower_sync_instruction_data(
@@ -7778,17 +7644,21 @@ fn try_parse_historical_tower_sync_instruction_data(
     let variant = cursor.read_u32_le()?;
     let parsed = match variant {
         14 => {
-            let tower = read_historical_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
+            let tower = read_historical_tower_sync(&mut cursor)?;
             cursor.ensure_eof()?;
-            ArchiveV2HotInstructionData::VoteTowerSync(tower)
+            ArchiveV2HotInstructionData::VoteTowerSync(compact_historical_tower_sync(
+                tower,
+                slot_to_block_id,
+                vote_hashes,
+            )?)
         }
         15 => {
-            let tower = read_historical_tower_sync(&mut cursor, slot_to_block_id, vote_hashes)?;
-            let switch_proof_hash = vote_hashes.ref_aux_hash(cursor.read_pubkey()?);
+            let tower = read_historical_tower_sync(&mut cursor)?;
+            let switch_proof_hash = cursor.read_pubkey()?;
             cursor.ensure_eof()?;
             ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
-                tower,
-                switch_proof_hash,
+                tower: compact_historical_tower_sync(tower, slot_to_block_id, vote_hashes)?,
+                switch_proof_hash: vote_hashes.ref_aux_hash(switch_proof_hash),
             }
         }
         _ => return Ok(None),
@@ -7796,11 +7666,17 @@ fn try_parse_historical_tower_sync_instruction_data(
     Ok(Some(parsed))
 }
 
+struct HistoricalTowerSync {
+    root: Option<u64>,
+    lockouts: Vec<(u64, u8)>,
+    hash: [u8; 32],
+    timestamp: Option<i64>,
+    block_id: [u8; 32],
+}
+
 fn read_historical_tower_sync(
     cursor: &mut VoteInstructionCursor<'_>,
-    slot_to_block_id: &GxHashMap<u64, u32>,
-    vote_hashes: &mut VoteHashRegistryBuilder,
-) -> Result<ArchiveV2VoteTowerSync> {
+) -> Result<HistoricalTowerSync> {
     let lockout_len = cursor.read_u64_le()?;
     anyhow::ensure!(
         lockout_len <= 31,
@@ -7820,34 +7696,42 @@ fn read_historical_tower_sync(
     let timestamp = cursor.read_option_i64_le()?;
     let block_id = cursor.read_pubkey()?;
 
-    let (update, last_slot) = archive_vote_state_update_from_parts(
+    Ok(HistoricalTowerSync {
         root,
-        lockouts.into_iter().map(Ok),
+        lockouts,
         hash,
         timestamp,
+        block_id,
+    })
+}
+
+fn compact_historical_tower_sync(
+    tower: HistoricalTowerSync,
+    slot_to_block_id: &GxHashMap<u64, u32>,
+    vote_hashes: &mut VoteHashRegistryBuilder,
+) -> Result<ArchiveV2VoteTowerSync> {
+    let (update, last_slot) = archive_vote_state_update_from_parts(
+        tower.root,
+        tower.lockouts.into_iter().map(Ok),
+        tower.hash,
+        tower.timestamp,
         slot_to_block_id,
         vote_hashes,
     )?;
-    let block_id_hash = vote_hashes.ref_block_id_hash(last_slot, block_id, slot_to_block_id)?;
+    let block_id_hash =
+        vote_hashes.ref_block_id_hash(last_slot, tower.block_id, slot_to_block_id)?;
     Ok(ArchiveV2VoteTowerSync {
         update,
         block_id_hash,
     })
 }
 
+#[cfg(test)]
 fn vote_instruction_variant_label(data: &[u8]) -> String {
     if data.len() < 4 {
         return "short".to_string();
     }
     u32::from_le_bytes([data[0], data[1], data[2], data[3]]).to_string()
-}
-
-fn is_tower_sync_vote_variant(data: &[u8]) -> bool {
-    data.len() >= 4
-        && matches!(
-            u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
-            14 | 15
-        )
 }
 
 fn hex_prefix(data: &[u8], max_len: usize) -> String {
@@ -10152,7 +10036,7 @@ fn compact_genesis_record(
             taper: genesis.inflation.taper,
             foundation: genesis.inflation.foundation,
             foundation_term: genesis.inflation.foundation_term,
-            padding: genesis.inflation.padding,
+            padding: genesis.inflation.storage.to_le_bytes(),
         },
         epoch_schedule: WincodeArchiveV2GenesisEpochSchedule {
             slots_per_epoch: genesis.epoch_schedule.slots_per_epoch,
@@ -10246,7 +10130,7 @@ fn no_registry_genesis_record(archive: &GenesisArchive) -> WincodeArchiveV2NoReg
             taper: genesis.inflation.taper,
             foundation: genesis.inflation.foundation,
             foundation_term: genesis.inflation.foundation_term,
-            padding: genesis.inflation.padding,
+            padding: genesis.inflation.storage.to_le_bytes(),
         },
         epoch_schedule: WincodeArchiveV2GenesisEpochSchedule {
             slots_per_epoch: genesis.epoch_schedule.slots_per_epoch,
@@ -20185,6 +20069,34 @@ mod tests {
     use solana_vote_interface::state::Lockout;
 
     #[test]
+    fn legacy_live_archive_publication_fails_before_creating_output() {
+        let output = std::env::temp_dir().join(format!(
+            "blockzilla-disabled-live-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&output);
+        let error = build_hot_blocks_from_live_capture(
+            Path::new("missing-live-capture"),
+            &output,
+            1,
+            None,
+            false,
+            LiveRegistrySource::Auto,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("publication from a legacy live capture is disabled")
+        );
+        assert!(!output.exists());
+    }
+
+    #[test]
     fn block_access_frame_limit_is_shared_and_inclusive() {
         let limit = usize::try_from(ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES).unwrap();
         assert_eq!(
@@ -20746,7 +20658,7 @@ mod tests {
     }
 
     #[test]
-    fn async_first_seen_block_writer_matches_ordered_sync_bytes_and_rows() {
+    fn ordered_async_block_writer_matches_sync_bytes_and_rows() {
         static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
 
         let path = std::env::temp_dir().join(format!(
@@ -20803,8 +20715,14 @@ mod tests {
         }
 
         let file = File::create(&path).unwrap();
-        let mut pipeline =
-            FirstSeenAsyncBlockWriter::start(file, path.clone(), level, true).unwrap();
+        let mut pipeline = OrderedAsyncBlockWriter::start(
+            file,
+            path.clone(),
+            level,
+            ARCHIVE_PRE_HOT_IO_BUFFER,
+            true,
+        )
+        .unwrap();
         let mut block_bytes = Vec::new();
         first_tx_ordinal = 0;
         first_signature_ordinal = 0;
@@ -20812,7 +20730,7 @@ mod tests {
             block_bytes.clear();
             block_bytes.extend_from_slice(payload);
             block_bytes = pipeline
-                .submit(FirstSeenBlockWriteJob {
+                .submit(OrderedBlockWriteJob {
                     block_bytes,
                     block_id: index as u32,
                     slot: 10_000 + index as u64 * 3,
@@ -20857,19 +20775,20 @@ mod tests {
     }
 
     #[test]
-    fn async_first_seen_block_writer_propagates_flush_error() {
+    fn ordered_async_block_writer_propagates_flush_error() {
         let read_only = File::open(std::env::current_exe().unwrap()).unwrap();
-        let mut pipeline = FirstSeenAsyncBlockWriter::start(
+        let mut pipeline = OrderedAsyncBlockWriter::start(
             read_only,
             PathBuf::from("read-only-test-output"),
             1,
+            ARCHIVE_PRE_HOT_IO_BUFFER,
             false,
         )
         .unwrap();
         let mut block_bytes = Vec::with_capacity(4096);
         block_bytes.extend_from_slice(&[0x44; 4096]);
         let _recycled = pipeline
-            .submit(FirstSeenBlockWriteJob {
+            .submit(OrderedBlockWriteJob {
                 block_bytes,
                 block_id: 0,
                 slot: 42,
@@ -21895,27 +21814,67 @@ mod tests {
     }
 
     #[test]
-    fn hot_vote_parser_rejects_invalid_instruction_payloads() {
+    fn hot_vote_parser_preserves_malformed_instruction_payloads() {
         let mut slots = GxHashMap::with_hasher(GxBuildHasher::default());
         slots.insert(1_000, 42);
         let mut vote_hashes = VoteHashRegistryBuilder::default();
 
+        // Mainnet epoch 761, slot 329125060, transaction
+        // 3R56pPRJ9RHtmTBCQxS9fVn4BCGqvjQybHeARc1YtwY155R9Q9RszHvaFL6LwvPNoJSGWv6K9jRfK7unbXRoD3j1,
+        // instruction 5. The failed transaction addressed the Vote program with
+        // base58 data `1`, i.e. the single byte 0x00. It is opaque chain data,
+        // so archive construction must preserve it instead of aborting.
+        let epoch_761_vote = vec![0x00];
+        let parsed = parse_hot_vote_instruction_data(&epoch_761_vote, &slots, &mut vote_hashes)
+            .expect("malformed on-chain vote payload must remain lossless");
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == epoch_761_vote)
+        );
+        assert_eq!(vote_hashes.compact_vote_ix, 0);
+        assert!(vote_hashes.rows.is_empty());
+
         let mut eof_vote = 12u32.to_le_bytes().to_vec();
         eof_vote.extend_from_slice(&0u64.to_le_bytes());
         eof_vote.push(0);
-        let err = parse_hot_vote_instruction_data(&eof_vote, &slots, &mut vote_hashes)
-            .expect_err("invalid vote payload must hard fail");
-        assert!(format!("{err:#}").contains("canonical vote instruction decode failed"));
+        let parsed = parse_hot_vote_instruction_data(&eof_vote, &slots, &mut vote_hashes)
+            .expect("truncated vote payload must remain lossless");
+        assert!(matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == eof_vote));
 
         let mut overflowing_short_vec = 12u32.to_le_bytes().to_vec();
         overflowing_short_vec.extend_from_slice(&0u64.to_le_bytes());
         overflowing_short_vec.extend_from_slice(&[0xff, 0xff, 0x7c]);
-        let err = parse_hot_vote_instruction_data(&overflowing_short_vec, &slots, &mut vote_hashes)
-            .expect_err("invalid vote payload must hard fail");
-        assert!(format!("{err:#}").contains("canonical vote instruction decode failed"));
+        let parsed =
+            parse_hot_vote_instruction_data(&overflowing_short_vec, &slots, &mut vote_hashes)
+                .expect("overflowing vote short-vec must remain lossless");
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == overflowing_short_vec)
+        );
+
+        // A malformed historical TowerSyncSwitch used to update the vote-hash
+        // registry before discovering that its switch proof was missing. Parsing
+        // and EOF validation must finish before compact hash references commit.
+        let mut truncated_historical_tower_switch = 15u32.to_le_bytes().to_vec();
+        truncated_historical_tower_switch.extend_from_slice(&1u64.to_le_bytes());
+        truncated_historical_tower_switch.extend_from_slice(&1_000u64.to_le_bytes());
+        truncated_historical_tower_switch.extend_from_slice(&1u32.to_le_bytes());
+        truncated_historical_tower_switch.push(0);
+        truncated_historical_tower_switch.extend_from_slice(&[7u8; 32]);
+        truncated_historical_tower_switch.push(0);
+        truncated_historical_tower_switch.extend_from_slice(&[8u8; 32]);
+        let parsed = parse_hot_vote_instruction_data(
+            &truncated_historical_tower_switch,
+            &slots,
+            &mut vote_hashes,
+        )
+        .expect("truncated historical TowerSyncSwitch must remain lossless");
+        assert!(
+            matches!(parsed, ArchiveV2HotInstructionData::UnknownVote(raw) if raw == truncated_historical_tower_switch)
+        );
 
         assert_eq!(vote_hashes.compact_vote_ix, 0);
         assert!(vote_hashes.rows.is_empty());
+        assert_eq!(vote_hashes.bank_hash_refs, 0);
+        assert_eq!(vote_hashes.block_id_refs, 0);
     }
 
     #[test]

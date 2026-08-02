@@ -2,6 +2,14 @@
 
 `blockzilla-format` contains the shared Archive V2 types, codecs, readers,
 writers, indexes, and registries used by Blockzilla and Archive V2 consumers.
+It also contains the bounded Replay V1 hot-payload codec used by the ongoing
+shred-to-replay work.
+
+Replay V1 payload format 8 is reserved but intentionally not accepted by the
+stream/job validators yet. The codec alone is not an activation: registry and
+blockhash resolution, signed-message expansion, status evidence, pinned Agave
+fixtures, and final-byte replay validation must land first. See the
+[Replay Projection V1 specification](../../docs/design/blockzilla-replay-projection-v1.md).
 
 Archive V2 is pre-1.0. Pin the Git revision that produced an archive and follow
 the [implemented format reference](../../docs/reference/archive-v2-hot-block-format.md)

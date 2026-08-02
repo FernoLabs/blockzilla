@@ -12,6 +12,7 @@ pub const GENERATION_DIGEST_DOMAIN: &[u8] = b"blockzilla/archive-v2-generation\0
 pub const BLOCKS_FILE: &str = blockzilla_format::ARCHIVE_V2_BLOCKS_FILE;
 pub const BLOCK_INDEX_FILE: &str = blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FILE;
 pub const META_FILE: &str = blockzilla_format::ARCHIVE_V2_META_FILE;
+pub const GENESIS_BIN_FILE: &str = blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE;
 pub const REGISTRY_FILE: &str = blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
 pub const SIGNATURES_FILE: &str = blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE;
 

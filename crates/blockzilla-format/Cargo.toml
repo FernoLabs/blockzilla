@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Archive V2 records, codecs, indexes, and registries for Blockzilla"
+description = "Archive V2 and Replay V1 records, codecs, indexes, and registries for Blockzilla"
 readme = "README.md"
 
 [features]
@@ -32,6 +32,7 @@ postcard = { version = "1.1.3", features = ["alloc","use-std"] }
 prost = "0.14.3"
 wincode = { version = "0.5.4", features = ["derive"] }
 solana-pubkey = "4.2.0"
+sha2 = "0.11.0"
 of-car-reader = { path = "../old-faithful/car-reader", default-features = false }
 blockzilla-log-parser = { path = "../blockzilla-log-parser" }
 data-encoding = "2.11.0"
