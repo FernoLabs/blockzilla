@@ -4,7 +4,8 @@
 The recorder is intentionally separate from the scheduler and maintenance
 workers. It observes their atomic status/control files and never signals a
 process. Private incidents contain process identity and resource samples; use
-publish-runtime-operations.py to create the redacted public feed.
+the Rust watcher gateway's `publish-runtime-operations` command to create the
+redacted public feed.
 """
 
 from __future__ import annotations

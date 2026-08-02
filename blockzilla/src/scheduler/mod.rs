@@ -25,7 +25,7 @@ use std::{
     convert::Infallible,
     ffi::CString,
     fs::{self, File, OpenOptions},
-    io::{BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom},
     net::SocketAddr,
     os::{
         fd::AsRawFd,
@@ -89,6 +89,7 @@ const LIVE_REPAIR_COMPACTED_MARKER: &str = "REPAIR-COMPACTED.json";
 const LIVE_REPAIR_SOURCE_MATERIALIZED_MARKER: &str = "repair/source-REPAIR-MATERIALIZED.json";
 const LIVE_REPAIR_PLAN_FILE: &str = "repair/live-merge-plan.jsonl";
 const LIVE_REPAIR_AVAILABLE_POH_FILE: &str = "repair/available-poh.wincode";
+const LEGACY_LIVE_PUBLICATION_DISABLED: &str = "legacy live Archive V2 publication is disabled: gRPC captures do not carry verified shred-boundary evidence; use the Hivezilla V1 candidate/compaction path";
 const MAX_LIVE_REPAIR_MARKER_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIVE_REPAIR_COMPACTED_MARKER_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIVE_REPAIR_META_BYTES: u64 = 2 * 1024 * 1024;
@@ -111,7 +112,6 @@ const LEGACY_CAR_DOWNLOAD_ARGV0: &str = "hivezilla-car-download";
 const HIVEZILLA_EXECUTABLE: &[u8] = b"hivezilla";
 const LEGACY_LIVE_PRODUCER_EXECUTABLE: &[u8] = b"blockzilla-live-producer";
 const FINALIZER_BUILD_OVERHEAD_BYTES: u64 = 256 * 1024 * 1024;
-const FINALIZER_REWRITE_OVERHEAD_BYTES: u64 = 512 * 1024 * 1024;
 const DOWNLOAD_MAX_ATTEMPTS: u8 = 3;
 const PREFLIGHT_IO_BUFFER_MIB: u64 = 8;
 // zstd preflight accepts a windowLog up to 31 (2 GiB). Budget that window plus
@@ -183,7 +183,11 @@ pub struct SchedulerConfig {
     /// strict finalizer exclusivity.
     pub legacy_compact_finalizer_overlap: usize,
     pub legacy_compact_cpu_cores_per_worker: u64,
+    /// Compatibility ceiling for the load/run-queue fallback on hosts without
+    /// Linux CPU PSI. CPU PSI is the primary adaptive CPU-pressure signal.
     pub legacy_compact_cpu_budget_cores: u64,
+    pub legacy_compact_cpu_pause_some_avg10: f64,
+    pub legacy_compact_cpu_resume_some_avg10: f64,
     pub legacy_compact_io_mib_per_sec_per_worker: u64,
     pub legacy_compact_io_budget_mib_per_sec: u64,
     pub legacy_compact_auto_pause: bool,
@@ -592,6 +596,10 @@ pub struct PipelineSummary {
     #[serde(default)]
     pub legacy_compact_cpu_budget_cores: u64,
     #[serde(default)]
+    pub legacy_compact_cpu_pause_some_avg10: f64,
+    #[serde(default)]
+    pub legacy_compact_cpu_resume_some_avg10: f64,
+    #[serde(default)]
     pub legacy_compact_io_mib_per_sec_per_worker: u64,
     #[serde(default)]
     pub legacy_compact_io_budget_mib_per_sec: u64,
@@ -630,6 +638,16 @@ pub struct MachineSnapshot {
     #[serde(default)]
     pub archive_device_write_mib_per_sec: Option<f64>,
     pub load_1m: f64,
+    /// Runnable (running or waiting for CPU) tasks from `/proc/loadavg`.
+    /// Unlike `load_1m`, this instantaneous count excludes tasks blocked in
+    /// uninterruptible I/O sleep, so the CPU guard does not mistake writeback
+    /// congestion for CPU saturation.
+    #[serde(default)]
+    pub runnable_tasks: Option<u64>,
+    /// Percentage of the last ten seconds during which at least one runnable
+    /// task was stalled waiting for CPU, from `/proc/pressure/cpu`.
+    #[serde(default)]
+    pub cpu_pressure_some_avg10: Option<f64>,
     #[serde(default)]
     pub io_pressure_some_avg10: Option<f64>,
     #[serde(default)]
@@ -1174,6 +1192,9 @@ enum ChildKind {
     HistoricalFinalizer {
         epoch: u64,
     },
+    // Kept so the scheduler can identify and report a legacy process that was
+    // already running across an upgrade; new live finalizers are never spawned.
+    #[allow(dead_code)]
     LiveFinalizer {
         id: String,
         epoch: Option<u64>,
@@ -1262,6 +1283,16 @@ pub async fn run_scheduler(config: SchedulerConfig) -> Result<()> {
         "legacy compact minimum running ({}) exceeds effective capacity ({})",
         config.legacy_compact_min_running,
         legacy_resource.effective_slots,
+    );
+    anyhow::ensure!(
+        config.legacy_compact_cpu_pause_some_avg10.is_finite()
+            && config.legacy_compact_cpu_resume_some_avg10.is_finite()
+            && config.legacy_compact_cpu_resume_some_avg10 >= 0.0
+            && config.legacy_compact_cpu_pause_some_avg10 <= 100.0
+            && config.legacy_compact_cpu_resume_some_avg10 <= 100.0
+            && config.legacy_compact_cpu_pause_some_avg10
+                > config.legacy_compact_cpu_resume_some_avg10,
+        "legacy compact CPU pause some avg10 must be finite and greater than the non-negative resume threshold"
     );
     anyhow::ensure!(
         config.legacy_compact_io_pause_full_avg10.is_finite()
@@ -2247,10 +2278,7 @@ fn argv_matches_job(bytes: &[u8], blockzilla_bin: &Path, expected_path: &Path, k
         return false;
     }
     if kind == "car_download" {
-        return args.first().is_some_and(|arg| arg.ends_with(b"/sh"))
-            && args
-                .iter()
-                .any(|arg| *arg == LEGACY_CAR_DOWNLOAD_ARGV0.as_bytes());
+        return argv_matches_car_download(&args, blockzilla_bin);
     }
     if args.first().copied() != Some(blockzilla_bin.as_os_str().as_bytes()) {
         return false;
@@ -3352,6 +3380,8 @@ fn reconcile_filesystem(
     summary.legacy_compact_last_action = runtime.legacy_last_adaptive_action_reason.clone();
     summary.legacy_compact_cpu_cores_per_worker = config.legacy_compact_cpu_cores_per_worker;
     summary.legacy_compact_cpu_budget_cores = config.legacy_compact_cpu_budget_cores;
+    summary.legacy_compact_cpu_pause_some_avg10 = config.legacy_compact_cpu_pause_some_avg10;
+    summary.legacy_compact_cpu_resume_some_avg10 = config.legacy_compact_cpu_resume_some_avg10;
     summary.legacy_compact_io_mib_per_sec_per_worker =
         config.legacy_compact_io_mib_per_sec_per_worker;
     summary.legacy_compact_io_budget_mib_per_sec = config.legacy_compact_io_budget_mib_per_sec;
@@ -5147,51 +5177,10 @@ fn live_archive_packaged(path: &Path) -> bool {
 }
 
 fn live_finalizer_queue_item(
-    config: &SchedulerConfig,
-    capture: &LiveCaptureSnapshot,
+    _config: &SchedulerConfig,
+    _capture: &LiveCaptureSnapshot,
 ) -> Option<FinalizerQueueItem> {
-    if capture.superseded_by.is_some() {
-        return None;
-    }
-    let output = capture.output_path.as_deref()?;
-    let registry_ready = output.join(LIVE_REGISTRY_READY_MARKER).is_file()
-        && is_nonempty_file(&output.join(REGISTRY_FILE))
-        && is_nonempty_file(&output.join(REGISTRY_COUNTS_FILE));
-    let (phase, estimated_memory_bytes, estimated_disk_bytes) = if !registry_ready {
-        (
-            LiveFinalizerPhase::Registry,
-            finalizer_memory_floor_bytes(config),
-            MIN_FINALIZER_SCRATCH_BYTES,
-        )
-    } else if !is_nonempty_file(&output.join(REGISTRY_INDEX_FILE)) {
-        (
-            LiveFinalizerPhase::Mphf,
-            estimate_mphf_build_bytes(config, file_len(&output.join(REGISTRY_FILE))),
-            estimate_finalizer_scratch_bytes(file_len(&output.join(REGISTRY_FILE))),
-        )
-    } else {
-        (
-            LiveFinalizerPhase::Rewrite,
-            finalizer_memory_floor_bytes(config).max(
-                file_len(&output.join(REGISTRY_INDEX_FILE))
-                    .saturating_add(FINALIZER_REWRITE_OVERHEAD_BYTES),
-            ),
-            MIN_FINALIZER_SCRATCH_BYTES.max(
-                file_len(&output.join(REGISTRY_INDEX_FILE))
-                    .saturating_add(FINALIZER_REWRITE_OVERHEAD_BYTES),
-            ),
-        )
-    };
-    Some(FinalizerQueueItem {
-        kind: "live".to_string(),
-        epoch: capture.epoch,
-        id: capture.id.clone(),
-        phase: phase.as_str().to_string(),
-        state: "ready_to_package".to_string(),
-        estimated_memory_bytes,
-        estimated_disk_bytes,
-        deferred_reason: None,
-    })
+    None
 }
 
 fn finalizer_memory_floor_bytes(config: &SchedulerConfig) -> u64 {
@@ -5284,9 +5273,10 @@ fn legacy_compact_resource_blocked_reason(
         && capacity.effective_slots < config.legacy_compact_concurrency;
     configured_cap_applies.then(|| {
         format!(
-            "legacy compact resource admission: effective={} configured_cap={}; CPU load ceiling={} and device ceiling={} MiB/s are measured globally and never converted to worker slots",
+            "legacy compact resource admission: effective={} configured_cap={}; CPU PSI threshold={:.2}% (load/run-queue fallback ceiling={}) and device ceiling={} MiB/s are measured globally and never converted to worker slots",
             capacity.effective_slots,
             config.legacy_compact_concurrency,
+            config.legacy_compact_cpu_pause_some_avg10,
             config.legacy_compact_cpu_budget_cores,
             config.legacy_compact_io_budget_mib_per_sec,
         )
@@ -8303,17 +8293,26 @@ fn classify_live_capture(
             Some("target epoch is owned by a different pipeline item".to_string()),
         )
     } else if output_complete {
-        (LiveState::Complete, None)
+        (
+            LiveState::Blocked,
+            Some(format!(
+                "{LEGACY_LIVE_PUBLICATION_DISABLED}; existing legacy output remains noncanonical"
+            )),
+        )
     } else if output_packaged {
         (
-            LiveState::Packaged,
-            Some(
-                "compact archive packaged; first-seen manifest/access sidecars are not canonical"
-                    .to_string(),
-            ),
+            LiveState::Blocked,
+            Some(format!(
+                "{LEGACY_LIVE_PUBLICATION_DISABLED}; existing legacy output remains noncanonical"
+            )),
         )
     } else if active || owner_finalizing {
-        (LiveState::Packaging, None)
+        (
+            LiveState::Blocked,
+            Some(format!(
+                "{LEGACY_LIVE_PUBLICATION_DISABLED}; a legacy finalizer process is still running and must be stopped"
+            )),
+        )
     } else if let Some(message) = failure.or(ownership_failure) {
         (LiveState::Failed, Some(message))
     } else if progress_active {
@@ -8339,7 +8338,10 @@ fn classify_live_capture(
             Some("target epoch output already exists but is not complete".to_string()),
         )
     } else if ready {
-        (LiveState::ReadyToPackage, None)
+        (
+            LiveState::Blocked,
+            Some(LEGACY_LIVE_PUBLICATION_DISABLED.to_string()),
+        )
     } else if finalize_needed {
         (
             LiveState::RepairGate,
@@ -10410,7 +10412,21 @@ fn legacy_pressure_state(
         .io_pressure_full_avg10
         .is_some_and(|value| value >= config.legacy_compact_io_pause_full_avg10);
     let cpu_load_ceiling = config.legacy_compact_cpu_budget_cores as f64;
-    let cpu_high = cpu_load_ceiling > 0.0 && machine.load_1m >= cpu_load_ceiling;
+    // CPU PSI measures runnable-task stall time and excludes tasks blocked in
+    // uninterruptible I/O sleep, unlike load average. Prefer its ten-second
+    // window so archive writeback cannot masquerade as CPU saturation. The
+    // load + live-run-queue guard preserves behavior on kernels without PSI;
+    // a truly old snapshot without either falls back to the legacy load gate.
+    let cpu_high = machine.cpu_pressure_some_avg10.map_or_else(
+        || {
+            cpu_load_ceiling > 0.0
+                && machine.load_1m >= cpu_load_ceiling
+                && machine
+                    .runnable_tasks
+                    .is_none_or(|tasks| tasks as f64 >= cpu_load_ceiling)
+        },
+        |value| value >= config.legacy_compact_cpu_pause_some_avg10,
+    );
     if memory_low || io_high || cpu_high {
         let mut reasons = Vec::new();
         if memory_low {
@@ -10428,10 +10444,22 @@ fn legacy_pressure_state(
             ));
         }
         if cpu_high {
-            reasons.push(format!(
-                "load average {:.2} reached CPU load ceiling {:.2}",
-                machine.load_1m, cpu_load_ceiling,
-            ));
+            if let Some(cpu_pressure) = machine.cpu_pressure_some_avg10 {
+                reasons.push(format!(
+                    "CPU PSI some avg10 {:.2} reached pause threshold {:.2}",
+                    cpu_pressure, config.legacy_compact_cpu_pause_some_avg10,
+                ));
+            } else if let Some(runnable_tasks) = machine.runnable_tasks {
+                reasons.push(format!(
+                    "CPU PSI unavailable; load average {:.2} and {} runnable tasks reached fallback ceiling {:.2}",
+                    machine.load_1m, runnable_tasks, cpu_load_ceiling,
+                ));
+            } else {
+                reasons.push(format!(
+                    "CPU PSI and run-queue telemetry unavailable; load average {:.2} reached fallback ceiling {:.2}",
+                    machine.load_1m, cpu_load_ceiling,
+                ));
+            }
         }
         return LegacyPressureState::Pause(reasons.join("; "));
     }
@@ -10441,7 +10469,16 @@ fn legacy_pressure_state(
     let io_recovered = machine
         .io_pressure_full_avg10
         .is_none_or(|value| value <= config.legacy_compact_io_resume_full_avg10);
-    let cpu_recovered = cpu_load_ceiling == 0.0 || machine.load_1m <= cpu_load_ceiling * 0.85;
+    let cpu_recovered = machine.cpu_pressure_some_avg10.map_or_else(
+        || {
+            cpu_load_ceiling == 0.0
+                || machine.runnable_tasks.map_or_else(
+                    || machine.load_1m <= cpu_load_ceiling * 0.85,
+                    |tasks| tasks as f64 <= cpu_load_ceiling * 0.85,
+                )
+        },
+        |value| value <= config.legacy_compact_cpu_resume_some_avg10,
+    );
     if memory_recovered && io_recovered && cpu_recovered {
         LegacyPressureState::Resume
     } else {
@@ -10497,7 +10534,7 @@ fn plan_legacy_adaptive_action(
             })
             .map(|record| LegacyAdaptiveDecision::Resume {
                 epoch: record.epoch,
-                reason: "MemAvailable and IO PSI crossed resume thresholds".to_string(),
+                reason: "memory, CPU, and I/O pressure crossed resume thresholds".to_string(),
             }),
         LegacyPressureState::Hold => None,
     }
@@ -11494,82 +11531,36 @@ async fn spawn_car_download(config: &SchedulerConfig, epoch: u64) -> Result<Opti
         .state_root
         .join("logs")
         .join(format!("epoch-{epoch}-download.log"));
-    const SCRIPT: &str = r#"
-set -eu
-url=$1
-part=$2
-canonical=$3
-blockzilla=$4
-epoch=$5
-receipt=$6
-attempts=$7
-progress=$8
-alternate=$9
-required_memory_mib=${10}
-[ ! -e "$canonical" ]
-[ ! -e "$alternate" ]
-attempt=1
-download_ok=0
-while [ "$attempt" -le "$attempts" ]; do
-  if command -v aria2c >/dev/null 2>&1; then
-    if aria2c --continue=true --allow-overwrite=true --auto-file-renaming=false --file-allocation=none --max-connection-per-server=4 --split=4 --min-split-size=64M --dir="$(dirname "$part")" --out="$(basename "$part")" "$url"; then
-      download_ok=1
-      break
-    fi
-  fi
-  if command -v wget >/dev/null 2>&1 && wget -c -O "$part" "$url"; then
-    download_ok=1
-    break
-  fi
-  attempt=$((attempt + 1))
-done
-[ "$download_ok" -eq 1 ]
-[ -s "$part" ]
-[ ! -e "$canonical" ]
-[ ! -e "$alternate" ]
-sync -f "$part"
-if [ -r /proc/meminfo ]; then
-  required_memory_kib=$((required_memory_mib * 1024))
-  while :; do
-    available_memory_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)
-    [ -n "$available_memory_kib" ]
-    if [ "$available_memory_kib" -ge "$required_memory_kib" ]; then
-      break
-    fi
-    sleep 10
-  done
-fi
-"$blockzilla" preflight-car "$part" --epoch "$epoch" --receipt "$receipt" --io-buffer-mib 8 --progress-json "$progress"
-grep -Eq '"structurally_valid"[[:space:]]*:[[:space:]]*true' "$receipt"
-grep -Eq '"clean_eof"[[:space:]]*:[[:space:]]*true' "$receipt"
-grep -Eq '"eligible_for_compaction"[[:space:]]*:[[:space:]]*true' "$receipt"
-sync -f "$receipt"
-mv -n "$part" "$canonical"
-[ ! -e "$part" ]
-[ -s "$canonical" ]
-if [ -e "$alternate" ]; then
-  exit 1
-fi
-sync -f "$(dirname "$canonical")"
-"#;
+    // Deliberately omit acquire-car --expected-bytes. The scheduler currently
+    // has only a URL template, local partial length, and historical projection
+    // estimates; none is authoritative remote object-size metadata. A trusted
+    // caller may still supply the typed option to acquire-car directly.
     let args = vec![
-        "-c".into(),
-        SCRIPT.into(),
-        LEGACY_CAR_DOWNLOAD_ARGV0.into(),
+        "acquire-car".into(),
+        "--url".into(),
         url.into(),
+        "--part".into(),
         part_path.clone().into_os_string(),
+        "--canonical".into(),
         canonical_path.clone().into_os_string(),
-        config.blockzilla_bin.clone().into_os_string(),
-        epoch.to_string().into(),
-        receipt_path.clone().into_os_string(),
-        DOWNLOAD_MAX_ATTEMPTS.to_string().into(),
-        progress_path.clone().into_os_string(),
+        "--alternate".into(),
         alternate_canonical.into_os_string(),
+        "--epoch".into(),
+        epoch.to_string().into(),
+        "--receipt".into(),
+        receipt_path.clone().into_os_string(),
+        "--progress-json".into(),
+        progress_path.clone().into_os_string(),
+        "--max-attempts".into(),
+        DOWNLOAD_MAX_ATTEMPTS.to_string().into(),
+        "--required-memory-mib".into(),
         config
             .memory_reserve_mib
             .saturating_add(PREFLIGHT_MEMORY_MIB)
             .to_string()
             .into(),
+        "--io-buffer-mib".into(),
+        PREFLIGHT_IO_BUFFER_MIB.to_string().into(),
     ];
     // Publish the claim before spawn. pid=0 is a deliberate pre-spawn state;
     // the inherited epoch lock distinguishes it from a stale failed claim.
@@ -11581,9 +11572,8 @@ sync -f "$(dirname "$canonical")"
         &canonical_path,
         &receipt_path,
     )?;
-    let result = spawn_command_child(
+    let result = spawn_child(
         config,
-        Path::new("/bin/sh"),
         args,
         ChildKind::CarDownload {
             epoch,
@@ -11942,88 +11932,11 @@ async fn spawn_historical_finalizer(config: &SchedulerConfig, epoch: u64) -> Res
 }
 
 async fn spawn_live_finalizer(
-    config: &SchedulerConfig,
-    capture: &LiveCaptureSnapshot,
-    phase: LiveFinalizerPhase,
+    _config: &SchedulerConfig,
+    _capture: &LiveCaptureSnapshot,
+    _phase: LiveFinalizerPhase,
 ) -> Result<Option<ManagedChild>> {
-    let output = capture
-        .output_path
-        .as_deref()
-        .context("ready live capture has no epoch/output mapping")?;
-    if directory_has_entries(output) {
-        let owner = read_ownership(output).with_context(|| {
-            format!(
-                "refusing to continue live capture {} in unowned output {}",
-                capture.id,
-                output.display()
-            )
-        })?;
-        anyhow::ensure!(
-            owner.kind == "live_finalizer" && owner.id == capture.id,
-            "live output ownership {}/{} does not match capture {}",
-            owner.kind,
-            owner.id,
-            capture.id
-        );
-    }
-    let Some(lock) = try_exclusive_lock(&config.finalizer_lock)? else {
-        return Ok(None);
-    };
-    write_ownership(output, "live_finalizer", &capture.id, phase.as_str(), None)?;
-    let progress_path = config
-        .state_root
-        .join("progress")
-        .join(format!("live-{}-package.json", safe_segment(&capture.id)));
-    let log_path = config.state_root.join("logs").join(format!(
-        "live-{}-{}.log",
-        safe_segment(&capture.id),
-        phase.as_str()
-    ));
-    let args = match phase {
-        LiveFinalizerPhase::Registry => vec![
-            "prepare-archive-v2-live-registry".into(),
-            capture.capture_dir.as_os_str().to_owned(),
-            output.as_os_str().to_owned(),
-        ],
-        LiveFinalizerPhase::Mphf => vec![
-            "build-archive-v2-registry-index".into(),
-            output.join(REGISTRY_FILE).into_os_string(),
-            "--output".into(),
-            output.join(REGISTRY_INDEX_FILE).into_os_string(),
-        ],
-        LiveFinalizerPhase::Rewrite => vec![
-            "build-archive-v2-hot-blocks-from-live".into(),
-            capture.capture_dir.as_os_str().to_owned(),
-            output.as_os_str().to_owned(),
-            "--registry-source".into(),
-            "runs".into(),
-            "--level".into(),
-            config.level.to_string().into(),
-        ],
-    };
-    let result = spawn_child(
-        config,
-        args,
-        ChildKind::LiveFinalizer {
-            id: capture.id.clone(),
-            epoch: capture.epoch,
-            phase,
-        },
-        progress_path,
-        log_path,
-        Some(lock),
-    )
-    .await;
-    if let Err(error) = &result {
-        let _ = write_ownership(
-            output,
-            "live_finalizer",
-            &capture.id,
-            "failed",
-            Some(format!("live package spawn failed: {error:#}")),
-        );
-    }
-    result.map(Some)
+    anyhow::bail!(LEGACY_LIVE_PUBLICATION_DISABLED)
 }
 
 async fn spawn_child(
@@ -12091,9 +12004,11 @@ async fn spawn_command_child(
     ) {
         command.process_group(0);
     }
-    // Acquisition children inherit a duplicate of the epoch lock. The child
-    // therefore keeps ownership if the controller crashes, while the parent's
-    // normal lock descriptor remains CLOEXEC and cannot leak into later jobs.
+    // Acquisition children inherit a duplicate of the epoch lock. Keep the
+    // duplicate CLOEXEC in this multithreaded parent, then clear the bit only
+    // in the post-fork child. Temporarily clearing a process-wide descriptor
+    // flag before spawn could leak the lock through an unrelated concurrent
+    // exec.
     let inherited_lock = if matches!(
         &kind,
         ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. }
@@ -12102,13 +12017,33 @@ async fn spawn_command_child(
             .as_ref()
             .map(|lock| {
                 let inherited = lock.try_clone().context("clone acquisition lock")?;
-                set_close_on_exec(&inherited, false)?;
+                set_close_on_exec(&inherited, true)?;
                 Ok::<_, anyhow::Error>(inherited)
             })
             .transpose()?
     } else {
         None
     };
+    if matches!(&kind, ChildKind::CarDownload { .. })
+        && let Some(inherited_lock) = inherited_lock.as_ref()
+    {
+        // The Rust acquisition helper deliberately passes the descriptor on
+        // to aria2c. If its supervisor is hard-killed, the surviving writer
+        // retains exclusive epoch ownership and a restarted scheduler cannot
+        // launch a second writer against the same resumable part.
+        command.env(
+            crate::car_acquire::ACQUISITION_LOCK_FD_ENV,
+            inherited_lock.as_raw_fd().to_string(),
+        );
+    }
+    if let Some(inherited_fd) = inherited_lock.as_ref().map(AsRawFd::as_raw_fd) {
+        // SAFETY: this closure runs after fork and before exec. It only invokes
+        // async-signal-safe fcntl calls on a descriptor kept alive until spawn
+        // returns; the parent copy remains CLOEXEC throughout.
+        unsafe {
+            command.pre_exec(move || clear_close_on_exec_raw(inherited_fd));
+        }
+    }
     let child_result = command
         .spawn()
         .with_context(|| format!("spawn {} with {}", kind.key(), executable.display()));
@@ -12167,12 +12102,16 @@ async fn spawn_command_child(
 }
 
 async fn terminate_child_group(child: &mut ManagedChild) {
+    kill_child_process_group(child);
+    let _ = child.child.wait().await;
+}
+
+fn kill_child_process_group(child: &ManagedChild) {
     if let Some(pid) = child.pid {
         // SAFETY: acquisition children are spawned as leaders of their own
         // process groups; negative pid targets that isolated group.
         let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
     }
-    let _ = child.child.wait().await;
 }
 
 async fn reap_children(state: &Arc<AppState>, runtime: &mut RuntimeState) {
@@ -12188,13 +12127,20 @@ async fn reap_children(state: &Arc<AppState>, runtime: &mut RuntimeState) {
                     .acquisitions
                     .remove(&epoch)
                     .expect("acquisition child exists");
+                if !status.success() {
+                    // The Rust supervisor may have been killed while aria2c
+                    // remained in its process group. Stop every descendant
+                    // before dropping the scheduler's lock copy.
+                    kill_child_process_group(&child);
+                }
                 handle_child_exit(&state.config, runtime, child, status.success());
             }
             Some(Err(error)) => {
-                let child = runtime
+                let mut child = runtime
                     .acquisitions
                     .remove(&epoch)
                     .expect("acquisition child exists");
+                terminate_child_group(&mut child).await;
                 let message = format!("poll {}: {error:#}", child.kind.key());
                 set_runtime_failure(&state.config, runtime, child.kind.key(), message.clone());
                 record_error(&state.config, runtime, "child", message);
@@ -12700,6 +12646,19 @@ fn set_close_on_exec(file: &File, close_on_exec: bool) -> Result<()> {
     Ok(())
 }
 
+fn clear_close_on_exec_raw(fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl only reads descriptor flags for the supplied live fd.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fcntl only updates descriptor flags for the supplied live fd.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn historical_progress_path(root: &Path, epoch: u64) -> PathBuf {
     root.join("progress").join(format!("epoch-{epoch}.json"))
 }
@@ -12782,17 +12741,23 @@ fn process_cmdline_matches_acquisition(
         return false;
     }
     match kind {
-        "car_download" => {
-            args.iter()
-                .any(|arg| *arg == LEGACY_CAR_DOWNLOAD_ARGV0.as_bytes())
-                && args.first().is_some_and(|arg| arg.ends_with(b"/sh"))
-        }
+        "car_download" => argv_matches_car_download(&args, blockzilla_bin),
         "car_preflight" => {
             args.first().copied() == Some(blockzilla_bin.as_os_str().as_bytes())
                 && args.get(1).copied() == Some(b"preflight-car")
         }
         _ => false,
     }
+}
+
+fn argv_matches_car_download(args: &[&[u8]], blockzilla_bin: &Path) -> bool {
+    let rust_helper = args.first().copied() == Some(blockzilla_bin.as_os_str().as_bytes())
+        && args.get(1).copied() == Some(b"acquire-car");
+    let legacy_shell = args.first().is_some_and(|arg| arg.ends_with(b"/sh"))
+        && args
+            .iter()
+            .any(|arg| *arg == LEGACY_CAR_DOWNLOAD_ARGV0.as_bytes());
+    rust_helper || legacy_shell
 }
 
 fn write_ownership(
@@ -13909,6 +13874,20 @@ fn parse_psi_avg10(pressure: &str, class: &str) -> Option<f64> {
     })
 }
 
+fn parse_loadavg_snapshot(loadavg: &str) -> (f64, Option<u64>) {
+    let mut fields = loadavg.split_whitespace();
+    let load_1m = fields
+        .next()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0);
+    let runnable_tasks = fields
+        .nth(2)
+        .and_then(|value| value.split_once('/'))
+        .and_then(|(runnable, _total)| runnable.parse::<u64>().ok());
+    (load_1m, runnable_tasks)
+}
+
 fn pressure_avg10(path: &str) -> (Option<f64>, Option<f64>) {
     let Ok(pressure) = fs::read_to_string(path) else {
         return (None, None);
@@ -13929,10 +13908,11 @@ fn machine_snapshot(
     let memory_available_bytes = parse_meminfo_kib(&memory, "MemAvailable:").saturating_mul(1024);
     let swap_total_bytes = parse_meminfo_kib(&memory, "SwapTotal:").saturating_mul(1024);
     let swap_free_bytes = parse_meminfo_kib(&memory, "SwapFree:").saturating_mul(1024);
-    let load_1m = fs::read_to_string("/proc/loadavg")
+    let (load_1m, runnable_tasks) = fs::read_to_string("/proc/loadavg")
         .ok()
-        .and_then(|line| line.split_whitespace().next()?.parse().ok())
-        .unwrap_or(0.0);
+        .map(|line| parse_loadavg_snapshot(&line))
+        .unwrap_or_default();
+    let (cpu_pressure_some_avg10, _) = pressure_avg10("/proc/pressure/cpu");
     let (io_pressure_some_avg10, io_pressure_full_avg10) = pressure_avg10("/proc/pressure/io");
     let (memory_pressure_some_avg10, memory_pressure_full_avg10) =
         pressure_avg10("/proc/pressure/memory");
@@ -13959,6 +13939,8 @@ fn machine_snapshot(
         archive_device_read_mib_per_sec: None,
         archive_device_write_mib_per_sec: None,
         load_1m,
+        runnable_tasks,
+        cpu_pressure_some_avg10,
         io_pressure_some_avg10,
         io_pressure_full_avg10,
         memory_pressure_some_avg10,
@@ -14914,6 +14896,8 @@ mod tests {
             legacy_compact_finalizer_overlap: 0,
             legacy_compact_cpu_cores_per_worker: 1,
             legacy_compact_cpu_budget_cores: 1,
+            legacy_compact_cpu_pause_some_avg10: 50.0,
+            legacy_compact_cpu_resume_some_avg10: 20.0,
             legacy_compact_io_mib_per_sec_per_worker: 120,
             legacy_compact_io_budget_mib_per_sec: 120,
             legacy_compact_auto_pause: false,
@@ -18176,7 +18160,7 @@ mod tests {
     }
 
     #[test]
-    fn live_compact_output_is_packaged_but_not_historically_complete() {
+    fn legacy_live_compact_output_is_blocked_and_not_historically_complete() {
         let root = temp_root("classify-live-packaged");
         let mut config = test_config(&root);
         config.no_access = false;
@@ -18193,7 +18177,13 @@ mod tests {
         let runtime = RuntimeState::default();
 
         let live = classify_live_capture(&config, &runtime, capture.clone(), unix_now());
-        assert_eq!(live.state, LiveState::Packaged);
+        assert_eq!(live.state, LiveState::Blocked);
+        assert!(
+            live.message
+                .as_deref()
+                .unwrap()
+                .contains("existing legacy output remains noncanonical")
+        );
         let historical = classify_epoch(&config, &runtime, 700, unix_now());
         assert_eq!(historical.state, HistoricalState::Blocked);
 
@@ -18201,6 +18191,34 @@ mod tests {
         let incomplete_live = classify_live_capture(&config, &runtime, capture, unix_now());
         assert_ne!(incomplete_live.state, LiveState::Packaged);
         assert!(!live_archive_packaged(&output));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unowned_structurally_complete_legacy_live_output_is_never_complete() {
+        let root = temp_root("classify-unowned-live-output");
+        let mut config = test_config(&root);
+        config.no_access = true;
+        fs::create_dir_all(&config.archive_root).unwrap();
+        fs::create_dir_all(&config.live_root).unwrap();
+        let capture = config.live_root.join("epoch-700-capture-test");
+        fs::create_dir_all(&capture).unwrap();
+        fs::write(capture.join(LIVE_FINALIZE_MARKER), b"closed").unwrap();
+        let output = config.archive_root.join("epoch-700");
+        fs::create_dir_all(&output).unwrap();
+        write_live_candidate(&output);
+        assert!(historical_archive_strict_complete(&output, false, false));
+        assert!(read_ownership(&output).is_none());
+
+        let live = classify_live_capture(&config, &RuntimeState::default(), capture, unix_now());
+        assert_eq!(live.state, LiveState::Blocked);
+        assert!(
+            live.message
+                .as_deref()
+                .unwrap()
+                .contains("existing legacy output remains noncanonical")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -18235,7 +18253,14 @@ mod tests {
             classify_live_capture(&config, &RuntimeState::default(), first, unix_now());
         let second_state =
             classify_live_capture(&config, &RuntimeState::default(), second, unix_now());
-        assert_eq!(first_state.state, LiveState::Packaged);
+        assert_eq!(first_state.state, LiveState::Blocked);
+        assert!(
+            first_state
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("existing legacy output remains noncanonical")
+        );
         assert_eq!(second_state.state, LiveState::Blocked);
         assert!(
             second_state
@@ -18633,7 +18658,11 @@ mod tests {
 
         let classified =
             classify_live_capture(&config, &RuntimeState::default(), capture, unix_now());
-        assert_eq!(classified.state, LiveState::ReadyToPackage);
+        assert_eq!(classified.state, LiveState::Blocked);
+        assert_eq!(
+            classified.message.as_deref(),
+            Some(LEGACY_LIVE_PUBLICATION_DISABLED)
+        );
         assert_eq!(classified.blocks_written, 41);
         fs::remove_dir_all(root).unwrap();
     }
@@ -19194,7 +19223,7 @@ mod tests {
     }
 
     #[test]
-    fn live_finalizer_queue_advances_through_durable_stages() {
+    fn legacy_live_finalizer_queue_is_disabled() {
         let root = temp_root("live-finalizer-stages");
         let config = test_config(&root);
         let output = config.archive_root.join("epoch-700");
@@ -19223,21 +19252,15 @@ mod tests {
             updated_unix_secs: 0,
         };
 
-        let registry = live_finalizer_queue_item(&config, &capture).unwrap();
-        assert_eq!(registry.phase, "registry_merge");
-        assert_eq!(registry.estimated_memory_bytes, 512 * 1024 * 1024);
+        assert!(live_finalizer_queue_item(&config, &capture).is_none());
 
         fs::write(output.join(REGISTRY_FILE), vec![0; 64]).unwrap();
         fs::write(output.join(REGISTRY_COUNTS_FILE), [1]).unwrap();
         fs::write(output.join(LIVE_REGISTRY_READY_MARKER), b"ready").unwrap();
-        let mphf = live_finalizer_queue_item(&config, &capture).unwrap();
-        assert_eq!(mphf.phase, "mphf_build");
-        assert!(mphf.estimated_memory_bytes >= 512 * 1024 * 1024);
+        assert!(live_finalizer_queue_item(&config, &capture).is_none());
 
         fs::write(output.join(REGISTRY_INDEX_FILE), vec![0; 128]).unwrap();
-        let rewrite = live_finalizer_queue_item(&config, &capture).unwrap();
-        assert_eq!(rewrite.phase, "hot_rewrite");
-        assert!(rewrite.estimated_memory_bytes >= 512 * 1024 * 1024);
+        assert!(live_finalizer_queue_item(&config, &capture).is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -19980,13 +20003,14 @@ mod tests {
         );
         runtime.auto_paused_legacy.remove(&701);
         runtime.legacy_throughput_tuner.pending_action = None;
-        loaded.machine.load_1m = config.legacy_compact_cpu_budget_cores as f64 + 1.0;
+        loaded.machine.cpu_pressure_some_avg10 =
+            Some(config.legacy_compact_cpu_pause_some_avg10 + 1.0);
         adjust_legacy_workers_for_pressure(&config, &loaded, &mut runtime, commit_now + 1);
         assert!(
             runtime
                 .auto_paused_legacy
                 .get(&701)
-                .is_some_and(|record| record.reason.contains("CPU load ceiling"))
+                .is_some_and(|record| record.reason.contains("CPU PSI some avg10"))
         );
 
         // SAFETY: the fixture was spawned by spawn_child with process_group(0).
@@ -21773,6 +21797,113 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn acquisition_lock_is_made_inheritable_only_in_spawned_child() {
+        let root = temp_root("acquisition-lock-inheritance");
+        fs::create_dir_all(&root).unwrap();
+        let lock = File::create(root.join("epoch.lock")).unwrap();
+        set_close_on_exec(&lock, true).unwrap();
+        let fd = lock.as_raw_fd();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "test -e /proc/self/fd/$LOCK_FD"])
+            .env("LOCK_FD", fd.to_string());
+        // SAFETY: the closure performs only fcntl on the live descriptor kept
+        // in scope through spawn.
+        unsafe {
+            command.pre_exec(move || clear_close_on_exec_raw(fd));
+        }
+        let status = command.spawn().unwrap().wait().await.unwrap();
+        assert!(status.success());
+        // SAFETY: the parent descriptor remains live and must never have been
+        // made inheritable while another thread could spawn.
+        let parent_flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(parent_flags & libc::FD_CLOEXEC, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn acquisition_group_cleanup_kills_a_surviving_writer() {
+        let root = temp_root("acquisition-orphan-cleanup");
+        fs::create_dir_all(&root).unwrap();
+        let orphan_pid_path = root.join("orphan.pid");
+        let mut direct = Command::new("/bin/sh");
+        direct
+            .arg("-c")
+            .arg("sleep 30 & echo $! > \"$ORPHAN_PID_PATH\"")
+            .env("ORPHAN_PID_PATH", &orphan_pid_path)
+            .process_group(0);
+        let mut direct = direct.spawn().unwrap();
+        let group_pid = direct.id().unwrap();
+        let status = direct.wait().await.unwrap();
+        assert!(status.success());
+        let orphan_pid = fs::read_to_string(&orphan_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let managed = ManagedChild {
+            child: direct,
+            pid: Some(group_pid),
+            kind: ChildKind::CarDownload {
+                epoch: 700,
+                canonical_path: root.join("epoch-700.car"),
+                receipt_path: root.join("epoch-700.json"),
+            },
+            started_unix_secs: unix_now(),
+            progress_path: root.join("progress.json"),
+            log_path: root.join("download.log"),
+            _exclusive_lock: None,
+        };
+
+        kill_child_process_group(&managed);
+        let mut stopped = false;
+        for _ in 0..100 {
+            stopped = process_stat_identity(orphan_pid).is_none_or(|(state, _)| state == 'Z');
+            if stopped {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            stopped,
+            "orphaned acquisition writer survived group cleanup"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn car_download_identity_accepts_rust_helper_and_legacy_shell_only() {
+        let blockzilla = Path::new("/opt/blockzilla/bin/blockzilla");
+        let canonical = Path::new("/cars/epoch-700.car.zst");
+        let rust_helper = b"/opt/blockzilla/bin/blockzilla\0acquire-car\0--canonical\0/cars/epoch-700.car.zst\0--epoch\x00700\0";
+        assert!(argv_matches_job(
+            rust_helper,
+            blockzilla,
+            canonical,
+            "car_download"
+        ));
+
+        let legacy_shell =
+            b"/bin/sh\0-c\0script\0hivezilla-car-download\0/cars/epoch-700.car.zst\0";
+        assert!(argv_matches_job(
+            legacy_shell,
+            blockzilla,
+            canonical,
+            "car_download"
+        ));
+
+        let unrelated = b"/opt/blockzilla/bin/blockzilla\0preflight-car\0/cars/epoch-700.car.zst\0";
+        assert!(!argv_matches_job(
+            unrelated,
+            blockzilla,
+            canonical,
+            "car_download"
+        ));
+    }
+
     #[test]
     fn artifact_states_preserve_empty_valid_files_and_reject_bad_marker() {
         let root = temp_root("artifact-states");
@@ -21920,8 +22051,17 @@ mod tests {
     }
 
     #[test]
-    fn cpu_budget_is_a_dynamic_pressure_guard_with_resume_hysteresis() {
-        let root = temp_root("adaptive-cpu-pressure");
+    fn parses_linux_load_and_runnable_tasks() {
+        assert_eq!(
+            parse_loadavg_snapshot("12.73 8.00 4.00 3/581 12345\n"),
+            (12.73, Some(3))
+        );
+        assert_eq!(parse_loadavg_snapshot("invalid"), (0.0, None));
+    }
+
+    #[test]
+    fn cpu_psi_is_the_primary_pressure_guard_with_resume_hysteresis() {
+        let root = temp_root("adaptive-cpu-psi-pressure");
         let mut config = test_config(&root);
         config.legacy_compact_concurrency = 0;
         config.legacy_compact_auto_pause = true;
@@ -21930,23 +22070,68 @@ mod tests {
             memory_total_bytes: 16 * 1024 * 1024 * 1024,
             memory_available_bytes: 8 * 1024 * 1024 * 1024,
             io_pressure_full_avg10: None,
-            load_1m: 4.0,
+            load_1m: 40.0,
+            runnable_tasks: Some(40),
+            cpu_pressure_some_avg10: Some(50.0),
             ..MachineSnapshot::default()
         };
 
         assert!(matches!(
             legacy_pressure_state(&config, &machine),
             LegacyPressureState::Pause(reason)
-                if reason.contains("load average 4.00 reached CPU load ceiling 4.00")
+                if reason.contains("CPU PSI some avg10 50.00 reached pause threshold 50.00")
         ));
 
-        machine.load_1m = 3.6;
+        machine.cpu_pressure_some_avg10 = Some(35.0);
         assert_eq!(
             legacy_pressure_state(&config, &machine),
             LegacyPressureState::Hold
         );
 
-        machine.load_1m = 3.4;
+        machine.cpu_pressure_some_avg10 = Some(20.0);
+        assert_eq!(
+            legacy_pressure_state(&config, &machine),
+            LegacyPressureState::Resume
+        );
+    }
+
+    #[test]
+    fn cpu_psi_ignores_blocked_io_load_and_load_runqueue_remains_a_fallback() {
+        let root = temp_root("adaptive-d-state-load");
+        let mut config = test_config(&root);
+        config.legacy_compact_concurrency = 0;
+        config.legacy_compact_auto_pause = true;
+        config.legacy_compact_cpu_budget_cores = 12;
+        let mut machine = MachineSnapshot {
+            memory_total_bytes: 16 * 1024 * 1024 * 1024,
+            memory_available_bytes: 8 * 1024 * 1024 * 1024,
+            io_pressure_full_avg10: Some(2.94),
+            load_1m: 25.0,
+            runnable_tasks: Some(3),
+            cpu_pressure_some_avg10: Some(1.0),
+            ..MachineSnapshot::default()
+        };
+
+        assert_eq!(
+            legacy_pressure_state(&config, &machine),
+            LegacyPressureState::Resume
+        );
+
+        machine.runnable_tasks = Some(12);
+        assert_eq!(
+            legacy_pressure_state(&config, &machine),
+            LegacyPressureState::Resume,
+            "CPU PSI remains authoritative even when legacy load signals are high"
+        );
+
+        machine.cpu_pressure_some_avg10 = None;
+        assert!(matches!(
+            legacy_pressure_state(&config, &machine),
+            LegacyPressureState::Pause(reason)
+                if reason.contains("12 runnable tasks reached fallback ceiling 12.00")
+        ));
+
+        machine.runnable_tasks = Some(10);
         assert_eq!(
             legacy_pressure_state(&config, &machine),
             LegacyPressureState::Resume
@@ -22022,7 +22207,7 @@ mod tests {
             plan_legacy_adaptive_action(&config, &machine, 1, &[], &paused, 0, 100),
             Some(LegacyAdaptiveDecision::Resume {
                 epoch: 900,
-                reason: "MemAvailable and IO PSI crossed resume thresholds".to_string(),
+                reason: "memory, CPU, and I/O pressure crossed resume thresholds".to_string(),
             }),
             "missing PSI is unknown and the oldest auto-pause resumes first"
         );
@@ -22049,7 +22234,7 @@ mod tests {
             plan_legacy_adaptive_action(&config, &machine, 1, &[], &priority_paused, 0, 100,),
             Some(LegacyAdaptiveDecision::Resume {
                 epoch: 865,
-                reason: "MemAvailable and IO PSI crossed resume thresholds".to_string(),
+                reason: "memory, CPU, and I/O pressure crossed resume thresholds".to_string(),
             }),
             "a preferred epoch resumes before an older ordinary pause"
         );

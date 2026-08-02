@@ -1,3 +1,7 @@
+use crate::rpc_access::{
+    BackendReadTracker, DirectCacheVariant, RpcApiKeyRecord, api_key_digest, direct_cache_identity,
+    parse_bearer_key, rpc_method_for_metrics,
+};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use blockzilla_format::{
@@ -19,7 +23,7 @@ use blockzilla_format::{
     wincode_leb128_config,
 };
 use futures_channel::mpsc;
-use futures_util::{SinkExt, future};
+use futures_util::{SinkExt, StreamExt, future};
 use ruzstd::decoding::StreamingDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -33,8 +37,9 @@ use std::{
 use wasm_bindgen::{JsCast, JsValue};
 use wincode::{SchemaRead, io::Reader};
 use worker::{
-    Bucket, Cache, Fetch, Headers, Method, Range as R2Range, Request, RequestInit, Response,
-    Result, RouteContext, Router, console_error, event,
+    AnalyticsEngineDataPointBuilder, AnalyticsEngineDataset, Bucket, Cache, Fetch, Headers, Method,
+    Range as R2Range, Request, RequestInit, Response, Result, RouteContext, Router, console_error,
+    event,
 };
 
 const SIGNATURE_BYTES: u64 = 64;
@@ -44,6 +49,9 @@ const BLOCK_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const INFO_CACHE_CONTROL: &str = "public, max-age=30";
 const ERROR_CACHE_CONTROL: &str = "no-store";
 const LOG_MESSAGES_BYTES_LIMIT: usize = 10 * 1000;
+const RPC_API_KEYS_BINDING: &str = "BZ_RPC_API_KEYS";
+const RPC_METRICS_BINDING: &str = "BZ_RPC_METRICS";
+const RPC_REQUEST_BODY_MAX_BYTES: usize = 1024 * 1024;
 
 fn base58_32(bytes: &[u8; 32]) -> String {
     let mut buf = [0u8; five8::BASE58_ENCODED_32_MAX_LEN];
@@ -627,137 +635,143 @@ fn round_ms(value: f64) -> f64 {
 
 #[event(fetch)]
 async fn main(req: Request, env: worker::Env, ctx: worker::Context) -> Result<Response> {
-    if req.method() == Method::Get && block_bin_slot_from_path(&req.path()).is_some() {
-        return handle_block_bin(req, env, ctx).await;
+    if req.method() == Method::Get && direct_block_route(&req.path()).is_some() {
+        return handle_direct_block(req, env, ctx).await;
+    }
+    if req.method() == Method::Post && req.path() == "/" {
+        return handle_rpc(req, env).await;
     }
 
     Router::new()
         .get_async("/", handle_info)
-        .post_async("/", handle_rpc)
         .get_async("/info", handle_info)
-        .get_async("/block/:slot", handle_block)
-        .get_async("/block-lite/:slot", handle_block_lite)
-        .get_async("/probe", handle_probe_first)
-        .get_async("/probe/:slot", handle_probe_slot)
         .run(req, env)
         .await
 }
 
-async fn handle_block_bin(
+async fn handle_direct_block(
     req: Request,
     env: worker::Env,
     ctx: worker::Context,
 ) -> Result<Response> {
+    let request_started = now_ms();
     let profile = request_profile(&req);
-    let access_mode = block_bin_access_mode(&req);
-    let cache_key = profile
-        .is_none()
-        .then(|| block_bin_cache_key(&req, access_mode))
-        .transpose()?;
-
-    if let Some(cache_key) = cache_key.as_ref() {
-        if let Some(response) = Cache::default().get(cache_key.clone(), false).await? {
-            return Ok(response);
-        }
-    }
-
-    let path = req.path();
-    let Some(slot_text) = block_bin_slot_from_path(&path) else {
-        return json_error_profiled(400, "invalid_slot", "missing slot", profile.as_ref());
-    };
-    let slot = match slot_text.parse::<u64>() {
-        Ok(slot) => slot,
-        Err(_) => {
+    let api_key = match authenticate_api_request(&req, &env).await {
+        Ok(record) => record,
+        Err(RpcAuthError::Unauthorized) => return api_unauthorized_response(),
+        Err(RpcAuthError::Unavailable) => {
             return json_error_profiled(
-                400,
-                "invalid_slot",
-                "slot must be an unsigned integer",
+                503,
+                "api_unavailable",
+                "API authentication is temporarily unavailable",
                 profile.as_ref(),
             );
         }
     };
-    let source = match WorkerSource::from_env(&env, profile.clone()) {
-        Ok(source) => source,
-        Err(err) => return json_error_profiled(500, "config_error", &err, profile.as_ref()),
-    };
-
-    let mut response = match fetch_block_bundle_bytes(&source, slot, access_mode).await {
-        Ok(Some(bytes)) => block_bundle_response_profiled(bytes, profile.as_ref())?,
-        Ok(None) => cached_json_response_profiled(
-            &json!({ "ok": true, "empty": true, "slot": slot }),
-            BLOCK_CACHE_CONTROL,
-            profile.as_ref(),
-        )?,
-        Err(err) => {
-            console_error!("block bin route failed for slot {}: {}", slot, err);
-            json_error_profiled(
-                502,
-                "blockzilla_decode_error",
-                &format!("failed to fetch slot {slot}: {err}"),
-                profile.as_ref(),
-            )?
-        }
-    };
-
-    if let Some(cache_key) = cache_key {
-        if response.status_code() == 200 {
-            let cache_response = response.cloned()?;
-            ctx.wait_until(async move {
-                if let Err(err) = Cache::default().put(cache_key, cache_response).await {
-                    console_error!("block bin cache put failed: {}", err);
-                }
-            });
-        }
-    }
-
-    Ok(response)
-}
-
-async fn handle_info(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
-    cached_json_response(
-        &json!({
-            "ok": true,
-            "name": "blockzilla-get-block",
-            "json_rpc_methods": ["getBlock", "getBlockTime", "getVersion"],
-            "block_routes": ["/block/:slot", "/block-lite/:slot"],
-            "binary_formats": {
-                ".bin": "Blockzilla getBlock bundle: zstd hot-block blob plus optional block-access blob",
-                ".proto.bin": "not implemented"
-            },
-            "probe_routes": ["GET /probe?epoch=N", "GET /probe/:slot"],
-            "archive_source": "blockzilla-v2",
-            "archive_backends": ["r2", "s3"],
-            "r2_binding": "BZ_ARCHIVE_BUCKET",
-        }),
-        INFO_CACHE_CONTROL,
-    )
-}
-
-async fn handle_block(req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    handle_block_response(req, ctx, RouteBlockMode::Full).await
-}
-
-async fn handle_block_lite(req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    handle_block_response(req, ctx, RouteBlockMode::Lite).await
-}
-
-async fn handle_block_response(
-    req: Request,
-    ctx: RouteContext<()>,
-    mode: RouteBlockMode,
-) -> Result<Response> {
-    let profile = request_profile(&req);
-    let route_started = now_ms();
-    let request = match parse_block_request(&req, &ctx) {
-        Ok(request) => request,
+    let metrics = match rpc_metrics(&env, profile.as_ref()) {
+        Ok(metrics) => metrics,
         Err(response) => return Ok(response),
     };
-    let source = match WorkerSource::from_env(&ctx.env, profile.clone()) {
+
+    let path = req.path();
+    let Some((mode, raw_slot)) = direct_block_route(&path) else {
+        return finish_metered_response(
+            json_error_profiled(400, "invalid_slot", "missing slot", profile.as_ref())?,
+            &api_key,
+            &metrics,
+            MeteredRequest::new("invalid", "invalid_request", "bypass", "unknown", 0, 0),
+            request_started,
+            profile.as_ref(),
+        );
+    };
+    let method = mode.metric_method();
+    let transport = direct_transport(raw_slot);
+    let request = match parse_block_request(&req, raw_slot) {
+        Ok(request) => request,
+        Err(response) => {
+            return finish_metered_response(
+                response,
+                &api_key,
+                &metrics,
+                MeteredRequest::new(method, "invalid_request", "bypass", transport, 0, 0),
+                request_started,
+                profile.as_ref(),
+            );
+        }
+    };
+    if request.format == BlockResponseFormat::Wincode && req.headers().get("Range")?.is_some() {
+        return finish_metered_response(
+            json_error_profiled(
+                400,
+                "unsupported_range",
+                "Range requests are not supported for direct binary responses",
+                profile.as_ref(),
+            )?,
+            &api_key,
+            &metrics,
+            MeteredRequest::new(method, "invalid_request", "bypass", transport, 0, 0),
+            request_started,
+            profile.as_ref(),
+        );
+    }
+    let access_mode = block_bin_access_mode(&req);
+    let cache_key = if profile.is_none() {
+        Some(canonical_block_cache_key(
+            &req,
+            request,
+            mode,
+            access_mode,
+            &archive_cache_generation(&env),
+        )?)
+    } else {
+        None
+    };
+    let mut cache_status = "bypass";
+    if let Some(cache_key) = cache_key.as_ref() {
+        match Cache::default().get(cache_key.clone(), false).await {
+            Ok(Some(response)) => {
+                let mut response = response_with_mutable_headers(response);
+                response
+                    .headers_mut()
+                    .set("Cache-Control", "private, no-store")?;
+                return finish_metered_response(
+                    response,
+                    &api_key,
+                    &metrics,
+                    MeteredRequest::new(method, "ok", "hit", transport, 0, 0),
+                    request_started,
+                    profile.as_ref(),
+                );
+            }
+            Ok(None) => cache_status = "miss",
+            Err(err) => {
+                console_error!(
+                    "{}",
+                    json!({
+                        "event": "block_cache_error",
+                        "operation": "get",
+                        "error": err.to_string(),
+                    })
+                );
+            }
+        }
+    }
+    let source = match WorkerSource::from_env(&env, profile.clone()) {
         Ok(source) => source,
-        Err(err) => return json_error_profiled(500, "config_error", &err, profile.as_ref()),
+        Err(err) => {
+            return finish_metered_response(
+                json_error_profiled(500, "config_error", &err, profile.as_ref())?,
+                &api_key,
+                &metrics,
+                MeteredRequest::new(method, "config_error", cache_status, transport, 0, 0),
+                request_started,
+                profile.as_ref(),
+            );
+        }
     };
 
-    let response = match request.format {
+    let route_started = now_ms();
+    let (mut response, outcome) = match request.format {
         BlockResponseFormat::Json => match render_route_block_bytes(&source, request, mode).await {
             Ok(Some(bytes)) => {
                 source.record_elapsed(
@@ -767,29 +781,37 @@ async fn handle_block_response(
                     "json_streamed",
                     None,
                 );
-                json_bytes_response_profiled(bytes, BLOCK_CACHE_CONTROL, profile.as_ref())
+                (
+                    json_bytes_response_profiled(bytes, BLOCK_CACHE_CONTROL, profile.as_ref())?,
+                    "ok",
+                )
             }
             Ok(None) => {
                 source.record_elapsed("route_total", route_started, 0, "json_empty", None);
-                cached_json_response_profiled(
-                    &json!({ "ok": true, "empty": true, "slot": request.slot }),
-                    BLOCK_CACHE_CONTROL,
-                    profile.as_ref(),
+                (
+                    cached_json_response_profiled(
+                        &json!({ "ok": true, "empty": true, "slot": request.slot }),
+                        ERROR_CACHE_CONTROL,
+                        profile.as_ref(),
+                    )?,
+                    "not_found",
                 )
             }
             Err(err) => {
                 console_error!("block route failed for slot {}: {}", request.slot, err);
                 source.record_elapsed("route_total", route_started, 0, "json_error", None);
-                json_error_profiled(
-                    502,
-                    "blockzilla_decode_error",
-                    &format!("failed to fetch slot {}: {err}", request.slot),
-                    profile.as_ref(),
+                (
+                    json_error_profiled(
+                        502,
+                        "blockzilla_decode_error",
+                        &format!("failed to fetch slot {}: {err}", request.slot),
+                        profile.as_ref(),
+                    )?,
+                    "backend_error",
                 )
             }
         },
         BlockResponseFormat::Wincode => {
-            let access_mode = block_bin_access_mode(&req);
             match fetch_block_bundle_bytes(&source, request.slot, access_mode).await {
                 Ok(Some(bytes)) => {
                     source.record_elapsed(
@@ -799,36 +821,210 @@ async fn handle_block_response(
                         "wincode_bundle",
                         None,
                     );
-                    block_bundle_response_profiled(bytes, profile.as_ref())
+                    (
+                        block_bundle_response_profiled(bytes, profile.as_ref())?,
+                        "ok",
+                    )
                 }
                 Ok(None) => {
                     source.record_elapsed("route_total", route_started, 0, "wincode_empty", None);
-                    cached_json_response_profiled(
-                        &json!({ "ok": true, "empty": true, "slot": request.slot }),
-                        BLOCK_CACHE_CONTROL,
-                        profile.as_ref(),
+                    (
+                        cached_json_response_profiled(
+                            &json!({ "ok": true, "empty": true, "slot": request.slot }),
+                            ERROR_CACHE_CONTROL,
+                            profile.as_ref(),
+                        )?,
+                        "not_found",
                     )
                 }
                 Err(err) => {
                     console_error!("wincode route failed for slot {}: {}", request.slot, err);
                     source.record_elapsed("route_total", route_started, 0, "wincode_error", None);
-                    json_error_profiled(
-                        502,
-                        "blockzilla_decode_error",
-                        &format!("failed to fetch slot {}: {err}", request.slot),
-                        profile.as_ref(),
+                    (
+                        json_error_profiled(
+                            502,
+                            "blockzilla_decode_error",
+                            &format!("failed to fetch slot {}: {err}", request.slot),
+                            profile.as_ref(),
+                        )?,
+                        "backend_error",
                     )
                 }
             }
         }
-        BlockResponseFormat::Proto => json_error_profiled(
-            400,
-            "unsupported_format",
-            "protobuf block responses are not implemented for Blockzilla V2 hot blocks yet; use .bin for wincode or .json",
-            profile.as_ref(),
-        ),
     };
+    let billable_backend_reads = source.billable_backend_reads();
+
+    let cache_write = if outcome == "ok"
+        && response.status_code() == 200
+        && let Some(cache_key) = cache_key
+    {
+        match response.cloned() {
+            Ok(cache_response) => Some((cache_key, cache_response)),
+            Err(err) => {
+                console_error!(
+                    "{}",
+                    json!({
+                        "event": "block_cache_error",
+                        "operation": "clone",
+                        "error": err.to_string(),
+                    })
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Only the programmatic Worker Cache owns reusable representations. The
+    // client response stays private so an outer shared cache cannot skip auth.
     response
+        .headers_mut()
+        .set("Cache-Control", "private, no-store")?;
+    let response = finish_metered_response(
+        response,
+        &api_key,
+        &metrics,
+        MeteredRequest::new(
+            method,
+            outcome,
+            cache_status,
+            transport,
+            0,
+            billable_backend_reads,
+        ),
+        request_started,
+        profile.as_ref(),
+    )?;
+    if response.status_code() != 503
+        && let Some((cache_key, cache_response)) = cache_write
+    {
+        ctx.wait_until(async move {
+            if let Err(err) = Cache::default().put(cache_key, cache_response).await {
+                console_error!(
+                    "{}",
+                    json!({
+                        "event": "block_cache_error",
+                        "operation": "put",
+                        "error": err.to_string(),
+                    })
+                );
+            }
+        });
+    }
+    Ok(response)
+}
+
+fn response_with_mutable_headers(response: Response) -> Response {
+    let status = response.status_code();
+    let headers = response.headers().clone();
+    let encode_body = *response.encode_body();
+    let (_, body) = response.into_parts();
+    Response::builder()
+        .with_status(status)
+        .with_headers(headers)
+        .with_encode_body(encode_body)
+        .body(body)
+}
+
+fn rpc_metrics(
+    env: &worker::Env,
+    profile: Option<&ProfileHandle>,
+) -> std::result::Result<AnalyticsEngineDataset, Response> {
+    env.analytics_engine(RPC_METRICS_BINDING).map_err(|_| {
+        console_error!(
+            "{}",
+            json!({
+                "event": "rpc_metrics_backend_error",
+                "reason": "missing_binding",
+            })
+        );
+        json_error_profiled(
+            503,
+            "api_unavailable",
+            "API metering is temporarily unavailable",
+            profile,
+        )
+        .unwrap_or_else(|_| Response::error("API unavailable", 503).unwrap())
+    })
+}
+
+fn direct_block_route(path: &str) -> Option<(RouteBlockMode, &str)> {
+    let (mode, raw_slot) = if let Some(raw_slot) = path.strip_prefix("/block/") {
+        (RouteBlockMode::Full, raw_slot)
+    } else if let Some(raw_slot) = path.strip_prefix("/block-lite/") {
+        (RouteBlockMode::Lite, raw_slot)
+    } else {
+        return None;
+    };
+    (!raw_slot.is_empty() && !raw_slot.contains('/')).then_some((mode, raw_slot))
+}
+
+fn direct_transport(raw_slot: &str) -> &'static str {
+    if raw_slot.ends_with(".bin") && !raw_slot.ends_with(".proto.bin") {
+        "http_binary"
+    } else if !raw_slot.contains('.') || raw_slot.ends_with(".json") {
+        "http_json"
+    } else {
+        "unknown"
+    }
+}
+
+fn archive_cache_generation(env: &worker::Env) -> String {
+    let prefix =
+        optional_var(env, "BZ_ARCHIVE_PREFIX").unwrap_or_else(|| "blockzilla-v2".to_string());
+    api_key_digest(&format!("direct-render-v1\0{}", prefix.trim_matches('/')))[..16].to_string()
+}
+
+fn canonical_block_cache_key(
+    req: &Request,
+    request: BlockRequest,
+    mode: RouteBlockMode,
+    access_mode: BlockBinAccessMode,
+    generation: &str,
+) -> Result<String> {
+    let mut url = req.url()?;
+    url.set_query(None);
+    let variant = match request.format {
+        BlockResponseFormat::Json => DirectCacheVariant::Json {
+            lite: mode == RouteBlockMode::Lite,
+            include_rewards: request.include_rewards,
+        },
+        BlockResponseFormat::Wincode => DirectCacheVariant::Binary {
+            include_access: access_mode == BlockBinAccessMode::Include,
+        },
+    };
+    let identity = direct_cache_identity(generation, request.slot, variant);
+    url.set_path(&identity.path);
+    url.query_pairs_mut()
+        .append_pair(identity.query_name, identity.query_value);
+    Ok(url.to_string())
+}
+
+async fn handle_info(_req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    cached_json_response(
+        &json!({
+            "ok": true,
+            "name": "blockzilla-get-block",
+            "authentication": "Authorization: Bearer <api-key>",
+            "recommended": "GET /block/:slot.bin",
+            "json_compatibility": ["GET /block/:slot.json", "GET /block-lite/:slot.json"],
+            "json_rpc": {
+                "route": "POST /",
+                "methods": ["getBlock", "getBlockTime", "getVersion"],
+                "cache": "uncached"
+            },
+            "binary_formats": {
+                ".bin": "Blockzilla getBlock bundle: zstd hot-block blob plus optional block-access blob",
+                ".proto.bin": "not implemented"
+            },
+            "archive_source": "blockzilla-v2",
+            "archive_backends": ["r2", "s3"],
+            "r2_binding": "BZ_ARCHIVE_BUCKET",
+        }),
+        INFO_CACHE_CONTROL,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -838,11 +1034,10 @@ struct BlockRequest {
     include_rewards: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockResponseFormat {
     Json,
     Wincode,
-    Proto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -860,20 +1055,32 @@ impl BlockBinAccessMode {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RouteBlockMode {
     Full,
     Lite,
 }
 
+impl RouteBlockMode {
+    fn metric_method(self) -> &'static str {
+        match self {
+            Self::Full => "getBlock",
+            Self::Lite => "getBlockLite",
+        }
+    }
+}
+
 fn parse_block_request(
     req: &Request,
-    ctx: &RouteContext<()>,
+    raw_slot: &str,
 ) -> std::result::Result<BlockRequest, Response> {
-    let raw_slot = ctx.param("slot").ok_or_else(invalid_slot_response)?;
     let (slot_text, format) = parse_slot_and_format(raw_slot)?;
     let slot = slot_text.parse().map_err(|_| invalid_slot_response())?;
-    let include_rewards = parse_include_rewards(req)?;
+    let include_rewards = if format == BlockResponseFormat::Json {
+        parse_include_rewards(req)?
+    } else {
+        true
+    };
     Ok(BlockRequest {
         slot,
         format,
@@ -884,8 +1091,13 @@ fn parse_block_request(
 fn parse_slot_and_format(
     raw_slot: &str,
 ) -> std::result::Result<(&str, BlockResponseFormat), Response> {
-    if let Some(slot) = raw_slot.strip_suffix(".proto.bin") {
-        return Ok((slot, BlockResponseFormat::Proto));
+    if raw_slot.ends_with(".proto.bin") {
+        return Err(json_error(
+            400,
+            "unsupported_format",
+            "protobuf block responses are not implemented; use .bin or .json",
+        )
+        .unwrap_or_else(|_| Response::error("Unsupported format", 400).unwrap()));
     }
     if raw_slot.ends_with(".zstd") {
         return Err(json_error(
@@ -913,11 +1125,6 @@ fn parse_slot_and_format(
     Ok((raw_slot, BlockResponseFormat::Json))
 }
 
-fn block_bin_slot_from_path(path: &str) -> Option<&str> {
-    let slot = path.strip_prefix("/block/")?.strip_suffix(".bin")?;
-    (!slot.is_empty() && !slot.contains('/')).then_some(slot)
-}
-
 fn block_bin_access_mode(req: &Request) -> BlockBinAccessMode {
     let skip_access = req.url().ok().is_some_and(|url| {
         url.query_pairs().any(|(key, value)| {
@@ -934,13 +1141,6 @@ fn block_bin_access_mode(req: &Request) -> BlockBinAccessMode {
     } else {
         BlockBinAccessMode::Include
     }
-}
-
-fn block_bin_cache_key(req: &Request, access_mode: BlockBinAccessMode) -> Result<String> {
-    let mut url = req.url()?;
-    url.query_pairs_mut()
-        .append_pair("__bz_access", access_mode.cache_key_suffix());
-    Ok(url.to_string())
 }
 
 fn parse_include_rewards(req: &Request) -> std::result::Result<bool, Response> {
@@ -1020,52 +1220,219 @@ impl RpcError {
     }
 }
 
-async fn handle_rpc(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+struct RpcExecution {
+    response: Response,
+    method: &'static str,
+    outcome: &'static str,
+    request_bytes: usize,
+    billable_backend_reads: u8,
+}
+
+enum RpcBodyReadError {
+    TooLarge,
+    Read,
+}
+
+async fn handle_rpc(mut req: Request, env: worker::Env) -> Result<Response> {
+    let request_started = now_ms();
     let profile = request_profile(&req);
-    let rpc_started = now_ms();
-    let source = match WorkerSource::from_env(&ctx.env, profile.clone()) {
-        Ok(source) => source,
-        Err(err) => {
-            if let Some(profile) = profile.as_ref() {
-                profile.record_elapsed("rpc_total", rpc_started, 0, "config_error", None);
-            }
-            return json_rpc_response_profiled(
-                error_response(Value::Null, -32000, err),
+    let api_key = match authenticate_api_request(&req, &env).await {
+        Ok(record) => record,
+        Err(RpcAuthError::Unauthorized) => return api_unauthorized_response(),
+        Err(RpcAuthError::Unavailable) => {
+            return json_error_profiled(
+                503,
+                "rpc_unavailable",
+                "RPC authentication is temporarily unavailable",
                 profile.as_ref(),
             );
         }
     };
+    let metrics = match rpc_metrics(&env, profile.as_ref()) {
+        Ok(metrics) => metrics,
+        Err(response) => return Ok(response),
+    };
+
     let body_started = now_ms();
-    let body = req.bytes().await?;
-    source.record_elapsed(
-        "request_body",
-        body_started,
-        body.len() as u64,
-        "json_rpc",
-        None,
-    );
-    let value: Value = match serde_json::from_slice(&body) {
-        Ok(value) => value,
-        Err(err) => {
-            source.record_elapsed("rpc_total", rpc_started, 0, "parse_error", None);
-            return json_rpc_response_profiled(
-                error_response(Value::Null, -32700, err.to_string()),
+    let body = match read_rpc_body(&mut req).await {
+        Ok(body) => body,
+        Err(RpcBodyReadError::TooLarge) => {
+            let execution = RpcExecution {
+                response: json_error_profiled(
+                    413,
+                    "request_too_large",
+                    "JSON-RPC request bodies are limited to 1 MiB",
+                    profile.as_ref(),
+                )?,
+                method: "invalid",
+                outcome: "request_too_large",
+                request_bytes: RPC_REQUEST_BODY_MAX_BYTES,
+                billable_backend_reads: 0,
+            };
+            return finish_metered_rpc(
+                execution,
+                &api_key,
+                &metrics,
+                request_started,
+                profile.as_ref(),
+            );
+        }
+        Err(RpcBodyReadError::Read) => {
+            let execution = RpcExecution {
+                response: json_error_profiled(
+                    400,
+                    "invalid_request_body",
+                    "Could not read the JSON-RPC request body",
+                    profile.as_ref(),
+                )?,
+                method: "invalid",
+                outcome: "body_read_error",
+                request_bytes: 0,
+                billable_backend_reads: 0,
+            };
+            return finish_metered_rpc(
+                execution,
+                &api_key,
+                &metrics,
+                request_started,
                 profile.as_ref(),
             );
         }
     };
 
-    if value.is_array() {
-        source.record_elapsed("rpc_total", rpc_started, 0, "batch_rejected", None);
-        return json_rpc_response_profiled(
-            error_response(
-                Value::Null,
-                -32600,
-                "JSON-RPC batch requests are not supported; submit one request per HTTP call for predictable pricing",
-            ),
-            profile.as_ref(),
+    if let Some(profile) = profile.as_ref() {
+        profile.record_elapsed(
+            "request_body",
+            body_started,
+            body.len() as u64,
+            "json_rpc",
+            None,
         );
     }
+    let rpc_started = now_ms();
+    let request_bytes = body.len();
+    let execution = match execute_rpc_body(body, &env, profile.clone(), rpc_started).await {
+        Ok(execution) => execution,
+        Err(err) => {
+            console_error!(
+                "{}",
+                json!({
+                    "event": "rpc_request_error",
+                    "keyId": api_key.key_id.as_str(),
+                    "error": err.to_string(),
+                })
+            );
+            RpcExecution {
+                response: json_error_profiled(
+                    500,
+                    "internal_error",
+                    "The JSON-RPC request could not be completed",
+                    profile.as_ref(),
+                )?,
+                method: "invalid",
+                outcome: "internal_error",
+                request_bytes,
+                billable_backend_reads: 0,
+            }
+        }
+    };
+
+    finish_metered_rpc(
+        execution,
+        &api_key,
+        &metrics,
+        request_started,
+        profile.as_ref(),
+    )
+}
+
+async fn execute_rpc_body(
+    body: Vec<u8>,
+    env: &worker::Env,
+    profile: Option<ProfileHandle>,
+    rpc_started: f64,
+) -> Result<RpcExecution> {
+    let request_bytes = body.len();
+    let parsed = serde_json::from_slice::<Value>(&body);
+    let method = parsed
+        .as_ref()
+        .map(rpc_method_for_metrics)
+        .unwrap_or("invalid");
+    let value = match parsed {
+        Ok(value) => value,
+        Err(err) => {
+            if let Some(profile) = profile.as_ref() {
+                profile.record_elapsed("rpc_total", rpc_started, 0, "parse_error", None);
+            }
+            return Ok(RpcExecution {
+                response: json_rpc_response_profiled(
+                    error_response(Value::Null, -32700, err.to_string()),
+                    profile.as_ref(),
+                )?,
+                method,
+                outcome: "parse_error",
+                request_bytes,
+                billable_backend_reads: 0,
+            });
+        }
+    };
+
+    if value.is_array() {
+        if let Some(profile) = profile.as_ref() {
+            profile.record_elapsed("rpc_total", rpc_started, 0, "batch_rejected", None);
+        }
+        return Ok(RpcExecution {
+            response: json_rpc_response_profiled(
+                error_response(
+                    Value::Null,
+                    -32600,
+                    "JSON-RPC batch requests are not supported; submit one request per HTTP call for predictable pricing",
+                ),
+                profile.as_ref(),
+            )?,
+            method,
+            outcome: "batch_rejected",
+            request_bytes,
+            billable_backend_reads: 0,
+        });
+    }
+
+    if let Some(local_response) = local_rpc_response(&value) {
+        let outcome = if local_response.get("error").is_some() {
+            "rpc_error"
+        } else {
+            "ok"
+        };
+        if let Some(profile) = profile.as_ref() {
+            profile.record_elapsed("rpc_total", rpc_started, 0, "local", None);
+        }
+        return Ok(RpcExecution {
+            response: json_rpc_response_profiled(local_response, profile.as_ref())?,
+            method,
+            outcome,
+            request_bytes,
+            billable_backend_reads: 0,
+        });
+    }
+
+    let source = match WorkerSource::from_env(env, profile.clone()) {
+        Ok(source) => source,
+        Err(err) => {
+            if let Some(profile) = profile.as_ref() {
+                profile.record_elapsed("rpc_total", rpc_started, 0, "config_error", None);
+            }
+            return Ok(RpcExecution {
+                response: json_rpc_response_profiled(
+                    error_response(Value::Null, -32000, err),
+                    profile.as_ref(),
+                )?,
+                method,
+                outcome: "config_error",
+                request_bytes,
+                billable_backend_reads: 0,
+            });
+        }
+    };
 
     match handle_one_streamed(&source, &value).await {
         Ok(Some(StreamedRpcBody::Buffered(bytes))) => {
@@ -1076,22 +1443,350 @@ async fn handle_rpc(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
                 "single_streamed",
                 None,
             );
-            return json_bytes_response_profiled(bytes, ERROR_CACHE_CONTROL, profile.as_ref());
+            return Ok(RpcExecution {
+                response: json_bytes_response_profiled(
+                    bytes,
+                    ERROR_CACHE_CONTROL,
+                    profile.as_ref(),
+                )?,
+                method,
+                outcome: "ok",
+                request_bytes,
+                billable_backend_reads: source.billable_backend_reads(),
+            });
         }
         Ok(Some(StreamedRpcBody::Stream(body))) => {
             source.record_elapsed("rpc_total", rpc_started, 0, "single_stream_body", None);
-            return json_stream_response_profiled(body, ERROR_CACHE_CONTROL, profile.as_ref());
+            return Ok(RpcExecution {
+                response: json_stream_response_profiled(
+                    body,
+                    ERROR_CACHE_CONTROL,
+                    profile.as_ref(),
+                )?,
+                method,
+                outcome: "ok",
+                request_bytes,
+                billable_backend_reads: source.billable_backend_reads(),
+            });
         }
         Ok(None) => {}
         Err(response) => {
             source.record_elapsed("rpc_total", rpc_started, 0, "single_streamed_error", None);
-            return json_rpc_response_profiled(response, profile.as_ref());
+            return Ok(RpcExecution {
+                response: json_rpc_response_profiled(response, profile.as_ref())?,
+                method,
+                outcome: "rpc_error",
+                request_bytes,
+                billable_backend_reads: source.billable_backend_reads(),
+            });
         }
     }
 
-    let response = handle_one(&source, value).await;
+    let value = handle_one(&source, value).await;
+    let outcome = if value.get("error").is_some() {
+        "rpc_error"
+    } else {
+        "ok"
+    };
     source.record_elapsed("rpc_total", rpc_started, 0, "single", None);
-    json_rpc_response_profiled(response, profile.as_ref())
+    Ok(RpcExecution {
+        response: json_rpc_response_profiled(value, profile.as_ref())?,
+        method,
+        outcome,
+        request_bytes,
+        billable_backend_reads: source.billable_backend_reads(),
+    })
+}
+
+// Return a complete local response when the request cannot or should not
+// touch archive storage. `None` is reserved for a fully validated archive
+// method, so only that path needs WorkerSource configuration.
+fn local_rpc_response(value: &Value) -> Option<Value> {
+    let request: RpcRequest = match serde_json::from_value(value.clone()) {
+        Ok(request) => request,
+        Err(err) => return Some(error_response(Value::Null, -32600, err.to_string())),
+    };
+    let id = request.id.clone().unwrap_or(Value::Null);
+    if request.jsonrpc.as_deref() != Some("2.0") {
+        return Some(error_response(
+            id,
+            -32600,
+            "Invalid Request: jsonrpc must be \"2.0\"",
+        ));
+    }
+    let Some(method) = request.method.as_deref() else {
+        return Some(error_response(
+            id,
+            -32600,
+            "Invalid Request: missing method",
+        ));
+    };
+    if request.params.as_ref().is_some_and(contains_json_parsed) {
+        return Some(error_response(
+            id,
+            -32602,
+            "The jsonParsed encoding is not supported by this archive RPC",
+        ));
+    }
+
+    let validation = match method {
+        "getBlock" => get_block_params(&request).map(|_| ()),
+        "getBlockTime" => params_array(&request).and_then(|params| {
+            params
+                .first()
+                .and_then(Value::as_u64)
+                .map(|_| ())
+                .ok_or_else(|| {
+                    RpcError::invalid_params("getBlockTime requires slot as first parameter")
+                })
+        }),
+        "getVersion" => {
+            return Some(success_response(
+                id,
+                json!({
+                    "solana-core": concat!("blockzilla-get-block/", env!("CARGO_PKG_VERSION"))
+                }),
+            ));
+        }
+        _ => {
+            return Some(error_response(
+                id,
+                -32601,
+                format!("Method not found: {method}"),
+            ));
+        }
+    };
+
+    match validation {
+        Ok(()) => None,
+        Err(err) => Some(error_response(id, err.code, err.message)),
+    }
+}
+
+enum RpcAuthError {
+    Unauthorized,
+    Unavailable,
+}
+
+async fn authenticate_api_request(
+    req: &Request,
+    env: &worker::Env,
+) -> std::result::Result<RpcApiKeyRecord, RpcAuthError> {
+    let authorization = req
+        .headers()
+        .get("Authorization")
+        .map_err(|_| RpcAuthError::Unauthorized)?;
+    let key = parse_bearer_key(authorization.as_deref()).map_err(|_| RpcAuthError::Unauthorized)?;
+    let digest = api_key_digest(key);
+    let keys = env.kv(RPC_API_KEYS_BINDING).map_err(|_| {
+        console_error!(
+            "{}",
+            json!({
+                "event": "rpc_auth_backend_error",
+                "reason": "missing_binding",
+            })
+        );
+        RpcAuthError::Unavailable
+    })?;
+    let record = keys
+        .get(&digest)
+        .json::<RpcApiKeyRecord>()
+        .await
+        .map_err(|_| {
+            console_error!(
+                "{}",
+                json!({
+                    "event": "rpc_auth_backend_error",
+                    "reason": "kv_read",
+                })
+            );
+            RpcAuthError::Unavailable
+        })?
+        .ok_or(RpcAuthError::Unauthorized)?;
+    if let Err(reason) = record.validate() {
+        console_error!(
+            "{}",
+            json!({
+                "event": "rpc_auth_backend_error",
+                "reason": "invalid_record",
+                "detail": reason,
+            })
+        );
+        return Err(RpcAuthError::Unavailable);
+    }
+    if !record.is_enabled() {
+        return Err(RpcAuthError::Unauthorized);
+    }
+    Ok(record)
+}
+
+async fn read_rpc_body(req: &mut Request) -> std::result::Result<Vec<u8>, RpcBodyReadError> {
+    let content_length = req
+        .headers()
+        .get("Content-Length")
+        .map_err(|_| RpcBodyReadError::Read)?
+        .and_then(|value| value.parse::<usize>().ok());
+    if content_length.is_some_and(|length| length > RPC_REQUEST_BODY_MAX_BYTES) {
+        return Err(RpcBodyReadError::TooLarge);
+    }
+    if content_length == Some(0) {
+        return Ok(Vec::new());
+    }
+    let mut stream = req.stream().map_err(|_| RpcBodyReadError::Read)?;
+    let mut body = Vec::with_capacity(content_length.unwrap_or(0));
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| RpcBodyReadError::Read)?;
+        if body.len().saturating_add(chunk.len()) > RPC_REQUEST_BODY_MAX_BYTES {
+            return Err(RpcBodyReadError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn finish_metered_rpc(
+    execution: RpcExecution,
+    api_key: &RpcApiKeyRecord,
+    metrics: &AnalyticsEngineDataset,
+    request_started: f64,
+    profile: Option<&ProfileHandle>,
+) -> Result<Response> {
+    let metering = MeteredRequest::new(
+        execution.method,
+        execution.outcome,
+        "uncached",
+        "json_rpc",
+        execution.request_bytes,
+        execution.billable_backend_reads,
+    );
+    finish_metered_response(
+        execution.response,
+        api_key,
+        metrics,
+        metering,
+        request_started,
+        profile,
+    )
+}
+
+struct MeteredRequest {
+    method: &'static str,
+    outcome: &'static str,
+    cache_status: &'static str,
+    transport: &'static str,
+    request_bytes: usize,
+    billable_backend_reads: u8,
+}
+
+impl MeteredRequest {
+    fn new(
+        method: &'static str,
+        outcome: &'static str,
+        cache_status: &'static str,
+        transport: &'static str,
+        request_bytes: usize,
+        billable_backend_reads: u8,
+    ) -> Self {
+        Self {
+            method,
+            outcome,
+            cache_status,
+            transport,
+            request_bytes,
+            billable_backend_reads: billable_backend_reads.min(1),
+        }
+    }
+}
+
+fn finish_metered_response(
+    mut response: Response,
+    api_key: &RpcApiKeyRecord,
+    metrics: &AnalyticsEngineDataset,
+    metering: MeteredRequest,
+    request_started: f64,
+    profile: Option<&ProfileHandle>,
+) -> Result<Response> {
+    let status = response.status_code();
+    let latency_ms = (now_ms() - request_started).max(0.0);
+    response.headers_mut().set(
+        "X-Blockzilla-Cache",
+        cache_receipt_value(metering.cache_status),
+    )?;
+    response.headers_mut().set(
+        "X-Blockzilla-Billable-Reads",
+        if metering.billable_backend_reads == 0 {
+            "0"
+        } else {
+            "1"
+        },
+    )?;
+    let point = AnalyticsEngineDataPointBuilder::new()
+        .indexes([api_key.key_id.as_str()])
+        .blobs([
+            api_key.customer_id.as_str(),
+            metering.method,
+            metering.outcome,
+            metering.cache_status,
+            metering.transport,
+        ])
+        .doubles([
+            1.0,
+            f64::from(metering.billable_backend_reads),
+            status as f64,
+            latency_ms,
+            metering.request_bytes as f64,
+        ]);
+    if point.write_to(metrics).is_err() {
+        console_error!(
+            "{}",
+            json!({
+                "event": "rpc_metrics_backend_error",
+                "reason": "write_failed",
+                "keyId": api_key.key_id.as_str(),
+            })
+        );
+        let mut unavailable = json_error_profiled(
+            503,
+            "api_unavailable",
+            "API metering is temporarily unavailable",
+            profile,
+        )?;
+        unavailable.headers_mut().set(
+            "X-Blockzilla-Cache",
+            cache_receipt_value(metering.cache_status),
+        )?;
+        unavailable.headers_mut().set(
+            "X-Blockzilla-Billable-Reads",
+            if metering.billable_backend_reads == 0 {
+                "0"
+            } else {
+                "1"
+            },
+        )?;
+        return Ok(unavailable);
+    }
+    Ok(response)
+}
+
+fn cache_receipt_value(cache_status: &str) -> &'static str {
+    match cache_status {
+        "hit" => "HIT",
+        "miss" => "MISS",
+        "uncached" => "UNCACHED",
+        _ => "BYPASS",
+    }
+}
+
+fn api_unauthorized_response() -> Result<Response> {
+    let mut response = json_error(
+        401,
+        "unauthorized",
+        "A valid Bearer API key is required for this request",
+    )?;
+    response
+        .headers_mut()
+        .set("WWW-Authenticate", "Bearer realm=\"Blockzilla API\"")?;
+    Ok(response)
 }
 
 enum StreamedRpcBody {
@@ -5282,6 +5977,7 @@ struct WorkerSource {
     archive_prefix: String,
     backend: ArchiveBackend,
     profile: Option<ProfileHandle>,
+    backend_read: BackendReadTracker,
 }
 
 #[derive(Clone)]
@@ -5343,7 +6039,12 @@ impl WorkerSource {
             archive_prefix,
             backend,
             profile,
+            backend_read: BackendReadTracker::default(),
         })
+    }
+
+    fn billable_backend_reads(&self) -> u8 {
+        self.backend_read.billable_reads()
     }
 
     fn record_elapsed(
@@ -5406,12 +6107,12 @@ impl WorkerSource {
         let key = path.trim_start_matches('/').to_string();
         let detail = range_fetch_detail(path, offset, len);
         let profile_name = range_fetch_profile_name(StorageBackendKind::R2, path);
-        let object = bucket
-            .get(key.clone())
-            .range(R2Range::OffsetWithLength {
-                offset,
-                length: len as u64,
-            })
+        let request = bucket.get(key.clone()).range(R2Range::OffsetWithLength {
+            offset,
+            length: len as u64,
+        });
+        self.backend_read.mark();
+        let object = request
             .execute()
             .await
             .map_err(|err| format!("R2 GET {path} via {binding} {}: {err}", detail))?;
@@ -5453,7 +6154,11 @@ impl WorkerSource {
         let detail = range_fetch_detail(path, offset, len);
         let profile_name = range_fetch_profile_name(StorageBackendKind::S3, path);
         let (url, headers) = source.signed_get(path, Some(&range))?;
-        let mut response = fetch_with_headers(&url, headers)
+        let request = request_with_headers(&url, headers)
+            .map_err(|err| format!("build S3 GET {path} {range}: {err}"))?;
+        self.backend_read.mark();
+        let mut response = Fetch::Request(request)
+            .send()
             .await
             .map_err(|err| format!("S3 GET {path} {range}: {err}"))?;
         let status = response.status_code();
@@ -5577,12 +6282,11 @@ impl S3Source {
     }
 }
 
-async fn fetch_with_headers(url: &str, headers: Headers) -> Result<worker::Response> {
+fn request_with_headers(url: &str, headers: Headers) -> Result<Request> {
     let mut init = RequestInit::new();
     init.with_method(Method::Get);
     init.with_headers(headers);
-    let request = Request::new_with_init(url, &init)?;
-    Fetch::Request(request).send().await
+    Request::new_with_init(url, &init)
 }
 
 fn required_var(env: &worker::Env, name: &str) -> std::result::Result<String, String> {
@@ -5854,11 +6558,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_block_bin_route_path() {
-        assert_eq!(block_bin_slot_from_path("/block/123.bin"), Some("123"));
-        assert_eq!(block_bin_slot_from_path("/block/123.json"), None);
-        assert_eq!(block_bin_slot_from_path("/block-lite/123.bin"), None);
-        assert_eq!(block_bin_slot_from_path("/block/nested/123.bin"), None);
+    fn parses_all_direct_block_route_variants() {
+        assert_eq!(
+            direct_block_route("/block/123.bin").map(|(mode, slot)| (mode.metric_method(), slot)),
+            Some(("getBlock", "123.bin"))
+        );
+        assert_eq!(
+            direct_block_route("/block-lite/123.json")
+                .map(|(mode, slot)| (mode.metric_method(), slot)),
+            Some(("getBlockLite", "123.json"))
+        );
+        assert!(direct_block_route("/block/nested/123.bin").is_none());
+    }
+
+    #[test]
+    fn renders_authoritative_cache_receipts() {
+        assert_eq!(cache_receipt_value("hit"), "HIT");
+        assert_eq!(cache_receipt_value("miss"), "MISS");
+        assert_eq!(cache_receipt_value("uncached"), "UNCACHED");
+        assert_eq!(cache_receipt_value("anything-else"), "BYPASS");
     }
 
     #[test]

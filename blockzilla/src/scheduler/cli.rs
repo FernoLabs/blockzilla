@@ -66,10 +66,18 @@ pub struct SchedulerArgs {
     #[arg(long, default_value_t = 1)]
     compact_cpu_cores_per_worker: u64,
 
-    /// One-minute load ceiling used by adaptive pause and resume. Defaults to
-    /// the host's available parallelism.
+    /// Fallback load/run-queue ceiling used when Linux CPU PSI is unavailable.
+    /// Defaults to the host's available parallelism.
     #[arg(long)]
     compact_cpu_budget_cores: Option<u64>,
+
+    /// Pause when Linux CPU PSI some avg10 reaches this percentage.
+    #[arg(long, default_value_t = 50.0)]
+    compact_cpu_pause_some_avg10: f64,
+
+    /// Resume when Linux CPU PSI some avg10 falls to this percentage.
+    #[arg(long, default_value_t = 20.0)]
+    compact_cpu_resume_some_avg10: f64,
 
     /// Estimated aggregate disk throughput for one compact worker.
     #[arg(long, default_value_t = 120)]
@@ -250,6 +258,15 @@ impl SchedulerArgs {
             compact_cpu_budget_cores > 0,
             "--compact-cpu-budget-cores must be positive"
         );
+        anyhow::ensure!(
+            self.compact_cpu_pause_some_avg10.is_finite()
+                && self.compact_cpu_resume_some_avg10.is_finite()
+                && self.compact_cpu_resume_some_avg10 >= 0.0
+                && self.compact_cpu_pause_some_avg10 <= 100.0
+                && self.compact_cpu_resume_some_avg10 <= 100.0
+                && self.compact_cpu_pause_some_avg10 > self.compact_cpu_resume_some_avg10,
+            "--compact-cpu-pause-some-avg10 must be finite and greater than the non-negative resume threshold"
+        );
         let compact_effective_capacity = if self.compact_concurrency == 0 {
             usize::MAX
         } else {
@@ -311,6 +328,8 @@ impl SchedulerArgs {
             legacy_compact_finalizer_overlap: self.compact_finalizer_overlap,
             legacy_compact_cpu_cores_per_worker: self.compact_cpu_cores_per_worker,
             legacy_compact_cpu_budget_cores: compact_cpu_budget_cores,
+            legacy_compact_cpu_pause_some_avg10: self.compact_cpu_pause_some_avg10,
+            legacy_compact_cpu_resume_some_avg10: self.compact_cpu_resume_some_avg10,
             legacy_compact_io_mib_per_sec_per_worker: self.compact_io_mib_per_sec_per_worker,
             legacy_compact_io_budget_mib_per_sec: self.compact_io_budget_mib_per_sec,
             legacy_compact_auto_pause: self.compact_auto_pause,
@@ -365,6 +384,29 @@ mod tests {
             PathBuf::from("blockzilla-scheduler-state")
         );
         assert!(parsed.management_bind.is_none());
+    }
+
+    #[test]
+    fn cpu_psi_thresholds_default_and_validate_hysteresis() {
+        let mut defaults = required_args().to_vec();
+        defaults.push("live");
+        let config = SchedulerArgs::try_parse_from(defaults)
+            .unwrap()
+            .into_config()
+            .unwrap();
+        assert_eq!(config.legacy_compact_cpu_pause_some_avg10, 50.0);
+        assert_eq!(config.legacy_compact_cpu_resume_some_avg10, 20.0);
+
+        let mut invalid = required_args().to_vec();
+        invalid.extend([
+            "live",
+            "--compact-cpu-pause-some-avg10",
+            "20",
+            "--compact-cpu-resume-some-avg10",
+            "20",
+        ]);
+        let parsed = SchedulerArgs::try_parse_from(invalid).unwrap();
+        assert!(parsed.into_config().is_err());
     }
 
     #[test]

@@ -1,4 +1,7 @@
-use crate::{ProgressTracker, SLOTS_PER_EPOCH};
+use crate::{
+    ProgressTracker, SLOTS_PER_EPOCH,
+    car_acquire::{PROGRESS_FILE_ENV, validate_distinct_artifact_paths},
+};
 use anyhow::{Context, Result, anyhow};
 use of_car_reader::{CarBlockGroup, CarBlockReader};
 use serde::{Deserialize, Serialize};
@@ -113,14 +116,7 @@ struct ScanStats {
 }
 
 pub(crate) fn preflight_car(config: CarPreflightConfig<'_>) -> Result<CarPreflightReceipt> {
-    anyhow::ensure!(
-        config.io_buffer_bytes > 0,
-        "CAR preflight I/O buffer must be positive"
-    );
-    anyhow::ensure!(
-        config.input != config.receipt,
-        "CAR preflight receipt must not replace its input"
-    );
+    validate_config(&config)?;
 
     // Keep this descriptor alive until the function returns. A stable sibling
     // lock serializes both receipt validation and the full CAR scan, so a
@@ -230,6 +226,31 @@ pub(crate) fn preflight_car(config: CarPreflightConfig<'_>) -> Result<CarPreflig
         config.receipt.display()
     );
     Ok(receipt)
+}
+
+fn validate_config(config: &CarPreflightConfig<'_>) -> Result<()> {
+    let inherited_progress = config
+        .progress_json
+        .is_none()
+        .then(|| std::env::var_os(PROGRESS_FILE_ENV))
+        .flatten()
+        .map(PathBuf::from);
+    validate_config_with_inherited_progress(config, inherited_progress.as_deref())
+}
+
+fn validate_config_with_inherited_progress(
+    config: &CarPreflightConfig<'_>,
+    inherited_progress: Option<&Path>,
+) -> Result<()> {
+    anyhow::ensure!(
+        config.io_buffer_bytes > 0,
+        "CAR preflight I/O buffer must be positive"
+    );
+    let mut artifacts = vec![("input", config.input), ("receipt", config.receipt)];
+    if let Some(progress) = config.progress_json.or(inherited_progress) {
+        artifacts.push(("progress", progress));
+    }
+    validate_distinct_artifact_paths("CAR preflight", &artifacts)
 }
 
 fn scan_reader<R: Read>(
@@ -585,6 +606,103 @@ mod tests {
     use super::*;
     use minicbor::Encoder;
     use std::io::Cursor;
+
+    #[test]
+    fn traversal_alias_is_rejected_before_receipt_lock_mutation() {
+        let root = test_root("traversal-alias");
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("epoch-7.car");
+        fs::write(&input, b"source-must-stay-intact").unwrap();
+        let receipt = root.join("missing/../epoch-7.car");
+
+        let error = preflight_car(CarPreflightConfig {
+            input: &input,
+            epoch: 7,
+            receipt: &receipt,
+            io_buffer_bytes: 64 * 1024,
+            progress_json: None,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("dot traversal"));
+        assert_eq!(fs::read(&input).unwrap(), b"source-must-stay-intact");
+        assert!(!root.join("missing").exists());
+        assert!(!receipt_lock_path(&receipt).exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_parent_alias_is_rejected_before_lock_or_input_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("symlink-parent-alias");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        fs::create_dir_all(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let input = real.join("epoch-7.car");
+        fs::write(&input, b"source-must-stay-intact").unwrap();
+        let receipt = alias.join("epoch-7.car");
+
+        let error = preflight_car(CarPreflightConfig {
+            input: &input,
+            epoch: 7,
+            receipt: &receipt,
+            io_buffer_bytes: 64 * 1024,
+            progress_json: None,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("resolve to the same target"));
+        assert_eq!(fs::read(&input).unwrap(), b"source-must-stay-intact");
+        assert!(!real.join("epoch-7.car.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inherited_progress_alias_is_rejected_without_filesystem_mutation() {
+        let root = test_root("ambient-progress-alias");
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("epoch-7.car");
+        fs::write(&input, b"source-must-stay-intact").unwrap();
+        let receipt = root.join("state/receipt.json");
+        let config = CarPreflightConfig {
+            input: &input,
+            epoch: 7,
+            receipt: &receipt,
+            io_buffer_bytes: 64 * 1024,
+            progress_json: None,
+        };
+
+        let error = validate_config_with_inherited_progress(&config, Some(&input)).unwrap_err();
+        assert!(format!("{error:#}").contains("progress"));
+        assert!(format!("{error:#}").contains("resolve to the same target"));
+        assert_eq!(fs::read(&input).unwrap(), b"source-must-stay-intact");
+        assert!(!root.join("state").exists());
+        assert!(!receipt_lock_path(&receipt).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_progress_path_overrides_unrelated_ambient_value() {
+        let root = test_root("explicit-progress-wins");
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("epoch-7.car");
+        let receipt = root.join("receipt.json");
+        let progress = root.join("progress.json");
+        fs::write(&input, b"source").unwrap();
+        let config = CarPreflightConfig {
+            input: &input,
+            epoch: 7,
+            receipt: &receipt,
+            io_buffer_bytes: 64 * 1024,
+            progress_json: Some(&progress),
+        };
+
+        validate_config_with_inherited_progress(&config, Some(&input)).unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn raw_preflight_reports_epoch_poh_shredding_and_duplicates() {

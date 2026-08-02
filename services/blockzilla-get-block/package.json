@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "build": "worker-build --release . --no-default-features --features worker",
-    "dev": "wrangler dev --config wrangler.example.toml"
+    "dev": "wrangler dev --config wrangler.example.toml",
+    "rpc-key:generate": "node scripts/generate-rpc-key.mjs"
   },
   "devDependencies": {
     "wrangler": "4.111.0"

@@ -23,7 +23,9 @@ The main commands are:
 | Command | Purpose |
 | --- | --- |
 | `scheduler` | Observe archive inventory and optionally schedule finite build, repair, and finalization jobs. |
+| `acquire-car` | Supervise resumable `aria2c` transfer, structural preflight, and durable no-clobber CAR publication. |
 | `preflight-car` | Verify that a CAR can be streamed to clean EOF. |
+| `seed-previous-blockhash-tails` | Discover and atomically publish verified predecessor tails with durable receipts. |
 | `build-block-time-gaps` | Build a sparse local slot-gap and block-time sidecar without RPC. |
 | `build-archive-v2-hot-blocks` | Build compressed blocks, indexes, metadata, and serving sidecars. |
 | `bench-archive-v2-hot-blocks` | Read and decode indexed blocks. |
@@ -51,6 +53,16 @@ management listener, to a separate watcher or reverse proxy. Scheduler state
 defaults to the relative `blockzilla-scheduler-state/` directory. Existing
 durable ownership markers keep their historical filename so upgraded
 deployments can adopt work safely.
+
+### CAR acquisition
+
+`acquire-car` keeps `aria2c` as the resumable byte-transfer engine while Rust
+owns retries, the epoch lock, the memory gate, structural preflight, receipt
+durability, and no-clobber publication. Supply `--expected-bytes` only from a
+trusted catalog or manifest; when present, the final object must match it
+exactly and runtime telemetry can report percentage and ETA. The scheduler
+currently omits this option because its URL template is not an authoritative
+size catalog.
 
 ### Block-time gap sidecars
 

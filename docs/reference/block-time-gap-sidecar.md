@@ -98,3 +98,32 @@ artifacts are required before metadata finalization. Pre-upgrade deferred scans,
 whose marker and manifest omit that contract, remain finalizable without a
 second full CAR scan; this compatibility applies only to those already-written
 legacy candidates.
+
+## Aggregate calendar index
+
+`blockzilla build-block-time-gap-index` strictly validates a bounded range of
+per-epoch sidecars and writes one atomic JSON index for monitoring clients:
+
+```sh
+blockzilla build-block-time-gap-index /archive-v2 \
+  --start-epoch 0 \
+  --end-epoch 1000 \
+  --minimum-interruption-secs 300 \
+  --output /ui/api/v1/sidecars/block-time-gaps/index.json
+```
+
+The index contains:
+
+- the audited epoch range and an explicit sorted list of missing sidecars;
+- a SHA-256 fingerprint over the range, threshold, epoch numbers, and exact
+  bytes of every consumed sidecar;
+- qualifying intra-epoch observations and observations formed from the last
+  block of one epoch and first block of the next adjacent indexed epoch; and
+- compact UTC-day summaries, splitting elapsed time at UTC midnight while
+  preserving the full longest observation for inspection.
+
+Only positive usable block-time deltas at or above the configured threshold
+are included. Missing timestamps, decreasing timestamps, missing sidecars, and
+non-adjacent epoch coverage are not converted into interruptions. The output is
+evidence of archived block-time discontinuities, not by itself a canonical
+network-outage ledger.
