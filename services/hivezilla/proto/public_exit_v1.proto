@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package hivezilla.public.v1;
+
+service HivezillaPublicExitV1 {
+  rpc ListStreams(ListStreamsRequestV1) returns (PublicStreamListWireV1);
+  rpc Subscribe(SubscribeRequestV1) returns (stream PublicServerFrameV1);
+}
+
+message ListStreamsRequestV1 {}
+
+message PublicStreamListWireV1 {
+  bytes registry_head = 1;
+  bytes registry = 2;
+  repeated bytes public_manifests = 3;
+}
+
+message SubscribeRequestV1 {
+  bytes stream_id = 1;
+  oneof start {
+    bool latest = 2;
+    bytes cursor = 3;
+  }
+}
+
+message CursorRangeWireV1 {
+  bytes start = 1;
+  bytes end = 2;
+}
+
+message PublicHelloWireV1 {
+  uint32 protocol_version = 1;
+  bytes stream = 2;
+  repeated CursorRangeWireV1 available = 3;
+  bytes live_tail = 4;
+}
+
+message PublicEventWireV1 {
+  bytes record = 1;
+}
+
+enum ReplayReasonWireV1 {
+  REPLAY_REASON_UNSPECIFIED = 0;
+  REPLAY_CURSOR_EXPIRED = 1;
+  REPLAY_STREAM_REPLACED = 2;
+  REPLAY_HISTORY_PENDING = 3;
+  REPLAY_HISTORY_LOST = 4;
+}
+
+enum RecoveryWireV1 {
+  RECOVERY_UNSPECIFIED = 0;
+  RECOVERY_RETRY = 1;
+  RECOVERY_CANONICAL_LOOKUP_ONLY = 2;
+  RECOVERY_NONE = 3;
+}
+
+message ReplayUnavailableWireV1 {
+  ReplayReasonWireV1 reason = 1;
+  bytes requested = 2;
+  repeated CursorRangeWireV1 available = 3;
+  bytes successor_stream_id = 4;
+  RecoveryWireV1 recovery = 5;
+}
+
+enum PublicErrorCodeWireV1 {
+  PUBLIC_ERROR_UNSPECIFIED = 0;
+  PUBLIC_UNKNOWN_STREAM = 1;
+  PUBLIC_CURSOR_MISMATCH = 2;
+  PUBLIC_SLOW_SUBSCRIBER = 3;
+  PUBLIC_LIMIT = 4;
+  PUBLIC_UNAVAILABLE = 5;
+}
+
+message PublicErrorWireV1 {
+  PublicErrorCodeWireV1 code = 1;
+}
+
+message PublicServerFrameV1 {
+  oneof frame {
+    PublicHelloWireV1 hello = 1;
+    PublicEventWireV1 event = 2;
+    ReplayUnavailableWireV1 replay_unavailable = 3;
+    PublicErrorWireV1 error = 4;
+  }
+}
