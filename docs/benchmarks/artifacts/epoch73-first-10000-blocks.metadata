@@ -1,0 +1,12 @@
+start_utc=2026-07-30T15:45:13Z
+start_unix_ns=1785426313180551791
+binary_sha256=fa019562b45f42b024fe9d6188726f266396be871c2c20126a49b906b3f24235
+checkpoint_sha256=15172e16aefbe670799e8224c6ab742796603e6129ecea5c8c7d2614f631c2a0
+input_format=blockzilla-compact-archive-v2
+max_slots=10000
+profile_frequency_hz=49
+cpu=0
+nice=10
+end_utc=2026-07-30T15:46:09Z
+end_unix_ns=1785426369195400847
+exit_status=0
