@@ -215,6 +215,61 @@ def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
         _required(source, "reserve_free_bytes", "Hivezilla status"),
         "reserve_free_bytes",
     )
+    udp_received = _integer(
+        _required(source, "udp_received_total", "Hivezilla status"),
+        "udp_received_total",
+    )
+    udp_received_bytes = _integer(
+        _required(source, "udp_received_bytes_total", "Hivezilla status"),
+        "udp_received_bytes_total",
+    )
+    queue_depth_events = _integer(
+        _required(source, "ingest_queue_depth_events", "Hivezilla status"),
+        "ingest_queue_depth_events",
+    )
+    queue_depth_bytes = _integer(
+        _required(source, "ingest_queue_depth_bytes", "Hivezilla status"),
+        "ingest_queue_depth_bytes",
+    )
+    queue_high_water_events = _integer(
+        _required(source, "ingest_queue_high_water_events", "Hivezilla status"),
+        "ingest_queue_high_water_events",
+    )
+    queue_high_water_bytes = _integer(
+        _required(source, "ingest_queue_high_water_bytes", "Hivezilla status"),
+        "ingest_queue_high_water_bytes",
+    )
+    queue_capacity_events = _integer(
+        _required(source, "ingest_queue_capacity_events", "Hivezilla status"),
+        "ingest_queue_capacity_events",
+        positive=True,
+    )
+    queue_capacity_bytes = _integer(
+        _required(source, "ingest_queue_capacity_bytes", "Hivezilla status"),
+        "ingest_queue_capacity_bytes",
+        positive=True,
+    )
+    queue_backpressure_events = _integer(
+        _required(source, "ingest_queue_backpressure_events_total", "Hivezilla status"),
+        "ingest_queue_backpressure_events_total",
+    )
+    queue_backpressure_micros = _integer(
+        _required(source, "ingest_queue_backpressure_micros_total", "Hivezilla status"),
+        "ingest_queue_backpressure_micros_total",
+    )
+    queue_backpressured = _required(source, "ingest_queue_backpressured", "Hivezilla status")
+    if type(queue_backpressured) is not bool:
+        raise ValueError("ingest_queue_backpressured must be a boolean")
+    socket_overflow_supported = _required(
+        source, "socket_rxq_overflow_supported", "Hivezilla status"
+    )
+    if type(socket_overflow_supported) is not bool:
+        raise ValueError("socket_rxq_overflow_supported must be a boolean")
+    socket_overflow = _integer(
+        _required(source, "socket_rxq_overflow_total", "Hivezilla status"),
+        "socket_rxq_overflow_total",
+        nullable=True,
+    )
 
     if started > updated:
         raise ValueError("Hivezilla start timestamp is after its update")
@@ -226,6 +281,19 @@ def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
         raise ValueError("Hivezilla spool usage exceeds its configured maximum")
     if filesystem_free > filesystem_total or reserve_free > filesystem_total:
         raise ValueError("Hivezilla filesystem counters are contradictory")
+    if accepted + invalid > udp_received or payload_bytes > udp_received_bytes:
+        raise ValueError("Hivezilla UDP counters are contradictory")
+    if (
+        queue_depth_events > queue_capacity_events
+        or queue_high_water_events > queue_capacity_events
+        or queue_depth_events > queue_high_water_events
+        or queue_depth_bytes > queue_capacity_bytes
+        or queue_high_water_bytes > queue_capacity_bytes
+        or queue_depth_bytes > queue_high_water_bytes
+    ):
+        raise ValueError("Hivezilla ingest queue counters are contradictory")
+    if socket_overflow_supported != (socket_overflow is not None):
+        raise ValueError("Hivezilla socket-overflow support and counter disagree")
 
     durable_tail = (durable_sequence, latest_slot, shred_version)
     has_durable_tail = any(child is not None for child in durable_tail)
@@ -264,6 +332,19 @@ def parse_hivezilla_status(value, now_unix_secs: int, config: StatusConfig):
         "filesystem_free_bytes": filesystem_free,
         "filesystem_total_bytes": filesystem_total,
         "reserve_free_bytes": reserve_free,
+        "udp_received_total": udp_received,
+        "udp_received_bytes_total": udp_received_bytes,
+        "ingest_queue_depth_events": queue_depth_events,
+        "ingest_queue_depth_bytes": queue_depth_bytes,
+        "ingest_queue_high_water_events": queue_high_water_events,
+        "ingest_queue_high_water_bytes": queue_high_water_bytes,
+        "ingest_queue_capacity_events": queue_capacity_events,
+        "ingest_queue_capacity_bytes": queue_capacity_bytes,
+        "ingest_queue_backpressure_events_total": queue_backpressure_events,
+        "ingest_queue_backpressure_micros_total": queue_backpressure_micros,
+        "ingest_queue_backpressured": queue_backpressured,
+        "socket_rxq_overflow_supported": socket_overflow_supported,
+        "socket_rxq_overflow_total": socket_overflow,
     }
 
 
@@ -286,6 +367,19 @@ def unavailable_hivezilla_status():
         "filesystem_free_bytes": None,
         "filesystem_total_bytes": None,
         "reserve_free_bytes": None,
+        "udp_received_total": None,
+        "udp_received_bytes_total": None,
+        "ingest_queue_depth_events": None,
+        "ingest_queue_depth_bytes": None,
+        "ingest_queue_high_water_events": None,
+        "ingest_queue_high_water_bytes": None,
+        "ingest_queue_capacity_events": None,
+        "ingest_queue_capacity_bytes": None,
+        "ingest_queue_backpressure_events_total": None,
+        "ingest_queue_backpressure_micros_total": None,
+        "ingest_queue_backpressured": None,
+        "socket_rxq_overflow_supported": None,
+        "socket_rxq_overflow_total": None,
     }
 
 
@@ -322,11 +416,23 @@ def parse_receiver_metrics(value, sampled_unix_secs: int, config: StatusConfig):
         "shred-reader metrics.seconds_since_last_packet",
         nullable=True,
     )
+    socket_overflow_supported = _required(
+        source, "tvu_socket_rxq_overflow_supported", "shred-reader metrics"
+    )
+    if type(socket_overflow_supported) is not bool:
+        raise ValueError("shred-reader metrics.tvu_socket_rxq_overflow_supported must be a boolean")
+    socket_overflow = _integer(
+        _required(source, "tvu_socket_rxq_overflow_total", "shred-reader metrics"),
+        "shred-reader metrics.tvu_socket_rxq_overflow_total",
+        nullable=True,
+    )
 
     if recent_peers > known_peers:
         raise ValueError("recent gossip peer count exceeds known peer count")
     if targets == 0 and (forwarded != 0 or forward_errors != 0):
         raise ValueError("forwarding counters exist without a forwarding target")
+    if socket_overflow_supported != (socket_overflow is not None):
+        raise ValueError("shred-reader TVU socket-overflow support and counter disagree")
     attempts = forwarded + forward_errors
     if attempts > MAX_SAFE_INTEGER:
         raise ValueError("forwarding attempt count exceeds the public integer limit")
@@ -371,6 +477,8 @@ def parse_receiver_metrics(value, sampled_unix_secs: int, config: StatusConfig):
             "duplicates_total": duplicates,
             "data_total": data,
             "code_total": code,
+            "socket_rxq_overflow_supported": socket_overflow_supported,
+            "socket_rxq_overflow_total": socket_overflow,
             "latest_slot": latest_slot_raw if parsed > 0 else None,
             "seconds_since_last_packet": seconds_since_packet,
             "updated_unix_secs": sampled_unix_secs,
@@ -408,6 +516,8 @@ def unavailable_receiver_status():
             "duplicates_total": None,
             "data_total": None,
             "code_total": None,
+            "socket_rxq_overflow_supported": None,
+            "socket_rxq_overflow_total": None,
             "latest_slot": None,
             "seconds_since_last_packet": None,
             "updated_unix_secs": None,

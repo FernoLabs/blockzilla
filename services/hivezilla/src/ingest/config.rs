@@ -164,6 +164,7 @@ pub enum SourceInputConfig {
         bind: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         multicast_group: Option<String>,
+        /// Concrete local IP address or interface name used to join the multicast group.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interface: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1409,9 +1410,16 @@ fn validate_udp_multicast(
     });
     let parsed_interface = interface.and_then(|value| match IpAddr::from_str(value) {
         Ok(address) if !address.is_multicast() && !address.is_unspecified() => Some(address),
-        _ => {
+        Ok(_) => {
             issues.push(format!(
-                "{prefix}.interface must be a concrete unicast IP address"
+                "{prefix}.interface must be a concrete unicast IP address or local interface name"
+            ));
+            None
+        }
+        Err(_) if valid_network_interface_name(value) => None,
+        Err(_) => {
+            issues.push(format!(
+                "{prefix}.interface must be a concrete unicast IP address or local interface name"
             ));
             None
         }
@@ -1428,6 +1436,14 @@ fn validate_udp_multicast(
             "{prefix}.multicast_group and interface must use the same IP family"
         ));
     }
+}
+
+fn valid_network_interface_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() < libc::IFNAMSIZ
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
 }
 
 /// Returns whether the endpoint is TLS protected.
@@ -2120,6 +2136,21 @@ mod tests {
         value["sources"][1]["input"]["interface"] = json!("::1");
         let error = validation_text(&value);
         assert!(error.contains("same IP family"));
+    }
+
+    #[test]
+    fn udp_multicast_accepts_a_bounded_local_interface_name() {
+        let mut value = valid_primary_json();
+        value["sources"][1]["input"]["interface"] = json!("doublezero1");
+        assert!(IngestConfig::from_json(&value.to_string()).is_ok());
+
+        value["sources"][1]["input"]["interface"] = json!("bad interface");
+        let error = validation_text(&value);
+        assert!(error.contains("unicast IP address or local interface name"));
+
+        value["sources"][1]["input"]["interface"] = json!("x".repeat(libc::IFNAMSIZ));
+        let error = validation_text(&value);
+        assert!(error.contains("unicast IP address or local interface name"));
     }
 
     #[test]

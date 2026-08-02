@@ -41,6 +41,19 @@ def hivezilla_status(now=2_000, **overrides):
         "filesystem_free_bytes": 42_949_672_960,
         "filesystem_total_bytes": 64_424_509_440,
         "reserve_free_bytes": 2_147_483_648,
+        "udp_received_total": 503,
+        "udp_received_bytes_total": 618_096,
+        "ingest_queue_depth_events": 3,
+        "ingest_queue_depth_bytes": 3_696,
+        "ingest_queue_high_water_events": 64,
+        "ingest_queue_high_water_bytes": 78_848,
+        "ingest_queue_capacity_events": 16_384,
+        "ingest_queue_capacity_bytes": 67_108_864,
+        "ingest_queue_backpressure_events_total": 0,
+        "ingest_queue_backpressure_micros_total": 0,
+        "ingest_queue_backpressured": False,
+        "socket_rxq_overflow_supported": True,
+        "socket_rxq_overflow_total": 0,
     }
     value.update(overrides)
     return value
@@ -69,6 +82,8 @@ def receiver_metrics(**overrides):
         "forward_targets": 1,
         "forwarded_datagrams_total": 985,
         "forward_errors_total": 5,
+        "tvu_socket_rxq_overflow_supported": True,
+        "tvu_socket_rxq_overflow_total": 0,
         "tracked_sources": 22,
         "latest_slot": 433_735_944,
         "seconds_since_last_packet": 2,
@@ -189,11 +204,15 @@ class ShredStatusTests(unittest.TestCase):
         self.assertEqual(public["gossip"]["recent_peer_count"], 37)
         self.assertEqual(public["tvu"]["state"], "receiving")
         self.assertEqual(public["tvu"]["latest_slot"], 433_735_944)
+        self.assertTrue(public["tvu"]["socket_rxq_overflow_supported"])
+        self.assertEqual(public["tvu"]["socket_rxq_overflow_total"], 0)
         self.assertEqual(public["forwarding"]["state"], "sending")
         self.assertEqual(public["forwarding"]["attempts_total"], 990)
         self.assertEqual(public["hivezilla"]["availability"], "available")
         self.assertTrue(public["hivezilla"]["status_fresh"])
         self.assertEqual(public["hivezilla"]["durable_through_sequence"], 7_499)
+        self.assertEqual(public["hivezilla"]["socket_rxq_overflow_total"], 0)
+        self.assertEqual(public["hivezilla"]["ingest_queue_high_water_events"], 64)
 
         encoded = status_server.encode_public_status(public).decode("ascii")
         for forbidden in (
@@ -208,6 +227,26 @@ class ShredStatusTests(unittest.TestCase):
             "hivezilla-secret",
         ):
             self.assertNotIn(forbidden, encoded)
+
+    def test_first_and_second_hop_socket_overflow_are_separate(self):
+        public = self.build(
+            receiver=receiver_metrics(tvu_socket_rxq_overflow_total=7),
+            hivezilla=hivezilla_status(socket_rxq_overflow_total=3),
+        )
+
+        self.assertEqual(public["tvu"]["socket_rxq_overflow_total"], 7)
+        self.assertEqual(public["hivezilla"]["socket_rxq_overflow_total"], 3)
+
+        unsupported_first_hop = self.build(
+            receiver=receiver_metrics(
+                tvu_socket_rxq_overflow_supported=False,
+                tvu_socket_rxq_overflow_total=None,
+            )
+        )
+        self.assertFalse(
+            unsupported_first_hop["tvu"]["socket_rxq_overflow_supported"]
+        )
+        self.assertIsNone(unsupported_first_hop["tvu"]["socket_rxq_overflow_total"])
 
     def test_receiver_and_hivezilla_fail_independently(self):
         def unavailable():
@@ -302,6 +341,9 @@ class ShredStatusTests(unittest.TestCase):
             hivezilla_status(spool_bytes=30_000_000_000),
             hivezilla_status(filesystem_free_bytes=70_000_000_000),
             hivezilla_status(last_durable_unix_secs=None),
+            hivezilla_status(udp_received_total=501),
+            hivezilla_status(ingest_queue_depth_events=17_000),
+            hivezilla_status(socket_rxq_overflow_supported=False),
         ]
         for value in cases:
             with self.subTest(value=value):
@@ -312,6 +354,10 @@ class ShredStatusTests(unittest.TestCase):
         self.assertEqual(invalid_receiver["gossip"]["state"], "unavailable")
         invalid_forwarding = self.build(receiver=receiver_metrics(forward_targets=0))
         self.assertEqual(invalid_forwarding["forwarding"]["state"], "unavailable")
+        invalid_first_hop_overflow = self.build(
+            receiver=receiver_metrics(tvu_socket_rxq_overflow_supported=False)
+        )
+        self.assertEqual(invalid_first_hop_overflow["tvu"]["state"], "unavailable")
 
     def test_unsafe_or_duplicate_json_is_rejected(self):
         duplicate = b'{"schema_version":1,"schema_version":1}'
