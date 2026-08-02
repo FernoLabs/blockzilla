@@ -1,0 +1,68 @@
+rank	leaf_samples	percent	function
+1	362	27.70	unknown
+2	178	13.62	solana_sbpf::memory_region::MemoryMapping::map_with_access_violation_handler
+3	172	13.16	core::ptr::copy_nonoverlapping
+4	171	13.08	solana_sbpf::memory_region::MappingCache::find
+5	55	4.21	core::sync::atomic::atomic_add
+6	45	3.44	<core::ops::range::Range<usize> as core::slice::index::SliceIndex<[T]>>::get_mut
+7	38	2.91	<T as core::array::equality::SpecArrayEq<U,_>>::spec_eq
+8	26	1.99	<u64>::checked_shr
+9	24	1.84	core::iter::adapters::try_process
+10	23	1.76	solana_sbpf::memory_region::MemoryMapping::load
+11	15	1.15	alloc::vec::Vec<T,A>::len
+12	14	1.07	blockzilla_replay::launch_vote::VoteStateV100::process_slot
+13	13	0.99	BIT_getMiddleBits
+14	12	0.92	blockzilla_replay::compiler::launch_syscall_string::{{closure}}
+15	11	0.84	curve25519_dalek::backend::serial::u64::field::FieldElement51::pow2k
+16	10	0.77	alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut,K,V,Type>::keys
+17	9	0.69	core::mem::maybe_uninit::MaybeUninit<T>::write
+18	9	0.69	solana_sbpf::memory_region::MemoryMapping::new_uninitialized
+19	8	0.61	<core::ops::control_flow::ControlFlow<B,C> as core::ops::try_trait::Try>::branch
+20	7	0.54	<blockzilla_format::v2::Leb128 as wincode::schema::int_encoding::IntEncoding<B>>::decode_u64
+21	7	0.54	<core::iter::adapters::enumerate::Enumerate<I> as core::iter::traits::iterator::Iterator>::try_fold::enumerate::{{closure}}
+22	6	0.46	blockzilla_replay::launch_replay::instruction_account_metas
+23	5	0.38	<u64 as core::cmp::Ord>::cmp
+24	5	0.38	core::intrinsics::unlikely
+25	5	0.38	solana_sbpf::memory_region::MemoryMapping::store
+26	5	0.38	wincode::schema::SchemaRead::get
+27	4	0.31	alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_fit
+28	4	0.31	core::core_arch::x86::sha::_mm_sha256rnds2_epu32
+29	4	0.31	core::str::validations::run_utf8_validation
+30	3	0.23	<core::slice::iter::Iter<T> as core::iter::traits::iterator::Iterator>::next
+31	3	0.23	BIT_reloadDStream
+32	3	0.23	ZSTD_buildFSETable_body
+33	3	0.23	ZSTD_decompressMultiFrame
+34	3	0.23	core::ptr::write
+35	2	0.15	<core::result::Result<T,E> as core::ops::try_trait::Try>::branch
+36	2	0.15	<subtle::Choice as core::convert::From<u8>>::from
+37	2	0.15	<usize as core::slice::index::SliceIndex<[T]>>::get_unchecked
+38	2	0.15	HUF_readDTableX1_wksp
+39	2	0.15	alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing
+40	2	0.15	blockzilla_replay::compiler::launch_syscall_string
+41	2	0.15	core::result::Result<T,E>::map_err
+42	2	0.15	core::slice::<impl [T]>::binary_search_by
+43	2	0.15	core::sync::atomic::atomic_compare_exchange
+44	2	0.15	smallvec::SmallVec<A>::spilled
+45	2	0.15	solana_sbpf::program::BuiltinFunctionDefinition::vm
+46	2	0.15	wincode::schema::impls::<impl wincode::schema::SchemaRead<C> for u64>::read
+47	1	0.08	<alloc::sync::Arc<T,A> as core::ops::drop::Drop>::drop
+48	1	0.08	<blockzilla_replay::compiler::SyscallInvokeSignedRust as solana_sbpf::program::BuiltinFunctionDefinition<blockzilla_replay::compiler::ReplayContext>>::rust
+49	1	0.08	<core::ptr::non_null::NonNull<T> as core::cmp::PartialEq>::eq
+50	1	0.08	<u64>::wrapping_add
+51	1	0.08	FSE_buildDTable_internal
+52	1	0.08	FSE_readNCount_body
+53	1	0.08	FSE_readNCount_body_bmi2
+54	1	0.08	alloc::boxed::Box<T>::new
+55	1	0.08	alloc::collections::btree::navigate::<impl alloc::collections::btree::node::NodeRef<BorrowType,K,V,alloc::collections::btree::node::marker::LeafOrInternal>>::first_leaf_edge
+56	1	0.08	blockzilla_format::v2::_::<impl wincode::schema::SchemaRead<__WincodeConfig> for blockzilla_format::v2::ArchiveV2SystemInstructionData>::read
+57	1	0.08	blockzilla_replay::compact::_::<impl wincode::schema::SchemaRead<__WincodeConfig> for blockzilla_replay::compact::CompactTransactionMetadataPrefix>::read
+58	1	0.08	blockzilla_replay::compact::own_lookups
+59	1	0.08	blockzilla_replay::compiler::copy_guest_bytes
+60	1	0.08	blockzilla_replay::launch_sysvar::rewrite_recent_blockhashes_data
+61	1	0.08	core::core_arch::x86::sse2::_mm_shuffle_epi32
+62	1	0.08	core::ptr::drop_in_place<core::iter::adapters::map::Map<smallvec::IntoIter<[blockzilla_replay::compact::May24ArchiveV2HotInstruction; 2]>,<blockzilla_replay::compact::May24ArchiveV2HotInstruction as core::convert::Into<blockzilla_replay::compact::DecodedCompactInstruction>>::into>>
+63	1	0.08	core::slice::<impl [T]>::split_at_checked
+64	1	0.08	curve25519_dalek::field::<impl curve25519_dalek::backend::serial::u64::field::FieldElement51>::pow22501
+65	1	0.08	smallvec::SmallVec<A>::push
+66	1	0.08	solana_sbpf::memory_region::UnalignedMemoryMapping::construct_eytzinger_order
+67	1	0.08	solana_sbpf::program::BuiltinFunctionDefinition::vm::{{closure}}
