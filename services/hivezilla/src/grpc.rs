@@ -352,6 +352,8 @@ struct GrpcCapturedBlockJournal {
     epoch_slot_index: u64,
     block_id: u32,
     parent_slot: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_blockhash: Option<[u8; 32]>,
     transactions: usize,
     entries: usize,
     executed_transaction_count: u64,
@@ -854,6 +856,7 @@ impl GrpcRawArchiveWriter {
             epoch_slot_index,
             block_id,
             parent_slot: block.parent_slot,
+            previous_blockhash: converted.previous_blockhash,
             transactions: block.transactions.len(),
             entries: block.entries.len(),
             executed_transaction_count: block.executed_transaction_count,
@@ -1657,6 +1660,7 @@ pub async fn capture_grpc_blocks(config: GrpcCaptureConfig) -> Result<GrpcCaptur
                 epoch_slot_index: epoch_slot.slot_index,
                 block_id,
                 parent_slot: block.parent_slot,
+                previous_blockhash: converted.previous_blockhash,
                 transactions: block.transactions.len(),
                 entries: block.entries.len(),
                 executed_transaction_count: block.executed_transaction_count,
@@ -3606,6 +3610,13 @@ pub(crate) struct ConvertedGrpcBlock {
     pub(crate) block: WincodeArchiveV2NoRegistryBlock,
     pub(crate) poh_entries: Vec<CompactPohEntry>,
     pub(crate) blockhash: [u8; 32],
+    /// Exact `SubscribeUpdateBlock.parent_blockhash` bytes from Yellowstone.
+    ///
+    /// This is deliberately separate from `block.header.compact.previous_blockhash`, which is a
+    /// legacy source-local registry ID and must never be interpreted as hash bytes. V1 candidate
+    /// production consumes this value and assigns canonical registry IDs only after validating the
+    /// finalized parent chain.
+    pub(crate) previous_blockhash: Option<[u8; 32]>,
     pub(crate) transaction_count: usize,
     pub(crate) missing: Vec<LiveBlockMissingField>,
 }
@@ -3773,6 +3784,15 @@ pub(crate) fn convert_grpc_block_frame_with_pubkey_cache(
     convert_grpc_block_frame_inner(frame, block_id, None, pubkey_string_cache)
 }
 
+/// Compatibility-only registry reference used by the legacy normalized capture artifact.
+///
+/// This value is not derived evidence about the source parent hash and is not valid for V1
+/// canonical publication. Candidate production must resolve [`ConvertedGrpcBlock::previous_blockhash`]
+/// against the finalized chain and assign its own registry ID.
+fn legacy_noncanonical_previous_blockhash_registry_id(block_id: u32) -> u32 {
+    block_id.checked_sub(1).unwrap_or_default()
+}
+
 macro_rules! borrowed_timing_start {
     ($timings:expr) => {
         if $timings.is_some() {
@@ -3805,6 +3825,7 @@ fn convert_grpc_block_frame_inner(
     let mut slot = 0u64;
     let mut parent_slot = 0u64;
     let mut blockhash = None;
+    let mut parent_blockhash = None;
     let mut block_time = None;
     let mut block_height = None;
     let mut rewards = None;
@@ -3846,7 +3867,8 @@ fn convert_grpc_block_frame_inner(
                 borrowed_record_timing!(timings, started_at, transactions_total);
             }
             56 => parent_slot = reader.read_uint64()?,
-            66 | 90 => reader.skip_length_delimited()?,
+            66 => parent_blockhash = Some(reader.read_string()?),
+            90 => reader.skip_length_delimited()?,
             72 => executed_transaction_count = reader.read_uint64()?,
             80 => {
                 let _ = reader.read_uint64()?;
@@ -3869,6 +3891,7 @@ fn convert_grpc_block_frame_inner(
         .into_iter()
         .map(|(_index, entry)| entry)
         .collect::<Vec<_>>();
+    txs.sort_unstable_by_key(|transaction| transaction.tx_index);
 
     let mut missing = Vec::new();
     if entries_count as usize != poh_entries.len() {
@@ -3884,11 +3907,13 @@ fn convert_grpc_block_frame_inner(
 
     let transaction_count = txs.len();
     let blockhash = blockhash.context("missing blockhash")?;
+    let previous_blockhash =
+        decode_source_parent_blockhash(slot, parent_blockhash.unwrap_or_default())?;
     let header = CompactBlockHeader {
         slot,
         parent_slot,
         blockhash: block_id,
-        previous_blockhash: block_id.saturating_sub(1),
+        previous_blockhash: legacy_noncanonical_previous_blockhash_registry_id(block_id),
         block_time,
         block_height,
         shredding: Vec::new(),
@@ -3922,6 +3947,7 @@ fn convert_grpc_block_frame_inner(
         },
         poh_entries,
         blockhash,
+        previous_blockhash,
         transaction_count,
         missing,
     })
@@ -3937,6 +3963,7 @@ fn convert_grpc_block_inner(
 
     let started_at = Instant::now();
     let blockhash = decode_required_hash_string(&block.blockhash)?;
+    let previous_blockhash = decode_source_parent_blockhash(block.slot, &block.parent_blockhash)?;
     if let Some(timings) = timings.as_deref_mut() {
         timings.blockhash += started_at.elapsed();
     }
@@ -3977,7 +4004,9 @@ fn convert_grpc_block_inner(
 
     let started_at = Instant::now();
     let mut txs = Vec::with_capacity(block.transactions.len());
-    for tx in &block.transactions {
+    let mut transactions = block.transactions.iter().collect::<Vec<_>>();
+    transactions.sort_unstable_by_key(|transaction| transaction.index);
+    for tx in transactions {
         let transaction = tx.transaction.as_ref().with_context(|| {
             format!(
                 "slot {} tx {} missing transaction payload",
@@ -4031,7 +4060,7 @@ fn convert_grpc_block_inner(
         slot: block.slot,
         parent_slot: block.parent_slot,
         blockhash: block_id,
-        previous_blockhash: block_id.saturating_sub(1),
+        previous_blockhash: legacy_noncanonical_previous_blockhash_registry_id(block_id),
         block_time: block.block_time.as_ref().map(|time| time.timestamp),
         block_height: block
             .block_height
@@ -4077,6 +4106,7 @@ fn convert_grpc_block_inner(
         },
         poh_entries,
         blockhash,
+        previous_blockhash,
         transaction_count,
         missing,
     })
@@ -5141,8 +5171,19 @@ fn decode_hash_string(value: &str) -> Result<Option<[u8; 32]>> {
     decode_base58_32(value, "blockhash").map(Some)
 }
 
-fn decode_required_hash_string(value: &str) -> Result<[u8; 32]> {
+pub(crate) fn decode_required_hash_string(value: &str) -> Result<[u8; 32]> {
     decode_hash_string(value)?.context("missing blockhash")
+}
+
+pub(crate) fn decode_source_parent_blockhash(slot: u64, value: &str) -> Result<Option<[u8; 32]>> {
+    if value.is_empty() {
+        anyhow::ensure!(slot == 0, "slot {slot} is missing its parent blockhash");
+        return Ok(None);
+    }
+
+    decode_base58_32(value, "parent blockhash")
+        .with_context(|| format!("slot {slot} has an invalid parent blockhash"))
+        .map(Some)
 }
 
 fn decode_required_pubkey_string(value: &str) -> Result<[u8; 32]> {
@@ -5155,16 +5196,114 @@ fn decode_base58_32(value: &str, kind: &str) -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
-fn bytes32(value: &[u8]) -> Result<[u8; 32]> {
+pub(crate) fn bytes32(value: &[u8]) -> Result<[u8; 32]> {
     let bytes: [u8; 32] = value
         .try_into()
         .map_err(|_| anyhow!("expected 32 bytes, got {}", value.len()))?;
     Ok(bytes)
 }
 
-fn bytes64(value: &[u8]) -> Result<[u8; 64]> {
+pub(crate) fn bytes64(value: &[u8]) -> Result<[u8; 64]> {
     let bytes: [u8; 64] = value
         .try_into()
         .map_err(|_| anyhow!("expected 64 bytes, got {}", value.len()))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod grpc_parent_blockhash_tests {
+    use super::*;
+
+    fn encode_hash(hash: &[u8; 32]) -> String {
+        let mut output = [0u8; five8::BASE58_ENCODED_32_MAX_LEN];
+        let length = five8::encode_32(hash, &mut output) as usize;
+        String::from_utf8(output[..length].to_vec()).expect("base58 hash is ASCII")
+    }
+
+    fn source_block(
+        slot: u64,
+        blockhash: [u8; 32],
+        previous_blockhash: Option<[u8; 32]>,
+    ) -> SubscribeUpdateBlock {
+        SubscribeUpdateBlock {
+            slot,
+            parent_slot: slot.saturating_sub(1),
+            blockhash: encode_hash(&blockhash),
+            parent_blockhash: previous_blockhash
+                .as_ref()
+                .map(encode_hash)
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prost_and_borrowed_conversion_preserve_exact_source_parent_blockhash() {
+        let expected = [0x37; 32];
+        let block = source_block(42, [0x52; 32], Some(expected));
+
+        let prost = convert_grpc_block(&block, 9).unwrap();
+        assert_eq!(prost.previous_blockhash, Some(expected));
+
+        let frame = block.encode_to_vec();
+        let borrowed = convert_grpc_block_frame_with_pubkey_cache(&frame, 9, true).unwrap();
+        assert_eq!(borrowed.previous_blockhash, Some(expected));
+    }
+
+    #[test]
+    fn prost_and_borrowed_conversion_reject_missing_non_genesis_parent_blockhash() {
+        let block = source_block(42, [0x52; 32], None);
+
+        let prost_error = convert_grpc_block(&block, 9).err().unwrap();
+        assert!(
+            prost_error
+                .to_string()
+                .contains("slot 42 is missing its parent blockhash")
+        );
+
+        let frame = block.encode_to_vec();
+        let borrowed_error = convert_grpc_block_frame_with_pubkey_cache(&frame, 9, true)
+            .err()
+            .unwrap();
+        assert!(
+            borrowed_error
+                .to_string()
+                .contains("slot 42 is missing its parent blockhash")
+        );
+    }
+
+    #[test]
+    fn prost_and_borrowed_conversion_reject_invalid_non_genesis_parent_blockhash() {
+        let mut block = source_block(42, [0x52; 32], Some([0x37; 32]));
+        block.parent_blockhash = "0-not-base58".to_string();
+
+        let prost_error = convert_grpc_block(&block, 9).err().unwrap();
+        assert!(
+            prost_error
+                .to_string()
+                .contains("slot 42 has an invalid parent blockhash")
+        );
+
+        let frame = block.encode_to_vec();
+        let borrowed_error = convert_grpc_block_frame_with_pubkey_cache(&frame, 9, true)
+            .err()
+            .unwrap();
+        assert!(
+            borrowed_error
+                .to_string()
+                .contains("slot 42 has an invalid parent blockhash")
+        );
+    }
+
+    #[test]
+    fn genesis_may_omit_parent_blockhash_without_synthesizing_one() {
+        let block = source_block(0, [0x52; 32], None);
+
+        let prost = convert_grpc_block(&block, 0).unwrap();
+        assert_eq!(prost.previous_blockhash, None);
+
+        let frame = block.encode_to_vec();
+        let borrowed = convert_grpc_block_frame_with_pubkey_cache(&frame, 0, true).unwrap();
+        assert_eq!(borrowed.previous_blockhash, None);
+    }
 }
