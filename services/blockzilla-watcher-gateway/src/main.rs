@@ -6,13 +6,19 @@ use clap::{Parser, Subcommand};
 #[command(name = "blockzilla-watcher-gateway")]
 #[command(about = "Bounded, public-safe Blockzilla watcher gateway")]
 struct Cli {
+    #[command(flatten)]
+    serve: public_proxy::ServeArgs,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Serve the public watcher without exposing private scheduler telemetry.
+    /// Compatibility form: `serve` is still supported.
+    ///
+    /// This is equivalent to running `blockzilla-watcher-gateway` directly with
+    /// the same serve arguments.
     Serve(public_proxy::ServeArgs),
     /// Publish bounded, secret-free telemetry for same-user NAS processes.
     PublishRuntimeOperations(runtime_operations::PublishArgs),
@@ -24,9 +30,10 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     match cli.command {
-        Command::Serve(args) => runtime.block_on(public_proxy::serve(args)),
-        Command::PublishRuntimeOperations(args) => {
+        Some(Command::Serve(args)) => runtime.block_on(public_proxy::serve(args)),
+        Some(Command::PublishRuntimeOperations(args)) => {
             runtime.block_on(runtime_operations::publish(args))
         }
+        None => runtime.block_on(public_proxy::serve(cli.serve)),
     }
 }
