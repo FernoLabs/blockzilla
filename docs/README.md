@@ -100,5 +100,4 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 These documents preserve ideas and measurements; they are not all implemented
 or current. Machine-specific runbooks, credentials, incidents, raw benchmark
-output, and production deployment configuration do not belong here. Use the
-repository [security policy](../SECURITY.md) for private reporting.
+output, and production deployment configuration do not belong here.

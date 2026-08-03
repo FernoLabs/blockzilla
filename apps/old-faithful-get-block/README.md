@@ -36,5 +36,4 @@ npm run dev
 Keep account IDs, bucket names, routes, and credentials outside the repository.
 
 `npm run bench -- --help` describes the optional live benchmark. It can create
-provider traffic and cost, so start with a small duration and concurrency. See
-the repository [security policy](../../SECURITY.md).
+provider traffic and cost, so start with a small duration and concurrency.

@@ -14,8 +14,7 @@ visible to local users.
   multiple credentials.
 
 Use short-lived read-only credentials, start with dry runs or small inputs, and
-review every artifact before publishing it. See the repository
-[security policy](../SECURITY.md).
+review every artifact before publishing it.
 
 ## Inventory
 

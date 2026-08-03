@@ -39,7 +39,7 @@ Prepare the two examples as private regular files, never as symlinks:
 - NAS client: [raw-shred-pull-client.example.json](../../services/hivezilla/config/raw-shred-pull-client.example.json)
 
 The Hetzner Dokploy Compose file is
-[docker-compose.hivezilla-shred.dokploy.yml](../../docker-compose.hivezilla-shred.dokploy.yml).
+[services/hivezilla/docker-compose.hivezilla-shred.dokploy.yml](../../services/hivezilla/docker-compose.hivezilla-shred.dokploy.yml).
 It now runs the pull listener instead of the old local-only `bridge-shred-spool` copy. Before
 deploying it, provision its private `deploy/hivezilla-shred/{tls,replication,receipts,secrets}`
 mounts and set `SHRED_JOURNAL_ID` to the active journal ID. The small container entrypoint renders

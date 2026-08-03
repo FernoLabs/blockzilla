@@ -256,5 +256,4 @@ send that ACK.
 The durability model and unfinished work are described in the
 [live-ingest design](../../docs/design/live-ingest-redundancy.md). Keep raw
 spools until downstream storage is independently verified, and never commit
-provider URLs, tokens, captures, journals, or incident artifacts. See the
-repository [security policy](../../SECURITY.md).
+provider URLs, tokens, captures, journals, or incident artifacts.

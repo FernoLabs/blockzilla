@@ -124,7 +124,7 @@ fails closed after 2 GiB, and preserves at least 8 GiB of filesystem free space:
 ```bash
 export DOUBLEZERO_EDGE_JOURNAL_ID="$(openssl rand -hex 16)"
 docker compose \
-  -f docker-compose.hivezilla-doublezero-edge.canary.yml \
+  -f <path-to-your-deployment>/docker-compose.hivezilla-doublezero-edge.canary.yml \
   --profile doublezero-edge-canary \
   up --build hivezilla-doublezero-edge-canary
 ```
