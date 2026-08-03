@@ -19,8 +19,10 @@ enum Command {
     ///
     /// This is equivalent to running `blockzilla-watcher-gateway` directly with
     /// the same serve arguments.
+    #[command(hide = true)]
     Serve(public_proxy::ServeArgs),
     /// Publish bounded, secret-free telemetry for same-user NAS processes.
+    #[command(hide = true)]
     PublishRuntimeOperations(runtime_operations::PublishArgs),
 }
 

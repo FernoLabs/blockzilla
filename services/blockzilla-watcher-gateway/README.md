@@ -9,7 +9,7 @@ endpoint and header allowlists, strict ingest-status projection, JSON and SSE
 redaction, body limits, private-address checks, and secret-free `502` responses.
 Static watcher assets are streamed without buffering.
 
-Run it against local-only watcher upstreams (serve mode is now the default):
+Run it against local-only watcher upstreams:
 
 ```console
 cargo run --release -p blockzilla-watcher-gateway -- \
@@ -28,31 +28,12 @@ cargo run --release -p blockzilla-watcher-gateway -- \
   --topcoat-ui
 ```
 
-Legacy form still works for scripts that still use `serve` explicitly:
-
-```console
-cargo run --release -p blockzilla-watcher-gateway -- serve --topcoat-ui
-```
-
 Test the contract with:
 
 ```console
 cargo test -p blockzilla-watcher-gateway
 ```
 
-Publish bounded runtime operations directly from Rust:
-
-```console
-cargo run --release -p blockzilla-watcher-gateway -- \
-  publish-runtime-operations \
-  --output /path/to/ui/api/v1/sidecars/runtime-operations/status.json \
-  --interval-secs 5
-```
-
-Use `--once` for a single atomic publication. The collector samples only
-same-user processes, keys counter history by both PID and process start time,
-redacts command lines and paths from its output, and bounds published process
-and job lists. Install the checked-in
-`systemd/blockzilla-watcher-runtime-operations.service` as a user unit so the
-publisher has the same Unix identity as the observed jobs. The former Python
-publisher was retired after fixture and live-output parity.
+This binary is intentionally focused on the public watcher runtime; the legacy
+`publish-runtime-operations` flow is handled by the dedicated service unit and
+is hidden from normal CLI usage.
