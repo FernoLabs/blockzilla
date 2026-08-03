@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use bincode::Options;
+
 use clap::Parser;
 use data_encoding::HEXLOWER;
 use of_car_reader::{
@@ -188,11 +188,11 @@ fn message_instructions<'a>(message: &'a VersionedMessage<'a>) -> &'a [CompiledI
 }
 
 fn canonical_vote_decode_status(data: &[u8]) -> String {
-    let result: Result<VoteInstruction, _> = bincode::options()
-        .with_limit(VOTE_INSTRUCTION_DECODE_LIMIT)
-        .with_fixint_encoding()
-        .reject_trailing_bytes()
-        .deserialize(data);
+    if data.len() > VOTE_INSTRUCTION_DECODE_LIMIT as usize {
+        return "err:too-large".to_string();
+    }
+
+    let result: std::result::Result<VoteInstruction, _> = bincode::deserialize(data);
     match result {
         Ok(instruction) => format!("ok:{instruction:?}"),
         Err(err) => format!("err:{err}"),

@@ -77,32 +77,11 @@ The main command groups are:
 | Replicate | `serve-ingest-receiver`, `replicate-grpc-raw`, `pull-grpc-raw`, `serve-grpc-raw-pull-source`, `serve-shred-spool-pull-source`, `bridge-receiver-grpc-raw` |
 | Capture | `capture-grpc`, `inspect-capture` |
 | Repair | `sync-rpc-epoch`, `backfill-rpc`, `prepare-epoch-repair` |
-| Operate | `serve-ingest-status`, `serve-shred-status`, `monitor-pull-ack-telegram`, `supervise`, `notify-supervisor` |
+| Operate | `serve-shred-reader`, `serve-shred-status`, `supervise`, `notify-supervisor` |
 
 Use command-specific `--help` before starting a networked or disk-writing task.
 Examples reference credentials through environment variables or files; do not
 place secret values in them.
-
-### Native durable ACK alerts
-
-`monitor-pull-ack-telegram` sends one warning when the signed durable receiver
-ACK is missing or stale and one recovery after fresh ACK progress returns. Its
-four-phase state file makes ambiguous network outcomes at-most-once across
-shutdowns and restarts. It bounds every local read and Telegram response,
-rejects symlinks, never logs the token-bearing URL, and refuses a shared or
-group/world-writable state directory.
-
-```bash
-hivezilla monitor-pull-ack-telegram \
-  --ack-status-file /control/pull-ack-status.json \
-  --state-file /alert-state/pull-ack-alert.json \
-  --token-file /run/secrets/telegram_bot_token \
-  --chat-id -100123456
-```
-
-Explicit options override the existing `BLOCKZILLA_PULL_ACK_*` and
-`BLOCKZILLA_TELEGRAM_*` environment variables, so deployments can replace the
-retired Python process without changing secret mounts or thresholds.
 
 ### Offline ledger projection shadow
 
@@ -161,27 +140,6 @@ small overhead. These RPC blocks contain transactions and rewards but no Solana
 PoH entries. They are a transaction/block backup source, not an entry-complete
 replacement for the Yellowstone raw spool.
 
-### Native ingest status
-
-`serve-ingest-status` exposes one bounded, read-only projection of the durable
-raw cache and signed replication ACK. The collector is implemented in Rust; it
-does not execute Python, mount secrets, or expose mutation endpoints.
-
-```bash
-hivezilla serve-ingest-status \
-  --listen 127.0.0.1:8790 \
-  --cache-root /path/to/read-only/grpc-cache \
-  --ack-status-file /path/to/read-only/pull-ack-status.json \
-  --known-gaps-file services/hivezilla/config/known-ingest-gaps.mainnet.json \
-  --disk-critical-free-bytes 402653184 \
-  --disk-warning-free-bytes 805306368
-```
-
-Only `/healthz` and
-`/api/v1/sidecars/ingest-pipeline/status.json` are served. Bind the listener to
-loopback or an explicit private address and route only the status endpoint
-through the watcher gateway.
-
 ### Shred UDP recorder
 
 `record-shred-udp` selects one enabled `shred_udp` source from a schema-v2
@@ -193,7 +151,8 @@ trusted private network; authenticated envelopes are not implemented yet.
 IPv4 multicast sources may select their local interface by concrete address or
 by a bounded interface name such as `doublezero1`. DoubleZero's IBRL routing and
 its direct Edge multicast feed are separate operating modes; see
-[Hivezilla and DoubleZero](../../docs/operations/hivezilla-doublezero.md) before
+the [DoubleZero section in the live archive producer guide](../../docs/guides/live-archive-producer.md#doublezero--shred-stream)
+before
 connecting either mode.
 
 ```bash
@@ -226,10 +185,15 @@ The supplied `docker-compose.hivezilla-shred.dokploy.yml` keeps metrics on host
 loopback, mounts recorder status read-only into the Rust collector, and exposes
 only the sanitized JSON through a separate read-only web container.
 
+`shred-reader` itself is now merged into the Hivezilla binary; use
+`hivezilla serve-shred-reader` (with environment variables described in
+`services/hivezilla/config/shred-reader.env.example`) to run the same gossip/TVU runtime without
+a separate service process.
+
 This is a bounded raw shred recorder, not block reconstruction or indexing. Its
 example spool fails closed at 20 GiB, and the recorder itself never deletes.
 The raw NAS replication path is documented in
-[raw-shred-nas-replication.md](../../docs/operations/raw-shred-nas-replication.md):
+[the live ingest and storage design note](../../docs/architecture/live-ingest-and-storage.md):
 the NAS opens an mTLS pull connection to Hetzner and writes the same compressed
 shred records to its own durable spool. In that legacy deployment, after the
 exact NAS **staging ACK** crosses the source's cumulative-ACK WAL fsync boundary,

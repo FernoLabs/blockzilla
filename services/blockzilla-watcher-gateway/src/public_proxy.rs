@@ -32,7 +32,6 @@ const SSE_UNGATED_CHUNK_BYTES: usize = 16 * 1024;
 const PUBLIC_API_GETS: &[&str] = &[
     "/api/v1/events",
     "/api/v1/sidecars/block-time-gaps/index.json",
-    "/api/v1/sidecars/block-time-gaps/status.json",
     "/api/v1/sidecars/ingest-pipeline/status.json",
     "/api/v1/sidecars/shred-ingest/status.json",
     "/api/v1/sidecars/runtime-operations/status.json",
@@ -729,7 +728,6 @@ mod tests {
         assert!(PUBLIC_API_GETS.contains(&"/api/v1/status"));
         assert!(PUBLIC_API_GETS.contains(&"/api/v1/events"));
         assert!(PUBLIC_API_GETS.contains(&"/api/v1/sidecars/block-time-gaps/index.json"));
-        assert!(PUBLIC_API_GETS.contains(&"/api/v1/sidecars/block-time-gaps/status.json"));
         assert!(PUBLIC_API_GETS.contains(&"/api/v1/sidecars/ingest-pipeline/status.json"));
         assert!(PUBLIC_API_GETS.contains(&"/api/v1/sidecars/runtime-operations/status.json"));
     }

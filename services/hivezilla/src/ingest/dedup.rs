@@ -6,6 +6,7 @@
 //! upstream source to replay data it may no longer retain.
 
 use anyhow::Result;
+pub use blockzilla_shred_codec::ShredKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -23,12 +24,6 @@ pub struct ObservationId {
 /// Digest of the canonical ingress payload, including a format/domain prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentDigest(pub [u8; 32]);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ShredKind {
-    Data,
-    Coding,
-}
 
 /// Semantic identity used to group exact duplicates and conflicting candidates.
 ///

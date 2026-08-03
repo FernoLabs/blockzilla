@@ -1,6 +1,6 @@
 //! Read-only verification and merge support for accepted repair-shred WALs.
 //!
-//! The writer lives in `services/shred-reader`.  This module deliberately duplicates the stable
+//! The writer lives in the merged `hivezilla` shred-reader module.  This module deliberately duplicates the stable
 //! wire decoder at the audit boundary: immutable prefix audits do not acquire the writer lock,
 //! truncate a crash tail, or otherwise mutate live ingest state. Complete terminal-cursor discovery
 //! intentionally holds the writer's base-file lock and refuses an active generation.

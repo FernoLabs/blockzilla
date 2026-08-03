@@ -220,4 +220,5 @@ sync, and production shred-processing and compact-worker paths; raw shred
 capture, replication, FEC recovery, and diagnostic deshredding foundations now
 exist. Blockzilla still lacks the production scheduler/catalog boundary and
 disk-backed candidate index that choose and commit one canonical block stream.
-Those gaps are tracked in the project [roadmap](../../ROADMAP.md).
+Those gaps are tracked in the project
+[hivezilla-v1 implementation plan](../architecture/hivezilla-v1-implementation-plan.md).

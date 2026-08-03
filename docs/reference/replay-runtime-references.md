@@ -34,8 +34,8 @@ This document pins the upstream material used to design Blockzilla's trusted-his
 Pins are immutable inputs to this design. Updating one requires a documented semantic diff, especially around loader state layouts, SBPF versions, syscalls, feature activation, transaction rollback, and rent/fee behavior.
 
 The source trees can be recreated without moving tags by running
-`scripts/fetch-replay-runtime-references.sh`; it fetches and detaches each exact
-revision into a caller-selected reference directory.
+`scripts/personal/reference/fetch-replay-runtime-references.sh`; it fetches and
+detaches each exact revision into a caller-selected reference directory.
 
 ## Agave: current semantic reference
 

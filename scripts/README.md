@@ -10,9 +10,6 @@ Network scripts can consume provider quotas, incur cost, and create large or
 sensitive artifacts. URLs and headers passed on the command line may also be
 visible to local users.
 
-- `bench-rpc-getblock.sh` prints its endpoint in TSV output.
-- `rpc-epoch-bench` and `rpc-correctness-check` accept endpoints through
-  environment-variable references and write only endpoint labels to artifacts.
 - `run-rpc-correctness-matrix.sh` contacts several providers and requires
   multiple credentials.
 
@@ -24,26 +21,17 @@ review every artifact before publishing it. See the repository
 
 | Script | Mode | Purpose |
 | --- | --- | --- |
-| `bench-car-registry-macos.sh` | Local, macOS | Compare CAR pubkey-registry strategies. |
-| `bench-rpc-getblock.sh` | Live network | Print repeated `getBlock` timings as TSV. |
 | `run-rpc-correctness-matrix.sh` | Maintainer-only | Run the standard multi-provider correctness matrix. |
 | `sync-replay-compact.sh` | SSH transfer + local validation | Resume the replay-minimal Compact epoch-0/1 files from the NAS and publish local Archive V2 manifests. |
-| `test-sync-replay-compact.sh` | Offline | Exercise rsync, legacy-SCP fallback, interrupted transfers, and manifest guards. |
 | `run-replay-marathon.sh` | Local/NAS, bounded | Resume a sealed Compact chain for several hours with boundary checkpoints, replay metrics, and `pidstat` telemetry. |
 
+Historical and one-off helpers are now intentionally stored locally outside git in:
+
+- `scripts/personal/benchmarks/` (`bench-*`, `compare-*`, `reference_rpc_matrix.py`, etc.)
+- `scripts/personal/tests/` (`test-sync-replay-compact.sh`, offline harnesses)
+- `scripts/personal/reference/` (`fetch-replay-runtime-references.sh`)
+
 Use `--help` where available for prerequisites, inputs, and output paths.
-
-The maintained RPC benchmark and correctness implementations are native Rust
-binaries in `blockzilla-get-block`:
-
-```bash
-cargo run --locked -p blockzilla-get-block --bin rpc-epoch-bench -- --help
-cargo run --locked -p blockzilla-get-block --bin rpc-correctness-check -- --help
-```
-
-Both commands plan deterministic representative slots and support several
-provider labels in one run. The older Python report/corpus utilities were
-retired instead of retaining a second network stack and artifact format.
 
 ## Production predecessor-tail seeding
 
@@ -220,11 +208,8 @@ copy of this same authoritative generation. File sizes and present-row counts
 remain pinned; a different generation requires an explicit review and script
 update instead of a permissive runtime switch.
 
-Run the offline helper self-test with:
-
-```bash
-scripts/test-sync-replay-compact.sh
-```
+An offline sync self-test remains available in
+`scripts/personal/tests/test-sync-replay-compact.sh` when needed.
 
 Build once and replay the two completed Compact generations in ledger order:
 
@@ -243,22 +228,5 @@ replay runtime.
 
 ## Safe starting points
 
-Run a bounded local benchmark on macOS:
-
-```bash
-MAX_BLOCKS=1000 scripts/bench-car-registry-macos.sh \
-  crates/old-faithful/car-reader/benches/fixtures/epoch-157-biggest.car
-```
-
-Create a reference plan without sending requests:
-
-```bash
-export REFERENCE_RPC_URL='https://rpc.example'
-cargo run --locked -p blockzilla-get-block --bin rpc-correctness-check -- \
-  --endpoint reference=@REFERENCE_RPC_URL \
-  --primary reference \
-  --output-dir target/reference-rpc \
-  --samples-per-epoch 1 \
-  --dry-run \
-  700
-```
+Run a bounded local benchmark on macOS or build a reference rpc matrix with the
+one-off scripts in `scripts/personal/`.

@@ -17,7 +17,7 @@ Current guides: [Blockzilla CLI](../blockzilla/README.md),
   locally derived slot/time discontinuity file emitted by current builders.
 - [Blockzilla scheduler](../blockzilla/README.md#scheduler) documents the
   experimental finite-work scheduler and its read-only status boundary.
-- [Blockzilla watcher](../services/blockzilla-watcher/README.md) documents the
+- [Blockzilla watcher](../apps/blockzilla-watcher/README.md) documents the
   separate read-only operational UI and API contract.
 - [FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
   hands off the completed-epoch read SDK and authenticated Range-gateway flow;
@@ -44,7 +44,7 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 - [Rust runtime boundary](architecture/rust-runtime-boundary.md): ownership
   rule for production logic, the narrow external-tool exceptions, and the
-  migration order for remaining shell implementations.
+  migration order for remaining Python and shell implementations.
 - [Hivezilla convergence architecture](architecture/hivezilla-convergence.md):
   code-backed map of the current live paths, the target hive, retention model,
   alerts, and phased implementation plan.
@@ -90,13 +90,10 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 ## Research and history
 
-- [Horizon problem statement](design/horizon-problem-statement.md)
 - [Live-ingest redundancy](design/live-ingest-redundancy.md)
 - [Portable Hivezilla supervisor](design/portable-supervisor.md)
 - [Archive V2 evolution](design/archive-v2-evolution.md)
-- [Log compression](design/log-compression.md)
 - [Earlier live-producer design](guides/live-archive-producer.md)
-- [Archive V2 benchmark snapshot](benchmarks/archive-v2-storage-read-getblock-2026-05-24.md)
 - [Replay runtime reference ledger](reference/replay-runtime-references.md):
   pinned Agave, LiteSVM, QuasarSVM, Firedancer, Mithril, launch-era Solana,
   SBPF, Cranelift, genesis, and Old Faithful findings.

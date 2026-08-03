@@ -1,0 +1,210 @@
+# Blockzilla Watcher
+
+Blockzilla Watcher is the operational UI for live indexing, archive work, and
+NAS health. Its default view keeps the live epoch, active task ETAs, runnable
+queue ETA, compact epoch timeline, NAS resources, recent errors, and external
+disk I/O visible; deeper worker and live-pipeline details remain collapsible.
+Completed compactions and recorded run durations live on the separate
+`/history` page. The `/ingest` page reports independent evidence for gossip
+observation, TVU datagram receipt, local forwarding attempts, and Hivezilla
+post-`fsync` recording. It does not label UDP as connected or claim that raw
+shreds have been reconstructed into indexed blocks.
+
+This directory contains the UI client only. The current
+[`services/hivezilla`](../../services/hivezilla/README.md) capture service does not provide
+the watcher API.
+
+For this repo layout, this app lives outside the runtime service boundary in
+`apps/` and can be deployed independently from the NAS services.
+
+## Run locally
+
+Use Node.js 24 or newer, then point the development proxy at a compatible
+watcher API:
+
+```bash
+cd apps/blockzilla-watcher
+npm ci
+BLOCKZILLA_WATCHER_API_URL=http://127.0.0.1:8788 npm run dev
+```
+
+The production build uses same-origin `/api` requests:
+
+```bash
+npm test
+npm run check
+npm run build
+```
+
+Shred telemetry is the exception: set the public, read-only sidecar endpoint at
+build time when it is not served by the watcher origin:
+
+```bash
+PUBLIC_HIVEZILLA_SHRED_STATUS_URL=https://status.example/api/v1/sidecars/shred-ingest/status.json \
+  npm run build
+```
+
+The static build uses `index.html` as its SPA fallback. Production hosting must
+rewrite direct requests such as `/history` to that fallback.
+
+To keep the maintenance screen available while the watcher process or NAS is
+offline, serve the static `build/` directory from hosting that is independent
+of the watcher API and route only `/api/*` to the NAS. If the same unavailable
+origin serves both the page and the API, the browser cannot load the client-side
+maintenance screen.
+
+## Epoch dates
+
+The calendar bundles a generated mainnet reference at
+`src/lib/data/mainnet-epoch-calendar.json`. A non-empty `epoch_calendar` from
+the watcher API remains authoritative and replaces matching reference entries.
+
+Regenerate the displayed dates from an archival Solana RPC endpoint:
+
+```bash
+SOLANA_RPC_URL=https://your-archival-rpc.example \
+  npm run generate:epoch-calendar -- \
+  --dates-only \
+  --cutoff-slot 432431999 \
+  --output src/lib/data/mainnet-epoch-calendar.json \
+  --concurrency 4
+```
+
+Dates-only mode locates each epoch's first and last produced blocks and obtains
+their chain timestamps. Unavailable historical times are interpolated between
+observed timestamps and marked `estimated`.
+
+If the live snapshot is newer than both the bundled reference and its optional
+`epoch_calendar`, the UI projects only the missing tail. It uses the median of
+the latest 16 known epoch durations and marks every projected range `estimated`;
+`432,000 × 400 ms` is only the last fallback when no duration sample exists.
+Regenerate the reference regularly because the target slot duration can change.
+
+Omit `--dates-only` to perform the reproducible skipped-slot audit. Full mode
+scans finalized history in non-overlapping `getBlocks` windows of at most
+500,000 slots, keeps only per-epoch counts and boundaries, and records exact
+produced/skipped counts in `epoch_stats`. It transfers several gigabytes for a
+full mainnet history scan, so both modes resume from ignored checkpoints under
+`target/epoch-calendar/`.
+
+Use an archival endpoint. The generator refuses an endpoint whose first
+available block is newer than the requested start, because pruned history must
+not be counted as skipped slots. RPC endpoint URLs are never written to the
+generated dataset or checkpoints.
+
+## API contract
+
+The client reads:
+
+- `GET /api/v1/status` for a full pipeline snapshot.
+- `GET /api/v1/events` for server-sent `snapshot`, `snapshot_patch`, and
+  `resync` events. Event data uses the envelope `{ type, sequence, data }`.
+- Optionally, `GET /api/v1/sidecars/block-time-gaps/index.json` for the
+  immutable aggregate of validated per-epoch block-time gap sidecars. The
+  client loads it once and overlays observed interruptions on the UTC year
+  calendar without changing archive-status colors. The index includes explicit
+  missing-epoch coverage; a missing sidecar is never interpreted as a day with
+  no interruption.
+- Optionally, `GET /api/v1/sidecars/runtime-operations/status.json` for raw WAL
+  capture, external CAR download/verification jobs, and bounded process I/O.
+  The client polls this feed every five seconds and marks samples older than 20
+  seconds stale. This keeps one-off NAS work visible without exposing command
+  lines, endpoints, tokens, or filesystem paths. The fallback process sampler
+  is deliberately limited to processes owned by the publisher's Unix user and
+  excludes Blockzilla/Hivezilla work already represented elsewhere in the UI.
+- Optionally, `GET /api/v1/sidecars/ingest-pipeline/status.json` for the focused
+  `/ingest` page. This feed reports only secret-free capture, local retention,
+  signed receiver-ACK, indexer, R2, fallback, continuity, and incident fields.
+  The client polls it every five seconds and marks samples older than 30 seconds
+  stale. A receiver ACK proves durable backup storage; it must not be presented
+  as an indexer watermark. Indexing remains `unavailable` until its own durable
+  post-commit status is published.
+
+The Rust watcher gateway publishes this sidecar operationally. Run it as the
+same Unix user as the processes being observed and point it at the path served
+for the URL above:
+
+```bash
+blockzilla-watcher-gateway publish-runtime-operations \
+  --output /path/to/ui/api/v1/sidecars/runtime-operations/status.json
+```
+
+The checked-in user unit
+[`blockzilla-watcher-runtime-operations.service`](../../services/blockzilla-watcher-gateway/systemd/blockzilla-watcher-runtime-operations.service)
+runs the publisher every five seconds. Before enabling it, create
+`~/.config/blockzilla-watcher/runtime-operations.env` with the absolute served
+sidecar path:
+
+```ini
+BLOCKZILLA_RUNTIME_OPERATIONS_OUTPUT=/path/to/ui/api/v1/sidecars/runtime-operations/status.json
+```
+
+Install the unit under `~/.config/systemd/user/`, then use
+`systemctl --user enable --now blockzilla-watcher-runtime-operations.service`.
+The same-user requirement is part of the privacy boundary: a system service or
+a different service account will observe the wrong process set. The former
+Python publisher was retired after fixture and live-output parity; the Rust
+gateway is the only maintained implementation.
+
+## Public deployment
+
+The scheduler keeps full filesystem paths internally. Its JSON serializers
+publish only safe artifact basenames. Put the Rust watcher gateway on the
+public boundary, including when an older scheduler remains in service:
+
+```sh
+blockzilla-watcher-gateway serve \
+  --listen 127.0.0.1:8787 \
+  --upstream 127.0.0.1:8786 \
+  --ingest-upstream 127.0.0.1:8790
+```
+
+The gateway is read-only, preserves the status and SSE contracts, and strips
+absolute storage paths from full snapshots, sidecar JSON, and real-time
+patches. The dedicated ingest route cannot accidentally fall through to the
+watcher upstream. Keep both upstreams on loopback. The listener may use
+loopback or an explicit private address; wildcard and public binds are rejected.
+
+The ingest status publisher must select fields from recorder and receiver
+state rather than proxying raw files. In particular, never publish upstream
+endpoints, journal or origin identifiers, block hashes, digests, receipt object
+keys, command lines, tokens, or filesystem paths. The browser must not receive
+Dokploy credentials and the status endpoint must remain read-only.
+
+Raw WAL capture is labeled as capture, not indexing. Archive materialization
+remains a separate Blockzilla task. A completed CAR transfer undergoing SHA-256
+is shown as `CAR verification`, rather than continuing to claim it is a
+download.
+
+Snapshots may optionally include `epoch_calendar` entries with `epoch`,
+`start_unix_secs`, nullable `end_unix_secs`, and `precision` (`observed` or
+`estimated`). Observed boundaries should come from the epoch's first and last
+produced block times. The UI groups these chain dates by UTC month, marks
+estimates with `~`, and never treats archive file timestamps as epoch dates.
+
+Snapshots may optionally include a bounded `recent_compactions` array. Each
+successful canonical archive publication has a stable `id`, `epoch`, `workflow`
+(`historical`, `live`, or `recompact`), `completed_unix_secs`, and
+`duration_secs`. Duration is wall-clock time from compactor worker start through
+successful publication; it excludes queue wait and source download. Persisted
+completion records remain authoritative. When a completed epoch has no record,
+the UI may show the archive `metadata` artifact modification time as a labeled
+approximate archive file time; duration remains unavailable. It must not use
+source CAR times, later repair artifact times, inventory refreshes, or chain
+dates as compaction completion times.
+
+Snapshots may also include a `process_io` sample:
+
+- `state`: `collecting`, `ready`, or `unavailable`.
+- `sampled_unix_secs`, `sample_window_secs`, `active_count`,
+  `inaccessible_count`, and `truncated` describe the bounded sample.
+- `processes` contains stable `id`, `pid`, `/proc/<pid>/comm` `name`,
+  `read_mib_per_sec`, `write_mib_per_sec`, and optional `cpu_percent`,
+  `rss_bytes`, and `blockzilla_owned`. Raw command-line arguments must not be
+  exposed because they can contain secrets.
+
+The backend should exclude the watcher and every managed Blockzilla process
+tree; the UI also hides entries explicitly marked `blockzilla_owned`. Rates
+from `/proc/<pid>/io` cover all filesystems used by the process, not only the
+archive device. CPU follows Linux `top` semantics: 100% is one logical core and
+multithreaded processes may exceed 100%.

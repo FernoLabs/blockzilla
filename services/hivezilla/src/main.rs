@@ -41,6 +41,7 @@ use hivezilla::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
         sync_epoch_info,
     },
+    shred_reader,
     shred_status::{ServeShredStatusArgs, serve_shred_status},
     supervisor::{
         BackoffPolicy, RestartPolicy, SupervisorConfig, SupervisorNotificationKind,
@@ -107,6 +108,8 @@ enum Command {
     ValidateIngestConfig(ValidateIngestConfigArgs),
     /// Durably record byte-for-byte Solana shred datagrams from one configured UDP source.
     RecordShredUdp(RecordShredUdpArgs),
+    /// Run the full shred-reader runtime (gossip + TVU receive + optional bounded repair).
+    ServeShredReader,
     /// Copy committed raw shreds into a Blockzilla-owned spool with a durable cursor.
     BridgeShredSpool(BridgeShredSpoolArgs),
     /// Run the bounded, mTLS-only durable inbound replication receiver.
@@ -122,13 +125,6 @@ enum Command {
     ServeShredSpoolPullSource(ServeShredSpoolPullSourceArgs),
     /// Aggregate recorder and loopback receiver telemetry into a bounded public status service.
     ServeShredStatus(ServeShredStatusArgs),
-    /// Serve a bounded, secret-free view of the durable live-ingest pipeline.
-    ServeIngestStatus(ServeIngestStatusArgs),
-    /// Alert once when durable receiver ACK progress stalls and once when it recovers.
-    MonitorPullAckTelegram(MonitorPullAckTelegramArgs),
-    /// Internal native helpers for the raw-recorder shell supervisor.
-    #[command(hide = true)]
-    RawRecorderSupport(RawRecorderSupportArgs),
     /// Portably supervise one long-lived service with bounded restart and health policy.
     Supervise(SuperviseArgs),
     /// Notify a parent Hivezilla supervisor of readiness or one heartbeat.
@@ -1641,9 +1637,9 @@ async fn main() -> Result<()> {
             tracing::info!("direct mTLS raw-shred pull source stopped cleanly");
         }
         Command::ServeShredStatus(args) => serve_shred_status(args).await?,
-        Command::ServeIngestStatus(args) => serve_ingest_status(args).await?,
-        Command::MonitorPullAckTelegram(args) => monitor_pull_ack_telegram(args).await?,
-        Command::RawRecorderSupport(args) => run_raw_recorder_support(args)?,
+        Command::ServeShredReader => {
+            shred_reader::run().await?;
+        }
     }
 
     Ok(())

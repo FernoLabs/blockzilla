@@ -503,7 +503,7 @@ Keep and converge these foundations:
   recorder failure boundary;
 - `services/hivezilla/src/grpc.rs` and
   `services/hivezilla/src/ingest/shred_compact.rs` as processing foundations;
-- `services/shred-reader/`; and
+- `services/hivezilla/src/shred_reader/`; and
 - Blockzilla Archive V2 validation, writer, and read code.
 
 Add readers and fixtures for old Helius, repair-WAL, and cloud-generation

@@ -28,21 +28,15 @@ use tokio::{
 };
 
 use super::{
-    IngestConfig, IngestRoleConfig, IngressRecordMeta, LogicalKey, ObservationId, ShredKind,
+    IngestConfig, IngestRoleConfig, IngressRecordMeta, LogicalKey, ObservationId,
     SourceInputConfig, SpoolFullPolicy, SpoolJournalIdentity, SpoolOptions, SpoolWriter,
 };
+pub use blockzilla_shred_codec::{
+    ParsedShredHeader, RAW_SOLANA_SHRED_V1, ZSTD_SOLANA_SHRED_V1, decode_stored_shred,
+    parse_shred_header,
+};
 
-/// Uncompressed, byte-for-byte Solana shred datagram.
-pub const RAW_SOLANA_SHRED_V1: u16 = 3;
-/// Independently zstd-compressed, byte-for-byte Solana shred datagram.
-pub const ZSTD_SOLANA_SHRED_V1: u16 = 4;
-const COMMON_SHRED_HEADER_BYTES: usize = 83;
-const SHRED_VARIANT_OFFSET: usize = 64;
-const SLOT_OFFSET: usize = 65;
-const INDEX_OFFSET: usize = 73;
-const VERSION_OFFSET: usize = 77;
-const FEC_SET_INDEX_OFFSET: usize = 79;
-const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
+const MAX_UDP_DATAGRAM_BYTES: usize = blockzilla_shred_codec::MAX_UDP_DATAGRAM_BYTES;
 const UDP_RECEIVE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 const SOCKET_DRAIN_BURST_MAX_RECORDS: usize = 1_024;
 const DURABLE_BATCH_MAX_RECORDS: usize = 512;
@@ -216,15 +210,6 @@ impl QueuedDatagram {
 struct ReceivedDatagram {
     length: usize,
     socket_rxq_overflow: Option<u32>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ParsedShredHeader {
-    pub(crate) slot: u64,
-    pub(crate) index: u32,
-    pub(crate) version: u16,
-    pub(crate) fec_set_index: u32,
-    pub(crate) kind: ShredKind,
 }
 
 pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
@@ -1184,41 +1169,6 @@ fn filesystem_available_bytes(path: &Path) -> Result<u64> {
     filesystem_capacity_bytes(path).map(|(available, _)| available)
 }
 
-/// Decode one independently compressed raw-shred spool payload.
-///
-/// The returned bytes are still an untrusted Solana UDP datagram. Callers must parse and validate
-/// the shred before using it; this helper only applies the recorder's bounded zstd envelope.
-pub fn decode_stored_shred(payload: &[u8]) -> Result<Vec<u8>> {
-    zstd::bulk::decompress(payload, MAX_UDP_DATAGRAM_BYTES)
-        .context("decompress stored shred datagram")
-}
-
-pub(crate) fn parse_shred_header(payload: &[u8]) -> Option<ParsedShredHeader> {
-    if payload.len() < COMMON_SHRED_HEADER_BYTES {
-        return None;
-    }
-    let kind = match payload[SHRED_VARIANT_OFFSET] & 0xf0 {
-        0x60 | 0x70 => ShredKind::Coding,
-        0x90 | 0xb0 => ShredKind::Data,
-        _ => return None,
-    };
-    Some(ParsedShredHeader {
-        slot: u64::from_le_bytes(payload[SLOT_OFFSET..SLOT_OFFSET + 8].try_into().ok()?),
-        index: u32::from_le_bytes(payload[INDEX_OFFSET..INDEX_OFFSET + 4].try_into().ok()?),
-        version: u16::from_le_bytes(
-            payload[VERSION_OFFSET..VERSION_OFFSET + 2]
-                .try_into()
-                .ok()?,
-        ),
-        fec_set_index: u32::from_le_bytes(
-            payload[FEC_SET_INDEX_OFFSET..FEC_SET_INDEX_OFFSET + 4]
-                .try_into()
-                .ok()?,
-        ),
-        kind,
-    })
-}
-
 fn bind_udp_socket(address: SocketAddr) -> Result<(UdpSocket, usize, bool)> {
     let domain = if address.is_ipv4() {
         Domain::IPV4
@@ -1349,6 +1299,13 @@ mod tests {
 
     #[test]
     fn parses_data_and_coding_shred_coordinates() {
+        const COMMON_SHRED_HEADER_BYTES: usize = 83;
+        const SHRED_VARIANT_OFFSET: usize = 64;
+        const SLOT_OFFSET: usize = 65;
+        const INDEX_OFFSET: usize = 73;
+        const VERSION_OFFSET: usize = 77;
+        const FEC_SET_INDEX_OFFSET: usize = 79;
+
         for (variant, kind) in [(0x90, ShredKind::Data), (0x6f, ShredKind::Coding)] {
             let mut payload = [0u8; COMMON_SHRED_HEADER_BYTES];
             payload[SHRED_VARIANT_OFFSET] = variant;

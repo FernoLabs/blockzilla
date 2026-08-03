@@ -243,7 +243,8 @@ historical queries but cannot reproduce either live stream.
 
 See the [system overview](system-overview.md), the
 [Streamer contract](local-streaming.md), and the
-[roadmap](../../ROADMAP.md) for the boundaries behind this schema.
+[Hivezilla V1 implementation plan](hivezilla-v1-implementation-plan.md) for the
+boundaries behind this schema.
 
 The repository also contains a read-only experimental Old Faithful CAR-backed
 Worker. It is useful for compatibility and reference testing, but it is not a

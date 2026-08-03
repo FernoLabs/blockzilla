@@ -6,7 +6,6 @@
 //! archived successful transactions, so cryptographic signature checks and the
 //! vote hash/slot-history acceptance checks are outside this mutator.
 
-use bincode::Options;
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -370,7 +369,17 @@ pub enum LaunchVoteMutation {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 pub enum LaunchVoteAuthorize {
     Voter,
     Withdrawer,
@@ -383,11 +392,11 @@ pub enum LaunchVoteError {
     #[error("vote instruction account {pubkey:?} is absent from the transaction overlay")]
     MissingAccountState { pubkey: Pubkey },
     #[error("decode launch-era vote instruction: {0}")]
-    DecodeInstruction(#[source] bincode::Error),
+    DecodeInstruction(#[source] wincode::error::Error),
     #[error("launch-era vote instruction {0} is not implemented by the epoch replay POC")]
     UnsupportedInstruction(&'static str),
     #[error("decode launch-era vote account: {0}")]
-    DecodeAccount(#[source] bincode::Error),
+    DecodeAccount(#[source] wincode::error::Error),
     #[error("vote account is uninitialized")]
     UninitializedAccount,
     #[error("vote account is already initialized")]
@@ -417,7 +426,7 @@ pub enum LaunchVoteError {
     #[error("vote account has no authorized voter for epoch {0}")]
     MissingAuthorizedVoter(u64),
     #[error("serialize launch-era vote account: {0}")]
-    EncodeAccount(#[source] bincode::Error),
+    EncodeAccount(#[source] wincode::error::Error),
     #[error("serialized vote state needs {needed} bytes but the account has {available}")]
     AccountDataTooSmall { needed: usize, available: usize },
     #[error("Vote program changed the owner of account {pubkey:?}")]
@@ -1205,12 +1214,19 @@ fn preflight_borrowed_vote(
 fn decode_instruction(data: &[u8]) -> Result<VoteInstructionV100, LaunchVoteError> {
     // Mirrors v1.0.7 `program_utils::limited_deserialize`: fixed integers,
     // trailing bytes accepted, and a packet-sized allocation budget.
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(PACKET_DATA_SIZE)
-        .deserialize(data)
-        .map_err(LaunchVoteError::DecodeInstruction)
+    if data.len() > PACKET_DATA_SIZE as usize {
+        let limit_error = wincode::error::ReadError::from(
+            wincode::error::preallocation_size_limit(data.len(), PACKET_DATA_SIZE as usize),
+        );
+        return Err(LaunchVoteError::DecodeInstruction(
+            wincode::error::Error::ReadError(limit_error),
+        ));
+    }
+    wincode::config::deserialize(
+        data,
+        wincode::config::Configuration::default().with_fixint_encoding(),
+    )
+    .map_err(|source| LaunchVoteError::DecodeInstruction(wincode::error::Error::ReadError(source)))
 }
 
 fn initialize_account(
@@ -1522,8 +1538,10 @@ impl<'a> FixedVoteStateEncoder<'a> {
 
 fn write_vote_state(account_data: &mut [u8], state: &VoteStateV100) -> Result<(), LaunchVoteError> {
     let versioned = VoteStateVersionsV100Ref::Current(state);
-    let needed = bincode::serialized_size(&versioned)
-        .map_err(LaunchVoteError::EncodeAccount)?
+    let needed = wincode::serialized_size(&versioned)
+        .map_err(|source| {
+            LaunchVoteError::EncodeAccount(wincode::error::Error::WriteError(source))
+        })?
         .try_into()
         .unwrap_or(usize::MAX);
     if needed > account_data.len() {
@@ -1533,13 +1551,15 @@ fn write_vote_state(account_data: &mut [u8], state: &VoteStateV100) -> Result<()
         });
     }
     // v1.0.7 `Account::serialize_data` writes only the encoded prefix.
-    bincode::serialize_into(&mut account_data[..needed], &versioned)
-        .map_err(LaunchVoteError::EncodeAccount)?;
+    wincode::serialize_into(&mut account_data[..needed], &versioned).map_err(|source| {
+        LaunchVoteError::EncodeAccount(wincode::error::Error::WriteError(source))
+    })?;
     Ok(())
 }
 
 fn decode_vote_state(data: &[u8]) -> Result<VoteStateVersionsV100, LaunchVoteError> {
-    bincode::deserialize(data).map_err(LaunchVoteError::DecodeAccount)
+    wincode::deserialize(data)
+        .map_err(|source| LaunchVoteError::DecodeAccount(wincode::error::Error::ReadError(source)))
 }
 
 fn required_meta(
@@ -1582,7 +1602,7 @@ fn read_rent(
             found: meta.pubkey,
         });
     }
-    bincode::deserialize(&required_account(accounts, meta.pubkey)?.data).map_err(|_| {
+    wincode::deserialize(&required_account(accounts, meta.pubkey)?.data).map_err(|_| {
         LaunchVoteError::InvalidSysvarData {
             position,
             pubkey: meta.pubkey,
@@ -1603,7 +1623,7 @@ fn read_clock(
             found: meta.pubkey,
         });
     }
-    bincode::deserialize(&required_account(accounts, meta.pubkey)?.data).map_err(|_| {
+    wincode::deserialize(&required_account(accounts, meta.pubkey)?.data).map_err(|_| {
         LaunchVoteError::InvalidSysvarData {
             position,
             pubkey: meta.pubkey,
@@ -1728,7 +1748,7 @@ pub fn decode_launch_vote_credits(_pubkey: Pubkey, data: &[u8]) -> Result<u64, L
     Ok(decode_vote_state(data)?.into_current().credits())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 enum VoteInstructionV100 {
     InitializeAccount(VoteInitV100),
     Authorize(Pubkey, LaunchVoteAuthorize),
@@ -1739,7 +1759,7 @@ enum VoteInstructionV100 {
     VoteSwitch(VoteV100, Hash),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct VoteInitV100 {
     node_pubkey: Pubkey,
     authorized_voter: Pubkey,
@@ -1747,14 +1767,14 @@ struct VoteInitV100 {
     commission: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct VoteV100 {
     slots: Vec<u64>,
     hash: Hash,
     timestamp: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct ClockV100 {
     #[allow(dead_code)]
     slot: u64,
@@ -1766,7 +1786,7 @@ struct ClockV100 {
     unix_timestamp: i64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct RentV100 {
     lamports_per_byte_year: u64,
     exemption_threshold: f64,
@@ -1786,7 +1806,7 @@ impl RentV100 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 // Current is deliberately inline: this short-lived decode value trades about
 // 1.7 KiB of stack space for one heap allocation on every Vote instruction.
 #[allow(clippy::large_enum_variant)]
@@ -1796,7 +1816,7 @@ enum VoteStateVersionsV100 {
 }
 
 #[allow(dead_code)]
-#[derive(Serialize)]
+#[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
 enum VoteStateVersionsV100Ref<'a> {
     V0_23_5(&'a VoteState0235),
     Current(&'a VoteStateV100),
@@ -1818,7 +1838,7 @@ impl VoteStateVersionsV100 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct VoteStateV100 {
     node_pubkey: Pubkey,
     authorized_withdrawer: Pubkey,
@@ -2019,7 +2039,7 @@ impl VoteStateV100 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct AuthorizedVotersV100 {
     authorized_voters: BTreeMap<u64, Pubkey>,
 }
@@ -2030,7 +2050,7 @@ impl AuthorizedVotersV100 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct VoteState0235 {
     node_pubkey: Pubkey,
     authorized_voter: Pubkey,
@@ -2044,7 +2064,17 @@ struct VoteState0235 {
     last_timestamp: BlockTimestampV100,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 struct LockoutV100 {
     slot: u64,
     confirmation_count: u32,
@@ -2057,13 +2087,24 @@ impl LockoutV100 {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 struct BlockTimestampV100 {
     slot: u64,
     timestamp: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct CircBufV100<I> {
     buf: [I; PRIOR_VOTER_ITEMS],
     idx: usize,
@@ -2092,7 +2133,7 @@ impl<I> CircBufV100<I> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct CircBuf0235<I> {
     buf: [I; PRIOR_VOTER_ITEMS],
     idx: usize,
@@ -2231,7 +2272,7 @@ mod tests {
     use super::*;
 
     #[allow(dead_code)]
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     enum LegacyBoxedVoteStateVersionsV100 {
         V0_23_5(Box<VoteState0235>),
         Current(Box<VoteStateV100>),
@@ -2276,7 +2317,7 @@ mod tests {
 
     fn clock_account_at(slot: u64, epoch: u64, leader_schedule_epoch: u64) -> AccountSnapshot {
         sysvar_account(
-            bincode::serialize(&ClockV100 {
+            wincode::serialize(&ClockV100 {
                 slot,
                 segment: 510,
                 epoch,
@@ -2289,7 +2330,7 @@ mod tests {
 
     fn rent_account() -> AccountSnapshot {
         sysvar_account(
-            bincode::serialize(&RentV100 {
+            wincode::serialize(&RentV100 {
                 lamports_per_byte_year: 3_480,
                 exemption_threshold: 2.0,
                 burn_percent: 100,
@@ -2299,7 +2340,7 @@ mod tests {
     }
 
     fn fixed_vote_data(state: VoteStateVersionsV100) -> Vec<u8> {
-        let encoded = bincode::serialize(&state).unwrap();
+        let encoded = wincode::serialize(&state).unwrap();
         let mut data = vec![0; 3_731];
         data[..encoded.len()].copy_from_slice(&encoded);
         data
@@ -2322,7 +2363,7 @@ mod tests {
     }
 
     fn assert_fast_vote_state_encoding_matches_bincode(state: &VoteStateV100) -> usize {
-        let oracle = bincode::serialize(&VoteStateVersionsV100Ref::Current(state)).unwrap();
+        let oracle = wincode::serialize(&VoteStateVersionsV100Ref::Current(state)).unwrap();
         let mut scratch = vec![0xa5; oracle.len() + 37];
         let encoded_len = encode_vote_state_v100_into(state, &mut scratch).unwrap();
         assert_eq!(encoded_len, oracle.len());
@@ -2394,7 +2435,7 @@ mod tests {
                 std::hint::black_box(output.as_slice());
             }
             let elapsed = started.elapsed();
-            let oracle = bincode::serialize(&VoteStateVersionsV100Ref::Current(&state)).unwrap();
+            let oracle = wincode::serialize(&VoteStateVersionsV100Ref::Current(&state)).unwrap();
             assert_eq!(output, oracle);
             samples.push(elapsed.as_nanos() / u128::from(iterations));
         }
@@ -2411,7 +2452,7 @@ mod tests {
     }
 
     fn vote_instruction(slots: Vec<u64>, timestamp: Option<i64>) -> Vec<u8> {
-        bincode::serialize(&VoteInstructionV100::Vote(VoteV100 {
+        wincode::serialize(&VoteInstructionV100::Vote(VoteV100 {
             slots,
             hash: [3; 32],
             timestamp,
@@ -2420,7 +2461,7 @@ mod tests {
     }
 
     fn vote_switch_instruction(slots: Vec<u64>, timestamp: Option<i64>, proof: Hash) -> Vec<u8> {
-        bincode::serialize(&VoteInstructionV100::VoteSwitch(
+        wincode::serialize(&VoteInstructionV100::VoteSwitch(
             VoteV100 {
                 slots,
                 hash: [3; 32],
@@ -2518,11 +2559,11 @@ mod tests {
             timestamp: 1_585_432_740,
         };
 
-        let legacy = bincode::serialize(&LegacyBoxedVoteStateVersionsV100::Current(Box::new(
+        let legacy = wincode::serialize(&LegacyBoxedVoteStateVersionsV100::Current(Box::new(
             state.clone(),
         )))
         .unwrap();
-        let unboxed = bincode::serialize(&VoteStateVersionsV100::Current(state.clone())).unwrap();
+        let unboxed = wincode::serialize(&VoteStateVersionsV100::Current(state.clone())).unwrap();
         assert_eq!(
             unboxed, legacy,
             "Box must be transparent on the bincode wire"
@@ -2539,7 +2580,7 @@ mod tests {
 
         let decoded = decode_vote_state(&legacy).unwrap().into_current();
         assert_eq!(
-            bincode::serialize(&VoteStateVersionsV100::Current(decoded)).unwrap(),
+            wincode::serialize(&VoteStateVersionsV100::Current(decoded)).unwrap(),
             legacy
         );
     }
@@ -2675,7 +2716,7 @@ mod tests {
                 timestamp: 700,
             },
         }));
-        let encoded_legacy = bincode::serialize(&legacy).unwrap();
+        let encoded_legacy = wincode::serialize(&legacy).unwrap();
         let mut initial_data = vec![0xa5; 3_731];
         initial_data[..encoded_legacy.len()].copy_from_slice(&encoded_legacy);
         let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
@@ -2712,7 +2753,7 @@ mod tests {
         let VoteStateVersionsV100::Current(migrated) = migrated else {
             panic!("successful legacy Vote must migrate to Current")
         };
-        let current_prefix = bincode::serialize(&VoteStateVersionsV100Ref::Current(&migrated))
+        let current_prefix = wincode::serialize(&VoteStateVersionsV100Ref::Current(&migrated))
             .unwrap()
             .len();
         assert_eq!(
@@ -2723,7 +2764,7 @@ mod tests {
 
     #[test]
     fn direct_fast_encoder_capacity_failure_falls_back_without_commit() {
-        let initial_data = bincode::serialize(&initialized_state()).unwrap();
+        let initial_data = wincode::serialize(&initialized_state()).unwrap();
         assert_eq!(initial_data.len(), 1_695);
         let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
         let metas = [
@@ -2766,7 +2807,7 @@ mod tests {
 
     #[test]
     fn lazy_direct_capacity_fallback_preserves_earlier_pending_commit() {
-        let encoded = bincode::serialize(&initialized_state()).unwrap();
+        let encoded = wincode::serialize(&initialized_state()).unwrap();
         assert_eq!(encoded.len(), 1_695);
         let mut initial_data = vec![0xa5; 1_707];
         initial_data[..encoded.len()].copy_from_slice(&encoded);
@@ -2830,7 +2871,7 @@ mod tests {
 
     #[test]
     fn lazy_direct_materializes_before_a_shorter_prefix_to_preserve_tail_bytes() {
-        let encoded = bincode::serialize(&initialized_state()).unwrap();
+        let encoded = wincode::serialize(&initialized_state()).unwrap();
         let mut initial_data = vec![0xa5; 3_731];
         initial_data[..encoded.len()].copy_from_slice(&encoded);
         let metas = [
@@ -2885,7 +2926,7 @@ mod tests {
 
     #[test]
     fn lazy_direct_multi_slot_growth_stays_deferred_and_exact() {
-        let encoded = bincode::serialize(&initialized_state()).unwrap();
+        let encoded = wincode::serialize(&initialized_state()).unwrap();
         let mut initial_data = vec![0xa5; 3_731];
         initial_data[..encoded.len()].copy_from_slice(&encoded);
         let metas = [
@@ -2946,7 +2987,7 @@ mod tests {
         // duplicate/old Vote and an identical timestamp require no write at
         // all, so semantic tracking must report a true no-op without relying
         // on a byte comparison.
-        let initial_data = bincode::serialize(&VoteStateVersionsV100::Current(state)).unwrap();
+        let initial_data = wincode::serialize(&VoteStateVersionsV100::Current(state)).unwrap();
         let mut account = vote_account(initial_data.clone(), 30_000_000);
         let metas = [
             meta(VOTE_ACCOUNT, false, true),
@@ -3058,7 +3099,7 @@ mod tests {
             .authorized_voters
             .authorized_voters
             .insert(1, [0x44; 32]);
-        let canonical = bincode::serialize(&VoteStateVersionsV100::Current(state.clone())).unwrap();
+        let canonical = wincode::serialize(&VoteStateVersionsV100::Current(state.clone())).unwrap();
 
         const FIXED_PREFIX_BYTES: usize = size_of::<u32>() + 32 + 32 + size_of::<u8>();
         const LENGTH_BYTES: usize = size_of::<u64>();
@@ -3160,7 +3201,7 @@ mod tests {
             epoch_credits: Vec::new(),
             last_timestamp: BlockTimestampV100::default(),
         }));
-        let encoded = bincode::serialize(&legacy).unwrap();
+        let encoded = wincode::serialize(&legacy).unwrap();
         let mut initial_data = vec![0xa5; 3_731];
         initial_data[..encoded.len()].copy_from_slice(&encoded);
         let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
@@ -3599,7 +3640,7 @@ mod tests {
         .unwrap();
         assert!(cache.contains(&VOTE_ACCOUNT));
 
-        let authorize = bincode::serialize(&VoteInstructionV100::Authorize(
+        let authorize = wincode::serialize(&VoteInstructionV100::Authorize(
             new_withdrawer,
             LaunchVoteAuthorize::Withdrawer,
         ))
@@ -3630,7 +3671,7 @@ mod tests {
         assert!(!cache_hit);
         assert!(cache.contains(&VOTE_ACCOUNT));
 
-        let withdraw = bincode::serialize(&VoteInstructionV100::Withdraw(1)).unwrap();
+        let withdraw = wincode::serialize(&VoteInstructionV100::Withdraw(1)).unwrap();
         let (_, cache_hit) = apply_launch_vote_instruction_in_place_cached(
             &withdraw,
             &[
@@ -3649,7 +3690,7 @@ mod tests {
 
     #[test]
     fn update_commission_matches_v1_2_32_wire_authority_and_cache_semantics() {
-        let instruction = bincode::serialize(&VoteInstructionV100::UpdateCommission(10)).unwrap();
+        let instruction = wincode::serialize(&VoteInstructionV100::UpdateCommission(10)).unwrap();
         assert_eq!(instruction, [5, 0, 0, 0, 10]);
         let initial_data = fixed_vote_data(initialized_state());
         let mut accounts = BTreeMap::from([
@@ -3690,7 +3731,7 @@ mod tests {
         );
 
         let max_commission =
-            bincode::serialize(&VoteInstructionV100::UpdateCommission(u8::MAX)).unwrap();
+            wincode::serialize(&VoteInstructionV100::UpdateCommission(u8::MAX)).unwrap();
         let mutation =
             apply_launch_vote_instruction(&max_commission, &signed_metas, &mut accounts, 0)
                 .unwrap();
@@ -3705,7 +3746,7 @@ mod tests {
 
     #[test]
     fn update_commission_preserves_decode_signer_verifier_order_and_atomicity() {
-        let instruction = bincode::serialize(&VoteInstructionV100::UpdateCommission(10)).unwrap();
+        let instruction = wincode::serialize(&VoteInstructionV100::UpdateCommission(10)).unwrap();
         let unsigned_metas = [
             meta(VOTE_ACCOUNT, false, true),
             meta(AUTHORIZED_WITHDRAWER, false, false),
@@ -3757,7 +3798,7 @@ mod tests {
 
     #[test]
     fn trusted_vote_mutates_the_fixed_account_allocation() {
-        let encoded = bincode::serialize(&initialized_state()).unwrap();
+        let encoded = wincode::serialize(&initialized_state()).unwrap();
         let mut account = vec![0xa5; 3_731];
         account[..encoded.len()].copy_from_slice(&encoded);
 
@@ -3766,12 +3807,12 @@ mod tests {
                 .unwrap();
 
         assert_eq!(mutation.voted_slots, vec![1, 2]);
-        let decoded: VoteStateVersionsV100 = bincode::deserialize(&account).unwrap();
+        let decoded: VoteStateVersionsV100 = wincode::deserialize(&account).unwrap();
         let state = decoded.into_current();
         assert_eq!(state.votes.len(), 2);
         assert_eq!(state.votes[0].confirmation_count, 2);
         assert_eq!(state.votes[1].confirmation_count, 1);
-        let encoded_after = bincode::serialize(&VoteStateVersionsV100::Current(state)).unwrap();
+        let encoded_after = wincode::serialize(&VoteStateVersionsV100::Current(state)).unwrap();
         assert!(
             account[encoded_after.len()..]
                 .iter()
@@ -3781,14 +3822,14 @@ mod tests {
 
     #[test]
     fn epoch_transition_caches_then_purges_authorized_voter() {
-        let encoded = bincode::serialize(&initialized_state()).unwrap();
+        let encoded = wincode::serialize(&initialized_state()).unwrap();
         let mut account = vec![0; 3_731];
         account[..encoded.len()].copy_from_slice(&encoded);
 
         apply_trusted_vote_instruction(&mut account, &vote_instruction(vec![432_000], None), 1)
             .unwrap();
 
-        let decoded: VoteStateVersionsV100 = bincode::deserialize(&account).unwrap();
+        let decoded: VoteStateVersionsV100 = wincode::deserialize(&account).unwrap();
         let state = decoded.into_current();
         assert_eq!(state.authorized_voters.authorized_voters.len(), 1);
         assert!(state.authorized_voters.authorized_voters.contains_key(&1));
@@ -3796,10 +3837,10 @@ mod tests {
 
     #[test]
     fn non_vote_variants_stop_explicitly() {
-        let encoded = bincode::serialize(&initialized_state()).unwrap();
+        let encoded = wincode::serialize(&initialized_state()).unwrap();
         let mut account = vec![0; 3_731];
         account[..encoded.len()].copy_from_slice(&encoded);
-        let instruction = bincode::serialize(&VoteInstructionV100::Withdraw(1)).unwrap();
+        let instruction = wincode::serialize(&VoteInstructionV100::Withdraw(1)).unwrap();
 
         let error = apply_trusted_vote_instruction(&mut account, &instruction, 0).unwrap_err();
         assert!(matches!(
@@ -3817,7 +3858,7 @@ mod tests {
             commission: 100,
         };
         let instruction =
-            bincode::serialize(&VoteInstructionV100::InitializeAccount(vote_init)).unwrap();
+            wincode::serialize(&VoteInstructionV100::InitializeAccount(vote_init)).unwrap();
         assert_eq!(instruction.len(), 101);
         let mut accounts = BTreeMap::from([
             (VOTE_ACCOUNT, vote_account(vec![0; 3_731], 26_858_640)),
@@ -3856,7 +3897,7 @@ mod tests {
             decoded.authorized_voters.authorized_voters,
             BTreeMap::from([(1, vote_init.authorized_voter)])
         );
-        let encoded = bincode::serialize(&VoteStateVersionsV100::Current(decoded)).unwrap();
+        let encoded = wincode::serialize(&VoteStateVersionsV100::Current(decoded)).unwrap();
         assert!(
             accounts[&VOTE_ACCOUNT].data[encoded.len()..]
                 .iter()
@@ -3873,7 +3914,7 @@ mod tests {
             commission: 100,
         };
         let instruction =
-            bincode::serialize(&VoteInstructionV100::InitializeAccount(vote_init)).unwrap();
+            wincode::serialize(&VoteInstructionV100::InitializeAccount(vote_init)).unwrap();
         let unsigned_metas = [
             meta(VOTE_ACCOUNT, true, true),
             meta(RENT_SYSVAR_ID, false, false),
@@ -3931,7 +3972,7 @@ mod tests {
     #[test]
     fn initialize_preserves_historical_rent_clock_and_state_error_order() {
         let instruction =
-            bincode::serialize(&VoteInstructionV100::InitializeAccount(VoteInitV100 {
+            wincode::serialize(&VoteInstructionV100::InitializeAccount(VoteInitV100 {
                 node_pubkey: [1; 32],
                 authorized_voter: [2; 32],
                 authorized_withdrawer: [3; 32],
@@ -3998,7 +4039,7 @@ mod tests {
     #[test]
     fn readonly_initialize_is_rejected_without_leaking_mutation() {
         let instruction =
-            bincode::serialize(&VoteInstructionV100::InitializeAccount(VoteInitV100 {
+            wincode::serialize(&VoteInstructionV100::InitializeAccount(VoteInitV100 {
                 node_pubkey: [1; 32],
                 authorized_voter: [2; 32],
                 authorized_withdrawer: [3; 32],
@@ -4034,7 +4075,7 @@ mod tests {
     #[test]
     fn authorize_enforces_signer_then_target_epoch_and_updates_prior_voters() {
         let new_authority = [22; 32];
-        let instruction = bincode::serialize(&VoteInstructionV100::Authorize(
+        let instruction = wincode::serialize(&VoteInstructionV100::Authorize(
             new_authority,
             LaunchVoteAuthorize::Voter,
         ))
@@ -4094,7 +4135,7 @@ mod tests {
 
     #[test]
     fn withdraw_moves_lamports_and_rolls_back_readonly_destination() {
-        let instruction = bincode::serialize(&VoteInstructionV100::Withdraw(400)).unwrap();
+        let instruction = wincode::serialize(&VoteInstructionV100::Withdraw(400)).unwrap();
         let mut accounts = BTreeMap::from([
             (
                 VOTE_ACCOUNT,

@@ -237,5 +237,6 @@ overwrite, or delete authority.
 - Existing stream assignments remain usable from cached verified registry state
   during a registry outage; the registry never becomes part of the data path.
 
-The copied turbine receiver prototype under `services/shred-reader/` remains a
-staging reference while its receiver logic is integrated into Hivezilla.
+The copied turbine receiver prototype under `services/hivezilla/src/shred_reader/`
+remains a staging reference while its receiver logic is integrated into
+Hivezilla.

@@ -47,6 +47,8 @@ Thumbs.db
 /debug/
 /reports/
 /outputs/
+docs/personal/
+scripts/personal/
 **/node_modules/
 **/.svelte-kit/
 /.wrangler/
