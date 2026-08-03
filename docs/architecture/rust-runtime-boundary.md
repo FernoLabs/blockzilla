@@ -47,12 +47,11 @@ the relevant product CLI or a small workspace `xtask` crate so they reuse the
 same parsers, schemas, validation, and tests as the runtime.
 
 Shell is limited to declarative host launchers that stage systemd-provided
-configuration and finish with `exec`. Larger shell programs are temporary
-migration inputs only: they may remain as differential-parity oracles until
-their Rust replacement passes the migration gate, then they are deleted. New
-product, benchmark, administration, and operational behavior must not be added
-to them. Custom Python source and embedded Python execution are forbidden in
-the maintained tree and rejected by CI.
+configuration and finish with `exec`. Python and larger shell programs are
+temporary migration inputs only: they may remain as differential-parity
+oracles until their Rust replacement passes the migration gate, then they are
+deleted. New product, benchmark, administration, and operational behavior must
+not be added to them.
 
 No production systemd service or timer may execute a custom Python program or
 a custom long-running shell state machine.
@@ -77,42 +76,36 @@ Completed:
 4. The public status boundary is the Rust watcher gateway; its superseded
    Python implementation has been retired.
 5. The bounded shred-status collector is `hivezilla serve-shred-status`; its
-   superseded Python implementation and tests have been retired.
-6. The bounded ingest-status collector is `hivezilla serve-ingest-status`; its
-   superseded Python implementation and tests have been retired.
-7. The watcher gateway now owns the bounded block-time-gap status projection
-   and typed private scheduler incident recorder; their Python implementations
-   and tests have been retired.
-8. Durable receiver-ACK warning and recovery alerts are emitted by
-   `hivezilla monitor-pull-ack-telegram`; the Python monitor and tests have been
-   retired.
-9. Immutable S3/R2/B2 generation upload, provider-native verification,
-   account-usage reporting, and crash-safe R2 retention are implemented by
-   `blockzilla-s3-upload`; the Python uploader and tests have been retired.
-10. Recorder support parsing, inherited-descriptor locks, generation scans,
-    and read-only receiver progress snapshots are Rust-owned through
-    `hivezilla raw-recorder-support`; recorder scripts contain no embedded
-    interpreter programs.
-11. RPC epoch benchmarks and correctness-corpus comparisons are native
-    `blockzilla-get-block` binaries; their Python predecessors have been
-    retired.
+   Docker and Compose entrypoints no longer execute Python. The frozen Python
+   implementation remains only as a CI parity oracle until the first live
+   container rollout is verified.
 
 Remaining, in priority order:
 
-1. Move the remaining recorder supervision state machine into Hivezilla and
-   reduce `linux-raw-grpc-recorder.sh` to a declarative launcher.
-2. Move the remaining maintained replay and Compact orchestration shell
-   programs into product subcommands or a workspace `xtask` after fixture
-   parity.
+1. Add production S3-compatible and Backblaze adapters to
+   `hivezilla-object-store`, then move recorder upload/retention orchestration
+   into Hivezilla.
+2. Reuse the bounded Rust shred-status service core for the ingest collector.
+3. Move scheduler incident recording and ACK alert decisions to typed Rust
+   events while preserving an independent failure-observation boundary.
+4. Move maintained replay harnesses, archive administration, reference-corpus
+   collection, and benchmark utilities into product subcommands or a workspace
+   `xtask`; retire their Python and shell predecessors after fixture parity.
 
 The largest transitional sources are tracked explicitly so they cannot be
 mistaken for approved permanent exceptions:
 
-- `services/hivezilla/scripts/linux-raw-grpc-recorder.sh` still owns recorder
-  supervision, while its custody operations and security-sensitive parsers are
-  native Rust commands.
-- replay-marathon and Compact synchronization scripts remain migration inputs
-  for product subcommands or `xtask`.
+- `services/hivezilla/scripts/linux-raw-grpc-recorder.sh` and
+  `s3_multipart_upload.py` still own recorder supervision and object-store
+  custody. They move only after production S3/R2/B2 adapters exist in Rust.
+- `ingest_status_server.py` and `pull_ack_telegram_monitor.py` still contain
+  long-running status or alert loops. `shred_status_server.py` is frozen and
+  retained only as the temporary differential-parity oracle for its Rust
+  replacement; it is no longer a production entrypoint.
+- watcher incident and block-time-gap publishers still need typed Rust event
+  consumers.
+- replay-marathon, Compact sync, archive-retirement, RPC-corpus, and benchmark
+  scripts remain migration inputs for product subcommands or `xtask`.
 
 Thin launch wrappers that only validate configuration and finish with `exec`
 may remain shell. Any wrapper that retries, polls, mutates durable state, makes

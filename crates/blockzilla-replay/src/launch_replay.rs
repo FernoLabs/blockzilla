@@ -4685,7 +4685,7 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     enum FixtureVoteInstruction {
         Initialize(()),
         Authorize((), ()),
@@ -4695,7 +4695,7 @@ mod tests {
         UpdateCommission(u8),
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     struct FixtureVote {
         slots: Vec<u64>,
         hash: [u8; 32],
@@ -4703,13 +4703,13 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     enum FixtureVoteStateVersions {
         Legacy(()),
         Current(Box<FixtureVoteState>),
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     struct FixtureVoteState {
         node_pubkey: [u8; 32],
         authorized_withdrawer: [u8; 32],
@@ -4722,25 +4722,25 @@ mod tests {
         last_timestamp: FixtureBlockTimestamp,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     struct FixtureLockout {
         slot: u64,
         confirmation_count: u32,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     struct FixtureAuthorizedVoters {
         authorized_voters: BTreeMap<u64, [u8; 32]>,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     struct FixturePriorVoters {
         buf: [([u8; 32], u64, u64); 32],
         idx: usize,
         is_empty: bool,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
     struct FixtureBlockTimestamp {
         slot: u64,
         timestamp: i64,
@@ -4856,7 +4856,7 @@ mod tests {
             },
             lockup: LaunchStakeLockup::default(),
         });
-        let encoded = bincode::serialize(&state).unwrap();
+        let encoded = wincode::serialize(&state).unwrap();
         let mut data = vec![0; 200];
         data[..encoded.len()].copy_from_slice(&encoded);
         genesis.accounts.push(CompactGenesisAccount {
@@ -4942,7 +4942,7 @@ mod tests {
                 timestamp: 0,
             },
         }));
-        let encoded = bincode::serialize(&state).unwrap();
+        let encoded = wincode::serialize(&state).unwrap();
         let mut account_data = vec![0xa5; 3_731];
         account_data[..encoded.len()].copy_from_slice(&encoded);
         account_data
@@ -4953,7 +4953,7 @@ mod tests {
     }
 
     fn vote_instruction_data_with_timestamp(slots: Vec<u64>, timestamp: Option<i64>) -> Vec<u8> {
-        bincode::serialize(&FixtureVoteInstruction::Vote(FixtureVote {
+        wincode::serialize(&FixtureVoteInstruction::Vote(FixtureVote {
             slots,
             hash: [3; 32],
             timestamp,
@@ -6317,7 +6317,7 @@ mod tests {
             data: Vec::new(),
         });
         let instruction_data =
-            bincode::serialize(&FixtureVoteInstruction::UpdateCommission(10)).unwrap();
+            wincode::serialize(&FixtureVoteInstruction::UpdateCommission(10)).unwrap();
         assert_eq!(instruction_data, [5, 0, 0, 0, 10]);
         let transaction = CompactTransactionProbe {
             tx_index: 99,
@@ -7672,7 +7672,7 @@ mod tests {
             },
             lockup: original_lockup,
         });
-        let encoded = bincode::serialize(&state).unwrap();
+        let encoded = wincode::serialize(&state).unwrap();
         let stake_account = genesis
             .accounts
             .iter_mut()

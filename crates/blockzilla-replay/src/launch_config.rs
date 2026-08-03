@@ -9,7 +9,6 @@
 
 use std::{collections::BTreeMap, fmt, marker::PhantomData, mem::size_of};
 
-use bincode::Options;
 use serde::{
     Deserialize, Deserializer,
     de::{self, SeqAccess, Visitor},
@@ -17,6 +16,8 @@ use serde::{
 use thiserror::Error;
 
 use crate::{AccountSnapshot, LaunchAccountMeta, default_system_account};
+
+const MAX_INSTRUCTION_LEN: usize = 1_232;
 
 /// `Config1111111111111111111111111111111111111`.
 pub const CONFIG_PROGRAM_ID: [u8; 32] = [
@@ -176,16 +177,77 @@ struct ConfigKeysWire {
 fn decode_instruction_keys(data: &[u8]) -> Result<ConfigKeysWire, LaunchConfigError> {
     // Matches v1.0.7 `program_utils::limited_deserialize`: fixed integers,
     // trailing bytes accepted, and a packet-sized deserialization budget.
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(1232)
-        .deserialize(data)
-        .map_err(|_| LaunchConfigError::InvalidInstructionData)
+    if data.len() > MAX_INSTRUCTION_LEN {
+        return Err(LaunchConfigError::InvalidInstructionData);
+    }
+    let (keys, _) = decode_config_keys(data)?;
+    Ok(keys)
 }
 
 fn decode_account_keys(data: &[u8]) -> Result<ConfigKeysWire, ()> {
-    bincode::deserialize(data).map_err(|_| ())
+    decode_config_keys(data)
+        .map(|(keys, _)| keys)
+        .map_err(|_| ())
+}
+
+fn decode_config_keys(data: &[u8]) -> Result<(ConfigKeysWire, usize), LaunchConfigError> {
+    let (key_count, header_len) = decode_short_u16_length(data)?;
+    let key_len_usize = usize::from(key_count);
+    let mut position = header_len;
+    let mut keys = Vec::with_capacity(key_len_usize);
+
+    for _ in 0..key_count {
+        let start = position;
+        let end = start
+            .checked_add(32)
+            .ok_or(LaunchConfigError::InvalidInstructionData)?;
+        let pubkey = data
+            .get(start..end)
+            .ok_or(LaunchConfigError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| LaunchConfigError::InvalidInstructionData)?;
+        position = end;
+
+        let is_signer = *data
+            .get(position)
+            .ok_or(LaunchConfigError::InvalidInstructionData)?;
+        position = position
+            .checked_add(1)
+            .ok_or(LaunchConfigError::InvalidInstructionData)?;
+        let is_signer = match is_signer {
+            0 => false,
+            1 => true,
+            _ => return Err(LaunchConfigError::InvalidInstructionData),
+        };
+        keys.push((pubkey, is_signer));
+    }
+
+    Ok((ConfigKeysWire { keys }, position))
+}
+
+fn decode_short_u16_length(data: &[u8]) -> Result<(u16, usize), LaunchConfigError> {
+    let mut value = 0_usize;
+    let mut shift = 0_usize;
+    let mut consumed = 0_usize;
+
+    loop {
+        let byte = data
+            .get(consumed)
+            .copied()
+            .ok_or(LaunchConfigError::InvalidInstructionData)?;
+        consumed += 1;
+        value |= usize::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift > 21 {
+            return Err(LaunchConfigError::InvalidInstructionData);
+        }
+    }
+
+    let key_count = u16::try_from(value).map_err(|_| LaunchConfigError::InvalidInstructionData)?;
+    Ok((key_count, consumed))
 }
 
 /// The subset of v1.0.7 `message_processor::PreAccount` required to enforce

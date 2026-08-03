@@ -35,14 +35,12 @@ required-features = ["shred-reconstruction"]
 default = []
 shred-reconstruction = [
     "dep:reed-solomon-erasure",
-    "dep:solana-entry",
-    "dep:solana-ledger",
-    "dep:solana-pubkey",
 ]
 
 [dependencies]
 anyhow = "1.0.102"
 ahash = "0.8.12"
+axum = "0.8"
 base64 = "0.22.1"
 blockzilla-format = { path = "../../crates/blockzilla-format" }
 clap = { version = "4.6.1", features = ["derive"] }
@@ -54,6 +52,7 @@ hashbrown = "0.17.1"
 hivezilla-protocol = { path = "../../crates/hivezilla-protocol" }
 libc = "0.2.186"
 of-car-reader = { path = "../../crates/old-faithful/car-reader", default-features = false }
+lru = "0.16"
 prost = "0.14.3"
 reed-solomon-erasure = { version = "6.0.0", optional = true }
 reqwest = { version = "0.13.3", default-features = false, features = ["http2", "json", "rustls", "stream"] }
@@ -61,9 +60,16 @@ rustc-hash = "2.1.2"
 rustls = { version = "0.23.40", features = ["ring"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-solana-entry = { version = "=4.1.2", optional = true }
-solana-ledger = { version = "=4.1.2", features = ["agave-unstable-api"], optional = true }
-solana-pubkey = { version = "4.2.0", optional = true }
+blockzilla-shred-codec = { path = "../../crates/shred-codec" }
+solana-entry = "=4.1.2"
+solana-gossip = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-hash = { version = "4.3.0", features = ["serde"] }
+solana-keypair = "=3.1.2"
+solana-ledger = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-net-utils = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-pubkey = "4.2.0"
+solana-rpc-client = "=4.1.2"
+solana-transaction-error = "=3.2.0"
 sha2 = "0.11.0"
 socket2 = "0.6"
 tokio = { version = "1.52.3", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

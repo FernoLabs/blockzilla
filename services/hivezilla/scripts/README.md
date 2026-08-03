@@ -21,6 +21,11 @@ complete node-owned cloud-overflow lifecycle.
 | `pull_ack_telegram_monitor.py` | Alert when signed receiver acknowledgements stop advancing |
 | `ingest_status_server.py` | Serve a bounded, secret-free capture and signed-ACK status snapshot for the watcher UI |
 
+The production shred-status collector is now the Rust command
+`hivezilla serve-shred-status`. `shred_status_server.py` is frozen and retained
+only as a differential test oracle until the first live Rust-container rollout
+is verified; no Docker or Compose entrypoint executes it.
+
 The launch wrappers expect a dedicated UID and file-backed secrets. Override
 their documented `BLOCKZILLA_*` environment variables for your deployment; do
 not modify the scripts to add real endpoints or credentials. Private keys are
@@ -91,6 +96,7 @@ python3 -m pip install -r services/hivezilla/scripts/requirements.txt
 python3 services/hivezilla/scripts/test_s3_multipart_upload.py
 python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
 python3 services/hivezilla/scripts/test_ingest_status_server.py
+python3 services/hivezilla/scripts/test_shred_status_server.py
 bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
 bash services/hivezilla/scripts/test-linux-raw-grpc-recorder-alerts.sh
 bash services/hivezilla/scripts/test-run-grpc-raw-wrappers.sh
@@ -117,9 +123,29 @@ treated as delivered after restart: if shutdown or a network timeout makes the
 Telegram result unknowable, the monitor suppresses a duplicate notification.
 
 Review every filesystem limit, TLS identity, retention threshold, and cleanup
-policy before operating against real data. Upload success is not permission to
-delete a source generation: cleanup additionally requires a verified durable
-receiver acknowledgement.
+policy before operating against real data. The current helper's generation
+cleanup requires a verified durable receiver acknowledgement; upload success
+alone does not trigger that cleanup.
+
+The V1 target makes a narrower distinction. Every source Hivezilla has its own
+private temporary cloud-overflow bucket or namespace. After a sealed segment is
+uploaded with a provider-verified end-to-end checksum (or verified read-back)
+and recorded in a durable local catalog, disk pressure may evict that local
+copy. The logical source record is not retired:
+the cloud object must remain available until the one configured terminal raw
+consumer writes verified exact objects plus a durable range index to its
+separate permanent raw dataset and cumulatively ACKs the exact contiguous
+prefix. Once the source persists that ACK and its retirement anchor, it may
+delete covered copies from both local disk and cloud.
+
+The target reconnect path also is not implemented by these wrappers. It chooses
+an atomic cutover `T`, resumes live delivery at `T`, and runs separately
+budgeted stateless range fetches over `[C, T)` from local disk or cloud. Bulk
+ranges may arrive out of order, but only one
+contiguous exact-byte ACK advances cleanup. Blockzilla schedules archive work
+and owns the canonical catalog; a separately fenced Hivezilla compact worker
+builds and uploads Archive V2 objects. Neither archive progress nor a public
+subscriber can acknowledge raw custody.
 
 ## Read-only ingest status
 

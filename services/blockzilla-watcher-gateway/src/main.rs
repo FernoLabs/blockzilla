@@ -1,7 +1,5 @@
 use anyhow::Result;
-use blockzilla_watcher_gateway::{
-    backfill_status, public_proxy, runtime_operations, scheduler_incidents,
-};
+use blockzilla_watcher_gateway::{public_proxy, runtime_operations};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -18,10 +16,6 @@ enum Command {
     Serve(public_proxy::ServeArgs),
     /// Publish bounded, secret-free telemetry for same-user NAS processes.
     PublishRuntimeOperations(runtime_operations::PublishArgs),
-    /// Publish a bounded, redacted block-time-gap backfill status document.
-    PublishBlockTimeGapBackfill(backfill_status::PublishArgs),
-    /// Record bounded private scheduler incidents without controlling workers.
-    RecordSchedulerIncidents(scheduler_incidents::RecordArgs),
 }
 
 fn main() -> Result<()> {
@@ -33,12 +27,6 @@ fn main() -> Result<()> {
         Command::Serve(args) => runtime.block_on(public_proxy::serve(args)),
         Command::PublishRuntimeOperations(args) => {
             runtime.block_on(runtime_operations::publish(args))
-        }
-        Command::PublishBlockTimeGapBackfill(args) => {
-            runtime.block_on(backfill_status::publish(args))
-        }
-        Command::RecordSchedulerIncidents(args) => {
-            runtime.block_on(scheduler_incidents::record(args))
         }
     }
 }

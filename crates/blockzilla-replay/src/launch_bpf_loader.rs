@@ -346,7 +346,7 @@ fn required_account_mut(
         .ok_or(LaunchBpfLoaderError::MissingAccountState { pubkey })
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct RentV100 {
     lamports_per_byte_year: u64,
     exemption_threshold: f64,
@@ -376,7 +376,7 @@ fn read_rent(
             found: meta.pubkey,
         });
     }
-    bincode::deserialize(&required_account(accounts, meta.pubkey)?.data)
+    wincode::deserialize(&required_account(accounts, meta.pubkey)?.data)
         .map_err(|_| LaunchBpfLoaderError::InvalidSysvarData { position })
 }
 
@@ -553,7 +553,7 @@ mod tests {
             owner: [9; 32],
             executable: false,
             rent_epoch: 0,
-            data: bincode::serialize(&rent).unwrap().into(),
+            data: wincode::serialize(&rent).unwrap().into(),
         }
     }
 

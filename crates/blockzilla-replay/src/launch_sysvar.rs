@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use serde::{Serialize, Serializer, ser::SerializeSeq};
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
@@ -93,7 +93,7 @@ pub enum LaunchSysvarError {
     Encode {
         kind: &'static str,
         #[source]
-        source: bincode::Error,
+        source: wincode::error::Error,
     },
     #[error("serialized launch {kind} sysvar needs {needed} bytes, allocation is {available}")]
     AllocationTooSmall {
@@ -614,10 +614,7 @@ impl LaunchBankSysvarState {
         }
         let expected_recent = sysvar_account(padded_data(
             "RecentBlockhashes",
-            &RecentBlockhashesWire {
-                entries: &self.recent_blockhash_order,
-                excluded_hash: Some(self.last_poh_blockhash),
-            },
+            &recent_blockhashes_wire(&self.recent_blockhash_order, Some(self.last_poh_blockhash)),
             Some(RECENT_BLOCKHASHES_DATA_LEN),
         )?);
         if accounts.get(&RECENT_BLOCKHASHES_SYSVAR_ID) != Some(&expected_recent) {
@@ -949,13 +946,35 @@ fn write_recent_blockhash_entry(
         .copy_from_slice(&entry.fee.to_le_bytes());
 }
 
-fn padded_data<T: Serialize>(
+fn recent_blockhashes_wire(
+    entries: &VecDeque<([u8; 32], LaunchRecentBlockhash)>,
+    excluded_hash: Option<[u8; 32]>,
+) -> OwnedRecentBlockhashesWire {
+    OwnedRecentBlockhashesWire(
+        entries
+            .iter()
+            .filter(|(hash, _)| excluded_hash != Some(*hash))
+            .take(RECENT_BLOCKHASH_SYSVAR_MAX_ENTRIES)
+            .map(|(blockhash, entry)| RecentBlockhashEntryWire {
+                blockhash: *blockhash,
+                fee_calculator: FeeCalculatorWire {
+                    lamports_per_signature: entry.fee,
+                },
+            })
+            .collect(),
+    )
+}
+
+fn padded_data<T: Serialize + wincode::SchemaWrite<wincode::config::DefaultConfig, Src = T>>(
     kind: &'static str,
     value: &T,
     allocation: Option<usize>,
 ) -> Result<Vec<u8>, LaunchSysvarError> {
-    let encoded_len = bincode::serialized_size(value)
-        .map_err(|source| LaunchSysvarError::Encode { kind, source })?;
+    let encoded_len =
+        wincode::serialized_size(value).map_err(|source| LaunchSysvarError::Encode {
+            kind,
+            source: wincode::error::Error::WriteError(source),
+        })?;
     let encoded_len =
         usize::try_from(encoded_len).map_err(|_| LaunchSysvarError::AllocationTooSmall {
             kind,
@@ -971,8 +990,12 @@ fn padded_data<T: Serialize>(
         });
     }
     let mut data = vec![0; data_len];
-    bincode::serialize_into(&mut data[..encoded_len], value)
-        .map_err(|source| LaunchSysvarError::Encode { kind, source })?;
+    wincode::serialize_into(&mut data[..encoded_len], value).map_err(|source| {
+        LaunchSysvarError::Encode {
+            kind,
+            source: wincode::error::Error::WriteError(source),
+        }
+    })?;
     Ok(data)
 }
 
@@ -1024,27 +1047,27 @@ fn clock_for_slot(
     })
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, wincode::SchemaWrite)]
 struct FeeCalculatorWire {
     lamports_per_signature: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct FeesWire {
     fee_calculator: FeeCalculatorWire,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct StakeHistoryEntryWire {
     effective: u64,
     activating: u64,
     deactivating: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct StakeHistoryWire(Vec<(u64, StakeHistoryEntryWire)>);
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct ClockWire {
     slot: u64,
     segment: u64,
@@ -1053,14 +1076,14 @@ struct ClockWire {
     unix_timestamp: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct RentWire {
     lamports_per_byte_year: u64,
     exemption_threshold: f64,
     burn_percent: u8,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct EpochScheduleWire {
     slots_per_epoch: u64,
     leader_schedule_slot_offset: u64,
@@ -1069,49 +1092,14 @@ struct EpochScheduleWire {
     first_normal_slot: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct RecentBlockhashEntryWire {
     blockhash: [u8; 32],
     fee_calculator: FeeCalculatorWire,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, wincode::SchemaWrite)]
 struct OwnedRecentBlockhashesWire(Vec<RecentBlockhashEntryWire>);
-
-#[derive(Debug)]
-struct RecentBlockhashesWire<'a> {
-    entries: &'a VecDeque<([u8; 32], LaunchRecentBlockhash)>,
-    excluded_hash: Option<[u8; 32]>,
-}
-
-impl Serialize for RecentBlockhashesWire<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let entry_count = self
-            .entries
-            .iter()
-            .filter(|(hash, _)| self.excluded_hash != Some(*hash))
-            .take(RECENT_BLOCKHASH_SYSVAR_MAX_ENTRIES)
-            .count();
-        let mut sequence = serializer.serialize_seq(Some(entry_count))?;
-        for (blockhash, entry) in self
-            .entries
-            .iter()
-            .filter(|(hash, _)| self.excluded_hash != Some(*hash))
-            .take(RECENT_BLOCKHASH_SYSVAR_MAX_ENTRIES)
-        {
-            sequence.serialize_element(&RecentBlockhashEntryWire {
-                blockhash: *blockhash,
-                fee_calculator: FeeCalculatorWire {
-                    lamports_per_signature: entry.fee,
-                },
-            })?;
-        }
-        sequence.end()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1219,7 +1207,7 @@ mod tests {
                 })
                 .collect(),
         );
-        let mut data = bincode::serialize(&wire).unwrap();
+        let mut data = wincode::serialize(&wire).unwrap();
         data.resize(RECENT_BLOCKHASHES_DATA_LEN, 0);
         data
     }
@@ -1237,10 +1225,7 @@ mod tests {
     ) -> Vec<u8> {
         padded_data(
             "RecentBlockhashes",
-            &RecentBlockhashesWire {
-                entries,
-                excluded_hash,
-            },
+            &recent_blockhashes_wire(entries, excluded_hash),
             Some(RECENT_BLOCKHASHES_DATA_LEN),
         )
         .unwrap()
@@ -1770,7 +1755,7 @@ mod tests {
                 credits_observed: 0,
             },
         );
-        let encoded = bincode::serialize(&stake_state).unwrap();
+        let encoded = wincode::serialize(&stake_state).unwrap();
         let mut stake_data = vec![0; crate::LAUNCH_STAKE_ACCOUNT_DATA_LEN];
         stake_data[..encoded.len()].copy_from_slice(&encoded);
         accounts.insert(

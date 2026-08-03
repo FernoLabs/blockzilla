@@ -99,5 +99,5 @@ in the [Archive V2 format reference](../docs/reference/archive-v2-hot-block-form
 and shared types live in [`blockzilla-format`](../crates/blockzilla-format/README.md).
 
 Use a fresh output directory, keep source CAR files immutable, and budget ample
-space for full epochs. See the [roadmap](../ROADMAP.md) for planned product work
-and the [security policy](../SECURITY.md) for private reporting.
+space for full epochs. See the [security policy](../SECURITY.md) for private
+reporting.

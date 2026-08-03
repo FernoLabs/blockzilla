@@ -26,7 +26,7 @@ use super::shred_udp::parse_shred_header;
 use super::{
     CommitmentEvidence, ContentDigest, CumulativePrimaryAck, DurableSpoolRecord, IngressRecordMeta,
     LogicalKey, REPLICATION_PROTOCOL_VERSION, ReceiptDisposition, ReplicationOffer,
-    ReplicationStreamId, ShredKind, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
+    ReplicationStreamId, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
     ZSTD_SOLANA_SHRED_V1, compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
 };
 
@@ -2767,39 +2767,6 @@ mod tests {
         )
         .expect("validate raw shred");
         assert!(!root.0.exists());
-    }
-
-    #[test]
-    fn read_only_audit_snapshot_reports_the_committed_shred_cursor() {
-        let root = TestRoot::new("progress-audit-snapshot");
-        let configuration = config(&root, 4);
-        let expected_stream = configuration.stream.clone();
-        let mut receiver = BlockzillaRawReceiver::open(configuration).unwrap();
-        receiver.push_batch(vec![shred_record(0, 1234, 7)]).unwrap();
-
-        let before = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let snapshot =
-            read_receiver_progress_audit_snapshot(receiver.progress.path(), &expected_stream)
-                .unwrap();
-        let after = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        assert!((before..=after).contains(&snapshot.captured_unix_secs));
-        assert_eq!(snapshot.through_sequence, 0);
-        assert_eq!(snapshot.durable_lsn, 1);
-        assert_eq!(snapshot.logical_slot, 1234);
-        assert_eq!(snapshot.logical_kind, ShredKind::Data);
-        assert_eq!(snapshot.logical_shred_index, 7);
-        assert_eq!(snapshot.progress_frames_validated, 1);
-        assert_eq!(
-            snapshot.progress_wal_observed_bytes,
-            snapshot.progress_wal_valid_bytes
-        );
-        assert_eq!(snapshot.progress_wal_unobserved_tail_bytes, 0);
     }
 
     #[test]

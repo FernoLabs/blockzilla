@@ -37,8 +37,8 @@ The current top-level layout is:
 blockzilla/                         Blockzilla CLI and archive builders
 services/
   hivezilla/                        current live prototype and executable
-  blockzilla-get-block/             read-only Worker and native reader tools
-  old-faithful-get-block/           experimental read-only CAR compatibility
+  apps/blockzilla-get-block/        read-only Worker and native reader tools
+  apps/old-faithful-get-block/      experimental read-only CAR compatibility
                                     Worker restored from preserved history
 crates/
   blockzilla-format/                Archive V2 records, codecs, and indexes
@@ -344,5 +344,5 @@ explicit states.
 - Provider credentials, machine paths, private incidents, and deployment
   tuning do not belong in the public architecture.
 
-The implementation sequence is tracked in the project
-[roadmap](../../ROADMAP.md).
+The implementation sequence is tracked in the
+[Hivezilla V1 implementation plan](hivezilla-v1-implementation-plan.md).

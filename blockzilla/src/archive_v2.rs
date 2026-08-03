@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use bincode::Options;
+
 use blockzilla_format::{
     ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
     ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES, ARCHIVE_V2_BLOCK_INDEX_FILE,
@@ -7563,11 +7563,11 @@ fn parse_hot_vote_instruction_data(
         return Ok(ArchiveV2HotInstructionData::UnknownVote(Vec::new()));
     }
 
-    let instruction_result: std::result::Result<VoteInstruction, _> = bincode::options()
-        .with_limit(VOTE_INSTRUCTION_DECODE_LIMIT)
-        .with_fixint_encoding()
-        .reject_trailing_bytes()
-        .deserialize(data);
+    if data.len() > VOTE_INSTRUCTION_DECODE_LIMIT as usize {
+        return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
+    }
+
+    let instruction_result: std::result::Result<VoteInstruction, _> = bincode::deserialize(data);
     let instruction = match instruction_result {
         Ok(instruction) => instruction,
         Err(_) => {

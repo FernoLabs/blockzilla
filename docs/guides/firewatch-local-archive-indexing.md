@@ -300,7 +300,7 @@ Useful Blockzilla decoding references are the
 [hot-block format](../reference/archive-v2-hot-block-format.md), the validated
 index reader in `crates/blockzilla-format/src/v2/archive.rs`, and the existing
 message/metadata rendering path in
-`services/blockzilla-get-block/src/worker.rs`.
+`apps/blockzilla-get-block/src/worker.rs`.
 
 ## Acceptance gate
 

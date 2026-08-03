@@ -9,7 +9,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bincode::Options;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -57,7 +56,17 @@ pub struct LaunchStakeHistoryEntry {
     pub deactivating: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 struct LaunchStakeLockupArgs {
     unix_timestamp: Option<i64>,
     epoch: Option<u64>,
@@ -66,7 +75,9 @@ struct LaunchStakeLockupArgs {
 
 pub type LaunchStakeHistory = BTreeMap<u64, LaunchStakeHistoryEntry>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchStakeRent {
     lamports_per_byte_year: u64,
     exemption_threshold: f64,
@@ -84,7 +95,9 @@ impl LaunchStakeRent {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchStakeClockWire {
     slot: u64,
     #[allow(dead_code)]
@@ -95,17 +108,31 @@ struct LaunchStakeClockWire {
     unix_timestamp: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 struct LaunchStakeHistoryEntryWire {
     effective: u64,
     activating: u64,
     deactivating: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchStakeHistoryWire(Vec<(u64, LaunchStakeHistoryEntryWire)>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchStakeConfig {
     warmup_cooldown_rate: f64,
     #[allow(dead_code)]
@@ -118,33 +145,76 @@ pub struct LaunchStakeContext<'a> {
     pub stake_history: &'a LaunchStakeHistory,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 pub enum LaunchStakeAuthorize {
     Staker,
     Withdrawer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 pub struct LaunchStakeAuthorized {
     pub staker: [u8; 32],
     pub withdrawer: [u8; 32],
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 pub struct LaunchStakeLockup {
     pub unix_timestamp: i64,
     pub epoch: u64,
     pub custodian: [u8; 32],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    wincode::SchemaRead,
+    wincode::SchemaWrite,
+)]
 pub struct LaunchStakeMeta {
     pub rent_exempt_reserve: u64,
     pub authorized: LaunchStakeAuthorized,
     pub lockup: LaunchStakeLockup,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 pub struct LaunchDelegation {
     pub voter_pubkey: [u8; 32],
     pub stake: u64,
@@ -153,13 +223,17 @@ pub struct LaunchDelegation {
     pub warmup_cooldown_rate: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 pub struct LaunchStake {
     pub delegation: LaunchDelegation,
     pub credits_observed: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 pub enum LaunchStakeState {
     Uninitialized,
     Initialized(LaunchStakeMeta),
@@ -309,7 +383,7 @@ enum DecodedStakeInstruction {
     Merge,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite)]
 enum LaunchStakeInstructionV100 {
     Initialize(LaunchStakeAuthorized, LaunchStakeLockup),
     Authorize([u8; 32], LaunchStakeAuthorize),
@@ -325,7 +399,7 @@ pub fn decode_launch_stake_state(
     pubkey: [u8; 32],
     data: &[u8],
 ) -> Result<LaunchStakeState, LaunchStakeError> {
-    bincode::deserialize(data).map_err(|_| LaunchStakeError::InvalidAccountData { pubkey })
+    wincode::deserialize(data).map_err(|_| LaunchStakeError::InvalidAccountData { pubkey })
 }
 
 /// Rebuild the `Stakes::clone_with_epoch()` aggregate written to StakeHistory
@@ -546,12 +620,14 @@ fn apply_inner(
 }
 
 fn decode_instruction(data: &[u8]) -> Result<DecodedStakeInstruction, LaunchStakeError> {
-    let instruction = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(1_232)
-        .deserialize(data)
-        .map_err(|_| LaunchStakeError::InvalidInstructionData)?;
+    if data.len() > 1_232 {
+        return Err(LaunchStakeError::InvalidInstructionData);
+    }
+    let instruction = wincode::config::deserialize(
+        data,
+        wincode::config::Configuration::default().with_fixint_encoding(),
+    )
+    .map_err(|_| LaunchStakeError::InvalidInstructionData)?;
     Ok(match instruction {
         LaunchStakeInstructionV100::Authorize(new_authority, authority_type) => {
             DecodedStakeInstruction::Authorize {
@@ -610,7 +686,7 @@ fn read_rent(
     let account = accounts
         .get(&pubkey)
         .expect("instruction accounts were materialized before Stake dispatch");
-    bincode::deserialize(&account.data)
+    wincode::deserialize(&account.data)
         .map_err(|_| LaunchStakeError::InvalidSysvarData { position, pubkey })
 }
 
@@ -624,7 +700,7 @@ fn read_clock(
     let account = accounts
         .get(&pubkey)
         .expect("instruction accounts were materialized before Stake dispatch");
-    let clock: LaunchStakeClockWire = bincode::deserialize(&account.data)
+    let clock: LaunchStakeClockWire = wincode::deserialize(&account.data)
         .map_err(|_| LaunchStakeError::InvalidSysvarData { position, pubkey })?;
     Ok(LaunchClock {
         slot: clock.slot,
@@ -643,7 +719,7 @@ fn read_stake_history(
     let account = accounts
         .get(&pubkey)
         .expect("instruction accounts were materialized before Stake dispatch");
-    let history: LaunchStakeHistoryWire = bincode::deserialize(&account.data)
+    let history: LaunchStakeHistoryWire = wincode::deserialize(&account.data)
         .map_err(|_| LaunchStakeError::InvalidSysvarData { position, pubkey })?;
     Ok(history
         .0
@@ -681,7 +757,7 @@ fn read_stake_config(
         launch_config_payload(&account.data).ok_or(LaunchStakeError::InvalidConfigData {
             pubkey: meta.pubkey,
         })?;
-    bincode::deserialize(payload).map_err(|_| LaunchStakeError::InvalidConfigData {
+    wincode::deserialize(payload).map_err(|_| LaunchStakeError::InvalidConfigData {
         pubkey: meta.pubkey,
     })
 }
@@ -729,7 +805,7 @@ fn write_account_state(
     state: &LaunchStakeState,
 ) -> Result<(), LaunchStakeError> {
     let encoded =
-        bincode::serialize(state).map_err(|_| LaunchStakeError::InvalidAccountData { pubkey })?;
+        wincode::serialize(state).map_err(|_| LaunchStakeError::InvalidAccountData { pubkey })?;
     let account = accounts
         .get_mut(&pubkey)
         .expect("instruction accounts were materialized before Stake dispatch");
@@ -1524,7 +1600,7 @@ mod tests {
             rent_epoch: 0,
             data: vec![0; 200].into(),
         };
-        let encoded = bincode::serialize(&state).unwrap();
+        let encoded = wincode::serialize(&state).unwrap();
         account.data[..encoded.len()].copy_from_slice(&encoded);
         account
     }
@@ -1540,13 +1616,13 @@ mod tests {
     }
 
     fn rent_account(rent: LaunchStakeRent) -> AccountSnapshot {
-        readonly_account(crate::SYSVAR_OWNER_ID, bincode::serialize(&rent).unwrap())
+        readonly_account(crate::SYSVAR_OWNER_ID, wincode::serialize(&rent).unwrap())
     }
 
     fn clock_account(epoch: u64) -> AccountSnapshot {
         readonly_account(
             crate::SYSVAR_OWNER_ID,
-            bincode::serialize(&LaunchStakeClockWire {
+            wincode::serialize(&LaunchStakeClockWire {
                 slot: 646_291,
                 segment: 632,
                 epoch,
@@ -1560,14 +1636,14 @@ mod tests {
     fn stake_history_account(entries: Vec<(u64, LaunchStakeHistoryEntryWire)>) -> AccountSnapshot {
         readonly_account(
             crate::SYSVAR_OWNER_ID,
-            bincode::serialize(&LaunchStakeHistoryWire(entries)).unwrap(),
+            wincode::serialize(&LaunchStakeHistoryWire(entries)).unwrap(),
         )
     }
 
     fn stake_config_account(warmup_cooldown_rate: f64) -> AccountSnapshot {
         let mut data = vec![0]; // empty v1.0.7 short-vec `ConfigKeys`
         data.extend_from_slice(
-            &bincode::serialize(&LaunchStakeConfig {
+            &wincode::serialize(&LaunchStakeConfig {
                 warmup_cooldown_rate,
                 slash_penalty: 12,
             })
@@ -1651,7 +1727,7 @@ mod tests {
         epoch: Option<u64>,
         custodian: Option<[u8; 32]>,
     ) -> Vec<u8> {
-        bincode::serialize(&LaunchStakeInstructionV100::SetLockup(
+        wincode::serialize(&LaunchStakeInstructionV100::SetLockup(
             LaunchStakeLockupArgs {
                 unix_timestamp,
                 epoch,
@@ -1697,7 +1773,7 @@ mod tests {
             custodian: [5; 32],
         };
         let instruction =
-            bincode::serialize(&LaunchStakeInstructionV100::Initialize(authorized, lockup))
+            wincode::serialize(&LaunchStakeInstructionV100::Initialize(authorized, lockup))
                 .unwrap();
         let rent = LaunchStakeRent {
             lamports_per_byte_year: 3_480,
@@ -1801,7 +1877,7 @@ mod tests {
             (STAKE_HISTORY_SYSVAR_ID, stake_history_account(Vec::new())),
             (STAKE_CONFIG_ID, stake_config_account(0.125)),
         ]);
-        let instruction = bincode::serialize(&LaunchStakeInstructionV100::DelegateStake).unwrap();
+        let instruction = wincode::serialize(&LaunchStakeInstructionV100::DelegateStake).unwrap();
 
         let mutation = apply_launch_stake_instruction(
             &instruction,
@@ -1871,7 +1947,7 @@ mod tests {
             (STAKE_HISTORY_SYSVAR_ID, stake_history_account(Vec::new())),
             (STAKE_CONFIG_ID, stake_config_account(0.5)),
         ];
-        let instruction = bincode::serialize(&LaunchStakeInstructionV100::DelegateStake).unwrap();
+        let instruction = wincode::serialize(&LaunchStakeInstructionV100::DelegateStake).unwrap();
         let metas = [
             meta(stake_pubkey, false, true),
             meta(new_vote, false, false),
@@ -1938,7 +2014,7 @@ mod tests {
     fn deactivate_uses_clock_epoch_with_the_exact_three_meta_shape() {
         let stake_pubkey = [0x60; 32];
         let authority = [0x61; 32];
-        let instruction = bincode::serialize(&LaunchStakeInstructionV100::Deactivate).unwrap();
+        let instruction = wincode::serialize(&LaunchStakeInstructionV100::Deactivate).unwrap();
         assert_eq!(instruction, [5, 0, 0, 0]);
         let mut accounts = BTreeMap::from([
             (
@@ -2197,7 +2273,7 @@ mod tests {
             ),
         ]);
         let before = accounts.clone();
-        let instruction = bincode::serialize(&LaunchStakeInstructionV100::DelegateStake).unwrap();
+        let instruction = wincode::serialize(&LaunchStakeInstructionV100::DelegateStake).unwrap();
         assert_eq!(
             apply_launch_stake_instruction(
                 &instruction,
@@ -2241,7 +2317,7 @@ mod tests {
                 credits_observed: 5,
             },
         );
-        assert_eq!(bincode::serialized_size(&state).unwrap(), 196);
+        assert_eq!(wincode::serialized_size(&state).unwrap(), 196);
         let account = stake_account(10, state);
         assert_eq!(
             decode_launch_stake_state([9; 32], &account.data).unwrap(),
@@ -2340,7 +2416,7 @@ mod tests {
             },
             credits_observed: 91,
         };
-        let instruction = bincode::serialize(&LaunchStakeInstructionV100::Merge).unwrap();
+        let instruction = wincode::serialize(&LaunchStakeInstructionV100::Merge).unwrap();
         assert_eq!(instruction, [7, 0, 0, 0]);
 
         // Exact balance movement observed at slot 28,621,186. The fee payer is
@@ -2704,7 +2780,7 @@ mod tests {
             decode_instruction(&[2, 0, 0, 0]).unwrap(),
             DecodedStakeInstruction::DelegateStake
         );
-        let set_lockup = bincode::serialize(&LaunchStakeInstructionV100::SetLockup(
+        let set_lockup = wincode::serialize(&LaunchStakeInstructionV100::SetLockup(
             LaunchStakeLockupArgs {
                 unix_timestamp: None,
                 epoch: None,
@@ -2767,7 +2843,7 @@ mod tests {
             authorized,
             lockup: original_lockup,
         });
-        let state_wire_len = bincode::serialize(&original_state).unwrap().len();
+        let state_wire_len = wincode::serialize(&original_state).unwrap().len();
         let mut account = stake_account(1_000, original_state);
         account.data[state_wire_len..].fill(0xa5);
         let mut accounts = BTreeMap::from([(stake_pubkey, account)]);

@@ -416,39 +416,53 @@ fn apply_inner(
 /// Private launch-era wire mirrors. These intentionally do not use a modern
 /// Solana SDK: v1.0.7 stores `Versions::Current(Box<State>)`, whose initialized
 /// fixed-int bincode representation is exactly 80 bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 enum LaunchNonceVersions {
     Current(Box<LaunchNonceState>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 enum LaunchNonceState {
     Uninitialized,
     Initialized(LaunchNonceData),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchNonceData {
     authority: [u8; 32],
     blockhash: [u8; 32],
     fee_calculator: LaunchNonceFeeCalculator,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchNonceFeeCalculator {
     lamports_per_signature: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchRecentBlockhashEntry {
     blockhash: [u8; 32],
     fee_calculator: LaunchNonceFeeCalculator,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchRecentBlockhashes(Vec<LaunchRecentBlockhashEntry>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, wincode::SchemaRead, wincode::SchemaWrite,
+)]
 struct LaunchRent {
     lamports_per_byte_year: u64,
     exemption_threshold: f64,
@@ -481,7 +495,7 @@ fn decode_recent_blockhashes(
     let account = accounts
         .get(&meta.pubkey)
         .expect("instruction accounts were materialized before dispatch");
-    bincode::deserialize(&account.data)
+    wincode::deserialize(&account.data)
         .map_err(|_| LaunchSystemError::InvalidSysvarData { position })
 }
 
@@ -501,7 +515,7 @@ fn decode_rent(
     let account = accounts
         .get(&meta.pubkey)
         .expect("instruction accounts were materialized before dispatch");
-    bincode::deserialize(&account.data)
+    wincode::deserialize(&account.data)
         .map_err(|_| LaunchSystemError::InvalidSysvarData { position })
 }
 
@@ -520,7 +534,7 @@ fn initialize_nonce(
         .get(&meta.pubkey)
         .expect("instruction accounts were materialized before dispatch");
     let versions: LaunchNonceVersions =
-        bincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
+        wincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
             pubkey: meta.pubkey,
         })?;
     let LaunchNonceVersions::Current(state) = versions;
@@ -548,7 +562,7 @@ fn initialize_nonce(
             },
         })));
     let encoded =
-        bincode::serialize(&initialized).map_err(|_| LaunchSystemError::GenericError {
+        wincode::serialize(&initialized).map_err(|_| LaunchSystemError::GenericError {
             pubkey: meta.pubkey,
         })?;
     if encoded.len() > account.data.len() {
@@ -587,7 +601,7 @@ fn advance_nonce(
         .get(&meta.pubkey)
         .expect("instruction accounts were materialized before dispatch");
     let versions: LaunchNonceVersions =
-        bincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
+        wincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
             pubkey: meta.pubkey,
         })?;
     let LaunchNonceVersions::Current(state) = versions;
@@ -612,7 +626,7 @@ fn advance_nonce(
     data.fee_calculator = recent.fee_calculator.clone();
     let new_blockhash = data.blockhash;
     let lamports_per_signature = data.fee_calculator.lamports_per_signature;
-    let encoded = bincode::serialize(&LaunchNonceVersions::Current(Box::new(
+    let encoded = wincode::serialize(&LaunchNonceVersions::Current(Box::new(
         LaunchNonceState::Initialized(data),
     )))
     .map_err(|_| LaunchSystemError::GenericError {
@@ -657,7 +671,7 @@ fn withdraw_nonce(
         .expect("instruction accounts were materialized before dispatch");
     let balance = account.lamports;
     let versions: LaunchNonceVersions =
-        bincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
+        wincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
             pubkey: nonce_meta.pubkey,
         })?;
     let LaunchNonceVersions::Current(state) = versions;
@@ -740,7 +754,7 @@ fn authorize_nonce(
         .get(&meta.pubkey)
         .expect("instruction accounts were materialized before dispatch");
     let versions: LaunchNonceVersions =
-        bincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
+        wincode::deserialize(&account.data).map_err(|_| LaunchSystemError::InvalidAccountData {
             pubkey: meta.pubkey,
         })?;
     let LaunchNonceVersions::Current(state) = versions;
@@ -756,7 +770,7 @@ fn authorize_nonce(
         });
     }
     data.authority = *new_authority;
-    let encoded = bincode::serialize(&LaunchNonceVersions::Current(Box::new(
+    let encoded = wincode::serialize(&LaunchNonceVersions::Current(Box::new(
         LaunchNonceState::Initialized(data),
     )))
     .map_err(|_| LaunchSystemError::GenericError {
@@ -1161,7 +1175,7 @@ mod tests {
                 },
             },
         )));
-        let data = bincode::serialize(&versions).unwrap();
+        let data = wincode::serialize(&versions).unwrap();
         assert_eq!(data.len(), LAUNCH_NONCE_ACCOUNT_DATA_LEN);
         AccountSnapshot {
             lamports: 1_000_000,
@@ -1172,7 +1186,7 @@ mod tests {
 
     fn uninitialized_nonce_account(lamports: u64) -> AccountSnapshot {
         let versions = LaunchNonceVersions::Current(Box::new(LaunchNonceState::Uninitialized));
-        let encoded = bincode::serialize(&versions).unwrap();
+        let encoded = wincode::serialize(&versions).unwrap();
         let mut data = vec![0; LAUNCH_NONCE_ACCOUNT_DATA_LEN];
         data[..encoded.len()].copy_from_slice(&encoded);
         AccountSnapshot {
@@ -1185,7 +1199,7 @@ mod tests {
     fn recent_blockhashes_account(entries: Vec<LaunchRecentBlockhashEntry>) -> AccountSnapshot {
         AccountSnapshot {
             owner: SYSVAR_OWNER_ID,
-            data: bincode::serialize(&LaunchRecentBlockhashes(entries))
+            data: wincode::serialize(&LaunchRecentBlockhashes(entries))
                 .unwrap()
                 .into(),
             ..default_system_account()
@@ -1195,7 +1209,7 @@ mod tests {
     fn rent_account(rent: LaunchRent) -> AccountSnapshot {
         AccountSnapshot {
             owner: SYSVAR_OWNER_ID,
-            data: bincode::serialize(&rent).unwrap().into(),
+            data: wincode::serialize(&rent).unwrap().into(),
             ..default_system_account()
         }
     }
@@ -2072,7 +2086,7 @@ mod tests {
                 new_authority,
             }
         );
-        let versions: LaunchNonceVersions = bincode::deserialize(&accounts[&nonce].data).unwrap();
+        let versions: LaunchNonceVersions = wincode::deserialize(&accounts[&nonce].data).unwrap();
         assert_eq!(
             versions,
             LaunchNonceVersions::Current(Box::new(LaunchNonceState::Initialized(
@@ -2133,7 +2147,7 @@ mod tests {
                 lamports_per_signature: 5_000,
             }
         );
-        let versions: LaunchNonceVersions = bincode::deserialize(&accounts[&nonce].data).unwrap();
+        let versions: LaunchNonceVersions = wincode::deserialize(&accounts[&nonce].data).unwrap();
         assert_eq!(
             versions,
             LaunchNonceVersions::Current(Box::new(LaunchNonceState::Initialized(
@@ -2302,7 +2316,7 @@ mod tests {
                 lamports_per_signature: 5_000,
             }
         );
-        let versions: LaunchNonceVersions = bincode::deserialize(&accounts[&nonce].data).unwrap();
+        let versions: LaunchNonceVersions = wincode::deserialize(&accounts[&nonce].data).unwrap();
         assert_eq!(
             versions,
             LaunchNonceVersions::Current(Box::new(LaunchNonceState::Initialized(
@@ -2551,7 +2565,7 @@ mod tests {
 
         let uninitialized = LaunchNonceVersions::Current(Box::new(LaunchNonceState::Uninitialized));
         let mut data = vec![0; LAUNCH_NONCE_ACCOUNT_DATA_LEN];
-        let encoded = bincode::serialize(&uninitialized).unwrap();
+        let encoded = wincode::serialize(&uninitialized).unwrap();
         data[..encoded.len()].copy_from_slice(&encoded);
         let mut accounts = BTreeMap::from([(
             nonce,

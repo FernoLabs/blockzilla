@@ -1,0 +1,14 @@
+[package]
+name = "blockzilla-shred-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared Shred payload constants, header parser, and compact codec helpers."
+publish = false
+
+[dependencies]
+anyhow = "1.0.102"
+serde = { version = "1.0.228", features = ["derive"] }
+zstd = "0.13.3"

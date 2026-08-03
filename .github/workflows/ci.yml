@@ -124,10 +124,10 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo install worker-build --locked --version 0.8.3
       - name: Build Archive V2 Edgezilla Worker
-        working-directory: services/blockzilla-get-block
+        working-directory: apps/blockzilla-get-block
         run: worker-build --release . --no-default-features --features worker
       - name: Build Old Faithful Edgezilla Worker
-        working-directory: services/old-faithful-get-block
+        working-directory: apps/old-faithful-get-block
         run: worker-build --release .
 
   watcher:
@@ -140,18 +140,21 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: services/blockzilla-watcher/package-lock.json
+          cache-dependency-path: apps/blockzilla-watcher/package-lock.json
       - name: Install watcher dependencies
-        working-directory: services/blockzilla-watcher
+        working-directory: apps/blockzilla-watcher
         run: npm ci
       - name: Test watcher data handling
-        working-directory: services/blockzilla-watcher
+        working-directory: apps/blockzilla-watcher
         run: npm test
+      - name: Test watcher operational helpers
+        working-directory: apps/blockzilla-watcher
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check watcher UI
-        working-directory: services/blockzilla-watcher
+        working-directory: apps/blockzilla-watcher
         run: npm run check
       - name: Build watcher UI
-        working-directory: services/blockzilla-watcher
+        working-directory: apps/blockzilla-watcher
         run: npm run build
 
   hivezilla-ops:
@@ -175,6 +178,7 @@ jobs:
             python3 services/hivezilla/scripts/test_s3_multipart_upload.py
           python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
           python3 services/hivezilla/scripts/test_ingest_status_server.py
+          python3 services/hivezilla/scripts/test_shred_status_server.py
       - name: Test shell operational helpers
         run: |
           bash services/hivezilla/scripts/test-linux-raw-grpc-cache-supervisor.sh
