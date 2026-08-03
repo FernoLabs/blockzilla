@@ -732,6 +732,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockzilla-monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap 4.6.1",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "topcoat",
+]
+
+[[package]]
 name = "blockzilla-read-sdk"
 version = "0.1.0"
 dependencies = [
@@ -756,6 +773,7 @@ dependencies = [
  "blockzilla-format",
  "blockzilla-read-sdk",
  "bs58",
+ "bzip2 0.5.2",
  "clap 4.6.1",
  "cranelift-codegen",
  "cranelift-frontend",
@@ -765,7 +783,6 @@ dependencies = [
  "curve25519-dalek 2.1.0",
  "hashbrown 0.15.5",
  "object",
- "of-car-reader",
  "pprof",
  "rayon",
  "serde",
@@ -773,6 +790,7 @@ dependencies = [
  "sha2 0.11.0",
  "smallvec",
  "solana-sbpf",
+ "tar",
  "target-lexicon",
  "thiserror 2.0.18",
  "wincode",
@@ -976,11 +994,30 @@ dependencies = [
 
 [[package]]
 name = "bzip2"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49ecfb22d906f800d4fe833b6282cf4dc1c298f5057ca0b5445e5c209735ca47"
+dependencies = [
+ "bzip2-sys",
+]
+
+[[package]]
+name = "bzip2"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
 dependencies = [
  "libbz2-rs-sys",
+]
+
+[[package]]
+name = "bzip2-sys"
+version = "0.1.13+1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225bff33b2141874fe80d71e07d6eec4f85c5c216453dd96388240f96e1acc14"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -3600,7 +3637,7 @@ dependencies = [
 name = "of-car-reader"
 version = "0.1.3"
 dependencies = [
- "bzip2",
+ "bzip2 0.6.1",
  "clap 4.6.1",
  "criterion",
  "minicbor",

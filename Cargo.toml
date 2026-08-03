@@ -9,6 +9,7 @@ members = [
     "crates/shred-codec",
     "crates/solana-gossip-compat",
     "services/blockzilla-archive-gateway",
+    "services/blockzilla-monitor",
     "apps/blockzilla-get-block",
     "services/blockzilla-watcher-gateway",
     "apps/old-faithful-get-block",
