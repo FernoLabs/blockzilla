@@ -11,7 +11,7 @@ use axum::{Json, Router, http::StatusCode, routing::get};
 use lru::LruCache;
 use serde::Serialize;
 use solana_gossip::cluster_info::ClusterInfo;
-use solana_ledger::shred::ShredId;
+use solana_ledger_compat::ShredId;
 use tokio::{net::TcpListener, sync::watch};
 
 use super::{config::nonzero_usize, repair_wal::RepairWalInspection};
@@ -854,7 +854,7 @@ fn unix_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solana_ledger::shred::ShredType;
+    use solana_ledger_compat::ShredType;
 
     #[test]
     fn metrics_requires_a_nonempty_dedup_cache() {

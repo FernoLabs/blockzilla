@@ -23,7 +23,7 @@ use hivezilla::ingest::{
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use solana_ledger::shred::Shred;
+use solana_ledger_compat::Shred;
 
 use repair_wal::{
     REPAIR_RECORD_MEMORY_OVERHEAD_BYTES, RepairMergeFailure, RepairMergeStats, RepairWalScanConfig,

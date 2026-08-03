@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use solana_ledger::shred::{
+use solana_ledger_compat::{
     DATA_SHREDS_PER_FEC_BLOCK, MAX_CODE_SHREDS_PER_SLOT, MAX_DATA_SHREDS_PER_SLOT, Shred,
 };
 use solana_pubkey::Pubkey;

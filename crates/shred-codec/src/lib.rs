@@ -10,11 +10,14 @@ pub const ZSTD_SOLANA_SHRED_V1: u16 = 4;
 
 /// Smallest raw shred header fragment required for slot/fec/shred kind inference.
 pub const COMMON_SHRED_HEADER_BYTES: usize = 83;
-const SHRED_VARIANT_OFFSET: usize = 64;
-const SLOT_OFFSET: usize = 65;
-const INDEX_OFFSET: usize = 73;
-const VERSION_OFFSET: usize = 77;
-const FEC_SET_INDEX_OFFSET: usize = 79;
+pub const SHRED_VARIANT_OFFSET: usize = 64;
+pub const SLOT_OFFSET: usize = 65;
+pub const INDEX_OFFSET: usize = 73;
+pub const VERSION_OFFSET: usize = 77;
+pub const FEC_SET_INDEX_OFFSET: usize = 79;
+
+/// Size of the Solana signature in the shred header prefix.
+pub const SIZE_OF_SIGNATURE: usize = 64;
 /// Maximum UDP payload size used by the recorder decompress envelope.
 pub const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
 
@@ -77,7 +80,7 @@ mod tests {
 
     #[test]
     fn parses_data_and_coding_shred_coordinates() {
-        for (variant, kind) in [(0x90, ShredKind::Data), (0x6f, ShredKind::Coding)] {
+        for (variant, kind) in [(0x90, ShredKind::Data), (0x70, ShredKind::Coding)] {
             let mut payload = [0u8; COMMON_SHRED_HEADER_BYTES];
             payload[SHRED_VARIANT_OFFSET] = variant;
             payload[SLOT_OFFSET..SLOT_OFFSET + 8].copy_from_slice(&42u64.to_le_bytes());

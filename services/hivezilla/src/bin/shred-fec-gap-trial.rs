@@ -13,7 +13,7 @@ use hivezilla::ingest::{
     ReplicationStreamId, ShredKind, ZSTD_SOLANA_SHRED_V1, read_receiver_durable_progress,
 };
 use serde::Serialize;
-use solana_ledger::shred::{DATA_SHREDS_PER_FEC_BLOCK, Shred};
+use solana_ledger_compat::{DATA_SHREDS_PER_FEC_BLOCK, Shred};
 
 #[derive(Debug, Parser)]
 #[command(about = "Read-only per-slot FEC coverage report for a raw-shred spool")]
