@@ -192,6 +192,4 @@ R2 mode can select the source, object prefix, and binding with
 S3-compatible mode requires `BZ_S3_ENDPOINT`, `BZ_S3_BUCKET`, `BZ_S3_REGION`,
 `BZ_S3_ACCESS_KEY_ID`, and `BZ_S3_SECRET_ACCESS_KEY`.
 
-Store credentials as Worker secrets and grant object-read access only. See the
-repository [security policy](../../SECURITY.md) before reporting a serving or
-credential-handling issue.
+Store credentials as Worker secrets and grant object-read access only.

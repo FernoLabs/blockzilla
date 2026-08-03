@@ -44,4 +44,4 @@ Open `http://127.0.0.1:8080/` for the included browser. Run the command with
 cargo test --locked -p blockzilla-token-api --all-targets
 ```
 
-Report security issues using the repository [security policy](../../SECURITY.md).
+Report security issues via the repository maintainer process.

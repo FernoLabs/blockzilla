@@ -72,8 +72,7 @@ cargo check --workspace --all-targets --locked
 cargo test --workspace --all-targets --locked
 ```
 
-Read the [documentation index](docs/README.md) and the
-[security policy](SECURITY.md) before working on formats, deployments, or
-credential-handling code.
+Read the [documentation index](docs/README.md) before working on formats,
+deployments, or credential-handling code.
 
 Blockzilla is available under the [MIT License](LICENSE).
