@@ -4,24 +4,26 @@ use crate::{
     sse::{MAX_SSE_LINE_BYTES, public_sse_line},
 };
 use anyhow::{Context, Result, anyhow, ensure};
-use axum::{
-    Router,
-    body::Body,
-    extract::State,
-    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
-    response::Response,
-};
-use bytes::{Bytes, BytesMut};
-use clap::Args;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
+use http_body::Frame;
+use http_body_util::StreamBody;
+use serde_json::Value;
 use std::{
+    borrow::Cow,
     convert::Infallible,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
+    time::SystemTime,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+use topcoat::Result as TopcoatResult;
+use topcoat::context::{Cx, app_context};
+use topcoat::router::{
+    Body, HeaderMap, HeaderName, HeaderValue, Method, Path, Response, RouteFn, RouteFuture, Router,
+    StatusCode, header, headers, method, uri,
+};
 
 const PUBLIC_ERROR: &[u8] = br#"{"error":"watcher upstream unavailable"}"#;
 const RESPONSE_CHUNK_BYTES: usize = 64 * 1024;
@@ -33,10 +35,119 @@ const PUBLIC_API_GETS: &[&str] = &[
     "/api/v1/events",
     "/api/v1/sidecars/block-time-gaps/index.json",
     "/api/v1/sidecars/ingest-pipeline/status.json",
-    "/api/v1/sidecars/shred-ingest/status.json",
     "/api/v1/sidecars/runtime-operations/status.json",
+    "/api/v1/sidecars/shred-ingest/status.json",
     "/api/v1/status",
 ];
+const MONITOR_UI_SHELL: &str = r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blockzilla Monitor</title>
+    <script
+      type="module"
+      src="https://cdn.jsdelivr.net/gh/starfederation/datastar@1.0.2/bundles/datastar.js"
+    ></script>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; padding: 24px; }
+      pre { background: #101010; border-radius: 8px; padding: 12px; overflow: auto; white-space: pre-wrap; }
+      button { margin-right: 8px; padding: 6px 10px; }
+      .grid { display: grid; gap: 12px; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      .subtitle { color: #c0c0c0; }
+    </style>
+  </head>
+  <body
+    data-signals='{"monitor_status":"loading status...","status_last_fetched":"never","backend":null}'
+  >
+    <h1>Blockzilla Monitor</h1>
+    <p class="subtitle">Single-process Topcoat + Datastar monitor shell.</p>
+    <p data-text="$backend"></p>
+    <div class="grid">
+      <div class="row">
+        <button onclick="window.location.href='/api/v1/status'">Status JSON</button>
+        <button onclick="window.location.href='/api/v1/events'">SSE</button>
+        <button
+          id="refresh-status"
+          data-on:click="@get('/ui/status')"
+        >Refresh status</button>
+      </div>
+      <section class="grid">
+        <p>Last fetched: <span id="status-fetched" data-text="$status_last_fetched"></span></p>
+        <div>
+          <button id="auto-refresh" onclick="return false;">Auto refresh</button>
+          <span id="auto-refresh-state">off</span>
+        </div>
+        <pre id="status" data-text="$monitor_status"></pre>
+      </section>
+      <section id="event-log" class="grid">
+        <strong>Live event stream (raw):</strong>
+        <pre id="events"></pre>
+      </section>
+    </div>
+    <script>
+      window.__blockzillaMonitorAutoRefresh = null;
+      const autoRefreshButton = document.getElementById('auto-refresh');
+      const autoRefreshLabel = document.getElementById('auto-refresh-state');
+      const fetchedNode = document.getElementById('status-fetched');
+      const refreshStatus = () => {
+        if (window.datastar && window.datastar.sendAction) {
+          window.datastar.sendAction("@get('/ui/status')");
+          return true;
+        }
+        return false;
+      };
+      const render = async () => {
+        try {
+          const response = await fetch('/api/v1/status');
+          const text = await response.text();
+          const statusNode = document.getElementById('status');
+          if (statusNode) {
+            statusNode.textContent = response.ok ? text : `status ${response.status}`;
+          }
+          if (fetchedNode) {
+            fetchedNode.textContent = new Date().toISOString();
+          }
+        } catch (error) {
+          document.getElementById('status').textContent = String(error);
+          if (fetchedNode) {
+            fetchedNode.textContent = new Date().toISOString();
+          }
+        }
+      };
+      const events = new EventSource('/api/v1/events');
+      events.onmessage = (event) => {
+        const output = document.getElementById('events');
+        output.textContent = `${output.textContent}${event.data}\n`;
+      };
+      const bootstrap = async () => {
+        const datastarPatched = refreshStatus();
+        if (!datastarPatched) {
+          await render();
+          setInterval(render, 5000);
+        }
+      };
+      bootstrap();
+      autoRefreshButton.addEventListener('click', () => {
+        if (window.__blockzillaMonitorAutoRefresh === null) {
+          if (window.datastar && window.datastar.sendAction) {
+            window.__blockzillaMonitorAutoRefresh = setInterval(refreshStatus, 5000);
+          } else {
+            window.__blockzillaMonitorAutoRefresh = setInterval(render, 5000);
+          }
+          autoRefreshLabel.textContent = 'on';
+        } else {
+          clearInterval(window.__blockzillaMonitorAutoRefresh);
+          window.__blockzillaMonitorAutoRefresh = null;
+          autoRefreshLabel.textContent = 'off';
+        }
+      });
+    </script>
+  </body>
+</html>
+"#;
 const COPY_REQUEST_HEADERS: &[&str] = &[
     "accept",
     "cache-control",
@@ -67,8 +178,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
-
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, clap::Args)]
 pub struct ServeArgs {
     /// Explicit loopback or RFC1918 listener. Wildcard and public binds are rejected.
     #[arg(long, default_value = "127.0.0.1:8787")]
@@ -134,23 +244,50 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         slots: Arc::new(Semaphore::new(args.max_requests)),
         json_transforms: Arc::new(Semaphore::new(args.max_json_transforms)),
     });
-    let app = Router::new().fallback(proxy_handler).with_state(state);
+
+    let router = Router::builder()
+        .route(RouteFn::new(
+            &[Method::GET],
+            Cow::Borrowed(Path::new("/ui/status")),
+            monitor_status_route_handler,
+        ))
+        .route(RouteFn::new(
+            &[Method::GET, Method::HEAD],
+            Cow::Borrowed(Path::new("/api/{*path}")),
+            proxy_route_handler,
+        ))
+        .route(RouteFn::new(
+            &[Method::GET],
+            Cow::Borrowed(Path::new("/{*path}")),
+            monitor_shell_route_handler,
+        ))
+        .app_context(state)
+        .build();
+
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind public watcher on {listen}"))?;
-    axum::serve(listener, app)
+    topcoat::serve(listener, router)
         .await
         .context("serve public watcher gateway")
 }
 
+fn monitor_shell_route_handler(cx: &Cx, body: Body) -> RouteFuture<'_> {
+    Box::pin(monitor_shell_route(cx, body))
+}
+
+fn monitor_status_route_handler(cx: &Cx, body: Body) -> RouteFuture<'_> {
+    Box::pin(monitor_status_route(cx, body))
+}
+
+fn proxy_route_handler(cx: &Cx, body: Body) -> RouteFuture<'_> {
+    Box::pin(proxy_route(cx, body))
+}
+
 fn build_upstream_client(timeout: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        // A loopback trust boundary must never honor HTTP_PROXY inherited from
-        // a login shell or the systemd user manager.
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        // Match Python's socket timeout: bound connection setup and each idle
-        // read, but do not impose a total lifetime on healthy SSE streams.
         .connect_timeout(timeout)
         .read_timeout(timeout)
         .pool_max_idle_per_host(8)
@@ -158,46 +295,127 @@ fn build_upstream_client(timeout: Duration) -> Result<reqwest::Client> {
         .context("build watcher upstream client")
 }
 
-async fn proxy_handler(
-    State(state): State<Arc<AppState>>,
-    request: Request<Body>,
-) -> Response<Body> {
-    let send_body = request.method() == Method::GET;
-    let Ok(permit) = Arc::clone(&state.slots).try_acquire_owned() else {
-        return status_response(StatusCode::SERVICE_UNAVAILABLE);
-    };
-    match proxy_request(&state, request, permit).await {
-        Ok(response) => response,
+async fn monitor_shell_route(_cx: &Cx, _body: Body) -> TopcoatResult<Response> {
+    let _ = _body;
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            HeaderName::from_static("content-type"),
+            "text/html; charset=utf-8",
+        )
+        .header(HeaderName::from_static("cache-control"), "no-store")
+        .body(Body::from(MONITOR_UI_SHELL))
+        .map_err(|error| anyhow!("failed to build monitor shell response: {error}"))?;
+    Ok(response)
+}
+
+async fn monitor_status_route(_cx: &Cx, body: Body) -> TopcoatResult<Response> {
+    let _ = body;
+    let state = app_context::<Arc<AppState>>(_cx);
+    let permit = acquire_json_transform(&state.json_transforms)
+        .await
+        .context("acquire json transform permit for ui status")?;
+    let url = format!("http://{}/api/v1/status", state.upstream);
+    let upstream = state
+        .client
+        .get(url)
+        .send()
+        .await
+        .context("request upstream status for monitor ui")?;
+    if upstream.status() != StatusCode::OK {
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .header(HeaderName::from_static("content-type"), "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "monitor_status": "upstream status endpoint is unavailable",
+                    "status_last_fetched": SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|time| time.as_secs())
+                        .unwrap_or_default()
+                })
+                .to_string(),
+            ))
+            .map_err(|error| anyhow!("failed to build monitor status response: {error}"))?);
+    }
+    let raw = read_limited(upstream, MAX_JSON_BYTES).await?;
+    let transformed = transform_public_json(raw, permit).await?;
+    let status_pretty = serde_json::from_slice::<Value>(&transformed)
+        .ok()
+        .map_or_else(
+            || status_pretty_fallback(&transformed),
+            |value| {
+                serde_json::to_string_pretty(&value)
+                    .unwrap_or_else(|_| status_pretty_fallback(&transformed))
+            },
+        );
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_secs())
+        .unwrap_or_default();
+    let payload = serde_json::json!({
+        "monitor_status": status_pretty,
+        "status_last_fetched": now
+    });
+    let body = serde_json::to_vec(&payload).context("serialize monitor status payload")?;
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(HeaderName::from_static("content-type"), "application/json")
+        .body(Body::from(body))
+        .map_err(|error| anyhow!("failed to build monitor status response: {error}"))?;
+    Ok(response)
+}
+
+fn status_pretty_fallback(transformed: &[u8]) -> String {
+    let value = String::from_utf8_lossy(transformed);
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+async fn proxy_route(cx: &Cx, body: Body) -> TopcoatResult<Response> {
+    let _request_body = body;
+    let state = app_context::<Arc<AppState>>(cx);
+    let send_body = matches!(method(cx), &Method::GET);
+    if !send_body && !matches!(method(cx), &Method::HEAD) {
+        return Ok(status_response(StatusCode::METHOD_NOT_ALLOWED));
+    }
+
+    let permit = match state.slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
         Err(_) => {
-            eprintln!("watcher gateway: upstream request failed");
-            public_error(send_body)
+            return Ok(status_response(StatusCode::SERVICE_UNAVAILABLE));
+        }
+    };
+
+    match proxy_request(app_context::<Arc<AppState>>(cx), cx, permit).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            eprintln!("watcher gateway: upstream request failed: {error}");
+            Ok(public_error(send_body))
         }
     }
 }
 
 async fn proxy_request(
     state: &AppState,
-    request: Request<Body>,
+    cx: &Cx,
     permit: OwnedSemaphorePermit,
-) -> Result<Response<Body>> {
-    let send_body = request.method() == Method::GET;
-    if !send_body && request.method() != Method::HEAD {
-        return Ok(status_response(StatusCode::METHOD_NOT_ALLOWED));
-    }
-    if request.uri().scheme().is_some()
-        || request.uri().authority().is_some()
-        || !request.uri().path().starts_with('/')
+) -> Result<Response> {
+    let request_uri = uri(cx);
+    let send_body = matches!(method(cx), &Method::GET);
+    if request_uri.scheme().is_some()
+        || request_uri.authority().is_some()
+        || !request_uri.path().starts_with('/')
     {
         return Ok(status_response(StatusCode::BAD_REQUEST));
     }
-    let path = request.uri().path();
+    let path = request_uri.path();
     if path.starts_with("/api/") && !PUBLIC_API_GETS.contains(&path) {
         return Ok(status_response(StatusCode::NOT_FOUND));
     }
 
     let is_ingest = path == "/api/v1/sidecars/ingest-pipeline/status.json";
-    let target = request
-        .uri()
+    let target = request_uri
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or(path);
@@ -214,11 +432,12 @@ async fn proxy_request(
     };
     let mut upstream_request = state.client.request(method, url);
     for name in COPY_REQUEST_HEADERS {
-        if let Some(value) = request.headers().get(*name) {
+        if let Some(value) = headers(cx).get(*name) {
             upstream_request = upstream_request.header(*name, value.clone());
         }
     }
     upstream_request = upstream_request.header(header::ACCEPT_ENCODING, "identity");
+
     let upstream_response = upstream_request
         .send()
         .await
@@ -293,11 +512,11 @@ async fn proxy_request(
             .headers_mut()
             .insert(header::CONNECTION, HeaderValue::from_static("close"));
         if send_body {
-            *response.body_mut() = sanitized_sse_body(
+            *response.body_mut() = Body::new(sanitized_sse_body(
                 upstream_response,
                 permit,
                 Arc::clone(&state.json_transforms),
-            );
+            ));
         }
         return Ok(response);
     }
@@ -309,16 +528,14 @@ async fn proxy_request(
         );
     }
     if send_body {
-        let stream = upstream_response.bytes_stream().map(move |item| {
-            let _keep_permit = &permit;
-            item
-        });
-        *response.body_mut() = Body::from_stream(stream);
+        *response.body_mut() = Body::new(StreamBody::new(
+            upstream_response.bytes_stream().map_ok(Frame::data),
+        ));
     }
     Ok(response)
 }
 
-async fn read_limited(response: reqwest::Response, limit: usize) -> Result<Bytes> {
+async fn read_limited(response: reqwest::Response, limit: usize) -> Result<bytes::Bytes> {
     if response
         .content_length()
         .is_some_and(|content_length| content_length > limit as u64)
@@ -326,7 +543,7 @@ async fn read_limited(response: reqwest::Response, limit: usize) -> Result<Bytes
         return Err(anyhow!("upstream body exceeds public limit"));
     }
     let mut stream = response.bytes_stream();
-    let mut output = BytesMut::new();
+    let mut output = bytes::BytesMut::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read watcher upstream body")?;
         ensure!(
@@ -346,7 +563,7 @@ async fn acquire_json_transform(json_transforms: &Arc<Semaphore>) -> Result<Owne
 }
 
 async fn transform_public_json(
-    raw: Bytes,
+    raw: bytes::Bytes,
     transform_permit: OwnedSemaphorePermit,
 ) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
@@ -358,7 +575,7 @@ async fn transform_public_json(
 }
 
 async fn transform_ingest_json(
-    raw: Bytes,
+    raw: bytes::Bytes,
     transform_permit: OwnedSemaphorePermit,
 ) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
@@ -374,11 +591,11 @@ fn sanitized_sse_body(
     permit: OwnedSemaphorePermit,
     json_transforms: Arc<Semaphore>,
 ) -> Body {
-    let (sender, receiver) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    let (sender, receiver) = mpsc::channel::<std::result::Result<bytes::Bytes, std::io::Error>>(8);
     tokio::spawn(async move {
         let _permit = permit;
         let mut upstream = response.bytes_stream();
-        let mut pending = BytesMut::new();
+        let mut pending = bytes::BytesMut::new();
         let mut pending_data_permit = None;
         loop {
             let chunk = tokio::select! {
@@ -410,8 +627,6 @@ fn sanitized_sse_body(
                     let line_permit = if is_data_line_prefix(&line) {
                         pending_data_permit.take()
                     } else {
-                        // A permit is only reserved for a line that began with
-                        // `data`; drop it if a malformed prefix changes shape.
                         pending_data_permit.take();
                         None
                     };
@@ -420,7 +635,9 @@ fn sanitized_sse_body(
                     else {
                         return;
                     };
-                    if !public.is_empty() && sender.send(Ok(Bytes::from(public))).await.is_err() {
+                    if !public.is_empty()
+                        && sender.send(Ok(bytes::Bytes::from(public))).await.is_err()
+                    {
                         return;
                     }
                 }
@@ -446,11 +663,13 @@ fn sanitized_sse_body(
                 return;
             };
             if !public.is_empty() {
-                let _ = sender.send(Ok(Bytes::from(public))).await;
+                let _ = sender.send(Ok(bytes::Bytes::from(public))).await;
             }
         }
     });
-    Body::from_stream(ReceiverStream::new(receiver))
+    Body::new(StreamBody::new(
+        ReceiverStream::new(receiver).map_ok(Frame::data),
+    ))
 }
 
 fn is_data_line_prefix(line: &[u8]) -> bool {
@@ -458,7 +677,7 @@ fn is_data_line_prefix(line: &[u8]) -> bool {
 }
 
 async fn transform_sse_line(
-    line: Bytes,
+    line: bytes::Bytes,
     reserved_permit: Option<OwnedSemaphorePermit>,
     json_transforms: Arc<Semaphore>,
 ) -> Option<Vec<u8>> {
@@ -468,7 +687,7 @@ async fn transform_sse_line(
     }
     let transform_permit = match reserved_permit {
         Some(permit) => permit,
-        None => json_transforms.acquire_owned().await.ok()?,
+        None => acquire_json_transform(&json_transforms).await.ok()?,
     };
     tokio::task::spawn_blocking(move || {
         let _transform_permit = transform_permit;
@@ -479,12 +698,12 @@ async fn transform_sse_line(
 }
 
 struct PermitBodyState {
-    bytes: Bytes,
+    bytes: bytes::Bytes,
     offset: usize,
     _permit: OwnedSemaphorePermit,
 }
 
-fn bounded_response_body(bytes: Bytes, permit: OwnedSemaphorePermit) -> Body {
+fn bounded_response_body(bytes: bytes::Bytes, permit: OwnedSemaphorePermit) -> Body {
     let state = PermitBodyState {
         bytes,
         offset: 0,
@@ -500,9 +719,9 @@ fn bounded_response_body(bytes: Bytes, permit: OwnedSemaphorePermit) -> Body {
             .min(state.bytes.len());
         let chunk = state.bytes.slice(state.offset..end);
         state.offset = end;
-        Some((Ok::<Bytes, Infallible>(chunk), state))
+        Some((Ok::<bytes::Bytes, Infallible>(chunk), state))
     });
-    Body::from_stream(stream)
+    Body::new(StreamBody::new(stream.map_ok(Frame::data)))
 }
 
 fn transformed_json_response(
@@ -510,9 +729,9 @@ fn transformed_json_response(
     upstream_headers: &reqwest::header::HeaderMap,
     body: Vec<u8>,
     permit: OwnedSemaphorePermit,
-) -> Response<Body> {
+) -> Response {
     let length = body.len();
-    let mut response = Response::new(bounded_response_body(Bytes::from(body), permit));
+    let mut response = Response::new(bounded_response_body(bytes::Bytes::from(body), permit));
     *response.status_mut() = status;
     copy_response_headers(upstream_headers, response.headers_mut(), true);
     response.headers_mut().insert(
@@ -526,10 +745,10 @@ fn transformed_json_response(
     response
 }
 
-fn ingest_response(body: Vec<u8>, send_body: bool, permit: OwnedSemaphorePermit) -> Response<Body> {
+fn ingest_response(body: Vec<u8>, send_body: bool, permit: OwnedSemaphorePermit) -> Response {
     let length = if send_body { body.len() } else { 0 };
     let mut response = Response::new(if send_body {
-        bounded_response_body(Bytes::from(body), permit)
+        bounded_response_body(bytes::Bytes::from(body), permit)
     } else {
         drop(permit);
         Body::empty()
@@ -546,13 +765,13 @@ fn ingest_response(body: Vec<u8>, send_body: bool, permit: OwnedSemaphorePermit)
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
-        "x-content-type-options",
+        HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
     );
     response
 }
 
-fn public_error(send_body: bool) -> Response<Body> {
+fn public_error(send_body: bool) -> Response {
     let length = if send_body { PUBLIC_ERROR.len() } else { 0 };
     let mut response = Response::new(if send_body {
         Body::from(PUBLIC_ERROR)
@@ -571,13 +790,13 @@ fn public_error(send_body: bool) -> Response<Body> {
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
-        "x-content-type-options",
+        HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
     );
     response
 }
 
-fn status_response(status: StatusCode) -> Response<Body> {
+fn status_response(status: StatusCode) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = status;
     response
@@ -641,25 +860,31 @@ fn network_address(value: &str, flag: &str, allow_private: bool) -> Result<Socke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, routing::any};
     use serde_json::{Value, json};
     use tokio::task::JoinHandle;
+    use topcoat::context::Cx;
+    use topcoat::router::to_bytes;
 
     #[derive(Clone)]
     struct MockResponse {
         status: StatusCode,
         content_type: &'static str,
-        body: Bytes,
+        body: bytes::Bytes,
     }
 
-    async fn mock_upstream(
-        State(mock): State<MockResponse>,
-        request: Request<Body>,
-    ) -> Response<Body> {
-        let mut response = Response::new(if request.method() == Method::HEAD {
-            Body::empty()
-        } else {
+    fn mock_upstream_handler(cx: &Cx, body: Body) -> RouteFuture<'_> {
+        Box::pin(mock_upstream(cx, body))
+    }
+
+    async fn mock_upstream(cx: &Cx, body: Body) -> TopcoatResult<Response> {
+        let mock = app_context::<MockResponse>(cx);
+        let mut response = Response::new(if matches!(method(cx), &Method::GET) {
+            // HEAD calls for the same path must stay bodyless.
+            drop(body);
             Body::from(mock.body.clone())
+        } else {
+            drop(body);
+            Body::empty()
         });
         *response.status_mut() = mock.status;
         response.headers_mut().insert(
@@ -671,18 +896,25 @@ mod tests {
             HeaderValue::from_str(&mock.body.len().to_string()).unwrap(),
         );
         response.headers_mut().insert(
-            "x-internal-diagnostic",
+            HeaderName::from_static("x-internal-diagnostic"),
             HeaderValue::from_static("must-not-leak"),
         );
-        response
+        Ok(response)
     }
 
-    async fn spawn_mock(mock: MockResponse) -> (SocketAddr, JoinHandle<()>) {
+    async fn mock_router(mock: MockResponse) -> (SocketAddr, JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let app = Router::new().fallback(any(mock_upstream)).with_state(mock);
+        let app = Router::builder()
+            .route(RouteFn::new(
+                &[Method::GET, Method::HEAD],
+                Cow::Borrowed(Path::new("/{*path}")),
+                mock_upstream_handler,
+            ))
+            .app_context(mock)
+            .build();
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            topcoat::serve(listener, app).await.unwrap();
         });
         (address, task)
     }
@@ -700,9 +932,26 @@ mod tests {
             slots: Arc::new(Semaphore::new(64)),
             json_transforms: Arc::new(Semaphore::new(2)),
         });
-        let app = Router::new().fallback(proxy_handler).with_state(state);
+        let router = Router::builder()
+            .route(RouteFn::new(
+                &[Method::GET],
+                Cow::Borrowed(Path::new("/ui/status")),
+                monitor_status_route_handler,
+            ))
+            .route(RouteFn::new(
+                &[Method::GET, Method::HEAD],
+                Cow::Borrowed(Path::new("/api/{*path}")),
+                proxy_route_handler,
+            ))
+            .route(RouteFn::new(
+                &[Method::GET],
+                Cow::Borrowed(Path::new("/{*path}")),
+                monitor_shell_route_handler,
+            ))
+            .app_context(state)
+            .build();
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            topcoat::serve(listener, router).await.unwrap();
         });
         (address, task)
     }
@@ -748,15 +997,15 @@ mod tests {
     async fn response_permit_lives_until_buffered_body_finishes_or_is_dropped() {
         let slots = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&slots).acquire_owned().await.unwrap();
-        let body = bounded_response_body(Bytes::from_static(b"public response"), permit);
+        let body = bounded_response_body(bytes::Bytes::from_static(b"public response"), permit);
         assert_eq!(slots.available_permits(), 0);
 
-        let collected = axum::body::to_bytes(body, 1024).await.unwrap();
+        let collected = to_bytes(body, 1024).await.unwrap();
         assert_eq!(collected.as_ref(), b"public response");
         assert_eq!(slots.available_permits(), 1);
 
         let permit = Arc::clone(&slots).acquire_owned().await.unwrap();
-        let body = bounded_response_body(Bytes::from_static(b"abandoned"), permit);
+        let body = bounded_response_body(bytes::Bytes::from_static(b"abandoned"), permit);
         assert_eq!(slots.available_permits(), 0);
         drop(body);
         assert_eq!(slots.available_permits(), 1);
@@ -778,23 +1027,28 @@ mod tests {
         assert_eq!(transforms.available_permits(), 1);
     }
 
-    async fn slow_sse() -> Response<Body> {
+    fn slow_sse_handler(cx: &Cx, body: Body) -> RouteFuture<'_> {
+        Box::pin(slow_sse(cx, body))
+    }
+
+    async fn slow_sse(_cx: &Cx, body: Body) -> TopcoatResult<Response> {
+        drop(body);
         let stream = futures_util::stream::unfold(0_u8, |index| async move {
             if index == 10 {
                 return None;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
             Some((
-                Ok::<Bytes, Infallible>(Bytes::from_static(b": heartbeat\n\n")),
+                Ok::<bytes::Bytes, Infallible>(bytes::Bytes::from_static(b": heartbeat\n\n")),
                 index + 1,
             ))
         });
-        let mut response = Response::new(Body::from_stream(stream));
+        let mut response = Response::new(Body::new(StreamBody::new(stream.map_ok(Frame::data))));
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/event-stream"),
         );
-        response
+        Ok(response)
     }
 
     #[tokio::test]
@@ -802,13 +1056,19 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let upstream_task = tokio::spawn(async move {
-            axum::serve(listener, Router::new().fallback(any(slow_sse)))
-                .await
-                .unwrap();
+            let app = Router::builder()
+                .route(RouteFn::new(
+                    &[Method::GET, Method::HEAD],
+                    Cow::Borrowed(Path::new("/{*path}")),
+                    slow_sse_handler,
+                ))
+                .build();
+            topcoat::serve(listener, app).await.unwrap();
         });
+
         let client = build_upstream_client(Duration::from_millis(100)).unwrap();
         let started = tokio::time::Instant::now();
-        let body = client
+        let response = client
             .get(format!("http://{address}/api/v1/events"))
             .send()
             .await
@@ -816,17 +1076,17 @@ mod tests {
             .bytes()
             .await
             .unwrap();
-        assert_eq!(body.as_ref(), b": heartbeat\n\n".repeat(10));
+        assert_eq!(response.as_ref(), b": heartbeat\n\n".repeat(10));
         assert!(started.elapsed() >= Duration::from_millis(200));
         upstream_task.abort();
     }
 
     #[tokio::test]
     async fn generic_json_is_sanitized_and_private_headers_are_dropped() {
-        let (upstream, upstream_task) = spawn_mock(MockResponse {
+        let (upstream, upstream_task) = mock_router(MockResponse {
             status: StatusCode::OK,
             content_type: "application/json",
-            body: Bytes::from_static(
+            body: bytes::Bytes::from_static(
                 br#"{"token":"TOPSECRET","path":"/tmp/private/file","ok":true}"#,
             ),
         })
@@ -855,15 +1115,15 @@ mod tests {
             MockResponse {
                 status: StatusCode::OK,
                 content_type: "text/plain",
-                body: Bytes::from_static(b"private diagnostic"),
+                body: bytes::Bytes::from_static(b"private diagnostic"),
             },
             MockResponse {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 content_type: "application/json",
-                body: Bytes::from_static(br#"{"token":"TOPSECRET"}"#),
+                body: bytes::Bytes::from_static(br#"{"token":"TOPSECRET"}"#),
             },
         ] {
-            let (upstream, upstream_task) = spawn_mock(mock).await;
+            let (upstream, upstream_task) = mock_router(mock).await;
             let (gateway, gateway_task) = spawn_gateway(upstream, upstream).await;
             let response = reqwest::get(format!("http://{gateway}/api/v1/status"))
                 .await
@@ -878,10 +1138,10 @@ mod tests {
 
     #[tokio::test]
     async fn head_upstream_failure_is_bodyless() {
-        let (upstream, upstream_task) = spawn_mock(MockResponse {
+        let (upstream, upstream_task) = mock_router(MockResponse {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             content_type: "application/json",
-            body: Bytes::from_static(br#"{"private":"diagnostic"}"#),
+            body: bytes::Bytes::from_static(br#"{"private":"diagnostic"}"#),
         })
         .await;
         let (gateway, gateway_task) = spawn_gateway(upstream, upstream).await;
@@ -899,13 +1159,13 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_uses_dedicated_upstream_and_projects_contract() {
-        let (upstream, upstream_task) = spawn_mock(MockResponse {
+        let (upstream, upstream_task) = mock_router(MockResponse {
             status: StatusCode::OK,
             content_type: "application/json",
-            body: Bytes::from_static(br#"{"wrong":true}"#),
+            body: bytes::Bytes::from_static(br#"{"wrong":true}"#),
         })
         .await;
-        let ingest = json!({
+        let ingest_upstream = json!({
             "schema_version": 1,
             "updated_unix_secs": 100,
             "overall_state": "healthy",
@@ -917,13 +1177,13 @@ mod tests {
             "fallback": {"state": "unavailable", "last_slot": null, "updated_unix_secs": null, "lag_slots": null},
             "gaps": [], "gaps_truncated": false, "incidents": [], "secret": "private"
         });
-        let (ingest_upstream, ingest_task) = spawn_mock(MockResponse {
+        let (ingest_upstream_address, ingest_task) = mock_router(MockResponse {
             status: StatusCode::OK,
             content_type: "application/json; charset=utf-8",
-            body: Bytes::from(serde_json::to_vec(&ingest).unwrap()),
+            body: bytes::Bytes::from(serde_json::to_vec(&ingest_upstream).unwrap()),
         })
         .await;
-        let (gateway, gateway_task) = spawn_gateway(upstream, ingest_upstream).await;
+        let (gateway, gateway_task) = spawn_gateway(upstream, ingest_upstream_address).await;
         let response = reqwest::get(format!(
             "http://{gateway}/api/v1/sidecars/ingest-pipeline/status.json"
         ))
@@ -942,11 +1202,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_status_endpoint_redacts_and_prettifies_status_payload() {
+        let (upstream, upstream_task) = mock_router(MockResponse {
+            status: StatusCode::OK,
+            content_type: "application/json",
+            body: bytes::Bytes::from_static(
+                br#"{"token":"TOPSECRET","path":"/tmp/private/path","message":"ok"}"#,
+            ),
+        })
+        .await;
+        let (gateway, gateway_task) = spawn_gateway(upstream, upstream).await;
+        let status = reqwest::get(format!("http://{gateway}/ui/status"))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let payload: Value = serde_json::from_slice(&status.bytes().await.unwrap()).unwrap();
+        let monitor_status = payload["monitor_status"].as_str().unwrap();
+        assert!(monitor_status.contains("ok"));
+        assert!(!monitor_status.contains("TOPSECRET"));
+        assert!(!monitor_status.contains("/tmp/private/path"));
+        assert!(payload["status_last_fetched"].as_u64().is_some());
+        gateway_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
     async fn sse_is_sanitized_and_unknown_api_or_mutation_never_reaches_upstream() {
-        let (upstream, upstream_task) = spawn_mock(MockResponse {
+        let (upstream, upstream_task) = mock_router(MockResponse {
             status: StatusCode::OK,
             content_type: "Text/Event-Stream; Charset=UTF-8",
-            body: Bytes::from_static(
+            body: bytes::Bytes::from_static(
                 b"event: snapshot_patch\ndata: {\"message\":\"Bearer TOPSECRET\",\"path\":\"/tmp/private\"}\n\n",
             ),
         })
