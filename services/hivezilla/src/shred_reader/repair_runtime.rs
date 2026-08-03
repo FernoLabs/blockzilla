@@ -15,7 +15,7 @@ use std::{
 
 use solana_hash::Hash;
 use solana_keypair::{Keypair, signable::Signable};
-use solana_ledger::shred::Shred;
+use solana_ledger_compat::Shred;
 use solana_pubkey::Pubkey;
 use tokio::net::UdpSocket;
 use tracing::debug;

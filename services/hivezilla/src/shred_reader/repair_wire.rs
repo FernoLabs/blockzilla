@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use solana_gossip::ping_pong::{Ping, Pong};
 use solana_hash::Hash;
 use solana_keypair::{Keypair, Signature, Signer, signable::Signable};
-use solana_ledger::shred::Shred;
+use solana_ledger_compat::Shred;
 use solana_pubkey::Pubkey;
 
 /// Repair nonces are appended to shred responses as a little-endian `u32`.

@@ -26,7 +26,7 @@ use super::shred_udp::parse_shred_header;
 use super::{
     CommitmentEvidence, ContentDigest, CumulativePrimaryAck, DurableSpoolRecord, IngressRecordMeta,
     LogicalKey, REPLICATION_PROTOCOL_VERSION, ReceiptDisposition, ReplicationOffer,
-    ReplicationStreamId, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
+    ReplicationStreamId, ShredKind, SpoolJournalIdentity, SpoolLocation, SpoolOptions, SpoolWriter,
     ZSTD_SOLANA_SHRED_V1, compute_content_digest, cumulative_chain_next, cumulative_chain_seed,
 };
 

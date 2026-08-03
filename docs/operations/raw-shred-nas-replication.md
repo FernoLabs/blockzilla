@@ -109,7 +109,7 @@ send success alone is not a durable receipt.
 ## Verified reconstruction diagnostic
 
 Block reconstruction is an offline diagnostic feature, not part of the small live ingest binary.
-Build it explicitly with `--features shred-reconstruction --bin shred-reconstruct-trial`.
+Build it with `--bin shred-reconstruct-trial` after the usual crate build (no feature flag is required).
 
 On 2026-07-22, the final ordered-component reader scanned a 500,000-record NAS sample from journal
 `d574db1d3e3faab86f06f08a2ce33cfd`. From 256 candidate slots it reconstructed 187 exact,

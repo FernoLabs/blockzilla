@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::Serialize;
 use solana_entry::block_component::BlockComponent;
-use solana_ledger::shred::{DATA_SHREDS_PER_FEC_BLOCK, Shred};
+use solana_ledger_compat::{DATA_SHREDS_PER_FEC_BLOCK, Shred};
 
 use super::{
     LogicalKey, ShredKind, SpoolJournalIdentity, read_spool_committed_snapshot_after,
@@ -985,7 +985,7 @@ where
     let mut previous: Option<u32> = None;
     for shred in shreds {
         let shred = shred.as_ref();
-        let index = solana_ledger::shred::layout::get_index(shred)
+        let index = solana_ledger_compat::get_data_index(shred)
             .ok_or_else(|| anyhow::anyhow!("data shred is missing its index"))?;
         if let Some(previous) = previous {
             ensure!(

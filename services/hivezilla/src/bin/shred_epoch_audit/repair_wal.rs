@@ -19,7 +19,7 @@ use std::os::fd::AsRawFd;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use solana_ledger::shred::{DATA_SHREDS_PER_FEC_BLOCK, MAX_DATA_SHREDS_PER_SLOT, Shred};
+use solana_ledger_compat::{DATA_SHREDS_PER_FEC_BLOCK, MAX_DATA_SHREDS_PER_SLOT, Shred};
 use solana_pubkey::Pubkey;
 
 const LEGACY_FILE_HEADER: &[u8; 16] = b"SHRED-REPAIR\0\0\x02\0";

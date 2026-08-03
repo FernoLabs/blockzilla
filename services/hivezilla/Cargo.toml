@@ -34,8 +34,18 @@ required-features = ["shred-reconstruction"]
 [features]
 default = []
 shred-reconstruction = [
+    "shred-reconstruction-backend-own",
     "dep:reed-solomon-erasure",
+    "dep:solana-entry",
+    "dep:solana-gossip",
+    "dep:solana-hash",
+    "dep:solana-keypair",
+    "dep:solana-ledger-compat",
+    "dep:solana-net-utils",
+    "dep:solana-pubkey",
+    "dep:solana-rpc-client",
 ]
+shred-reconstruction-backend-own = ["dep:solana-ledger-compat"]
 
 [dependencies]
 anyhow = "1.0.102"
@@ -61,15 +71,14 @@ rustls = { version = "0.23.40", features = ["ring"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 blockzilla-shred-codec = { path = "../../crates/shred-codec" }
-solana-entry = "=4.1.2"
-solana-gossip = { version = "=4.1.2", features = ["agave-unstable-api"] }
-solana-hash = { version = "4.3.0", features = ["serde"] }
-solana-keypair = "=3.1.2"
-solana-ledger = { version = "=4.1.2", features = ["agave-unstable-api"] }
-solana-net-utils = { version = "=4.1.2", features = ["agave-unstable-api"] }
-solana-pubkey = "4.2.0"
-solana-rpc-client = "=4.1.2"
-solana-transaction-error = "=3.2.0"
+solana-entry = { version = "=4.1.2", optional = true }
+solana-gossip = { path = "../../crates/solana-gossip-compat", optional = true }
+solana-hash = { version = "4.3.0", features = ["serde"], optional = true }
+solana-keypair = { version = "=3.1.2", optional = true }
+solana-net-utils = { version = "=4.1.2", features = ["agave-unstable-api"], optional = true }
+solana-pubkey = { version = "4.2.0", optional = true }
+solana-rpc-client = { version = "=4.1.2", optional = true }
+solana-ledger-compat = { path = "../../crates/solana-ledger-compat", optional = true }
 sha2 = "0.11.0"
 socket2 = "0.6"
 tokio = { version = "1.52.3", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

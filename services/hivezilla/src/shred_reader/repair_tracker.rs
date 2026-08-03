@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use solana_ledger::shred::{MAX_CODE_SHREDS_PER_SLOT, MAX_DATA_SHREDS_PER_SLOT, Shred};
+use solana_ledger_compat::{MAX_CODE_SHREDS_PER_SLOT, MAX_DATA_SHREDS_PER_SLOT, Shred};
 
 // Agave v4.1.2 uses fixed 32-data + 32-coding FEC batches, including padding the final batch.
 const DATA_SHREDS_PER_FEC: u32 = 32;

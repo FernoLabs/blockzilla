@@ -1,0 +1,20 @@
+[package]
+name = "solana-gossip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal local compatibility surface for shard of `solana-gossip` used by Blockzilla."
+publish = false
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+solana-address = { version = "2.6.0", features = ["serde"] }
+solana-hash = { version = "4.3.0", features = ["serde"] }
+serde-big-array = "0.5.1"
+solana-keypair = { version = "=3.1.2" }
+solana-signature = { version = "3.4.1", features = ["serde"] }
+solana-net-utils = { version = "=4.1.2", features = ["agave-unstable-api"] }
+solana-sha256-hasher = { version = "3.1.0" }
+tracing = "0.1.40"

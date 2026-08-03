@@ -18,7 +18,7 @@ use solana_gossip::{
     gossip_service::GossipService,
 };
 use solana_keypair::Signer;
-use solana_ledger::shred::Shred;
+use solana_ledger_compat::Shred;
 use solana_net_utils::{
     SocketAddrSpace, get_cluster_shred_version_with_binding, get_public_ip_addr_with_binding,
     ip_echo_server, multihomed_sockets::BindIpAddrs, verify_all_reachable_tcp,

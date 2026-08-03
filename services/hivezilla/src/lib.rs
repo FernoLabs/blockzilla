@@ -10,8 +10,11 @@ pub mod ingest;
 pub mod ingest_status;
 pub mod layout;
 pub mod ledger;
+pub mod pull_ack_monitor;
+pub mod raw_recorder_support;
 pub mod repair;
 pub mod rpc;
+#[cfg(feature = "shred-reconstruction")]
 pub mod shred_reader;
 pub mod shred_status;
 pub mod source;

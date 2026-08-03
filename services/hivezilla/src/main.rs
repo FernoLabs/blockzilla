@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(feature = "shred-reconstruction")]
+use hivezilla::shred_reader;
 use hivezilla::{
     app::LiveProducerApp,
     config::ProducerConfig,
@@ -41,7 +43,6 @@ use hivezilla::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
         sync_epoch_info,
     },
-    shred_reader,
     shred_status::{ServeShredStatusArgs, serve_shred_status},
     supervisor::{
         BackoffPolicy, RestartPolicy, SupervisorConfig, SupervisorNotificationKind,
@@ -108,6 +109,7 @@ enum Command {
     ValidateIngestConfig(ValidateIngestConfigArgs),
     /// Durably record byte-for-byte Solana shred datagrams from one configured UDP source.
     RecordShredUdp(RecordShredUdpArgs),
+    #[cfg(feature = "shred-reconstruction")]
     /// Run the full shred-reader runtime (gossip + TVU receive + optional bounded repair).
     ServeShredReader,
     /// Copy committed raw shreds into a Blockzilla-owned spool with a durable cursor.
@@ -1637,6 +1639,7 @@ async fn main() -> Result<()> {
             tracing::info!("direct mTLS raw-shred pull source stopped cleanly");
         }
         Command::ServeShredStatus(args) => serve_shred_status(args).await?,
+        #[cfg(feature = "shred-reconstruction")]
         Command::ServeShredReader => {
             shred_reader::run().await?;
         }

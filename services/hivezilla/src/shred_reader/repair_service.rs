@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol};
-use solana_ledger::shred::Shred;
+use solana_ledger_compat::Shred;
 use tokio::{
     sync::{mpsc, watch},
     task::{AbortHandle, JoinHandle},
