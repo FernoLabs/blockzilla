@@ -1,0 +1,18 @@
+[Unit]
+Description=Blockzilla watcher block-time gap sidecar publisher
+After=network-online.target blockzilla-archive.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/test -x /volume1/@home/ach/dev/blockzilla-pipeline/tools/block-time-gap-public-status-v2/publish-block-time-gap-backfill.py
+ExecStartPre=/usr/bin/test -r /volume1/@home/ach/dev/blockzilla-pipeline/state/block-time-gap-archive-v2-v1/status.json
+ExecStart=/usr/bin/python3 /volume1/@home/ach/dev/blockzilla-pipeline/tools/block-time-gap-public-status-v2/publish-block-time-gap-backfill.py --source /volume1/@home/ach/dev/blockzilla-pipeline/state/block-time-gap-archive-v2-v1/status.json --output /volume1/@home/ach/dev/blockzilla-pipeline/releases/blockzilla-nas-pipeline-2026.07.19-watcher-recovery-3/ui/api/v1/sidecars/block-time-gaps/status.json --interval-secs 15
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+UMask=0022
+
+[Install]
+WantedBy=default.target
