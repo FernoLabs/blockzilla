@@ -446,6 +446,9 @@ pub fn launch_stake_history_entry(
 }
 
 /// Apply one v1.0.7 Stake instruction atomically to a transaction overlay.
+///
+/// Instruction-atomic for external callers. Replay uses
+/// [`apply_launch_stake_instruction_in_place`] on a disposable overlay.
 pub fn apply_launch_stake_instruction(
     data: &[u8],
     account_metas: &[LaunchAccountMeta],
@@ -453,15 +456,28 @@ pub fn apply_launch_stake_instruction(
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
     let mut working = accounts.clone();
+    let mutation =
+        apply_launch_stake_instruction_in_place(data, account_metas, &mut working, context)?;
+    *accounts = working;
+    Ok(mutation)
+}
+
+/// Replay-only fast path. On error `accounts` may be partially mutated and
+/// must be discarded with the transaction overlay.
+pub fn apply_launch_stake_instruction_in_place(
+    data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    context: LaunchStakeContext<'_>,
+) -> Result<LaunchStakeMutation, LaunchStakeError> {
     for meta in account_metas {
-        working
+        accounts
             .entry(meta.pubkey)
             .or_insert_with(default_system_account);
     }
-    let pre_accounts = launch_pre_accounts(account_metas, &working);
-    let mutation = apply_inner(data, account_metas, &mut working, context)?;
-    verify_launch_stake_instruction(&pre_accounts, &working)?;
-    *accounts = working;
+    let pre_accounts = launch_pre_accounts(account_metas, accounts);
+    let mutation = apply_inner(data, account_metas, accounts, context)?;
+    verify_launch_stake_instruction(&pre_accounts, accounts)?;
     Ok(mutation)
 }
 

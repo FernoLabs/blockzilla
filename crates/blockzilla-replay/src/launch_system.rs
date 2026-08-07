@@ -205,6 +205,11 @@ pub fn apply_launch_system_instruction(
 }
 
 /// Apply the System processor selected by the historical Stable-cluster epoch.
+///
+/// This public API is instruction-atomic: on error the caller's `accounts` map
+/// is unchanged. The replay hot path uses
+/// [`apply_launch_system_instruction_for_epoch_in_place`] instead because the
+/// transaction overlay is discarded on any instruction failure.
 pub fn apply_launch_system_instruction_for_epoch(
     instruction: &ArchiveV2SystemInstructionData,
     account_metas: &[LaunchSystemAccountMeta],
@@ -212,20 +217,39 @@ pub fn apply_launch_system_instruction_for_epoch(
     epoch: u64,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
     let mut working = accounts.clone();
-    for meta in account_metas {
-        working
-            .entry(meta.pubkey)
-            .or_insert_with(default_system_account);
-    }
-    let pre_accounts = launch_pre_accounts(account_metas, &working);
-    let mutation = apply_inner(
+    let mutation = apply_launch_system_instruction_for_epoch_in_place(
         instruction,
         account_metas,
         &mut working,
+        epoch,
+    )?;
+    *accounts = working;
+    Ok(mutation)
+}
+
+/// Replay-only fast path. Mutates `accounts` in place.
+///
+/// On error the overlay may be partially mutated. Callers must discard it
+/// (transaction-level rollback), matching the Vote in-place contract.
+pub fn apply_launch_system_instruction_for_epoch_in_place(
+    instruction: &ArchiveV2SystemInstructionData,
+    account_metas: &[LaunchSystemAccountMeta],
+    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    epoch: u64,
+) -> Result<LaunchSystemMutation, LaunchSystemError> {
+    for meta in account_metas {
+        accounts
+            .entry(meta.pubkey)
+            .or_insert_with(default_system_account);
+    }
+    let pre_accounts = launch_pre_accounts(account_metas, accounts);
+    let mutation = apply_inner(
+        instruction,
+        account_metas,
+        accounts,
         epoch >= STABLE_NEW_SYSTEM_PROGRAM_ACTIVATION_EPOCH,
     )?;
-    verify_launch_system_instruction(&pre_accounts, &working)?;
-    *accounts = working;
+    verify_launch_system_instruction(&pre_accounts, accounts)?;
     Ok(mutation)
 }
 
