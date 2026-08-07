@@ -66,7 +66,7 @@ fn positive_interval(value: &str) -> std::result::Result<f64, String> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ProcessSample {
+pub struct ProcessSample {
     pid: u32,
     ppid: u32,
     start_ticks: u64,
@@ -81,10 +81,10 @@ struct ProcessSample {
 }
 
 #[derive(Debug)]
-struct ProcessCollection {
-    samples: BTreeMap<u32, ProcessSample>,
-    inaccessible: usize,
-    clock_ticks: u64,
+pub struct ProcessCollection {
+    pub samples: BTreeMap<u32, ProcessSample>,
+    pub inaccessible: usize,
+    pub clock_ticks: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,27 +131,27 @@ struct RuntimeJob {
 }
 
 #[derive(Debug, Serialize)]
-struct ProcessIoStatus {
-    state: &'static str,
-    sampled_unix_secs: u64,
-    sample_window_secs: Option<f64>,
-    active_count: usize,
-    inaccessible_count: usize,
-    truncated: bool,
-    processes: Vec<ProcessIoEntry>,
-    message: Option<&'static str>,
+pub struct ProcessIoStatus {
+    pub state: &'static str,
+    pub sampled_unix_secs: u64,
+    pub sample_window_secs: Option<f64>,
+    pub active_count: usize,
+    pub inaccessible_count: usize,
+    pub truncated: bool,
+    pub processes: Vec<ProcessIoEntry>,
+    pub message: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
-struct ProcessIoEntry {
-    id: String,
-    pid: u32,
-    name: String,
-    read_mib_per_sec: f64,
-    write_mib_per_sec: f64,
-    cpu_percent: Option<f64>,
-    rss_bytes: u64,
-    blockzilla_owned: bool,
+pub struct ProcessIoEntry {
+    pub id: String,
+    pub pid: u32,
+    pub name: String,
+    pub read_mib_per_sec: f64,
+    pub write_mib_per_sec: f64,
+    pub cpu_percent: Option<f64>,
+    pub rss_bytes: u64,
+    pub blockzilla_owned: bool,
 }
 
 pub async fn publish(args: PublishArgs) -> Result<()> {
@@ -247,7 +247,7 @@ fn system_parameters() -> Result<(u32, u64, u64)> {
     bail!("runtime operations collection requires a Unix procfs host")
 }
 
-fn collect_processes(proc_root: &Path) -> Result<ProcessCollection> {
+pub fn collect_processes(proc_root: &Path) -> Result<ProcessCollection> {
     let (uid, clock_ticks, page_size) = system_parameters()?;
     collect_processes_for_uid(proc_root, uid, clock_ticks, page_size)
 }
@@ -906,7 +906,7 @@ fn is_blockzilla_owned(samples: &BTreeMap<u32, ProcessSample>, sample: &ProcessS
     false
 }
 
-fn process_io_status(
+pub fn process_io_status(
     samples: &BTreeMap<u32, ProcessSample>,
     previous: &BTreeMap<u32, ProcessSample>,
     elapsed: f64,

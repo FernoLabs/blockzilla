@@ -12,7 +12,7 @@ pre-1.0, so pin the Git revision used to produce an archive.
 | --- | --- |
 | [`blockzilla/`](blockzilla/README.md) | Builds and reads Blockzilla archives and includes an experimental finite-work scheduler. |
 | [`services/`](services/README.md) | Runtime daemons for live ingestion and edge/runtime boundaries (Hivezilla capture, archive gateway, watcher gateway). |
-| [`apps/`](apps/README.md) | Svelte apps and API-edge consumers that are deployable outside the NAS host. |
+| [`workers/`](workers/README.md) | Cloudflare Workers/edge API consumers that are deployable outside the NAS host. |
 | [`crates/`](crates/) | Shared formats, parsers, protocol types, and Old Faithful interoperability readers. |
 | [`examples/token-api/`](examples/token-api/README.md) | Example | Builds a small derived index and local API. |
 | [`docs/`](docs/README.md) | Implemented formats, architecture, and research/benchmark notes. |

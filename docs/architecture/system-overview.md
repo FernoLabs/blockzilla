@@ -37,8 +37,8 @@ The current top-level layout is:
 blockzilla/                         Blockzilla CLI and archive builders
 services/
   hivezilla/                        current live prototype and executable
-  apps/blockzilla-get-block/        read-only Worker and native reader tools
-  apps/old-faithful-get-block/      experimental read-only CAR compatibility
+  workers/blockzilla-get-block/        read-only Worker and native reader tools
+  workers/old-faithful-get-block/      experimental read-only CAR compatibility
                                     Worker restored from preserved history
 crates/
   blockzilla-format/                Archive V2 records, codecs, and indexes
