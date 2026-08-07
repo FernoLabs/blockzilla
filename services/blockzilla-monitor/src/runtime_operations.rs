@@ -48,7 +48,7 @@ pub fn start() {
                     collection.clock_ticks,
                     now,
                 );
-                state::set_local_process_io(to_snapshot(status));
+                state::set_local_process_io(to_snapshot(status)).await;
                 previous = collection.samples;
                 previous_at = Some(now);
             }

@@ -23,19 +23,18 @@
 //!   nothing should only be discoverable by hover.
 
 use topcoat::{
-    view::{component, view, View},
     Result,
+    view::{View, component, view},
 };
 
 use crate::state::{
-    format_bytes, format_thousands, CompactionHistoryEntry, DashboardState, EpochTask, ErrorEntry,
-    MachineSnapshot, ProcessEntry, SchedulerReasoning,
+    CompactionHistoryEntry, DashboardState, EpochTask, ErrorEntry, MachineSnapshot, ProcessEntry,
+    SchedulerReasoning, format_bytes, format_thousands,
 };
 
 const CARD: &str = "rounded-lg border border-zinc-800/70 bg-white/[0.02]";
 const EYEBROW: &str = "text-[11px] font-medium uppercase tracking-wider text-zinc-500";
-const FOCUS_RING: &str =
-    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950";
+const FOCUS_RING: &str = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950";
 
 /// Page chrome shared by every route: a fixed-width column (so nothing
 /// shifts horizontally between pages), the header/nav, and Datastar's
@@ -139,9 +138,15 @@ async fn header_nav(active: &str, state: &DashboardState) -> Result<View> {
 #[component]
 async fn badge_pill(label: &str, tone: &str) -> Result<View> {
     let class = match tone {
-        "amber" => "rounded-full border border-amber-700/60 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400",
-        "rose" => "rounded-full border border-rose-700/60 bg-rose-500/10 px-2 py-0.5 text-xs font-medium text-rose-400",
-        _ => "rounded-full border border-zinc-700/60 bg-zinc-500/10 px-2 py-0.5 text-xs font-medium text-zinc-400",
+        "amber" => {
+            "rounded-full border border-amber-700/60 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400"
+        }
+        "rose" => {
+            "rounded-full border border-rose-700/60 bg-rose-500/10 px-2 py-0.5 text-xs font-medium text-rose-400"
+        }
+        _ => {
+            "rounded-full border border-zinc-700/60 bg-zinc-500/10 px-2 py-0.5 text-xs font-medium text-zinc-400"
+        }
     };
     view! { <span class=(class)>(label)</span> }
 }
@@ -151,7 +156,9 @@ async fn nav_link(label: &str, href: &str, active: bool) -> Result<View> {
     let class = if active {
         "border-b-2 border-emerald-400 pb-1 font-medium text-zinc-100".to_string()
     } else {
-        format!("border-b-2 border-transparent pb-1 text-zinc-500 transition-colors hover:text-zinc-300 {FOCUS_RING}")
+        format!(
+            "border-b-2 border-transparent pb-1 text-zinc-500 transition-colors hover:text-zinc-300 {FOCUS_RING}"
+        )
     };
     view! { <a href=(href) class=(class)>(label)</a> }
 }
@@ -296,7 +303,7 @@ pub async fn poh_migration_progress(state: &DashboardState) -> Result<View> {
 pub async fn poh_migration_lane_list(state: &DashboardState) -> Result<View> {
     let card = CARD;
     view! {
-        <div class="flex flex-col gap-2">
+        <div id="poh-migration-lane-list" class="flex flex-col gap-2">
             <span class=(EYEBROW)>"PoH migration workers"</span>
             <div class=(format!("divide-y divide-zinc-800/70 {card}"))>
                 if state.poh_migration_lanes.is_empty() {
@@ -333,10 +340,14 @@ pub async fn live_capture_banner(state: &DashboardState) -> Result<View> {
 #[component]
 pub async fn epoch_list(state: &DashboardState) -> Result<View> {
     let card = CARD;
-    let visible: Vec<&EpochTask> = state.epochs.iter().filter(|task| !task.hidden_from_overview).collect();
+    let visible: Vec<&EpochTask> = state
+        .epochs
+        .iter()
+        .filter(|task| !task.hidden_from_overview)
+        .collect();
     let hidden_count = state.epochs.len() - visible.len();
     view! {
-        <div class="flex flex-col gap-2">
+        <div id="epoch-list" class="flex flex-col gap-2">
             <div class=(format!("divide-y divide-zinc-800/70 {card}"))>
                 if visible.is_empty() {
                     <div class="px-6 py-4 text-sm text-zinc-500">
@@ -365,6 +376,27 @@ pub async fn epoch_list(state: &DashboardState) -> Result<View> {
             }
         </div>
     }
+}
+
+/// Plain (non-`#[component]`) wrappers around `epoch_list`/
+/// `poh_migration_lane_list`, for `state.rs`'s `publish` to call and
+/// `.await` directly. `#[component]`-annotated functions use a call
+/// convention (keyword args, a `PhantomData`-backed marker type) that only
+/// resolves correctly from inside a surrounding `view! { ... }` block --
+/// they aren't plain async fns callable from ordinary code, even though
+/// they're declared `async fn`. These two exist solely to cross that
+/// boundary: `view!` around a single component call just forwards to it.
+/// Outside a `#[component]`/`#[page]`/route body there's no ambient request
+/// context to render against, so the leading `cx =>` names an owned,
+/// contextless one -- fine here since neither component reads `cx` itself.
+pub async fn render_epoch_list(state: &DashboardState) -> Result<View> {
+    let cx = &topcoat::context::Cx::default();
+    view! { cx => epoch_list(state: state) }
+}
+
+pub async fn render_poh_migration_lane_list(state: &DashboardState) -> Result<View> {
+    let cx = &topcoat::context::Cx::default();
+    view! { cx => poh_migration_lane_list(state: state) }
 }
 
 #[component]
@@ -437,6 +469,8 @@ async fn epoch_row(task: &EpochTask) -> Result<View> {
     let bar_id = format!("{id}-bar");
     let blocks_id = format!("{id}-blocks");
     let eta_id = format!("{id}-eta");
+    let label_id = format!("{id}-label");
+    let phase_id = format!("{id}-phase");
     // Per-row signal names, e.g. `$epoch_790_pct`, so the SSE patch can
     // update just this row without touching the others.
     let sig = format!("epoch_{}", task.epoch);
@@ -450,9 +484,25 @@ async fn epoch_row(task: &EpochTask) -> Result<View> {
             <div class="w-24 font-medium text-zinc-300 tabular-nums">
                 (format!("Epoch {}", task.epoch))
             </div>
-            <div class="flex w-40 items-center gap-2 capitalize text-zinc-100">
-                <span class=(format!("h-1.5 w-1.5 shrink-0 rounded-full {dot}"))></span>
-                (task.label.clone())
+            <div class="flex w-40 flex-col justify-center gap-0.5">
+                <div class="flex items-center gap-2 capitalize text-zinc-100">
+                    <span class=(format!("h-1.5 w-1.5 shrink-0 rounded-full {dot}"))></span>
+                    <span id=(label_id) data-text=(format!("${sig}_label"))>
+                        (task.label.clone())
+                    </span>
+                </div>
+                <div
+                    id=(phase_id)
+                    data-text=(format!("${sig}_phase"))
+                    data-show=(format!("${sig}_phase"))
+                    class=(if task.phase.is_empty() {
+                        "hidden truncate pl-3.5 text-xs text-zinc-500"
+                    } else {
+                        "truncate pl-3.5 text-xs text-zinc-500"
+                    })
+                >
+                    (task.phase.clone())
+                </div>
             </div>
             <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800">
                 <div
@@ -496,10 +546,13 @@ async fn epoch_table_row(task: &EpochTask) -> Result<View> {
                 (task.epoch)
             </td>
             <td class="px-3 py-2 text-zinc-300">
-                <span class="inline-flex items-center gap-2 capitalize">
+                <div class="inline-flex items-center gap-2 capitalize">
                     <span class=(format!("h-1.5 w-1.5 shrink-0 rounded-full {dot}"))></span>
                     (task.label.clone())
-                </span>
+                </div>
+                if !task.phase.is_empty() {
+                    <div class="pl-3.5 text-xs normal-case text-zinc-500">(task.phase.clone())</div>
+                }
             </td>
             <td class="px-3 py-2 tabular-nums text-zinc-300">
                 (format_thousands(task.blocks))
@@ -517,7 +570,9 @@ fn state_dot_class(label: &str) -> &'static str {
     let normalized = crate::snapshot::normalize(label);
     match normalized.as_str() {
         "complete" | "completed" => "bg-emerald-400",
-        "scanning" | "finalizing" | "active" | "running" | "capturing" | "packaging" => "bg-cyan-400",
+        "scanning" | "finalizing" | "active" | "running" | "capturing" | "packaging" => {
+            "bg-cyan-400"
+        }
         "queued" | "scan_ready" | "ready" | "ready_to_package" => "bg-zinc-500",
         "failed" | "blocked" | "repair_required" => "bg-rose-400",
         _ => "bg-amber-400",
@@ -533,7 +588,11 @@ pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
     let tasks_label = format!(
         "{} active{}",
         state.tasks_active,
-        if state.tasks_paused > 0 { format!(" · {} paused", state.tasks_paused) } else { String::new() }
+        if state.tasks_paused > 0 {
+            format!(" · {} paused", state.tasks_paused)
+        } else {
+            String::new()
+        }
     );
     let nas_label = format!("load {:.2}", state.machine.load_1m);
     let errors_label = format!("{} errors", state.error_count);
@@ -551,8 +610,11 @@ pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
         .iter()
         .filter(|reason| reason.is_some())
         .count();
-    let reasoning_label =
-        if reasoning_count == 0 { "clear".to_string() } else { format!("{reasoning_count} to review") };
+    let reasoning_label = if reasoning_count == 0 {
+        "clear".to_string()
+    } else {
+        format!("{reasoning_count} to review")
+    };
     let card = CARD;
 
     view! {
@@ -685,7 +747,13 @@ async fn reasoning_row(label: &str, text: &str, tone: &str) -> Result<View> {
 }
 
 #[component]
-async fn summary_panel(key: &str, title: &str, trailing: &str, open_by_default: bool, child: View) -> Result<View> {
+async fn summary_panel(
+    key: &str,
+    title: &str,
+    trailing: &str,
+    open_by_default: bool,
+    child: View,
+) -> Result<View> {
     let sig = format!("panel_{key}_open");
     let card = CARD;
     view! {
@@ -733,8 +801,16 @@ async fn machine_summary(machine: &MachineSnapshot) -> Result<View> {
         format_bytes(machine.memory_total_bytes - machine.memory_available_bytes),
         format_bytes(machine.memory_total_bytes)
     );
-    let swap = format!("{} / {}", format_bytes(machine.swap_used_bytes), format_bytes(machine.swap_total_bytes));
-    let disk = format!("{} / {}", format_bytes(machine.disk_used_bytes), format_bytes(machine.disk_total_bytes));
+    let swap = format!(
+        "{} / {}",
+        format_bytes(machine.swap_used_bytes),
+        format_bytes(machine.swap_total_bytes)
+    );
+    let disk = format!(
+        "{} / {}",
+        format_bytes(machine.disk_used_bytes),
+        format_bytes(machine.disk_total_bytes)
+    );
     let device_io = format!(
         "{:.1} / {:.1} MiB/s r/w",
         machine.archive_device_read_mib_per_sec, machine.archive_device_write_mib_per_sec
@@ -800,7 +876,11 @@ async fn error_log(errors: &[ErrorEntry]) -> Result<View> {
 #[component]
 pub async fn service_unavailable(connection_state: &str, connection_message: &str) -> Result<View> {
     let is_retry = connection_state == "retrying" || connection_state == "offline";
-    let status_title = if is_retry { "Gateway unavailable" } else { "Connecting to watcher gateway" };
+    let status_title = if is_retry {
+        "Gateway unavailable"
+    } else {
+        "Connecting to watcher gateway"
+    };
     let status_body = if is_retry {
         "blockzilla-watcher-gateway did not respond. This monitor never shows fabricated numbers in place of a real snapshot."
     } else {
@@ -845,7 +925,9 @@ pub async fn service_unavailable(connection_state: &str, connection_message: &st
 /// Compaction archive history panel.
 #[component]
 pub async fn compaction_history(entries: &[CompactionHistoryEntry]) -> Result<View> {
-    let show_workflow = entries.iter().any(|entry| entry.workflow.as_str() != "historical");
+    let show_workflow = entries
+        .iter()
+        .any(|entry| entry.workflow.as_str() != "historical");
     let colspan = if show_workflow { 4 } else { 3 };
     let card = CARD;
     view! {
@@ -902,8 +984,14 @@ async fn history_row(entry: &CompactionHistoryEntry, show_workflow: bool) -> Res
         "historical" => "Historical",
         _ => "Unknown",
     };
-    let completion = entry.completed_unix_secs.map(format_unix_timestamp).unwrap_or_else(|| "—".to_string());
-    let duration = entry.duration_secs.map(crate::state::format_duration).unwrap_or_else(|| "—".to_string());
+    let completion = entry
+        .completed_unix_secs
+        .map(format_unix_timestamp)
+        .unwrap_or_else(|| "—".to_string());
+    let duration = entry
+        .duration_secs
+        .map(crate::state::format_duration)
+        .unwrap_or_else(|| "—".to_string());
     view! {
         <tr class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">
             <td class="px-4 py-3 font-medium tabular-nums text-zinc-100">
@@ -992,8 +1080,14 @@ async fn process_table(processes: &[ProcessEntry], hidden: bool) -> Result<View>
 
 #[component]
 async fn process_row(process: &ProcessEntry) -> Result<View> {
-    let cpu_label = process.cpu_percent.map(|v| format!("{v:.1}%")).unwrap_or_else(|| "-".to_string());
-    let rss_label = process.rss_bytes.map(format_bytes).unwrap_or_else(|| "-".to_string());
+    let cpu_label = process
+        .cpu_percent
+        .map(|v| format!("{v:.1}%"))
+        .unwrap_or_else(|| "-".to_string());
+    let rss_label = process
+        .rss_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "-".to_string());
     view! {
         <tr class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">
             <td class="px-4 py-2 text-zinc-100">(process.name.clone())</td>
@@ -1034,7 +1128,8 @@ fn format_unix_timestamp(unix_secs: u64) -> String {
     let z = days_since_epoch + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z.rem_euclid(146_097);
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let mp = (5 * day_of_year + 2) / 153;

@@ -15,7 +15,27 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::components::{render_epoch_list, render_poh_migration_lane_list};
 use crate::snapshot::{self, PipelineSnapshot};
+
+/// One item on the `/api/stream` broadcast: either a signal-value delta
+/// (the common case -- pct/blocks/eta/label/phase ticking on rows that
+/// already exist) or a full HTML replacement for a list container whose
+/// *membership* changed (a row appeared or disappeared -- a `data-text`
+/// patch has nothing to bind to for a row that doesn't exist in the DOM
+/// yet, and never removes one that's gone). `PatchElements`' default mode
+/// morphs the new HTML into the element matched by `selector` id-for-id,
+/// so rows that persist (matched by their own `epoch-N` id) keep their
+/// live signal bindings and in-flight transitions; only the add/remove
+/// diff actually touches the DOM.
+#[derive(Clone, Debug)]
+pub enum StreamEvent {
+    Signals(serde_json::Value),
+    Elements {
+        selector: &'static str,
+        html: String,
+    },
+}
 
 /// Controls how much of a real snapshot reaches the rendered dashboard.
 /// This binary has no authentication of its own -- see
@@ -63,7 +83,9 @@ fn tier() -> RedactionTier {
 /// without mutating shared process-global state.
 fn redact_text(tier: RedactionTier, text: &str) -> String {
     match tier {
-        RedactionTier::Public => blockzilla_watcher_gateway::public_json::sanitize_public_string(text),
+        RedactionTier::Public => {
+            blockzilla_watcher_gateway::public_json::sanitize_public_string(text)
+        }
         RedactionTier::Full => text.to_string(),
     }
 }
@@ -72,6 +94,11 @@ fn redact_text(tier: RedactionTier, text: &str) -> String {
 pub struct EpochTask {
     pub epoch: u32,
     pub label: String,
+    /// Current phase of the active lane working this epoch, e.g. `"Archive
+    /// V2 Hot Write"` -- empty when nothing is actively running (queued,
+    /// failed, blocked). Shown alongside `label` so "Scanning" also says
+    /// which of scanning's several phases is running right now.
+    pub phase: String,
     pub pct: u8,
     pub blocks: u64,
     pub eta_secs: u64,
@@ -269,7 +296,8 @@ impl DashboardState {
     /// the raw `u64` operands straight to `f32` first loses real precision (`f32` only carries
     /// ~7 significant digits) -- narrowing only the final 0-100 result is lossless for display.
     pub fn poh_migration_pct(&self) -> f32 {
-        (100.0 * self.poh_migration_bytes_done as f64 / self.poh_migration_bytes_total.max(1) as f64) as f32
+        (100.0 * self.poh_migration_bytes_done as f64
+            / self.poh_migration_bytes_total.max(1) as f64) as f32
     }
 
     /// "812 done \u{b7} 197 remaining" -- the primary, at-a-glance count. Bytes still drive the
@@ -277,7 +305,9 @@ impl DashboardState {
     /// `poh_migration_bytes_label`'s small subtext, since "how many epochs are left" is what
     /// operators actually want to read first.
     pub fn poh_migration_epoch_label(&self) -> String {
-        let remaining = self.poh_migration_epochs_total.saturating_sub(self.poh_migration_epochs_done);
+        let remaining = self
+            .poh_migration_epochs_total
+            .saturating_sub(self.poh_migration_epochs_done);
         format!(
             "{} done \u{b7} {} remaining",
             format_thousands(self.poh_migration_epochs_done as u64),
@@ -317,7 +347,10 @@ impl DashboardState {
     pub fn to_signals(&self) -> serde_json::Value {
         let mut map = serde_json::Map::new();
         map.insert("live".into(), self.live.into());
-        map.insert("connection_state".into(), self.connection_state.clone().into());
+        map.insert(
+            "connection_state".into(),
+            self.connection_state.clone().into(),
+        );
         map.insert("runnable_eta_label".into(), self.eta_label().into());
         map.insert("queued".into(), self.queued.into());
         map.insert("needs_action".into(), self.needs_action.into());
@@ -331,18 +364,36 @@ impl DashboardState {
         // either way, since that's already a pre-formatted string -- it's only the
         // live-patched value that was ever wrong).
         map.insert("archive_pct".into(), format_pct(self.archive_pct()).into());
-        map.insert("poh_migration_epoch_label".into(), self.poh_migration_epoch_label().into());
-        map.insert("poh_migration_bytes_label".into(), self.poh_migration_bytes_label().into());
-        map.insert("poh_migration_eta_label".into(), self.poh_migration_eta_label().into());
-        map.insert("poh_migration_pct".into(), format_pct(self.poh_migration_pct()).into());
-        map.insert("live_capture_active".into(), self.live_capture_active.into());
+        map.insert(
+            "poh_migration_epoch_label".into(),
+            self.poh_migration_epoch_label().into(),
+        );
+        map.insert(
+            "poh_migration_bytes_label".into(),
+            self.poh_migration_bytes_label().into(),
+        );
+        map.insert(
+            "poh_migration_eta_label".into(),
+            self.poh_migration_eta_label().into(),
+        );
+        map.insert(
+            "poh_migration_pct".into(),
+            format_pct(self.poh_migration_pct()).into(),
+        );
+        map.insert(
+            "live_capture_active".into(),
+            self.live_capture_active.into(),
+        );
         map.insert("load_1m".into(), format_pct(self.machine.load_1m).into());
         map.insert("error_count".into(), self.error_count.into());
         map.insert("tasks_active".into(), self.tasks_active.into());
         map.insert("tasks_paused".into(), self.tasks_paused.into());
         map.insert("scheduler_paused".into(), self.scheduler_paused.into());
         map.insert("history_count".into(), self.compactions.len().into());
-        map.insert("process_io_active_count".into(), self.process_io_active_count.into());
+        map.insert(
+            "process_io_active_count".into(),
+            self.process_io_active_count.into(),
+        );
 
         // `poh_migration_lanes` never overlaps `epochs` by epoch number (an
         // epoch is either still building, in `epochs`, or already
@@ -352,8 +403,13 @@ impl DashboardState {
         for task in self.epochs.iter().chain(self.poh_migration_lanes.iter()) {
             let sig = format!("epoch_{}", task.epoch);
             map.insert(format!("{sig}_pct"), task.pct.into());
-            map.insert(format!("{sig}_blocks"), format_thousands(task.blocks).into());
+            map.insert(
+                format!("{sig}_blocks"),
+                format_thousands(task.blocks).into(),
+            );
             map.insert(format!("{sig}_eta"), task.eta_label().into());
+            map.insert(format!("{sig}_label"), task.label.clone().into());
+            map.insert(format!("{sig}_phase"), task.phase.clone().into());
         }
 
         serde_json::Value::Object(map)
@@ -369,18 +425,20 @@ impl DashboardState {
             .filter(|epoch| epoch.state != "complete")
             .map(|epoch| {
                 let is_failed_or_blocked = matches!(epoch.state.as_str(), "failed" | "blocked");
-                let has_active_process = snapshot.lanes.iter().any(|lane| lane.epoch == Some(epoch.epoch));
+                let active_lane = snapshot
+                    .lanes
+                    .iter()
+                    .find(|lane| lane.epoch == Some(epoch.epoch));
                 EpochTask {
                     epoch: epoch.epoch,
                     label: snapshot::humanize(&epoch.state),
-                    pct: epoch
-                        .progress
-                        .progress_pct
-                        .unwrap_or(0.0)
-                        .clamp(0.0, 100.0) as u8,
+                    phase: active_lane
+                        .map(|lane| lane.phase.clone())
+                        .unwrap_or_default(),
+                    pct: epoch.progress.progress_pct.unwrap_or(0.0).clamp(0.0, 100.0) as u8,
                     blocks: epoch.progress.blocks_done,
                     eta_secs: epoch.progress.eta_secs.unwrap_or(0.0).max(0.0).round() as u64,
-                    hidden_from_overview: is_failed_or_blocked && !has_active_process,
+                    hidden_from_overview: is_failed_or_blocked && active_lane.is_none(),
                 }
             })
             .take(12)
@@ -395,11 +453,8 @@ impl DashboardState {
                 Some(EpochTask {
                     epoch,
                     label: snapshot::humanize(&lane.state),
-                    pct: lane
-                        .progress
-                        .progress_pct
-                        .unwrap_or(0.0)
-                        .clamp(0.0, 100.0) as u8,
+                    phase: lane.phase.clone(),
+                    pct: lane.progress.progress_pct.unwrap_or(0.0).clamp(0.0, 100.0) as u8,
                     blocks: lane.progress.blocks_done,
                     eta_secs: lane.progress.eta_secs.unwrap_or(0.0).max(0.0).round() as u64,
                     hidden_from_overview: false,
@@ -414,12 +469,18 @@ impl DashboardState {
             .map(|lane| PausedLane {
                 id: redact_text(tier, &lane.id),
                 kind: redact_text(tier, &lane.kind),
-                reason: lane.auto_pause_reason.as_deref().map(|reason| redact_text(tier, reason)),
+                reason: lane
+                    .auto_pause_reason
+                    .as_deref()
+                    .map(|reason| redact_text(tier, reason)),
             })
             .collect();
 
         let reasoning = SchedulerReasoning {
-            admission_blocked_reason: summary.admission_blocked_reason.as_deref().map(|r| redact_text(tier, r)),
+            admission_blocked_reason: summary
+                .admission_blocked_reason
+                .as_deref()
+                .map(|r| redact_text(tier, r)),
             legacy_compact_admission_blocked_reason: summary
                 .legacy_compact_admission_blocked_reason
                 .as_deref()
@@ -428,7 +489,10 @@ impl DashboardState {
                 .finalizer_admission_blocked_reason
                 .as_deref()
                 .map(|r| redact_text(tier, r)),
-            legacy_compact_last_action: summary.legacy_compact_last_action.as_deref().map(|r| redact_text(tier, r)),
+            legacy_compact_last_action: summary
+                .legacy_compact_last_action
+                .as_deref()
+                .map(|r| redact_text(tier, r)),
             legacy_compact_last_action_unix_secs: summary.legacy_compact_last_action_unix_secs,
             legacy_compact_tuning_last_decision: summary
                 .legacy_compact_tuning_last_decision
@@ -466,8 +530,14 @@ impl DashboardState {
         // read-only viewer -- dropped wholesale on the public tier rather
         // than field-by-field, per the exposure audit in
         // docs/operations/blockzilla-monitor-roadmap.md §2.
-        let raw_processes = snapshot.process_io.as_ref().map(|io| io.processes.as_slice()).unwrap_or_default();
-        let has_visible_processes = raw_processes.iter().any(|process| process.blockzilla_owned != Some(true));
+        let raw_processes = snapshot
+            .process_io
+            .as_ref()
+            .map(|io| io.processes.as_slice())
+            .unwrap_or_default();
+        let has_visible_processes = raw_processes
+            .iter()
+            .any(|process| process.blockzilla_owned != Some(true));
         let process_io_hidden = tier == RedactionTier::Public && has_visible_processes;
         let processes = if tier == RedactionTier::Public {
             Vec::new()
@@ -495,7 +565,9 @@ impl DashboardState {
             demo: false,
             scheduler_paused: snapshot.scheduler.paused,
             updated_unix_secs: snapshot.now_unix_secs,
-            runnable_eta_secs: summary.runnable_eta_secs().map(|secs| secs.max(0.0).round() as u64),
+            runnable_eta_secs: summary
+                .runnable_eta_secs()
+                .map(|secs| secs.max(0.0).round() as u64),
             queued: summary.queued,
             needs_action: summary.needs_action(),
             archive_complete: summary.complete,
@@ -514,7 +586,11 @@ impl DashboardState {
                 .any(|capture| capture.state == "capturing"),
             epochs,
             poh_migration_lanes,
-            tasks_active: snapshot.lanes.iter().filter(|l| l.is_active() && !l.is_paused()).count() as u32,
+            tasks_active: snapshot
+                .lanes
+                .iter()
+                .filter(|l| l.is_active() && !l.is_paused())
+                .count() as u32,
             tasks_paused: snapshot.lanes.iter().filter(|l| l.is_paused()).count() as u32,
             error_count: snapshot.errors.len() as u32,
             errors,
@@ -528,8 +604,12 @@ impl DashboardState {
                 disk_available_bytes: machine.disk_available_bytes,
                 disk_total_bytes: machine.disk_total_bytes,
                 disk_used_bytes: machine.disk_used_bytes,
-                archive_device_read_mib_per_sec: machine.archive_device_read_mib_per_sec.unwrap_or(0.0),
-                archive_device_write_mib_per_sec: machine.archive_device_write_mib_per_sec.unwrap_or(0.0),
+                archive_device_read_mib_per_sec: machine
+                    .archive_device_read_mib_per_sec
+                    .unwrap_or(0.0),
+                archive_device_write_mib_per_sec: machine
+                    .archive_device_write_mib_per_sec
+                    .unwrap_or(0.0),
                 pressure_memory_full_avg10: machine.memory_pressure_full_avg10.unwrap_or(0.0),
                 pressure_io_full_avg10: machine.io_pressure_full_avg10.unwrap_or(0.0),
             },
@@ -566,10 +646,13 @@ pub fn format_thousands(n: u64) -> String {
 }
 
 pub fn format_duration(secs: u64) -> String {
-    let h = secs / 3600;
+    let d = secs / 86_400;
+    let h = (secs % 86_400) / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
-    if h > 0 {
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
         format!("{h}h {m}m")
     } else if m > 0 {
         format!("{m}m {s}s")
@@ -603,7 +686,16 @@ struct Shared {
     /// same delta stream -- see `publish` for why that's safe even though
     /// subscribers can join at different times.
     last_signals: Mutex<serde_json::Value>,
-    tx: broadcast::Sender<serde_json::Value>,
+    /// Epoch numbers in `DashboardState::epochs` as of the last publish --
+    /// compared by value (not just length) so a swap (one epoch completing
+    /// while another is admitted in the same tick) is still detected as a
+    /// membership change. See `StreamEvent::Elements`.
+    last_epoch_ids: Mutex<Vec<u32>>,
+    /// Same idea as `last_epoch_ids`, for `poh_migration_lanes` -- this is
+    /// the list the reported bug was actually about (a finished worker
+    /// stuck in the DOM, a new one never appearing without a reload).
+    last_poh_lane_ids: Mutex<Vec<u32>>,
+    tx: broadcast::Sender<StreamEvent>,
     /// The raw ingredients the `/calendar` page needs that `DashboardState`
     /// doesn't otherwise keep: the *full* epoch list (the main dashboard
     /// only retains the top 12 non-complete epochs) and any
@@ -648,6 +740,8 @@ fn shared() -> &'static Shared {
         let initial = DashboardState::default();
         Shared {
             last_signals: Mutex::new(initial.to_signals()),
+            last_epoch_ids: Mutex::new(Vec::new()),
+            last_poh_lane_ids: Mutex::new(Vec::new()),
             current: Mutex::new(initial),
             tx,
             calendar_source: Mutex::new(CalendarSource::default()),
@@ -665,7 +759,11 @@ fn shared() -> &'static Shared {
 /// a `Clone`, never held across an `.await`, so there's nothing to gain from
 /// an async mutex here.
 pub async fn snapshot() -> DashboardState {
-    shared().current.lock().expect("state mutex poisoned").clone()
+    shared()
+        .current
+        .lock()
+        .expect("state mutex poisoned")
+        .clone()
 }
 
 /// The full current signal map, matching what the SSR page seeds into
@@ -673,7 +771,11 @@ pub async fn snapshot() -> DashboardState {
 /// self-heal a client that fell behind the broadcast buffer -- both cases
 /// need a complete, not incremental, payload.
 pub fn full_signals() -> serde_json::Value {
-    shared().last_signals.lock().expect("state mutex poisoned").clone()
+    shared()
+        .last_signals
+        .lock()
+        .expect("state mutex poisoned")
+        .clone()
 }
 
 /// Subscribe to future updates. Every `/api/stream` connection gets its own
@@ -682,30 +784,86 @@ pub fn full_signals() -> serde_json::Value {
 /// previous publish, with removed keys carrying `null` so Datastar deletes
 /// them from the client's signal store (see the `datastar` docs: a signal
 /// set to `null` in a patch is removed, not zeroed).
-pub fn subscribe() -> broadcast::Receiver<serde_json::Value> {
+pub fn subscribe() -> broadcast::Receiver<StreamEvent> {
     shared().tx.subscribe()
 }
 
-fn publish(state: DashboardState) {
+/// Renders `epoch_list`/`poh_migration_lane_list` and broadcasts an
+/// element patch when the *set* of epochs in `ids` differs from
+/// `last_ids` -- a row appearing or disappearing, not just an existing
+/// row's fields changing (that's `diff_signals`' job below). Cheap to
+/// call on every publish: the id-vector comparison is the only work
+/// unless something actually changed, and full-list renders are small
+/// (the Overview epoch list caps at 12 rows).
+async fn publish_list_if_membership_changed(
+    last_ids: &Mutex<Vec<u32>>,
+    ids: Vec<u32>,
+    selector: &'static str,
+    render: impl std::future::Future<Output = topcoat::Result<topcoat::view::View>>,
+    tx: &broadcast::Sender<StreamEvent>,
+) {
+    let changed = {
+        let mut last = last_ids.lock().expect("state mutex poisoned");
+        let changed = *last != ids;
+        *last = ids;
+        changed
+    };
+    if !changed {
+        return;
+    }
+    if let Ok(view) = render.await {
+        let html = view.render(&topcoat::context::Cx::default());
+        let _ = tx.send(StreamEvent::Elements { selector, html });
+    }
+}
+
+async fn publish(state: DashboardState) {
     let shared = shared();
     let new_signals = state.to_signals();
+    let epoch_ids: Vec<u32> = state.epochs.iter().map(|task| task.epoch).collect();
+    let poh_lane_ids: Vec<u32> = state
+        .poh_migration_lanes
+        .iter()
+        .map(|task| task.epoch)
+        .collect();
 
-    *shared.current.lock().expect("state mutex poisoned") = state;
+    *shared.current.lock().expect("state mutex poisoned") = state.clone();
 
-    let mut last_signals = shared.last_signals.lock().expect("state mutex poisoned");
-    let delta = diff_signals(&last_signals, &new_signals);
-    *last_signals = new_signals;
-    drop(last_signals);
+    // Scoped (rather than an explicit `drop`) so the `MutexGuard` -- not
+    // `Send`, and this function crosses `.await` points below -- is
+    // provably gone from the async fn's generated state before then, not
+    // just logically unused.
+    let delta = {
+        let mut last_signals = shared.last_signals.lock().expect("state mutex poisoned");
+        let delta = diff_signals(&last_signals, &new_signals);
+        *last_signals = new_signals;
+        delta
+    };
 
     // Nothing actually changed (e.g. a snapshot_patch that only touched
     // fields this dashboard doesn't surface) -- skip the broadcast instead
     // of sending an empty patch to every open tab.
-    if let serde_json::Value::Object(map) = &delta
-        && map.is_empty()
-    {
-        return;
+    let signals_changed = !matches!(&delta, serde_json::Value::Object(map) if map.is_empty());
+    if signals_changed {
+        let _ = shared.tx.send(StreamEvent::Signals(delta));
     }
-    let _ = shared.tx.send(delta);
+
+    publish_list_if_membership_changed(
+        &shared.last_epoch_ids,
+        epoch_ids,
+        "#epoch-list",
+        render_epoch_list(&state),
+        &shared.tx,
+    )
+    .await;
+    publish_list_if_membership_changed(
+        &shared.last_poh_lane_ids,
+        poh_lane_ids,
+        "#poh-migration-lane-list",
+        render_poh_migration_lane_list(&state),
+        &shared.tx,
+    )
+    .await;
 }
 
 /// Keys present (with a different value) in `new` but not `old`, or
@@ -731,21 +889,27 @@ fn diff_signals(old: &serde_json::Value, new: &serde_json::Value) -> serde_json:
 }
 
 /// Called by `client.rs` whenever a fresh real snapshot arrives.
-pub fn set_snapshot(snapshot: PipelineSnapshot) {
-    *shared().calendar_source.lock().expect("state mutex poisoned") = CalendarSource {
+pub async fn set_snapshot(snapshot: PipelineSnapshot) {
+    *shared()
+        .calendar_source
+        .lock()
+        .expect("state mutex poisoned") = CalendarSource {
         epochs: snapshot.epochs.clone(),
         epoch_calendar: snapshot.epoch_calendar.clone(),
         now_unix_secs: snapshot.now_unix_secs,
     };
     *shared().last_snapshot.lock().expect("state mutex poisoned") = Some(snapshot);
-    recompute_and_publish();
+    recompute_and_publish().await;
 }
 
 /// Called by `runtime_operations.rs` on its own ~5s sampling tick,
 /// independent of when the next upstream snapshot/patch happens to arrive.
-pub fn set_local_process_io(io: snapshot::ProcessIoSnapshot) {
-    *shared().local_process_io.lock().expect("state mutex poisoned") = Some(io);
-    recompute_and_publish();
+pub async fn set_local_process_io(io: snapshot::ProcessIoSnapshot) {
+    *shared()
+        .local_process_io
+        .lock()
+        .expect("state mutex poisoned") = Some(io);
+    recompute_and_publish().await;
 }
 
 /// Merges the last upstream snapshot with the last locally-collected
@@ -753,28 +917,52 @@ pub fn set_local_process_io(io: snapshot::ProcessIoSnapshot) {
 /// snapshot arrives, and after `set_offline` -- there is nothing live to
 /// merge into, and publishing here would otherwise let a `runtime_operations.rs`
 /// tick that lands while offline resurrect a stale "live" dashboard.
-fn recompute_and_publish() {
-    let Some(mut snapshot) = shared().last_snapshot.lock().expect("state mutex poisoned").clone() else {
+async fn recompute_and_publish() {
+    let Some(mut snapshot) = shared()
+        .last_snapshot
+        .lock()
+        .expect("state mutex poisoned")
+        .clone()
+    else {
         return;
     };
-    if let Some(io) = shared().local_process_io.lock().expect("state mutex poisoned").clone() {
+    if let Some(io) = shared()
+        .local_process_io
+        .lock()
+        .expect("state mutex poisoned")
+        .clone()
+    {
         snapshot.process_io = Some(io);
     }
-    publish(DashboardState::from_snapshot(&snapshot, tier()));
+    publish(DashboardState::from_snapshot(&snapshot, tier())).await;
 }
 
 /// The full epoch list + live-authoritative calendar entries + current
 /// time, as of the most recent snapshot -- everything `calendar::build_years`
 /// needs that isn't already in `DashboardState`. See `Shared::calendar_source`.
-pub fn epochs_for_calendar() -> (Vec<snapshot::EpochStatus>, Vec<snapshot::EpochCalendarEntry>, u64) {
-    let source = shared().calendar_source.lock().expect("state mutex poisoned");
-    (source.epochs.clone(), source.epoch_calendar.clone(), source.now_unix_secs)
+pub fn epochs_for_calendar() -> (
+    Vec<snapshot::EpochStatus>,
+    Vec<snapshot::EpochCalendarEntry>,
+    u64,
+) {
+    let source = shared()
+        .calendar_source
+        .lock()
+        .expect("state mutex poisoned");
+    (
+        source.epochs.clone(),
+        source.epoch_calendar.clone(),
+        source.now_unix_secs,
+    )
 }
 
 /// Called by `client.rs`'s gap-index poller on a successful fetch.
 pub fn set_gap_index(index: snapshot::BlockTimeGapIndex) {
     *shared().gap_index.lock().expect("state mutex poisoned") = Some(index);
-    *shared().gap_index_error.lock().expect("state mutex poisoned") = None;
+    *shared()
+        .gap_index_error
+        .lock()
+        .expect("state mutex poisoned") = None;
 }
 
 /// Called by the same poller when a fetch fails -- keeps whatever the last
@@ -782,27 +970,39 @@ pub fn set_gap_index(index: snapshot::BlockTimeGapIndex) {
 /// working data), but records why, so the calendar page can say why the
 /// outage overlay might be stale or missing instead of just going quiet.
 pub fn set_gap_index_error(reason: String) {
-    *shared().gap_index_error.lock().expect("state mutex poisoned") = Some(reason);
+    *shared()
+        .gap_index_error
+        .lock()
+        .expect("state mutex poisoned") = Some(reason);
 }
 
 pub fn gap_index() -> (Option<snapshot::BlockTimeGapIndex>, Option<String>) {
     (
-        shared().gap_index.lock().expect("state mutex poisoned").clone(),
-        shared().gap_index_error.lock().expect("state mutex poisoned").clone(),
+        shared()
+            .gap_index
+            .lock()
+            .expect("state mutex poisoned")
+            .clone(),
+        shared()
+            .gap_index_error
+            .lock()
+            .expect("state mutex poisoned")
+            .clone(),
     )
 }
 
 /// Called by `client.rs` when the upstream gateway is unreachable or sends
 /// something we can't parse. Keeps the dashboard honestly in the
 /// `service_unavailable` state instead of freezing on stale numbers.
-pub fn set_offline(reason: String) {
+pub async fn set_offline(reason: String) {
     *shared().last_snapshot.lock().expect("state mutex poisoned") = None;
     publish(DashboardState {
         live: false,
         connection_state: "offline".into(),
         connection_message: reason,
         ..DashboardState::default()
-    });
+    })
+    .await;
 }
 
 /// Deterministic in-process demo data, for UI iteration with no gateway
@@ -816,11 +1016,11 @@ pub fn start_demo_simulation() {
         state.demo = true;
         state.connection_state = "live".into();
         state.connection_message = "Demo data (--demo, no gateway connected)".into();
-        publish(state.clone());
+        publish(state.clone()).await;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             demo_tick(&mut state);
-            publish(state.clone());
+            publish(state.clone()).await;
         }
     });
 }
@@ -834,24 +1034,84 @@ fn demo_seed() -> DashboardState {
         archive_total: 1005,
         live_capture_active: false,
         epochs: vec![
-            EpochTask { epoch: 790, label: "scanning".into(), pct: 88, blocks: 376_536, eta_secs: 28 * 60 + 58, hidden_from_overview: false },
-            EpochTask { epoch: 791, label: "scanning".into(), pct: 85, blocks: 356_870, eta_secs: 40 * 60 + 44, hidden_from_overview: false },
-            EpochTask { epoch: 792, label: "finalizing".into(), pct: 86, blocks: 357_498, eta_secs: 39 * 60 + 41, hidden_from_overview: false },
-            EpochTask { epoch: 793, label: "queued".into(), pct: 0, blocks: 0, eta_secs: 0, hidden_from_overview: false },
+            EpochTask {
+                epoch: 790,
+                label: "scanning".into(),
+                phase: "Archive V2 Hot Write".into(),
+                pct: 88,
+                blocks: 376_536,
+                eta_secs: 28 * 60 + 58,
+                hidden_from_overview: false,
+            },
+            EpochTask {
+                epoch: 791,
+                label: "scanning".into(),
+                phase: "Prev Blockhash Seed".into(),
+                pct: 85,
+                blocks: 356_870,
+                eta_secs: 40 * 60 + 44,
+                hidden_from_overview: false,
+            },
+            EpochTask {
+                epoch: 792,
+                label: "finalizing".into(),
+                phase: "Registry Index".into(),
+                pct: 86,
+                blocks: 357_498,
+                eta_secs: 39 * 60 + 41,
+                hidden_from_overview: false,
+            },
+            EpochTask {
+                epoch: 793,
+                label: "queued".into(),
+                phase: String::new(),
+                pct: 0,
+                blocks: 0,
+                eta_secs: 0,
+                hidden_from_overview: false,
+            },
             // Demonstrates the Overview filter: stale, no active process --
             // hidden here, but still visible on the /epochs page.
-            EpochTask { epoch: 705, label: "failed".into(), pct: 62, blocks: 210_004, eta_secs: 0, hidden_from_overview: true },
+            EpochTask {
+                epoch: 705,
+                label: "failed".into(),
+                phase: String::new(),
+                pct: 62,
+                blocks: 210_004,
+                eta_secs: 0,
+                hidden_from_overview: true,
+            },
         ],
         tasks_active: 4,
         tasks_paused: 1,
         error_count: 2,
         errors: vec![
-            ErrorEntry { at_unix_secs: 1_739_090_100, scope: "historical_scan:790".into(), message: "retrying after transient CAR read timeout".into() },
-            ErrorEntry { at_unix_secs: 1_739_089_800, scope: "live_finalizer:cap-2026-08-04".into(), message: "repair gate waiting on predecessor blockhash tail".into() },
+            ErrorEntry {
+                at_unix_secs: 1_739_090_100,
+                scope: "historical_scan:790".into(),
+                message: "retrying after transient CAR read timeout".into(),
+            },
+            ErrorEntry {
+                at_unix_secs: 1_739_089_800,
+                scope: "live_finalizer:cap-2026-08-04".into(),
+                message: "repair gate waiting on predecessor blockhash tail".into(),
+            },
         ],
         compactions: vec![
-            CompactionHistoryEntry { id: "complete-1010-historical".into(), epoch: 1010, workflow: "historical".into(), completed_unix_secs: Some(1_739_040_000), duration_secs: Some(4 * 3600 + 26 * 60 + 11) },
-            CompactionHistoryEntry { id: "complete-1009-live".into(), epoch: 1009, workflow: "live".into(), completed_unix_secs: Some(1_738_980_000), duration_secs: Some(2 * 3600 + 12 * 60 + 39) },
+            CompactionHistoryEntry {
+                id: "complete-1010-historical".into(),
+                epoch: 1010,
+                workflow: "historical".into(),
+                completed_unix_secs: Some(1_739_040_000),
+                duration_secs: Some(4 * 3600 + 26 * 60 + 11),
+            },
+            CompactionHistoryEntry {
+                id: "complete-1009-live".into(),
+                epoch: 1009,
+                workflow: "live".into(),
+                completed_unix_secs: Some(1_738_980_000),
+                duration_secs: Some(2 * 3600 + 12 * 60 + 39),
+            },
         ],
         machine: MachineSnapshot {
             load_1m: 1.8,
@@ -868,12 +1128,30 @@ fn demo_seed() -> DashboardState {
             pressure_io_full_avg10: 0.9,
         },
         processes: vec![
-            ProcessEntry { id: "lane:replayer".into(), name: "replayer".into(), pid: 1182, cpu_percent: Some(41.8), rss_bytes: Some(6_400_000_000), read_mib_per_sec: Some(74.0), write_mib_per_sec: Some(11.0) },
-            ProcessEntry { id: "lane:packager".into(), name: "packager".into(), pid: 1184, cpu_percent: Some(17.1), rss_bytes: Some(2_800_000_000), read_mib_per_sec: Some(15.4), write_mib_per_sec: Some(7.8) },
+            ProcessEntry {
+                id: "lane:replayer".into(),
+                name: "replayer".into(),
+                pid: 1182,
+                cpu_percent: Some(41.8),
+                rss_bytes: Some(6_400_000_000),
+                read_mib_per_sec: Some(74.0),
+                write_mib_per_sec: Some(11.0),
+            },
+            ProcessEntry {
+                id: "lane:packager".into(),
+                name: "packager".into(),
+                pid: 1184,
+                cpu_percent: Some(17.1),
+                rss_bytes: Some(2_800_000_000),
+                read_mib_per_sec: Some(15.4),
+                write_mib_per_sec: Some(7.8),
+            },
         ],
         process_io_active_count: 2,
         reasoning: SchedulerReasoning {
-            legacy_compact_tuning_last_decision: Some("scaled up: 3 lanes accepted, 78 MiB/s baseline".into()),
+            legacy_compact_tuning_last_decision: Some(
+                "scaled up: 3 lanes accepted, 78 MiB/s baseline".into(),
+            ),
             legacy_compact_last_action: Some("increased worker budget to 4 cores".into()),
             legacy_compact_last_action_unix_secs: Some(1_739_089_500),
             paused_lanes: vec![PausedLane {
@@ -947,8 +1225,14 @@ mod tests {
         let snapshot = snapshot_with_process_and_leaky_error();
         let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Public);
 
-        assert!(state.processes.is_empty(), "public tier must not expose process name/pid");
-        assert!(state.process_io_hidden, "UI must say processes are hidden, not absent");
+        assert!(
+            state.processes.is_empty(),
+            "public tier must not expose process name/pid"
+        );
+        assert!(
+            state.process_io_hidden,
+            "UI must say processes are hidden, not absent"
+        );
         assert!(
             !state.errors[0].message.contains("/home/operator"),
             "public tier must scrub absolute paths from error text: {}",
@@ -965,7 +1249,11 @@ mod tests {
         assert_eq!(state.processes[0].pid, 1182);
         assert_eq!(state.processes[0].name, "some-backup-agent");
         assert!(!state.process_io_hidden);
-        assert!(state.errors[0].message.contains("/home/operator/private/state"));
+        assert!(
+            state.errors[0]
+                .message
+                .contains("/home/operator/private/state")
+        );
     }
 
     #[test]
@@ -983,7 +1271,9 @@ mod tests {
                     kind: "historical_compact_reuse".into(),
                     state: "paused".into(),
                     auto_paused: true,
-                    auto_pause_reason: Some("IO PSI full avg10 92.1 reached pause threshold 85.0".into()),
+                    auto_pause_reason: Some(
+                        "IO PSI full avg10 92.1 reached pause threshold 85.0".into(),
+                    ),
                     ..Default::default()
                 },
                 snapshot::LaneStatus {
@@ -998,23 +1288,39 @@ mod tests {
 
         let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
 
-        assert_eq!(state.reasoning.admission_blocked_reason.as_deref(), Some("queue at capacity"));
         assert_eq!(
-            state.reasoning.legacy_compact_tuning_last_decision.as_deref(),
+            state.reasoning.admission_blocked_reason.as_deref(),
+            Some("queue at capacity")
+        );
+        assert_eq!(
+            state
+                .reasoning
+                .legacy_compact_tuning_last_decision
+                .as_deref(),
             Some("scaled up: headroom available")
         );
-        assert_eq!(state.reasoning.legacy_compact_last_action_unix_secs, Some(42));
+        assert_eq!(
+            state.reasoning.legacy_compact_last_action_unix_secs,
+            Some(42)
+        );
         // Only the auto-paused lane appears -- a running lane needs no
         // explanation and would just be noise.
         assert_eq!(state.reasoning.paused_lanes.len(), 1);
         assert_eq!(state.reasoning.paused_lanes[0].id, "compact_reuse:794");
-        assert!(state.reasoning.paused_lanes[0].reason.as_deref().unwrap().contains("PSI"));
+        assert!(
+            state.reasoning.paused_lanes[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("PSI")
+        );
         assert!(!state.reasoning.is_empty());
     }
 
     #[test]
     fn reasoning_is_empty_when_snapshot_has_no_reasons() {
-        let state = DashboardState::from_snapshot(&PipelineSnapshot::default(), RedactionTier::Full);
+        let state =
+            DashboardState::from_snapshot(&PipelineSnapshot::default(), RedactionTier::Full);
         assert!(state.reasoning.is_empty());
     }
 
@@ -1037,16 +1343,25 @@ mod tests {
         assert_eq!(state.poh_migration_bytes_done, 429_000);
         assert_eq!(state.poh_migration_bytes_total, 1_000_000);
         assert!((state.poh_migration_pct() - 42.9).abs() < 0.01);
-        assert_eq!(state.poh_migration_bytes_label(), "418.9 KiB / 976.6 KiB processed");
+        assert_eq!(
+            state.poh_migration_bytes_label(),
+            "418.9 KiB / 976.6 KiB processed"
+        );
         // Epoch counts, not bytes, are the primary label -- bytes stay as
         // the small subtext above.
-        assert_eq!(state.poh_migration_epoch_label(), "812 done \u{b7} 197 remaining");
+        assert_eq!(
+            state.poh_migration_epoch_label(),
+            "812 done \u{b7} 197 remaining"
+        );
         assert_eq!(state.poh_migration_eta_label(), "6h 12m");
     }
 
     #[test]
     fn poh_migration_eta_label_is_unknown_without_a_current_rate() {
-        let state = DashboardState { poh_migration_eta_secs: None, ..Default::default() };
+        let state = DashboardState {
+            poh_migration_eta_secs: None,
+            ..Default::default()
+        };
         assert_eq!(state.poh_migration_eta_label(), "unknown");
     }
 
@@ -1137,6 +1452,64 @@ mod tests {
     }
 
     #[test]
+    fn format_duration_switches_to_days_past_24_hours() {
+        assert_eq!(format_duration(428_400), "4d 23h"); // 119h, the case that motivated this
+        assert_eq!(format_duration(86_400), "1d 0h");
+        assert_eq!(format_duration(3_600), "1h 0m");
+        assert_eq!(format_duration(90), "1m 30s");
+        assert_eq!(format_duration(5), "5s");
+    }
+
+    #[test]
+    fn epoch_task_phase_flows_from_the_active_lane_into_state_and_signals() {
+        let snapshot = PipelineSnapshot {
+            epochs: vec![snapshot::EpochStatus {
+                epoch: 761,
+                state: "scanning".into(),
+                ..Default::default()
+            }],
+            lanes: vec![snapshot::LaneStatus {
+                id: "compact_reuse:761".into(),
+                kind: "historical_compact_reuse".into(),
+                state: "running".into(),
+                phase: "Archive V2 Hot Write".into(),
+                epoch: Some(761),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+
+        let task = state.epochs.iter().find(|t| t.epoch == 761).unwrap();
+        assert_eq!(task.phase, "Archive V2 Hot Write");
+        // Not hidden: it's failed/blocked-only filtering, and this epoch has
+        // an active lane regardless.
+        assert!(!task.hidden_from_overview);
+
+        let signals = state.to_signals();
+        assert_eq!(signals["epoch_761_phase"], "Archive V2 Hot Write");
+        assert_eq!(signals["epoch_761_label"], "scanning");
+    }
+
+    #[test]
+    fn epoch_task_phase_is_empty_without_an_active_lane() {
+        let snapshot = PipelineSnapshot {
+            epochs: vec![snapshot::EpochStatus {
+                epoch: 1010,
+                state: "queued".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+
+        let task = state.epochs.iter().find(|t| t.epoch == 1010).unwrap();
+        assert_eq!(task.phase, "");
+    }
+
+    #[test]
     fn poh_migration_pct_is_zero_not_nan_when_total_is_zero() {
         let state = DashboardState::default();
         assert_eq!(state.poh_migration_pct(), 0.0);
@@ -1146,22 +1519,51 @@ mod tests {
     fn stale_failed_or_blocked_epochs_are_flagged_hidden_only_without_an_active_lane() {
         let snapshot = PipelineSnapshot {
             epochs: vec![
-                snapshot::EpochStatus { epoch: 1, state: "failed".into(), ..Default::default() },
-                snapshot::EpochStatus { epoch: 2, state: "blocked".into(), ..Default::default() },
+                snapshot::EpochStatus {
+                    epoch: 1,
+                    state: "failed".into(),
+                    ..Default::default()
+                },
+                snapshot::EpochStatus {
+                    epoch: 2,
+                    state: "blocked".into(),
+                    ..Default::default()
+                },
                 // Same failed state, but a lane is still actively retrying it.
-                snapshot::EpochStatus { epoch: 3, state: "failed".into(), ..Default::default() },
-                snapshot::EpochStatus { epoch: 4, state: "scanning".into(), ..Default::default() },
+                snapshot::EpochStatus {
+                    epoch: 3,
+                    state: "failed".into(),
+                    ..Default::default()
+                },
+                snapshot::EpochStatus {
+                    epoch: 4,
+                    state: "scanning".into(),
+                    ..Default::default()
+                },
             ],
-            lanes: vec![snapshot::LaneStatus { epoch: Some(3), state: "running".into(), ..Default::default() }],
+            lanes: vec![snapshot::LaneStatus {
+                epoch: Some(3),
+                state: "running".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
-        let hidden: std::collections::BTreeMap<u32, bool> =
-            state.epochs.iter().map(|task| (task.epoch, task.hidden_from_overview)).collect();
+        let hidden: std::collections::BTreeMap<u32, bool> = state
+            .epochs
+            .iter()
+            .map(|task| (task.epoch, task.hidden_from_overview))
+            .collect();
         assert!(hidden[&1], "failed with no lane must be hidden");
         assert!(hidden[&2], "blocked with no lane must be hidden");
-        assert!(!hidden[&3], "failed but still has an active lane must stay visible");
-        assert!(!hidden[&4], "scanning is never hidden regardless of lane state");
+        assert!(
+            !hidden[&3],
+            "failed but still has an active lane must stay visible"
+        );
+        assert!(
+            !hidden[&4],
+            "scanning is never hidden regardless of lane state"
+        );
     }
 
     #[test]
@@ -1184,26 +1586,117 @@ mod tests {
         assert_eq!(diff_signals(&state, &state), json!({}));
     }
 
-    #[test]
-    fn publish_skips_broadcast_when_nothing_changed() {
-        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[tokio::test]
+    async fn publish_skips_broadcast_when_nothing_changed() {
+        let _guard = GLOBAL_STATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Two states that map to the same signals (e.g. only a field this
         // dashboard doesn't surface changed upstream) must not wake up
         // every open tab with an empty patch.
         let mut rx = subscribe();
         let state = snapshot_blocking();
-        publish(state.clone());
-        publish(state);
-        assert!(rx.try_recv().is_err(), "no delta should have been broadcast");
+        publish(state.clone()).await;
+        publish(state).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no delta should have been broadcast"
+        );
+    }
+
+    fn poh_lane_task(epoch: u32) -> EpochTask {
+        EpochTask {
+            epoch,
+            label: "running".into(),
+            phase: "PoH Signature Count Migration".into(),
+            pct: 40,
+            blocks: 1_000,
+            eta_secs: 60,
+            hidden_from_overview: false,
+        }
+    }
+
+    /// The bug this covers: a worker finishing (or a new one starting)
+    /// changes which epochs are in `poh_migration_lanes`/`epochs`, not just
+    /// an existing row's field values -- `diff_signals` alone has nothing
+    /// to add/remove a DOM row for, since Datastar's signal patches only
+    /// update bindings on elements that already exist. `publish` must also
+    /// broadcast a `StreamEvent::Elements` for `#poh-migration-lane-list`
+    /// whenever that set changes, so the list actually gains/loses rows
+    /// without a manual refresh.
+    #[tokio::test]
+    async fn publish_broadcasts_an_element_patch_when_poh_lane_membership_changes() {
+        let _guard = GLOBAL_STATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Seed at a known membership first so this test doesn't depend on
+        // whatever the previous test in this binary happened to leave
+        // `last_poh_lane_ids` at (`shared()` is process-global).
+        publish(DashboardState {
+            poh_migration_lanes: vec![poh_lane_task(493)],
+            ..snapshot_blocking()
+        })
+        .await;
+
+        let mut rx = subscribe();
+
+        // Same membership, only a field value changing: signals only, no
+        // element patch -- the row already exists and `data-text` covers it.
+        publish(DashboardState {
+            poh_migration_lanes: vec![EpochTask {
+                pct: 41,
+                ..poh_lane_task(493)
+            }],
+            ..snapshot_blocking()
+        })
+        .await;
+        assert!(
+            (0..8)
+                .map(|_| rx.try_recv())
+                .take_while(Result::is_ok)
+                .all(|event| !matches!(event, Ok(StreamEvent::Elements { .. }))),
+            "a same-membership publish must not emit an element patch"
+        );
+
+        // Epoch 493 finishes (drops out), epoch 494 starts (appears): a
+        // real membership change must emit an element patch for the list.
+        publish(DashboardState {
+            poh_migration_lanes: vec![poh_lane_task(494)],
+            ..snapshot_blocking()
+        })
+        .await;
+        let mut saw_element_patch = false;
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::Elements { selector, html } = event {
+                assert_eq!(selector, "#poh-migration-lane-list");
+                assert!(html.contains("epoch-494"), "new row should be in the patch");
+                assert!(
+                    !html.contains("epoch-493"),
+                    "finished worker's row should be gone from the patch"
+                );
+                saw_element_patch = true;
+            }
+        }
+        assert!(
+            saw_element_patch,
+            "a membership change must broadcast a StreamEvent::Elements patch"
+        );
     }
 
     fn snapshot_blocking() -> DashboardState {
-        shared().current.lock().expect("state mutex poisoned").clone()
+        shared()
+            .current
+            .lock()
+            .expect("state mutex poisoned")
+            .clone()
     }
 
-    #[test]
-    fn local_process_io_merges_into_snapshots_and_is_cleared_on_offline() {
-        let _guard = GLOBAL_STATE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[tokio::test]
+    async fn local_process_io_merges_into_snapshots_and_is_cleared_on_offline() {
+        let _guard = GLOBAL_STATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Sequential by design (see `publish_skips_broadcast_when_nothing_changed`
         // above): every assertion here reads `shared()`, a process-global,
         // so interleaving with a concurrently-running test that also
@@ -1230,30 +1723,41 @@ mod tests {
         // A process-I/O tick before any snapshot has (re-)arrived must not
         // conjure a "live" dashboard out of nothing -- even though the
         // value is retained for whenever a snapshot does arrive.
-        set_offline("reset for test".into());
-        set_local_process_io(io(11));
+        set_offline("reset for test".into()).await;
+        set_local_process_io(io(11)).await;
         assert!(!snapshot_blocking().live);
 
         // Once a snapshot arrives, the already-pending value merges in
         // immediately -- no extra process-I/O tick required.
-        set_snapshot(PipelineSnapshot { sequence: 1, ..Default::default() });
+        set_snapshot(PipelineSnapshot {
+            sequence: 1,
+            ..Default::default()
+        })
+        .await;
         assert_eq!(snapshot_blocking().process_io_active_count, 11);
 
         // A later process-I/O tick updates it without waiting for the next
         // snapshot/patch.
-        set_local_process_io(io(12));
+        set_local_process_io(io(12)).await;
         assert_eq!(snapshot_blocking().process_io_active_count, 12);
 
         // A subsequent snapshot keeps carrying the locally-collected value
         // forward -- it should not require a fresh process-I/O tick.
-        set_snapshot(PipelineSnapshot { sequence: 2, ..Default::default() });
+        set_snapshot(PipelineSnapshot {
+            sequence: 2,
+            ..Default::default()
+        })
+        .await;
         assert_eq!(snapshot_blocking().process_io_active_count, 12);
 
         // Going offline must not leave a stale snapshot around for a late
         // process-I/O tick to republish as "live" again.
-        set_offline("test offline".into());
+        set_offline("test offline".into()).await;
         assert!(!snapshot_blocking().live);
-        set_local_process_io(io(13));
-        assert!(!snapshot_blocking().live, "a process-I/O tick alone must not revive the dashboard while offline");
+        set_local_process_io(io(13)).await;
+        assert!(
+            !snapshot_blocking().live,
+            "a process-I/O tick alone must not revive the dashboard while offline"
+        );
     }
 }

@@ -1,6 +1,6 @@
 use topcoat::{
-    router::{header, route, HeaderName},
     Result,
+    router::{HeaderName, header, route},
 };
 
 /// Vendored Datastar client bundle -- see the README for how to update the

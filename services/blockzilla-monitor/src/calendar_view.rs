@@ -12,8 +12,8 @@
 //! this crate.
 
 use topcoat::{
-    view::{component, view, View},
     Result,
+    view::{View, component, view},
 };
 
 use crate::calendar::{CalendarDay, CalendarYear, InterruptionCoverage};
@@ -25,7 +25,11 @@ const GAP_PX: u32 = 2;
 const MONTH_ROW_PX: u32 = 14;
 
 #[component]
-pub async fn calendar_page(years: &[CalendarYear], gap_index_error: Option<&str>, has_interruption_data: bool) -> Result<View> {
+pub async fn calendar_page(
+    years: &[CalendarYear],
+    gap_index_error: Option<&str>,
+    has_interruption_data: bool,
+) -> Result<View> {
     view! {
         <section class=(format!("overflow-hidden {CARD}"))>
             <div class="border-b border-zinc-800/70 px-6 py-4">
@@ -59,7 +63,9 @@ pub async fn calendar_page(years: &[CalendarYear], gap_index_error: Option<&str>
 #[component]
 async fn interruption_status_banner(error: &str, has_interruption_data: bool) -> Result<View> {
     let message = if has_interruption_data {
-        format!("Interruption overlay is showing the last successful fetch; most recent refresh failed: {error}")
+        format!(
+            "Interruption overlay is showing the last successful fetch; most recent refresh failed: {error}"
+        )
     } else {
         format!(
             "Interruption overlay (slot-time-drift outage markers) isn't available yet -- the block-time-gap sidecar hasn't been built/served: {error}"
@@ -76,8 +82,13 @@ async fn interruption_status_banner(error: &str, has_interruption_data: bool) ->
 
 #[component]
 async fn legend() -> Result<View> {
-    const ENTRIES: [(&str, &str); 5] =
-        [("emerald", "archived"), ("cyan", "in progress"), ("zinc", "queued / untracked"), ("amber", "needs attention"), ("rose", "failed")];
+    const ENTRIES: [(&str, &str); 5] = [
+        ("emerald", "archived"),
+        ("cyan", "in progress"),
+        ("zinc", "queued / untracked"),
+        ("amber", "needs attention"),
+        ("rose", "failed"),
+    ];
     view! {
         <div
             class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-zinc-800/70 px-6 py-3 text-xs text-zinc-400"
@@ -119,7 +130,11 @@ async fn year_block(year: &CalendarYear) -> Result<View> {
         Some(format!(
             "{} interruption {}",
             year.interruption_day_count,
-            if year.interruption_day_count == 1 { "day" } else { "days" }
+            if year.interruption_day_count == 1 {
+                "day"
+            } else {
+                "days"
+            }
         ))
     } else {
         None
@@ -128,7 +143,11 @@ async fn year_block(year: &CalendarYear) -> Result<View> {
         Some(format!(
             "{} unindexed {}",
             year.missing_interruption_coverage_day_count,
-            if year.missing_interruption_coverage_day_count == 1 { "day" } else { "days" }
+            if year.missing_interruption_coverage_day_count == 1 {
+                "day"
+            } else {
+                "days"
+            }
         ))
     } else {
         None
@@ -175,12 +194,19 @@ async fn year_block(year: &CalendarYear) -> Result<View> {
 
 #[component]
 async fn day_cell(day: &CalendarDay) -> Result<View> {
-    let position = format!("grid-column: {}; grid-row: {};", day.week + 1, day.weekday + 2);
+    let position = format!(
+        "grid-column: {}; grid-row: {};",
+        day.week + 1,
+        day.weekday + 2
+    );
     let Some(content) = &day.content else {
         // Before the first tracked epoch, or in the future: a plain dim
         // placeholder so the grid stays a filled rectangle instead of
         // having holes -- mirrors the Svelte template's `empty-day` span.
-        let style = format!("{position} opacity: {};", if day.future { 0.25 } else { 0.6 });
+        let style = format!(
+            "{position} opacity: {};",
+            if day.future { 0.25 } else { 0.6 }
+        );
         return view! { <span style=(style) class="rounded-[1px] bg-zinc-800"></span> };
     };
 
@@ -191,14 +217,21 @@ async fn day_cell(day: &CalendarDay) -> Result<View> {
     if day.today {
         box_shadow_layers.push("0 0 0 1px #f4f4f5".to_string());
     }
-    let box_shadow =
-        if box_shadow_layers.is_empty() { String::new() } else { format!("box-shadow: {};", box_shadow_layers.join(", ")) };
+    let box_shadow = if box_shadow_layers.is_empty() {
+        String::new()
+    } else {
+        format!("box-shadow: {};", box_shadow_layers.join(", "))
+    };
     let outline = if content.interruption_coverage == InterruptionCoverage::Missing {
         "outline: 1px dashed #71717a; outline-offset: -1px;"
     } else {
         ""
     };
-    let opacity = if content.estimated { "opacity: 0.82;" } else { "" };
+    let opacity = if content.estimated {
+        "opacity: 0.82;"
+    } else {
+        ""
+    };
     let style = format!("{position} {box_shadow} {outline} {opacity}");
 
     view! {
@@ -217,7 +250,14 @@ fn day_title(day: &CalendarDay, content: &crate::calendar::CalendarDayContent) -
         .map(|epoch| epoch.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    let mut parts = vec![day.date.clone(), format!("Epoch{} {epochs}", if content.epochs.len() > 1 { "s" } else { "" }), content.label.clone()];
+    let mut parts = vec![
+        day.date.clone(),
+        format!(
+            "Epoch{} {epochs}",
+            if content.epochs.len() > 1 { "s" } else { "" }
+        ),
+        content.label.clone(),
+    ];
     if content.estimated {
         parts.push("estimated chain date".to_string());
     }
@@ -225,9 +265,20 @@ fn day_title(day: &CalendarDay, content: &crate::calendar::CalendarDayContent) -
         parts.push(format!(
             "{} block-time {} · longest {}{}",
             interruption.count,
-            if interruption.count == 1 { "interruption" } else { "interruptions" },
+            if interruption.count == 1 {
+                "interruption"
+            } else {
+                "interruptions"
+            },
             format_elapsed(interruption.longest_secs),
-            if interruption.boundary_count > 0 { format!(" · {} crosses an epoch boundary", interruption.boundary_count) } else { String::new() }
+            if interruption.boundary_count > 0 {
+                format!(
+                    " · {} crosses an epoch boundary",
+                    interruption.boundary_count
+                )
+            } else {
+                String::new()
+            }
         ));
     }
     if content.interruption_coverage == InterruptionCoverage::Missing {

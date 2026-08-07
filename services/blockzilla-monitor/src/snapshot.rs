@@ -169,6 +169,11 @@ pub struct LaneStatus {
     pub id: String,
     pub kind: String,
     pub state: String,
+    /// Human-readable current phase within this lane's job, e.g. `"Archive
+    /// V2 Hot Write"` or `"Prev Blockhash Seed"` -- a short, fixed set of
+    /// internal phase names, not free text, so it's shown unredacted like
+    /// `state`/`kind`.
+    pub phase: String,
     pub epoch: Option<u32>,
     pub auto_paused: bool,
     pub auto_pause_reason: Option<String>,
@@ -308,10 +313,11 @@ impl PipelineSnapshot {
     /// other field wholesale. Faithful port of `applySnapshotPatch` in
     /// `snapshot-patch.ts` -- see that file for the reference semantics.
     pub fn apply_patch(&mut self, patch: PipelineSnapshotPatch) {
-        let mut epochs: std::collections::BTreeMap<u32, EpochStatus> = std::mem::take(&mut self.epochs)
-            .into_iter()
-            .map(|epoch| (epoch.epoch, epoch))
-            .collect();
+        let mut epochs: std::collections::BTreeMap<u32, EpochStatus> =
+            std::mem::take(&mut self.epochs)
+                .into_iter()
+                .map(|epoch| (epoch.epoch, epoch))
+                .collect();
         for epoch in patch.epochs_removed {
             epochs.remove(&epoch);
         }
@@ -384,7 +390,11 @@ mod tests {
     #[test]
     fn apply_patch_reconciles_epochs_by_key() {
         let mut snapshot = PipelineSnapshot {
-            epochs: vec![epoch(790, "scanning"), epoch(791, "queued"), epoch(792, "scanning")],
+            epochs: vec![
+                epoch(790, "scanning"),
+                epoch(791, "queued"),
+                epoch(792, "scanning"),
+            ],
             ..Default::default()
         };
         let patch = PipelineSnapshotPatch {
@@ -396,7 +406,11 @@ mod tests {
 
         snapshot.apply_patch(patch);
 
-        let states: Vec<(u32, String)> = snapshot.epochs.iter().map(|e| (e.epoch, e.state.clone())).collect();
+        let states: Vec<(u32, String)> = snapshot
+            .epochs
+            .iter()
+            .map(|e| (e.epoch, e.state.clone()))
+            .collect();
         // 791 removed, 790 updated in place, 793 inserted, 792 untouched --
         // and sorted by epoch, same as `applySnapshotPatch` in
         // snapshot-patch.ts.
@@ -414,13 +428,23 @@ mod tests {
     fn apply_patch_replaces_everything_else_wholesale() {
         let mut snapshot = PipelineSnapshot {
             sequence: 1,
-            scheduler: SchedulerSnapshot { paused: false, updated_unix_secs: 1 },
+            scheduler: SchedulerSnapshot {
+                paused: false,
+                updated_unix_secs: 1,
+            },
             ..Default::default()
         };
         let patch = PipelineSnapshotPatch {
             sequence: 2,
-            scheduler: SchedulerSnapshot { paused: true, updated_unix_secs: 2 },
-            errors: vec![PipelineError { at_unix_secs: 2, scope: "x".into(), message: "y".into() }],
+            scheduler: SchedulerSnapshot {
+                paused: true,
+                updated_unix_secs: 2,
+            },
+            errors: vec![PipelineError {
+                at_unix_secs: 2,
+                scope: "x".into(),
+                message: "y".into(),
+            }],
             ..Default::default()
         };
 
@@ -433,7 +457,10 @@ mod tests {
     #[test]
     fn apply_patch_keeps_optional_fields_when_patch_omits_them() {
         let mut snapshot = PipelineSnapshot {
-            recent_compactions: vec![CompactionHistoryEntry { id: "a".into(), ..Default::default() }],
+            recent_compactions: vec![CompactionHistoryEntry {
+                id: "a".into(),
+                ..Default::default()
+            }],
             process_io: Some(ProcessIoSnapshot::default()),
             ..Default::default()
         };
@@ -441,15 +468,30 @@ mod tests {
 
         snapshot.apply_patch(patch);
 
-        assert_eq!(snapshot.recent_compactions.len(), 1, "omitted field must not be wiped");
-        assert!(snapshot.process_io.is_some(), "omitted field must not be wiped");
+        assert_eq!(
+            snapshot.recent_compactions.len(),
+            1,
+            "omitted field must not be wiped"
+        );
+        assert!(
+            snapshot.process_io.is_some(),
+            "omitted field must not be wiped"
+        );
     }
 
     #[test]
     fn sequence_action_matches_reference_semantics() {
-        assert_eq!(sequence_action(-1, 0), SequenceAction::Resync, "no base snapshot yet");
+        assert_eq!(
+            sequence_action(-1, 0),
+            SequenceAction::Resync,
+            "no base snapshot yet"
+        );
         assert_eq!(sequence_action(5, 5), SequenceAction::Ignore, "duplicate");
-        assert_eq!(sequence_action(5, 3), SequenceAction::Ignore, "stale/out of order");
+        assert_eq!(
+            sequence_action(5, 3),
+            SequenceAction::Ignore,
+            "stale/out of order"
+        );
         assert_eq!(sequence_action(5, 6), SequenceAction::Apply, "contiguous");
         assert_eq!(sequence_action(5, 8), SequenceAction::Resync, "gap");
     }

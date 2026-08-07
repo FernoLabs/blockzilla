@@ -1,6 +1,6 @@
 use topcoat::{
-    router::{header, route, HeaderName},
     Result,
+    router::{HeaderName, header, route},
 };
 
 /// Pre-compiled, minified Tailwind output for exactly the classes this
