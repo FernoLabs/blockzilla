@@ -6,14 +6,14 @@
 //! instruction-provided launch sysvar accounts. Stable switches from the
 //! legacy v1.0 processor to v1.2.32's replacement on entry to epoch 40.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use blockzilla_format::ArchiveV2SystemInstructionData;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{AccountSnapshot, RECENT_BLOCKHASHES_SYSVAR_ID, RENT_SYSVAR_ID};
+use crate::{AccountMap, AccountSnapshot, RECENT_BLOCKHASHES_SYSVAR_ID, RENT_SYSVAR_ID};
 
 pub const SYSTEM_PROGRAM_ID: [u8; 32] = [0; 32];
 const SYSVAR_OWNER_ID: [u8; 32] = [
@@ -199,7 +199,7 @@ pub fn default_system_account() -> AccountSnapshot {
 pub fn apply_launch_system_instruction(
     instruction: &ArchiveV2SystemInstructionData,
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
     apply_launch_system_instruction_for_epoch(instruction, account_metas, accounts, 0)
 }
@@ -213,7 +213,7 @@ pub fn apply_launch_system_instruction(
 pub fn apply_launch_system_instruction_for_epoch(
     instruction: &ArchiveV2SystemInstructionData,
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     epoch: u64,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
     let mut working = accounts.clone();
@@ -234,7 +234,7 @@ pub fn apply_launch_system_instruction_for_epoch(
 pub fn apply_launch_system_instruction_for_epoch_in_place(
     instruction: &ArchiveV2SystemInstructionData,
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     epoch: u64,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
     for meta in account_metas {
@@ -271,7 +271,7 @@ pub fn create_address_with_seed(
 fn apply_inner(
     instruction: &ArchiveV2SystemInstructionData,
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     new_system_processor: bool,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
     let signers = account_metas
@@ -505,7 +505,7 @@ impl LaunchRent {
 
 fn decode_recent_blockhashes(
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<LaunchRecentBlockhashes, LaunchSystemError> {
     let meta = required_meta(account_metas, position)?;
@@ -525,7 +525,7 @@ fn decode_recent_blockhashes(
 
 fn decode_rent(
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<LaunchRent, LaunchSystemError> {
     let meta = required_meta(account_metas, position)?;
@@ -544,7 +544,7 @@ fn decode_rent(
 }
 
 fn initialize_nonce(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     meta: &LaunchSystemAccountMeta,
     authority: &[u8; 32],
     recent_blockhashes: &LaunchRecentBlockhashes,
@@ -610,7 +610,7 @@ fn initialize_nonce(
 }
 
 fn advance_nonce(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     meta: &LaunchSystemAccountMeta,
     recent_blockhashes: &LaunchRecentBlockhashes,
     signers: &BTreeSet<[u8; 32]>,
@@ -679,7 +679,7 @@ fn advance_nonce(
 }
 
 fn withdraw_nonce(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     nonce_meta: &LaunchSystemAccountMeta,
     destination_meta: &LaunchSystemAccountMeta,
     lamports: u64,
@@ -769,7 +769,7 @@ fn withdraw_nonce(
 }
 
 fn authorize_nonce(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     meta: &LaunchSystemAccountMeta,
     new_authority: &[u8; 32],
     signers: &BTreeSet<[u8; 32]>,
@@ -962,7 +962,7 @@ fn is_zeroed(data: &[u8]) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Vec<LaunchPreAccount> {
     account_metas
         .iter()
@@ -988,7 +988,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_system_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<(), LaunchSystemError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;
@@ -1010,7 +1010,7 @@ fn verify_launch_system_instruction(
 }
 
 fn reject_prefunded_create_destination(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     meta: &LaunchSystemAccountMeta,
     new_system_processor: bool,
 ) -> Result<(), LaunchSystemError> {
@@ -1029,7 +1029,7 @@ fn reject_prefunded_create_destination(
 }
 
 fn allocate(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     meta: &LaunchSystemAccountMeta,
     address: &Address,
     space: u64,
@@ -1057,7 +1057,7 @@ fn allocate(
 }
 
 fn assign(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     meta: &LaunchSystemAccountMeta,
     address: &Address,
     owner: &[u8; 32],
@@ -1086,7 +1086,7 @@ fn assign(
 }
 
 fn allocate_and_assign(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     meta: &LaunchSystemAccountMeta,
     address: &Address,
     space: u64,
@@ -1098,7 +1098,7 @@ fn allocate_and_assign(
 }
 
 fn transfer(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     from: &LaunchSystemAccountMeta,
     to: &LaunchSystemAccountMeta,
     lamports: u64,
@@ -1244,7 +1244,7 @@ mod tests {
             create_address_with_seed(&BASE, "1", &STAKE_PROGRAM).unwrap(),
             TARGET
         );
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             BASE,
             AccountSnapshot {
                 lamports: 19_090_880,
@@ -1280,7 +1280,7 @@ mod tests {
 
     #[test]
     fn missing_seed_base_signature_rolls_back_default_account_creation() {
-        let mut accounts = BTreeMap::new();
+        let mut accounts = AccountMap::new();
         let before = accounts.clone();
         let error = apply_launch_system_instruction(
             &ArchiveV2SystemInstructionData::AllocateWithSeed {
@@ -1303,7 +1303,7 @@ mod tests {
     #[test]
     fn seeded_address_mismatch_fails_before_mutation() {
         let wrong_target = [42; 32];
-        let mut accounts = BTreeMap::new();
+        let mut accounts = AccountMap::new();
         let error = apply_launch_system_instruction(
             &ArchiveV2SystemInstructionData::AllocateWithSeed {
                 base: BASE,
@@ -1328,7 +1328,7 @@ mod tests {
         let from = [1; 32];
         let to = [2; 32];
         let owner = [3; 32];
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             from,
             AccountSnapshot {
                 lamports: 10,
@@ -1354,7 +1354,7 @@ mod tests {
     #[test]
     fn create_account_with_seed_uses_the_base_signer() {
         let from = [4; 32];
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             from,
             AccountSnapshot {
                 lamports: 11,
@@ -1400,7 +1400,7 @@ mod tests {
         let from = [5; 32];
         let to = [6; 32];
         let owner = [7; 32];
-        let initial = BTreeMap::from([
+        let initial = AccountMap::from([
             (
                 from,
                 AccountSnapshot {
@@ -1466,7 +1466,7 @@ mod tests {
     #[test]
     fn stable_epoch_40_seeded_create_checks_address_then_prefunding() {
         let from = [8; 32];
-        let initial = BTreeMap::from([
+        let initial = AccountMap::from([
             (
                 from,
                 AccountSnapshot {
@@ -1531,7 +1531,7 @@ mod tests {
         }
 
         let wrong_target = [42; 32];
-        let mut mismatched = BTreeMap::from([
+        let mut mismatched = AccountMap::from([
             (from, initial[&from].clone()),
             (wrong_target, initial[&TARGET].clone()),
         ]);
@@ -1556,7 +1556,7 @@ mod tests {
         let plain = [5; 32];
         let allocated = [6; 32];
         let plain_owner = [7; 32];
-        let mut accounts = BTreeMap::new();
+        let mut accounts = AccountMap::new();
 
         apply_launch_system_instruction(
             &ArchiveV2SystemInstructionData::Assign { owner: plain_owner },
@@ -1592,7 +1592,7 @@ mod tests {
     fn transfer_moves_lamports_and_zero_transfer_is_a_privilege_free_noop() {
         let from = [8; 32];
         let to = [9; 32];
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             from,
             AccountSnapshot {
                 lamports: 9,
@@ -1621,7 +1621,7 @@ mod tests {
     #[test]
     fn zero_lamport_aliased_transfer_succeeds_on_both_system_processors() {
         let account = [10; 32];
-        let initial = BTreeMap::from([(
+        let initial = AccountMap::from([(
             account,
             AccountSnapshot {
                 data: vec![1].into(),
@@ -1645,7 +1645,7 @@ mod tests {
     #[test]
     fn readonly_zero_effect_allocate_and_create_succeed() {
         let allocated = [10; 32];
-        let mut accounts = BTreeMap::from([(allocated, default_system_account())]);
+        let mut accounts = AccountMap::from([(allocated, default_system_account())]);
         let before = accounts.clone();
         apply_launch_system_instruction(
             &ArchiveV2SystemInstructionData::Allocate { space: 0 },
@@ -1657,7 +1657,7 @@ mod tests {
 
         let from = [11; 32];
         let to = [12; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 from,
                 AccountSnapshot {
@@ -1686,7 +1686,7 @@ mod tests {
     #[test]
     fn readonly_allocate_keeps_native_error_order_then_post_verifies() {
         let account = [14; 32];
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             account,
             AccountSnapshot {
                 data: vec![1].into(),
@@ -1708,7 +1708,7 @@ mod tests {
         );
         assert_eq!(accounts, before);
 
-        let mut accounts = BTreeMap::from([(account, default_system_account())]);
+        let mut accounts = AccountMap::from([(account, default_system_account())]);
         let before = accounts.clone();
         let error = apply_launch_system_instruction(
             &ArchiveV2SystemInstructionData::Allocate {
@@ -1740,7 +1740,7 @@ mod tests {
     #[test]
     fn assign_rejects_only_the_launch_sysvar_owner_id() {
         let account = [15; 32];
-        let mut accounts = BTreeMap::from([(account, default_system_account())]);
+        let mut accounts = AccountMap::from([(account, default_system_account())]);
         let before = accounts.clone();
         let error = apply_launch_system_instruction(
             &ArchiveV2SystemInstructionData::Assign {
@@ -1768,7 +1768,7 @@ mod tests {
         .unwrap();
         assert_eq!(accounts[&account].owner, crate::CLOCK_SYSVAR_ID);
 
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             account,
             AccountSnapshot {
                 owner: SYSVAR_OWNER_ID,
@@ -1801,7 +1801,7 @@ mod tests {
                 ..default_system_account()
             },
         ] {
-            let mut accounts = BTreeMap::from([(account, snapshot)]);
+            let mut accounts = AccountMap::from([(account, snapshot)]);
             let before = accounts.clone();
             let error = apply_launch_system_instruction(
                 &ArchiveV2SystemInstructionData::Assign { owner: [18; 32] },
@@ -1816,7 +1816,7 @@ mod tests {
             assert_eq!(accounts, before);
         }
 
-        let mut accounts = BTreeMap::from([(account, default_system_account())]);
+        let mut accounts = AccountMap::from([(account, default_system_account())]);
         let before = accounts.clone();
         let error = apply_launch_system_instruction(
             &ArchiveV2SystemInstructionData::Assign { owner: [18; 32] },
@@ -1835,7 +1835,7 @@ mod tests {
     fn transfer_runs_native_checks_before_post_instruction_invariants() {
         let from = [19; 32];
         let to = [20; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 from,
                 AccountSnapshot {
@@ -1891,7 +1891,7 @@ mod tests {
     #[test]
     fn positive_aliased_transfer_checks_signature_before_borrow_conflict() {
         let account = [22; 32];
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             account,
             AccountSnapshot {
                 lamports: 1,
@@ -1927,7 +1927,7 @@ mod tests {
     #[test]
     fn stable_epoch_40_system_processor_supports_positive_self_transfer() {
         let account = [23; 32];
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             account,
             AccountSnapshot {
                 lamports: 1_003_770_000,
@@ -2017,7 +2017,7 @@ mod tests {
     fn release_overflow_is_rejected_by_the_historical_balance_verifier() {
         let from = [23; 32];
         let to = [24; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 from,
                 AccountSnapshot {
@@ -2054,7 +2054,7 @@ mod tests {
     fn failed_transfer_is_atomic() {
         let from = [1; 32];
         let to = [2; 32];
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             from,
             AccountSnapshot {
                 lamports: 3,
@@ -2088,7 +2088,7 @@ mod tests {
         assert_eq!(&nonce_account.data[40..72], &blockhash);
         assert_eq!(&nonce_account.data[72..80], &5_000_u64.to_le_bytes());
         nonce_account.data.extend_from_slice(&[0xaa, 0xbb]);
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, nonce_account),
             (old_authority, default_system_account()),
         ]);
@@ -2137,7 +2137,7 @@ mod tests {
             burn_percent: 100,
         };
         let minimum = rent.minimum_balance(LAUNCH_NONCE_ACCOUNT_DATA_LEN);
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, uninitialized_nonce_account(minimum)),
             (
                 RECENT_BLOCKHASHES_SYSVAR_ID,
@@ -2203,7 +2203,7 @@ mod tests {
             meta(RENT_SYSVAR_ID, false, false),
         ];
 
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, uninitialized_nonce_account(u64::MAX)),
             (
                 RECENT_BLOCKHASHES_SYSVAR_ID,
@@ -2251,7 +2251,7 @@ mod tests {
         let authority = [48; 32];
         let wrong = [49; 32];
         let instruction = ArchiveV2SystemInstructionData::InitializeNonceAccount { authority };
-        let mut accounts = BTreeMap::from([(nonce, uninitialized_nonce_account(u64::MAX))]);
+        let mut accounts = AccountMap::from([(nonce, uninitialized_nonce_account(u64::MAX))]);
         let before = accounts.clone();
         assert_eq!(
             apply_launch_system_instruction(
@@ -2305,7 +2305,7 @@ mod tests {
         let new_blockhash = [53; 32];
         let mut nonce_account = initialized_nonce_account(authority, old_blockhash, 1);
         nonce_account.data.extend_from_slice(&[0xaa, 0xbb]);
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, nonce_account),
             (
                 RECENT_BLOCKHASHES_SYSVAR_ID,
@@ -2365,7 +2365,7 @@ mod tests {
         let authority = [55; 32];
         let blockhash = [56; 32];
         let instruction = ArchiveV2SystemInstructionData::AdvanceNonceAccount;
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, initialized_nonce_account(authority, blockhash, 1)),
             (
                 RECENT_BLOCKHASHES_SYSVAR_ID,
@@ -2425,7 +2425,7 @@ mod tests {
             data: vec![0xff; LAUNCH_NONCE_ACCOUNT_DATA_LEN].into(),
             ..default_system_account()
         };
-        let mut accounts = BTreeMap::from([(nonce, malformed_nonce.clone())]);
+        let mut accounts = AccountMap::from([(nonce, malformed_nonce.clone())]);
         let before = accounts.clone();
 
         assert_eq!(
@@ -2528,7 +2528,7 @@ mod tests {
         let nonce = [61; 32];
         let authority = [62; 32];
         let old_blockhash = [63; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 nonce,
                 initialized_nonce_account(authority, old_blockhash, 1),
@@ -2572,7 +2572,7 @@ mod tests {
         };
 
         let mut accounts =
-            BTreeMap::from([(nonce, initialized_nonce_account(old_authority, [28; 32], 0))]);
+            AccountMap::from([(nonce, initialized_nonce_account(old_authority, [28; 32], 0))]);
         let before = accounts.clone();
         assert_eq!(
             apply_launch_system_instruction(
@@ -2591,7 +2591,7 @@ mod tests {
         let mut data = vec![0; LAUNCH_NONCE_ACCOUNT_DATA_LEN];
         let encoded = wincode::serialize(&uninitialized).unwrap();
         data[..encoded.len()].copy_from_slice(&encoded);
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             nonce,
             AccountSnapshot {
                 data: data.into(),
@@ -2610,7 +2610,7 @@ mod tests {
         );
         assert_eq!(accounts, before);
 
-        let mut accounts = BTreeMap::from([(
+        let mut accounts = AccountMap::from([(
             nonce,
             AccountSnapshot {
                 data: vec![255; LAUNCH_NONCE_ACCOUNT_DATA_LEN].into(),
@@ -2639,7 +2639,7 @@ mod tests {
         };
 
         let account = initialized_nonce_account(authority, [32; 32], 42);
-        let mut accounts = BTreeMap::from([(nonce, account.clone())]);
+        let mut accounts = AccountMap::from([(nonce, account.clone())]);
         assert_eq!(
             apply_launch_system_instruction(
                 &instruction,
@@ -2649,13 +2649,13 @@ mod tests {
             .unwrap_err(),
             LaunchSystemError::ReadonlyDataModified { pubkey: nonce }
         );
-        assert_eq!(accounts, BTreeMap::from([(nonce, account.clone())]));
+        assert_eq!(accounts, AccountMap::from([(nonce, account.clone())]));
 
         let external = AccountSnapshot {
             owner: [33; 32],
             ..account
         };
-        let mut accounts = BTreeMap::from([(nonce, external.clone())]);
+        let mut accounts = AccountMap::from([(nonce, external.clone())]);
         assert_eq!(
             apply_launch_system_instruction(
                 &instruction,
@@ -2665,7 +2665,7 @@ mod tests {
             .unwrap_err(),
             LaunchSystemError::ExternalAccountDataModified { pubkey: nonce }
         );
-        assert_eq!(accounts, BTreeMap::from([(nonce, external)]));
+        assert_eq!(accounts, AccountMap::from([(nonce, external)]));
     }
 
     #[test]
@@ -2676,7 +2676,7 @@ mod tests {
             owner: [36; 32],
             ..initialized_nonce_account(authority, [37; 32], 99)
         };
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, external.clone()),
             (authority, default_system_account()),
         ]);
@@ -2705,7 +2705,7 @@ mod tests {
         let destination = [39; 32];
         let nonce_account = uninitialized_nonce_account(1_000);
         let nonce_data = nonce_account.data.clone();
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, nonce_account),
             (
                 destination,
@@ -2771,7 +2771,7 @@ mod tests {
                 0x3e, 0x6b, 0xa0, 0x3f,
             ]
         );
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, nonce_account),
             (
                 destination_and_authority,
@@ -2830,7 +2830,7 @@ mod tests {
         let mut nonce_account = initialized_nonce_account(authority, [43; 32], 5_000);
         nonce_account.lamports = 1_000;
         let nonce_data = nonce_account.data.clone();
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, nonce_account),
             (destination, default_system_account()),
             (
@@ -2891,7 +2891,7 @@ mod tests {
         let mut nonce_account = initialized_nonce_account(authority, durable_blockhash, 1);
         nonce_account.lamports = 1_000;
         let nonce_data = nonce_account.data.clone();
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, nonce_account),
             (destination, default_system_account()),
             (
@@ -2960,7 +2960,7 @@ mod tests {
     fn withdraw_nonce_allows_repeated_source_and_destination_index() {
         let nonce = [49; 32];
         let nonce_account = uninitialized_nonce_account(1_000);
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (nonce, nonce_account.clone()),
             (
                 RECENT_BLOCKHASHES_SYSVAR_ID,
@@ -2992,7 +2992,7 @@ mod tests {
 
     #[test]
     fn missing_nonce_accounts_and_post_launch_variants_fail_explicitly() {
-        let mut accounts = BTreeMap::new();
+        let mut accounts = AccountMap::new();
         assert_eq!(
             apply_launch_system_instruction(
                 &ArchiveV2SystemInstructionData::AdvanceNonceAccount,

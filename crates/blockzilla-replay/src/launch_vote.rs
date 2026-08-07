@@ -15,7 +15,7 @@ use std::{
 };
 use thiserror::Error;
 
-use crate::{AccountSnapshot, CLOCK_SYSVAR_ID, LaunchAccountMeta, RENT_SYSVAR_ID};
+use crate::{AccountMap, AccountSnapshot, CLOCK_SYSVAR_ID, LaunchAccountMeta, RENT_SYSVAR_ID};
 
 const MAX_LOCKOUT_HISTORY: usize = 31;
 const MAX_EPOCH_CREDITS_HISTORY: usize = 64;
@@ -462,7 +462,7 @@ pub enum LaunchVoteError {
 pub fn apply_launch_vote_instruction(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     trusted_vote_epoch: u64,
 ) -> Result<LaunchVoteMutation, LaunchVoteError> {
     let mut working = accounts.clone();
@@ -482,7 +482,7 @@ pub fn apply_launch_vote_instruction(
 pub(crate) fn apply_launch_vote_instruction_in_place(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     trusted_vote_epoch: u64,
 ) -> Result<LaunchVoteMutation, LaunchVoteError> {
     apply_launch_vote_instruction_in_place_impl(
@@ -501,7 +501,7 @@ pub(crate) fn apply_launch_vote_instruction_in_place(
 pub(crate) fn apply_launch_vote_instruction_in_place_cached(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     trusted_vote_epoch: u64,
     cache: &mut LaunchVoteStateCache,
 ) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
@@ -869,7 +869,7 @@ fn borrowed_vote_may_shrink_encoded_state(
 fn apply_launch_vote_instruction_in_place_impl(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     trusted_vote_epoch: u64,
     cache: Option<&mut LaunchVoteStateCache>,
 ) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
@@ -888,7 +888,7 @@ fn apply_launch_vote_instruction_in_place_impl(
 fn apply_launch_vote_inner(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     trusted_vote_epoch: u64,
     mut cache: Option<&mut LaunchVoteStateCache>,
 ) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
@@ -1230,7 +1230,7 @@ fn decode_instruction(data: &[u8]) -> Result<VoteInstructionV100, LaunchVoteErro
 }
 
 fn initialize_account(
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     vote_pubkey: Pubkey,
     vote_init: VoteInitV100,
     account_metas: &[LaunchAccountMeta],
@@ -1256,7 +1256,7 @@ fn initialize_account(
 }
 
 fn authorize(
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     vote_pubkey: Pubkey,
     new_authority: Pubkey,
     authority_type: LaunchVoteAuthorize,
@@ -1290,7 +1290,7 @@ fn authorize(
 }
 
 fn withdraw(
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     vote_pubkey: Pubkey,
     destination: Pubkey,
     lamports: u64,
@@ -1325,7 +1325,7 @@ fn withdraw(
 }
 
 fn update_commission(
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     vote_pubkey: Pubkey,
     new_commission: u8,
     account_metas: &[LaunchAccountMeta],
@@ -1572,7 +1572,7 @@ fn required_meta(
 }
 
 fn required_account(
-    accounts: &BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &AccountMap,
     pubkey: Pubkey,
 ) -> Result<&AccountSnapshot, LaunchVoteError> {
     accounts
@@ -1581,7 +1581,7 @@ fn required_account(
 }
 
 fn required_account_mut(
-    accounts: &mut BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &mut AccountMap,
     pubkey: Pubkey,
 ) -> Result<&mut AccountSnapshot, LaunchVoteError> {
     accounts
@@ -1591,7 +1591,7 @@ fn required_account_mut(
 
 fn read_rent(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<RentV100, LaunchVoteError> {
     let meta = required_meta(account_metas, position)?;
@@ -1612,7 +1612,7 @@ fn read_rent(
 
 fn read_clock(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<ClockV100, LaunchVoteError> {
     let meta = required_meta(account_metas, position)?;
@@ -2220,7 +2220,7 @@ impl LaunchPreAccount {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<SmallVec<[LaunchPreAccount; 4]>, LaunchVoteError> {
     account_metas
         .iter()
@@ -2240,7 +2240,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_vote_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &BTreeMap<Pubkey, AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<(), LaunchVoteError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;
@@ -2485,7 +2485,7 @@ mod tests {
             meta(AUTHORIZED_VOTER, true, false),
         ];
         let initial_vote = vote_account(fixed_vote_data(initialized_state()), 30_000_000);
-        let initial = BTreeMap::from([
+        let initial = AccountMap::from([
             (VOTE_ACCOUNT, initial_vote.clone()),
             (AUTHORIZED_VOTER, crate::default_system_account()),
         ]);
@@ -2720,7 +2720,7 @@ mod tests {
         let mut initial_data = vec![0xa5; 3_731];
         initial_data[..encoded_legacy.len()].copy_from_slice(&encoded_legacy);
         let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
-        let mut generic_accounts = BTreeMap::from([
+        let mut generic_accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data.clone(), 30_000_000)),
             (AUTHORIZED_VOTER, crate::default_system_account()),
         ]);
@@ -2788,7 +2788,7 @@ mod tests {
         assert_eq!(direct_account.data, initial_data);
         assert!(!cache.contains(&VOTE_ACCOUNT));
 
-        let mut generic_accounts = BTreeMap::from([
+        let mut generic_accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data.clone(), 30_000_000)),
             (AUTHORIZED_VOTER, crate::default_system_account()),
         ]);
@@ -2851,7 +2851,7 @@ mod tests {
             LaunchFastVoteApply::Fallback
         );
 
-        let mut generic_accounts = BTreeMap::from([
+        let mut generic_accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data, 30_000_000)),
             (AUTHORIZED_VOTER, crate::default_system_account()),
         ]);
@@ -3035,7 +3035,7 @@ mod tests {
             .insert(1, AUTHORIZED_VOTER);
         let initial_data = fixed_vote_data(VoteStateVersionsV100::Current(state));
         let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
-        let mut generic_accounts = BTreeMap::from([
+        let mut generic_accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data, 30_000_000)),
             (AUTHORIZED_VOTER, crate::default_system_account()),
         ]);
@@ -3150,7 +3150,7 @@ mod tests {
             let mut initial_data = vec![0xa5; 3_731];
             initial_data[..noncanonical.len()].copy_from_slice(&noncanonical);
             let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
-            let mut generic_accounts = BTreeMap::from([
+            let mut generic_accounts = AccountMap::from([
                 (VOTE_ACCOUNT, vote_account(initial_data, 30_000_000)),
                 (AUTHORIZED_VOTER, crate::default_system_account()),
             ]);
@@ -3205,7 +3205,7 @@ mod tests {
         let mut initial_data = vec![0xa5; 3_731];
         initial_data[..encoded.len()].copy_from_slice(&encoded);
         let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
-        let mut generic_accounts = BTreeMap::from([
+        let mut generic_accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data, 30_000_000)),
             (AUTHORIZED_VOTER, crate::default_system_account()),
         ]);
@@ -3314,7 +3314,7 @@ mod tests {
 
     #[test]
     fn cached_vote_hit_is_byte_identical_to_the_generic_path() {
-        let base = BTreeMap::from([
+        let base = AccountMap::from([
             (
                 VOTE_ACCOUNT,
                 vote_account(fixed_vote_data(initialized_state()), 30_000_000),
@@ -3367,7 +3367,7 @@ mod tests {
             .insert(1, AUTHORIZED_VOTER);
         let initial_data = fixed_vote_data(VoteStateVersionsV100::Current(state));
         let mut direct_account = vote_account(initial_data.clone(), 30_000_000);
-        let mut generic_accounts = BTreeMap::from([
+        let mut generic_accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data.clone(), 30_000_000)),
             (AUTHORIZED_VOTER, crate::default_system_account()),
         ]);
@@ -3562,7 +3562,7 @@ mod tests {
 
     #[test]
     fn failed_cached_vote_invalidates_mutated_decoded_state() {
-        let mut cached = BTreeMap::from([
+        let mut cached = AccountMap::from([
             (
                 VOTE_ACCOUNT,
                 vote_account(fixed_vote_data(initialized_state()), 30_000_000),
@@ -3614,7 +3614,7 @@ mod tests {
     #[test]
     fn authorize_and_withdraw_bypass_and_invalidate_vote_cache() {
         let new_withdrawer = [22; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 VOTE_ACCOUNT,
                 vote_account(fixed_vote_data(initialized_state()), 30_000_000),
@@ -3693,7 +3693,7 @@ mod tests {
         let instruction = wincode::serialize(&VoteInstructionV100::UpdateCommission(10)).unwrap();
         assert_eq!(instruction, [5, 0, 0, 0, 10]);
         let initial_data = fixed_vote_data(initialized_state());
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data.clone(), 30_000_000)),
             (AUTHORIZED_WITHDRAWER, crate::default_system_account()),
         ]);
@@ -3751,7 +3751,7 @@ mod tests {
             meta(VOTE_ACCOUNT, false, true),
             meta(AUTHORIZED_WITHDRAWER, false, false),
         ];
-        let mut malformed = BTreeMap::from([
+        let mut malformed = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(vec![0xff; 3_731], 30_000_000)),
             (AUTHORIZED_WITHDRAWER, crate::default_system_account()),
         ]);
@@ -3761,7 +3761,7 @@ mod tests {
         ));
 
         let initial_data = fixed_vote_data(initialized_state());
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(initial_data.clone(), 30_000_000)),
             (AUTHORIZED_WITHDRAWER, crate::default_system_account()),
         ]);
@@ -3860,7 +3860,7 @@ mod tests {
         let instruction =
             wincode::serialize(&VoteInstructionV100::InitializeAccount(vote_init)).unwrap();
         assert_eq!(instruction.len(), 101);
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(vec![0; 3_731], 26_858_640)),
             (RENT_SYSVAR_ID, rent_account()),
             (CLOCK_SYSVAR_ID, clock_account(1, 2)),
@@ -3923,7 +3923,7 @@ mod tests {
 
         // v1.0.7's original three-account wire remains valid immediately
         // before the mainnet transition.
-        let mut pre_activation = BTreeMap::from([
+        let mut pre_activation = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(vec![0; 3_731], 26_858_640)),
             (RENT_SYSVAR_ID, rent_account()),
             (
@@ -3934,7 +3934,7 @@ mod tests {
         apply_launch_vote_instruction(&instruction, &unsigned_metas, &mut pre_activation, 1)
             .unwrap();
 
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(vec![0; 3_731], 26_858_640)),
             (RENT_SYSVAR_ID, rent_account()),
             (
@@ -3980,7 +3980,7 @@ mod tests {
             }))
             .unwrap();
         let wrong_rent = [21; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(vec![0; 3_731], 0)),
             (wrong_rent, rent_account()),
         ]);
@@ -4046,7 +4046,7 @@ mod tests {
                 commission: 4,
             }))
             .unwrap();
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (VOTE_ACCOUNT, vote_account(vec![0; 3_731], 26_858_640)),
             (RENT_SYSVAR_ID, rent_account()),
             (CLOCK_SYSVAR_ID, clock_account(1, 2)),
@@ -4080,7 +4080,7 @@ mod tests {
             LaunchVoteAuthorize::Voter,
         ))
         .unwrap();
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 VOTE_ACCOUNT,
                 vote_account(fixed_vote_data(initialized_state()), 30_000_000),
@@ -4136,7 +4136,7 @@ mod tests {
     #[test]
     fn withdraw_moves_lamports_and_rolls_back_readonly_destination() {
         let instruction = wincode::serialize(&VoteInstructionV100::Withdraw(400)).unwrap();
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 VOTE_ACCOUNT,
                 vote_account(fixed_vote_data(initialized_state()), 1_000),

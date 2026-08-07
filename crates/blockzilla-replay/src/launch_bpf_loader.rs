@@ -7,14 +7,12 @@
 //! so the replay dispatcher can cache a derived native artifact only after the
 //! containing transaction commits.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AccountSnapshot, CompilationManifest, CompiledProgram, LaunchAccountMeta, LoaderAccountKind,
-    RENT_SYSVAR_ID, ReplayCompiler, extract_program,
+    AccountMap, AccountSnapshot, CompilationManifest, CompiledProgram, LaunchAccountMeta,
+    LoaderAccountKind, RENT_SYSVAR_ID, ReplayCompiler, extract_program,
 };
 
 /// `BPFLoader1111111111111111111111111111111111`.
@@ -161,7 +159,7 @@ pub enum LaunchBpfLoaderError {
 pub fn apply_launch_bpf_loader_instruction(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     compiler: &ReplayCompiler,
     context: LaunchBpfLoaderContext,
 ) -> Result<LaunchBpfLoaderApply, LaunchBpfLoaderError> {
@@ -182,7 +180,7 @@ pub fn apply_launch_bpf_loader_instruction(
 pub fn apply_launch_bpf_loader_instruction_in_place(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     compiler: &ReplayCompiler,
     context: LaunchBpfLoaderContext,
 ) -> Result<LaunchBpfLoaderApply, LaunchBpfLoaderError> {
@@ -351,7 +349,7 @@ fn required_meta(
 }
 
 fn required_account(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     pubkey: [u8; 32],
 ) -> Result<&AccountSnapshot, LaunchBpfLoaderError> {
     accounts
@@ -360,7 +358,7 @@ fn required_account(
 }
 
 fn required_account_mut(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     pubkey: [u8; 32],
 ) -> Result<&mut AccountSnapshot, LaunchBpfLoaderError> {
     accounts
@@ -387,7 +385,7 @@ impl RentV100 {
 }
 
 fn read_rent(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     meta: &LaunchAccountMeta,
     position: usize,
 ) -> Result<RentV100, LaunchBpfLoaderError> {
@@ -502,7 +500,7 @@ fn should_verify_data(owner: &[u8; 32], is_writable: bool) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<Vec<LaunchPreAccount>, LaunchBpfLoaderError> {
     account_metas
         .iter()
@@ -524,7 +522,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_bpf_loader_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     context: LaunchBpfLoaderContext,
 ) -> Result<(), LaunchBpfLoaderError> {
     let mut pre_lamports = 0_u128;
@@ -639,7 +637,7 @@ mod tests {
 
     #[test]
     fn write_mutates_exact_range_and_allows_historical_trailing_bytes() {
-        let mut accounts = BTreeMap::from([(PROGRAM, program_account(vec![0; 8]))]);
+        let mut accounts = AccountMap::from([(PROGRAM, program_account(vec![0; 8]))]);
         let mut instruction = write(2, &[1, 2, 3]);
         instruction.extend_from_slice(&[0xaa, 0xbb]);
         let applied = apply_launch_bpf_loader_instruction(
@@ -666,7 +664,7 @@ mod tests {
     fn write_error_order_is_signature_then_size_then_post_verifier() {
         let original = program_account(vec![0; 2]);
         let instruction = write(1, &[1, 2]);
-        let mut accounts = BTreeMap::from([(PROGRAM, original.clone())]);
+        let mut accounts = AccountMap::from([(PROGRAM, original.clone())]);
         assert_eq!(
             apply_launch_bpf_loader_instruction(
                 &instruction,
@@ -717,7 +715,7 @@ mod tests {
             exemption_threshold: 2.0,
             burn_percent: 100,
         };
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (PROGRAM, program_account(elf.clone())),
             (RENT_SYSVAR_ID, rent_account(rent)),
         ]);
@@ -750,7 +748,7 @@ mod tests {
         let mut account = program_account(elf.clone());
         let bank_context = context(LaunchBpfLoaderProfile::V1_1_14);
         account.lamports = bank_context.bank_rent.minimum_balance(elf.len());
-        let mut accounts = BTreeMap::from([(PROGRAM, account)]);
+        let mut accounts = AccountMap::from([(PROGRAM, account)]);
         let applied = apply_launch_bpf_loader_instruction(
             &1_u32.to_le_bytes(),
             &[meta(PROGRAM, true, true)],
@@ -776,7 +774,7 @@ mod tests {
         account.lamports = 0;
         account.owner = [8; 32];
         let original = account.clone();
-        let mut accounts = BTreeMap::from([(PROGRAM, account)]);
+        let mut accounts = AccountMap::from([(PROGRAM, account)]);
         assert!(matches!(
             apply_launch_bpf_loader_instruction(
                 &1_u32.to_le_bytes(),
@@ -793,7 +791,7 @@ mod tests {
     #[test]
     fn finalize_requests_rent_meta_before_signature_and_checks_elf_before_rent_data() {
         let invalid_program = program_account(vec![0; 64]);
-        let mut accounts = BTreeMap::from([(PROGRAM, invalid_program.clone())]);
+        let mut accounts = AccountMap::from([(PROGRAM, invalid_program.clone())]);
         assert_eq!(
             apply_launch_bpf_loader_instruction(
                 &1_u32.to_le_bytes(),

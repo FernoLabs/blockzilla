@@ -6,18 +6,22 @@
 //! iteration order is never observable: hashes and future checkpoints visit
 //! accounts in lexicographic pubkey order.
 
-use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    ops::Index,
-};
+use std::ops::Index;
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, hash_map::Entry};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::AccountSnapshot;
 
 pub type AccountPubkey = [u8; 32];
+
+/// Transaction-local account overlay and other small mutable account maps.
+///
+/// Ordering is not part of the execution contract: the canonical store hashes
+/// and checkpoints via [`AccountStore::visit_sorted`]. Open-addressing beats
+/// `BTreeMap` for the typical 2–64 key overlay.
+pub type AccountMap = HashMap<AccountPubkey, AccountSnapshot>;
 
 /// Backend contract used by canonical replay state.
 ///
@@ -255,7 +259,9 @@ pub enum AccountWrite {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccountWriteBatch {
-    writes: BTreeMap<AccountPubkey, AccountWrite>,
+    /// Publication order is irrelevant; the memory backend applies Puts/Deletes
+    /// independently and only requires uniqueness of keys within one batch.
+    writes: HashMap<AccountPubkey, AccountWrite>,
 }
 
 impl AccountWriteBatch {

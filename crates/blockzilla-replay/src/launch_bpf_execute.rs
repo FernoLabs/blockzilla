@@ -6,15 +6,15 @@
 //! The Bank's generic post-instruction verifier remains authoritative for the
 //! resulting account mutation.
 
-use std::{cell::RefCell, collections::BTreeMap};
+use std::cell::RefCell;
 
 use hashbrown::HashMap;
 use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{
-    AccountData, AccountSnapshot, BPF_LOADER_PROGRAM_ID, CompiledProgram, ExecutionEngine,
-    LaunchAccountMeta, LaunchBpfLoaderRent, ReplayCompiler,
+    AccountData, AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, CompiledProgram,
+    ExecutionEngine, LaunchAccountMeta, LaunchBpfLoaderRent, ReplayCompiler,
 };
 
 const MAX_LAUNCH_BPF_INSTRUCTION_ACCOUNTS: usize = 256;
@@ -191,7 +191,7 @@ pub fn apply_launch_bpf_program_instruction(
     program_id: [u8; 32],
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     compiler: &ReplayCompiler,
     compiled_program: &CompiledProgram,
     bank_rent: LaunchBpfLoaderRent,
@@ -212,7 +212,7 @@ pub(crate) fn apply_launch_bpf_program_instruction_with_stack(
     program_id: [u8; 32],
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     compiler: &ReplayCompiler,
     compiled_program: &CompiledProgram,
     bank_rent: LaunchBpfLoaderRent,
@@ -291,7 +291,7 @@ enum LaunchBpfSerializationEntry {
 impl LaunchBpfSerializationPlan {
     fn collect(
         account_metas: &[LaunchAccountMeta],
-        accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+        accounts: &AccountMap,
     ) -> Result<Self, LaunchBpfExecutionError> {
         if account_metas.len() > MAX_LAUNCH_BPF_INSTRUCTION_ACCOUNTS {
             return Err(LaunchBpfExecutionError::TooManyInstructionAccounts {
@@ -378,7 +378,7 @@ impl LaunchBpfSerializationPlan {
 pub(crate) fn serialize_parameters(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     instruction_data: &[u8],
 ) -> Result<Vec<u8>, LaunchBpfExecutionError> {
     let plan = LaunchBpfSerializationPlan::collect(account_metas, accounts)?;
@@ -398,7 +398,7 @@ pub(crate) fn serialize_parameters(
 fn serialize_parameters_with_plan(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     instruction_data: &[u8],
     plan: &LaunchBpfSerializationPlan,
     bytes: &mut Vec<u8>,
@@ -417,7 +417,7 @@ fn serialize_parameters_with_plan(
 fn serialize_parameters_and_baselines_with_plan(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     instruction_data: &[u8],
     plan: &LaunchBpfSerializationPlan,
     bytes: &mut Vec<u8>,
@@ -438,7 +438,7 @@ fn serialize_parameters_and_baselines_with_plan(
 fn serialize_parameters_with_plan_inner(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     instruction_data: &[u8],
     plan: &LaunchBpfSerializationPlan,
     bytes: &mut Vec<u8>,
@@ -487,7 +487,7 @@ fn serialize_parameters_with_plan_inner(
 #[cfg(test)]
 fn deserialize_parameters(
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     buffer: &[u8],
 ) -> Result<(), LaunchBpfExecutionError> {
     let plan = LaunchBpfSerializationPlan::collect(account_metas, accounts)?;
@@ -496,7 +496,7 @@ fn deserialize_parameters(
 
 fn deserialize_parameters_with_plan(
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     buffer: &[u8],
     plan: &LaunchBpfSerializationPlan,
 ) -> Result<(), LaunchBpfExecutionError> {
@@ -703,7 +703,7 @@ impl LaunchPreAccount {
 pub(crate) fn launch_pre_accounts(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<LaunchPreAccounts, LaunchBpfExecutionError> {
     let plan = LaunchBpfSerializationPlan::collect(account_metas, accounts)?;
     launch_pre_accounts_with_plan(program_id, account_metas, accounts, &plan)
@@ -713,7 +713,7 @@ pub(crate) fn launch_pre_accounts(
 fn launch_pre_accounts_with_plan(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     plan: &LaunchBpfSerializationPlan,
 ) -> Result<LaunchPreAccounts, LaunchBpfExecutionError> {
     let mut pre_accounts = LaunchPreAccounts::with_capacity(plan.unique_account_count);
@@ -734,7 +734,7 @@ fn launch_pre_accounts_with_plan(
 pub(crate) fn verify_launch_bpf_instruction(
     program_id: [u8; 32],
     pre_accounts: &[LaunchPreAccount],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     bank_rent: LaunchBpfLoaderRent,
 ) -> Result<(), LaunchBpfExecutionError> {
     let mut pre_lamports = 0_u128;
@@ -764,7 +764,7 @@ fn should_verify_data(
 }
 
 fn required_account(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     pubkey: [u8; 32],
 ) -> Result<&AccountSnapshot, LaunchBpfExecutionError> {
     accounts
@@ -820,7 +820,7 @@ mod tests {
     fn pooled_parameter_serialization_matches_fresh_abi_and_reuses_output() {
         clear_parameter_buffer_pool();
         let metas = [meta(OWNED, true), meta(OWNED, true), meta(EXTERNAL, false)];
-        let accounts = BTreeMap::from([
+        let accounts = AccountMap::from([
             (OWNED, account(PROGRAM, 11, &[1, 2, 3])),
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn fused_serialization_builds_identical_verifier_baselines() {
         let metas = [meta(OWNED, true), meta(OWNED, true), meta(EXTERNAL, false)];
-        let accounts = BTreeMap::from([
+        let accounts = AccountMap::from([
             (OWNED, account(PROGRAM, 11, &[1, 2, 3])),
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
@@ -932,7 +932,7 @@ mod tests {
     #[test]
     fn launch_parameter_abi_is_packed_and_duplicate_uses_one_byte() {
         let metas = [meta(OWNED, true), meta(OWNED, true), meta(EXTERNAL, false)];
-        let accounts = BTreeMap::from([
+        let accounts = AccountMap::from([
             (OWNED, account(PROGRAM, 11, &[1, 2, 3])),
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn launch_parameter_plan_collects_duplicate_and_packed_offsets_once() {
         let metas = [meta(OWNED, true), meta(OWNED, true), meta(EXTERNAL, false)];
-        let accounts = BTreeMap::from([
+        let accounts = AccountMap::from([
             (OWNED, account(PROGRAM, 11, &[1, 2, 3])),
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
@@ -986,7 +986,7 @@ mod tests {
                 let pubkey = [index as u8; 32];
                 (pubkey, account(PROGRAM, 1, &[]))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<AccountMap>();
         let metas = (0_u16..=u8::MAX.into())
             .map(|index| meta([index as u8; 32], true))
             .collect::<Vec<_>>();
@@ -1024,7 +1024,7 @@ mod tests {
 
     #[test]
     fn verifier_baselines_are_inline_for_common_instructions_and_spill_when_wide() {
-        fn fixture(count: usize) -> (Vec<LaunchAccountMeta>, BTreeMap<[u8; 32], AccountSnapshot>) {
+        fn fixture(count: usize) -> (Vec<LaunchAccountMeta>, AccountMap) {
             let metas = (0..count)
                 .map(|index| meta([index as u8; 32], true))
                 .collect::<Vec<_>>();
@@ -1035,7 +1035,7 @@ mod tests {
                         account(PROGRAM, index as u64 + 1, &[index as u8]),
                     )
                 })
-                .collect::<BTreeMap<_, _>>();
+                .collect::<AccountMap>();
             (metas, accounts)
         }
 
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn no_op_copyback_keeps_account_data_shared() {
         let metas = [meta(OWNED, true)];
-        let mut accounts = BTreeMap::from([(OWNED, account(PROGRAM, 11, &[1, 2, 3]))]);
+        let mut accounts = AccountMap::from([(OWNED, account(PROGRAM, 11, &[1, 2, 3]))]);
         let shared_before = accounts[&OWNED].data.clone();
         let bytes = serialize_parameters(PROGRAM, &metas, &accounts, &[]).unwrap();
 
@@ -1065,7 +1065,7 @@ mod tests {
     #[test]
     fn deserializer_copies_back_only_lamports_and_fixed_data() {
         let metas = [meta(OWNED, true)];
-        let mut accounts = BTreeMap::from([(OWNED, account(PROGRAM, 11, &[1, 2, 3]))]);
+        let mut accounts = AccountMap::from([(OWNED, account(PROGRAM, 11, &[1, 2, 3]))]);
         let shared_before = accounts[&OWNED].data.clone();
         let mut bytes = serialize_parameters(PROGRAM, &metas, &accounts, &[]).unwrap();
         let lamports_start = 8 + 1 + 1 + 1 + 32;
@@ -1087,7 +1087,7 @@ mod tests {
     #[test]
     fn post_verifier_allows_owned_writable_data_but_balances_lamports() {
         let metas = [meta(OWNED, true), meta(EXTERNAL, true)];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (OWNED, account(PROGRAM, 11, &[1, 2, 3])),
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
@@ -1111,7 +1111,7 @@ mod tests {
     #[test]
     fn post_verifier_rejects_external_data_change_before_balance_check() {
         let metas = [meta(EXTERNAL, true)];
-        let mut accounts = BTreeMap::from([(EXTERNAL, account([6; 32], 12, &[4, 5]))]);
+        let mut accounts = AccountMap::from([(EXTERNAL, account([6; 32], 12, &[4, 5]))]);
         let pre = launch_pre_accounts(PROGRAM, &metas, &accounts).unwrap();
         accounts.get_mut(&EXTERNAL).unwrap().data[0] = 9;
 

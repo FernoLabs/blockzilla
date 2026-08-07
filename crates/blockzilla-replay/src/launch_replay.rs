@@ -16,12 +16,12 @@
 //! result profile and must be closed before claiming full Bank parity.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-use hashbrown::{HashMap, hash_map::Entry as HashEntry};
+use hashbrown::{HashMap, hash_map::Entry, hash_map::Entry as HashEntry};
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -35,7 +35,7 @@ use crate::launch_vote::{
     try_apply_launch_vote_direct_cached_lazy,
 };
 use crate::{
-    AccountBatchCommit, AccountSnapshot, AccountStoreError, AccountWriteBatch,
+    AccountBatchCommit, AccountMap, AccountSnapshot, AccountStoreError, AccountWriteBatch,
     BPF_LOADER_PROGRAM_ID, CLOCK_SYSVAR_ID, CONFIG_PROGRAM_ID, CompactArchivedTransactionOutcome,
     CompactGenerationContext, CompactGenesisProbe, CompactGenesisSource, CompactInstructionData,
     CompactInstructionProbe, CompactMessageVersion, CompactProbeError, CompactSlotProbe,
@@ -3009,7 +3009,7 @@ impl LaunchReplay {
 
             // Only accounts changed by this transaction are copied. If a
             // later instruction fails, this overlay is discarded.
-            let mut overlay = BTreeMap::<[u8; 32], AccountSnapshot>::new();
+            let mut overlay = AccountMap::new();
             let mut absent_overlay_accounts = AbsentOverlayAccounts::new();
             seed_absent_covered_pre_balances(
                 &self.outcome.account_state,
@@ -3930,7 +3930,7 @@ fn seed_absent_covered_pre_balances(
     canonical: &MemoryAccountStore,
     transaction: &CompactTransactionProbe,
     transaction_metas: &TransactionAccountMetaLayout<'_>,
-    overlay: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    overlay: &mut AccountMap,
     absent_overlay_accounts: &mut AbsentOverlayAccounts,
 ) {
     let Some(oracle) = &transaction.balance_oracle else {
@@ -4210,7 +4210,7 @@ fn instruction_account_metas(
 }
 
 fn begin_account_diff_journal(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     metas: &[LaunchAccountMeta],
     absent_accounts: &AbsentOverlayAccounts,
 ) -> AccountDiffJournal {
@@ -4229,7 +4229,7 @@ fn begin_account_diff_journal(
 }
 
 fn reconcile_absent_overlay_accounts(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     metas: &[LaunchAccountMeta],
     absent_accounts: &mut AbsentOverlayAccounts,
 ) {
@@ -4251,7 +4251,7 @@ fn capture_instruction_diff(
     instruction_path_index: u16,
     program_id: [u8; 32],
     journal: AccountDiffJournal,
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     metas: &[LaunchAccountMeta],
     absent_accounts: &mut AbsentOverlayAccounts,
 ) -> InstructionDiff {
@@ -4533,7 +4533,7 @@ mod tests {
             data: vec![7].into(),
             ..default_system_account()
         };
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (READONLY, structural_account()),
             (WRITABLE, structural_account()),
             (CREATED_WRITABLE, structural_account()),
@@ -5769,7 +5769,7 @@ mod tests {
         let transaction_metas = transaction_account_meta_layout(105_368, &transaction).unwrap();
         assert!(!transaction_metas.is_writable(2));
         let replay = LaunchReplay::from_genesis(0, Some(&exact_genesis()), false).unwrap();
-        let mut overlay = BTreeMap::new();
+        let mut overlay = AccountMap::new();
         let mut absent = AbsentOverlayAccounts::new();
 
         seed_absent_covered_pre_balances(

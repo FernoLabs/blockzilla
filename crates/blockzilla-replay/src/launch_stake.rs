@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AccountSnapshot, LaunchAccountMeta, MemoryAccountStore, RENT_SYSVAR_ID,
+    AccountMap, AccountSnapshot, LaunchAccountMeta, MemoryAccountStore, RENT_SYSVAR_ID,
     decode_launch_vote_credits, default_system_account,
 };
 
@@ -452,7 +452,7 @@ pub fn launch_stake_history_entry(
 pub fn apply_launch_stake_instruction(
     data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
     let mut working = accounts.clone();
@@ -467,7 +467,7 @@ pub fn apply_launch_stake_instruction(
 pub fn apply_launch_stake_instruction_in_place(
     data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
     for meta in account_metas {
@@ -484,7 +484,7 @@ pub fn apply_launch_stake_instruction_in_place(
 fn apply_inner(
     data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
     // v1.0.7 obtains the first keyed account before deserializing data.
@@ -694,7 +694,7 @@ fn validate_sysvar(
 
 fn read_rent(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<LaunchStakeRent, LaunchStakeError> {
     validate_sysvar(account_metas, position, RENT_SYSVAR_ID)?;
@@ -708,7 +708,7 @@ fn read_rent(
 
 fn read_clock(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<LaunchClock, LaunchStakeError> {
     validate_sysvar(account_metas, position, CLOCK_SYSVAR_ID)?;
@@ -727,7 +727,7 @@ fn read_clock(
 
 fn read_stake_history(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<LaunchStakeHistory, LaunchStakeError> {
     validate_sysvar(account_metas, position, STAKE_HISTORY_SYSVAR_ID)?;
@@ -755,7 +755,7 @@ fn read_stake_history(
 
 fn read_stake_config(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     position: usize,
 ) -> Result<LaunchStakeConfig, LaunchStakeError> {
     let meta = required_meta(account_metas, position)?;
@@ -806,7 +806,7 @@ fn launch_config_payload(data: &[u8]) -> Option<&[u8]> {
 }
 
 fn decode_account(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     pubkey: [u8; 32],
 ) -> Result<LaunchStakeState, LaunchStakeError> {
     let account = accounts
@@ -816,7 +816,7 @@ fn decode_account(
 }
 
 fn write_account_state(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     pubkey: [u8; 32],
     state: &LaunchStakeState,
 ) -> Result<(), LaunchStakeError> {
@@ -833,7 +833,7 @@ fn write_account_state(
 }
 
 fn initialize(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     stake_meta: &LaunchAccountMeta,
     authorized: LaunchStakeAuthorized,
     lockup: LaunchStakeLockup,
@@ -868,7 +868,7 @@ fn initialize(
 }
 
 fn delegate(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     stake_meta: &LaunchAccountMeta,
     vote_meta: &LaunchAccountMeta,
     signers: &BTreeSet<[u8; 32]>,
@@ -943,7 +943,7 @@ fn delegate(
 }
 
 fn split(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     source_meta: &LaunchAccountMeta,
     destination_meta: &LaunchAccountMeta,
     lamports: u64,
@@ -1039,7 +1039,7 @@ fn split(
 }
 
 fn merge(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     destination_meta: &LaunchAccountMeta,
     source_meta: &LaunchAccountMeta,
     signers: &BTreeSet<[u8; 32]>,
@@ -1113,7 +1113,7 @@ fn mergeable_stake_meta(
 }
 
 fn authorize(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     stake_meta: &LaunchAccountMeta,
     new_authority: [u8; 32],
     authority_type: LaunchStakeAuthorize,
@@ -1194,7 +1194,7 @@ fn authorize_meta(
 }
 
 fn deactivate(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     stake_meta: &LaunchAccountMeta,
     signers: &BTreeSet<[u8; 32]>,
     epoch: u64,
@@ -1222,7 +1222,7 @@ fn deactivate(
 }
 
 fn set_lockup(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     stake_meta: &LaunchAccountMeta,
     lockup: LaunchStakeLockupArgs,
     signers: &BTreeSet<[u8; 32]>,
@@ -1279,7 +1279,7 @@ fn set_lockup_meta(
 }
 
 fn withdraw(
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     stake_meta: &LaunchAccountMeta,
     destination_meta: &LaunchAccountMeta,
     lamports: u64,
@@ -1551,7 +1551,7 @@ fn is_zeroed(data: &[u8]) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Vec<LaunchPreAccount> {
     account_metas
         .iter()
@@ -1575,7 +1575,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_stake_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<(), LaunchStakeError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;
@@ -1680,7 +1680,7 @@ mod tests {
             exemption_threshold: 2.0,
             burn_percent: 100,
         };
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 vote_pubkey,
                 AccountSnapshot {
@@ -1797,7 +1797,7 @@ mod tests {
             burn_percent: 100,
         };
         let reserve = rent.minimum_balance(LAUNCH_STAKE_ACCOUNT_DATA_LEN);
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(reserve + 1, LaunchStakeState::Uninitialized),
@@ -1829,7 +1829,7 @@ mod tests {
             })
         );
 
-        let mut exactly_exempt = BTreeMap::from([
+        let mut exactly_exempt = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(reserve, LaunchStakeState::Uninitialized),
@@ -1846,7 +1846,7 @@ mod tests {
         );
         assert_eq!(exactly_exempt, before);
 
-        let mut readonly = BTreeMap::from([
+        let mut readonly = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(reserve + 1, LaunchStakeState::Uninitialized),
@@ -1886,7 +1886,7 @@ mod tests {
             },
             lockup: LaunchStakeLockup::default(),
         });
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (stake_pubkey, stake_account(lamports, initialized)),
             (vote_pubkey, initialized_vote_account(vote_pubkey, 1)),
             (CLOCK_SYSVAR_ID, clock_account(1)),
@@ -1972,7 +1972,7 @@ mod tests {
             meta(STAKE_CONFIG_ID, false, false),
             meta(authority, true, false),
         ];
-        let mut accounts = BTreeMap::from(common_accounts.clone());
+        let mut accounts = AccountMap::from(common_accounts.clone());
         accounts.insert(
             stake_pubkey,
             stake_account(1_000, LaunchStakeState::Stake(meta_state, inactive_stake)),
@@ -2010,7 +2010,7 @@ mod tests {
             },
             ..inactive_stake
         };
-        let mut active_accounts = BTreeMap::from(common_accounts);
+        let mut active_accounts = AccountMap::from(common_accounts);
         active_accounts.insert(
             stake_pubkey,
             stake_account(1_000, LaunchStakeState::Stake(meta_state, active_stake)),
@@ -2032,7 +2032,7 @@ mod tests {
         let authority = [0x61; 32];
         let instruction = wincode::serialize(&LaunchStakeInstructionV100::Deactivate).unwrap();
         assert_eq!(instruction, [5, 0, 0, 0]);
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(1_000, delegated_stake_state(authority, u64::MAX)),
@@ -2074,7 +2074,7 @@ mod tests {
     fn deactivate_wrong_authority_is_rejected_atomically() {
         let stake_pubkey = [0x62; 32];
         let authority = [0x63; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(1_000, delegated_stake_state(authority, u64::MAX)),
@@ -2104,7 +2104,7 @@ mod tests {
     fn deactivate_rejects_an_already_deactivated_stake_after_authority_check() {
         let stake_pubkey = [0x65; 32];
         let authority = [0x66; 32];
-        let original = BTreeMap::from([
+        let original = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(1_000, delegated_stake_state(authority, 3)),
@@ -2152,7 +2152,7 @@ mod tests {
     fn readonly_deactivate_is_rolled_back_by_the_post_verifier() {
         let stake_pubkey = [0x68; 32];
         let authority = [0x69; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(1_000, delegated_stake_state(authority, u64::MAX)),
@@ -2187,13 +2187,13 @@ mod tests {
         let wrong_sysvar = [0x6c; 32];
         let stake = stake_account(1_000, LaunchStakeState::RewardsPool);
 
-        let mut missing_first = BTreeMap::new();
+        let mut missing_first = AccountMap::new();
         assert_eq!(
             apply_launch_stake_instruction(&[], &[], &mut missing_first, context(),).unwrap_err(),
             LaunchStakeError::MissingAccount { position: 0 }
         );
 
-        let mut missing_clock = BTreeMap::from([(stake_pubkey, stake.clone())]);
+        let mut missing_clock = AccountMap::from([(stake_pubkey, stake.clone())]);
         assert_eq!(
             apply_launch_stake_instruction(
                 &[5, 0, 0, 0],
@@ -2205,7 +2205,7 @@ mod tests {
             LaunchStakeError::MissingAccount { position: 1 }
         );
 
-        let mut wrong_clock = BTreeMap::from([
+        let mut wrong_clock = AccountMap::from([
             (stake_pubkey, stake.clone()),
             (wrong_sysvar, clock_account(10)),
         ]);
@@ -2227,7 +2227,7 @@ mod tests {
             }
         );
 
-        let mut malformed_clock = BTreeMap::from([
+        let mut malformed_clock = AccountMap::from([
             (stake_pubkey, stake.clone()),
             (
                 CLOCK_SYSVAR_ID,
@@ -2252,7 +2252,7 @@ mod tests {
         );
 
         let mut invalid_state =
-            BTreeMap::from([(stake_pubkey, stake), (CLOCK_SYSVAR_ID, clock_account(10))]);
+            AccountMap::from([(stake_pubkey, stake), (CLOCK_SYSVAR_ID, clock_account(10))]);
         assert_eq!(
             apply_launch_stake_instruction(
                 &[5, 0, 0, 0],
@@ -2275,7 +2275,7 @@ mod tests {
     fn delegate_validates_config_before_stake_state_and_authority() {
         let stake_pubkey = [0x26; 32];
         let vote_pubkey = [0x27; 32];
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(1_000, LaunchStakeState::RewardsPool),
@@ -2364,7 +2364,7 @@ mod tests {
             },
             credits_observed: 7,
         };
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 source,
                 stake_account(1_000, LaunchStakeState::Stake(meta_state, stake)),
@@ -2438,7 +2438,7 @@ mod tests {
         // Exact balance movement observed at slot 28,621,186. The fee payer is
         // outside the Stake instruction account list and is reconciled by the
         // transaction layer.
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 destination,
                 stake_account(
@@ -2517,7 +2517,7 @@ mod tests {
             meta(authority, true, false),
         ];
 
-        let mut active_destination = BTreeMap::from([
+        let mut active_destination = AccountMap::from([
             (
                 destination,
                 stake_account(1_000, LaunchStakeState::Stake(stake_meta, active_stake)),
@@ -2545,7 +2545,7 @@ mod tests {
         assert_eq!(active_destination, before);
 
         // Destination authorization is checked before source state decoding.
-        let mut missing_authority = BTreeMap::from([
+        let mut missing_authority = AccountMap::from([
             (
                 destination,
                 stake_account(1_000, LaunchStakeState::Initialized(stake_meta)),
@@ -2573,7 +2573,7 @@ mod tests {
             rent_exempt_reserve: 101,
             ..stake_meta
         };
-        let mut mismatch = BTreeMap::from([
+        let mut mismatch = AccountMap::from([
             (
                 destination,
                 stake_account(1_000, LaunchStakeState::Initialized(stake_meta)),
@@ -2609,7 +2609,7 @@ mod tests {
             },
             lockup: LaunchStakeLockup::default(),
         };
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (
                 stake_pubkey,
                 stake_account(5_000, LaunchStakeState::Initialized(stake_meta)),
@@ -2661,7 +2661,7 @@ mod tests {
         let mut data = vec![1, 0, 0, 0];
         data.extend_from_slice(&new_authority);
         data.extend_from_slice(&0_u32.to_le_bytes());
-        let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_000, state))]);
+        let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_000, state))]);
         apply_launch_stake_instruction(
             &data,
             &[
@@ -2699,7 +2699,7 @@ mod tests {
         let mut staker_instruction = vec![1, 0, 0, 0];
         staker_instruction.extend_from_slice(&new_authority);
         staker_instruction.extend_from_slice(&0_u32.to_le_bytes());
-        let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_000, state))]);
+        let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_000, state))]);
         let before = accounts.clone();
 
         assert_eq!(
@@ -2766,7 +2766,7 @@ mod tests {
             },
             lockup: LaunchStakeLockup::default(),
         });
-        let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_100, state))]);
+        let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_100, state))]);
         apply_launch_stake_instruction(
             &[4, 0, 0, 0, 232, 3, 0, 0, 0, 0, 0, 0],
             &[
@@ -2862,7 +2862,7 @@ mod tests {
         let state_wire_len = wincode::serialize(&original_state).unwrap().len();
         let mut account = stake_account(1_000, original_state);
         account.data[state_wire_len..].fill(0xa5);
-        let mut accounts = BTreeMap::from([(stake_pubkey, account)]);
+        let mut accounts = AccountMap::from([(stake_pubkey, account)]);
 
         let mutation = apply_launch_stake_instruction(
             &instruction,
@@ -2934,7 +2934,7 @@ mod tests {
             },
             stake,
         );
-        let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_000, state))]);
+        let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_000, state))]);
         apply_launch_stake_instruction(
             &set_lockup_data(Some(88), None, None),
             &[
@@ -2982,7 +2982,7 @@ mod tests {
         let instruction = set_lockup_data(None, None, Some(new_custodian));
 
         for wrong_signer in [None, Some(withdrawer), Some(new_custodian)] {
-            let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_000, state))]);
+            let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_000, state))]);
             let before = accounts.clone();
             let mut metas = vec![meta(stake_pubkey, false, true)];
             if let Some(wrong_signer) = wrong_signer {
@@ -3001,7 +3001,7 @@ mod tests {
             assert_eq!(accounts, before);
         }
 
-        let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_000, state))]);
+        let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_000, state))]);
         apply_launch_stake_instruction(
             &instruction,
             &[
@@ -3050,7 +3050,7 @@ mod tests {
         });
 
         for clock in [context_at(0, 0), context_at(11, 11)] {
-            let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_000, state))]);
+            let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_000, state))]);
             assert_eq!(
                 apply_launch_stake_instruction(
                     &set_lockup_data(None, Some(20), None),
@@ -3095,7 +3095,7 @@ mod tests {
         });
         let instruction = set_lockup_data(Some(123), None, None);
 
-        let mut readonly = BTreeMap::from([(stake_pubkey, stake_account(1_000, state))]);
+        let mut readonly = AccountMap::from([(stake_pubkey, stake_account(1_000, state))]);
         let before = readonly.clone();
         assert_eq!(
             apply_launch_stake_instruction(
@@ -3116,7 +3116,7 @@ mod tests {
 
         let mut wrong_owner_account = stake_account(1_000, state);
         wrong_owner_account.owner = [0x7d; 32];
-        let mut wrong_owner = BTreeMap::from([(stake_pubkey, wrong_owner_account)]);
+        let mut wrong_owner = AccountMap::from([(stake_pubkey, wrong_owner_account)]);
         let before = wrong_owner.clone();
         assert_eq!(
             apply_launch_stake_instruction(
@@ -3135,7 +3135,7 @@ mod tests {
         );
         assert_eq!(wrong_owner, before);
 
-        let mut malformed = BTreeMap::from([(
+        let mut malformed = AccountMap::from([(
             stake_pubkey,
             AccountSnapshot {
                 lamports: 1_000,
@@ -3173,7 +3173,7 @@ mod tests {
             },
             lockup: LaunchStakeLockup::default(),
         });
-        let mut accounts = BTreeMap::from([(stake_pubkey, stake_account(1_100, state))]);
+        let mut accounts = AccountMap::from([(stake_pubkey, stake_account(1_100, state))]);
         apply_launch_stake_instruction(
             &[4, 0, 0, 0, 232, 3, 0, 0, 0, 0, 0, 0],
             &[
@@ -3207,7 +3207,7 @@ mod tests {
             },
             lockup: LaunchStakeLockup::default(),
         });
-        let mut accounts = BTreeMap::from([
+        let mut accounts = AccountMap::from([
             (source, stake_account(1_000, state)),
             (
                 destination,

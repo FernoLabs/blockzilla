@@ -7,7 +7,7 @@
 //! front of account zero and intentionally leaves any remaining account tail
 //! untouched.
 
-use std::{collections::BTreeMap, fmt, marker::PhantomData, mem::size_of};
+use std::{fmt, marker::PhantomData, mem::size_of};
 
 use serde::{
     Deserialize, Deserializer,
@@ -15,7 +15,7 @@ use serde::{
 };
 use thiserror::Error;
 
-use crate::{AccountSnapshot, LaunchAccountMeta, default_system_account};
+use crate::{AccountMap, AccountSnapshot, LaunchAccountMeta, default_system_account};
 
 const MAX_INSTRUCTION_LEN: usize = 1_232;
 
@@ -82,7 +82,7 @@ pub enum LaunchConfigError {
 pub fn apply_launch_config_instruction(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
 ) -> Result<LaunchConfigMutation, LaunchConfigError> {
     let mut working = accounts.clone();
     let mutation =
@@ -96,7 +96,7 @@ pub fn apply_launch_config_instruction(
 pub fn apply_launch_config_instruction_in_place(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
 ) -> Result<LaunchConfigMutation, LaunchConfigError> {
     // v1.0.7 calls limited_deserialize before asking for account zero.
     let incoming = decode_instruction_keys(instruction_data)?;
@@ -356,7 +356,7 @@ fn is_zeroed(data: &[u8]) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Vec<LaunchPreAccount> {
     account_metas
         .iter()
@@ -380,7 +380,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_config_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<(), LaunchConfigError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn initializes_zeroed_account_and_preserves_unused_tail() {
         let instruction = wire(&[], &[1, 2, 3]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(vec![0; 12]))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(vec![0; 12]))]);
         let mutation = apply_launch_config_instruction(
             &instruction,
             &[meta(CONFIG, true, true)],
@@ -554,7 +554,7 @@ mod tests {
     fn configured_external_signers_can_update_without_config_signature() {
         let current = wire(&[(SIGNER_A, true), (SIGNER_B, true)], &[0; 4]);
         let incoming = wire(&[(SIGNER_A, true), (SIGNER_B, true)], &[9; 4]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(current))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(current))]);
 
         apply_launch_config_instruction(
             &incoming,
@@ -573,7 +573,7 @@ mod tests {
     fn missing_current_signer_rejects_update_atomically() {
         let current = wire(&[(SIGNER_A, true), (SIGNER_B, true)], &[0; 4]);
         let incoming = wire(&[(SIGNER_A, true)], &[9; 4]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(current))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(current))]);
         let before = accounts.clone();
 
         let error = apply_launch_config_instruction(
@@ -593,7 +593,7 @@ mod tests {
     fn positional_signer_mismatch_is_rejected() {
         let current = wire(&[(SIGNER_A, true)], &[0]);
         let incoming = wire(&[(SIGNER_A, true)], &[1]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(current))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(current))]);
         let error = apply_launch_config_instruction(
             &incoming,
             &[meta(CONFIG, false, true), meta(SIGNER_B, true, false)],
@@ -611,7 +611,7 @@ mod tests {
         let instruction = wire(&[], &[1]);
         let mut external = config_account(vec![0; 2]);
         external.owner = [99; 32];
-        let mut accounts = BTreeMap::from([(CONFIG, external)]);
+        let mut accounts = AccountMap::from([(CONFIG, external)]);
         let error = apply_launch_config_instruction(
             &instruction,
             &[meta(CONFIG, true, true)],
@@ -623,7 +623,7 @@ mod tests {
             LaunchConfigError::ExternalAccountDataModified { pubkey: CONFIG }
         );
 
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(vec![0; 2]))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(vec![0; 2]))]);
         let error = apply_launch_config_instruction(
             &instruction,
             &[meta(CONFIG, true, false)],
@@ -641,7 +641,7 @@ mod tests {
         let instruction = wire(&[], &[1]);
         let mut account = config_account(instruction.clone());
         account.owner = [99; 32];
-        let mut accounts = BTreeMap::from([(CONFIG, account.clone())]);
+        let mut accounts = AccountMap::from([(CONFIG, account.clone())]);
         let mutation = apply_launch_config_instruction(
             &instruction,
             &[meta(CONFIG, true, false)],
@@ -657,7 +657,7 @@ mod tests {
     fn initialized_config_cannot_introduce_unknown_external_signer() {
         let current = wire(&[(SIGNER_A, true)], &[0]);
         let incoming = wire(&[(SIGNER_B, true)], &[1]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(current))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(current))]);
         let error = apply_launch_config_instruction(
             &incoming,
             &[meta(CONFIG, false, true), meta(SIGNER_B, true, false)],
@@ -674,7 +674,7 @@ mod tests {
     fn config_signer_substitution_preserves_launch_cardinality_quirk() {
         let current = wire(&[(SIGNER_A, true), (SIGNER_B, true)], &[0]);
         let incoming = wire(&[(CONFIG, true), (CONFIG, true)], &[1]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(current))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(current))]);
 
         apply_launch_config_instruction(&incoming, &[meta(CONFIG, true, true)], &mut accounts)
             .unwrap();
@@ -685,7 +685,7 @@ mod tests {
     fn repeated_authorized_signer_preserves_launch_cardinality_quirk() {
         let current = wire(&[(SIGNER_A, true), (SIGNER_B, true)], &[0]);
         let incoming = wire(&[(SIGNER_A, true), (SIGNER_A, true)], &[1]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(current))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(current))]);
 
         apply_launch_config_instruction(
             &incoming,
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn malformed_current_state_precedes_signature_validation() {
         let instruction = wire(&[], &[1]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(Vec::new()))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(Vec::new()))]);
         let error = apply_launch_config_instruction(
             &instruction,
             &[meta(CONFIG, false, true)],
@@ -718,14 +718,14 @@ mod tests {
 
     #[test]
     fn invalid_data_is_reported_before_missing_account() {
-        let error = apply_launch_config_instruction(&[], &[], &mut BTreeMap::new()).unwrap_err();
+        let error = apply_launch_config_instruction(&[], &[], &mut AccountMap::new()).unwrap_err();
         assert_eq!(error, LaunchConfigError::InvalidInstructionData);
     }
 
     #[test]
     fn account_must_hold_complete_instruction_and_rollback_on_failure() {
         let instruction = wire(&[], &[1, 2, 3]);
-        let mut accounts = BTreeMap::from([(CONFIG, config_account(vec![0; 3]))]);
+        let mut accounts = AccountMap::from([(CONFIG, config_account(vec![0; 3]))]);
         let before = accounts.clone();
         let error = apply_launch_config_instruction(
             &instruction,

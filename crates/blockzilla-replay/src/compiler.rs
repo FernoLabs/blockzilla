@@ -1,5 +1,5 @@
 use crate::{
-    AccountSnapshot, BPF_LOADER_PROGRAM_ID, LaunchAccountMeta, LaunchBpfExecutionError,
+    AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, LaunchAccountMeta, LaunchBpfExecutionError,
     LaunchBpfLoaderRent,
     launch_bpf_execute::{
         LaunchPreAccounts, apply_launch_bpf_program_instruction_with_stack,
@@ -25,7 +25,6 @@ use solana_sbpf::{
 use std::sync::atomic::AtomicUsize;
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
     fmt,
     ptr::NonNull,
     slice, str,
@@ -193,6 +192,15 @@ struct ReplayExecutionScratch {
     stack: AlignedMemory<{ ebpf::HOST_ALIGN }>,
     heap: AlignedMemory<{ ebpf::HOST_ALIGN }>,
     call_frames: Vec<CallFrame>,
+    /// Bytes of stack written by the previous invocation that still need zeroing.
+    stack_dirty_len: usize,
+    /// Bytes of heap written/allocated by the previous invocation that still
+    /// need zeroing. Launch-era programs use the bump allocator tracked by
+    /// [`ReplayContext::heap_position`]; raw stores beyond that watermark are
+    /// outside the supported ABI surface for this runtime.
+    heap_dirty_len: usize,
+    /// When true, call frames carry residual state from the previous invoke.
+    call_frames_dirty: bool,
 }
 
 std::thread_local! {
@@ -210,6 +218,10 @@ impl ReplayExecutionScratch {
             stack: AlignedMemory::zero_filled(config.stack_size()),
             heap: AlignedMemory::zero_filled(LEGACY_BPF_HEAP_SIZE),
             call_frames: vec![CallFrame::default(); config.max_call_depth],
+            // Fresh zero-filled memory needs no reset on the first acquire.
+            stack_dirty_len: 0,
+            heap_dirty_len: 0,
+            call_frames_dirty: false,
         }
     }
 
@@ -221,9 +233,33 @@ impl ReplayExecutionScratch {
             *self = Self::new(config);
             return;
         }
-        self.stack.as_slice_mut().fill(0);
-        self.heap.as_slice_mut().fill(0);
-        self.call_frames.fill(CallFrame::default());
+        let stack_end = self.stack_dirty_len.min(self.stack.len());
+        if stack_end > 0 {
+            self.stack.as_slice_mut()[..stack_end].fill(0);
+            self.stack_dirty_len = 0;
+        }
+        let heap_end = self.heap_dirty_len.min(self.heap.len());
+        if heap_end > 0 {
+            self.heap.as_slice_mut()[..heap_end].fill(0);
+            self.heap_dirty_len = 0;
+        }
+        if self.call_frames_dirty {
+            self.call_frames.fill(CallFrame::default());
+            self.call_frames_dirty = false;
+        }
+    }
+
+    /// Record residual state after a VM invoke so the next [`Self::reset`]
+    /// only clears bytes that may be non-zero.
+    fn mark_used_after_execute(&mut self, heap_position: u64, stack_fully_used: bool) {
+        let heap_used = usize::try_from(heap_position)
+            .unwrap_or(self.heap.len())
+            .min(self.heap.len());
+        self.heap_dirty_len = self.heap_dirty_len.max(heap_used);
+        if stack_fully_used {
+            self.stack_dirty_len = self.stack.len();
+        }
+        self.call_frames_dirty = true;
     }
 }
 
@@ -601,6 +637,7 @@ impl ReplayCompiler {
             stack,
             heap,
             call_frames,
+            ..
         } = scratch.get_mut();
         let stack_len = stack.len();
         let input_ptr: *mut [u8] = input.as_mut_slice();
@@ -643,17 +680,24 @@ impl ReplayCompiler {
         let return_value = match result {
             Ok(value) => value,
             Err(EbpfError::ExceededMaxInstructions) => {
+                scratch
+                    .get_mut()
+                    .mark_used_after_execute(context.heap_position, true);
                 return Err(CompilerError::WatchdogExceeded {
                     limit: WATCHDOG_INSTRUCTION_LIMIT,
                 });
             }
             Err(error) => {
-                return Err(CompilerError::Execute(format!(
-                    "{error} at guest pc {}",
-                    vm.registers[11]
-                )));
+                let pc = vm.registers[11];
+                scratch
+                    .get_mut()
+                    .mark_used_after_execute(context.heap_position, true);
+                return Err(CompilerError::Execute(format!("{error} at guest pc {pc}")));
             }
         };
+        scratch
+            .get_mut()
+            .mark_used_after_execute(context.heap_position, true);
         let engine = match mode {
             ExecutionMode::Jit => ExecutionEngine::NativeJitX86_64,
             ExecutionMode::Interpreted | ExecutionMode::PreferJit => ExecutionEngine::Interpreter,
@@ -707,7 +751,13 @@ impl ReplayCompiler {
         let frame_pointer = ebpf::MM_STACK_START.saturating_add(config.stack_frame_size as u64);
         let outcome = native
             .execute(&mut memory_mapping, ebpf::MM_INPUT_START, frame_pointer)
-            .map_err(CompilerError::Execute)?;
+            .map_err(CompilerError::Execute);
+        // Native AArch64 does not expose the bump-allocator watermark, so treat
+        // the full stack and heap as dirty after every invoke.
+        scratch
+            .get_mut()
+            .mark_used_after_execute(LEGACY_BPF_HEAP_SIZE as u64, true);
+        let outcome = outcome?;
         Ok(ExecutionOutcome {
             engine: ExecutionEngine::NativeCraneliftAarch64Subset,
             return_value: outcome.return_value,
@@ -1564,7 +1614,7 @@ solana_sbpf::declare_builtin_function!(
         let current_accounts = bindings
             .iter()
             .map(|binding| (binding.pubkey, binding.snapshot.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<AccountMap>();
         if current_accounts.len() != bindings.len() {
             return Err(malformed_cpi("duplicate unique account pubkey"));
         }
@@ -1648,7 +1698,7 @@ solana_sbpf::declare_builtin_function!(
         let compiled_program = compiler
             .compile_nested_program(instruction.program_id, &program_binding.snapshot.data)
             .map_err(|error| ReplaySyscallError::CrossProgramExecution(error.to_string()))?;
-        let mut cpi_accounts = BTreeMap::new();
+        let mut cpi_accounts = AccountMap::with_capacity(instruction.accounts.len() + 1);
         for account in &instruction.accounts {
             if cpi_accounts.contains_key(&account.pubkey) {
                 continue;
@@ -2352,7 +2402,7 @@ mod tests {
                 is_writable: false,
             },
         ];
-        let mut bank = BTreeMap::new();
+        let mut bank = AccountMap::new();
         bank.insert(
             first_key,
             AccountSnapshot {
@@ -2452,7 +2502,7 @@ mod tests {
             is_signer: false,
             is_writable: false,
         }];
-        let bank = BTreeMap::from([(
+        let bank = AccountMap::from([(
             PUBKEY,
             AccountSnapshot {
                 lamports: 41,
@@ -2519,7 +2569,7 @@ mod tests {
             is_signer: true,
             is_writable: true,
         }];
-        let bank = BTreeMap::from([(
+        let bank = AccountMap::from([(
             PUBKEY,
             AccountSnapshot {
                 lamports: 41,
