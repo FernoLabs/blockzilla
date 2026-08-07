@@ -21,6 +21,37 @@ pub struct CompactPohEntry {
     pub num_hashes: u64,
     pub hash: [u8; 32],
     pub tx_count: u32,
+    /// Total signatures across this entry's transactions (sum of each transaction's
+    /// `signatures.len()`, not the transaction count). Lets `verify-archive-v2-poh`
+    /// slice `signatures.bin` per entry directly from the PoH sidecar instead of
+    /// decompressing and decoding the hot block just to read per-transaction
+    /// signature counts.
+    pub signature_count: u32,
+}
+
+/// `CompactPohEntry` before `signature_count` was added. Every `poh.wincode` sidecar
+/// written before that migration lands has this layout; see
+/// [`crate::deserialize_archive_v2_poh_record`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct CompactPohEntryLegacyNoSignatureCount {
+    pub num_hashes: u64,
+    pub hash: [u8; 32],
+    pub tx_count: u32,
+}
+
+impl From<CompactPohEntryLegacyNoSignatureCount> for CompactPohEntry {
+    fn from(value: CompactPohEntryLegacyNoSignatureCount) -> Self {
+        CompactPohEntry {
+            num_hashes: value.num_hashes,
+            hash: value.hash,
+            tx_count: value.tx_count,
+            // Real signature counts aren't recoverable from this legacy record alone; callers
+            // that need them must derive from the hot block's `tx_rows` (see
+            // `patch_poh_entry_signature_counts` and the `migrate-poh-signature-counts` command).
+            // Verifiers must treat 0 here as "unknown", not "no signatures".
+            signature_count: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]

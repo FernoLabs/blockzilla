@@ -435,6 +435,7 @@ fn acquire_output_lock(output: &Path) -> Result<File> {
     let lock_path = output_lock_path(output);
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)

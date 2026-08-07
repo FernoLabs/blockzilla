@@ -3990,6 +3990,10 @@ fn convert_grpc_block_inner(
                         entry.slot, entry.index
                     )
                 })?,
+                // Not wired for the live gRPC path yet; verify-archive-v2-poh's cross-check
+                // against the block index detects this and falls back to decompression rather
+                // than trusting an unpopulated count.
+                signature_count: 0,
             },
         ));
     }
@@ -4718,6 +4722,10 @@ fn read_borrowed_entry(bytes: &[u8]) -> Result<(u64, CompactPohEntry)> {
             num_hashes,
             hash: hash.context("entry missing PoH hash")?,
             tx_count: u32::try_from(tx_count).context("entry tx count exceeds u32::MAX")?,
+            // Not decoded from this wire format yet; verify-archive-v2-poh's cross-check
+            // against the block index detects the unpopulated count and falls back to
+            // decompression rather than trusting it.
+            signature_count: 0,
         },
     ))
 }

@@ -35,9 +35,6 @@ use hivezilla::{
         ShredSpoolPullRuntimeConfig, ShredSpoolPullServerRuntime, ShredUdpRecordConfig,
         SpoolJournalIdentity, bridge_shred_spool, load_ingest_receiver_config, record_shred_udp,
     },
-    ingest_status::{ServeIngestStatusArgs, serve_ingest_status},
-    pull_ack_monitor::{MonitorPullAckTelegramArgs, monitor_pull_ack_telegram},
-    raw_recorder_support::{RawRecorderSupportArgs, run_raw_recorder_support},
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,

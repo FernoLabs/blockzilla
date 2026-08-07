@@ -480,8 +480,8 @@ pub fn compact_meta_from_proto(
     })
 }
 
-pub fn compact_meta_from_protobuf_visit<'metadata>(
-    bytes: &'metadata [u8],
+pub fn compact_meta_from_protobuf_visit(
+    bytes: &[u8],
     index: &KeyIndex,
 ) -> Result<CompactMetaV1> {
     let mut visitor = CompactMetaVisitor::new(index);

@@ -26,7 +26,7 @@ use blockzilla_format::{
     WincodeArchiveV2NoRegistryLogs, WincodeArchiveV2NoRegistryMeta,
     WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward,
     WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance,
-    WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord,
+    WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2Payload,
     WincodeLeb128FramedReader, encode_with_scratch, framed::read_u32_varint,
     framed::write_u32_varint, read_archive_v2_block_access_index, read_archive_v2_get_block_index,
     read_archive_v2_hot_block_index, wincode_leb128_config,
@@ -547,6 +547,7 @@ pub(crate) fn materialize_live_repair(
     let blocks_path = stage.join(OUTPUT_BLOCKS);
     let blocks_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&blocks_path)
@@ -1063,6 +1064,9 @@ fn validate_plan_and_partial_poh(context: &mut ValidatedContext) -> Result<()> {
     let mut previous: Option<(u64, [u8; 32])> = None;
     let mut first_slot = None;
     let mut last_slot = None;
+    // Every frame in this sidecar shares one schema; probing per-frame would decode a legacy
+    // (pre-`signature_count`) sidecar twice on every single block.
+    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
 
     for produced_id_u64 in 0..context.manifest.produced_blocks {
         let produced_id =
@@ -1124,9 +1128,9 @@ fn validate_plan_and_partial_poh(context: &mut ValidatedContext) -> Result<()> {
             }
             let poh = poh_reader
                 .read_bytes_with_limit(POH_FRAME_MAX_BYTES, |bytes| {
-                    wincode::config::deserialize::<WincodeArchiveV2PohRecord, _>(
+                    blockzilla_format::deserialize_archive_v2_poh_record_with_schema(
                         bytes,
-                        wincode_leb128_config(),
+                        &mut poh_schema,
                     )
                     .map_err(|error| anyhow!("{error}"))
                 })?
@@ -2279,13 +2283,13 @@ pub(crate) fn validate_materialized_for_hot(materialized_dir: &Path) -> Result<M
     );
     let mut missing_ids = Vec::with_capacity(missing_capacity);
     let mut previous_slot = None;
+    // Every frame in this sidecar shares one schema; probing per-frame would decode a legacy
+    // (pre-`signature_count`) sidecar twice on every single block.
+    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
     while let Some((_len, record)) =
         poh_reader.read_bytes_with_limit(POH_FRAME_MAX_BYTES, |bytes| {
-            wincode::config::deserialize::<WincodeArchiveV2PohRecord, _>(
-                bytes,
-                wincode_leb128_config(),
-            )
-            .map_err(|error| anyhow!("{error}"))
+            blockzilla_format::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
+                .map_err(|error| anyhow!("{error}"))
         })?
     {
         anyhow::ensure!(
@@ -3606,6 +3610,7 @@ fn acquire_lock(parent: &Path, output_name: &std::ffi::OsStr) -> Result<File> {
     ));
     let mut file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -3651,7 +3656,8 @@ fn current_rss_bytes() -> Option<u64> {
 mod tests {
     use super::*;
     use blockzilla_format::{
-        CompactPohEntry, WincodeArchiveV2NoRegistryRewards, WincodeLeb128FramedWriter,
+        CompactPohEntry, WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2PohRecord,
+        WincodeLeb128FramedWriter,
     };
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -3848,6 +3854,7 @@ mod tests {
                 num_hashes: 1,
                 hash: hash((live_slot - epoch_start_slot) as u8),
                 tx_count: 0,
+                signature_count: 0,
             }],
         })?;
         poh.flush()?;

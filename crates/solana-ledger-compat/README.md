@@ -4,13 +4,13 @@
 It lets us keep replay and ingest parsing logic in one place so we can evolve the shred
 implementation without touching core replay/hive code.
 
-## Feature backends
+## Implementations
 
-- `own`: custom parser used by default for Blockzilla replay and shred ingestion tooling.
+- `blockzilla-shred`: custom parser used by Blockzilla replay and shred ingestion tooling.
 
 ## Building with the façade
 
-Default (current production) backend:
+Default (current implementation):
 
 ```bash
 cargo build -p hivezilla

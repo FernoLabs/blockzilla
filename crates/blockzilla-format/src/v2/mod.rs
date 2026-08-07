@@ -419,6 +419,107 @@ pub struct WincodeArchiveV2PohRecord {
     pub entries: Vec<crate::CompactPohEntry>,
 }
 
+/// `WincodeArchiveV2PohRecord` before `CompactPohEntry::signature_count` was added.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct WincodeArchiveV2PohRecordLegacyNoSignatureCount {
+    pub block_id: u32,
+    pub slot: u64,
+    pub entries: Vec<crate::CompactPohEntryLegacyNoSignatureCount>,
+}
+
+impl From<WincodeArchiveV2PohRecordLegacyNoSignatureCount> for WincodeArchiveV2PohRecord {
+    fn from(value: WincodeArchiveV2PohRecordLegacyNoSignatureCount) -> Self {
+        WincodeArchiveV2PohRecord {
+            block_id: value.block_id,
+            slot: value.slot,
+            entries: value.entries.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Decode a `poh.wincode` frame, falling back to the pre-`signature_count` schema.
+///
+/// `poh.wincode` frames are read one at a time from a fixed-length LEB128 frame (see
+/// `WincodeLeb128FramedReader`), so a schema mismatch fails cleanly within that frame's byte
+/// slice rather than reading into the next record. Every entry in a legacy-decoded record gets
+/// `signature_count: 0`, which callers must treat as "unknown, derive if needed" rather than "no
+/// signatures" — `verify-archive-v2-poh` relies on this to fail its cross-check and fall back to
+/// decompression instead of silently trusting an unpopulated count.
+///
+/// This always probes the current schema first. A caller decoding every frame of one sidecar
+/// (every frame in a `poh.wincode` shares one schema — it's written by a single archive
+/// generation) should use [`deserialize_archive_v2_poh_record_with_schema`] instead: on a
+/// legacy sidecar this function's current-schema probe fails and falls back on *every* frame,
+/// effectively decoding each frame twice.
+pub fn deserialize_archive_v2_poh_record(bytes: &[u8]) -> ReadResult<WincodeArchiveV2PohRecord> {
+    let mut schema = PohRecordSchema::Current;
+    deserialize_archive_v2_poh_record_with_schema(bytes, &mut schema)
+}
+
+/// Which `poh.wincode` frame schema last decoded successfully, for
+/// [`deserialize_archive_v2_poh_record_with_schema`]. `Default` starts at `Current` since
+/// that's what every freshly built archive writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PohRecordSchema {
+    #[default]
+    Current,
+    LegacyNoSignatureCount,
+}
+
+/// Decode a `poh.wincode` frame, trying `schema` first and updating it on a fallback.
+///
+/// Callers that decode every frame of a single sidecar should hold one `PohRecordSchema`
+/// across the whole read loop (starting from `PohRecordSchema::default()`) and pass it here
+/// each time, instead of calling [`deserialize_archive_v2_poh_record`] per frame. Every frame
+/// in a `poh.wincode` sidecar shares one schema, so after the first frame this makes every
+/// later decode single-shot rather than probing the current schema and falling back on every
+/// single frame of a legacy (pre-`signature_count`) archive.
+///
+/// If `schema` stops matching partway through a stream (a malformed or hand-edited sidecar),
+/// this still falls back to the other schema before giving up, so it never returns a spurious
+/// error just because the cached hint was wrong for one frame — it only costs the double
+/// decode on that one frame, then re-settles `schema` for the rest of the stream.
+pub fn deserialize_archive_v2_poh_record_with_schema(
+    bytes: &[u8],
+    schema: &mut PohRecordSchema,
+) -> ReadResult<WincodeArchiveV2PohRecord> {
+    match schema {
+        PohRecordSchema::Current => {
+            match wincode::config::deserialize(bytes, wincode_leb128_config()) {
+                Ok(record) => Ok(record),
+                Err(primary_error) => {
+                    match wincode::config::deserialize::<
+                        WincodeArchiveV2PohRecordLegacyNoSignatureCount,
+                        _,
+                    >(bytes, wincode_leb128_config())
+                    {
+                        Ok(record) => {
+                            *schema = PohRecordSchema::LegacyNoSignatureCount;
+                            Ok(record.into())
+                        }
+                        Err(_) => Err(primary_error),
+                    }
+                }
+            }
+        }
+        PohRecordSchema::LegacyNoSignatureCount => {
+            match wincode::config::deserialize::<WincodeArchiveV2PohRecordLegacyNoSignatureCount, _>(
+                bytes,
+                wincode_leb128_config(),
+            ) {
+                Ok(record) => Ok(record.into()),
+                Err(_) => match wincode::config::deserialize(bytes, wincode_leb128_config()) {
+                    Ok(record) => {
+                        *schema = PohRecordSchema::Current;
+                        Ok(record)
+                    }
+                    Err(current_error) => Err(current_error),
+                },
+            }
+        }
+    }
+}
+
 /// Shredding sidecar record for Archive V2.
 ///
 /// Shred boundary metadata is intentionally addressable outside hot block blobs
@@ -944,6 +1045,48 @@ mod hot_block_slot_time_tests {
             deserialize_archive_v2_hot_block_slot_time(&bytes).unwrap(),
             (789, Some(-42))
         );
+    }
+
+    #[test]
+    fn poh_record_decoder_supports_current_encoding() {
+        let record = WincodeArchiveV2PohRecord {
+            block_id: 42,
+            slot: 999,
+            entries: vec![crate::CompactPohEntry {
+                num_hashes: 10,
+                hash: [7; 32],
+                tx_count: 2,
+                signature_count: 3,
+            }],
+        };
+        let bytes = wincode::config::serialize(&record, wincode_leb128_config()).unwrap();
+
+        let decoded = deserialize_archive_v2_poh_record(&bytes).unwrap();
+        assert_eq!(decoded.block_id, 42);
+        assert_eq!(decoded.slot, 999);
+        assert_eq!(decoded.entries[0].signature_count, 3);
+    }
+
+    #[test]
+    fn poh_record_decoder_falls_back_to_pre_signature_count_encoding() {
+        let record = WincodeArchiveV2PohRecordLegacyNoSignatureCount {
+            block_id: 42,
+            slot: 999,
+            entries: vec![crate::CompactPohEntryLegacyNoSignatureCount {
+                num_hashes: 10,
+                hash: [7; 32],
+                tx_count: 2,
+            }],
+        };
+        let bytes = wincode::config::serialize(&record, wincode_leb128_config()).unwrap();
+
+        let decoded = deserialize_archive_v2_poh_record(&bytes).unwrap();
+        assert_eq!(decoded.block_id, 42);
+        assert_eq!(decoded.slot, 999);
+        assert_eq!(decoded.entries[0].tx_count, 2);
+        // Not recoverable from a legacy record; callers must treat this as "unknown", never as
+        // a real zero-signature entry.
+        assert_eq!(decoded.entries[0].signature_count, 0);
     }
 
     #[test]

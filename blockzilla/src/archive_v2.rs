@@ -1802,7 +1802,7 @@ pub(crate) fn build_hot_blocks_first_seen(
                 timings.classify += classify_started.elapsed();
                 let previous_blockhash =
                     last_blockhash.or_else(|| previous_tail.last().map(|previous| previous.hash));
-                let (mut record, tx_count, sidecar) = build_block_record(
+                let (mut record, tx_count, mut sidecar) = build_block_record(
                     &mut pending,
                     block,
                     &raw_key_index,
@@ -1863,6 +1863,8 @@ pub(crate) fn build_hot_blocks_first_seen(
                 )
                 .with_context(|| format!("slot {slot} first-seen hot block encode"))?;
                 first_seen_signatures.record_block_write();
+                patch_poh_entry_signature_counts(&mut sidecar.poh_entries, &hot_block.tx_rows)
+                    .with_context(|| format!("slot {slot} PoH entry signature counts"))?;
 
                 block_bytes.clear();
                 let serialize_started = timings.detail_timer();
@@ -4155,8 +4157,7 @@ fn build_live_no_registry_pubkey_registry(
     .with_context(|| format!("write {}", registry_path.display()))?;
     write_live_registry_counts(
         registry_counts_path,
-        std::iter::repeat(0)
-            .take(missing_builtins.len())
+        std::iter::repeat_n(0, missing_builtins.len())
             .chain(items.iter().map(|(_, count)| *count)),
     )
     .with_context(|| format!("write {}", registry_counts_path.display()))?;
@@ -4230,8 +4231,7 @@ fn build_live_pubkey_registry_from_counts(
     .with_context(|| format!("write {}", registry_path.display()))?;
     write_live_registry_counts(
         registry_counts_path,
-        std::iter::repeat(0)
-            .take(missing_builtins.len())
+        std::iter::repeat_n(0, missing_builtins.len())
             .chain(items.iter().map(|(_, count)| *count)),
     )
     .with_context(|| format!("write {}", registry_counts_path.display()))?;
@@ -6392,10 +6392,10 @@ fn hot_block_from_archive_block_with_signatures(
     if let HotBlockSignatureSource::FirstSeen { bytes, .. } = signature_source {
         let signature_write_started = timings.detail_timer();
         if !bytes.is_empty() {
-            if let Some(writer) = signatures_writer.as_deref_mut() {
+            if let Some(writer) = signatures_writer {
                 writer.write_all(bytes)?;
             }
-            if let Some(block_bytes) = block_signature_bytes.as_deref_mut() {
+            if let Some(block_bytes) = block_signature_bytes {
                 block_bytes.extend_from_slice(bytes);
             }
         }
@@ -7179,16 +7179,14 @@ fn collect_access_log_refs(logs: &CompactLogStream, pubkey_ids: &mut Vec<u32>) {
 }
 
 fn collect_access_program_log_refs(log: &ProgramLog, pubkey_ids: &mut Vec<u32>) {
-    if let ProgramLog::Token2022(log) = log {
-        match log {
-            Token2022Log::ErrorHarvestingFrom { account_key, .. }
-            | Token2022Log::ErrorHarvestingFrom2 { account_key, .. }
-            | Token2022Log::ErrorHarvestingFrom3 { account_key, .. }
-            | Token2022Log::ErrorHarvestingFrom4 { account_key, .. } => {
-                collect_access_pubkey_id(*account_key, pubkey_ids);
-            }
-            _ => {}
-        }
+    if let ProgramLog::Token2022(
+        Token2022Log::ErrorHarvestingFrom { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom2 { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom3 { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom4 { account_key, .. },
+    ) = log
+    {
+        collect_access_pubkey_id(*account_key, pubkey_ids);
     }
 }
 
@@ -8858,8 +8856,8 @@ fn load_or_build_previous_tail(
         return Ok(tail);
     }
 
-    if let Some(previous_epoch) = parse_epoch_from_path(previous_car) {
-        if let Some(sidecar_dir) = find_previous_epoch_sidecar_dir(output_dir, previous_epoch)? {
+    if let Some(previous_epoch) = parse_epoch_from_path(previous_car)
+        && let Some(sidecar_dir) = find_previous_epoch_sidecar_dir(output_dir, previous_epoch)? {
             match read_blockhash_tail_from_sidecars(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY) {
                 Ok(tail) => {
                     write_prev_blockhash_tail(output_dir, &tail)?;
@@ -8879,7 +8877,6 @@ fn load_or_build_previous_tail(
                 ),
             }
         }
-    }
 
     let tail = read_blockhash_tail_from_car(previous_car, ROLLING_BLOCKHASH_CAPACITY)
         .with_context(|| {
@@ -9077,7 +9074,16 @@ fn read_blockhash_tail_from_poh_sidecar(
     let mut reader = WincodeLeb128FramedReader::new(BufReader::with_capacity(BUFFER_SIZE, file));
     let mut tail = VecDeque::with_capacity(max_entries);
     let mut rows = 0usize;
-    while let Some((_len, record)) = reader.read::<WincodeArchiveV2PohRecord>()? {
+    // Falls back to the pre-`signature_count` schema: this reads whatever generation of
+    // `poh.wincode` an already-committed epoch happens to have, not just the current one. Every
+    // frame in a given sidecar shares one schema, so `poh_schema` makes every frame after the
+    // first a single-shot decode instead of probing the current schema on every one.
+    const MAX_POH_FRAME_BYTES: usize = 64 << 20;
+    let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+    while let Some((_len, record)) = reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
+        blockzilla_format::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
+            .map_err(anyhow::Error::from)
+    })? {
         rows += 1;
         tail.push_back((record.block_id, record.slot));
         while tail.len() > max_entries {
@@ -9632,8 +9638,7 @@ fn optimize_no_registry_meta(
     let logs = meta
         .logs
         .map(|logs| decode_no_registry_logs(logs, _slot, _tx_index, key_index))
-        .transpose()?
-        .map(|logs| logs);
+        .transpose()?;
     if let Some(timings) = timings.as_mut() {
         timings.metadata_logs_decode_compact += logs_started.elapsed();
     }
@@ -11293,7 +11298,7 @@ mod first_seen_registry_tests {
     fn hot_seed_selects_frequency_head_with_key_tie_break() {
         let path = temp_file("seed");
         let registry_path = temp_file("seed-registry");
-        let keys = vec![[3u8; 32], [2u8; 32], [1u8; 32], [4u8; 32]];
+        let keys = [[3u8; 32], [2u8; 32], [1u8; 32], [4u8; 32]];
         let mut counts = FirstSeenCounts::with_capacity(4);
         for count in [1, 9, 9, 2] {
             counts.push(count);
@@ -16435,7 +16440,14 @@ pub(crate) fn inspect(input: &Path, max_blocks: Option<u64>, top: usize) -> Resu
             .with_context(|| format!("open {}", poh_sidecar_path.display()))?;
         let mut poh_reader =
             WincodeLeb128FramedReader::new(BufReader::with_capacity(BUFFER_SIZE, file));
-        while let Some((len, record)) = poh_reader.read::<WincodeArchiveV2PohRecord>()? {
+        const MAX_POH_FRAME_BYTES: usize = 64 << 20;
+        // Every frame in this sidecar shares one schema; probing per-frame would decode a
+        // legacy (pre-`signature_count`) sidecar twice on every single block.
+        let mut poh_schema = blockzilla_format::PohRecordSchema::default();
+        while let Some((len, record)) = poh_reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
+            blockzilla_format::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
+                .map_err(anyhow::Error::from)
+        })? {
             poh_sidecar_records += 1;
             poh_entries_serialized_bytes += len as u64;
             max_poh_entries_per_block = max_poh_entries_per_block.max(record.entries.len());
@@ -17147,6 +17159,14 @@ fn block_sidecar_from_entries(
             num_hashes: entry.entry.num_hashes,
             hash: entry.entry.hash,
             tx_count: entry.entry.transactions.len() as u32,
+            // Real per-transaction signature counts aren't known yet at this point in any
+            // build path (they come from later message/signature decode). Callers MUST patch
+            // this via `patch_poh_entry_signature_counts` once their hot block's `tx_rows` are
+            // available, before writing the PoH sidecar. `verify_archive_v2_poh` cross-checks
+            // the per-block sum against the block index's `signature_count`, so a build path
+            // that forgets to patch this fails loudly (mismatch) rather than silently
+            // under-reporting signatures.
+            signature_count: 0,
         })
         .collect::<Vec<_>>();
     let blockhash = poh_entries
@@ -17157,6 +17177,37 @@ fn block_sidecar_from_entries(
         poh_entries,
         blockhash,
     })
+}
+
+/// Fills in each entry's `signature_count` from the block's already-decoded `tx_rows`, in the
+/// same block-order-based grouping `verify_archive_v2_poh` relies on. Must run after a build
+/// path decodes its hot block (real per-transaction signature counts aren't known any earlier)
+/// and before the PoH sidecar is written; `block_sidecar_from_entries` only populates a `0`
+/// placeholder for `signature_count`.
+pub(crate) fn patch_poh_entry_signature_counts(
+    poh_entries: &mut [CompactPohEntry],
+    tx_rows: &[ArchiveV2HotTxRow],
+) -> Result<()> {
+    let mut cursor = 0usize;
+    for entry in poh_entries.iter_mut() {
+        let end = cursor
+            .checked_add(entry.tx_count as usize)
+            .context("PoH entry tx_count overflow while patching signature counts")?;
+        let rows = tx_rows
+            .get(cursor..end)
+            .context("PoH entry consumes transactions beyond the block's tx_rows")?;
+        entry.signature_count = rows
+            .iter()
+            .map(|row| u32::from(row.signature_count))
+            .sum();
+        cursor = end;
+    }
+    anyhow::ensure!(
+        cursor == tx_rows.len(),
+        "PoH entries consumed {cursor} of {} block transactions while patching signature counts",
+        tx_rows.len()
+    );
+    Ok(())
 }
 
 fn reconstruct_tick_only_poh(
@@ -17184,6 +17235,8 @@ fn reconstruct_tick_only_poh(
             num_hashes: hashes_per_tick,
             hash,
             tx_count: 0,
+            // Real, not a placeholder: reconstructed gap-slot ticks never carry transactions.
+            signature_count: 0,
         });
     }
     Ok(entries)
@@ -17871,7 +17924,7 @@ fn to_no_registry_transaction(vtx: VersionedTransaction<'_>) -> WincodeArchiveV2
                     num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
                     num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
                 },
-                account_keys: message.account_keys.into_iter().map(|key| *key).collect(),
+                account_keys: message.account_keys.into_iter().copied().collect(),
                 recent_blockhash: *message.recent_blockhash,
                 instructions: message
                     .instructions
@@ -17887,7 +17940,7 @@ fn to_no_registry_transaction(vtx: VersionedTransaction<'_>) -> WincodeArchiveV2
                     num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
                     num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
                 },
-                account_keys: message.account_keys.into_iter().map(|key| *key).collect(),
+                account_keys: message.account_keys.into_iter().copied().collect(),
                 recent_blockhash: *message.recent_blockhash,
                 instructions: message
                     .instructions
@@ -19730,20 +19783,20 @@ fn detailed_timings_enabled_from_value(value: Option<&str>) -> bool {
     matches!(value, Some("1"))
 }
 
-fn detailed_timings_enabled() -> bool {
+pub(crate) fn detailed_timings_enabled() -> bool {
     detailed_timings_enabled_from_value(std::env::var(DETAILED_TIMINGS_ENV).ok().as_deref())
 }
 
-struct DetailTimer(Option<Instant>);
+pub(crate) struct DetailTimer(Option<Instant>);
 
 impl DetailTimer {
     #[inline]
-    fn start(enabled: bool) -> Self {
+    pub(crate) fn start(enabled: bool) -> Self {
         Self(enabled.then(Instant::now))
     }
 
     #[inline]
-    fn elapsed(&self) -> Duration {
+    pub(crate) fn elapsed(&self) -> Duration {
         self.0.as_ref().map_or(Duration::ZERO, Instant::elapsed)
     }
 }
@@ -21304,7 +21357,7 @@ mod tests {
         loop {
             let byte = (remaining & 0x7f) as u8;
             remaining >>= 7;
-            encoded.push(byte | u8::from(remaining != 0) * 0x80);
+            encoded.push(byte | (u8::from(remaining != 0) * 0x80));
             if remaining == 0 {
                 return encoded;
             }

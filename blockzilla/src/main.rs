@@ -11,9 +11,11 @@ use std::{
 use tracing::{Level, info};
 
 mod archive_v2;
+mod archive_verify;
 mod block_time_gap_index;
 mod block_time_gaps;
 mod car_acquire;
+mod car_debug;
 mod car_preflight;
 mod first_seen_finalization;
 mod genesis_epoch0;
@@ -44,6 +46,45 @@ struct Cli {
 enum Commands {
     /// Run the storage scheduler and its read-only status API.
     Scheduler,
+
+    /// Stream Compact V2 and recompute every available Proof-of-History entry.
+    VerifyArchiveV2Poh {
+        /// Compact V2 epoch directory.
+        archive_dir: PathBuf,
+        /// Worker threads used for independent entry verification.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+        /// Stop after N blocks. Intended for local profiling and smoke tests.
+        #[arg(long)]
+        max_blocks: Option<u64>,
+    },
+
+    /// Backfill CompactPohEntry::signature_count into an already-built archive's poh.wincode.
+    ///
+    /// Decompresses each block only when its current signature_count doesn't already sum
+    /// correctly against the block index (an archive generation older than the field, or one
+    /// already migrated is a fast no-op pass-through). Never recomputes PoH hashes. Publishes
+    /// via a temp file and atomic rename, so a crash mid-run or a concurrent reader never
+    /// observes a partially written sidecar. Safe to rerun.
+    MigratePohSignatureCounts {
+        /// Compact V2 epoch directory.
+        archive_dir: PathBuf,
+    },
+
+    /// Microbenchmark the allocation-free PoH hash and signature-mixin core.
+    #[cfg(feature = "benchmark-tools")]
+    BenchArchiveV2PohCore {
+        #[arg(long, default_value_t = 4096)]
+        entries: usize,
+        #[arg(long, default_value_t = 1024)]
+        hashes_per_entry: u64,
+        #[arg(long, default_value_t = 2)]
+        signatures_per_entry: usize,
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+    },
 
     /// Stream a CAR to clean EOF and atomically publish a bounded-memory structural receipt.
     PreflightCar {
@@ -943,6 +984,19 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+
+    /// Independently decode one block's PoH entries/transactions straight from a CAR,
+    /// bypassing the Compact V2 compactor. For cross-checking verify-archive-v2-poh mismatches.
+    DumpCarPohEntry {
+        /// Input CAR or CAR.ZST file.
+        input: PathBuf,
+        /// Target slot.
+        #[arg(long)]
+        slot: u64,
+        /// PoH entry index within the block to print transaction signatures for.
+        #[arg(long)]
+        entry: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1272,12 +1326,10 @@ fn main() -> Result<()> {
             if first_seen_registry {
                 let car_zstd_prefetch_mib = car_zstd_prefetch_mib.map_or_else(
                     || {
-                        input
+                        if input
                             .file_name()
                             .and_then(|name| name.to_str())
-                            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".car.zst"))
-                            .then_some(4)
-                            .unwrap_or(0)
+                            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".car.zst")) { 4 } else { 0 }
                     },
                     usize::from,
                 );
@@ -1669,6 +1721,44 @@ fn main() -> Result<()> {
         Commands::FindPohGaps { input, output } => {
             archive_v2::find_poh_gaps(&input, output.as_deref())
         }
+        Commands::DumpCarPohEntry { input, slot, entry } => {
+            car_debug::dump_car_poh_entry(&input, slot, entry)
+        }
+        Commands::VerifyArchiveV2Poh {
+            archive_dir,
+            threads,
+            max_blocks,
+        } => archive_verify::verify_archive_v2_poh(&archive_dir, threads, max_blocks).map(|report| {
+            println!("{}", serde_json::to_string(&report).expect("serialize PoH report"));
+        }),
+        Commands::MigratePohSignatureCounts { archive_dir } => {
+            archive_verify::migrate_poh_signature_counts(&archive_dir).map(|report| {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("serialize PoH migration report")
+                );
+            })
+        }
+        #[cfg(feature = "benchmark-tools")]
+        Commands::BenchArchiveV2PohCore {
+            entries,
+            hashes_per_entry,
+            signatures_per_entry,
+            iterations,
+            threads,
+        } => archive_verify::bench_poh_core(
+            entries,
+            hashes_per_entry,
+            signatures_per_entry,
+            iterations,
+            threads,
+        )
+        .map(|report| {
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("serialize PoH benchmark report")
+            );
+        }),
     }
 }
 
@@ -1753,6 +1843,14 @@ impl ProgressTracker {
             self.first_slot = Some(slot);
         }
         self.last_slot = Some(slot);
+    }
+
+    /// Overrides the `SLOTS_PER_EPOCH` default with an exact known unit count
+    /// (e.g. an index's row count), for phases that iterate a fixed, already-known
+    /// set of items rather than scanning an epoch of unknown density.
+    #[inline(always)]
+    pub(crate) fn set_estimated_total_blocks(&mut self, total: u64) {
+        self.estimated_total_blocks = total;
     }
 
     /// Records cumulative useful input bytes consumed by this phase. This is
@@ -1910,9 +2008,9 @@ impl ProgressTracker {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs());
         let mut json = String::with_capacity(512);
-        let _ = write!(
+        let _ = writeln!(
             json,
-            "{{\"schema_version\":1,\"pid\":{},\"phase\":\"{}\",\"state\":\"{}\",\"blocks_done\":{},\"transactions_done\":{},\"blocks_total_estimate\":{},\"first_slot\":{},\"last_slot\":{},\"slots_processed\":{},\"elapsed_secs\":{:.3},\"blocks_per_sec\":{:.3},\"transactions_per_sec\":{:.3},\"input_bytes_done\":{},\"input_mib_per_sec\":{},\"progress_pct\":{},\"eta_secs\":{},\"updated_unix_secs\":{}}}\n",
+            "{{\"schema_version\":1,\"pid\":{},\"phase\":\"{}\",\"state\":\"{}\",\"blocks_done\":{},\"transactions_done\":{},\"blocks_total_estimate\":{},\"first_slot\":{},\"last_slot\":{},\"slots_processed\":{},\"elapsed_secs\":{:.3},\"blocks_per_sec\":{:.3},\"transactions_per_sec\":{:.3},\"input_bytes_done\":{},\"input_mib_per_sec\":{},\"progress_pct\":{},\"eta_secs\":{},\"updated_unix_secs\":{}}}",
             std::process::id(),
             self.phase,
             state,
@@ -2301,6 +2399,50 @@ mod cli_tests {
         assert!(json.contains("\"input_bytes_done\":8388608"));
         assert!(json.contains("\"last_slot\":432100"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// A fixed-size migration (e.g. `migrate-poh-signature-counts`, which knows its exact
+    /// row count upfront) reports progress against that count rather than the
+    /// `SLOTS_PER_EPOCH` default meant for slot-density-unknown scan/download phases.
+    #[test]
+    fn progress_tracker_set_estimated_total_blocks_overrides_default_epoch_estimate() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "blockzilla-progress-total-override-{}-{unique}.json",
+            std::process::id()
+        ));
+        let mut tracker = ProgressTracker::new("test migration");
+        tracker.progress_path = Some(path.clone());
+        tracker.set_estimated_total_blocks(937);
+        tracker.update_slot(100);
+        tracker.update(1, 0);
+        tracker.update_slot(1_037);
+        tracker.final_report();
+
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains("\"blocks_total_estimate\":937"));
+        // slots_processed = 1037-100 = 937, so progress against the 937-unit override
+        // reads 100%, not the ~0.2% it would read against the 432,000-slot default.
+        assert!(json.contains("\"progress_pct\":100.000"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A migration invoked by hand (e.g. an operator running `migrate-poh-signature-counts`
+    /// directly, outside the scheduler) has no `BLOCKZILLA_PROGRESS_FILE` set. Progress
+    /// reporting must be a silent no-op in that case, not a panic or a stray write.
+    #[test]
+    fn progress_tracker_without_progress_path_reports_without_writing_a_file() {
+        let mut tracker = ProgressTracker::new("test migration");
+        tracker.progress_path = None;
+        tracker.set_estimated_total_blocks(10);
+        tracker.update_slot(1);
+        tracker.update(1, 0);
+        tracker.update_slot(2);
+        // Must not panic with no progress_path set.
+        tracker.final_report();
     }
 
     #[test]

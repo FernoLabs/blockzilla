@@ -2,8 +2,8 @@ use std::{
     collections::HashSet,
     net::UdpSocket,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
         mpsc::Sender,
     },
     thread::{self, JoinHandle},

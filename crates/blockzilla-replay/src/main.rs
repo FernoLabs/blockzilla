@@ -13,7 +13,7 @@ use blockzilla_replay::{
     LaunchCheckpointResumeConfig, LaunchGenerationMetrics, LaunchInstructionEffect,
     LaunchInstructionMutation, LaunchReplayError, LaunchReplayFailure, LaunchReplayOutcome,
     LaunchStakeError, LaunchTransactionFailureReason, LaunchVoteMutation, LoaderAccountKind,
-    ReplayCompiler, probe_compact_generation, read_genesis_summary,
+    ReplayCompiler, probe_compact_generation, pubkey_to_base58, read_genesis_summary,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
@@ -854,7 +854,7 @@ fn print_launch_replay_report(
         {
             println!(
                 "first_derived_transaction_failure {coordinate} reason=missing_required_signature authority={}",
-                of_car_reader::genesis::pubkey_to_base58(pubkey)
+                pubkey_to_base58(pubkey)
             );
         } else {
             println!(
@@ -878,7 +878,7 @@ fn print_launch_replay_report(
                 failure.location.slot,
                 transaction_index,
                 instruction_index,
-                of_car_reader::genesis::pubkey_to_base58(program_id)
+                pubkey_to_base58(program_id)
             );
         } else {
             println!(
@@ -905,16 +905,16 @@ fn print_launch_replay_report(
         let Some(account) = replay.account_state.get(pubkey) else {
             println!(
                 "final_account account={} deleted=true",
-                of_car_reader::genesis::pubkey_to_base58(pubkey)
+                pubkey_to_base58(pubkey)
             );
             continue;
         };
         let data_hash: [u8; 32] = Sha256::digest(&account.data).into();
         println!(
             "final_account account={} lamports={} owner={} executable={} data_len={} data_sha256={}",
-            of_car_reader::genesis::pubkey_to_base58(pubkey),
+            pubkey_to_base58(pubkey),
             account.lamports,
-            of_car_reader::genesis::pubkey_to_base58(&account.owner),
+            pubkey_to_base58(&account.owner),
             account.executable,
             account.data.len(),
             hex(&data_hash)
@@ -1044,7 +1044,7 @@ fn print_instruction_mutation(label: &str, mutation: &LaunchInstructionMutation)
                 mutation.slot,
                 mutation.transaction_index,
                 mutation.instruction_index,
-                of_car_reader::genesis::pubkey_to_base58(vote_account),
+                pubkey_to_base58(vote_account),
                 vote.voted_slots,
                 vote.root_slot,
                 vote.credits,
@@ -1056,7 +1056,7 @@ fn print_instruction_mutation(label: &str, mutation: &LaunchInstructionMutation)
                 mutation.slot,
                 mutation.transaction_index,
                 mutation.instruction_index,
-                of_car_reader::genesis::pubkey_to_base58(vote_account),
+                pubkey_to_base58(vote_account),
                 mutation.diff.disposition,
                 mutation.diff.accounts.len()
             ),
@@ -1098,7 +1098,7 @@ fn print_instruction_mutation(label: &str, mutation: &LaunchInstructionMutation)
             mutation.slot,
             mutation.transaction_index,
             mutation.instruction_index,
-            of_car_reader::genesis::pubkey_to_base58(&execution.program_account),
+            pubkey_to_base58(&execution.program_account),
             execution.engine,
             execution.watchdog_instructions,
             mutation.diff.disposition,
@@ -1108,7 +1108,7 @@ fn print_instruction_mutation(label: &str, mutation: &LaunchInstructionMutation)
     for account in &mutation.diff.accounts {
         println!(
             "account_diff account={} created={} deleted={} lamports_included={} owner_changed={} executable_changed={} rent_epoch_changed={}",
-            of_car_reader::genesis::pubkey_to_base58(&account.pubkey),
+            pubkey_to_base58(&account.pubkey),
             account.created,
             account.deleted,
             account.lamports.is_some(),
@@ -1119,7 +1119,7 @@ fn print_instruction_mutation(label: &str, mutation: &LaunchInstructionMutation)
         if let Some(data) = &account.data {
             println!(
                 "data_diff account={} before_len={:?} after_len={:?} before_sha256={} after_sha256={} ranges={} truncated={}",
-                of_car_reader::genesis::pubkey_to_base58(&account.pubkey),
+                pubkey_to_base58(&account.pubkey),
                 data.before_len,
                 data.after_len,
                 data.before_sha256
@@ -1156,7 +1156,7 @@ fn print_compact_probe(path: &PathBuf, config: CompactProbeConfig) -> Result<()>
         println!(
             "genesis source={:?} hash={} bytes={} accounts={} reward_pools={} builtins={} ticks_per_slot={} slots_per_segment={:?}",
             genesis.source,
-            of_car_reader::genesis::pubkey_to_base58(&genesis.genesis_hash),
+            pubkey_to_base58(&genesis.genesis_hash),
             genesis.genesis_bin_len,
             genesis.accounts.len(),
             genesis.reward_pools.len(),
@@ -1168,7 +1168,7 @@ fn print_compact_probe(path: &PathBuf, config: CompactProbeConfig) -> Result<()>
             println!(
                 "genesis_builtin={} {}",
                 builtin.key,
-                of_car_reader::genesis::pubkey_to_base58(&builtin.pubkey)
+                pubkey_to_base58(&builtin.pubkey)
             );
         }
     } else {
@@ -1184,7 +1184,7 @@ fn print_compact_probe(path: &PathBuf, config: CompactProbeConfig) -> Result<()>
     for (program_id, count) in &probe.program_instruction_counts {
         println!(
             "program={} instructions={count}",
-            of_car_reader::genesis::pubkey_to_base58(program_id)
+            pubkey_to_base58(program_id)
         );
     }
     for slot in &probe.slots {
@@ -1195,7 +1195,7 @@ fn print_compact_probe(path: &PathBuf, config: CompactProbeConfig) -> Result<()>
             slot.block_id,
             slot.transaction_count,
             slot.transactions.len(),
-            of_car_reader::genesis::pubkey_to_base58(&slot.blockhash)
+            pubkey_to_base58(&slot.blockhash)
         );
         for transaction in &slot.transactions {
             println!(
@@ -1227,7 +1227,7 @@ fn print_compact_probe(path: &PathBuf, config: CompactProbeConfig) -> Result<()>
                     slot.slot,
                     transaction.tx_index,
                     instruction.instruction_index,
-                    of_car_reader::genesis::pubkey_to_base58(&instruction.program_id),
+                    pubkey_to_base58(&instruction.program_id),
                     instruction.account_indexes.len(),
                     kind,
                     bytes,
@@ -1237,10 +1237,7 @@ fn print_compact_probe(path: &PathBuf, config: CompactProbeConfig) -> Result<()>
                     let pubkey = transaction
                         .account_keys
                         .get(*account_index as usize)
-                        .map_or_else(
-                            || "unresolved".to_owned(),
-                            of_car_reader::genesis::pubkey_to_base58,
-                        );
+                        .map_or_else(|| "unresolved".to_owned(), pubkey_to_base58);
                     println!(
                         "instruction_account slot={} tx={} instruction={} position={} account_index={} pubkey={}",
                         slot.slot,

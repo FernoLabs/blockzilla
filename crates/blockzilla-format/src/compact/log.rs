@@ -1087,7 +1087,7 @@ where
         update_program_stack(parsed, &mut program_stack);
     }
 
-    if let Some(stats) = stats.as_deref_mut() {
+    if let Some(stats) = stats {
         stats.record_pubkey_cache(&pubkey_cache);
     }
 

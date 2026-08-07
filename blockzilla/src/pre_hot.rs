@@ -360,16 +360,14 @@ fn count_log_raw_pubkeys(logs: &CompactLogStream, raw: &mut u64) {
 }
 
 fn count_program_log_raw_pubkeys(log: &ProgramLog, raw: &mut u64) {
-    if let ProgramLog::Token2022(log) = log {
-        match log {
-            Token2022Log::ErrorHarvestingFrom { account_key, .. }
-            | Token2022Log::ErrorHarvestingFrom2 { account_key, .. }
-            | Token2022Log::ErrorHarvestingFrom3 { account_key, .. }
-            | Token2022Log::ErrorHarvestingFrom4 { account_key, .. } => {
-                count_raw_key(*account_key, raw);
-            }
-            _ => {}
-        }
+    if let ProgramLog::Token2022(
+        Token2022Log::ErrorHarvestingFrom { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom2 { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom3 { account_key, .. }
+        | Token2022Log::ErrorHarvestingFrom4 { account_key, .. },
+    ) = log
+    {
+        count_raw_key(*account_key, raw);
     }
 }
 
