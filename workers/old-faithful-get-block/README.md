@@ -26,7 +26,7 @@ hash.
 rustup target add wasm32-unknown-unknown
 cargo install worker-build --locked --version 0.8.3
 
-cd apps/old-faithful-get-block
+cd workers/old-faithful-get-block
 npm install
 npm run build
 npm run dev
