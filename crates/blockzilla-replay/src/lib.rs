@@ -35,8 +35,9 @@ mod native_aarch64;
 pub mod program;
 
 pub use account_store::{
-    AccountBatchCommit, AccountDataPatch, AccountPubkey, AccountStore, AccountStoreError,
-    AccountWrite, AccountWriteBatch, MemoryAccountStore, canonical_account_state_hash,
+    AccountBatchCommit, AccountDataPatch, AccountMap, AccountPubkey, AccountStore,
+    AccountStoreError, AccountWrite, AccountWriteBatch, MemoryAccountStore,
+    canonical_account_state_hash,
 };
 pub use compact::{
     CompactAddressTableLookupProbe, CompactArchiveProbe, CompactArchivedTransactionOutcome,

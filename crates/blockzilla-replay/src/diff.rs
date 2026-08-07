@@ -2,11 +2,11 @@ use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use std::{
     borrow::Borrow,
-    cmp::Ordering,
-    collections::BTreeMap,
     ops::{Deref, DerefMut},
     sync::{Arc, LazyLock},
 };
+
+use crate::AccountMap;
 
 static EMPTY_ACCOUNT_DATA: LazyLock<Arc<Vec<u8>>> = LazyLock::new(|| Arc::new(Vec::new()));
 
@@ -288,8 +288,8 @@ impl InstructionDiff {
         boundary: DiffBoundary,
         program_id: [u8; 32],
         disposition: DiffDisposition,
-        before: &BTreeMap<[u8; 32], AccountSnapshot>,
-        after: &BTreeMap<[u8; 32], AccountSnapshot>,
+        before: &AccountMap,
+        after: &AccountMap,
         policy: DiffPolicy,
     ) -> Self {
         Self {
@@ -384,55 +384,22 @@ impl AccountDiffJournal {
 }
 
 pub fn diff_account_sets(
-    before: &BTreeMap<[u8; 32], AccountSnapshot>,
-    after: &BTreeMap<[u8; 32], AccountSnapshot>,
+    before: &AccountMap,
+    after: &AccountMap,
     policy: DiffPolicy,
 ) -> Vec<AccountDiff> {
+    // AccountMap is unordered; materialize a sorted key union so the merge is
+    // deterministic and still allocation-light relative to full snapshot clones.
+    let mut keys = Vec::with_capacity(before.len().saturating_add(after.len()));
+    keys.extend(before.keys().copied());
+    keys.extend(after.keys().copied());
+    keys.sort_unstable();
+    keys.dedup();
+
     let mut diffs = Vec::new();
-    let mut before_accounts = before.iter().peekable();
-    let mut after_accounts = after.iter().peekable();
-    loop {
-        let (pubkey, before_account, after_account) =
-            match (before_accounts.peek(), after_accounts.peek()) {
-                (Some((before_pubkey, _)), Some((after_pubkey, _))) => {
-                    match before_pubkey.cmp(after_pubkey) {
-                        Ordering::Less => {
-                            let (pubkey, account) = before_accounts
-                                .next()
-                                .expect("peeked before account must remain present");
-                            (*pubkey, Some(account), None)
-                        }
-                        Ordering::Equal => {
-                            let (pubkey, before_account) = before_accounts
-                                .next()
-                                .expect("peeked before account must remain present");
-                            let (_, after_account) = after_accounts
-                                .next()
-                                .expect("peeked after account must remain present");
-                            (*pubkey, Some(before_account), Some(after_account))
-                        }
-                        Ordering::Greater => {
-                            let (pubkey, account) = after_accounts
-                                .next()
-                                .expect("peeked after account must remain present");
-                            (*pubkey, None, Some(account))
-                        }
-                    }
-                }
-                (Some(_), None) => {
-                    let (pubkey, account) = before_accounts
-                        .next()
-                        .expect("peeked before account must remain present");
-                    (*pubkey, Some(account), None)
-                }
-                (None, Some(_)) => {
-                    let (pubkey, account) = after_accounts
-                        .next()
-                        .expect("peeked after account must remain present");
-                    (*pubkey, None, Some(account))
-                }
-                (None, None) => break,
-            };
+    for pubkey in keys {
+        let before_account = before.get(&pubkey);
+        let after_account = after.get(&pubkey);
         if let Some(diff) = diff_account(pubkey, before_account, after_account, policy) {
             diffs.push(diff);
         }
@@ -593,12 +560,12 @@ mod tests {
         changed_after.data.set_from_slice(b"after!");
         let (_, created) = account(1, b"created");
 
-        let before = BTreeMap::from([
+        let before = AccountMap::from([
             (deleted_key, deleted.clone()),
             (changed_key, changed_before.clone()),
             (unchanged_key, unchanged.clone()),
         ]);
-        let after = BTreeMap::from([
+        let after = AccountMap::from([
             (created_key, created),
             (changed_key, changed_after),
             (unchanged_key, unchanged),
@@ -649,7 +616,7 @@ mod tests {
             .iter()
             .map(|byte| byte ^ 0xff)
             .collect::<Vec<_>>();
-        let before = BTreeMap::from([(
+        let before = AccountMap::from([(
             key,
             AccountSnapshot {
                 lamports: 1,
@@ -659,7 +626,7 @@ mod tests {
                 data: before_bytes.clone().into(),
             },
         )]);
-        let after = BTreeMap::from([(
+        let after = AccountMap::from([(
             key,
             AccountSnapshot {
                 data: after_bytes.clone().into(),
@@ -757,8 +724,8 @@ mod tests {
         after_account.lamports = 11;
         after_account.owner = [8; 32];
         after_account.executable = true;
-        let before = BTreeMap::from([(pubkey, before_account)]);
-        let after = BTreeMap::from([(pubkey, after_account)]);
+        let before = AccountMap::from([(pubkey, before_account)]);
+        let after = AccountMap::from([(pubkey, after_account)]);
         let diffs = diff_account_sets(&before, &after, DiffPolicy::default());
         assert_eq!(diffs.len(), 1);
         let diff = &diffs[0];
@@ -781,8 +748,8 @@ mod tests {
     fn marks_creation_and_deletion_even_without_balance_output() {
         let (created_pubkey, created) = account(1, &[1]);
         let (deleted_pubkey, deleted) = account(2, &[2]);
-        let before = BTreeMap::from([(deleted_pubkey, deleted)]);
-        let after = BTreeMap::from([(created_pubkey, created)]);
+        let before = AccountMap::from([(deleted_pubkey, deleted)]);
+        let after = AccountMap::from([(created_pubkey, created)]);
         let diffs = diff_account_sets(&before, &after, DiffPolicy::default());
         assert_eq!(diffs.len(), 2);
         assert!(diffs.iter().any(|diff| diff.created && !diff.deleted));
@@ -793,8 +760,8 @@ mod tests {
     fn keeps_hashes_when_inline_ranges_exceed_budget() {
         let (pubkey, before_account) = account(1, &[0; 64]);
         let (_, after_account) = account(1, &[1; 64]);
-        let before = BTreeMap::from([(pubkey, before_account)]);
-        let after = BTreeMap::from([(pubkey, after_account)]);
+        let before = AccountMap::from([(pubkey, before_account)]);
+        let after = AccountMap::from([(pubkey, after_account)]);
         let policy = DiffPolicy {
             max_inline_data_bytes: 16,
             ..DiffPolicy::default()
@@ -819,8 +786,8 @@ mod tests {
             boundary.clone(),
             [4; 32],
             DiffDisposition::Speculative,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
+            &AccountMap::new(),
+            &AccountMap::new(),
             DiffPolicy::default(),
         );
         assert_eq!(diff.boundary, boundary);
@@ -832,8 +799,8 @@ mod tests {
         let (pubkey, before_account) = account(1, &[]);
         let mut after_account = before_account.clone();
         after_account.lamports = 99;
-        let before = BTreeMap::from([(pubkey, before_account)]);
-        let after = BTreeMap::from([(pubkey, after_account)]);
+        let before = AccountMap::from([(pubkey, before_account)]);
+        let after = AccountMap::from([(pubkey, after_account)]);
         let policy = DiffPolicy {
             include_lamports: true,
             ..DiffPolicy::default()

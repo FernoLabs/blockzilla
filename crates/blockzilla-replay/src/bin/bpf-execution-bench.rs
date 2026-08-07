@@ -17,7 +17,6 @@
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
-    collections::BTreeMap,
     convert::Infallible,
     fmt::Write as _,
     hint::black_box,
@@ -33,7 +32,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use blockzilla_replay::{
-    AccountData, AccountSnapshot, CompilationBackend, CompiledProgram, ExecutionEngine,
+    AccountData, AccountMap, AccountSnapshot, CompilationBackend, CompiledProgram, ExecutionEngine,
     ExecutionOutcome, ExecutionRequest, LaunchAccountMeta, LaunchBpfLoaderRent, LoaderAccountKind,
     ReplayCompiler, apply_launch_bpf_program_instruction, extract_program,
 };
@@ -162,7 +161,7 @@ struct Sample {
 
 struct FullAbiFixture {
     metas: Vec<LaunchAccountMeta>,
-    accounts: BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: AccountMap,
     instruction_data: Vec<u8>,
 }
 
@@ -1043,7 +1042,7 @@ fn benchmark_config() -> Config {
 
 fn full_abi_fixture(account_count: usize, account_data_bytes: usize) -> FullAbiFixture {
     let mut metas = Vec::with_capacity(account_count);
-    let mut accounts = BTreeMap::new();
+    let mut accounts = AccountMap::new();
     for index in 0..account_count {
         let mut pubkey = [0_u8; 32];
         pubkey[..8].copy_from_slice(&(index as u64 + 1).to_le_bytes());
@@ -1103,7 +1102,7 @@ fn patch_fixture_to_mutate_first_account_data(elf: &mut [u8]) -> Result<()> {
 fn prepare_pre_accounts_mirror(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
 ) -> Result<Vec<PreparedAccount>> {
     account_metas
         .iter()
@@ -1134,7 +1133,7 @@ fn prepare_pre_accounts_mirror(
 fn serialize_parameters_mirror(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     instruction_data: &[u8],
 ) -> Result<Vec<u8>> {
     let mut capacity = 8_usize
@@ -1184,7 +1183,7 @@ fn serialize_parameters_mirror(
 
 fn deserialize_parameters_mirror(
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &mut AccountMap,
     buffer: &[u8],
 ) -> Result<()> {
     let mut start = 8_usize;
@@ -1231,7 +1230,7 @@ fn duplicate_position(metas: &[LaunchAccountMeta], pubkey: [u8; 32]) -> Option<u
 }
 
 fn required_account(
-    accounts: &BTreeMap<[u8; 32], AccountSnapshot>,
+    accounts: &AccountMap,
     pubkey: [u8; 32],
 ) -> Result<&AccountSnapshot> {
     accounts
@@ -1240,8 +1239,8 @@ fn required_account(
 }
 
 fn account_data_allocations_are_shared(
-    left: &BTreeMap<[u8; 32], AccountSnapshot>,
-    right: &BTreeMap<[u8; 32], AccountSnapshot>,
+    left: &AccountMap,
+    right: &AccountMap,
 ) -> bool {
     left.len() == right.len()
         && left.iter().all(|(pubkey, left_account)| {
@@ -1254,16 +1253,21 @@ fn account_data_allocations_are_shared(
 }
 
 fn embedded_fixture_mutated_exactly_first_account(
-    before: &BTreeMap<[u8; 32], AccountSnapshot>,
-    after: &BTreeMap<[u8; 32], AccountSnapshot>,
+    before: &AccountMap,
+    after: &AccountMap,
 ) -> bool {
     if before.len() != after.len() {
         return false;
     }
-    let Some((first_pubkey, first_before)) = before.first_key_value() else {
+    // `full_abi_fixture` assigns pubkeys from 1..N in little-endian order and
+    // the patched ELF mutates only the first message account (pubkey index 0).
+    // Do not use HashMap iteration order.
+    let mut first_pubkey = [0_u8; 32];
+    first_pubkey[..8].copy_from_slice(&1u64.to_le_bytes());
+    let Some(first_before) = before.get(&first_pubkey) else {
         return false;
     };
-    let Some(first_after) = after.get(first_pubkey) else {
+    let Some(first_after) = after.get(&first_pubkey) else {
         return false;
     };
     if first_before.data.is_empty()
@@ -1277,7 +1281,10 @@ fn embedded_fixture_mutated_exactly_first_account(
     {
         return false;
     }
-    before.iter().skip(1).all(|(pubkey, account)| {
+    before.iter().all(|(pubkey, account)| {
+        if pubkey == &first_pubkey {
+            return true;
+        }
         after
             .get(pubkey)
             .is_some_and(|after_account| after_account == account)
@@ -1356,7 +1363,7 @@ fn buffer_checksum(buffer: &[u8]) -> u64 {
     black_box(checksum)
 }
 
-fn account_sample_checksum(accounts: &BTreeMap<[u8; 32], AccountSnapshot>) -> u64 {
+fn account_sample_checksum(accounts: &AccountMap) -> u64 {
     accounts.iter().fold(0_u64, |checksum, (pubkey, account)| {
         checksum
             .rotate_left(3)
@@ -1376,7 +1383,7 @@ fn execution_semantic_fingerprint(outcome: &ExecutionOutcome) -> [u8; 32] {
     digest.finalize().into()
 }
 
-fn account_state_fingerprint(accounts: &BTreeMap<[u8; 32], AccountSnapshot>) -> [u8; 32] {
+fn account_state_fingerprint(accounts: &AccountMap) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"blockzilla-bpf-bench-account-state-v1\0");
     for (pubkey, account) in accounts {
@@ -1592,7 +1599,7 @@ mod tests {
                 &accounts
             ));
 
-            let first_pubkey = *fixture.accounts.first_key_value().unwrap().0;
+            let first_pubkey = *fixture.accounts.keys().next().unwrap();
             assert!(
                 !accounts[&first_pubkey]
                     .data

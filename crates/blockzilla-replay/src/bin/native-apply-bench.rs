@@ -1,10 +1,11 @@
 //! Microbenchmark: instruction-atomic native apply (clone overlay) vs
-//! replay-only in-place apply (no BTreeMap clone).
+//! replay-only in-place apply (no overlay clone).
 //!
 //! Hypothesis: System/Stake/Config/BPF-loader previously cloned the whole
 //! transaction overlay on every instruction for instruction-level atomicity.
 //! Replay already discards the overlay on failure, so the clone is pure
-//! overhead. This bench measures that cost.
+//! overhead. This bench measures that cost (and tracks AccountMap clone cost
+//! as overlay cardinality grows).
 //!
 //! ```text
 //! cargo run --release -p blockzilla-replay --bin native-apply-bench
@@ -12,7 +13,6 @@
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
-    collections::BTreeMap,
     env,
     hint::black_box,
     process,
@@ -22,7 +22,7 @@ use std::{
 
 use blockzilla_format::ArchiveV2SystemInstructionData;
 use blockzilla_replay::{
-    AccountSnapshot, LaunchAccountMeta, SYSTEM_PROGRAM_ID,
+    AccountMap, AccountSnapshot, LaunchAccountMeta, SYSTEM_PROGRAM_ID,
     apply_launch_system_instruction_for_epoch,
     apply_launch_system_instruction_for_epoch_in_place, default_system_account,
 };
@@ -153,9 +153,9 @@ fn seeded_account(index: u64, lamports: u64, with_data: bool) -> AccountSnapshot
 
 /// Build an overlay shaped like a multi-account System transfer transaction:
 /// from + to plus filler keys already present (prior instructions in the same tx).
-fn build_overlay(size: usize) -> BTreeMap<[u8; 32], AccountSnapshot> {
+fn build_overlay(size: usize) -> AccountMap {
     assert!(size >= 2, "transfer needs from+to");
-    let mut overlay = BTreeMap::new();
+    let mut overlay = AccountMap::with_capacity(size);
     for i in 0..size {
         let with_data = i >= 2;
         let lamports = 1_000_000 + (i as u64) * 1_000;
@@ -179,7 +179,7 @@ fn transfer_metas() -> [LaunchAccountMeta; 2] {
     ]
 }
 
-fn restore_transfer_pair(overlay: &mut BTreeMap<[u8; 32], AccountSnapshot>) {
+fn restore_transfer_pair(overlay: &mut AccountMap) {
     // Keep filler accounts; reset from/to balances so each iter is identical.
     overlay.insert(pubkey(0), seeded_account(0, 1_000_000, false));
     overlay.insert(pubkey(1), seeded_account(1, 1_001_000, false));
@@ -187,7 +187,7 @@ fn restore_transfer_pair(overlay: &mut BTreeMap<[u8; 32], AccountSnapshot>) {
 
 fn apply_once(
     mode: Mode,
-    overlay: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    overlay: &mut AccountMap,
     instruction: &ArchiveV2SystemInstructionData,
     metas: &[LaunchAccountMeta],
 ) {

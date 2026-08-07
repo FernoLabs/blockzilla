@@ -4,8 +4,8 @@
 //! execution. It does not decode compact blocks or execute a program. The
 //! deterministic sweep covers:
 //!
-//! - read-set transaction-overlay construction (the runtime's `BTreeMap` and
-//!   a capacity-reserved hash-map candidate);
+//! - read-set transaction-overlay construction (production `AccountMap` and
+//!   a side-by-side capacity-reserved hash-map candidate);
 //! - writable-account clone/mutate/staging in both map layouts;
 //! - `AccountWriteBatch` staging separately from atomic publication;
 //! - `InstructionDiff` materialization;
@@ -44,14 +44,17 @@ use std::{
 };
 
 use blockzilla_replay::{
-    AccountBatchCommit, AccountSnapshot, AccountWriteBatch, DiffBoundary, DiffDisposition,
-    DiffPolicy, InlineInstructionPath, InstructionDiff, MemoryAccountStore,
+    AccountBatchCommit, AccountMap, AccountSnapshot, AccountWriteBatch, DiffBoundary,
+    DiffDisposition, DiffPolicy, InlineInstructionPath, InstructionDiff, MemoryAccountStore,
 };
 use hashbrown::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
 
 type Pubkey = [u8; 32];
+/// Legacy ordered overlay retained only for A/B comparison in this bench.
 type BTreeOverlay = BTreeMap<Pubkey, AccountSnapshot>;
+/// Production transaction overlay (hashbrown).
+type ProdOverlay = AccountMap;
 type HashOverlay = HashMap<Pubkey, AccountSnapshot>;
 
 const DEFAULT_CARDINALITIES: &[usize] = &[1_000, 54_339];
@@ -155,8 +158,8 @@ struct ShapeWorkload {
     writable_keys: Vec<Pubkey>,
     before_writable: Vec<(Pubkey, AccountSnapshot)>,
     after_writable: Vec<(Pubkey, AccountSnapshot)>,
-    diff_before: BTreeOverlay,
-    diff_after: BTreeOverlay,
+    diff_before: ProdOverlay,
+    diff_after: ProdOverlay,
     changed_base_keys: Vec<Pubkey>,
     changed_events: Vec<Pubkey>,
     changed_final_len: usize,
@@ -503,8 +506,8 @@ fn build_workload(
 
     let mut before_writable = Vec::with_capacity(config.writable);
     let mut after_writable = Vec::with_capacity(config.writable);
-    let mut diff_before = BTreeMap::new();
-    let mut diff_after = BTreeMap::new();
+    let mut diff_before = AccountMap::new();
+    let mut diff_after = AccountMap::new();
     for &pubkey in &writable_keys {
         let before = accounts
             .get(&pubkey)
@@ -1135,10 +1138,12 @@ fn hash_btree_overlay(overlay: &BTreeOverlay) -> [u8; 32] {
     hash_account_pairs(overlay.iter())
 }
 
+fn hash_prod_overlay(overlay: &ProdOverlay) -> [u8; 32] {
+    hash_account_pairs(overlay.iter())
+}
+
 fn hash_hash_overlay(overlay: &HashOverlay) -> [u8; 32] {
-    let mut entries = overlay.iter().collect::<Vec<_>>();
-    entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-    hash_account_pairs(entries)
+    hash_account_pairs(overlay.iter())
 }
 
 fn hash_account_pairs<'a>(
@@ -1194,8 +1199,8 @@ fn hash_workload(
     writable_keys: &[Pubkey],
     changed_base_keys: &[Pubkey],
     changed_events: &[Pubkey],
-    diff_before: &BTreeOverlay,
-    diff_after: &BTreeOverlay,
+    diff_before: &ProdOverlay,
+    diff_after: &ProdOverlay,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"blockzilla/replay-state-bench/workload/v1\0");
@@ -1205,8 +1210,8 @@ fn hash_workload(
     update_key_slice_hash(&mut hasher, writable_keys);
     update_key_slice_hash(&mut hasher, changed_base_keys);
     update_key_slice_hash(&mut hasher, changed_events);
-    hasher.update(hash_btree_overlay(diff_before));
-    hasher.update(hash_btree_overlay(diff_after));
+    hasher.update(hash_prod_overlay(diff_before));
+    hasher.update(hash_prod_overlay(diff_after));
     hasher.finalize().into()
 }
 
