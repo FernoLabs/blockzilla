@@ -17,7 +17,7 @@ Current guides: [Blockzilla CLI](../blockzilla/README.md),
   locally derived slot/time discontinuity file emitted by current builders.
 - [Blockzilla scheduler](../blockzilla/README.md#scheduler) documents the
   experimental finite-work scheduler and its read-only status boundary.
-- [Blockzilla watcher](../apps/blockzilla-watcher/README.md) documents the
+- [Blockzilla monitor](../services/blockzilla-monitor/README.md) documents the
   separate read-only operational UI and API contract.
 - [FireWatch local archive indexing](guides/firewatch-local-archive-indexing.md)
   hands off the completed-epoch read SDK and authenticated Range-gateway flow;
