@@ -247,6 +247,24 @@ pub struct SchedulerArgs {
         default_value_t = true
     )]
     poh_migration_auto_pause: bool,
+
+    /// Adaptive ceiling the scheduler may grow PoH migration concurrency into, one worker at
+    /// a time, under sustained resume pressure. Zero (the default) disables growth entirely
+    /// and keeps --poh-migration-concurrency a hard fixed ceiling, matching prior behavior.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_POH_MIGRATION_CAPACITY_MAX",
+        default_value_t = 0
+    )]
+    poh_migration_capacity_max: usize,
+
+    /// Minimum seconds between adaptive PoH migration capacity grow/shrink steps.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_POH_MIGRATION_CAPACITY_COOLDOWN_SECS",
+        default_value_t = 60
+    )]
+    poh_migration_capacity_cooldown_secs: u64,
 }
 
 impl SchedulerArgs {
@@ -377,6 +395,15 @@ impl SchedulerArgs {
             self.poll_interval_secs > 0,
             "--poll-interval-secs must be positive"
         );
+        anyhow::ensure!(
+            self.poh_migration_capacity_max == 0
+                || self.poh_migration_capacity_max >= self.poh_migration_concurrency,
+            "--poh-migration-capacity-max must be zero or at least --poh-migration-concurrency"
+        );
+        anyhow::ensure!(
+            self.poh_migration_capacity_cooldown_secs > 0,
+            "--poh-migration-capacity-cooldown-secs must be positive"
+        );
 
         let blockzilla_bin = match self.blockzilla_bin {
             Some(path) => path,
@@ -428,6 +455,10 @@ impl SchedulerArgs {
             finalizer_lock,
             poh_migration_concurrency: self.poh_migration_concurrency,
             poh_migration_auto_pause: self.poh_migration_auto_pause,
+            poh_migration_capacity_max: self.poh_migration_capacity_max,
+            poh_migration_capacity_cooldown: Duration::from_secs(
+                self.poh_migration_capacity_cooldown_secs,
+            ),
         })
     }
 }

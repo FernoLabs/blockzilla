@@ -4,7 +4,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
     fmt::Write as _,
+    fs::File,
+    io::Write as _,
     num::NonZeroU64,
+    os::fd::{FromRawFd, RawFd},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -69,6 +72,10 @@ enum Commands {
     MigratePohSignatureCounts {
         /// Compact V2 epoch directory.
         archive_dir: PathBuf,
+        /// Worker threads used to decompress and patch blocks that need it. 0 uses every
+        /// available core.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
     },
 
     /// Microbenchmark the allocation-free PoH hash and signature-mixin core.
@@ -997,6 +1004,9 @@ enum Commands {
         #[arg(long)]
         entry: Option<usize>,
     },
+
+    /// TEMPORARY: reset every PoH entry's signature_count to zero, for benchmark prep.
+    DebugResetPohSignatureCounts { input: PathBuf, output: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1724,6 +1734,9 @@ fn main() -> Result<()> {
         Commands::DumpCarPohEntry { input, slot, entry } => {
             car_debug::dump_car_poh_entry(&input, slot, entry)
         }
+        Commands::DebugResetPohSignatureCounts { input, output } => {
+            car_debug::debug_reset_poh_signature_counts(&input, &output)
+        }
         Commands::VerifyArchiveV2Poh {
             archive_dir,
             threads,
@@ -1731,8 +1744,8 @@ fn main() -> Result<()> {
         } => archive_verify::verify_archive_v2_poh(&archive_dir, threads, max_blocks).map(|report| {
             println!("{}", serde_json::to_string(&report).expect("serialize PoH report"));
         }),
-        Commands::MigratePohSignatureCounts { archive_dir } => {
-            archive_verify::migrate_poh_signature_counts(&archive_dir).map(|report| {
+        Commands::MigratePohSignatureCounts { archive_dir, threads } => {
+            archive_verify::migrate_poh_signature_counts(&archive_dir, threads).map(|report| {
                 println!(
                     "{}",
                     serde_json::to_string(&report).expect("serialize PoH migration report")
@@ -1813,11 +1826,24 @@ pub(crate) struct ProgressTracker {
     input_mib_per_sec: Option<f64>,
     phase: &'static str,
     progress_path: Option<PathBuf>,
+    /// Pipe back to a spawning scheduler, set only for job kinds piloting the disk-free
+    /// progress channel (currently PoH migration only -- see `BLOCKZILLA_PROGRESS_FD`).
+    /// Takes over from `progress_path` entirely when present: every snapshot goes to this fd
+    /// instead of a file, since the point is to stop competing with the job's own sequential
+    /// disk I/O for head movement. The scheduler owns crash/restart recovery by re-deriving
+    /// state from what the job already produced, not from a durable progress checkpoint.
+    progress_fd: Option<File>,
 }
 
 impl ProgressTracker {
     pub(crate) fn new(phase: &'static str) -> Self {
         let now = Instant::now();
+        let progress_fd = std::env::var("BLOCKZILLA_PROGRESS_FD")
+            .ok()
+            .and_then(|value| value.parse::<RawFd>().ok())
+            // SAFETY: the scheduler opens this fd across the exec boundary specifically for
+            // this process to own; it is never inherited by anything else and never reused.
+            .map(|fd| unsafe { File::from_raw_fd(fd) });
         Self {
             start_time: now,
             last_report: now,
@@ -1833,7 +1859,10 @@ impl ProgressTracker {
             input_bytes_at_last_report: 0,
             input_mib_per_sec: None,
             phase,
-            progress_path: std::env::var_os("BLOCKZILLA_PROGRESS_FILE").map(PathBuf::from),
+            progress_path: (progress_fd.is_none())
+                .then(|| std::env::var_os("BLOCKZILLA_PROGRESS_FILE").map(PathBuf::from))
+                .flatten(),
+            progress_fd,
         }
     }
 
@@ -1890,7 +1919,7 @@ impl ProgressTracker {
         }
     }
 
-    fn report(&self) {
+    fn report(&mut self) {
         let elapsed = self.start_time.elapsed().as_secs_f64();
         if elapsed < 0.001 {
             return;
@@ -1954,7 +1983,7 @@ impl ProgressTracker {
         }
     }
 
-    pub(crate) fn final_report(&self) {
+    pub(crate) fn final_report(&mut self) {
         let elapsed = self.start_time.elapsed().as_secs_f64();
         let blocks_per_sec = self.blocks as f64 / elapsed;
         let txs_per_sec = self.txs as f64 / elapsed;
@@ -1982,10 +2011,10 @@ impl ProgressTracker {
         info!("{}", msg);
     }
 
-    fn write_progress_snapshot(&self, state: &str) {
-        let Some(path) = self.progress_path.as_deref() else {
+    fn write_progress_snapshot(&mut self, state: &str) {
+        if self.progress_fd.is_none() && self.progress_path.is_none() {
             return;
-        };
+        }
         let elapsed_secs = self.start_time.elapsed().as_secs_f64().max(0.001);
         let blocks_per_sec = self.blocks as f64 / elapsed_secs;
         let txs_per_sec = self.txs as f64 / elapsed_secs;
@@ -2029,6 +2058,16 @@ impl ProgressTracker {
             json_f64(eta_secs),
             updated_unix_secs,
         );
+
+        if let Some(fd) = self.progress_fd.as_mut() {
+            // Best-effort, like the file path below: a scheduler that already exited (or a
+            // full pipe it stopped draining) must never fail or block this job's real work.
+            let _ = fd.write_all(json.as_bytes());
+            return;
+        }
+        let Some(path) = self.progress_path.as_deref() else {
+            return;
+        };
         if let Some(parent) = path.parent()
             && std::fs::create_dir_all(parent).is_err()
         {
