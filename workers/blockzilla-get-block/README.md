@@ -106,7 +106,7 @@ time to become visible.
 Generate key material locally:
 
 ```bash
-cd apps/blockzilla-get-block
+cd workers/blockzilla-get-block
 npm run rpc-key:generate -- \
   --key-id key_acme_main \
   --customer-id customer_acme \
@@ -176,7 +176,7 @@ Build or run the Worker:
 rustup target add wasm32-unknown-unknown
 cargo install worker-build --locked --version 0.8.3
 
-cd apps/blockzilla-get-block
+cd workers/blockzilla-get-block
 npm install
 npm run build
 npm run dev
