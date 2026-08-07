@@ -14,77 +14,114 @@ struct SchedulerCli {
 }
 
 /// Run the Blockzilla storage scheduler and its read-only status API.
+///
+/// Every non-boolean flag below also reads from a `BLOCKZILLA_*`-prefixed environment
+/// variable (lowest precedence, below the CLI flag itself), so a deployment's entire
+/// configuration can live in one `EnvironmentFile=` sourced by its systemd unit instead of
+/// being spelled out as a long flag list. The four presence-only opt-in flags (`--execute`,
+/// `--no-access`, `--compact-auto-pause`, `--preflight-car`) deliberately have no env var:
+/// clap's env handling for a `SetTrue` flag treats the variable merely being *set* as
+/// enabling it regardless of its value, which is exactly the kind of "silently on because a
+/// stale env file exists" footgun these opt-in flags exist to prevent.
 #[derive(Debug, Clone, Args)]
 pub struct SchedulerArgs {
     /// Address for the read-only health, status, and event-stream API.
-    #[arg(long, default_value = "127.0.0.1:8787")]
+    #[arg(long, env = "BLOCKZILLA_STATUS_BIND", default_value = "127.0.0.1:8787")]
     status_bind: SocketAddr,
 
     /// Optional loopback-only address for pause, resume, and retry operations.
     /// Leave unset to disable all management endpoints.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_MANAGEMENT_BIND")]
     management_bind: Option<SocketAddr>,
 
     /// Blockzilla executable launched for archive jobs. Defaults to this executable.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_BIN")]
     blockzilla_bin: Option<PathBuf>,
 
     /// Optional alternate Blockzilla executable used only for repair jobs.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_REPAIR_BIN")]
     repair_blockzilla_bin: Option<PathBuf>,
 
     /// Directory containing source CAR and CAR.ZST files.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_CAR_ROOT")]
     car_root: PathBuf,
 
     /// Directory containing and receiving Archive V2 epochs.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_ARCHIVE_ROOT")]
     archive_root: PathBuf,
 
     /// Directory containing live-capture workspaces.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_LIVE_ROOT")]
     live_root: PathBuf,
 
     /// Durable scheduler state, progress, and logs.
-    #[arg(long, default_value = "blockzilla-scheduler-state")]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_STATE_ROOT",
+        default_value = "blockzilla-scheduler-state"
+    )]
     state_root: PathBuf,
 
     /// Maximum concurrent historical scan jobs.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "BLOCKZILLA_SCAN_CONCURRENCY", default_value_t = 1)]
     scan_concurrency: usize,
 
     /// Compact-job ceiling. Zero enables adaptive probing without a fixed ceiling.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, env = "BLOCKZILLA_COMPACT_CONCURRENCY", default_value_t = 0)]
     compact_concurrency: usize,
 
     /// Compact-job ceiling while a finalizer is active. Zero keeps strict
     /// exclusivity in fixed mode and remains uncapped in adaptive mode.
-    #[arg(long, default_value_t = 0)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_FINALIZER_OVERLAP",
+        default_value_t = 0
+    )]
     compact_finalizer_overlap: usize,
 
     /// CPU estimate retained in status output for each compact worker.
-    #[arg(long, default_value_t = 1)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_CPU_CORES_PER_WORKER",
+        default_value_t = 1
+    )]
     compact_cpu_cores_per_worker: u64,
 
     /// Fallback load/run-queue ceiling used when Linux CPU PSI is unavailable.
     /// Defaults to the host's available parallelism.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_COMPACT_CPU_BUDGET_CORES")]
     compact_cpu_budget_cores: Option<u64>,
 
     /// Pause when Linux CPU PSI some avg10 reaches this percentage.
-    #[arg(long, default_value_t = 50.0)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_CPU_PAUSE_SOME_AVG10",
+        default_value_t = 50.0
+    )]
     compact_cpu_pause_some_avg10: f64,
 
     /// Resume when Linux CPU PSI some avg10 falls to this percentage.
-    #[arg(long, default_value_t = 20.0)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_CPU_RESUME_SOME_AVG10",
+        default_value_t = 20.0
+    )]
     compact_cpu_resume_some_avg10: f64,
 
     /// Estimated aggregate disk throughput for one compact worker.
-    #[arg(long, default_value_t = 120)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_IO_MIB_PER_SEC_PER_WORKER",
+        default_value_t = 120
+    )]
     compact_io_mib_per_sec_per_worker: u64,
 
     /// Optional measured archive-device throughput ceiling. Zero disables it.
-    #[arg(long, default_value_t = 0)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_IO_BUDGET_MIB_PER_SEC",
+        default_value_t = 0
+    )]
     compact_io_budget_mib_per_sec: u64,
 
     /// Adaptively stop and resume managed compact process groups under pressure.
@@ -92,43 +129,59 @@ pub struct SchedulerArgs {
     compact_auto_pause: bool,
 
     /// Initial compact lane target. Hard resource guards may pause below it.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "BLOCKZILLA_COMPACT_MIN_RUNNING", default_value_t = 1)]
     compact_min_running: usize,
 
     /// Extra MemAvailable guard above the scheduler reserve.
-    #[arg(long, default_value_t = 512)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_MEMORY_GUARD_MIB",
+        default_value_t = 512
+    )]
     compact_memory_guard_mib: u64,
 
     /// Pause when Linux I/O PSI full avg10 reaches this percentage.
-    #[arg(long, default_value_t = 20.0)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_IO_PAUSE_FULL_AVG10",
+        default_value_t = 20.0
+    )]
     compact_io_pause_full_avg10: f64,
 
     /// Resume when Linux I/O PSI full avg10 falls to this percentage.
-    #[arg(long, default_value_t = 5.0)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_IO_RESUME_FULL_AVG10",
+        default_value_t = 5.0
+    )]
     compact_io_resume_full_avg10: f64,
 
     /// Minimum seconds between adaptive compact-lane actions.
-    #[arg(long, default_value_t = 30)]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_COMPACT_PAUSE_COOLDOWN_SECS",
+        default_value_t = 30
+    )]
     compact_pause_cooldown_secs: u64,
 
     /// Expected peak RSS for one historical scan job.
-    #[arg(long, default_value_t = 800)]
+    #[arg(long, env = "BLOCKZILLA_SCAN_MEMORY_MIB", default_value_t = 800)]
     scan_memory_mib: u64,
 
     /// Minimum RSS budget for a finalizer stage.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, env = "BLOCKZILLA_FINALIZER_MEMORY_MIB", default_value_t = 512)]
     finalizer_memory_mib: u64,
 
     /// Memory kept available after projected job growth.
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, env = "BLOCKZILLA_MEMORY_RESERVE_MIB", default_value_t = 512)]
     memory_reserve_mib: u64,
 
     /// Free archive-filesystem space below which new work does not start.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, env = "BLOCKZILLA_DISK_RESERVE_GIB", default_value_t = 16)]
     disk_reserve_gib: u64,
 
     /// Zstd compression level used by archive builders.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "BLOCKZILLA_LEVEL", default_value_t = 1)]
     level: i32,
 
     /// Launch jobs. Omit for observer mode.
@@ -140,27 +193,27 @@ pub struct SchedulerArgs {
     no_access: bool,
 
     /// First epoch included in scheduler inventory.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_START_EPOCH")]
     start_epoch: Option<u64>,
 
     /// Last epoch included in scheduler inventory. Requires --start-epoch.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_END_EPOCH")]
     end_epoch: Option<u64>,
 
     /// First epoch in an optional preferred historical range.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_PRIORITY_EPOCH_START")]
     priority_epoch_start: Option<u64>,
 
     /// Last epoch in an optional preferred historical range.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_PRIORITY_EPOCH_END")]
     priority_epoch_end: Option<u64>,
 
     /// Optional CAR URL template containing `{epoch}`. Requires an explicit range.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_CAR_SOURCE_URL_TEMPLATE")]
     car_source_url_template: Option<String>,
 
     /// Maximum concurrent CAR download and preflight jobs.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "BLOCKZILLA_DOWNLOAD_CONCURRENCY", default_value_t = 1)]
     download_concurrency: usize,
 
     /// Structurally preflight canonical CAR files before new historical scans.
@@ -168,13 +221,32 @@ pub struct SchedulerArgs {
     preflight_car: bool,
 
     /// Scheduler reconciliation interval.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, env = "BLOCKZILLA_POLL_INTERVAL_SECS", default_value_t = 5)]
     poll_interval_secs: u64,
 
     /// Advisory lock shared by first-seen scan and finalizer jobs. Defaults
     /// beneath --state-root.
-    #[arg(long)]
+    #[arg(long, env = "BLOCKZILLA_FINALIZER_LOCK")]
     finalizer_lock: Option<PathBuf>,
+
+    /// Maximum concurrent PoH signature-count migration jobs. Zero disables the migration
+    /// lane entirely; unlike --compact-concurrency, zero here is not "unbounded" because this
+    /// is a new capability that must not activate itself without explicit operator opt-in.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_POH_MIGRATION_CONCURRENCY",
+        default_value_t = 0
+    )]
+    poh_migration_concurrency: usize,
+
+    /// Adaptively stop starting new PoH signature-count migration jobs under the same shared
+    /// I/O pressure signal the legacy compact/reuse lane already respects.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_POH_MIGRATION_AUTO_PAUSE",
+        default_value_t = true
+    )]
+    poh_migration_auto_pause: bool,
 }
 
 impl SchedulerArgs {
@@ -354,6 +426,8 @@ impl SchedulerArgs {
             preflight_car: self.preflight_car,
             poll_interval: Duration::from_secs(self.poll_interval_secs),
             finalizer_lock,
+            poh_migration_concurrency: self.poh_migration_concurrency,
+            poh_migration_auto_pause: self.poh_migration_auto_pause,
         })
     }
 }
@@ -371,6 +445,53 @@ mod tests {
             "archives",
             "--live-root",
         ]
+    }
+
+    /// The whole point of adding `env` to these args: a systemd unit's
+    /// `EnvironmentFile=` can supply every path with no CLI flags at all, and an
+    /// explicit CLI flag still wins over the environment when both are present
+    /// (clap's normal precedence). Env var mutation is process-global, so this
+    /// keeps both scenarios in one test rather than risking two tests racing on
+    /// the same variables under parallel execution.
+    #[test]
+    fn env_vars_satisfy_required_paths_and_cli_flags_still_take_precedence() {
+        // SAFETY: no other test in this binary reads or writes these BLOCKZILLA_*
+        // names, and this test does not spawn threads that could race on them.
+        unsafe {
+            std::env::set_var("BLOCKZILLA_CAR_ROOT", "env-cars");
+            std::env::set_var("BLOCKZILLA_ARCHIVE_ROOT", "env-archives");
+            std::env::set_var("BLOCKZILLA_LIVE_ROOT", "env-live");
+        }
+
+        let from_env = SchedulerArgs::try_parse_from(["test"]);
+
+        unsafe {
+            std::env::remove_var("BLOCKZILLA_CAR_ROOT");
+            std::env::remove_var("BLOCKZILLA_ARCHIVE_ROOT");
+            std::env::remove_var("BLOCKZILLA_LIVE_ROOT");
+        }
+
+        let from_env = from_env.unwrap();
+        assert_eq!(from_env.car_root, PathBuf::from("env-cars"));
+        assert_eq!(from_env.archive_root, PathBuf::from("env-archives"));
+        assert_eq!(from_env.live_root, PathBuf::from("env-live"));
+
+        unsafe {
+            std::env::set_var("BLOCKZILLA_CAR_ROOT", "env-cars");
+        }
+        let overridden = SchedulerArgs::try_parse_from([
+            "test",
+            "--car-root",
+            "cli-cars",
+            "--archive-root",
+            "archives",
+            "--live-root",
+            "live",
+        ]);
+        unsafe {
+            std::env::remove_var("BLOCKZILLA_CAR_ROOT");
+        }
+        assert_eq!(overridden.unwrap().car_root, PathBuf::from("cli-cars"));
     }
 
     #[test]
