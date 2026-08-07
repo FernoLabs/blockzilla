@@ -1,17 +1,12 @@
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::HashMap,
-    sync::{
-        Arc, RwLock,
-    },
+    sync::{Arc, RwLock},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use solana_keypair::{Keypair, Signer};
-use solana_net_utils::{
-    multihomed_sockets::BindIpAddrs,
-    SocketAddrSpace,
-};
 use solana_address::Address as Pubkey;
+use solana_keypair::{Keypair, Signer};
+use solana_net_utils::{SocketAddrSpace, multihomed_sockets::BindIpAddrs};
 
 use crate::contact_info::{ContactInfo, Protocol};
 
@@ -85,7 +80,9 @@ impl ClusterInfo {
         self.peers_snapshot()
             .into_iter()
             .filter(|peer| {
-                peer.tvu(Protocol::UDP).or(peer.tvu(Protocol::QUIC)).is_some()
+                peer.tvu(Protocol::UDP)
+                    .or(peer.tvu(Protocol::QUIC))
+                    .is_some()
             })
             .map(|peer| mapper(&peer))
             .collect()
@@ -104,7 +101,11 @@ impl ClusterInfo {
     pub fn repair_peers(&self, _slot: u64) -> Vec<ContactInfo> {
         self.peers_snapshot()
             .into_iter()
-            .filter(|peer| peer.serve_repair(Protocol::UDP).or(peer.serve_repair(Protocol::QUIC)).is_some())
+            .filter(|peer| {
+                peer.serve_repair(Protocol::UDP)
+                    .or(peer.serve_repair(Protocol::QUIC))
+                    .is_some()
+            })
             .collect()
     }
 
@@ -123,7 +124,10 @@ impl ClusterInfo {
             .into_iter()
             .filter(|peer| peer.pubkey() != &self_id)
             .fold(Vec::new(), |mut acc, peer| {
-                if !acc.iter().any(|existing| existing.pubkey() == peer.pubkey()) {
+                if !acc
+                    .iter()
+                    .any(|existing| existing.pubkey() == peer.pubkey())
+                {
                     acc.push(peer);
                 }
                 acc

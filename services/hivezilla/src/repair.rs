@@ -1864,6 +1864,7 @@ mod tests {
                     num_hashes: 1,
                     hash: blockhash(hash_byte),
                     tx_count: 0,
+                    signature_count: 0,
                 }],
             })
             .unwrap();

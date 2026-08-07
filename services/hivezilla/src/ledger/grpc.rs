@@ -124,6 +124,10 @@ pub(crate) fn project_grpc_ledger_candidate(
                         block.slot, entry.index
                     )
                 })?,
+                // Not wired for this ingestion path yet; verify-archive-v2-poh's cross-check
+                // against the block index detects the unpopulated count and falls back to
+                // decompression rather than trusting it.
+                signature_count: 0,
             })
         })
         .collect::<Result<Vec<_>>>()?;

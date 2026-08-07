@@ -9,14 +9,14 @@ use of_car_reader::{
         decode_transaction_status_meta_from_frame, slot_uses_protobuf_metadata,
         visit_protobuf_transaction_status_meta,
     },
-    reconstruct::LosslessCarBlock,
+    reconstruct::{Cid36, LosslessCarBlock},
 };
 use prost::Message;
 use solana_pubkey::{Pubkey, pubkey};
 use solana_short_vec::decode_shortu16_len;
 use std::{
     cmp::Reverse,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashSet},
     fs::File,
     io::{BufRead, BufReader, BufWriter, Read, Write},
     path::Path,
@@ -25,7 +25,11 @@ use std::{
 };
 use tracing::info;
 
-use crate::{BUFFER_SIZE, ProgressTracker, genesis_epoch0};
+use crate::{
+    BUFFER_SIZE, ProgressTracker,
+    archive_v2::{DetailTimer, detailed_timings_enabled},
+    genesis_epoch0,
+};
 
 const MAX_BLOCKHASHES_PER_EPOCH: usize = 432_000;
 const MESSAGE_VERSION_PREFIX: u8 = 0x80;
@@ -111,7 +115,8 @@ pub(crate) fn build_registry_and_blockhash_for_input(
     let mut counter = PubkeyCounter::new(8_000_000);
     let start = Instant::now();
     let mut progress = ProgressTracker::new("Split Compact Registry");
-    let mut timings = RegistryBuildTimings::default();
+    let mut timings = RegistryBuildTimings::from_env();
+    let mut scratch = RegistryScanScratch::new();
     let genesis = genesis_epoch0::maybe_load_for_input(input)?;
     if let Some(genesis) = &genesis {
         blockhash_out.extend_from_slice(&genesis.genesis_hash);
@@ -131,8 +136,8 @@ pub(crate) fn build_registry_and_blockhash_for_input(
         let blockhash = blockhash_for_block(block, external_blockhashes)?;
         blockhash_out.extend_from_slice(&blockhash);
 
-        let count_started = Instant::now();
-        let txs = count_block_pubkeys(block, &mut counter, &mut timings)?;
+        let count_started = DetailTimer::start(timings.detailed);
+        let txs = count_block_pubkeys(block, &mut counter, &mut timings, &mut scratch)?;
         timings.count_block_total += count_started.elapsed();
         timings.blocks += 1;
         timings.txs += txs;
@@ -186,8 +191,7 @@ pub(crate) fn build_registry_and_blockhash_for_input(
         if let Some(path) = registry_counts_path {
             write_registry_counts(
                 path,
-                std::iter::repeat(0)
-                    .take(missing_builtins.len())
+                std::iter::repeat_n(0, missing_builtins.len())
                     .chain(items.iter().map(|(_, count)| *count)),
             )
             .with_context(|| format!("write {}", path.display()))?;
@@ -378,48 +382,57 @@ fn count_block_pubkeys(
     block: &LosslessCarBlock,
     counter: &mut impl PubkeySink,
     timings: &mut RegistryBuildTimings,
+    scratch: &mut RegistryScanScratch,
 ) -> Result<u64> {
     let raw_block = require_block(block)?;
-    let mut zstd = ZstdReusableDecoder::new();
+    let detailed = timings.detailed;
     let mut txs = 0u64;
-    let mut tx_bytes = Vec::new();
-    let mut metadata_bytes = Vec::new();
-    let mut reassemble_visited = std::collections::HashSet::new();
 
     for (tx_index, tx_node) in block.transactions.iter().enumerate() {
         txs += 1;
 
-        let reassemble_started = Instant::now();
+        let reassemble_started = DetailTimer::start(detailed);
         tx_node
-            .transaction_bytes_into(&block.dataframes, &mut tx_bytes, &mut reassemble_visited)
+            .transaction_bytes_into(
+                &block.dataframes,
+                &mut scratch.tx_bytes,
+                &mut scratch.reassemble_visited,
+            )
             .with_context(|| {
                 tx_context(raw_block.slot, tx_index, "reassemble transaction bytes")
             })?;
         timings.tx_reassemble += reassemble_started.elapsed();
-        timings.tx_scratch_max = timings.tx_scratch_max.max(tx_bytes.capacity());
-        let scan_started = Instant::now();
-        count_transaction_pubkeys_from_bytes(&tx_bytes, counter)
+        timings.tx_scratch_max = timings.tx_scratch_max.max(scratch.tx_bytes.capacity());
+        let scan_started = DetailTimer::start(detailed);
+        count_transaction_pubkeys_from_bytes(&scratch.tx_bytes, counter)
             .with_context(|| tx_context(raw_block.slot, tx_index, "count transaction pubkeys"))?;
         timings.tx_pubkey_scan += scan_started.elapsed();
 
-        let reassemble_started = Instant::now();
+        let reassemble_started = DetailTimer::start(detailed);
         tx_node
             .metadata_bytes_into(
                 &block.dataframes,
-                &mut metadata_bytes,
-                &mut reassemble_visited,
+                &mut scratch.metadata_bytes,
+                &mut scratch.reassemble_visited,
             )
             .with_context(|| tx_context(raw_block.slot, tx_index, "reassemble metadata bytes"))?;
         timings.metadata_reassemble += reassemble_started.elapsed();
-        timings.metadata_scratch_max = timings.metadata_scratch_max.max(metadata_bytes.capacity());
-        if metadata_bytes.is_empty() {
+        timings.metadata_scratch_max = timings
+            .metadata_scratch_max
+            .max(scratch.metadata_bytes.capacity());
+        if scratch.metadata_bytes.is_empty() {
             continue;
         }
 
         timings.metadata_frames += 1;
-        let metadata_started = Instant::now();
-        count_metadata_pubkeys_from_frame(raw_block.slot, &metadata_bytes, &mut zstd, counter)
-            .with_context(|| tx_context(raw_block.slot, tx_index, "count metadata pubkeys"))?;
+        let metadata_started = DetailTimer::start(detailed);
+        count_metadata_pubkeys_from_frame(
+            raw_block.slot,
+            &scratch.metadata_bytes,
+            &mut scratch.zstd,
+            counter,
+        )
+        .with_context(|| tx_context(raw_block.slot, tx_index, "count metadata pubkeys"))?;
         timings.metadata_decode_count += metadata_started.elapsed();
     }
 
@@ -436,7 +449,7 @@ pub(crate) fn bench_car_registry(config: CarRegistryBenchConfig<'_>) -> Result<(
     match config.strategy {
         CarRegistryBenchStrategy::ExactOld | CarRegistryBenchStrategy::ExactStream => {
             let mut counter = PubkeyCounter::new(config.initial_capacity);
-            let mut timings = RegistryBuildTimings::default();
+            let mut timings = RegistryBuildTimings::always_detailed();
             stream_car_pubkeys(config.input, config.max_blocks, &mut counter, &mut timings)?;
             let rss_after_stream = peak_rss_bytes();
             let count_sum = counter.count_sum();
@@ -484,7 +497,7 @@ pub(crate) fn bench_car_registry(config: CarRegistryBenchConfig<'_>) -> Result<(
                 config.initial_capacity,
                 config.heavy_hitter_capacity,
             );
-            let mut timings = RegistryBuildTimings::default();
+            let mut timings = RegistryBuildTimings::always_detailed();
             stream_car_pubkeys(config.input, config.max_blocks, &mut counter, &mut timings)?;
             let rss_after_stream = peak_rss_bytes();
             let touches = counter.touches;
@@ -535,12 +548,13 @@ fn stream_car_pubkeys(
     reader.skip_header()?;
     let mut progress = ProgressTracker::new("CAR Registry Bench");
     let mut block = LosslessCarBlock::default();
+    let mut scratch = RegistryScanScratch::new();
     let stream_started = Instant::now();
 
     while reader.read_until_block_lossless(&mut block)? {
         let raw_block = require_block(&block)?;
-        let count_started = Instant::now();
-        let txs = count_block_pubkeys(&block, counter, timings)?;
+        let count_started = DetailTimer::start(timings.detailed);
+        let txs = count_block_pubkeys(&block, counter, timings, &mut scratch)?;
         timings.count_block_total += count_started.elapsed();
         timings.blocks += 1;
         timings.txs += txs;
@@ -613,8 +627,7 @@ fn finalize_exact_stream(
         )?;
         write_registry_counts(
             &output_dir.join("registry_counts.bin"),
-            std::iter::repeat(0)
-                .take(missing_builtins.len())
+            std::iter::repeat_n(0, missing_builtins.len())
                 .chain(items.iter().map(|(_, count)| *count)),
         )?;
     }
@@ -653,8 +666,7 @@ fn finalize_unique_space_saving(
         )?;
         write_registry_counts(
             &output_dir.join("registry_counts_estimated.bin"),
-            std::iter::repeat(0)
-                .take(missing_builtins.len())
+            std::iter::repeat_n(0, missing_builtins.len())
                 .chain(
                     candidates
                         .iter()
@@ -813,6 +825,7 @@ fn exact_counter_estimated_heap_bytes(capacity: usize, value_bytes: usize) -> u6
 
 #[derive(Default)]
 struct RegistryBuildTimings {
+    detailed: bool,
     stream_total: Duration,
     count_block_total: Duration,
     tx_reassemble: Duration,
@@ -827,6 +840,45 @@ struct RegistryBuildTimings {
     metadata_frames: u64,
     tx_scratch_max: usize,
     metadata_scratch_max: usize,
+}
+
+impl RegistryBuildTimings {
+    fn from_env() -> Self {
+        Self {
+            detailed: detailed_timings_enabled(),
+            ..Self::default()
+        }
+    }
+
+    /// The `bench-car-registry` CLI command exists specifically to report
+    /// these per-phase timings, so unlike the production build path it must
+    /// not depend on `BLOCKZILLA_DETAILED_TIMINGS` to populate them.
+    fn always_detailed() -> Self {
+        Self {
+            detailed: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Per-block scratch reused across `count_block_pubkeys` calls so the hot
+/// registry-build loop does not allocate a decoder and two buffers per block.
+struct RegistryScanScratch {
+    zstd: ZstdReusableDecoder,
+    tx_bytes: Vec<u8>,
+    metadata_bytes: Vec<u8>,
+    reassemble_visited: HashSet<Cid36>,
+}
+
+impl RegistryScanScratch {
+    fn new() -> Self {
+        Self {
+            zstd: ZstdReusableDecoder::new(),
+            tx_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+            reassemble_visited: HashSet::new(),
+        }
+    }
 }
 
 fn count_transaction_pubkeys_from_bytes(

@@ -168,6 +168,7 @@ fn acquire_lock(lock_path: Option<&Path>, exclusive: bool) -> Result<Finalizatio
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)

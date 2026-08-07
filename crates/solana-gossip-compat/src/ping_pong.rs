@@ -2,10 +2,10 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
-use solana_sha256_hasher::hashv;
-use solana_hash::Hash;
 use solana_address::Address as Pubkey;
-use solana_keypair::{signable::Signable, Keypair, Signer};
+use solana_hash::Hash;
+use solana_keypair::{Keypair, Signer, signable::Signable};
+use solana_sha256_hasher::hashv;
 use solana_signature::Signature;
 
 #[derive(Debug, Deserialize, Serialize)]

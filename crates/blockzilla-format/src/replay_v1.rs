@@ -2186,7 +2186,7 @@ mod tests {
         }
         let mut level: Vec<[u8; 32]> = signatures.iter().map(signature_leaf_hash).collect();
         while level.len() > 1 {
-            if level.len() % 2 != 0 {
+            if !level.len().is_multiple_of(2) {
                 level.push(*level.last().unwrap());
             }
             level = level

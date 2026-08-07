@@ -28,7 +28,10 @@ impl fmt::Display for Error {
         match self {
             Self::InvalidPort(port) => write!(formatter, "invalid socket port {port}"),
             Self::InvalidIpAddress(addr) => {
-                write!(formatter, "invalid socket address IP {addr} for gossip data plane")
+                write!(
+                    formatter,
+                    "invalid socket address IP {addr} for gossip data plane"
+                )
             }
         }
     }

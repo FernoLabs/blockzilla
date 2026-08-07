@@ -684,6 +684,7 @@ mod tests {
                 num_hashes: 12,
                 hash: [9; 32],
                 tx_count: 1,
+                signature_count: 0,
             }]),
             block_components: Some(vec![
                 BlockComponentLayoutV1::EntryBatch {
@@ -808,11 +809,13 @@ mod tests {
                 num_hashes: 1,
                 hash: [3; 32],
                 tx_count: 0,
+                signature_count: 0,
             },
             PohEntryV1 {
                 num_hashes: 1,
                 hash: [9; 32],
                 tx_count: 1,
+                signature_count: 0,
             },
         ]);
         candidate.block_components = Some(vec![
@@ -858,11 +861,13 @@ mod tests {
                 num_hashes: 1,
                 hash: [3; 32],
                 tx_count: 0,
+                signature_count: 0,
             },
             PohEntryV1 {
                 num_hashes: 1,
                 hash: [9; 32],
                 tx_count: 1,
+                signature_count: 0,
             },
         ]);
         candidate.block_components = Some(vec![

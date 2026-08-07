@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::genesis::parse_genesis_bin;
 use blockzilla_format::{
     ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_TX_FLAG_HAS_ERROR, ARCHIVE_V2_TX_FLAG_HAS_METADATA,
@@ -1665,7 +1666,7 @@ fn own_archive_genesis(
         let inline = inline.ok_or_else(|| {
             CompactProbeError::Genesis("genesis.bin exists without inline genesis identity".into())
         })?;
-        let parsed = of_car_reader::genesis::parse_genesis_bin(bytes)
+        let parsed = parse_genesis_bin(bytes)
             .map_err(|error| CompactProbeError::Genesis(format!("parse genesis.bin: {error}")))?;
         return Ok(Some(own_exact_genesis(inline, parsed)));
     }
@@ -1678,7 +1679,7 @@ fn own_archive_genesis(
 #[cfg(feature = "genesis")]
 fn own_exact_genesis(
     inline: &WincodeArchiveV2Genesis,
-    genesis: of_car_reader::genesis::GenesisConfig,
+    genesis: crate::genesis::GenesisConfig,
 ) -> CompactGenesisProbe {
     use blockzilla_format::{
         WincodeArchiveV2GenesisEpochSchedule as EpochSchedule,

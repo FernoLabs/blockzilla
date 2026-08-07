@@ -473,6 +473,7 @@ fn acquire_receipt_lock(receipt: &Path) -> Result<File> {
     let lock_path = receipt_lock_path(receipt);
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)

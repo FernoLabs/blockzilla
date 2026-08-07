@@ -18,19 +18,19 @@ path = "src/bin/extract-unsupported-program.rs"
 
 [features]
 default = ["genesis"]
-genesis = ["dep:of-car-reader"]
+genesis = []
 
 [dependencies]
 anyhow = "1.0.102"
 base64 = "0.22.1"
 blockzilla-format = { path = "../blockzilla-format" }
 blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
+bzip2 = "0.5.2"
 bs58 = "0.5.1"
 clap = { version = "4.6.1", features = ["derive"] }
 curve25519-dalek = "=2.1.0"
 hashbrown = "0.15.5"
 object = { version = "0.37.3", default-features = false, features = ["elf", "read_core"] }
-of-car-reader = { path = "../old-faithful/car-reader", optional = true, default-features = false, features = ["genesis"] }
 pprof = { version = "0.15.0", features = ["flamegraph"] }
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -39,6 +39,7 @@ sha2 = "0.11.0"
 smallvec = "1.15.1"
 solana-sbpf = "=0.21.0"
 target-lexicon = "=0.13.5"
+tar = "0.4.43"
 thiserror = "2.0.18"
 wincode = { version = "0.5.4", features = ["derive", "smallvec"] }
 
