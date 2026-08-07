@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use blockzilla_format::{
     ARCHIVE_V2_BLOCK_INDEX_FILE, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE, ARCHIVE_V2_BLOCKS_FILE,
     ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
-    ARCHIVE_V2_SIGNATURES_FILE, WincodeArchiveV2PohRecord, WincodeLeb128FramedReader,
-    WincodeLeb128FramedWriter, deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards,
+    ARCHIVE_V2_SIGNATURES_FILE, ArchiveV2HotBlockIndexRow, ArchiveV2HotTxRow,
+    WincodeArchiveV2PohRecord, WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
+    deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards,
     read_archive_v2_hot_block_index,
 };
 use memmap2::Mmap;
@@ -22,6 +23,12 @@ use std::{
 const SIGNATURE_BYTES: usize = 64;
 const POH_READER_BUFFER_BYTES: usize = 8 << 20;
 const MAX_POH_FRAME_BYTES: usize = 64 << 20;
+/// Rows read and buffered per migration batch before their "needs patch" subset is dispatched
+/// to the worker pool. Large enough to amortize the rayon fork/join per batch instead of per
+/// block; the buffered state per row is small (a `WincodeArchiveV2PohRecord`, tens of entries)
+/// since each block's transient decompressed bytes live only in worker-owned scratch, not in
+/// the batch itself, so this doesn't meaningfully bound peak memory.
+const POH_MIGRATION_BATCH_ROWS: usize = 1024;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PohVerificationReport {
@@ -195,6 +202,15 @@ pub(crate) struct PohSignatureCountMigrationReport {
     /// generation already migrated, or a genuinely empty block where 0 is the real count).
     blocks_already_current: u64,
     elapsed_secs: f64,
+    worker_threads: usize,
+}
+
+/// One batch row: the read-only index row it came from, its (possibly not-yet-patched) PoH
+/// record, and whether the sequential read phase already determined it needs decompression.
+struct PohMigrationBatchItem<'idx> {
+    row: &'idx ArchiveV2HotBlockIndexRow,
+    poh: WincodeArchiveV2PohRecord,
+    needs_patch: bool,
 }
 
 /// Backfills `signature_count` into an already-built archive's `poh.wincode`, without
@@ -203,9 +219,18 @@ pub(crate) struct PohSignatureCountMigrationReport {
 /// `verify_archive_v2_poh`'s identical check. Writes to a temp file and publishes via
 /// sync+rename, so a reader (or a crash mid-run) never observes a partially written sidecar.
 ///
+/// The PoH sidecar is one framed stream, so reading and writing records stays strictly
+/// sequential and in block order. But a "needs patch" block's expensive work -- decompressing
+/// the hot block and recomputing its signature counts -- has no cross-block dependency (each
+/// block is its own independent zstd frame), so it runs on a worker pool: read a batch of
+/// `POH_MIGRATION_BATCH_ROWS` records sequentially, fan the ones needing a patch out across
+/// `requested_threads` workers, then write the whole batch back out in its original order.
+/// `requested_threads == 0` uses every available core, matching `verify_archive_v2_poh`.
+///
 /// Safe to run more than once: an already-migrated archive round-trips its records unchanged.
 pub(crate) fn migrate_poh_signature_counts(
     archive_dir: &Path,
+    requested_threads: usize,
 ) -> Result<PohSignatureCountMigrationReport> {
     let index_path = archive_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
     let index = read_archive_v2_hot_block_index(&index_path)?;
@@ -247,12 +272,20 @@ pub(crate) fn migrate_poh_signature_counts(
         tmp_file,
     ));
 
+    let worker_threads = if requested_threads == 0 {
+        std::thread::available_parallelism().map_or(1, usize::from)
+    } else {
+        requested_threads
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_threads)
+        .thread_name(|index| format!("bz-poh-migrate-{index}"))
+        .build()
+        .context("build PoH migration thread pool")?;
+
     let started = Instant::now();
     let mut progress = crate::ProgressTracker::new("PoH Signature Count Migration");
     progress.set_estimated_total_blocks(index.rows.len() as u64);
-    let mut decompressor = zstd::bulk::Decompressor::new().context("create zstd decompressor")?;
-    let mut uncompressed = Vec::new();
-    let mut tx_rows_scratch = Vec::new();
     let mut poh_write_scratch = Vec::new();
     let mut blocks_patched = 0u64;
     let mut blocks_already_current = 0u64;
@@ -262,130 +295,160 @@ pub(crate) fn migrate_poh_signature_counts(
 
     let bench_phases = std::env::var("BENCH_PHASE_TIMING").is_ok();
     let mut t_poh_read = std::time::Duration::ZERO;
-    let mut t_decompress = std::time::Duration::ZERO;
-    let mut t_deserialize_block = std::time::Duration::ZERO;
-    let mut t_tx_rows_collect = std::time::Duration::ZERO;
-    let mut t_patch = std::time::Duration::ZERO;
+    let mut t_parallel_process = std::time::Duration::ZERO;
     let mut t_poh_write = std::time::Duration::ZERO;
 
-    for (position, row) in index.rows.iter().enumerate() {
-        anyhow::ensure!(
-            row.block_id as usize == position,
-            "non-contiguous block id {} at index position {position}",
-            row.block_id
-        );
+    let mut rows = index.rows.iter().enumerate();
+    let mut batch: Vec<PohMigrationBatchItem<'_>> = Vec::with_capacity(POH_MIGRATION_BATCH_ROWS);
+    loop {
+        batch.clear();
         let t0 = bench_phases.then(Instant::now);
-        let (_, mut poh) = poh_reader
-            .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-                blockzilla_format::deserialize_archive_v2_poh_record_with_schema(
-                    bytes,
-                    &mut poh_schema,
-                )
-                .map_err(anyhow::Error::from)
-            })?
-            .with_context(|| format!("PoH sidecar ended before block {}", row.block_id))?;
+        for (position, row) in rows.by_ref().take(POH_MIGRATION_BATCH_ROWS) {
+            anyhow::ensure!(
+                row.block_id as usize == position,
+                "non-contiguous block id {} at index position {position}",
+                row.block_id
+            );
+            let (_, poh) = poh_reader
+                .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
+                    blockzilla_format::deserialize_archive_v2_poh_record_with_schema(
+                        bytes,
+                        &mut poh_schema,
+                    )
+                    .map_err(anyhow::Error::from)
+                })?
+                .with_context(|| format!("PoH sidecar ended before block {}", row.block_id))?;
+            anyhow::ensure!(
+                poh.block_id == row.block_id && poh.slot == row.slot,
+                "PoH record does not match block {} slot {}",
+                row.block_id,
+                row.slot
+            );
+            let poh_signature_sum = poh.entries.iter().try_fold(0u32, |acc, entry| {
+                acc.checked_add(entry.signature_count)
+                    .context("PoH entry signature_count overflow")
+            })?;
+            let needs_patch = poh_signature_sum != row.signature_count;
+            batch.push(PohMigrationBatchItem {
+                row,
+                poh,
+                needs_patch,
+            });
+        }
         if let Some(t0) = t0 {
             t_poh_read += t0.elapsed();
         }
-        anyhow::ensure!(
-            poh.block_id == row.block_id && poh.slot == row.slot,
-            "PoH record does not match block {} slot {}",
-            row.block_id,
-            row.slot
-        );
+        if batch.is_empty() {
+            break;
+        }
 
-        let poh_signature_sum = poh.entries.iter().try_fold(0u32, |acc, entry| {
-            acc.checked_add(entry.signature_count)
-                .context("PoH entry signature_count overflow")
+        let t1 = bench_phases.then(Instant::now);
+        pool.install(|| {
+            batch
+                .par_iter_mut()
+                .filter(|item| item.needs_patch)
+                .try_for_each_init(
+                    || {
+                        (
+                            zstd::bulk::Decompressor::default(),
+                            Vec::<u8>::new(),
+                            Vec::<ArchiveV2HotTxRow>::new(),
+                        )
+                    },
+                    |(decompressor, uncompressed, tx_rows_scratch), item| -> Result<()> {
+                        let row = item.row;
+                        let compressed_start = usize::try_from(row.compressed_offset)
+                            .context("compressed offset exceeds usize")?;
+                        let compressed_end = compressed_start
+                            .checked_add(row.compressed_len as usize)
+                            .context("compressed range overflows usize")?;
+                        let compressed = block_map
+                            .get(compressed_start..compressed_end)
+                            .with_context(|| {
+                                format!("block {} points outside block file", row.block_id)
+                            })?;
+                        let expected_len = row.uncompressed_len as usize;
+                        uncompressed.clear();
+                        uncompressed.reserve(expected_len);
+                        let decoded = decompressor
+                            .decompress_to_buffer(compressed, uncompressed)
+                            .with_context(|| {
+                                format!("decompress block {} slot {}", row.block_id, row.slot)
+                            })?;
+                        anyhow::ensure!(
+                            decoded == expected_len,
+                            "block {} decompressed to {decoded} bytes, expected {expected_len}",
+                            row.block_id
+                        );
+                        let block =
+                            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
+                                uncompressed,
+                            )
+                            .with_context(|| {
+                                format!("decode block {} slot {}", row.block_id, row.slot)
+                            })?;
+                        anyhow::ensure!(
+                            block.header.slot == row.slot && block.tx_count == row.tx_count,
+                            "block {} header/index mismatch",
+                            row.block_id
+                        );
+
+                        tx_rows_scratch.clear();
+                        tx_rows_scratch.extend(block.tx_rows());
+                        crate::archive_v2::patch_poh_entry_signature_counts(
+                            &mut item.poh.entries,
+                            tx_rows_scratch,
+                        )
+                        .with_context(|| {
+                            format!("patch block {} signature counts", row.block_id)
+                        })?;
+                        let patched_sum = item
+                            .poh
+                            .entries
+                            .iter()
+                            .map(|entry| u64::from(entry.signature_count))
+                            .sum::<u64>();
+                        anyhow::ensure!(
+                            patched_sum == u64::from(row.signature_count),
+                            "block {} patched signature_count sum {patched_sum} still does not match index {}",
+                            row.block_id,
+                            row.signature_count
+                        );
+                        Ok(())
+                    },
+                )
         })?;
-
-        if poh_signature_sum == row.signature_count {
-            blocks_already_current += 1;
-        } else {
-            let compressed_start = usize::try_from(row.compressed_offset)
-                .context("compressed offset exceeds usize")?;
-            let compressed_end = compressed_start
-                .checked_add(row.compressed_len as usize)
-                .context("compressed range overflows usize")?;
-            let compressed = block_map
-                .get(compressed_start..compressed_end)
-                .with_context(|| format!("block {} points outside block file", row.block_id))?;
-            let expected_len = row.uncompressed_len as usize;
-            uncompressed.clear();
-            uncompressed.reserve(expected_len);
-            let t1 = bench_phases.then(Instant::now);
-            let decoded = decompressor
-                .decompress_to_buffer(compressed, &mut uncompressed)
-                .with_context(|| format!("decompress block {} slot {}", row.block_id, row.slot))?;
-            if let Some(t1) = t1 {
-                t_decompress += t1.elapsed();
-            }
-            anyhow::ensure!(
-                decoded == expected_len,
-                "block {} decompressed to {decoded} bytes, expected {expected_len}",
-                row.block_id
-            );
-            let t2 = bench_phases.then(Instant::now);
-            let block = deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
-                &uncompressed,
-            )
-            .with_context(|| format!("decode block {} slot {}", row.block_id, row.slot))?;
-            if let Some(t2) = t2 {
-                t_deserialize_block += t2.elapsed();
-            }
-            anyhow::ensure!(
-                block.header.slot == row.slot && block.tx_count == row.tx_count,
-                "block {} header/index mismatch",
-                row.block_id
-            );
-
-            let t3 = bench_phases.then(Instant::now);
-            tx_rows_scratch.clear();
-            tx_rows_scratch.extend(block.tx_rows());
-            if let Some(t3) = t3 {
-                t_tx_rows_collect += t3.elapsed();
-            }
-            let t4 = bench_phases.then(Instant::now);
-            crate::archive_v2::patch_poh_entry_signature_counts(&mut poh.entries, &tx_rows_scratch)
-                .with_context(|| format!("patch block {} signature counts", row.block_id))?;
-            let patched_sum = poh
-                .entries
-                .iter()
-                .map(|entry| u64::from(entry.signature_count))
-                .sum::<u64>();
-            if let Some(t4) = t4 {
-                t_patch += t4.elapsed();
-            }
-            anyhow::ensure!(
-                patched_sum == u64::from(row.signature_count),
-                "block {} patched signature_count sum {patched_sum} still does not match index {}",
-                row.block_id,
-                row.signature_count
-            );
-            blocks_patched += 1;
+        if let Some(t1) = t1 {
+            t_parallel_process += t1.elapsed();
         }
 
-        let t5 = bench_phases.then(Instant::now);
-        poh_writer
-            .write_with_scratch(&poh, &mut poh_write_scratch)
-            .with_context(|| format!("write migrated PoH record for block {}", row.block_id))?;
-        if let Some(t5) = t5 {
-            t_poh_write += t5.elapsed();
+        let t2 = bench_phases.then(Instant::now);
+        for item in &batch {
+            if item.needs_patch {
+                blocks_patched += 1;
+            } else {
+                blocks_already_current += 1;
+            }
+            poh_writer
+                .write_with_scratch(&item.poh, &mut poh_write_scratch)
+                .with_context(|| {
+                    format!("write migrated PoH record for block {}", item.row.block_id)
+                })?;
+            progress.update_slot(item.row.slot);
+            progress.update(1, u64::from(item.row.tx_count));
         }
-        progress.update_slot(row.slot);
-        progress.update(1, u64::from(row.tx_count));
+        if let Some(t2) = t2 {
+            t_poh_write += t2.elapsed();
+        }
     }
 
     if bench_phases {
         eprintln!(
-            "PHASE_TIMING poh_read={:.3}s decompress={:.3}s deserialize_block={:.3}s tx_rows_collect={:.3}s patch={:.3}s poh_write={:.3}s total_measured={:.3}s wall_so_far={:.3}s",
+            "PHASE_TIMING poh_read={:.3}s parallel_process={:.3}s poh_write={:.3}s total_measured={:.3}s wall_so_far={:.3}s worker_threads={worker_threads}",
             t_poh_read.as_secs_f64(),
-            t_decompress.as_secs_f64(),
-            t_deserialize_block.as_secs_f64(),
-            t_tx_rows_collect.as_secs_f64(),
-            t_patch.as_secs_f64(),
+            t_parallel_process.as_secs_f64(),
             t_poh_write.as_secs_f64(),
-            (t_poh_read + t_decompress + t_deserialize_block + t_tx_rows_collect + t_patch + t_poh_write).as_secs_f64(),
+            (t_poh_read + t_parallel_process + t_poh_write).as_secs_f64(),
             started.elapsed().as_secs_f64(),
         );
     }
@@ -422,6 +485,7 @@ pub(crate) fn migrate_poh_signature_counts(
         blocks_patched,
         blocks_already_current,
         elapsed_secs: started.elapsed().as_secs_f64(),
+        worker_threads,
     })
 }
 
@@ -1121,6 +1185,165 @@ mod tests {
             },
         ]);
         assert!(!poh_migration_epoch_verified(&root).unwrap());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn migrate_poh_signature_counts_patches_batched_blocks_across_worker_threads() {
+        use blockzilla_format::{
+            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
+            ArchiveV2HotTxRow, CompactPohEntry, write_archive_v2_hot_block_index,
+        };
+
+        let root = poh_migration_verify_fixture_root("poh-migration-migrate");
+
+        // Block 0: two transactions with signature_count 2 and 1 (real total 3), but its PoH
+        // sidecar entries below still carry the unmigrated legacy placeholder of 0 -- this block
+        // must go through decompression and patching.
+        let hot_block = ArchiveV2HotBlockBlob {
+            header: ArchiveV2HotBlockHeader {
+                slot: 100,
+                parent_slot: 99,
+                blockhash_id: 1,
+                previous_blockhash_id: 0,
+                block_time: None,
+                block_height: None,
+                rewards: None,
+            },
+            tx_count: 2,
+            tx_rows: vec![
+                ArchiveV2HotTxRow {
+                    tx_index: 0,
+                    flags: 0,
+                    message_offset: 0,
+                    message_len: 2,
+                    metadata_offset: 0,
+                    metadata_len: 1,
+                    signature_count: 2,
+                    reserved: [0; 3],
+                },
+                ArchiveV2HotTxRow {
+                    tx_index: 1,
+                    flags: 0,
+                    message_offset: 2,
+                    message_len: 3,
+                    metadata_offset: 1,
+                    metadata_len: 2,
+                    signature_count: 1,
+                    reserved: [0; 3],
+                },
+            ],
+            message_bytes: vec![10, 11, 12, 13, 14],
+            metadata_bytes: vec![20, 21, 22],
+        };
+        let uncompressed =
+            wincode::config::serialize(&hot_block, blockzilla_format::wincode_leb128_config())
+                .unwrap();
+        let compressed = zstd::bulk::compress(&uncompressed, 3).unwrap();
+        std::fs::write(root.join(ARCHIVE_V2_BLOCKS_FILE), &compressed).unwrap();
+
+        let rows = vec![
+            ArchiveV2HotBlockIndexRow {
+                block_id: 0,
+                slot: 100,
+                compressed_offset: 0,
+                compressed_len: compressed.len() as u32,
+                uncompressed_len: uncompressed.len() as u32,
+                tx_count: 2,
+                first_tx_ordinal: 0,
+                first_signature_ordinal: 0,
+                signature_count: 3,
+            },
+            // Block 1 is already current: its lone entry's signature_count already sums to the
+            // index's recorded 0, so migration must leave it as a no-op fast-path block and never
+            // touch the (deliberately absent) block bytes for it.
+            ArchiveV2HotBlockIndexRow {
+                block_id: 1,
+                slot: 101,
+                compressed_offset: compressed.len() as u64,
+                compressed_len: 0,
+                uncompressed_len: 0,
+                tx_count: 0,
+                first_tx_ordinal: 2,
+                first_signature_ordinal: 3,
+                signature_count: 0,
+            },
+        ];
+        write_archive_v2_hot_block_index(
+            &root.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
+            compressed.len() as u64,
+            3,
+            0,
+            &rows,
+        )
+        .unwrap();
+
+        let mut writer = WincodeLeb128FramedWriter::new(
+            File::create(root.join(ARCHIVE_V2_POH_FILE)).unwrap(),
+        );
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 100,
+                entries: vec![
+                    CompactPohEntry {
+                        num_hashes: 1,
+                        hash: [0; 32],
+                        tx_count: 1,
+                        signature_count: 0,
+                    },
+                    CompactPohEntry {
+                        num_hashes: 1,
+                        hash: [1; 32],
+                        tx_count: 1,
+                        signature_count: 0,
+                    },
+                ],
+            })
+            .unwrap();
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 1,
+                slot: 101,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                    signature_count: 0,
+                }],
+            })
+            .unwrap();
+        writer.flush().unwrap();
+
+        let report = migrate_poh_signature_counts(&root, 2).unwrap();
+        assert_eq!(report.blocks_total, 2);
+        assert_eq!(report.blocks_patched, 1);
+        assert_eq!(report.blocks_already_current, 1);
+
+        let mut reader = WincodeLeb128FramedReader::new(File::open(root.join(ARCHIVE_V2_POH_FILE)).unwrap());
+        let (_, migrated_block_0) = reader
+            .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
+                blockzilla_format::deserialize_archive_v2_poh_record(bytes)
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap()
+            .unwrap();
+        let migrated_block_0: WincodeArchiveV2PohRecord = migrated_block_0;
+        assert_eq!(migrated_block_0.entries[0].signature_count, 2);
+        assert_eq!(migrated_block_0.entries[1].signature_count, 1);
+
+        let (_, migrated_block_1) = reader
+            .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
+                blockzilla_format::deserialize_archive_v2_poh_record(bytes)
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap()
+            .unwrap();
+        let migrated_block_1: WincodeArchiveV2PohRecord = migrated_block_1;
+        assert_eq!(migrated_block_1.entries[0].signature_count, 0);
+
+        assert!(poh_migration_epoch_verified(&root).unwrap());
 
         std::fs::remove_dir_all(&root).ok();
     }

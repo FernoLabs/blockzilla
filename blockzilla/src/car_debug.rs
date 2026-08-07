@@ -3,6 +3,36 @@ use anyhow::{Context, Result};
 use of_car_reader::CarStream;
 use std::path::Path;
 
+/// TEMPORARY benchmark-prep helper (not part of the real tool): resets every PoH entry's
+/// `signature_count` to zero, simulating an unmigrated legacy sidecar from real block data, so
+/// `migrate-poh-signature-counts` can be benchmarked against realistic content.
+pub(crate) fn debug_reset_poh_signature_counts(input: &Path, output: &Path) -> Result<()> {
+    use blockzilla_format::{
+        WincodeArchiveV2PohRecord, WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
+        deserialize_archive_v2_poh_record,
+    };
+    let mut reader = WincodeLeb128FramedReader::new(std::io::BufReader::new(
+        std::fs::File::open(input).with_context(|| format!("open {}", input.display()))?,
+    ));
+    let mut writer = WincodeLeb128FramedWriter::new(std::io::BufWriter::new(
+        std::fs::File::create(output).with_context(|| format!("create {}", output.display()))?,
+    ));
+    let mut count = 0u64;
+    while let Some((_, mut record)) = reader.read_bytes_with_limit(64 << 20, |bytes| {
+        deserialize_archive_v2_poh_record(bytes).map_err(anyhow::Error::from)
+    })? {
+        let record: &mut WincodeArchiveV2PohRecord = &mut record;
+        for entry in &mut record.entries {
+            entry.signature_count = 0;
+        }
+        writer.write(record)?;
+        count += 1;
+    }
+    writer.flush().context("flush output")?;
+    println!("reset signature_count on {count} records");
+    Ok(())
+}
+
 /// Independently decode one PoH entry's num_hashes/hash/transactions straight from a CAR,
 /// bypassing the Compact V2 compactor entirely. Used to cross-check compact archive output
 /// against ground truth when `verify-archive-v2-poh` reports a mismatch.
