@@ -227,6 +227,144 @@ impl FromIterator<(AccountPubkey, AccountSnapshot)> for MemoryAccountStore {
     }
 }
 
+/// Transaction overlay with copy-on-write reads from a canonical parent store.
+///
+/// Readonly accounts stay in the parent until a write forces a local clone.
+/// The commit path only inspects [`Self::into_local`].
+///
+/// The parent is stored as a raw pointer so the overlay can live across
+/// `&mut self` uses in the replay loop. Callers must not mutate the parent
+/// store for the lifetime of the overlay (replay only publishes through
+/// `apply_batch` after the overlay is dropped).
+#[derive(Debug)]
+pub struct CowAccountMap {
+    local: AccountMap,
+    parent: Option<*const MemoryAccountStore>,
+}
+
+impl CowAccountMap {
+    /// Replay hot path: empty local overlay layered on the Bank account store.
+    ///
+    /// # Safety contract
+    /// `parent` must outlive the returned overlay and must not be mutated
+    /// through another alias while the overlay is live.
+    pub fn layered(parent: &MemoryAccountStore) -> Self {
+        Self {
+            local: AccountMap::new(),
+            parent: Some(parent as *const MemoryAccountStore),
+        }
+    }
+
+    /// Public/native API path: every account lives in `local` only.
+    pub fn detached(local: AccountMap) -> Self {
+        Self {
+            local,
+            parent: None,
+        }
+    }
+
+    #[inline]
+    fn parent(&self) -> Option<&MemoryAccountStore> {
+        // SAFETY: layered() requires the parent outlives this overlay and is
+        // not mutated while the overlay is live.
+        self.parent.map(|ptr| unsafe { &*ptr })
+    }
+
+    pub fn local(&self) -> &AccountMap {
+        &self.local
+    }
+
+    pub fn into_local(self) -> AccountMap {
+        self.local
+    }
+
+    #[inline]
+    pub fn get(&self, key: &AccountPubkey) -> Option<&AccountSnapshot> {
+        self.local
+            .get(key)
+            .or_else(|| self.parent().and_then(|parent| parent.get(key)))
+    }
+
+    /// Pull the account into the local overlay (clone-on-write) when needed.
+    pub fn get_mut(&mut self, key: &AccountPubkey) -> Option<&mut AccountSnapshot> {
+        if !self.local.contains_key(key) {
+            let account = self.parent().and_then(|parent| parent.get(key).cloned())?;
+            self.local.insert(*key, account);
+        }
+        self.local.get_mut(key)
+    }
+
+    /// Ensure `key` is present locally, cloning from the parent or inserting
+    /// `default` when absent everywhere.
+    pub fn entry_or_insert_with(
+        &mut self,
+        key: AccountPubkey,
+        default: impl FnOnce() -> AccountSnapshot,
+    ) -> &mut AccountSnapshot {
+        if !self.local.contains_key(&key) {
+            let account = self
+                .parent()
+                .and_then(|parent| parent.get(&key).cloned())
+                .unwrap_or_else(default);
+            self.local.insert(key, account);
+        }
+        self.local
+            .get_mut(&key)
+            .expect("account was just inserted into the local overlay")
+    }
+
+    /// Materialize only writable instruction accounts into the local overlay.
+    pub fn materialize_writable(
+        &mut self,
+        metas: impl IntoIterator<Item = (AccountPubkey, bool)>,
+        default: impl Fn() -> AccountSnapshot,
+    ) {
+        for (pubkey, is_writable) in metas {
+            if !is_writable || self.local.contains_key(&pubkey) {
+                continue;
+            }
+            let account = self
+                .parent()
+                .and_then(|parent| parent.get(&pubkey).cloned())
+                .unwrap_or_else(&default);
+            self.local.insert(pubkey, account);
+        }
+    }
+
+    #[inline]
+    pub fn insert(&mut self, key: AccountPubkey, account: AccountSnapshot) {
+        self.local.insert(key, account);
+    }
+
+    #[inline]
+    pub fn contains_key(&self, key: &AccountPubkey) -> bool {
+        self.local.contains_key(key) || self.parent().is_some_and(|parent| parent.contains_key(key))
+    }
+
+    #[inline]
+    pub fn local_contains_key(&self, key: &AccountPubkey) -> bool {
+        self.local.contains_key(key)
+    }
+}
+
+impl std::ops::Index<&AccountPubkey> for CowAccountMap {
+    type Output = AccountSnapshot;
+
+    fn index(&self, key: &AccountPubkey) -> &Self::Output {
+        self.get(key)
+            .unwrap_or_else(|| panic!("account {} missing from overlay and parent", hex32(key)))
+    }
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountDataPatch {
     pub offset: usize,

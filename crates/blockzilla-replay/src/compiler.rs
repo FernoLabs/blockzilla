@@ -1,6 +1,6 @@
 use crate::{
-    AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, LaunchAccountMeta, LaunchBpfExecutionError,
-    LaunchBpfLoaderRent,
+    AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, CowAccountMap, LaunchAccountMeta,
+    LaunchBpfExecutionError, LaunchBpfLoaderRent,
     launch_bpf_execute::{
         LaunchPreAccounts, apply_launch_bpf_program_instruction_with_stack,
         verify_launch_bpf_instruction,
@@ -1621,6 +1621,7 @@ solana_sbpf::declare_builtin_function!(
         if context.verifier_baselines.is_empty() {
             return Err(malformed_cpi("missing caller verifier baseline"));
         }
+        let current_accounts = CowAccountMap::detached(current_accounts);
         verify_launch_bpf_instruction(
             caller_program_id,
             &context.verifier_baselines,
@@ -1709,6 +1710,7 @@ solana_sbpf::declare_builtin_function!(
             cpi_accounts.insert(account.pubkey, snapshot.clone());
         }
         cpi_accounts.insert(instruction.program_id, program_binding.snapshot.clone());
+        let mut cpi_accounts = CowAccountMap::detached(cpi_accounts);
 
         let mut child_stack = context.program_stack.clone();
         child_stack.push(instruction.program_id);
@@ -2424,10 +2426,10 @@ mod tests {
             },
         );
         let mut input =
-            crate::launch_bpf_execute::serialize_parameters(program_id, &metas, &bank, &[12, 13])
+            crate::launch_bpf_execute::serialize_parameters(program_id, &metas, &crate::CowAccountMap::detached(bank.clone()), &[12, 13])
                 .unwrap();
         let verifier_baselines =
-            crate::launch_bpf_execute::launch_pre_accounts(program_id, &metas, &bank).unwrap();
+            crate::launch_bpf_execute::launch_pre_accounts(program_id, &metas, &crate::CowAccountMap::detached(bank.clone())).unwrap();
         let compiler = ReplayCompiler::new();
         let input_len = input.len();
         let input_ptr: *mut [u8] = input.as_mut_slice();
@@ -2513,10 +2515,10 @@ mod tests {
             },
         )]);
         let serialized =
-            crate::launch_bpf_execute::serialize_parameters(PROGRAM_ID, &metas, &bank, &[])
+            crate::launch_bpf_execute::serialize_parameters(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone()), &[])
                 .unwrap();
         let verifier_baselines =
-            crate::launch_bpf_execute::launch_pre_accounts(PROGRAM_ID, &metas, &bank).unwrap();
+            crate::launch_bpf_execute::launch_pre_accounts(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone())).unwrap();
         let mutations = [
             ("pubkey", PUBKEY_OFFSET..PUBKEY_OFFSET + 1, vec![0xff]),
             ("signer", SIGNER_OFFSET..SIGNER_OFFSET + 1, vec![1]),
@@ -2580,12 +2582,12 @@ mod tests {
             },
         )]);
         let mut input =
-            crate::launch_bpf_execute::serialize_parameters(PROGRAM_ID, &metas, &bank, &[])
+            crate::launch_bpf_execute::serialize_parameters(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone()), &[])
                 .unwrap();
         input[LAMPORTS_OFFSET..LAMPORTS_OFFSET + 8].copy_from_slice(&99_u64.to_le_bytes());
         input[DATA_OFFSET..DATA_OFFSET + 3].copy_from_slice(&[7, 8, 9]);
         let verifier_baselines =
-            crate::launch_bpf_execute::launch_pre_accounts(PROGRAM_ID, &metas, &bank).unwrap();
+            crate::launch_bpf_execute::launch_pre_accounts(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone())).unwrap();
         let compiler = ReplayCompiler::new();
 
         let bindings =

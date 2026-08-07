@@ -15,7 +15,7 @@ use serde::{
 };
 use thiserror::Error;
 
-use crate::{AccountMap, AccountSnapshot, LaunchAccountMeta, default_system_account};
+use crate::{AccountMap, CowAccountMap, AccountSnapshot, LaunchAccountMeta, default_system_account};
 
 const MAX_INSTRUCTION_LEN: usize = 1_232;
 
@@ -84,10 +84,10 @@ pub fn apply_launch_config_instruction(
     account_metas: &[LaunchAccountMeta],
     accounts: &mut AccountMap,
 ) -> Result<LaunchConfigMutation, LaunchConfigError> {
-    let mut working = accounts.clone();
+    let mut working = CowAccountMap::detached(accounts.clone());
     let mutation =
-        apply_launch_config_instruction_in_place(instruction_data, account_metas, &mut working)?;
-    *accounts = working;
+        apply_launch_config_instruction_on_overlay(instruction_data, account_metas, &mut working)?;
+    *accounts = working.into_local();
     Ok(mutation)
 }
 
@@ -98,6 +98,19 @@ pub fn apply_launch_config_instruction_in_place(
     account_metas: &[LaunchAccountMeta],
     accounts: &mut AccountMap,
 ) -> Result<LaunchConfigMutation, LaunchConfigError> {
+    let mut cow = CowAccountMap::detached(std::mem::take(accounts));
+    let result = apply_launch_config_instruction_on_overlay(
+        instruction_data, account_metas, &mut cow,
+    );
+    *accounts = cow.into_local();
+    result
+}
+
+pub fn apply_launch_config_instruction_on_overlay(
+    instruction_data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut CowAccountMap,
+) -> Result<LaunchConfigMutation, LaunchConfigError> {
     // v1.0.7 calls limited_deserialize before asking for account zero.
     let incoming = decode_instruction_keys(instruction_data)?;
     let config_meta = account_metas
@@ -105,9 +118,7 @@ pub fn apply_launch_config_instruction_in_place(
         .ok_or(LaunchConfigError::MissingAccount { position: 0 })?;
 
     for meta in account_metas {
-        accounts
-            .entry(meta.pubkey)
-            .or_insert_with(default_system_account);
+        accounts.entry_or_insert_with(meta.pubkey, default_system_account);
     }
     let pre_accounts = launch_pre_accounts(account_metas, accounts);
 
@@ -356,7 +367,7 @@ fn is_zeroed(data: &[u8]) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Vec<LaunchPreAccount> {
     account_metas
         .iter()
@@ -380,7 +391,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_config_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Result<(), LaunchConfigError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;
