@@ -1,0 +1,25 @@
+[Unit]
+Description=Blockzilla block-time gap sidecar backfill
+Wants=network-online.target
+After=network-online.target blockzilla-archive.service
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/test -x /volume1/@home/ach/dev/blockzilla-pipeline/tools/block-time-gap-archive-v2-v3/run.sh
+ExecStartPre=/usr/bin/test -s /volume1/@home/ach/dev/blockzilla-pipeline/state/block-time-gap-archive-v2-v1/run-manifest.tsv
+Environment=WORKERS=2
+ExecStart=/volume1/@home/ach/dev/blockzilla-pipeline/tools/block-time-gap-archive-v2-v3/run.sh
+Restart=on-failure
+RestartSec=30s
+KillMode=control-group
+TimeoutStopSec=45s
+Nice=19
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+SyslogIdentifier=blockzilla-gap-backfill
+
+[Install]
+WantedBy=default.target
