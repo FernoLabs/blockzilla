@@ -48,9 +48,9 @@ use crate::{
     LaunchStakeHistory, LaunchStakeMutation, LaunchSystemError, LaunchSystemMutation,
     LaunchSysvarError, LaunchVoteError, LaunchVoteMutation, LoaderAccountKind, MemoryAccountStore,
     ReplayCompiler, SLOT_HISTORY_SYSVAR_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
-    apply_launch_bpf_loader_instruction, apply_launch_bpf_program_instruction,
-    apply_launch_config_instruction, apply_launch_stake_instruction,
-    apply_launch_system_instruction_for_epoch, checkpoint::CompactCheckpointCursor,
+    apply_launch_bpf_loader_instruction_in_place, apply_launch_bpf_program_instruction,
+    apply_launch_config_instruction_in_place, apply_launch_stake_instruction_in_place,
+    apply_launch_system_instruction_for_epoch_in_place, checkpoint::CompactCheckpointCursor,
     checkpoint::LaunchCheckpointDescriptor, checkpoint::RecordedCompactCheckpoint,
     checkpoint_file::publish_frozen_checkpoint, checkpoint_file::read_trusted_frozen_checkpoint,
     default_system_account, instruction_data_bytes, launch_genesis_sysvar_accounts,
@@ -3169,7 +3169,7 @@ impl LaunchReplay {
                                 instruction_index: instruction.instruction_index,
                             },
                         )?;
-                        let mutation = apply_launch_config_instruction(
+                        let mutation = apply_launch_config_instruction_in_place(
                             config_instruction,
                             &config_metas,
                             &mut overlay,
@@ -3242,7 +3242,7 @@ impl LaunchReplay {
                                 });
                             }
                         };
-                        let mutation = apply_launch_system_instruction_for_epoch(
+                        let mutation = apply_launch_system_instruction_for_epoch_in_place(
                             system_instruction,
                             &system_metas,
                             &mut overlay,
@@ -3311,7 +3311,7 @@ impl LaunchReplay {
                                 instruction_index: instruction.instruction_index,
                             },
                         )?;
-                        let mutation = apply_launch_stake_instruction(
+                        let mutation = apply_launch_stake_instruction_in_place(
                             stake_instruction,
                             &stake_metas,
                             &mut overlay,
@@ -3386,7 +3386,7 @@ impl LaunchReplay {
                                 source: LaunchBpfLoaderError::InvalidInstructionData,
                             },
                         )?;
-                        let applied = apply_launch_bpf_loader_instruction(
+                        let applied = apply_launch_bpf_loader_instruction_in_place(
                             loader_instruction,
                             &loader_metas,
                             &mut overlay,

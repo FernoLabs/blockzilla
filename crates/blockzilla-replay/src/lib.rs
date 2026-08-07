@@ -71,11 +71,11 @@ pub use launch_bpf_execute::{
 pub use launch_bpf_loader::{
     BPF_LOADER_PROGRAM_ID, LaunchBpfLoaderApply, LaunchBpfLoaderContext, LaunchBpfLoaderError,
     LaunchBpfLoaderMutation, LaunchBpfLoaderProfile, LaunchBpfLoaderRent,
-    apply_launch_bpf_loader_instruction,
+    apply_launch_bpf_loader_instruction, apply_launch_bpf_loader_instruction_in_place,
 };
 pub use launch_config::{
     CONFIG_PROGRAM_ID, LaunchConfigError, LaunchConfigKey, LaunchConfigMutation,
-    apply_launch_config_instruction,
+    apply_launch_config_instruction, apply_launch_config_instruction_in_place,
 };
 pub use launch_replay::{
     LaunchCheckpointPublication, LaunchCheckpointResumeConfig, LaunchDerivedTransactionFailure,
@@ -95,13 +95,15 @@ pub use launch_stake::{
     LaunchStakeAuthorize, LaunchStakeAuthorized, LaunchStakeContext, LaunchStakeError,
     LaunchStakeHistory, LaunchStakeHistoryEntry, LaunchStakeLockup, LaunchStakeMeta,
     LaunchStakeMutation, LaunchStakeState, STAKE_HISTORY_SYSVAR_ID, STAKE_PROGRAM_ID,
-    apply_launch_stake_instruction, decode_launch_stake_state, launch_stake_history_entry,
+    apply_launch_stake_instruction, apply_launch_stake_instruction_in_place,
+    decode_launch_stake_state, launch_stake_history_entry,
 };
 pub use launch_system::{
     LAUNCH_NONCE_ACCOUNT_DATA_LEN, LaunchAccountMeta, LaunchSystemAccountMeta, LaunchSystemError,
     LaunchSystemMutation, MAX_ADDRESS_SEED_LEN, MAX_PERMITTED_DATA_LENGTH,
     STABLE_NEW_SYSTEM_PROGRAM_ACTIVATION_EPOCH, SYSTEM_PROGRAM_ID, apply_launch_system_instruction,
-    apply_launch_system_instruction_for_epoch, create_address_with_seed, default_system_account,
+    apply_launch_system_instruction_for_epoch, apply_launch_system_instruction_for_epoch_in_place,
+    create_address_with_seed, default_system_account,
 };
 pub use launch_sysvar::{
     EPOCH_SCHEDULE_SYSVAR_ID, FEES_SYSVAR_ID, LaunchBankSysvarState, LaunchBankSysvarUpdate,

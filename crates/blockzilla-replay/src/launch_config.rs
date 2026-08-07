@@ -74,9 +74,26 @@ pub enum LaunchConfigError {
 /// Apply one launch Config instruction atomically to a transaction overlay.
 ///
 /// This preserves the v1.0.7 processor's error ordering and positional signer
-/// behavior.  Signature *cryptography* is deliberately outside replay; the
+/// behavior. Signature *cryptography* is deliberately outside replay; the
 /// `is_signer` flags are trusted message privileges.
+///
+/// Instruction-atomic for external callers. Replay uses
+/// [`apply_launch_config_instruction_in_place`] on a disposable overlay.
 pub fn apply_launch_config_instruction(
+    instruction_data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+) -> Result<LaunchConfigMutation, LaunchConfigError> {
+    let mut working = accounts.clone();
+    let mutation =
+        apply_launch_config_instruction_in_place(instruction_data, account_metas, &mut working)?;
+    *accounts = working;
+    Ok(mutation)
+}
+
+/// Replay-only fast path. On error `accounts` may be partially mutated and
+/// must be discarded with the transaction overlay.
+pub fn apply_launch_config_instruction_in_place(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
     accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
@@ -87,16 +104,15 @@ pub fn apply_launch_config_instruction(
         .first()
         .ok_or(LaunchConfigError::MissingAccount { position: 0 })?;
 
-    let mut working = accounts.clone();
     for meta in account_metas {
-        working
+        accounts
             .entry(meta.pubkey)
             .or_insert_with(default_system_account);
     }
-    let pre_accounts = launch_pre_accounts(account_metas, &working);
+    let pre_accounts = launch_pre_accounts(account_metas, accounts);
 
     let current = decode_account_keys(
-        &working
+        &accounts
             .get(&config_meta.pubkey)
             .expect("instruction accounts were materialized")
             .data,
@@ -147,7 +163,7 @@ pub fn apply_launch_config_instruction(
         return Err(LaunchConfigError::MissingRequiredSignature { pubkey: missing });
     }
 
-    let config_account = working
+    let config_account = accounts
         .get_mut(&config_meta.pubkey)
         .expect("instruction account was materialized");
     if config_account.data.len() < instruction_data.len() {
@@ -155,8 +171,7 @@ pub fn apply_launch_config_instruction(
     }
     config_account.data[..instruction_data.len()].copy_from_slice(instruction_data);
 
-    verify_launch_config_instruction(&pre_accounts, &working)?;
-    *accounts = working;
+    verify_launch_config_instruction(&pre_accounts, accounts)?;
     Ok(LaunchConfigMutation {
         config_account: config_meta.pubkey,
         keys: incoming

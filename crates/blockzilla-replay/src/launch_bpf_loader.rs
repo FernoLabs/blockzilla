@@ -155,7 +155,31 @@ pub enum LaunchBpfLoaderError {
 /// The returned compiled artifact remains tentative. The transaction owner
 /// must insert it into its cache only after every instruction succeeds and the
 /// account overlay commits.
+///
+/// Instruction-atomic for external callers. Replay uses
+/// [`apply_launch_bpf_loader_instruction_in_place`] on a disposable overlay.
 pub fn apply_launch_bpf_loader_instruction(
+    instruction_data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
+    compiler: &ReplayCompiler,
+    context: LaunchBpfLoaderContext,
+) -> Result<LaunchBpfLoaderApply, LaunchBpfLoaderError> {
+    let mut working = accounts.clone();
+    let applied = apply_launch_bpf_loader_instruction_in_place(
+        instruction_data,
+        account_metas,
+        &mut working,
+        compiler,
+        context,
+    )?;
+    *accounts = working;
+    Ok(applied)
+}
+
+/// Replay-only fast path. On error `accounts` may be partially mutated and
+/// must be discarded with the transaction overlay.
+pub fn apply_launch_bpf_loader_instruction_in_place(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
     accounts: &mut BTreeMap<[u8; 32], AccountSnapshot>,
@@ -171,8 +195,7 @@ pub fn apply_launch_bpf_loader_instruction(
     }
     let instruction = decode_instruction(instruction_data)?;
 
-    let mut working = accounts.clone();
-    let pre_accounts = launch_pre_accounts(account_metas, &working)?;
+    let pre_accounts = launch_pre_accounts(account_metas, accounts)?;
     let mut compiled_program = None;
     let mutation = match instruction {
         LoaderInstructionRef::Write { offset, bytes } => {
@@ -183,7 +206,7 @@ pub fn apply_launch_bpf_loader_instruction(
             }
             let offset_usize = offset as usize;
             let needed = offset_usize.saturating_add(bytes.len());
-            let account = required_account_mut(&mut working, program_meta.pubkey)?;
+            let account = required_account_mut(accounts, program_meta.pubkey)?;
             if account.data.len() < needed {
                 return Err(LaunchBpfLoaderError::AccountDataTooSmall {
                     pubkey: program_meta.pubkey,
@@ -203,7 +226,7 @@ pub fn apply_launch_bpf_loader_instruction(
             // v1.1.14 Stable epoch-34 processor no longer consumes Rent here.
             let explicit_rent_meta = if context.profile == LaunchBpfLoaderProfile::V1_0_7 {
                 let meta = required_meta(account_metas, 1)?;
-                required_account(&working, meta.pubkey)?;
+                required_account(accounts, meta.pubkey)?;
                 Some(meta)
             } else {
                 None
@@ -220,7 +243,7 @@ pub fn apply_launch_bpf_loader_instruction(
             // historically accepted Finalize mutates Bank state.
             let extracted = extract_program(
                 LoaderAccountKind::Legacy,
-                &required_account(&working, program_meta.pubkey)?.data,
+                &required_account(accounts, program_meta.pubkey)?.data,
             )
             .map_err(|error| LaunchBpfLoaderError::InvalidAccountData {
                 pubkey: program_meta.pubkey,
@@ -235,8 +258,8 @@ pub fn apply_launch_bpf_loader_instruction(
                 Err(error) => (None, Some(error.to_string())),
             };
             if let Some(rent_meta) = explicit_rent_meta {
-                let rent = read_rent(&working, rent_meta, 1)?;
-                let account = required_account(&working, program_meta.pubkey)?;
+                let rent = read_rent(accounts, rent_meta, 1)?;
+                let account = required_account(accounts, program_meta.pubkey)?;
                 let minimum = rent.minimum_balance(account.data.len());
                 if account.lamports < minimum {
                     return Err(LaunchBpfLoaderError::InsufficientFunds {
@@ -246,7 +269,7 @@ pub fn apply_launch_bpf_loader_instruction(
                     });
                 }
             }
-            required_account_mut(&mut working, program_meta.pubkey)?.executable = true;
+            required_account_mut(accounts, program_meta.pubkey)?.executable = true;
             LaunchBpfLoaderMutation::Finalize {
                 program_account: program_meta.pubkey,
                 elf_sha256: extracted.elf_sha256,
@@ -256,8 +279,7 @@ pub fn apply_launch_bpf_loader_instruction(
         }
     };
 
-    verify_launch_bpf_loader_instruction(&pre_accounts, &working, context)?;
-    *accounts = working;
+    verify_launch_bpf_loader_instruction(&pre_accounts, accounts, context)?;
     Ok(LaunchBpfLoaderApply {
         mutation,
         compiled_program,
