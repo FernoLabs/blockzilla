@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{AccountMap, AccountSnapshot, RECENT_BLOCKHASHES_SYSVAR_ID, RENT_SYSVAR_ID};
+use crate::{AccountMap, CowAccountMap, AccountSnapshot, RECENT_BLOCKHASHES_SYSVAR_ID, RENT_SYSVAR_ID};
 
 pub const SYSTEM_PROGRAM_ID: [u8; 32] = [0; 32];
 const SYSVAR_OWNER_ID: [u8; 32] = [
@@ -216,14 +216,14 @@ pub fn apply_launch_system_instruction_for_epoch(
     accounts: &mut AccountMap,
     epoch: u64,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
-    let mut working = accounts.clone();
-    let mutation = apply_launch_system_instruction_for_epoch_in_place(
+    let mut working = CowAccountMap::detached(accounts.clone());
+    let mutation = apply_launch_system_instruction_for_epoch_on_overlay(
         instruction,
         account_metas,
         &mut working,
         epoch,
     )?;
-    *accounts = working;
+    *accounts = working.into_local();
     Ok(mutation)
 }
 
@@ -231,16 +231,43 @@ pub fn apply_launch_system_instruction_for_epoch(
 ///
 /// On error the overlay may be partially mutated. Callers must discard it
 /// (transaction-level rollback), matching the Vote in-place contract.
+///
+/// Prefer a [`CowAccountMap::layered`] overlay so readonly accounts stay in the
+/// parent Bank store until a write forces a local clone.
 pub fn apply_launch_system_instruction_for_epoch_in_place(
     instruction: &ArchiveV2SystemInstructionData,
     account_metas: &[LaunchSystemAccountMeta],
     accounts: &mut AccountMap,
     epoch: u64,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
+    let mut cow = CowAccountMap::detached(std::mem::take(accounts));
+    let result = apply_launch_system_instruction_for_epoch_on_overlay(
+        instruction, account_metas, &mut cow, epoch,
+    );
+    *accounts = cow.into_local();
+    result
+}
+
+/// Replay hot path over a layered/local overlay.
+pub fn apply_launch_system_instruction_for_epoch_on_overlay(
+    instruction: &ArchiveV2SystemInstructionData,
+    account_metas: &[LaunchSystemAccountMeta],
+    accounts: &mut CowAccountMap,
+    epoch: u64,
+) -> Result<LaunchSystemMutation, LaunchSystemError> {
+    // Writable accounts must be local before mutation. Readonly accounts are
+    // resolved through the parent on demand.
+    accounts.materialize_writable(
+        account_metas
+            .iter()
+            .map(|meta| (meta.pubkey, meta.is_writable)),
+        default_system_account,
+    );
+    // Absent keys (not in parent) still need a local default for creates.
     for meta in account_metas {
-        accounts
-            .entry(meta.pubkey)
-            .or_insert_with(default_system_account);
+        if !accounts.contains_key(&meta.pubkey) {
+            accounts.insert(meta.pubkey, default_system_account());
+        }
     }
     let pre_accounts = launch_pre_accounts(account_metas, accounts);
     let mutation = apply_inner(
@@ -271,7 +298,7 @@ pub fn create_address_with_seed(
 fn apply_inner(
     instruction: &ArchiveV2SystemInstructionData,
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     new_system_processor: bool,
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
     let signers = account_metas
@@ -505,7 +532,7 @@ impl LaunchRent {
 
 fn decode_recent_blockhashes(
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<LaunchRecentBlockhashes, LaunchSystemError> {
     let meta = required_meta(account_metas, position)?;
@@ -525,7 +552,7 @@ fn decode_recent_blockhashes(
 
 fn decode_rent(
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<LaunchRent, LaunchSystemError> {
     let meta = required_meta(account_metas, position)?;
@@ -544,7 +571,7 @@ fn decode_rent(
 }
 
 fn initialize_nonce(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     meta: &LaunchSystemAccountMeta,
     authority: &[u8; 32],
     recent_blockhashes: &LaunchRecentBlockhashes,
@@ -610,7 +637,7 @@ fn initialize_nonce(
 }
 
 fn advance_nonce(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     meta: &LaunchSystemAccountMeta,
     recent_blockhashes: &LaunchRecentBlockhashes,
     signers: &BTreeSet<[u8; 32]>,
@@ -679,7 +706,7 @@ fn advance_nonce(
 }
 
 fn withdraw_nonce(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     nonce_meta: &LaunchSystemAccountMeta,
     destination_meta: &LaunchSystemAccountMeta,
     lamports: u64,
@@ -769,7 +796,7 @@ fn withdraw_nonce(
 }
 
 fn authorize_nonce(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     meta: &LaunchSystemAccountMeta,
     new_authority: &[u8; 32],
     signers: &BTreeSet<[u8; 32]>,
@@ -962,7 +989,7 @@ fn is_zeroed(data: &[u8]) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchSystemAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Vec<LaunchPreAccount> {
     account_metas
         .iter()
@@ -988,7 +1015,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_system_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Result<(), LaunchSystemError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;
@@ -1010,7 +1037,7 @@ fn verify_launch_system_instruction(
 }
 
 fn reject_prefunded_create_destination(
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     meta: &LaunchSystemAccountMeta,
     new_system_processor: bool,
 ) -> Result<(), LaunchSystemError> {
@@ -1029,7 +1056,7 @@ fn reject_prefunded_create_destination(
 }
 
 fn allocate(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     meta: &LaunchSystemAccountMeta,
     address: &Address,
     space: u64,
@@ -1057,7 +1084,7 @@ fn allocate(
 }
 
 fn assign(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     meta: &LaunchSystemAccountMeta,
     address: &Address,
     owner: &[u8; 32],
@@ -1086,7 +1113,7 @@ fn assign(
 }
 
 fn allocate_and_assign(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     meta: &LaunchSystemAccountMeta,
     address: &Address,
     space: u64,
@@ -1098,7 +1125,7 @@ fn allocate_and_assign(
 }
 
 fn transfer(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     from: &LaunchSystemAccountMeta,
     to: &LaunchSystemAccountMeta,
     lamports: u64,

@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hashbrown::{HashMap, hash_map::Entry, hash_map::Entry as HashEntry};
+use hashbrown::{HashMap, hash_map::Entry as HashEntry};
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -29,13 +29,14 @@ use thiserror::Error;
 use crate::compact::visit_compact_generation_without_program_counts;
 use crate::diff::AccountDiffJournal;
 use crate::launch_vote::{
-    LaunchFastVoteApply, LaunchVoteStateCache, apply_launch_vote_instruction_in_place,
-    apply_launch_vote_instruction_in_place_cached, launch_vote_direct_shape_supported,
+    LaunchFastVoteApply, LaunchVoteStateCache, apply_launch_vote_instruction_on_overlay,
+    apply_launch_vote_instruction_on_overlay_cached, launch_vote_direct_shape_supported,
     launch_vote_direct_wire_supported, try_apply_launch_vote_direct_cached,
     try_apply_launch_vote_direct_cached_lazy,
 };
 use crate::{
     AccountBatchCommit, AccountMap, AccountSnapshot, AccountStoreError, AccountWriteBatch,
+    CowAccountMap,
     BPF_LOADER_PROGRAM_ID, CLOCK_SYSVAR_ID, CONFIG_PROGRAM_ID, CompactArchivedTransactionOutcome,
     CompactGenerationContext, CompactGenesisProbe, CompactGenesisSource, CompactInstructionData,
     CompactInstructionProbe, CompactMessageVersion, CompactProbeError, CompactSlotProbe,
@@ -48,9 +49,9 @@ use crate::{
     LaunchStakeHistory, LaunchStakeMutation, LaunchSystemError, LaunchSystemMutation,
     LaunchSysvarError, LaunchVoteError, LaunchVoteMutation, LoaderAccountKind, MemoryAccountStore,
     ReplayCompiler, SLOT_HISTORY_SYSVAR_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
-    apply_launch_bpf_loader_instruction_in_place, apply_launch_bpf_program_instruction,
-    apply_launch_config_instruction_in_place, apply_launch_stake_instruction_in_place,
-    apply_launch_system_instruction_for_epoch_in_place, checkpoint::CompactCheckpointCursor,
+    apply_launch_bpf_loader_instruction_on_overlay,
+    apply_launch_config_instruction_on_overlay, apply_launch_stake_instruction_on_overlay,
+    apply_launch_system_instruction_for_epoch_on_overlay, checkpoint::CompactCheckpointCursor,
     checkpoint::LaunchCheckpointDescriptor, checkpoint::RecordedCompactCheckpoint,
     checkpoint_file::publish_frozen_checkpoint, checkpoint_file::read_trusted_frozen_checkpoint,
     default_system_account, instruction_data_bytes, launch_genesis_sysvar_accounts,
@@ -3007,12 +3008,12 @@ impl LaunchReplay {
                 self.prepare_generic_transaction(transaction_metas.account_keys);
             }
 
-            // Only accounts changed by this transaction are copied. If a
-            // later instruction fails, this overlay is discarded.
-            let mut overlay = AccountMap::new();
+            // Layered overlay: readonly accounts stay in the Bank store until a
+            // write forces a local clone. If a later instruction fails, the
+            // local overlay is discarded.
+            let mut overlay = CowAccountMap::layered(&self.outcome.account_state);
             let mut absent_overlay_accounts = AbsentOverlayAccounts::new();
             seed_absent_covered_pre_balances(
-                &self.outcome.account_state,
                 transaction,
                 &transaction_metas,
                 &mut overlay,
@@ -3058,14 +3059,14 @@ impl LaunchReplay {
                             self.vote_state_cache.invalidate(vote_account);
                         }
                         for meta in &vote_metas {
-                            if let Entry::Vacant(entry) = overlay.entry(meta.pubkey) {
-                                if let Some(account) = self.outcome.account_state.get(&meta.pubkey)
-                                {
-                                    entry.insert(account.clone());
-                                } else {
-                                    entry.insert(default_system_account());
-                                    absent_overlay_accounts.insert(meta.pubkey);
-                                }
+                            if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
+                                continue;
+                            }
+                            if let Some(account) = overlay.get(&meta.pubkey).cloned() {
+                                overlay.insert(meta.pubkey, account);
+                            } else {
+                                overlay.insert(meta.pubkey, default_system_account());
+                                absent_overlay_accounts.insert(meta.pubkey);
                             }
                         }
                         let bytes = match &instruction.data {
@@ -3088,7 +3089,7 @@ impl LaunchReplay {
                             )
                         });
                         let mutation_result = if use_vote_state_cache {
-                            apply_launch_vote_instruction_in_place_cached(
+                            apply_launch_vote_instruction_on_overlay_cached(
                                 bytes,
                                 &vote_metas,
                                 &mut overlay,
@@ -3097,7 +3098,7 @@ impl LaunchReplay {
                             )
                             .map(|(mutation, _cache_hit)| mutation)
                         } else {
-                            apply_launch_vote_instruction_in_place(
+                            apply_launch_vote_instruction_on_overlay(
                                 bytes,
                                 &vote_metas,
                                 &mut overlay,
@@ -3145,14 +3146,14 @@ impl LaunchReplay {
                     } else if instruction.program_id == self.config_program {
                         let config_metas = instruction_metas;
                         for meta in &config_metas {
-                            if let Entry::Vacant(entry) = overlay.entry(meta.pubkey) {
-                                if let Some(account) = self.outcome.account_state.get(&meta.pubkey)
-                                {
-                                    entry.insert(account.clone());
-                                } else {
-                                    entry.insert(default_system_account());
-                                    absent_overlay_accounts.insert(meta.pubkey);
-                                }
+                            if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
+                                continue;
+                            }
+                            if let Some(account) = overlay.get(&meta.pubkey).cloned() {
+                                overlay.insert(meta.pubkey, account);
+                            } else {
+                                overlay.insert(meta.pubkey, default_system_account());
+                                absent_overlay_accounts.insert(meta.pubkey);
                             }
                         }
                         let journal = capture_diff.then(|| {
@@ -3169,7 +3170,7 @@ impl LaunchReplay {
                                 instruction_index: instruction.instruction_index,
                             },
                         )?;
-                        let mutation = apply_launch_config_instruction_in_place(
+                        let mutation = apply_launch_config_instruction_on_overlay(
                             config_instruction,
                             &config_metas,
                             &mut overlay,
@@ -3213,14 +3214,14 @@ impl LaunchReplay {
                     } else if instruction.program_id == self.system_program {
                         let system_metas = instruction_metas;
                         for meta in &system_metas {
-                            if let Entry::Vacant(entry) = overlay.entry(meta.pubkey) {
-                                if let Some(account) = self.outcome.account_state.get(&meta.pubkey)
-                                {
-                                    entry.insert(account.clone());
-                                } else {
-                                    entry.insert(default_system_account());
-                                    absent_overlay_accounts.insert(meta.pubkey);
-                                }
+                            if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
+                                continue;
+                            }
+                            if let Some(account) = overlay.get(&meta.pubkey).cloned() {
+                                overlay.insert(meta.pubkey, account);
+                            } else {
+                                overlay.insert(meta.pubkey, default_system_account());
+                                absent_overlay_accounts.insert(meta.pubkey);
                             }
                         }
                         let journal = capture_diff.then(|| {
@@ -3242,7 +3243,7 @@ impl LaunchReplay {
                                 });
                             }
                         };
-                        let mutation = apply_launch_system_instruction_for_epoch_in_place(
+                        let mutation = apply_launch_system_instruction_for_epoch_on_overlay(
                             system_instruction,
                             &system_metas,
                             &mut overlay,
@@ -3287,14 +3288,14 @@ impl LaunchReplay {
                     } else if instruction.program_id == self.stake_program {
                         let stake_metas = instruction_metas;
                         for meta in &stake_metas {
-                            if let Entry::Vacant(entry) = overlay.entry(meta.pubkey) {
-                                if let Some(account) = self.outcome.account_state.get(&meta.pubkey)
-                                {
-                                    entry.insert(account.clone());
-                                } else {
-                                    entry.insert(default_system_account());
-                                    absent_overlay_accounts.insert(meta.pubkey);
-                                }
+                            if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
+                                continue;
+                            }
+                            if let Some(account) = overlay.get(&meta.pubkey).cloned() {
+                                overlay.insert(meta.pubkey, account);
+                            } else {
+                                overlay.insert(meta.pubkey, default_system_account());
+                                absent_overlay_accounts.insert(meta.pubkey);
                             }
                         }
                         let journal = capture_diff.then(|| {
@@ -3311,7 +3312,7 @@ impl LaunchReplay {
                                 instruction_index: instruction.instruction_index,
                             },
                         )?;
-                        let mutation = apply_launch_stake_instruction_in_place(
+                        let mutation = apply_launch_stake_instruction_on_overlay(
                             stake_instruction,
                             &stake_metas,
                             &mut overlay,
@@ -3361,14 +3362,14 @@ impl LaunchReplay {
                     {
                         let loader_metas = instruction_metas;
                         for meta in &loader_metas {
-                            if let Entry::Vacant(entry) = overlay.entry(meta.pubkey) {
-                                if let Some(account) = self.outcome.account_state.get(&meta.pubkey)
-                                {
-                                    entry.insert(account.clone());
-                                } else {
-                                    entry.insert(default_system_account());
-                                    absent_overlay_accounts.insert(meta.pubkey);
-                                }
+                            if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
+                                continue;
+                            }
+                            if let Some(account) = overlay.get(&meta.pubkey).cloned() {
+                                overlay.insert(meta.pubkey, account);
+                            } else {
+                                overlay.insert(meta.pubkey, default_system_account());
+                                absent_overlay_accounts.insert(meta.pubkey);
                             }
                         }
                         let journal = capture_diff.then(|| {
@@ -3386,7 +3387,7 @@ impl LaunchReplay {
                                 source: LaunchBpfLoaderError::InvalidInstructionData,
                             },
                         )?;
-                        let applied = apply_launch_bpf_loader_instruction_in_place(
+                        let applied = apply_launch_bpf_loader_instruction_on_overlay(
                             loader_instruction,
                             &loader_metas,
                             &mut overlay,
@@ -3442,14 +3443,14 @@ impl LaunchReplay {
                     {
                         let bpf_metas = instruction_metas;
                         for meta in &bpf_metas {
-                            if let Entry::Vacant(entry) = overlay.entry(meta.pubkey) {
-                                if let Some(account) = self.outcome.account_state.get(&meta.pubkey)
-                                {
-                                    entry.insert(account.clone());
-                                } else {
-                                    entry.insert(default_system_account());
-                                    absent_overlay_accounts.insert(meta.pubkey);
-                                }
+                            if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
+                                continue;
+                            }
+                            if let Some(account) = overlay.get(&meta.pubkey).cloned() {
+                                overlay.insert(meta.pubkey, account);
+                            } else {
+                                overlay.insert(meta.pubkey, default_system_account());
+                                absent_overlay_accounts.insert(meta.pubkey);
                             }
                         }
                         if !self.bpf_program_cache.contains_key(&instruction.program_id)
@@ -3498,7 +3499,8 @@ impl LaunchReplay {
                                 )
                             })
                             .expect("legacy BPF program was compiled or already cached");
-                        let mutation = apply_launch_bpf_program_instruction(
+                        let mutation =
+                            crate::launch_bpf_execute::apply_launch_bpf_program_instruction_with_stack(
                             instruction.program_id,
                             bpf_instruction,
                             &bpf_metas,
@@ -3506,6 +3508,7 @@ impl LaunchReplay {
                             &self.bpf_compiler,
                             compiled_program,
                             self.bpf_loader_context().bank_rent,
+                            smallvec::SmallVec::from_slice(&[instruction.program_id]),
                         )
                         .map_err(|source| {
                             LaunchReplayError::BpfProgramExecution {
@@ -3652,7 +3655,7 @@ impl LaunchReplay {
             }
 
             let mut account_batch = AccountWriteBatch::new();
-            for (pubkey, account) in overlay {
+            for (pubkey, account) in overlay.into_local() {
                 let before = self.outcome.account_state.get(&pubkey);
                 let changed = before.map_or_else(
                     || account != default_system_account(),
@@ -3927,10 +3930,9 @@ fn validate_absent_writable_prebalance_coverage(
 }
 
 fn seed_absent_covered_pre_balances(
-    canonical: &MemoryAccountStore,
     transaction: &CompactTransactionProbe,
     transaction_metas: &TransactionAccountMetaLayout<'_>,
-    overlay: &mut AccountMap,
+    overlay: &mut CowAccountMap,
     absent_overlay_accounts: &mut AbsentOverlayAccounts,
 ) {
     let Some(oracle) = &transaction.balance_oracle else {
@@ -3947,7 +3949,7 @@ fn seed_absent_covered_pre_balances(
         .iter()
         .zip(&oracle.pre_balances)
     {
-        if canonical.contains_key(&pubkey) || overlay.contains_key(&pubkey) {
+        if overlay.contains_key(&pubkey) {
             continue;
         }
         let mut account = default_system_account();
@@ -4210,7 +4212,7 @@ fn instruction_account_metas(
 }
 
 fn begin_account_diff_journal(
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     metas: &[LaunchAccountMeta],
     absent_accounts: &AbsentOverlayAccounts,
 ) -> AccountDiffJournal {
@@ -4229,7 +4231,7 @@ fn begin_account_diff_journal(
 }
 
 fn reconcile_absent_overlay_accounts(
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     metas: &[LaunchAccountMeta],
     absent_accounts: &mut AbsentOverlayAccounts,
 ) {
@@ -4251,7 +4253,7 @@ fn capture_instruction_diff(
     instruction_path_index: u16,
     program_id: [u8; 32],
     journal: AccountDiffJournal,
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     metas: &[LaunchAccountMeta],
     absent_accounts: &mut AbsentOverlayAccounts,
 ) -> InstructionDiff {
@@ -4565,7 +4567,8 @@ mod tests {
         absent_accounts.insert(CREATED_WRITABLE);
         absent_accounts.insert(CREATED_READONLY);
 
-        let journal = begin_account_diff_journal(&accounts, &metas, &absent_accounts);
+        let cow = CowAccountMap::detached(accounts.clone());
+        let journal = begin_account_diff_journal(&cow, &metas, &absent_accounts);
         accounts
             .get_mut(&WRITABLE)
             .expect("writable fixture exists")
@@ -4576,7 +4579,8 @@ mod tests {
             .expect("readonly fixture exists")
             .data
             .set_from_slice(&[9]);
-        reconcile_absent_overlay_accounts(&accounts, &metas, &mut absent_accounts);
+        let cow = CowAccountMap::detached(accounts.clone());
+        reconcile_absent_overlay_accounts(&cow, &metas, &mut absent_accounts);
         let diff = journal.finish(
             DiffBoundary {
                 slot: 1,
@@ -5769,11 +5773,10 @@ mod tests {
         let transaction_metas = transaction_account_meta_layout(105_368, &transaction).unwrap();
         assert!(!transaction_metas.is_writable(2));
         let replay = LaunchReplay::from_genesis(0, Some(&exact_genesis()), false).unwrap();
-        let mut overlay = AccountMap::new();
+        let mut overlay = CowAccountMap::layered(&replay.outcome.account_state);
         let mut absent = AbsentOverlayAccounts::new();
 
         seed_absent_covered_pre_balances(
-            &replay.outcome.account_state,
             &transaction,
             &transaction_metas,
             &mut overlay,

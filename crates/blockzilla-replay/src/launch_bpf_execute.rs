@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{
-    AccountData, AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, CompiledProgram,
+    AccountData, AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, CompiledProgram, CowAccountMap,
     ExecutionEngine, LaunchAccountMeta, LaunchBpfLoaderRent, ReplayCompiler,
 };
 
@@ -196,23 +196,26 @@ pub fn apply_launch_bpf_program_instruction(
     compiled_program: &CompiledProgram,
     bank_rent: LaunchBpfLoaderRent,
 ) -> Result<LaunchBpfExecutionMutation, LaunchBpfExecutionError> {
-    apply_launch_bpf_program_instruction_with_stack(
+    let mut working = CowAccountMap::detached(std::mem::take(accounts));
+    let result = apply_launch_bpf_program_instruction_with_stack(
         program_id,
         instruction_data,
         account_metas,
-        accounts,
+        &mut working,
         compiler,
         compiled_program,
         bank_rent,
         SmallVec::from_slice(&[program_id]),
-    )
+    );
+    *accounts = working.into_local();
+    result
 }
 
 pub(crate) fn apply_launch_bpf_program_instruction_with_stack(
     program_id: [u8; 32],
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     compiler: &ReplayCompiler,
     compiled_program: &CompiledProgram,
     bank_rent: LaunchBpfLoaderRent,
@@ -291,7 +294,7 @@ enum LaunchBpfSerializationEntry {
 impl LaunchBpfSerializationPlan {
     fn collect(
         account_metas: &[LaunchAccountMeta],
-        accounts: &AccountMap,
+        accounts: &CowAccountMap,
     ) -> Result<Self, LaunchBpfExecutionError> {
         if account_metas.len() > MAX_LAUNCH_BPF_INSTRUCTION_ACCOUNTS {
             return Err(LaunchBpfExecutionError::TooManyInstructionAccounts {
@@ -378,7 +381,7 @@ impl LaunchBpfSerializationPlan {
 pub(crate) fn serialize_parameters(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     instruction_data: &[u8],
 ) -> Result<Vec<u8>, LaunchBpfExecutionError> {
     let plan = LaunchBpfSerializationPlan::collect(account_metas, accounts)?;
@@ -398,7 +401,7 @@ pub(crate) fn serialize_parameters(
 fn serialize_parameters_with_plan(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     instruction_data: &[u8],
     plan: &LaunchBpfSerializationPlan,
     bytes: &mut Vec<u8>,
@@ -417,7 +420,7 @@ fn serialize_parameters_with_plan(
 fn serialize_parameters_and_baselines_with_plan(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     instruction_data: &[u8],
     plan: &LaunchBpfSerializationPlan,
     bytes: &mut Vec<u8>,
@@ -438,7 +441,7 @@ fn serialize_parameters_and_baselines_with_plan(
 fn serialize_parameters_with_plan_inner(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     instruction_data: &[u8],
     plan: &LaunchBpfSerializationPlan,
     bytes: &mut Vec<u8>,
@@ -487,7 +490,7 @@ fn serialize_parameters_with_plan_inner(
 #[cfg(test)]
 fn deserialize_parameters(
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     buffer: &[u8],
 ) -> Result<(), LaunchBpfExecutionError> {
     let plan = LaunchBpfSerializationPlan::collect(account_metas, accounts)?;
@@ -496,7 +499,7 @@ fn deserialize_parameters(
 
 fn deserialize_parameters_with_plan(
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     buffer: &[u8],
     plan: &LaunchBpfSerializationPlan,
 ) -> Result<(), LaunchBpfExecutionError> {
@@ -703,7 +706,7 @@ impl LaunchPreAccount {
 pub(crate) fn launch_pre_accounts(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Result<LaunchPreAccounts, LaunchBpfExecutionError> {
     let plan = LaunchBpfSerializationPlan::collect(account_metas, accounts)?;
     launch_pre_accounts_with_plan(program_id, account_metas, accounts, &plan)
@@ -713,7 +716,7 @@ pub(crate) fn launch_pre_accounts(
 fn launch_pre_accounts_with_plan(
     program_id: [u8; 32],
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     plan: &LaunchBpfSerializationPlan,
 ) -> Result<LaunchPreAccounts, LaunchBpfExecutionError> {
     let mut pre_accounts = LaunchPreAccounts::with_capacity(plan.unique_account_count);
@@ -734,7 +737,7 @@ fn launch_pre_accounts_with_plan(
 pub(crate) fn verify_launch_bpf_instruction(
     program_id: [u8; 32],
     pre_accounts: &[LaunchPreAccount],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     bank_rent: LaunchBpfLoaderRent,
 ) -> Result<(), LaunchBpfExecutionError> {
     let mut pre_lamports = 0_u128;
@@ -763,10 +766,10 @@ fn should_verify_data(
     owner != program_id || !is_writable || is_executable
 }
 
-fn required_account(
-    accounts: &AccountMap,
+fn required_account<'a>(
+    accounts: &'a CowAccountMap,
     pubkey: [u8; 32],
-) -> Result<&AccountSnapshot, LaunchBpfExecutionError> {
+) -> Result<&'a AccountSnapshot, LaunchBpfExecutionError> {
     accounts
         .get(&pubkey)
         .ok_or(LaunchBpfExecutionError::MissingAccountState { pubkey })
@@ -788,6 +791,16 @@ fn read_u64(bytes: &[u8], start: usize) -> Result<u64, LaunchBpfExecutionError> 
 
 #[cfg(test)]
 mod tests {
+    fn cow(accounts: &AccountMap) -> CowAccountMap {
+        CowAccountMap::detached(accounts.clone())
+    }
+    fn cow_mut(accounts: &mut AccountMap) -> CowAccountMap {
+        CowAccountMap::detached(std::mem::take(accounts))
+    }
+    fn restore(accounts: &mut AccountMap, cow: CowAccountMap) {
+        *accounts = cow.into_local();
+    }
+
     use super::*;
 
     const PROGRAM: [u8; 32] = [9; 32];
@@ -825,15 +838,15 @@ mod tests {
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
         let instruction_data = [0xaa, 0xbb];
-        let expected = serialize_parameters(PROGRAM, &metas, &accounts, &instruction_data).unwrap();
-        let plan = LaunchBpfSerializationPlan::collect(&metas, &accounts).unwrap();
+        let expected = serialize_parameters(PROGRAM, &metas, &cow(&accounts), &instruction_data).unwrap();
+        let plan = LaunchBpfSerializationPlan::collect(&metas, &cow(&accounts)).unwrap();
 
         let mut lease = LegacyBpfParameterBufferLease::acquire();
         lease.get_mut().extend_from_slice(&[0xff; 17]);
         serialize_parameters_with_plan(
             PROGRAM,
             &metas,
-            &accounts,
+            &cow(&accounts),
             &instruction_data,
             &plan,
             lease.get_mut(),
@@ -863,16 +876,16 @@ mod tests {
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
         let instruction_data = [0xaa, 0xbb];
-        let plan = LaunchBpfSerializationPlan::collect(&metas, &accounts).unwrap();
+        let plan = LaunchBpfSerializationPlan::collect(&metas, &cow(&accounts)).unwrap();
         let expected_bytes =
-            serialize_parameters(PROGRAM, &metas, &accounts, &instruction_data).unwrap();
-        let expected_baselines = launch_pre_accounts(PROGRAM, &metas, &accounts).unwrap();
+            serialize_parameters(PROGRAM, &metas, &cow(&accounts), &instruction_data).unwrap();
+        let expected_baselines = launch_pre_accounts(PROGRAM, &metas, &cow(&accounts)).unwrap();
         let mut bytes = Vec::new();
 
         let baselines = serialize_parameters_and_baselines_with_plan(
             PROGRAM,
             &metas,
-            &accounts,
+            &cow(&accounts),
             &instruction_data,
             &plan,
             &mut bytes,
@@ -936,7 +949,7 @@ mod tests {
             (OWNED, account(PROGRAM, 11, &[1, 2, 3])),
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
-        let bytes = serialize_parameters(PROGRAM, &metas, &accounts, &[0xaa, 0xbb]).unwrap();
+        let bytes = serialize_parameters(PROGRAM, &metas, &cow(&accounts), &[0xaa, 0xbb]).unwrap();
 
         assert_eq!(u64::from_le_bytes(bytes[..8].try_into().unwrap()), 3);
         assert_eq!(bytes[8], u8::MAX);
@@ -954,7 +967,7 @@ mod tests {
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
 
-        let plan = LaunchBpfSerializationPlan::collect(&metas, &accounts).unwrap();
+        let plan = LaunchBpfSerializationPlan::collect(&metas, &cow(&accounts)).unwrap();
 
         assert_eq!(plan.unique_account_count, 2);
         assert_eq!(plan.account_region_end, 198);
@@ -991,7 +1004,7 @@ mod tests {
             .map(|index| meta([index as u8; 32], true))
             .collect::<Vec<_>>();
 
-        let plan = LaunchBpfSerializationPlan::collect(&metas, &accounts).unwrap();
+        let plan = LaunchBpfSerializationPlan::collect(&metas, &cow(&accounts)).unwrap();
         assert_eq!(plan.entries.len(), 256);
         assert!(matches!(
             plan.entries.last(),
@@ -1003,7 +1016,7 @@ mod tests {
 
         let mut duplicate_at_last = metas.clone();
         duplicate_at_last[255] = duplicate_at_last[254].clone();
-        let plan = LaunchBpfSerializationPlan::collect(&duplicate_at_last, &accounts).unwrap();
+        let plan = LaunchBpfSerializationPlan::collect(&duplicate_at_last, &cow(&accounts)).unwrap();
         assert_eq!(
             plan.entries.last(),
             Some(&LaunchBpfSerializationEntry::Duplicate {
@@ -1014,7 +1027,7 @@ mod tests {
         let mut too_many = metas;
         too_many.push(meta(OWNED, true));
         assert_eq!(
-            LaunchBpfSerializationPlan::collect(&too_many, &accounts),
+            LaunchBpfSerializationPlan::collect(&too_many, &cow(&accounts)),
             Err(LaunchBpfExecutionError::TooManyInstructionAccounts {
                 count: 257,
                 max: 256,
@@ -1040,12 +1053,12 @@ mod tests {
         }
 
         let (inline_metas, inline_accounts) = fixture(INLINE_SERIALIZATION_PLAN_ACCOUNTS);
-        let inline = launch_pre_accounts(PROGRAM, &inline_metas, &inline_accounts).unwrap();
+        let inline = launch_pre_accounts(PROGRAM, &inline_metas, &cow(&inline_accounts)).unwrap();
         assert_eq!(inline.len(), INLINE_SERIALIZATION_PLAN_ACCOUNTS);
         assert!(!inline.spilled());
 
         let (wide_metas, wide_accounts) = fixture(INLINE_SERIALIZATION_PLAN_ACCOUNTS + 1);
-        let wide = launch_pre_accounts(PROGRAM, &wide_metas, &wide_accounts).unwrap();
+        let wide = launch_pre_accounts(PROGRAM, &wide_metas, &cow(&wide_accounts)).unwrap();
         assert_eq!(wide.len(), INLINE_SERIALIZATION_PLAN_ACCOUNTS + 1);
         assert!(wide.spilled());
     }
@@ -1055,9 +1068,11 @@ mod tests {
         let metas = [meta(OWNED, true)];
         let mut accounts = AccountMap::from([(OWNED, account(PROGRAM, 11, &[1, 2, 3]))]);
         let shared_before = accounts[&OWNED].data.clone();
-        let bytes = serialize_parameters(PROGRAM, &metas, &accounts, &[]).unwrap();
+        let bytes = serialize_parameters(PROGRAM, &metas, &cow(&accounts), &[]).unwrap();
 
-        deserialize_parameters(&metas, &mut accounts, &bytes).unwrap();
+        let mut overlay = cow_mut(&mut accounts);
+        deserialize_parameters(&metas, &mut overlay, &bytes).unwrap();
+        restore(&mut accounts, overlay);
 
         assert!(accounts[&OWNED].data.shares_allocation_with(&shared_before));
     }
@@ -1067,7 +1082,7 @@ mod tests {
         let metas = [meta(OWNED, true)];
         let mut accounts = AccountMap::from([(OWNED, account(PROGRAM, 11, &[1, 2, 3]))]);
         let shared_before = accounts[&OWNED].data.clone();
-        let mut bytes = serialize_parameters(PROGRAM, &metas, &accounts, &[]).unwrap();
+        let mut bytes = serialize_parameters(PROGRAM, &metas, &cow(&accounts), &[]).unwrap();
         let lamports_start = 8 + 1 + 1 + 1 + 32;
         bytes[lamports_start..lamports_start + 8].copy_from_slice(&19_u64.to_le_bytes());
         let data_start = lamports_start + 16;
@@ -1075,7 +1090,9 @@ mod tests {
         let owner_start = data_start + 3;
         bytes[owner_start..owner_start + 32].fill(0xff);
 
-        deserialize_parameters(&metas, &mut accounts, &bytes).unwrap();
+        let mut overlay = cow_mut(&mut accounts);
+        deserialize_parameters(&metas, &mut overlay, &bytes).unwrap();
+        restore(&mut accounts, overlay);
 
         assert_eq!(accounts[&OWNED].lamports, 19);
         assert_eq!(accounts[&OWNED].data, [7, 8, 9]);
@@ -1091,7 +1108,7 @@ mod tests {
             (OWNED, account(PROGRAM, 11, &[1, 2, 3])),
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
-        let pre = launch_pre_accounts(PROGRAM, &metas, &accounts).unwrap();
+        let pre = launch_pre_accounts(PROGRAM, &metas, &cow(&accounts)).unwrap();
         accounts.get_mut(&OWNED).unwrap().data[0] = 9;
         accounts.get_mut(&OWNED).unwrap().lamports = 10;
         accounts.get_mut(&EXTERNAL).unwrap().lamports = 13;
@@ -1099,7 +1116,7 @@ mod tests {
         verify_launch_bpf_instruction(
             PROGRAM,
             &pre,
-            &accounts,
+            &cow(&accounts),
             LaunchBpfLoaderRent {
                 lamports_per_byte_year: 1,
                 exemption_threshold: 2.0,
@@ -1112,14 +1129,14 @@ mod tests {
     fn post_verifier_rejects_external_data_change_before_balance_check() {
         let metas = [meta(EXTERNAL, true)];
         let mut accounts = AccountMap::from([(EXTERNAL, account([6; 32], 12, &[4, 5]))]);
-        let pre = launch_pre_accounts(PROGRAM, &metas, &accounts).unwrap();
+        let pre = launch_pre_accounts(PROGRAM, &metas, &cow(&accounts)).unwrap();
         accounts.get_mut(&EXTERNAL).unwrap().data[0] = 9;
 
         assert_eq!(
             verify_launch_bpf_instruction(
                 PROGRAM,
                 &pre,
-                &accounts,
+                &cow(&accounts),
                 LaunchBpfLoaderRent {
                     lamports_per_byte_year: 1,
                     exemption_threshold: 2.0,

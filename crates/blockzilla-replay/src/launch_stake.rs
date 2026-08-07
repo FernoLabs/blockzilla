@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AccountMap, AccountSnapshot, LaunchAccountMeta, MemoryAccountStore, RENT_SYSVAR_ID,
-    decode_launch_vote_credits, default_system_account,
+    AccountMap, AccountSnapshot, CowAccountMap, LaunchAccountMeta, MemoryAccountStore,
+    RENT_SYSVAR_ID, decode_launch_vote_credits, default_system_account,
 };
 
 pub const STAKE_PROGRAM_ID: [u8; 32] = [
@@ -455,10 +455,10 @@ pub fn apply_launch_stake_instruction(
     accounts: &mut AccountMap,
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
-    let mut working = accounts.clone();
+    let mut working = CowAccountMap::detached(accounts.clone());
     let mutation =
-        apply_launch_stake_instruction_in_place(data, account_metas, &mut working, context)?;
-    *accounts = working;
+        apply_launch_stake_instruction_on_overlay(data, account_metas, &mut working, context)?;
+    *accounts = working.into_local();
     Ok(mutation)
 }
 
@@ -470,10 +470,22 @@ pub fn apply_launch_stake_instruction_in_place(
     accounts: &mut AccountMap,
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
+    let mut cow = CowAccountMap::detached(std::mem::take(accounts));
+    let result = apply_launch_stake_instruction_on_overlay(
+        data, account_metas, &mut cow, context,
+    );
+    *accounts = cow.into_local();
+    result
+}
+
+pub fn apply_launch_stake_instruction_on_overlay(
+    data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut CowAccountMap,
+    context: LaunchStakeContext<'_>,
+) -> Result<LaunchStakeMutation, LaunchStakeError> {
     for meta in account_metas {
-        accounts
-            .entry(meta.pubkey)
-            .or_insert_with(default_system_account);
+        accounts.entry_or_insert_with(meta.pubkey, default_system_account);
     }
     let pre_accounts = launch_pre_accounts(account_metas, accounts);
     let mutation = apply_inner(data, account_metas, accounts, context)?;
@@ -484,7 +496,7 @@ pub fn apply_launch_stake_instruction_in_place(
 fn apply_inner(
     data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
     // v1.0.7 obtains the first keyed account before deserializing data.
@@ -694,7 +706,7 @@ fn validate_sysvar(
 
 fn read_rent(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<LaunchStakeRent, LaunchStakeError> {
     validate_sysvar(account_metas, position, RENT_SYSVAR_ID)?;
@@ -708,7 +720,7 @@ fn read_rent(
 
 fn read_clock(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<LaunchClock, LaunchStakeError> {
     validate_sysvar(account_metas, position, CLOCK_SYSVAR_ID)?;
@@ -727,7 +739,7 @@ fn read_clock(
 
 fn read_stake_history(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<LaunchStakeHistory, LaunchStakeError> {
     validate_sysvar(account_metas, position, STAKE_HISTORY_SYSVAR_ID)?;
@@ -755,7 +767,7 @@ fn read_stake_history(
 
 fn read_stake_config(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<LaunchStakeConfig, LaunchStakeError> {
     let meta = required_meta(account_metas, position)?;
@@ -806,7 +818,7 @@ fn launch_config_payload(data: &[u8]) -> Option<&[u8]> {
 }
 
 fn decode_account(
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     pubkey: [u8; 32],
 ) -> Result<LaunchStakeState, LaunchStakeError> {
     let account = accounts
@@ -816,7 +828,7 @@ fn decode_account(
 }
 
 fn write_account_state(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     pubkey: [u8; 32],
     state: &LaunchStakeState,
 ) -> Result<(), LaunchStakeError> {
@@ -833,7 +845,7 @@ fn write_account_state(
 }
 
 fn initialize(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     stake_meta: &LaunchAccountMeta,
     authorized: LaunchStakeAuthorized,
     lockup: LaunchStakeLockup,
@@ -868,7 +880,7 @@ fn initialize(
 }
 
 fn delegate(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     stake_meta: &LaunchAccountMeta,
     vote_meta: &LaunchAccountMeta,
     signers: &BTreeSet<[u8; 32]>,
@@ -943,7 +955,7 @@ fn delegate(
 }
 
 fn split(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     source_meta: &LaunchAccountMeta,
     destination_meta: &LaunchAccountMeta,
     lamports: u64,
@@ -1039,7 +1051,7 @@ fn split(
 }
 
 fn merge(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     destination_meta: &LaunchAccountMeta,
     source_meta: &LaunchAccountMeta,
     signers: &BTreeSet<[u8; 32]>,
@@ -1113,7 +1125,7 @@ fn mergeable_stake_meta(
 }
 
 fn authorize(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     stake_meta: &LaunchAccountMeta,
     new_authority: [u8; 32],
     authority_type: LaunchStakeAuthorize,
@@ -1194,7 +1206,7 @@ fn authorize_meta(
 }
 
 fn deactivate(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     stake_meta: &LaunchAccountMeta,
     signers: &BTreeSet<[u8; 32]>,
     epoch: u64,
@@ -1222,7 +1234,7 @@ fn deactivate(
 }
 
 fn set_lockup(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     stake_meta: &LaunchAccountMeta,
     lockup: LaunchStakeLockupArgs,
     signers: &BTreeSet<[u8; 32]>,
@@ -1279,7 +1291,7 @@ fn set_lockup_meta(
 }
 
 fn withdraw(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     stake_meta: &LaunchAccountMeta,
     destination_meta: &LaunchAccountMeta,
     lamports: u64,
@@ -1551,7 +1563,7 @@ fn is_zeroed(data: &[u8]) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Vec<LaunchPreAccount> {
     account_metas
         .iter()
@@ -1575,7 +1587,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_stake_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Result<(), LaunchStakeError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;

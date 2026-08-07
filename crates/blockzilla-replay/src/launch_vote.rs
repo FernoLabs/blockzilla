@@ -15,7 +15,7 @@ use std::{
 };
 use thiserror::Error;
 
-use crate::{AccountMap, AccountSnapshot, CLOCK_SYSVAR_ID, LaunchAccountMeta, RENT_SYSVAR_ID};
+use crate::{AccountMap, CowAccountMap, AccountSnapshot, CLOCK_SYSVAR_ID, LaunchAccountMeta, RENT_SYSVAR_ID};
 
 const MAX_LOCKOUT_HISTORY: usize = 31;
 const MAX_EPOCH_CREDITS_HISTORY: usize = 64;
@@ -465,14 +465,14 @@ pub fn apply_launch_vote_instruction(
     accounts: &mut AccountMap,
     trusted_vote_epoch: u64,
 ) -> Result<LaunchVoteMutation, LaunchVoteError> {
-    let mut working = accounts.clone();
-    let mutation = apply_launch_vote_instruction_in_place(
+    let mut working = CowAccountMap::detached(accounts.clone());
+    let mutation = apply_launch_vote_instruction_on_overlay(
         instruction_data,
         account_metas,
         &mut working,
         trusted_vote_epoch,
     )?;
-    *accounts = working;
+    *accounts = working.into_local();
     Ok(mutation)
 }
 
@@ -483,6 +483,20 @@ pub(crate) fn apply_launch_vote_instruction_in_place(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
     accounts: &mut AccountMap,
+    trusted_vote_epoch: u64,
+) -> Result<LaunchVoteMutation, LaunchVoteError> {
+    let mut cow = CowAccountMap::detached(std::mem::take(accounts));
+    let result = apply_launch_vote_instruction_on_overlay(
+        instruction_data, account_metas, &mut cow, trusted_vote_epoch,
+    );
+    *accounts = cow.into_local();
+    result
+}
+
+pub(crate) fn apply_launch_vote_instruction_on_overlay(
+    instruction_data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut CowAccountMap,
     trusted_vote_epoch: u64,
 ) -> Result<LaunchVoteMutation, LaunchVoteError> {
     apply_launch_vote_instruction_in_place_impl(
@@ -502,6 +516,21 @@ pub(crate) fn apply_launch_vote_instruction_in_place_cached(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
     accounts: &mut AccountMap,
+    trusted_vote_epoch: u64,
+    cache: &mut LaunchVoteStateCache,
+) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
+    let mut cow = CowAccountMap::detached(std::mem::take(accounts));
+    let result = apply_launch_vote_instruction_on_overlay_cached(
+        instruction_data, account_metas, &mut cow, trusted_vote_epoch, cache,
+    );
+    *accounts = cow.into_local();
+    result
+}
+
+pub(crate) fn apply_launch_vote_instruction_on_overlay_cached(
+    instruction_data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut CowAccountMap,
     trusted_vote_epoch: u64,
     cache: &mut LaunchVoteStateCache,
 ) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
@@ -869,7 +898,7 @@ fn borrowed_vote_may_shrink_encoded_state(
 fn apply_launch_vote_instruction_in_place_impl(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     trusted_vote_epoch: u64,
     cache: Option<&mut LaunchVoteStateCache>,
 ) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
@@ -888,7 +917,7 @@ fn apply_launch_vote_instruction_in_place_impl(
 fn apply_launch_vote_inner(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     trusted_vote_epoch: u64,
     mut cache: Option<&mut LaunchVoteStateCache>,
 ) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
@@ -1230,7 +1259,7 @@ fn decode_instruction(data: &[u8]) -> Result<VoteInstructionV100, LaunchVoteErro
 }
 
 fn initialize_account(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     vote_pubkey: Pubkey,
     vote_init: VoteInitV100,
     account_metas: &[LaunchAccountMeta],
@@ -1256,7 +1285,7 @@ fn initialize_account(
 }
 
 fn authorize(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     vote_pubkey: Pubkey,
     new_authority: Pubkey,
     authority_type: LaunchVoteAuthorize,
@@ -1290,7 +1319,7 @@ fn authorize(
 }
 
 fn withdraw(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     vote_pubkey: Pubkey,
     destination: Pubkey,
     lamports: u64,
@@ -1325,7 +1354,7 @@ fn withdraw(
 }
 
 fn update_commission(
-    accounts: &mut AccountMap,
+    accounts: &mut CowAccountMap,
     vote_pubkey: Pubkey,
     new_commission: u8,
     account_metas: &[LaunchAccountMeta],
@@ -1571,19 +1600,19 @@ fn required_meta(
         .ok_or(LaunchVoteError::MissingAccount { position })
 }
 
-fn required_account(
-    accounts: &AccountMap,
+fn required_account<'a>(
+    accounts: &'a CowAccountMap,
     pubkey: Pubkey,
-) -> Result<&AccountSnapshot, LaunchVoteError> {
+) -> Result<&'a AccountSnapshot, LaunchVoteError> {
     accounts
         .get(&pubkey)
         .ok_or(LaunchVoteError::MissingAccountState { pubkey })
 }
 
-fn required_account_mut(
-    accounts: &mut AccountMap,
+fn required_account_mut<'a>(
+    accounts: &'a mut CowAccountMap,
     pubkey: Pubkey,
-) -> Result<&mut AccountSnapshot, LaunchVoteError> {
+) -> Result<&'a mut AccountSnapshot, LaunchVoteError> {
     accounts
         .get_mut(&pubkey)
         .ok_or(LaunchVoteError::MissingAccountState { pubkey })
@@ -1591,7 +1620,7 @@ fn required_account_mut(
 
 fn read_rent(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<RentV100, LaunchVoteError> {
     let meta = required_meta(account_metas, position)?;
@@ -1612,7 +1641,7 @@ fn read_rent(
 
 fn read_clock(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     position: usize,
 ) -> Result<ClockV100, LaunchVoteError> {
     let meta = required_meta(account_metas, position)?;
@@ -2220,7 +2249,7 @@ impl LaunchPreAccount {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Result<SmallVec<[LaunchPreAccount; 4]>, LaunchVoteError> {
     account_metas
         .iter()
@@ -2240,7 +2269,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_vote_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Result<(), LaunchVoteError> {
     let mut pre_lamports = 0_u128;
     let mut post_lamports = 0_u128;

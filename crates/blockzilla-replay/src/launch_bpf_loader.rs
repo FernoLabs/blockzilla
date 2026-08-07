@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AccountMap, AccountSnapshot, CompilationManifest, CompiledProgram, LaunchAccountMeta,
-    LoaderAccountKind, RENT_SYSVAR_ID, ReplayCompiler, extract_program,
+    AccountMap, AccountSnapshot, CompilationManifest, CompiledProgram, CowAccountMap,
+    LaunchAccountMeta, LoaderAccountKind, RENT_SYSVAR_ID, ReplayCompiler, extract_program,
 };
 
 /// `BPFLoader1111111111111111111111111111111111`.
@@ -163,15 +163,15 @@ pub fn apply_launch_bpf_loader_instruction(
     compiler: &ReplayCompiler,
     context: LaunchBpfLoaderContext,
 ) -> Result<LaunchBpfLoaderApply, LaunchBpfLoaderError> {
-    let mut working = accounts.clone();
-    let applied = apply_launch_bpf_loader_instruction_in_place(
+    let mut working = CowAccountMap::detached(accounts.clone());
+    let applied = apply_launch_bpf_loader_instruction_on_overlay(
         instruction_data,
         account_metas,
         &mut working,
         compiler,
         context,
     )?;
-    *accounts = working;
+    *accounts = working.into_local();
     Ok(applied)
 }
 
@@ -181,6 +181,21 @@ pub fn apply_launch_bpf_loader_instruction_in_place(
     instruction_data: &[u8],
     account_metas: &[LaunchAccountMeta],
     accounts: &mut AccountMap,
+    compiler: &ReplayCompiler,
+    context: LaunchBpfLoaderContext,
+) -> Result<LaunchBpfLoaderApply, LaunchBpfLoaderError> {
+    let mut cow = CowAccountMap::detached(std::mem::take(accounts));
+    let result = apply_launch_bpf_loader_instruction_on_overlay(
+        instruction_data, account_metas, &mut cow, compiler, context,
+    );
+    *accounts = cow.into_local();
+    result
+}
+
+pub fn apply_launch_bpf_loader_instruction_on_overlay(
+    instruction_data: &[u8],
+    account_metas: &[LaunchAccountMeta],
+    accounts: &mut CowAccountMap,
     compiler: &ReplayCompiler,
     context: LaunchBpfLoaderContext,
 ) -> Result<LaunchBpfLoaderApply, LaunchBpfLoaderError> {
@@ -348,19 +363,19 @@ fn required_meta(
         .ok_or(LaunchBpfLoaderError::MissingAccount { position })
 }
 
-fn required_account(
-    accounts: &AccountMap,
+fn required_account<'a>(
+    accounts: &'a CowAccountMap,
     pubkey: [u8; 32],
-) -> Result<&AccountSnapshot, LaunchBpfLoaderError> {
+) -> Result<&'a AccountSnapshot, LaunchBpfLoaderError> {
     accounts
         .get(&pubkey)
         .ok_or(LaunchBpfLoaderError::MissingAccountState { pubkey })
 }
 
-fn required_account_mut(
-    accounts: &mut AccountMap,
+fn required_account_mut<'a>(
+    accounts: &'a mut CowAccountMap,
     pubkey: [u8; 32],
-) -> Result<&mut AccountSnapshot, LaunchBpfLoaderError> {
+) -> Result<&'a mut AccountSnapshot, LaunchBpfLoaderError> {
     accounts
         .get_mut(&pubkey)
         .ok_or(LaunchBpfLoaderError::MissingAccountState { pubkey })
@@ -385,7 +400,7 @@ impl RentV100 {
 }
 
 fn read_rent(
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     meta: &LaunchAccountMeta,
     position: usize,
 ) -> Result<RentV100, LaunchBpfLoaderError> {
@@ -500,7 +515,7 @@ fn should_verify_data(owner: &[u8; 32], is_writable: bool) -> bool {
 
 fn launch_pre_accounts(
     account_metas: &[LaunchAccountMeta],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
 ) -> Result<Vec<LaunchPreAccount>, LaunchBpfLoaderError> {
     account_metas
         .iter()
@@ -522,7 +537,7 @@ fn launch_pre_accounts(
 
 fn verify_launch_bpf_loader_instruction(
     pre_accounts: &[LaunchPreAccount],
-    accounts: &AccountMap,
+    accounts: &CowAccountMap,
     context: LaunchBpfLoaderContext,
 ) -> Result<(), LaunchBpfLoaderError> {
     let mut pre_lamports = 0_u128;
