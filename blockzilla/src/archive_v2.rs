@@ -1700,6 +1700,12 @@ pub(crate) fn build_hot_blocks_first_seen(
     let mut first_seen_signatures = FirstSeenBlockSignatures::default();
     let mut hot_block_buffers = HotBlockBuffers::default();
     let mut first_seen_access_pubkeys = Vec::<ArchiveV2BlockAccessPubkey>::new();
+    // Gates pushes into `first_seen_access_pubkeys` so the per-block traversal (which revisits
+    // the same program/mint/owner id many times across a block's transactions and log events)
+    // records each id once instead of relying on `normalize_first_seen_access_pubkeys` to sort
+    // and dedupe the full duplicate multiset afterward. Reused and cleared per block; still
+    // catches one id resolving to two different pubkeys within a block, same as before.
+    let mut first_seen_access_pubkey_seen = GxHashMap::<u32, [u8; 32]>::with_hasher(GxBuildHasher::default());
     let mut blockhashes = Vec::<[u8; 32]>::new();
 
     let mut blockhash_index_v3 = full_blockhash_index_v3_publisher(output_dir, max_blocks)?;
@@ -1821,11 +1827,27 @@ pub(crate) fn build_hot_blocks_first_seen(
 
                 let intern_started = timings.detail_timer();
                 first_seen_access_pubkeys.clear();
+                if include_access {
+                    first_seen_access_pubkey_seen.clear();
+                }
                 let intern_stats = crate::pre_hot::intern_block_pubkeys(&mut record, |key| {
                     let id = registry.intern(key)?;
                     if include_access {
-                        first_seen_access_pubkeys
-                            .push(ArchiveV2BlockAccessPubkey { id, pubkey: *key });
+                        match first_seen_access_pubkey_seen.entry(id) {
+                            std::collections::hash_map::Entry::Occupied(existing) => {
+                                anyhow::ensure!(
+                                    *existing.get() == *key,
+                                    "first-seen ID {id} aliases two pubkeys within one block: existing={} incoming={}",
+                                    hex32(existing.get()),
+                                    hex32(key),
+                                );
+                            }
+                            std::collections::hash_map::Entry::Vacant(slot) => {
+                                slot.insert(*key);
+                                first_seen_access_pubkeys
+                                    .push(ArchiveV2BlockAccessPubkey { id, pubkey: *key });
+                            }
+                        }
                     }
                     Ok(id)
                 })
@@ -2786,10 +2808,8 @@ fn build_pre_hot_spool(
                 )?;
                 let slot = pending.last_slot;
                 let block_time = record.header.compact.block_time;
-                crate::pre_hot::count_registry_pubkeys(&record, |key| counter.add32(key))
-                    .with_context(|| format!("slot {slot} count PreHot registry pubkeys"))?;
-                let raw_pubkey_refs = crate::pre_hot::count_all_raw_pubkey_refs(&record)
-                    .with_context(|| format!("slot {slot} count PreHot raw pubkeys"))?;
+                let raw_pubkey_refs = crate::pre_hot::count_pubkeys(&record, |key| counter.add32(key))
+                    .with_context(|| format!("slot {slot} count PreHot pubkeys"))?;
                 let raw_pubkey_refs_u32 = u32::try_from(raw_pubkey_refs)
                     .context("PreHot block raw pubkey reference count exceeds u32::MAX")?;
                 writer.write(&LivePreHotRecord::Block(LivePreHotBlock::new(

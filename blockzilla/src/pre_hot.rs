@@ -17,20 +17,29 @@ pub(crate) struct PreHotRekeyStats {
     pub(crate) raw_remaining: u64,
 }
 
-/// Visits pubkeys using the historical CAR registry-counting semantics.
+/// Counts every raw `CompactPubkey` in a pre-hot block in one traversal, feeding the
+/// registry-eligible subset to `add` and returning the total raw reference count.
 ///
-/// In particular, this deliberately excludes pubkeys found only while parsing
-/// logs. Keeping this definition aligned with the existing registry pass makes
-/// the frequency ordering (and therefore the assigned ids) byte-compatible
-/// with an archive built directly from CAR.
-pub(crate) fn count_registry_pubkeys(
+/// "Registry-eligible" follows the historical CAR registry-counting semantics: message account
+/// keys, address-table-lookup keys, loaded addresses, token balance mint/owner/program_id, meta
+/// rewards, and return-data program ids -- deliberately excluding block-level rewards and pubkeys
+/// found only while parsing logs. Keeping `add`'s call set aligned with the existing registry pass
+/// makes the frequency ordering (and therefore the assigned ids) byte-compatible with an archive
+/// built directly from CAR. The returned total additionally counts block-level rewards and
+/// log-embedded pubkeys, which `add` never sees.
+pub(crate) fn count_pubkeys(
     block: &WincodeArchiveV2Block,
     mut add: impl FnMut(&[u8; 32]),
 ) -> Result<u64> {
-    let mut refs = 0u64;
+    let mut registry_refs = 0u64;
+    let mut raw_refs = 0u64;
 
-    // The historical CAR registry pass does not count block-level rewards.
-    // Keep them raw unless the same key is referenced by a transaction/meta.
+    if let Some(rewards) = &block.header.rewards {
+        ensure_decoded_rewards(rewards)?;
+        for reward in rewards.decoded.as_deref().unwrap_or_default() {
+            count_raw_key(reward.pubkey, &mut raw_refs);
+        }
+    }
 
     for transaction in &block.txs {
         let value = match &transaction.tx {
@@ -45,15 +54,15 @@ pub(crate) fn count_registry_pubkeys(
         match &value.message {
             OwnedCompactMessage::Legacy(message) => {
                 for key in &message.account_keys {
-                    visit_required_raw(*key, &mut add, &mut refs)?;
+                    visit_required_raw(*key, &mut add, &mut registry_refs)?;
                 }
             }
             OwnedCompactMessage::V0(message) => {
                 for key in &message.account_keys {
-                    visit_required_raw(*key, &mut add, &mut refs)?;
+                    visit_required_raw(*key, &mut add, &mut registry_refs)?;
                 }
                 for lookup in &message.address_table_lookups {
-                    visit_required_raw(lookup.account_key, &mut add, &mut refs)?;
+                    visit_required_raw(lookup.account_key, &mut add, &mut registry_refs)?;
                 }
             }
         }
@@ -64,15 +73,23 @@ pub(crate) fn count_registry_pubkeys(
             value: metadata, ..
         }) = &transaction.metadata
         {
-            count_registry_meta_pubkeys(metadata, &mut add, &mut refs)?;
+            count_registry_meta_pubkeys(metadata, &mut add, &mut registry_refs)?;
+            if let Some(logs) = &metadata.logs {
+                count_log_raw_pubkeys(logs, &mut raw_refs);
+            }
         }
     }
 
-    Ok(refs)
+    Ok(raw_refs.saturating_add(registry_refs))
 }
 
-/// Counts every raw `CompactPubkey` encoded in a pre-hot block, including
-/// pubkeys nested in compact log events.
+/// Counts every raw `CompactPubkey` remaining in a pre-hot block, including pubkeys nested in
+/// compact log events. Unlike [`count_pubkeys`], this tolerates a block in any rekeying state --
+/// fully raw, partially rekeyed, or fully interned -- silently skipping any `CompactPubkey::Id`
+/// instead of erroring, so it doubles as a "how many raw refs remain" check after
+/// [`rekey_block_pubkeys`] or [`intern_block_pubkeys`] has run. Only that lenient invariant check
+/// needs it today, so it's test-only; promote it back to production if a non-test caller shows up.
+#[cfg(test)]
 pub(crate) fn count_all_raw_pubkey_refs(block: &WincodeArchiveV2Block) -> Result<u64> {
     let mut raw = 0u64;
 
@@ -104,6 +121,57 @@ pub(crate) fn count_all_raw_pubkey_refs(block: &WincodeArchiveV2Block) -> Result
     }
 
     Ok(raw)
+}
+
+#[cfg(test)]
+fn count_message_raw_pubkeys(message: &OwnedCompactMessage, raw: &mut u64) {
+    match message {
+        OwnedCompactMessage::Legacy(message) => {
+            for key in &message.account_keys {
+                count_raw_key(*key, raw);
+            }
+        }
+        OwnedCompactMessage::V0(message) => {
+            for key in &message.account_keys {
+                count_raw_key(*key, raw);
+            }
+            for lookup in &message.address_table_lookups {
+                count_raw_key(lookup.account_key, raw);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn count_meta_raw_pubkeys(meta: &CompactMetaV1, raw: &mut u64) {
+    for key in meta
+        .loaded_writable_addresses
+        .iter()
+        .chain(meta.loaded_readonly_addresses.iter())
+    {
+        count_raw_key(*key, raw);
+    }
+    for balance in meta
+        .pre_token_balances
+        .iter()
+        .chain(meta.post_token_balances.iter())
+    {
+        for key in [balance.mint, balance.owner, balance.program_id]
+            .into_iter()
+            .flatten()
+        {
+            count_raw_key(key, raw);
+        }
+    }
+    for reward in &meta.rewards {
+        count_raw_key(reward.pubkey, raw);
+    }
+    if let Some(return_data) = &meta.return_data {
+        count_raw_key(return_data.program_id, raw);
+    }
+    if let Some(logs) = &meta.logs {
+        count_log_raw_pubkeys(logs, raw);
+    }
 }
 
 /// Rewrites all known raw pubkey references in a pre-hot block to registry ids.
@@ -246,55 +314,6 @@ fn count_registry_meta_pubkeys(
         visit_required_raw(return_data.program_id, add, refs)?;
     }
     Ok(())
-}
-
-fn count_message_raw_pubkeys(message: &OwnedCompactMessage, raw: &mut u64) {
-    match message {
-        OwnedCompactMessage::Legacy(message) => {
-            for key in &message.account_keys {
-                count_raw_key(*key, raw);
-            }
-        }
-        OwnedCompactMessage::V0(message) => {
-            for key in &message.account_keys {
-                count_raw_key(*key, raw);
-            }
-            for lookup in &message.address_table_lookups {
-                count_raw_key(lookup.account_key, raw);
-            }
-        }
-    }
-}
-
-fn count_meta_raw_pubkeys(meta: &CompactMetaV1, raw: &mut u64) {
-    for key in meta
-        .loaded_writable_addresses
-        .iter()
-        .chain(meta.loaded_readonly_addresses.iter())
-    {
-        count_raw_key(*key, raw);
-    }
-    for balance in meta
-        .pre_token_balances
-        .iter()
-        .chain(meta.post_token_balances.iter())
-    {
-        for key in [balance.mint, balance.owner, balance.program_id]
-            .into_iter()
-            .flatten()
-        {
-            count_raw_key(key, raw);
-        }
-    }
-    for reward in &meta.rewards {
-        count_raw_key(reward.pubkey, raw);
-    }
-    if let Some(return_data) = &meta.return_data {
-        count_raw_key(return_data.program_id, raw);
-    }
-    if let Some(logs) = &meta.logs {
-        count_log_raw_pubkeys(logs, raw);
-    }
 }
 
 fn count_log_raw_pubkeys(logs: &CompactLogStream, raw: &mut u64) {
@@ -829,16 +848,15 @@ mod tests {
     fn registry_count_matches_historical_fields_and_excludes_logs() {
         let block = test_block();
         let mut visited = Vec::new();
-        let refs = count_registry_pubkeys(&block, |key| visited.push(*key)).unwrap();
+        let refs = count_pubkeys(&block, |key| visited.push(*key)).unwrap();
 
-        assert_eq!(refs, 10);
+        assert_eq!(refs, 15);
         assert_eq!(
             visited,
             [2u8, 3, 4, 5, 6, 7, 8, 9, 14, 15]
                 .map(|value| [value; 32])
                 .to_vec()
         );
-        assert_eq!(count_all_raw_pubkey_refs(&block).unwrap(), 15);
     }
 
     #[test]
@@ -937,8 +955,7 @@ mod tests {
             bytes: vec![0xde, 0xad, 0xbe, 0xef],
             error: "scripted undecodable metadata".to_owned(),
         });
-        let expected_refs = count_all_raw_pubkey_refs(&block).unwrap();
-        count_registry_pubkeys(&block, |_| {}).unwrap();
+        let expected_refs = count_pubkeys(&block, |_| {}).unwrap();
 
         let mut next_id = 1u32;
         let stats = intern_block_pubkeys(&mut block, |_| {
