@@ -1,5 +1,7 @@
 use clap::{Parser, ValueEnum};
-use topcoat::router::{tower::TowerLayer, HeaderName, HeaderValue, Path, Router, RouterBuilderDiscoverExt};
+use topcoat::router::{
+    HeaderName, HeaderValue, Path, Router, RouterBuilderDiscoverExt, tower::TowerLayer,
+};
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -33,7 +35,11 @@ struct Cli {
     /// Base URL of the redacted, public-safe blockzilla-watcher-gateway
     /// (see services/blockzilla-watcher-gateway). This dashboard never talks
     /// to the scheduler's raw status port directly.
-    #[arg(long, env = "BLOCKZILLA_MONITOR_UPSTREAM", default_value = "http://127.0.0.1:8787")]
+    #[arg(
+        long,
+        env = "BLOCKZILLA_MONITOR_UPSTREAM",
+        default_value = "http://127.0.0.1:8787"
+    )]
     upstream: String,
 
     /// Run against a synthetic, in-process ticker instead of a real

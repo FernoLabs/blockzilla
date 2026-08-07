@@ -52,7 +52,10 @@ pub fn reference_calendar() -> &'static [EpochCalendarEntry] {
 
 /// Merges `authoritative` over `reference` by epoch (authoritative wins on
 /// conflict), sorted by epoch. Mirrors `mergeEpochCalendars`.
-pub fn merge_calendars(reference: &[EpochCalendarEntry], authoritative: &[EpochCalendarEntry]) -> Vec<EpochCalendarEntry> {
+pub fn merge_calendars(
+    reference: &[EpochCalendarEntry],
+    authoritative: &[EpochCalendarEntry],
+) -> Vec<EpochCalendarEntry> {
     let mut merged: BTreeMap<u32, EpochCalendarEntry> = BTreeMap::new();
     for entry in reference {
         merged.insert(entry.epoch, entry.clone());
@@ -67,7 +70,10 @@ pub fn merge_calendars(reference: &[EpochCalendarEntry], authoritative: &[EpochC
 /// most recent (up to 16) known epoch durations, falling back to
 /// `SLOTS_PER_EPOCH * FALLBACK_SLOT_MS` if there's no usable history yet.
 /// Mirrors `extendEpochCalendarTail`.
-pub fn extend_tail(calendar: &[EpochCalendarEntry], through_epoch: Option<u32>) -> Vec<EpochCalendarEntry> {
+pub fn extend_tail(
+    calendar: &[EpochCalendarEntry],
+    through_epoch: Option<u32>,
+) -> Vec<EpochCalendarEntry> {
     let mut extended: Vec<EpochCalendarEntry> = calendar.to_vec();
     extended.sort_by_key(|entry| entry.epoch);
 
@@ -83,7 +89,11 @@ pub fn extend_tail(calendar: &[EpochCalendarEntry], through_epoch: Option<u32>) 
 
     let mut durations: Vec<u64> = extended
         .iter()
-        .filter_map(|entry| entry.end_unix_secs.map(|end| end.saturating_sub(entry.start_unix_secs)))
+        .filter_map(|entry| {
+            entry
+                .end_unix_secs
+                .map(|end| end.saturating_sub(entry.start_unix_secs))
+        })
         .filter(|&duration| duration > 0)
         .collect();
     let recent = durations.split_off(durations.len().saturating_sub(16));
@@ -111,7 +121,11 @@ pub fn extend_tail(calendar: &[EpochCalendarEntry], through_epoch: Option<u32>) 
         extended.push(EpochCalendarEntry {
             epoch,
             start_unix_secs: start,
-            end_unix_secs: if epoch == through_epoch { None } else { Some(end) },
+            end_unix_secs: if epoch == through_epoch {
+                None
+            } else {
+                Some(end)
+            },
             precision: CalendarPrecision::Estimated,
         });
         start = end;
@@ -124,7 +138,11 @@ fn median(sorted: &[u64]) -> Option<u64> {
         return None;
     }
     let mid = sorted.len() / 2;
-    Some(if sorted.len() % 2 == 1 { sorted[mid] } else { (sorted[mid - 1] + sorted[mid]) / 2 })
+    Some(if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        (sorted[mid - 1] + sorted[mid]) / 2
+    })
 }
 
 /// Which color bucket / tooltip text a day's primary epoch gets. Higher
@@ -220,7 +238,9 @@ fn is_legacy_no_access_message(message: Option<&str>) -> bool {
 }
 
 fn has_missing_source_message(message: Option<&str>) -> bool {
-    message.map(|message| message.to_lowercase().contains("input car is missing")).unwrap_or(false)
+    message
+        .map(|message| message.to_lowercase().contains("input car is missing"))
+        .unwrap_or(false)
 }
 
 /// One day's rendered cell: which epoch(s) touch it, the winning tone/color,
@@ -293,7 +313,8 @@ pub fn build_years(
 
     let mut timings: Vec<&EpochCalendarEntry> = calendar.iter().collect();
     timings.sort_by_key(|entry| entry.epoch);
-    let epoch_by_number: BTreeMap<u32, &EpochStatus> = epochs.iter().map(|epoch| (epoch.epoch, epoch)).collect();
+    let epoch_by_number: BTreeMap<u32, &EpochStatus> =
+        epochs.iter().map(|epoch| (epoch.epoch, epoch)).collect();
 
     // date -> epochs touching that day, most-urgent tone first.
     let mut day_epochs: BTreeMap<String, Vec<(u32, DayTone, String, bool)>> = BTreeMap::new();
@@ -308,12 +329,18 @@ pub fn build_years(
             Some(epoch) => (historical_tone(epoch), historical_label(epoch)),
             None => (DayTone::Untracked, "untracked".to_string()),
         };
-        let next_start = timings.get(index + 1).map(|next| next.start_unix_secs as i64);
+        let next_start = timings
+            .get(index + 1)
+            .map(|next| next.start_unix_secs as i64);
         let open_end = match next_start {
             None => now,
             Some(next_start) => now.min(start.max(next_start - 1)),
         };
-        let end = timing.end_unix_secs.map(|end| end as i64).unwrap_or(open_end).min(now);
+        let end = timing
+            .end_unix_secs
+            .map(|end| end as i64)
+            .unwrap_or(open_end)
+            .min(now);
         let start_day = utc_day_start(start);
         let end_day = utc_day_start(end);
         first_day = Some(first_day.map_or(start_day, |first| first.min(start_day)));
@@ -321,7 +348,12 @@ pub fn build_years(
         let estimated = timing.precision == CalendarPrecision::Estimated;
         let mut day = start_day;
         while day <= end_day {
-            day_epochs.entry(iso_date(day)).or_default().push((timing.epoch, tone, label.clone(), estimated));
+            day_epochs.entry(iso_date(day)).or_default().push((
+                timing.epoch,
+                tone,
+                label.clone(),
+                estimated,
+            ));
             day += SECONDS_PER_DAY;
         }
     }
@@ -346,9 +378,12 @@ pub fn build_years(
             continue;
         }
         let (start_year, ..) = civil_from_days(start.div_euclid(SECONDS_PER_DAY));
-        let archived = epoch_by_number
-            .get(&timing.epoch)
-            .is_some_and(|epoch| matches!(historical_tone(epoch), DayTone::Complete | DayTone::FirstSeenComplete | DayTone::LegacyComplete));
+        let archived = epoch_by_number.get(&timing.epoch).is_some_and(|epoch| {
+            matches!(
+                historical_tone(epoch),
+                DayTone::Complete | DayTone::FirstSeenComplete | DayTone::LegacyComplete
+            )
+        });
         let entry = epoch_counts.entry(start_year).or_insert((0, 0));
         entry.0 += 1;
         if archived {
@@ -356,21 +391,24 @@ pub fn build_years(
         }
     }
 
-    let interruption_by_date: BTreeMap<String, &crate::snapshot::BlockTimeInterruptionDay> = interruption_index
-        .map(|index| {
-            index
-                .days
-                .iter()
-                .map(|day| (iso_date(utc_day_start(day.day_start_unix_secs as i64)), day))
-                .collect()
-        })
+    let interruption_by_date: BTreeMap<String, &crate::snapshot::BlockTimeInterruptionDay> =
+        interruption_index
+            .map(|index| {
+                index
+                    .days
+                    .iter()
+                    .map(|day| (iso_date(utc_day_start(day.day_start_unix_secs as i64)), day))
+                    .collect()
+            })
+            .unwrap_or_default();
+    let missing_interruption_epochs: std::collections::BTreeSet<u32> = interruption_index
+        .map(|index| index.coverage.missing_epochs.iter().copied().collect())
         .unwrap_or_default();
-    let missing_interruption_epochs: std::collections::BTreeSet<u32> =
-        interruption_index.map(|index| index.coverage.missing_epochs.iter().copied().collect()).unwrap_or_default();
 
     let mut years = Vec::new();
     for year in first_year..=last_year {
-        let (epoch_count, archived_epoch_count) = epoch_counts.get(&year).copied().unwrap_or((0, 0));
+        let (epoch_count, archived_epoch_count) =
+            epoch_counts.get(&year).copied().unwrap_or((0, 0));
         years.push(build_year(
             year,
             epoch_count,
@@ -410,7 +448,13 @@ fn build_year(
         let week = (first_weekday + day_of_year) / 7;
 
         let mut entries = day_epochs.get(&date).cloned().unwrap_or_default();
-        entries.sort_by(|left, right| right.1.priority().cmp(&left.1.priority()).then(right.0.cmp(&left.0)));
+        entries.sort_by(|left, right| {
+            right
+                .1
+                .priority()
+                .cmp(&left.1.priority())
+                .then(right.0.cmp(&left.0))
+        });
         let primary = entries.first().cloned();
         // `entries` stays priority-sorted (needed to pick `primary` above),
         // but the displayed epoch list re-sorts ascending -- matches the
@@ -418,12 +462,15 @@ fn build_year(
         let mut epochs: Vec<u32> = entries.iter().map(|entry| entry.0).collect();
         epochs.sort_unstable();
 
-        let interruption = interruption_by_date.get(&date).map(|day| InterruptionSummary {
-            count: day.interruption_count,
-            longest_secs: day.longest_interruption_secs,
-            boundary_count: day.boundary_interruption_count,
-        });
-        let coverage = interruption_coverage_for(&epochs, interruption_index, missing_interruption_epochs);
+        let interruption = interruption_by_date
+            .get(&date)
+            .map(|day| InterruptionSummary {
+                count: day.interruption_count,
+                longest_secs: day.longest_interruption_secs,
+                boundary_count: day.boundary_interruption_count,
+            });
+        let coverage =
+            interruption_coverage_for(&epochs, interruption_index, missing_interruption_epochs);
         if interruption.is_some() {
             interruption_day_count += 1;
         }
@@ -437,14 +484,18 @@ fn build_year(
         // (still present in `days` so the grid stays a filled rectangle --
         // mirrors the Svelte template's `{#if day.primary_epoch !== null
         // && !day.future} ... {:else} <span class="empty-day">`).
-        let content = (!future).then(|| primary.map(|(_, tone, label, estimated)| CalendarDayContent {
-            epochs,
-            color: tone.color(),
-            label,
-            interruption,
-            interruption_coverage: coverage,
-            estimated,
-        })).flatten();
+        let content = (!future)
+            .then(|| {
+                primary.map(|(_, tone, label, estimated)| CalendarDayContent {
+                    epochs,
+                    color: tone.color(),
+                    label,
+                    interruption,
+                    interruption_coverage: coverage,
+                    estimated,
+                })
+            })
+            .flatten();
         days.push(CalendarDay {
             date: date.clone(),
             week,
@@ -481,11 +532,16 @@ fn interruption_coverage_for(
     index: Option<&BlockTimeGapIndex>,
     missing_epochs: &std::collections::BTreeSet<u32>,
 ) -> InterruptionCoverage {
-    let Some(index) = index else { return InterruptionCoverage::Unavailable };
+    let Some(index) = index else {
+        return InterruptionCoverage::Unavailable;
+    };
     if epochs.is_empty() {
         return InterruptionCoverage::Outside;
     }
-    if epochs.iter().any(|&epoch| epoch < index.coverage.start_epoch || epoch > index.coverage.end_epoch) {
+    if epochs
+        .iter()
+        .any(|&epoch| epoch < index.coverage.start_epoch || epoch > index.coverage.end_epoch)
+    {
         return InterruptionCoverage::Outside;
     }
     if epochs.iter().any(|epoch| missing_epochs.contains(epoch)) {
@@ -505,8 +561,9 @@ fn iso_date(unix_secs: i64) -> String {
 }
 
 fn month_label(zero_based_month: u32) -> String {
-    const NAMES: [&str; 12] =
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const NAMES: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     NAMES[zero_based_month as usize % 12].to_string()
 }
 
@@ -524,7 +581,8 @@ fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
     let z = days_since_epoch + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z.rem_euclid(146_097);
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let mp = (5 * day_of_year + 2) / 153;
@@ -576,9 +634,16 @@ mod tests {
     #[test]
     fn reference_calendar_parses_and_is_sorted_by_epoch() {
         let calendar = reference_calendar();
-        assert!(calendar.len() > 900, "expected the full bundled history, got {}", calendar.len());
+        assert!(
+            calendar.len() > 900,
+            "expected the full bundled history, got {}",
+            calendar.len()
+        );
         for window in calendar.windows(2) {
-            assert!(window[0].epoch < window[1].epoch, "reference calendar must be epoch-ordered");
+            assert!(
+                window[0].epoch < window[1].epoch,
+                "reference calendar must be epoch-ordered"
+            );
         }
     }
 
@@ -605,20 +670,41 @@ mod tests {
     #[test]
     fn extend_tail_extrapolates_through_the_latest_tracked_epoch() {
         let calendar = vec![
-            EpochCalendarEntry { epoch: 1, start_unix_secs: 0, end_unix_secs: Some(1000), precision: CalendarPrecision::Observed },
-            EpochCalendarEntry { epoch: 2, start_unix_secs: 1000, end_unix_secs: None, precision: CalendarPrecision::Observed },
+            EpochCalendarEntry {
+                epoch: 1,
+                start_unix_secs: 0,
+                end_unix_secs: Some(1000),
+                precision: CalendarPrecision::Observed,
+            },
+            EpochCalendarEntry {
+                epoch: 2,
+                start_unix_secs: 1000,
+                end_unix_secs: None,
+                precision: CalendarPrecision::Observed,
+            },
         ];
         let extended = extend_tail(&calendar, Some(4));
         assert_eq!(extended.len(), 4);
-        assert_eq!(extended[1].end_unix_secs, Some(2000), "open-ended entry gets closed at the estimated epoch duration");
+        assert_eq!(
+            extended[1].end_unix_secs,
+            Some(2000),
+            "open-ended entry gets closed at the estimated epoch duration"
+        );
         assert_eq!(extended[1].precision, CalendarPrecision::Estimated);
         assert_eq!(extended[3].epoch, 4);
-        assert_eq!(extended[3].end_unix_secs, None, "the final requested epoch stays open-ended");
+        assert_eq!(
+            extended[3].end_unix_secs, None,
+            "the final requested epoch stays open-ended"
+        );
     }
 
     #[test]
     fn build_years_marks_complete_epoch_day_and_skips_future_days() {
-        let epochs = vec![EpochStatus { epoch: 1, state: "complete".into(), ..Default::default() }];
+        let epochs = vec![EpochStatus {
+            epoch: 1,
+            state: "complete".into(),
+            ..Default::default()
+        }];
         let calendar = vec![EpochCalendarEntry {
             epoch: 1,
             start_unix_secs: 1_700_000_000, // 2023-11-14T22:13:20Z
@@ -629,8 +715,15 @@ mod tests {
         let years = build_years(&epochs, &calendar, now, None);
         let total_days: usize = years.iter().map(|year| year.days.len()).sum();
         assert!(total_days > 0, "expected at least one rendered day");
-        let touched = years.iter().flat_map(|year| &year.days).find(|day| day.content.as_ref().is_some_and(|content| content.epochs.contains(&1)));
-        assert!(touched.is_some(), "the epoch's date range must produce at least one calendar day");
+        let touched = years.iter().flat_map(|year| &year.days).find(|day| {
+            day.content
+                .as_ref()
+                .is_some_and(|content| content.epochs.contains(&1))
+        });
+        assert!(
+            touched.is_some(),
+            "the epoch's date range must produce at least one calendar day"
+        );
         assert_eq!(touched.unwrap().content.as_ref().unwrap().color, "emerald");
         for year in &years {
             for day in &year.days {
@@ -649,7 +742,11 @@ mod tests {
         // An epoch spanning 5 days must count once toward `archived_epoch_count`,
         // not once per day it touches -- caught during review: an earlier draft
         // incremented the counter inside the day loop.
-        let epochs = vec![EpochStatus { epoch: 1, state: "complete".into(), ..Default::default() }];
+        let epochs = vec![EpochStatus {
+            epoch: 1,
+            state: "complete".into(),
+            ..Default::default()
+        }];
         let five_days = 5 * SECONDS_PER_DAY as u64;
         let calendar = vec![EpochCalendarEntry {
             epoch: 1,
@@ -659,10 +756,17 @@ mod tests {
         }];
         let now = 1_700_000_000 + five_days;
         let years = build_years(&epochs, &calendar, now, None);
-        assert_eq!(years.len(), 1, "a 5-day span shouldn't cross a year boundary in this fixture");
+        assert_eq!(
+            years.len(),
+            1,
+            "a 5-day span shouldn't cross a year boundary in this fixture"
+        );
         assert_eq!(years[0].epoch_count, 1);
         assert_eq!(years[0].archived_epoch_count, 1);
-        assert!(years[0].days.len() >= 5, "expected multiple rendered days for the one epoch");
+        assert!(
+            years[0].days.len() >= 5,
+            "expected multiple rendered days for the one epoch"
+        );
     }
 
     #[test]
@@ -672,15 +776,37 @@ mod tests {
         // priority tie so it becomes primary). The displayed epoch list
         // must still read ascending (0, 1), not primary-first (1, 0).
         let epochs = vec![
-            EpochStatus { epoch: 0, state: "complete".into(), ..Default::default() },
-            EpochStatus { epoch: 1, state: "complete".into(), ..Default::default() },
+            EpochStatus {
+                epoch: 0,
+                state: "complete".into(),
+                ..Default::default()
+            },
+            EpochStatus {
+                epoch: 1,
+                state: "complete".into(),
+                ..Default::default()
+            },
         ];
         let calendar = vec![
-            EpochCalendarEntry { epoch: 0, start_unix_secs: 1_700_000_000, end_unix_secs: Some(1_700_000_000 + 100), precision: CalendarPrecision::Observed },
-            EpochCalendarEntry { epoch: 1, start_unix_secs: 1_700_000_000, end_unix_secs: Some(1_700_000_000 + 100), precision: CalendarPrecision::Observed },
+            EpochCalendarEntry {
+                epoch: 0,
+                start_unix_secs: 1_700_000_000,
+                end_unix_secs: Some(1_700_000_000 + 100),
+                precision: CalendarPrecision::Observed,
+            },
+            EpochCalendarEntry {
+                epoch: 1,
+                start_unix_secs: 1_700_000_000,
+                end_unix_secs: Some(1_700_000_000 + 100),
+                precision: CalendarPrecision::Observed,
+            },
         ];
         let years = build_years(&epochs, &calendar, 1_700_000_000 + 100, None);
-        let day = years.iter().flat_map(|year| &year.days).find(|day| day.content.is_some()).unwrap();
+        let day = years
+            .iter()
+            .flat_map(|year| &year.days)
+            .find(|day| day.content.is_some())
+            .unwrap();
         assert_eq!(day.content.as_ref().unwrap().epochs, vec![0, 1]);
     }
 
@@ -691,7 +817,11 @@ mod tests {
         // though its date range produces rendered days in both years.
         let start = days_from_civil(2023, 12, 30) * SECONDS_PER_DAY;
         let end = days_from_civil(2024, 1, 4) * SECONDS_PER_DAY;
-        let epochs = vec![EpochStatus { epoch: 1, state: "complete".into(), ..Default::default() }];
+        let epochs = vec![EpochStatus {
+            epoch: 1,
+            state: "complete".into(),
+            ..Default::default()
+        }];
         let calendar = vec![EpochCalendarEntry {
             epoch: 1,
             start_unix_secs: start as u64,
@@ -699,11 +829,20 @@ mod tests {
             precision: CalendarPrecision::Observed,
         }];
         let years = build_years(&epochs, &calendar, end as u64, None);
-        let by_year: BTreeMap<i32, &CalendarYear> = years.iter().map(|year| (year.year, year)).collect();
+        let by_year: BTreeMap<i32, &CalendarYear> =
+            years.iter().map(|year| (year.year, year)).collect();
         assert_eq!(by_year[&2023].epoch_count, 1, "counted in its start year");
         assert_eq!(by_year[&2023].archived_epoch_count, 1);
-        assert_eq!(by_year.get(&2024).map(|year| year.epoch_count).unwrap_or(0), 0, "not double-counted in the year it merely continues into");
+        assert_eq!(
+            by_year.get(&2024).map(|year| year.epoch_count).unwrap_or(0),
+            0,
+            "not double-counted in the year it merely continues into"
+        );
         // But the grid still renders a colored cell on the 2024 side too.
-        assert!(by_year[&2024].days.iter().any(|day| day.content.as_ref().is_some_and(|content| content.epochs.contains(&1))));
+        assert!(by_year[&2024].days.iter().any(|day| {
+            day.content
+                .as_ref()
+                .is_some_and(|content| content.epochs.contains(&1))
+        }));
     }
 }

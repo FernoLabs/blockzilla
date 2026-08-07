@@ -1,7 +1,7 @@
 use topcoat::{
+    Result,
     router::{layout, page},
     view::view,
-    Result,
 };
 
 use crate::calendar;
@@ -133,7 +133,12 @@ async fn calendar_route() -> Result {
     let latest_tracked_epoch = tracked_epochs.iter().map(|epoch| epoch.epoch).max();
     let extended = calendar::extend_tail(&merged, latest_tracked_epoch);
     let (gap_index, gap_index_error) = crate::state::gap_index();
-    let years = calendar::build_years(&tracked_epochs, &extended, now_unix_secs, gap_index.as_ref());
+    let years = calendar::build_years(
+        &tracked_epochs,
+        &extended,
+        now_unix_secs,
+        gap_index.as_ref(),
+    );
     let has_interruption_data = gap_index.is_some();
 
     view! {

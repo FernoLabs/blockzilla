@@ -41,7 +41,7 @@ pub fn start(upstream: String) {
     tokio::spawn(async move {
         loop {
             if let Err(err) = run(&upstream).await {
-                state::set_offline(err.to_string());
+                state::set_offline(err.to_string()).await;
             }
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
@@ -66,7 +66,7 @@ impl Session {
     async fn bootstrap(client: reqwest::Client, upstream: &str) -> anyhow::Result<Self> {
         let current = fetch_status(&client, upstream).await?;
         let last_sequence = current.sequence as i64;
-        state::set_snapshot(current.clone());
+        state::set_snapshot(current.clone()).await;
         Ok(Session {
             client,
             upstream: upstream.to_string(),
@@ -78,11 +78,11 @@ impl Session {
     async fn resync(&mut self) -> anyhow::Result<()> {
         self.current = fetch_status(&self.client, &self.upstream).await?;
         self.last_sequence = self.current.sequence as i64;
-        state::set_snapshot(self.current.clone());
+        state::set_snapshot(self.current.clone()).await;
         Ok(())
     }
 
-    fn accept_snapshot(&mut self, snapshot: PipelineSnapshot) {
+    async fn accept_snapshot(&mut self, snapshot: PipelineSnapshot) {
         // A restarted upstream resets its process-local sequence counter;
         // a newer `now_unix_secs` is the evidence that's what happened
         // rather than a stale/duplicate full-snapshot event arriving late.
@@ -93,12 +93,16 @@ impl Session {
         }
         self.last_sequence = snapshot.sequence as i64;
         self.current = snapshot;
-        state::set_snapshot(self.current.clone());
+        state::set_snapshot(self.current.clone()).await;
     }
 
     /// Returns `true` if the patch was applied (or ignored as stale) and no
     /// resync is needed; `false` means the caller should resync.
-    async fn handle_patch(&mut self, envelope_sequence: i64, patch: PipelineSnapshotPatch) -> anyhow::Result<bool> {
+    async fn handle_patch(
+        &mut self,
+        envelope_sequence: i64,
+        patch: PipelineSnapshotPatch,
+    ) -> anyhow::Result<bool> {
         match snapshot::sequence_action(self.last_sequence, envelope_sequence) {
             SequenceAction::Ignore => Ok(true),
             SequenceAction::Resync => Ok(false),
@@ -108,7 +112,7 @@ impl Session {
                 }
                 self.current.apply_patch(patch);
                 self.last_sequence = envelope_sequence;
-                state::set_snapshot(self.current.clone());
+                state::set_snapshot(self.current.clone()).await;
                 Ok(true)
             }
         }
@@ -159,19 +163,21 @@ async fn run(upstream: &str) -> anyhow::Result<()> {
             match event_name.as_str() {
                 "snapshot" => {
                     if let Some(envelope) = parse_envelope(data)
-                        && let Ok(snapshot) = serde_json::from_value::<PipelineSnapshot>(envelope.data)
+                        && let Ok(snapshot) =
+                            serde_json::from_value::<PipelineSnapshot>(envelope.data)
                     {
-                        session.accept_snapshot(snapshot);
+                        session.accept_snapshot(snapshot).await;
                     }
                 }
                 "snapshot_patch" => {
                     let Some(envelope) = parse_envelope(data) else {
                         continue;
                     };
-                    let needs_resync = match serde_json::from_value::<PipelineSnapshotPatch>(envelope.data) {
-                        Ok(patch) => !session.handle_patch(envelope.sequence, patch).await?,
-                        Err(_) => true,
-                    };
+                    let needs_resync =
+                        match serde_json::from_value::<PipelineSnapshotPatch>(envelope.data) {
+                            Ok(patch) => !session.handle_patch(envelope.sequence, patch).await?,
+                            Err(_) => true,
+                        };
                     if needs_resync {
                         session.resync().await?;
                     }
@@ -187,7 +193,10 @@ async fn run(upstream: &str) -> anyhow::Result<()> {
     anyhow::bail!("event stream ended")
 }
 
-async fn fetch_status(client: &reqwest::Client, upstream: &str) -> anyhow::Result<PipelineSnapshot> {
+async fn fetch_status(
+    client: &reqwest::Client,
+    upstream: &str,
+) -> anyhow::Result<PipelineSnapshot> {
     let response = client
         .get(format!("{upstream}/api/v1/status"))
         .header("accept", "application/json")
@@ -231,9 +240,14 @@ pub fn start_gap_index_poller(upstream: String) {
     });
 }
 
-async fn fetch_gap_index(client: &reqwest::Client, upstream: &str) -> anyhow::Result<snapshot::BlockTimeGapIndex> {
+async fn fetch_gap_index(
+    client: &reqwest::Client,
+    upstream: &str,
+) -> anyhow::Result<snapshot::BlockTimeGapIndex> {
     let response = client
-        .get(format!("{upstream}/api/v1/sidecars/block-time-gaps/index.json"))
+        .get(format!(
+            "{upstream}/api/v1/sidecars/block-time-gaps/index.json"
+        ))
         .header("accept", "application/json")
         .timeout(CONNECT_TIMEOUT)
         .send()
@@ -259,7 +273,9 @@ pub fn start_gap_index_file_poller(path: std::path::PathBuf) {
     });
 }
 
-async fn read_gap_index_file(path: &std::path::Path) -> anyhow::Result<snapshot::BlockTimeGapIndex> {
+async fn read_gap_index_file(
+    path: &std::path::Path,
+) -> anyhow::Result<snapshot::BlockTimeGapIndex> {
     let bytes = tokio::fs::read(path).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
