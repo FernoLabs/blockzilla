@@ -15,7 +15,7 @@ use blockzilla_format::{
     ARCHIVE_V2_HOT_INDEX_MAGIC, ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION,
     ArchiveV2BlockAccessBlob, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
     WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
-    WincodeLeb128FramedReader, write_u32_varint,
+    WincodeArchiveV2PohRecord, WincodeLeb128FramedReader, wincode_leb128_config, write_u32_varint,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -149,6 +149,7 @@ const LEGACY_TUNER_PAUSE_PREFIX: &str = "throughput probe rejected:";
 const LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX: &str = "throughput tuner downshift:";
 const LEGACY_TUNER_GUARD_PAUSE_PREFIX: &str = "throughput tuner hard guard:";
 const LEGACY_COMPACT_OWNERSHIP_KIND: &str = "historical_compact_reuse";
+const POH_MIGRATION_OWNERSHIP_KIND: &str = "poh_signature_count_migration";
 const LEGACY_BLOCKHASH_LOCK_DIR: &str = ".blockhash.lock";
 const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
 const REGISTRY_INDEX_VERSION: u16 = 2;
@@ -214,6 +215,14 @@ pub struct SchedulerConfig {
     pub preflight_car: bool,
     pub poll_interval: Duration,
     pub finalizer_lock: PathBuf,
+    /// Fixed ceiling for concurrent PoH signature-count migration jobs. Unlike
+    /// `legacy_compact_concurrency`, zero here means *disabled*, not unbounded: this is a new
+    /// capability layered onto a live production scheduler, so it stays off until an operator
+    /// explicitly opts in.
+    pub poh_migration_concurrency: usize,
+    /// Adaptively stop starting new PoH signature-count migration jobs under the same shared
+    /// PSI pressure signal `legacy_compact_auto_pause` reacts to (`legacy_pressure_state`).
+    pub poh_migration_auto_pause: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +344,10 @@ pub enum ArtifactKind {
     BlockAccess,
     BlockAccessIndex,
     PreviousBlockhashTail,
+    /// Whether `poh.wincode`'s `CompactPohEntry` records carry `signature_count`, letting
+    /// `verify-archive-v2-poh` skip decompressing the hot block. Backfilled by
+    /// `migrate-poh-signature-counts`; see `poh_signature_count_migration_artifact`.
+    PohSignatureCountMigration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,6 +619,37 @@ pub struct PipelineSummary {
     #[serde(default)]
     pub legacy_compact_admission_blocked_reason: Option<String>,
     pub finalizer_admission_blocked_reason: Option<String>,
+    /// Sum of on-disk PoH sidecar bytes across every migration candidate (complete archived
+    /// epochs whose sidecar is on the legacy or current schema -- excludes epochs that are not
+    /// yet archive-complete). An epoch-count would treat every epoch as equal-sized work, but
+    /// this job's cost tracks bytes actually read/patched, not epoch count -- see
+    /// `poh_migration_bytes_done`.
+    #[serde(default)]
+    pub poh_migration_bytes_total: u64,
+    /// Of `poh_migration_bytes_total`, how many bytes belong to epochs that already carry a
+    /// current-schema PoH sidecar (organically current, or migrated).
+    #[serde(default)]
+    pub poh_migration_bytes_done: u64,
+    /// Same migration candidates as `poh_migration_bytes_total`, counted by epoch instead of by
+    /// byte -- the byte totals above drive the progress percentage (epochs aren't equal-sized
+    /// work), but "N of M epochs" is what operators actually want to read at a glance.
+    #[serde(default)]
+    pub poh_migration_epochs_total: usize,
+    #[serde(default)]
+    pub poh_migration_epochs_done: usize,
+    /// Aggregate current throughput across running migration workers, in bytes/sec -- each
+    /// lane's `blocks_per_sec` (from its `ProgressTracker`) scaled by that epoch's PoH sidecar
+    /// bytes-per-block, summed. `None` when nothing is running or reporting a rate yet.
+    #[serde(default)]
+    pub poh_migration_bytes_per_sec: Option<f64>,
+    /// `(poh_migration_bytes_total - poh_migration_bytes_done) / poh_migration_bytes_per_sec`.
+    /// `None` without a current rate to divide by.
+    #[serde(default)]
+    pub poh_migration_eta_secs: Option<f64>,
+    #[serde(default)]
+    pub poh_migration_capacity_configured: usize,
+    #[serde(default)]
+    pub poh_migration_running: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -822,7 +866,7 @@ struct ResyncNotice {
 
 #[derive(Debug)]
 enum RealtimeMessage {
-    SnapshotPatch(RealtimeEnvelope<SnapshotPatch>),
+    SnapshotPatch(Box<RealtimeEnvelope<SnapshotPatch>>),
     Resync(RealtimeEnvelope<ResyncNotice>),
 }
 
@@ -922,6 +966,7 @@ struct RuntimeState {
     acquisitions: BTreeMap<u64, ManagedChild>,
     scans: BTreeMap<u64, ManagedChild>,
     legacy_compacts: BTreeMap<u64, ManagedChild>,
+    poh_migrations: BTreeMap<u64, ManagedChild>,
     finalizer: Option<ManagedChild>,
     errors: VecDeque<PipelineError>,
     failures: BTreeMap<String, String>,
@@ -1192,6 +1237,9 @@ enum ChildKind {
     HistoricalFinalizer {
         epoch: u64,
     },
+    PohSignatureCountMigration {
+        epoch: u64,
+    },
     // Kept so the scheduler can identify and report a legacy process that was
     // already running across an upgrade; new live finalizers are never spawned.
     #[allow(dead_code)]
@@ -1236,6 +1284,7 @@ impl ChildKind {
             Self::HistoricalScan { epoch } => format!("scan:{epoch}"),
             Self::HistoricalCompactReuse { epoch } => format!("compact_reuse:{epoch}"),
             Self::HistoricalFinalizer { epoch } => format!("finalize:{epoch}"),
+            Self::PohSignatureCountMigration { epoch } => format!("poh_migration:{epoch}"),
             Self::LiveFinalizer { id, .. } => format!("live:{id}"),
         }
     }
@@ -1508,7 +1557,7 @@ fn realtime_message(
     current_sequence: u64,
 ) -> RealtimeMessage {
     match item {
-        Ok(envelope) => RealtimeMessage::SnapshotPatch(envelope),
+        Ok(envelope) => RealtimeMessage::SnapshotPatch(Box::new(envelope)),
         Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
             RealtimeMessage::Resync(RealtimeEnvelope {
                 event_type: "resync",
@@ -1757,6 +1806,57 @@ async fn retry_job(
             target: format!("{kind}/{id}"),
             message: "acquisition failure cleared; resumable partial download preserved"
                 .to_string(),
+            snapshot_sequence: sequence,
+        }));
+    }
+    if kind == "poh_signature_count_migration" {
+        // This job's marker lives outside the epoch's own archival ownership marker (see
+        // `poh_migration_marker_path`), so it cannot share the generic ownership-marker retry
+        // tail below -- that tail quarantines `target` wholesale for kinds it doesn't recognize,
+        // which would discard a perfectly good, already-complete epoch archive.
+        let epoch = id.parse::<u64>().map_err(|_| {
+            ControlError::BadRequest("PoH migration retry id must be an epoch number".to_string())
+        })?;
+        let marker = read_poh_migration_marker(&state.config.state_root, epoch).ok_or_else(|| {
+            ControlError::NotFound(format!(
+                "epoch {epoch} has no PoH signature-count migration marker"
+            ))
+        })?;
+        if marker.state != "failed" {
+            return Err(ControlError::Conflict(format!(
+                "PoH signature-count migration marker for epoch {epoch} is {}, not failed",
+                marker.state
+            )));
+        }
+        let epoch_output = state.config.archive_root.join(format!("epoch-{epoch}"));
+        if marker
+            .pid
+            .is_some_and(|pid| process_cmdline_contains(pid, &epoch_output))
+        {
+            return Err(ControlError::Conflict(
+                "PoH signature-count migration process is still running".to_string(),
+            ));
+        }
+        let mut runtime = state.runtime.lock().await;
+        let failure_key = format!("poh_migration:{epoch}");
+        clear_runtime_failure(&state.config, &mut runtime, &failure_key);
+        runtime.paused_jobs.remove(&failure_key);
+        let _ = fs::remove_file(poh_migration_progress_path(&state.config.state_root, epoch));
+        write_poh_migration_marker(&state.config.state_root, epoch, "retry_ready", None)
+            .map_err(ControlError::Internal)?;
+        set_poh_migration_marker_pid(&state.config.state_root, epoch, None)
+            .map_err(ControlError::Internal)?;
+        persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
+        append_control_event(&state.config, "retry", &format!("{kind}/{id}"))
+            .map_err(ControlError::Internal)?;
+        drop(runtime);
+        reconcile_and_schedule(&state).await;
+        let sequence = state.snapshot.read().await.sequence;
+        return Ok(Json(ControlResponse {
+            ok: true,
+            action: "retry".to_string(),
+            target: format!("{kind}/{id}"),
+            message: "PoH signature-count migration failure cleared; ready to retry".to_string(),
             snapshot_sequence: sequence,
         }));
     }
@@ -2301,6 +2401,10 @@ fn argv_matches_job(bytes: &[u8], blockzilla_bin: &Path, expected_path: &Path, k
                 && !args.iter().any(|arg| *arg == b"--first-seen-scan-only")
         }
         "historical_finalizer" => args.get(1).copied() == Some(b"finalize-archive-v2-first-seen"),
+        "poh_signature_count_migration" => {
+            args.get(1).copied() == Some(b"migrate-poh-signature-counts")
+                && args.get(2).copied() == Some(expected_path)
+        }
         "live_finalizer" => matches!(
             args.get(1).copied(),
             Some(b"prepare-archive-v2-live-registry")
@@ -2559,6 +2663,9 @@ fn lane_progress_paths(config: &SchedulerConfig, lane: &LaneSnapshot) -> Vec<Pat
         ],
         ("historical_scan" | "historical_finalizer" | "historical_compact_reuse", Some(epoch)) => {
             vec![historical_progress_path(&config.state_root, epoch)]
+        }
+        ("poh_signature_count_migration", Some(epoch)) => {
+            vec![poh_migration_progress_path(&config.state_root, epoch)]
         }
         ("live_finalizer", _) => lane.capture_id.as_ref().map_or_else(Vec::new, |id| {
             vec![
@@ -3386,6 +3493,45 @@ fn reconcile_filesystem(
         config.legacy_compact_io_mib_per_sec_per_worker;
     summary.legacy_compact_io_budget_mib_per_sec = config.legacy_compact_io_budget_mib_per_sec;
     summary.legacy_compact_admission_blocked_reason = legacy_blocked_reason;
+    // Reuses the per-epoch artifact classification already computed once per poll (see
+    // `poh_signature_count_migration_artifact`) instead of re-reading every epoch's PoH sidecar
+    // here -- this scheduler already goes to some lengths to avoid extra NAS I/O per poll.
+    // `.bytes` on that snapshot is itself just `file_len()`, already computed as part of the same
+    // classification pass, so summing it costs nothing beyond the `.count()` this replaced.
+    summary.poh_migration_bytes_total = epochs
+        .iter()
+        .filter_map(poh_migration_artifact)
+        .filter(|artifact| matches!(artifact.state, ArtifactState::Pending | ArtifactState::Present))
+        .map(|artifact| artifact.bytes)
+        .sum();
+    summary.poh_migration_bytes_done = epochs
+        .iter()
+        .filter_map(poh_migration_artifact)
+        .filter(|artifact| artifact.state == ArtifactState::Present)
+        .map(|artifact| artifact.bytes)
+        .sum();
+    summary.poh_migration_epochs_total = epochs
+        .iter()
+        .filter_map(poh_migration_artifact)
+        .filter(|artifact| matches!(artifact.state, ArtifactState::Pending | ArtifactState::Present))
+        .count();
+    summary.poh_migration_epochs_done = epochs
+        .iter()
+        .filter_map(poh_migration_artifact)
+        .filter(|artifact| artifact.state == ArtifactState::Present)
+        .count();
+    summary.poh_migration_bytes_per_sec = poh_migration_bytes_per_sec(&epochs, &lanes);
+    summary.poh_migration_eta_secs = summary.poh_migration_bytes_per_sec.map(|rate| {
+        summary
+            .poh_migration_bytes_total
+            .saturating_sub(summary.poh_migration_bytes_done) as f64
+            / rate
+    });
+    summary.poh_migration_capacity_configured = config.poh_migration_concurrency;
+    summary.poh_migration_running = lanes
+        .iter()
+        .filter(|lane| lane.kind == "poh_signature_count_migration")
+        .count();
     let scan_pending = epochs
         .iter()
         .filter(|epoch| {
@@ -3738,6 +3884,46 @@ fn parse_epoch_name(name: &str) -> Option<u64> {
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
+fn epoch_archive_output_complete(
+    config: &SchedulerConfig,
+    epoch: u64,
+    owner: &Option<OwnershipMarker>,
+    output: &Path,
+    allow_legacy_no_access: bool,
+) -> bool {
+    let owner_is_first_seen = owner.as_ref().is_some_and(ownership_is_first_seen);
+    let owner_is_legacy_compact = owner
+        .as_ref()
+        .is_some_and(|owner| owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND);
+    let owner_matches_epoch = owner.as_ref().is_some_and(|owner| {
+        (owner_is_first_seen || owner_is_legacy_compact) && owner.id == epoch.to_string()
+    });
+    let require_first_seen_manifest = owner_matches_epoch && owner_is_first_seen;
+    let legacy_no_access_complete = allow_legacy_no_access
+        && legacy_no_access_archive_complete(
+            output,
+            !config.no_access,
+            require_first_seen_manifest,
+        );
+    // A compact/reuse child publishes directly into its adopted directory.
+    // Require the controller's successful-exit commit before accepting those
+    // files; otherwise a controller restart near EOF could bless a torn core.
+    let legacy_compact_reuse_complete = owner_matches_epoch
+        && owner_is_legacy_compact
+        && owner
+            .as_ref()
+            .is_some_and(|owner| owner.state == "complete")
+        && legacy_compact_reader_complete(output);
+    (!owner_is_legacy_compact
+        && historical_archive_strict_complete(
+            output,
+            !config.no_access,
+            require_first_seen_manifest,
+        ))
+        || legacy_no_access_complete
+        || legacy_compact_reuse_complete
+}
+
 #[cfg(test)]
 fn classify_epoch(
     config: &SchedulerConfig,
@@ -3790,23 +3976,14 @@ fn classify_epoch_with_context(
             !config.no_access,
             require_first_seen_manifest,
         );
-    // A compact/reuse child publishes directly into its adopted directory.
-    // Require the controller's successful-exit commit before accepting those
-    // files; otherwise a controller restart near EOF could bless a torn core.
     let legacy_compact_reuse_complete = owner_matches_epoch
         && owner_is_legacy_compact
         && owner
             .as_ref()
             .is_some_and(|owner| owner.state == "complete")
         && legacy_compact_reader_complete(&output);
-    let output_complete = (!owner_is_legacy_compact
-        && historical_archive_strict_complete(
-            &output,
-            !config.no_access,
-            require_first_seen_manifest,
-        ))
-        || legacy_no_access_complete
-        || legacy_compact_reuse_complete;
+    let output_complete =
+        epoch_archive_output_complete(config, epoch, &owner, &output, allow_legacy_no_access);
     let scan_marker = scan_marker_is_valid(&output.join(SCAN_MARKER));
     let ambiguous_car = car_paths_ambiguous(&config.car_root, epoch);
     let active_scan = runtime.scans.contains_key(&epoch);
@@ -4265,6 +4442,36 @@ fn legacy_compact_dependency_ready(config: &SchedulerConfig, epoch: u64) -> bool
     }
     previous_tail_valid(&config.archive_root.join(format!("epoch-{epoch}")))
         || predecessor_seed_sidecars_usable(config, epoch)
+}
+
+/// Admit a first-seen scan only after its in-range predecessor has published
+/// stable blockhash sidecars. Without this gate, adjacent scans fall back to
+/// rereading the predecessor CAR in `Prev Blockhash Seed`, doubling archive
+/// I/O while competing sequential readers collapse NAS throughput.
+fn historical_scan_dependency_ready(
+    config: &SchedulerConfig,
+    epochs: &[EpochSnapshot],
+    epoch: u64,
+) -> bool {
+    if epoch == 0 || previous_tail_valid(&config.archive_root.join(format!("epoch-{epoch}"))) {
+        return true;
+    }
+
+    let previous = epoch - 1;
+    match epochs.iter().find(|candidate| candidate.epoch == previous) {
+        Some(candidate) => matches!(
+            candidate.state,
+            HistoricalState::ScanReady | HistoricalState::Finalizing | HistoricalState::Complete
+        ),
+        // A scheduler may intentionally manage only a suffix of history. At
+        // that boundary, accept an already committed predecessor archive. If
+        // only a CAR exists, preserve the explicit boundary fallback used by
+        // older deployments; contiguous in-range epochs never take this path.
+        None => {
+            predecessor_seed_sidecars_usable(config, epoch)
+                || car_path(&config.car_root, previous).is_some()
+        }
+    }
 }
 
 fn legacy_compact_reuse_status(config: &SchedulerConfig, epoch: u64) -> LegacyCompactReuseStatus {
@@ -4742,6 +4949,7 @@ fn epoch_artifacts(
             scan_outputs_required,
             false,
         ),
+        poh_signature_count_migration_artifact(&output.join(POH_FILE)),
         archive_file_artifact(
             ArtifactKind::Shredding,
             output.join(SHREDDING_FILE),
@@ -4884,6 +5092,60 @@ fn archive_file_artifact(
         bytes,
         modified_unix_secs: modified_unix_secs(&path),
         message: None,
+    }
+}
+
+/// Reads only `poh.wincode`'s first frame to check whether it's on the
+/// `signature_count`-carrying schema, without decompressing anything or scanning the whole
+/// (potentially multi-GB) sidecar. Cheap enough to recompute on every poll.
+fn poh_sidecar_uses_current_schema(poh_path: &Path) -> Result<bool> {
+    const MAX_POH_FRAME_BYTES: usize = 64 << 20;
+    let file = File::open(poh_path)?;
+    let mut reader = WincodeLeb128FramedReader::new(BufReader::with_capacity(64 << 10, file));
+    let first = reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
+        Ok::<bool, anyhow::Error>(
+            wincode::config::deserialize::<WincodeArchiveV2PohRecord, _>(
+                bytes,
+                wincode_leb128_config(),
+            )
+            .is_ok(),
+        )
+    })?;
+    // An empty sidecar (no records at all) has nothing to migrate.
+    Ok(first.map(|(_, is_current)| is_current).unwrap_or(true))
+}
+
+fn poh_signature_count_migration_artifact(poh_path: &Path) -> ArtifactSnapshot {
+    if !is_nonempty_file(poh_path) {
+        return ArtifactSnapshot {
+            kind: ArtifactKind::PohSignatureCountMigration,
+            state: ArtifactState::NotApplicable,
+            requirement: ArtifactRequirement::Optional,
+            required_now: false,
+            bytes: 0,
+            modified_unix_secs: None,
+            message: None,
+        };
+    }
+    let (state, message) = match poh_sidecar_uses_current_schema(poh_path) {
+        Ok(true) => (ArtifactState::Present, None),
+        Ok(false) => (
+            ArtifactState::Pending,
+            Some("signature_count not backfilled; run migrate-poh-signature-counts".to_string()),
+        ),
+        Err(error) => (
+            ArtifactState::Invalid,
+            Some(format!("failed to inspect PoH sidecar schema: {error:#}")),
+        ),
+    };
+    ArtifactSnapshot {
+        kind: ArtifactKind::PohSignatureCountMigration,
+        state,
+        requirement: ArtifactRequirement::Optional,
+        required_now: false,
+        bytes: file_len(poh_path),
+        modified_unix_secs: modified_unix_secs(poh_path),
+        message,
     }
 }
 
@@ -5486,7 +5748,6 @@ fn legacy_compact_capacity_admission_with_policy(
     );
     let mut first_blocked = None;
     for epoch in prioritized_epochs(config, epochs)
-        .into_iter()
         .filter(|epoch| {
             legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
         })
@@ -5654,6 +5915,40 @@ fn active_block_processing_rate(lanes: &[LaneSnapshot], now: u64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn poh_migration_artifact(epoch: &EpochSnapshot) -> Option<&ArtifactSnapshot> {
+    epoch
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == ArtifactKind::PohSignatureCountMigration)
+}
+
+/// Aggregate current PoH migration throughput, in bytes/sec. Each running lane's own
+/// `blocks_per_sec` (from its `ProgressTracker`) is scaled by that epoch's PoH sidecar
+/// bytes-per-block and summed -- this avoids needing a separate cross-poll rolling average just
+/// for this, since the byte totals in `PipelineSummary` only move in whole-epoch jumps at
+/// completion (no partial-epoch checkpoint) and would be far too lumpy to rate from
+/// poll-to-poll directly. `None` when nothing is running or reporting a rate yet.
+fn poh_migration_bytes_per_sec(epochs: &[EpochSnapshot], lanes: &[LaneSnapshot]) -> Option<f64> {
+    let total: f64 = lanes
+        .iter()
+        .filter(|lane| lane.kind == "poh_signature_count_migration" && lane.state == "running")
+        .filter_map(|lane| {
+            let epoch = lane.epoch?;
+            let artifact = epochs
+                .iter()
+                .find(|candidate| candidate.epoch == epoch)
+                .and_then(poh_migration_artifact)?;
+            let blocks_total = lane.progress.blocks_total;
+            let blocks_per_sec = lane.progress.blocks_per_sec?;
+            if blocks_total == 0 || !blocks_per_sec.is_finite() || blocks_per_sec <= 0.0 {
+                return None;
+            }
+            Some(artifact.bytes as f64 / blocks_total as f64 * blocks_per_sec)
+        })
+        .sum();
+    (total.is_finite() && total > 0.0).then_some(total)
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -8292,14 +8587,7 @@ fn classify_live_capture(
             LiveState::Blocked,
             Some("target epoch is owned by a different pipeline item".to_string()),
         )
-    } else if output_complete {
-        (
-            LiveState::Blocked,
-            Some(format!(
-                "{LEGACY_LIVE_PUBLICATION_DISABLED}; existing legacy output remains noncanonical"
-            )),
-        )
-    } else if output_packaged {
+    } else if output_complete || output_packaged {
         (
             LiveState::Blocked,
             Some(format!(
@@ -8558,6 +8846,12 @@ fn runtime_lanes(runtime: &RuntimeState) -> Vec<LaneSnapshot> {
     );
     lanes.extend(
         runtime
+            .poh_migrations
+            .iter()
+            .map(|(epoch, child)| lane_from_child(child, Some(*epoch), None, now, runtime)),
+    );
+    lanes.extend(
+        runtime
             .adopted_legacy_compacts
             .values()
             .map(|compact| lane_from_adopted_legacy(compact, now, runtime)),
@@ -8569,9 +8863,9 @@ fn runtime_lanes(runtime: &RuntimeState) -> Vec<LaneSnapshot> {
             }
             ChildKind::HistoricalFinalizer { epoch } => (Some(*epoch), None),
             ChildKind::LiveFinalizer { id, epoch, .. } => (*epoch, Some(id.clone())),
-            ChildKind::HistoricalScan { epoch } | ChildKind::HistoricalCompactReuse { epoch } => {
-                (Some(*epoch), None)
-            }
+            ChildKind::HistoricalScan { epoch }
+            | ChildKind::HistoricalCompactReuse { epoch }
+            | ChildKind::PohSignatureCountMigration { epoch } => (Some(*epoch), None),
         };
         lanes.push(lane_from_child(finalizer, epoch, capture_id, now, runtime));
     }
@@ -8648,6 +8942,9 @@ fn lane_from_child(
         ChildKind::HistoricalScan { .. } => ("historical_scan", "scan"),
         ChildKind::HistoricalCompactReuse { .. } => ("historical_compact_reuse", "compact_reuse"),
         ChildKind::HistoricalFinalizer { .. } => ("historical_finalizer", "finalize"),
+        ChildKind::PohSignatureCountMigration { .. } => {
+            ("poh_signature_count_migration", "poh_migration")
+        }
         ChildKind::LiveFinalizer { phase, .. } => ("live_finalizer", phase.as_str()),
     };
     let key = child.kind.key();
@@ -9316,7 +9613,7 @@ fn reset_legacy_tuner_context(runtime: &mut RuntimeState, context: LegacyTunerCo
             expected_identity: start.map(|start| (epoch, pid, start)),
             reason: "scheduler context changed; re-observe resumed probe".to_string(),
         }),
-        pending_action_started_unix_secs: paused_probe.is_some().then_some(now).unwrap_or_default(),
+        pending_action_started_unix_secs: if paused_probe.is_some() { now } else { Default::default() },
         ..LegacyThroughputTuner::default()
     };
 }
@@ -9525,11 +9822,9 @@ fn observe_legacy_throughput_tuner(
                 .copied(),
             reason: format!("{LEGACY_TUNER_GUARD_PAUSE_PREFIX} {reason}"),
         });
-        tuner.pending_action_started_unix_secs = tuner
+        tuner.pending_action_started_unix_secs = if tuner
             .pending_action
-            .is_some()
-            .then_some(now)
-            .unwrap_or_default();
+            .is_some() { now } else { Default::default() };
         tuner.last_decision = Some(format!("held throughput probing: {reason}"));
         return;
     }
@@ -10000,7 +10295,7 @@ fn observe_legacy_throughput_tuner(
                 && !legacy_pause_present;
             let downshift_eligible = throughput_comparable && controlled_audit_epoch.is_some();
             let degradation = downshift_eligible
-                .then(|| tuner.accepted_useful_mib_per_sec)
+                .then_some(tuner.accepted_useful_mib_per_sec)
                 .flatten()
                 .and_then(|accepted| legacy_tuner_degradation(accepted, measured));
             if let Some((drop, required_drop)) = degradation {
@@ -10076,7 +10371,7 @@ fn observe_legacy_throughput_tuner(
                 return;
             }
             let suspected_decline = throughput_comparable
-                .then(|| tuner.accepted_useful_mib_per_sec)
+                .then_some(tuner.accepted_useful_mib_per_sec)
                 .flatten()
                 .and_then(|accepted| {
                     let drop = accepted - measured;
@@ -11121,7 +11416,6 @@ async fn top_up_legacy_compacts(
     };
     let mut started = 0usize;
     for epoch in prioritized_epochs(config, &snapshot.epochs)
-        .into_iter()
         .filter(|epoch| {
             legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
         })
@@ -11174,6 +11468,53 @@ async fn top_up_legacy_compacts(
     started
 }
 
+/// Admits PoH signature-count migration jobs up to `config.poh_migration_concurrency`. Unlike
+/// `top_up_legacy_compacts`, this carries no throughput-tuner/memory-policy machinery: the
+/// migration's dominant path (an already-current-schema block) does almost no I/O against the
+/// multi-GB block file, so "useful MiB/s" is not an honest admission signal here, and a fixed
+/// ceiling gated by the same shared PSI signal `legacy_compact_reuse` already respects is enough
+/// to keep the two contending safely for the same disk instead of fighting it.
+async fn top_up_poh_migrations(config: &SchedulerConfig, snapshot: &PipelineSnapshot, runtime: &mut RuntimeState) -> usize {
+    if config.poh_migration_auto_pause
+        && !matches!(
+            legacy_pressure_state(config, &snapshot.machine),
+            LegacyPressureState::Resume
+        )
+    {
+        return 0;
+    }
+    let mut running_count = runtime.poh_migrations.len();
+    let mut started = 0usize;
+    for epoch in prioritized_epochs(config, &snapshot.epochs) {
+        if running_count >= config.poh_migration_concurrency {
+            break;
+        }
+        let failure_key = format!("poh_migration:{}", epoch.epoch);
+        if runtime.poh_migrations.contains_key(&epoch.epoch)
+            || runtime.failures.contains_key(&failure_key)
+            || !matches!(
+                poh_migration_status(config, epoch.epoch),
+                PohMigrationStatus::Ready | PohMigrationStatus::RetryReady
+            )
+        {
+            continue;
+        }
+        match spawn_poh_migration(config, epoch).await {
+            Ok(child) => {
+                runtime.poh_migrations.insert(epoch.epoch, child);
+                running_count = running_count.saturating_add(1);
+                started = started.saturating_add(1);
+            }
+            Err(error) => {
+                let message = format!("{failure_key} spawn failed: {error:#}");
+                set_runtime_failure(config, runtime, failure_key, message.clone());
+                record_error(config, runtime, "poh_migration", message);
+            }
+        }
+    }
+    started
+}
+
 async fn schedule_work(
     config: &SchedulerConfig,
     snapshot: &PipelineSnapshot,
@@ -11185,6 +11526,10 @@ async fn schedule_work(
     if !snapshot.inventory.complete {
         return Ok(());
     }
+    // PoH migration targets already-complete epochs outside the acquisition/scan/compact/
+    // finalize pipeline entirely, so it is intentionally not gated by the exclusivity logic
+    // below (legacy-compact-vs-acquisition/scan/finalizer overlap does not apply to it).
+    top_up_poh_migrations(config, snapshot, runtime).await;
     let active_legacy_compacts = active_legacy_compact_rss(snapshot, runtime);
     let adaptive_legacy_limit = legacy_tuner_capacity_limit(config, snapshot, runtime, unix_now());
     if legacy_compact_exclusive_hold_reason(runtime, &snapshot.epochs, &snapshot.live).is_some() {
@@ -11210,7 +11555,6 @@ async fn schedule_work(
         })
         .count();
     let acquisition_candidates = prioritized_epochs(config, &snapshot.epochs)
-        .into_iter()
         .filter_map(|epoch| acquisition_action(config, epoch).map(|action| (epoch, action)))
         .collect::<Vec<_>>();
     let active_acquisition_count = runtime
@@ -11374,21 +11718,20 @@ async fn schedule_work(
     // child counted until it has actually been reaped, while also accounting
     // for adopted scans discovered from filesystem/process state after restart.
     let active_scans = adopted_active_scans;
-    if active_scans == 0 && runtime.scans.is_empty() && !live_ready_pending {
-        if !finalizer_ready_pending
+    if active_scans == 0 && runtime.scans.is_empty() && !live_ready_pending
+        && !finalizer_ready_pending
             && top_up_legacy_compacts(config, snapshot, runtime, adaptive_legacy_limit).await > 0
         {
             return Ok(());
         }
-    }
     let slots = snapshot
         .summary
         .scan_capacity_admitted
         .saturating_sub(active_scans);
     let queued = prioritized_epochs(config, &snapshot.epochs)
-        .into_iter()
         .filter(|epoch| epoch.state == HistoricalState::Queued)
         .filter(|epoch| acquisition_action(config, epoch).is_none())
+        .filter(|epoch| historical_scan_dependency_ready(config, &snapshot.epochs, epoch.epoch))
         .filter(|epoch| {
             legacy_compact_reuse_status(config, epoch.epoch)
                 == LegacyCompactReuseStatus::NotCandidate
@@ -11470,7 +11813,32 @@ fn acquisition_action(
         // this migration read every multi-terabyte input twice.
         return None;
     }
+    // If an archive is already complete, skip download even if state is
+    // still queued from a stale snapshot.
+    let output_complete = {
+        let owner = read_ownership(&epoch.output_path);
+        let allow_legacy_no_access = !fs::read_dir(&config.live_root).is_ok_and(|entries| {
+            entries.filter_map(std::result::Result::ok).any(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .and_then(parse_epoch_name)
+                        .is_some_and(|live_epoch| live_epoch == epoch.epoch)
+            })
+        });
+        epoch_archive_output_complete(
+            config,
+            epoch.epoch,
+            &owner,
+            &epoch.output_path,
+            allow_legacy_no_access,
+        )
+    };
     if epoch.input_path.is_none() && config.car_source_url_template.is_some() {
+        if output_complete {
+            return None;
+        }
         return Some(AcquisitionAction::Download);
     }
     if config.preflight_car
@@ -11734,11 +12102,18 @@ async fn spawn_historical_scan(
     if config.no_access {
         args.push("--no-access".into());
     }
-    if let Some(previous_car) = epoch
-        .epoch
-        .checked_sub(1)
-        .and_then(|previous| car_path(&config.car_root, previous))
-    {
+    if let Some(previous_epoch) = epoch.epoch.checked_sub(1) {
+        // This argument is also an epoch hint: the builder first resolves the
+        // predecessor from committed compact sidecars. Keep passing the hint
+        // after source-CAR cleanup so the fast sidecar path remains available.
+        // If the admission invariant is ever violated, the synthetic missing
+        // path makes the fallback fail closed instead of silently building an
+        // archive without its predecessor tail.
+        let previous_car = car_path(&config.car_root, previous_epoch).unwrap_or_else(|| {
+            config
+                .car_root
+                .join(format!("epoch-{previous_epoch}.car.zst"))
+        });
         args.push("--previous-car".into());
         args.push(previous_car.into_os_string());
     }
@@ -11872,6 +12247,192 @@ async fn spawn_legacy_compact_reuse(
     result
 }
 
+fn poh_migration_args(archive_dir: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "migrate-poh-signature-counts".into(),
+        archive_dir.as_os_str().to_owned(),
+    ]
+}
+
+fn poh_migration_progress_path(state_root: &Path, epoch: u64) -> PathBuf {
+    state_root
+        .join("progress")
+        .join(format!("epoch-{epoch}-poh-migration.json"))
+}
+
+/// PoH migration ownership lives under `state_root`, never inside the epoch's own archive
+/// directory. Unlike `historical_compact_reuse`/`historical_finalizer`, this job targets an
+/// epoch that is *already complete* and already carries its own archival ownership marker
+/// (kind `historical_finalizer`/first-seen/or `LEGACY_COMPACT_OWNERSHIP_KIND`, permanently, at
+/// `output.join(OWNERSHIP_MARKER)`). `classify_epoch_with_context`/`epoch_archive_output_complete`
+/// key completeness off that marker's `kind` for compact/reuse-built epochs
+/// (`legacy_compact_reuse_complete` requires `owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND`).
+/// Publishing a `poh_signature_count_migration`-kind marker there would overwrite it and could
+/// flip such an epoch's `HistoricalState` away from `Complete` for the duration of the migration
+/// (and permanently once `handle_child_exit` commits `state="complete"` under the migration's own
+/// kind). A dedicated marker file keeps this job's bookkeeping fully invisible to that
+/// classification.
+fn poh_migration_marker_path(state_root: &Path, epoch: u64) -> PathBuf {
+    state_root
+        .join("poh_migrations")
+        .join(format!("epoch-{epoch}.json"))
+}
+
+fn read_poh_migration_marker(state_root: &Path, epoch: u64) -> Option<OwnershipMarker> {
+    serde_json::from_slice(&fs::read(poh_migration_marker_path(state_root, epoch)).ok()?).ok()
+}
+
+fn write_poh_migration_marker(
+    state_root: &Path,
+    epoch: u64,
+    state: &str,
+    message: Option<String>,
+) -> Result<()> {
+    let path = poh_migration_marker_path(state_root, epoch);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create PoH migration marker directory {}", parent.display()))?;
+    }
+    let existing = read_poh_migration_marker(state_root, epoch);
+    let marker = OwnershipMarker {
+        schema_version: SCHEMA_VERSION,
+        kind: POH_MIGRATION_OWNERSHIP_KIND.to_string(),
+        id: epoch.to_string(),
+        state: state.to_string(),
+        created_unix_secs: existing
+            .as_ref()
+            .map(|marker| marker.created_unix_secs)
+            .unwrap_or_else(unix_now),
+        updated_unix_secs: unix_now(),
+        message,
+        pid: existing.and_then(|marker| marker.pid),
+    };
+    let temp = path.with_file_name(format!(
+        ".epoch-{epoch}.json.{}.tmp",
+        std::process::id()
+    ));
+    fs::write(&temp, serde_json::to_vec_pretty(&marker)?)
+        .with_context(|| format!("write PoH migration marker temp {}", temp.display()))?;
+    fs::rename(&temp, &path).with_context(|| {
+        format!(
+            "publish PoH migration marker {} -> {}",
+            temp.display(),
+            path.display()
+        )
+    })
+}
+
+fn set_poh_migration_marker_pid(state_root: &Path, epoch: u64, pid: Option<u32>) -> Result<()> {
+    let Some(mut marker) = read_poh_migration_marker(state_root, epoch) else {
+        return Ok(());
+    };
+    marker.pid = pid;
+    marker.updated_unix_secs = unix_now();
+    let path = poh_migration_marker_path(state_root, epoch);
+    let temp = path.with_file_name(format!(
+        ".epoch-{epoch}.json.{}.tmp",
+        std::process::id()
+    ));
+    fs::write(&temp, serde_json::to_vec_pretty(&marker)?)
+        .with_context(|| format!("write PoH migration marker pid {}", temp.display()))?;
+    fs::rename(&temp, &path)
+        .with_context(|| format!("publish PoH migration marker pid {}", path.display()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PohMigrationStatus {
+    NotEligible,
+    Ready,
+    AlreadyMigrated,
+    RetryReady,
+}
+
+/// Classifies an epoch's PoH signature-count migration eligibility. Called frequently during
+/// admission scanning, so this deliberately stops at the cheap first-frame schema check
+/// (`poh_sidecar_uses_current_schema`) rather than the expensive whole-sidecar sum-vs-index pass
+/// (`archive_verify::poh_migration_epoch_verified`); correctness for an already-current-schema
+/// epoch is verified once, at job completion, in `handle_child_exit` -- not speculatively on
+/// every poll.
+fn poh_migration_status(config: &SchedulerConfig, epoch: u64) -> PohMigrationStatus {
+    let output = config.archive_root.join(format!("epoch-{epoch}"));
+    let poh_path = output.join(POH_FILE);
+    if !historical_archive_core_complete(&output, false) || !is_nonempty_file(&poh_path) {
+        return PohMigrationStatus::NotEligible;
+    }
+    let current_schema = match poh_sidecar_uses_current_schema(&poh_path) {
+        Ok(current) => current,
+        Err(_) => return PohMigrationStatus::NotEligible,
+    };
+    if !current_schema {
+        return PohMigrationStatus::Ready;
+    }
+    match read_poh_migration_marker(&config.state_root, epoch) {
+        None => PohMigrationStatus::AlreadyMigrated,
+        Some(marker) if marker.state == "retry_ready" => PohMigrationStatus::RetryReady,
+        Some(_) => PohMigrationStatus::NotEligible,
+    }
+}
+
+async fn spawn_poh_migration(config: &SchedulerConfig, epoch: &EpochSnapshot) -> Result<ManagedChild> {
+    anyhow::ensure!(
+        matches!(
+            poh_migration_status(config, epoch.epoch),
+            PohMigrationStatus::Ready | PohMigrationStatus::RetryReady
+        ),
+        "epoch {} is not a PoH signature-count migration candidate",
+        epoch.epoch
+    );
+    // Duplicate-writer guard (no adoption subsystem for this job kind): refuse to spawn over a
+    // migration marker in anything but a clean retry-ready state. A marker held with a live pid,
+    // or in "running"/"failed" without an explicit retry, must not be queued behind or waited on
+    // here. This marker is dedicated to this job kind (see `poh_migration_marker_path`) and is
+    // never the epoch's own archival ownership marker, so this never contends with or clobbers
+    // the archive's real owner (first-seen / `historical_compact_reuse` / `historical_finalizer`).
+    match read_poh_migration_marker(&config.state_root, epoch.epoch) {
+        None => {}
+        Some(marker) => anyhow::ensure!(
+            marker.state == "retry_ready" && marker.pid.is_none(),
+            "PoH signature-count migration marker already in state {} (pid {:?}) for epoch {}",
+            marker.state,
+            marker.pid,
+            epoch.epoch
+        ),
+    }
+    write_poh_migration_marker(
+        &config.state_root,
+        epoch.epoch,
+        "running",
+        Some("migrating poh.wincode signature counts".to_string()),
+    )?;
+    let progress_path = poh_migration_progress_path(&config.state_root, epoch.epoch);
+    let log_path = config
+        .state_root
+        .join("logs")
+        .join(format!("epoch-{}-poh-migration.log", epoch.epoch));
+    let args = poh_migration_args(&epoch.output_path);
+    let result = spawn_child(
+        config,
+        args,
+        ChildKind::PohSignatureCountMigration { epoch: epoch.epoch },
+        progress_path,
+        log_path,
+        None,
+    )
+    .await;
+    if let Err(error) = &result {
+        let _ = write_poh_migration_marker(
+            &config.state_root,
+            epoch.epoch,
+            "failed",
+            Some(format!(
+                "PoH signature-count migration spawn failed: {error:#}"
+            )),
+        );
+        let _ = set_poh_migration_marker_pid(&config.state_root, epoch.epoch, None);
+    }
+    result
+}
+
 async fn spawn_historical_finalizer(config: &SchedulerConfig, epoch: u64) -> Result<ManagedChild> {
     let output = config.archive_root.join(format!("epoch-{epoch}"));
     anyhow::ensure!(
@@ -12001,6 +12562,7 @@ async fn spawn_command_child(
         ChildKind::CarDownload { .. }
             | ChildKind::CarPreflight { .. }
             | ChildKind::HistoricalCompactReuse { .. }
+            | ChildKind::PohSignatureCountMigration { .. }
     ) {
         command.process_group(0);
     }
@@ -12054,7 +12616,8 @@ async fn spawn_command_child(
         ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. } => None,
         ChildKind::HistoricalScan { epoch }
         | ChildKind::HistoricalCompactReuse { epoch }
-        | ChildKind::HistoricalFinalizer { epoch } => {
+        | ChildKind::HistoricalFinalizer { epoch }
+        | ChildKind::PohSignatureCountMigration { epoch } => {
             Some(config.archive_root.join(format!("epoch-{epoch}")))
         }
         ChildKind::LiveFinalizer { epoch, .. } => {
@@ -12085,6 +12648,35 @@ async fn spawn_command_child(
             let _ = child.wait().await;
             return Err(error.context(format!(
                 "establish recoverable ownership for compact_reuse:{epoch}"
+            )));
+        }
+    } else if let ChildKind::PohSignatureCountMigration { epoch } = &kind {
+        let publication = (|| -> Result<()> {
+            let pid = pid.context("spawned PoH signature-count migration has no pid")?;
+            set_poh_migration_marker_pid(&config.state_root, *epoch, Some(pid))?;
+            let marker = read_poh_migration_marker(&config.state_root, *epoch)
+                .context("PoH signature-count migration marker disappeared after spawn")?;
+            anyhow::ensure!(
+                marker.schema_version == SCHEMA_VERSION
+                    && marker.kind == POH_MIGRATION_OWNERSHIP_KIND
+                    && marker.id == epoch.to_string()
+                    && marker.state == "running"
+                    && marker.pid == Some(pid),
+                "PoH signature-count migration marker PID publication did not preserve exact schema/kind/id/state/pid"
+            );
+            Ok(())
+        })();
+        if let Err(error) = publication {
+            if let Some(pid) = pid {
+                // SAFETY: this command was requested with process_group(0);
+                // kill the whole group before returning a failed admission.
+                let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+            } else {
+                let _ = child.kill().await;
+            }
+            let _ = child.wait().await;
+            return Err(error.context(format!(
+                "establish recoverable ownership for poh_migration:{epoch}"
             )));
         }
     } else if let Some(output) = owned_output.as_deref() {
@@ -12169,6 +12761,7 @@ async fn reap_children(state: &Arc<AppState>, runtime: &mut RuntimeState) {
         }
     }
     reap_legacy_compacts(&state.config, runtime);
+    reap_poh_migrations(&state.config, runtime);
     let finalizer_result = runtime
         .finalizer
         .as_mut()
@@ -12411,6 +13004,42 @@ fn reap_legacy_compacts(config: &SchedulerConfig, runtime: &mut RuntimeState) {
     }
 }
 
+fn reap_poh_migrations(config: &SchedulerConfig, runtime: &mut RuntimeState) {
+    let epochs = runtime.poh_migrations.keys().copied().collect::<Vec<_>>();
+    for epoch in epochs {
+        let result = runtime
+            .poh_migrations
+            .get_mut(&epoch)
+            .and_then(|child| child.child.try_wait().transpose());
+        match result {
+            Some(Ok(status)) => {
+                let child = runtime
+                    .poh_migrations
+                    .remove(&epoch)
+                    .expect("PoH migration child exists");
+                handle_child_exit(config, runtime, child, status.success());
+            }
+            Some(Err(error)) => {
+                let child = runtime
+                    .poh_migrations
+                    .remove(&epoch)
+                    .expect("PoH migration child exists");
+                let message = format!("poll {}: {error:#}", child.kind.key());
+                set_runtime_failure(config, runtime, child.kind.key(), message.clone());
+                let _ = write_poh_migration_marker(
+                    &config.state_root,
+                    epoch,
+                    "failed",
+                    Some(message.clone()),
+                );
+                let _ = set_poh_migration_marker_pid(&config.state_root, epoch, None);
+                record_error(config, runtime, "child", message);
+            }
+            None => {}
+        }
+    }
+}
+
 fn clear_legacy_pause_state_after_exit(
     config: &SchedulerConfig,
     runtime: &mut RuntimeState,
@@ -12460,7 +13089,8 @@ fn handle_child_exit(
         ChildKind::CarPreflight { input_path, .. } => input_path.clone(),
         ChildKind::HistoricalScan { epoch }
         | ChildKind::HistoricalCompactReuse { epoch }
-        | ChildKind::HistoricalFinalizer { epoch } => {
+        | ChildKind::HistoricalFinalizer { epoch }
+        | ChildKind::PohSignatureCountMigration { epoch } => {
             config.archive_root.join(format!("epoch-{epoch}"))
         }
         ChildKind::LiveFinalizer { epoch, .. } => epoch
@@ -12494,6 +13124,12 @@ fn handle_child_exit(
             !config.no_access,
             true,
         ),
+        ChildKind::PohSignatureCountMigration { epoch } => {
+            crate::archive_verify::poh_migration_epoch_verified(
+                &config.archive_root.join(format!("epoch-{epoch}")),
+            )
+            .unwrap_or(false)
+        }
         ChildKind::LiveFinalizer { epoch, phase, .. } => epoch.is_some_and(|epoch| {
             let output = config.archive_root.join(format!("epoch-{epoch}"));
             match phase {
@@ -12507,6 +13143,30 @@ fn handle_child_exit(
             }
         }),
     };
+    // PoH migration bookkeeping lives entirely in its own dedicated marker (see
+    // `poh_migration_marker_path`), never in the epoch's archival ownership marker at `output`.
+    // Handle it before the generic shared-marker paths below, which read/write exactly that file.
+    if let ChildKind::PohSignatureCountMigration { epoch } = &child.kind {
+        if success && valid {
+            clear_runtime_failure(config, runtime, &key);
+            let _ = write_poh_migration_marker(&config.state_root, *epoch, "complete", None);
+            let _ = set_poh_migration_marker_pid(&config.state_root, *epoch, None);
+        } else {
+            let message = format!(
+                "{} exited {} but filesystem validation {}; log={}",
+                key,
+                if success { "successfully" } else { "with failure" },
+                if valid { "passed" } else { "failed" },
+                child.log_path.display()
+            );
+            set_runtime_failure(config, runtime, key, message.clone());
+            let _ =
+                write_poh_migration_marker(&config.state_root, *epoch, "failed", Some(message.clone()));
+            let _ = set_poh_migration_marker_pid(&config.state_root, *epoch, None);
+            record_error(config, runtime, "child_exit", message);
+        }
+        return;
+    }
     let acquisition = matches!(
         &child.kind,
         ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. }
@@ -12531,6 +13191,9 @@ fn handle_child_exit(
                 ChildKind::HistoricalScan { .. } => "scan_ready",
                 ChildKind::HistoricalCompactReuse { .. } => "complete",
                 ChildKind::HistoricalFinalizer { .. } => "complete",
+                // Handled by the dedicated PoH-migration-marker branch above, which returns
+                // before this generic shared-ownership-marker path is ever reached.
+                ChildKind::PohSignatureCountMigration { .. } => unreachable!(),
                 ChildKind::LiveFinalizer { phase, .. } => match phase {
                     LiveFinalizerPhase::Registry => "registry_ready",
                     LiveFinalizerPhase::Mphf => "mphf_ready",
@@ -12959,8 +13622,8 @@ fn merge_live_journal_progress(
             .zip(baseline_last_slot)
             .is_some_and(|(last_slot, baseline_last_slot)| last_slot > baseline_last_slot)
             || (progress.last_slot.is_some() && baseline_last_slot.is_none());
-        if journal_advanced {
-            if let Some(delta_secs) = baseline_updated
+        if journal_advanced
+            && let Some(delta_secs) = baseline_updated
                 .map(|baseline| journal_updated.saturating_sub(baseline))
                 .filter(|delta| *delta > 0)
             {
@@ -12979,7 +13642,6 @@ fn merge_live_journal_progress(
                 progress.elapsed_secs =
                     Some(progress.elapsed_secs.unwrap_or(0.0).max(0.0) + delta_secs as f64);
             }
-        }
         progress.updated_unix_secs = Some(
             progress
                 .updated_unix_secs
@@ -13533,8 +14195,7 @@ fn source_input_window_rate_mib(
                 .sampled_at
                 .duration_since(previous.sampled_at)
                 .as_secs_f64();
-            (elapsed >= SOURCE_READ_RATE_MIN_WINDOW_SECS
-                && elapsed <= SOURCE_READ_RATE_MAX_WINDOW_SECS)
+            (SOURCE_READ_RATE_MIN_WINDOW_SECS..=SOURCE_READ_RATE_MAX_WINDOW_SECS).contains(&elapsed)
                 .then_some((elapsed, previous))
         })
         .max_by(|(left, _), (right, _)| left.total_cmp(right))
@@ -14115,7 +14776,6 @@ fn admission_snapshot(
         .saturating_sub(active_disk_growth);
     let mut additional_by_disk = 0usize;
     for projection in prioritized_epochs(config, epochs)
-        .into_iter()
         .filter(|epoch| epoch.state == HistoricalState::Queued && epoch.input_path.is_some())
         .map(scan_remaining_disk_projection)
     {
@@ -14922,6 +15582,8 @@ mod tests {
             preflight_car: false,
             poll_interval: Duration::from_secs(5),
             finalizer_lock: root.join("finalizer.lock"),
+            poh_migration_concurrency: 0,
+            poh_migration_auto_pause: true,
         }
     }
 
@@ -14934,6 +15596,483 @@ mod tests {
             "blockzilla-scheduler-{label}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn poh_signature_count_migration_artifact_distinguishes_schema_and_absence() {
+        use blockzilla_format::{
+            CompactPohEntry, CompactPohEntryLegacyNoSignatureCount, WincodeArchiveV2PohRecord,
+            WincodeArchiveV2PohRecordLegacyNoSignatureCount, WincodeLeb128FramedWriter,
+        };
+
+        let root = temp_root("poh-sig-migration");
+        fs::create_dir_all(&root).unwrap();
+
+        let missing_path = root.join("missing-poh.wincode");
+        assert_eq!(
+            poh_signature_count_migration_artifact(&missing_path).state,
+            ArtifactState::NotApplicable
+        );
+
+        let legacy_path = root.join("legacy-poh.wincode");
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(&legacy_path).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecordLegacyNoSignatureCount {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntryLegacyNoSignatureCount {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                }],
+            })
+            .unwrap();
+        drop(writer);
+        let legacy_artifact = poh_signature_count_migration_artifact(&legacy_path);
+        assert_eq!(legacy_artifact.state, ArtifactState::Pending);
+        assert!(legacy_artifact.message.unwrap().contains("migrate-poh-signature-counts"));
+
+        let current_path = root.join("current-poh.wincode");
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(&current_path).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                    signature_count: 0,
+                }],
+            })
+            .unwrap();
+        drop(writer);
+        assert_eq!(
+            poh_signature_count_migration_artifact(&current_path).state,
+            ArtifactState::Present
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_migration_marker_roundtrips_through_write_read_and_set_pid() {
+        let root = temp_root("poh-migration-marker-roundtrip");
+        fs::create_dir_all(&root).unwrap();
+
+        assert!(read_poh_migration_marker(&root, 42).is_none());
+
+        write_poh_migration_marker(&root, 42, "running", Some("migrating".to_string())).unwrap();
+        let marker = read_poh_migration_marker(&root, 42).unwrap();
+        assert_eq!(marker.kind, POH_MIGRATION_OWNERSHIP_KIND);
+        assert_eq!(marker.id, "42");
+        assert_eq!(marker.state, "running");
+        assert_eq!(marker.pid, None);
+
+        set_poh_migration_marker_pid(&root, 42, Some(1234)).unwrap();
+        assert_eq!(read_poh_migration_marker(&root, 42).unwrap().pid, Some(1234));
+
+        // write_poh_migration_marker preserves pid across a state transition, mirroring
+        // write_ownership -- pid is only ever cleared by an explicit set_*_pid(None) call.
+        write_poh_migration_marker(&root, 42, "complete", None).unwrap();
+        let marker = read_poh_migration_marker(&root, 42).unwrap();
+        assert_eq!(marker.state, "complete");
+        assert_eq!(marker.pid, Some(1234));
+
+        set_poh_migration_marker_pid(&root, 42, None).unwrap();
+        assert_eq!(read_poh_migration_marker(&root, 42).unwrap().pid, None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_migration_marker_never_touches_epochs_own_archival_ownership_marker() {
+        let root = temp_root("poh-migration-marker-isolation");
+        let config = test_config(&root);
+        let output = config.archive_root.join("epoch-700");
+        fs::create_dir_all(&output).unwrap();
+
+        // A normal complete epoch permanently carries its own archival ownership marker (here,
+        // as if built by legacy compact/reuse). `classify_epoch_with_context` keys such an
+        // epoch's `HistoricalState::Complete` classification off this marker's exact kind/state
+        // (`legacy_compact_reuse_complete` requires `owner.kind == LEGACY_COMPACT_OWNERSHIP_KIND`).
+        let archival_owner = OwnershipMarker {
+            schema_version: SCHEMA_VERSION,
+            kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
+            id: "700".to_string(),
+            state: "complete".to_string(),
+            created_unix_secs: 111,
+            updated_unix_secs: 222,
+            message: Some("legacy compact/reuse committed".to_string()),
+            pid: None,
+        };
+        publish_ownership_marker(&output, &archival_owner).unwrap();
+        let before = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
+
+        // A full migration lifecycle against the dedicated marker.
+        write_poh_migration_marker(&config.state_root, 700, "running", None).unwrap();
+        set_poh_migration_marker_pid(&config.state_root, 700, Some(9999)).unwrap();
+        write_poh_migration_marker(&config.state_root, 700, "complete", None).unwrap();
+        set_poh_migration_marker_pid(&config.state_root, 700, None).unwrap();
+
+        let after = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
+        assert_eq!(
+            before, after,
+            "PoH migration bookkeeping must never touch the epoch's own archival ownership marker"
+        );
+        assert_eq!(
+            read_poh_migration_marker(&config.state_root, 700)
+                .unwrap()
+                .state,
+            "complete"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_migration_status_is_ready_for_legacy_schema_regardless_of_foreign_archival_owner() {
+        use blockzilla_format::{
+            CompactPohEntryLegacyNoSignatureCount, WincodeArchiveV2PohRecordLegacyNoSignatureCount,
+            WincodeLeb128FramedWriter,
+        };
+
+        let root = temp_root("poh-migration-status-ready");
+        let config = test_config(&root);
+        let output = config.archive_root.join("epoch-700");
+        write_legacy_registry_sidecars(&output, false);
+        write_legacy_reader_core(&output);
+
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(output.join(POH_FILE)).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecordLegacyNoSignatureCount {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntryLegacyNoSignatureCount {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                }],
+            })
+            .unwrap();
+        drop(writer);
+
+        // Every real, already-complete epoch carries a foreign-kind archival ownership marker
+        // (first-seen or, as here, legacy compact/reuse) forever. Eligibility for the legacy
+        // (pre-signature-count) schema branch must not depend on that marker at all.
+        publish_ownership_marker(
+            &output,
+            &OwnershipMarker {
+                schema_version: SCHEMA_VERSION,
+                kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
+                id: "700".to_string(),
+                state: "complete".to_string(),
+                created_unix_secs: 1,
+                updated_unix_secs: 1,
+                message: None,
+                pid: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(poh_migration_status(&config, 700), PohMigrationStatus::Ready);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_migration_status_transitions_through_already_migrated_and_retry_ready() {
+        use blockzilla_format::{CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter};
+
+        let root = temp_root("poh-migration-status-current-schema");
+        let config = test_config(&root);
+        let output = config.archive_root.join("epoch-700");
+        write_legacy_registry_sidecars(&output, false);
+        write_legacy_reader_core(&output);
+
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(output.join(POH_FILE)).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                    signature_count: 0,
+                }],
+            })
+            .unwrap();
+        drop(writer);
+
+        // No PoH-migration-specific marker at all: this epoch was simply built on the current
+        // schema from the start and our migration never touched it.
+        assert_eq!(
+            poh_migration_status(&config, 700),
+            PohMigrationStatus::AlreadyMigrated
+        );
+
+        write_poh_migration_marker(&config.state_root, 700, "failed", None).unwrap();
+        assert_eq!(
+            poh_migration_status(&config, 700),
+            PohMigrationStatus::NotEligible
+        );
+
+        write_poh_migration_marker(&config.state_root, 700, "retry_ready", None).unwrap();
+        assert_eq!(
+            poh_migration_status(&config, 700),
+            PohMigrationStatus::RetryReady
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn lane_progress_paths_poh_signature_count_migration_returns_dedicated_progress_path() {
+        let root = temp_root("poh-migration-lane-progress-path");
+        let config = test_config(&root);
+        let lane = LaneSnapshot {
+            id: "poh_migration:700".to_string(),
+            kind: "poh_signature_count_migration".to_string(),
+            epoch: Some(700),
+            capture_id: None,
+            phase: "poh_migration".to_string(),
+            state: "running".to_string(),
+            auto_paused: false,
+            auto_pause_reason: None,
+            pid: None,
+            progress: ProgressSnapshot::default(),
+            rss_bytes: None,
+            started_unix_secs: None,
+            updated_unix_secs: 0,
+        };
+        assert_eq!(
+            lane_progress_paths(&config, &lane),
+            vec![poh_migration_progress_path(&config.state_root, 700)]
+        );
+    }
+
+    #[tokio::test]
+    async fn top_up_poh_migrations_returns_zero_when_concurrency_is_zero() {
+        let root = temp_root("poh-migration-topup-concurrency-zero");
+        let mut config = test_config(&root);
+        config.poh_migration_auto_pause = false;
+        assert_eq!(config.poh_migration_concurrency, 0);
+
+        let mut snapshot = empty_snapshot(false);
+        snapshot.epochs = vec![test_epoch(&root, 700, HistoricalState::Complete)];
+        let mut runtime = RuntimeState::default();
+
+        assert_eq!(
+            top_up_poh_migrations(&config, &snapshot, &mut runtime).await,
+            0
+        );
+        assert!(runtime.poh_migrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn top_up_poh_migrations_returns_zero_when_shared_io_psi_blocks_pressure_gate() {
+        let root = temp_root("poh-migration-topup-pressure-gate");
+        let mut config = test_config(&root);
+        config.poh_migration_concurrency = 5;
+        config.poh_migration_auto_pause = true;
+
+        let mut snapshot = empty_snapshot(false);
+        snapshot.epochs = vec![test_epoch(&root, 700, HistoricalState::Complete)];
+        snapshot.machine = MachineSnapshot {
+            io_pressure_full_avg10: Some(99.0),
+            ..MachineSnapshot::default()
+        };
+        let mut runtime = RuntimeState::default();
+
+        assert_eq!(
+            top_up_poh_migrations(&config, &snapshot, &mut runtime).await,
+            0
+        );
+        assert!(runtime.poh_migrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn top_up_poh_migrations_skips_epoch_with_an_active_runtime_failure() {
+        use blockzilla_format::{
+            CompactPohEntryLegacyNoSignatureCount, WincodeArchiveV2PohRecordLegacyNoSignatureCount,
+            WincodeLeb128FramedWriter,
+        };
+
+        let root = temp_root("poh-migration-topup-skips-failed");
+        let mut config = test_config(&root);
+        config.poh_migration_concurrency = 5;
+        config.poh_migration_auto_pause = false;
+
+        let output = config.archive_root.join("epoch-700");
+        write_legacy_registry_sidecars(&output, false);
+        write_legacy_reader_core(&output);
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(output.join(POH_FILE)).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecordLegacyNoSignatureCount {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntryLegacyNoSignatureCount {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                }],
+            })
+            .unwrap();
+        drop(writer);
+        assert_eq!(poh_migration_status(&config, 700), PohMigrationStatus::Ready);
+
+        let mut snapshot = empty_snapshot(false);
+        snapshot.epochs = vec![test_epoch(&root, 700, HistoricalState::Complete)];
+        let mut runtime = RuntimeState::default();
+        set_runtime_failure(
+            &config,
+            &mut runtime,
+            "poh_migration:700".to_string(),
+            "prior attempt failed".to_string(),
+        );
+
+        assert_eq!(
+            top_up_poh_migrations(&config, &snapshot, &mut runtime).await,
+            0
+        );
+        assert!(runtime.poh_migrations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_child_exit_poh_migration_success_commits_dedicated_marker_and_leaves_archival_owner_untouched()
+     {
+        use blockzilla_format::{
+            ArchiveV2HotBlockIndexRow, CompactPohEntry, WincodeArchiveV2PohRecord,
+            WincodeLeb128FramedWriter, write_archive_v2_hot_block_index,
+        };
+
+        let root = temp_root("poh-migration-exit-success");
+        let config = test_config(&root);
+        fs::create_dir_all(config.state_root.join("logs")).unwrap();
+        let output = config.archive_root.join("epoch-700");
+
+        let rows = vec![ArchiveV2HotBlockIndexRow {
+            block_id: 0,
+            slot: 100,
+            compressed_offset: 0,
+            compressed_len: 1,
+            uncompressed_len: 1,
+            tx_count: 0,
+            first_tx_ordinal: 0,
+            first_signature_ordinal: 0,
+            signature_count: 1,
+        }];
+        write_archive_v2_hot_block_index(&output.join(BLOCK_INDEX_FILE), 1, 1, 0, &rows).unwrap();
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(output.join(POH_FILE)).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                    signature_count: 1,
+                }],
+            })
+            .unwrap();
+        drop(writer);
+        assert!(crate::archive_verify::poh_migration_epoch_verified(&output).unwrap());
+
+        let archival_owner = OwnershipMarker {
+            schema_version: SCHEMA_VERSION,
+            kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
+            id: "700".to_string(),
+            state: "complete".to_string(),
+            created_unix_secs: 111,
+            updated_unix_secs: 222,
+            message: None,
+            pid: None,
+        };
+        publish_ownership_marker(&output, &archival_owner).unwrap();
+        let archival_marker_before = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
+
+        write_poh_migration_marker(&config.state_root, 700, "running", None).unwrap();
+        set_poh_migration_marker_pid(&config.state_root, 700, Some(4242)).unwrap();
+
+        let log = config.state_root.join("logs/poh-migration-700.log");
+        fs::write(&log, b"").unwrap();
+        let child = make_finished_child(
+            ChildKind::PohSignatureCountMigration { epoch: 700 },
+            poh_migration_progress_path(&config.state_root, 700),
+            log,
+        )
+        .await;
+        let mut runtime = RuntimeState::default();
+        handle_child_exit(&config, &mut runtime, child, true);
+
+        let marker = read_poh_migration_marker(&config.state_root, 700).unwrap();
+        assert_eq!(marker.state, "complete");
+        assert_eq!(marker.pid, None);
+        assert!(!runtime.failures.contains_key("poh_migration:700"));
+        assert_eq!(
+            fs::read(output.join(OWNERSHIP_MARKER)).unwrap(),
+            archival_marker_before,
+            "success path must not touch the epoch's own archival ownership marker"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn handle_child_exit_poh_migration_failure_marks_dedicated_marker_failed_and_leaves_archival_owner_untouched()
+     {
+        let root = temp_root("poh-migration-exit-failure");
+        let config = test_config(&root);
+        fs::create_dir_all(config.state_root.join("logs")).unwrap();
+        let output = config.archive_root.join("epoch-701");
+        fs::create_dir_all(&output).unwrap();
+
+        let archival_owner = OwnershipMarker {
+            schema_version: SCHEMA_VERSION,
+            kind: LEGACY_COMPACT_OWNERSHIP_KIND.to_string(),
+            id: "701".to_string(),
+            state: "complete".to_string(),
+            created_unix_secs: 111,
+            updated_unix_secs: 222,
+            message: None,
+            pid: None,
+        };
+        publish_ownership_marker(&output, &archival_owner).unwrap();
+        let archival_marker_before = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
+
+        write_poh_migration_marker(&config.state_root, 701, "running", None).unwrap();
+        set_poh_migration_marker_pid(&config.state_root, 701, Some(4343)).unwrap();
+
+        let log = config.state_root.join("logs/poh-migration-701.log");
+        fs::write(&log, b"").unwrap();
+        let child = make_finished_child(
+            ChildKind::PohSignatureCountMigration { epoch: 701 },
+            poh_migration_progress_path(&config.state_root, 701),
+            log,
+        )
+        .await;
+        let mut runtime = RuntimeState::default();
+        handle_child_exit(&config, &mut runtime, child, false);
+
+        let marker = read_poh_migration_marker(&config.state_root, 701).unwrap();
+        assert_eq!(marker.state, "failed");
+        assert_eq!(marker.pid, None);
+        assert!(runtime.failures.contains_key("poh_migration:701"));
+        assert_eq!(
+            fs::read(output.join(OWNERSHIP_MARKER)).unwrap(),
+            archival_marker_before,
+            "failure path must not touch the epoch's own archival ownership marker"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[cfg(target_os = "linux")]
@@ -16127,7 +17266,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         let ordered = prioritized_epochs(&config, &epochs)
-            .into_iter()
             .map(|epoch| epoch.epoch)
             .collect::<Vec<_>>();
         assert_eq!(ordered, vec![899, 864, 863, 862, 900]);
@@ -16141,7 +17279,6 @@ mod tests {
         config.priority_epoch_end = None;
         assert_eq!(
             prioritized_epochs(&config, &epochs)
-                .into_iter()
                 .map(|epoch| epoch.epoch)
                 .collect::<Vec<_>>(),
             vec![862, 863, 864, 899, 900]
@@ -16511,6 +17648,76 @@ mod tests {
         let mut complete = test_epoch(&root, 1, HistoricalState::Complete);
         complete.progress.blocks_per_sec = Some(999.0);
         assert_eq!(summarize_epochs(&[complete]).blocks_per_sec, 0.0);
+    }
+
+    fn poh_migration_lane(epoch: u64, state: &str, blocks_total: u64, blocks_per_sec: Option<f64>) -> LaneSnapshot {
+        LaneSnapshot {
+            id: format!("poh_migration:{epoch}"),
+            kind: "poh_signature_count_migration".to_string(),
+            epoch: Some(epoch),
+            capture_id: None,
+            phase: "poh_migration".to_string(),
+            state: state.to_string(),
+            auto_paused: false,
+            auto_pause_reason: None,
+            pid: None,
+            progress: ProgressSnapshot {
+                blocks_total,
+                blocks_per_sec,
+                ..ProgressSnapshot::default()
+            },
+            rss_bytes: None,
+            started_unix_secs: None,
+            updated_unix_secs: 0,
+        }
+    }
+
+    fn poh_migration_epoch(root: &Path, epoch: u64, sidecar_bytes: u64, artifact_state: ArtifactState) -> EpochSnapshot {
+        let mut snapshot = test_epoch(root, epoch, HistoricalState::Complete);
+        snapshot.artifacts.push(ArtifactSnapshot {
+            kind: ArtifactKind::PohSignatureCountMigration,
+            state: artifact_state,
+            requirement: ArtifactRequirement::Optional,
+            required_now: false,
+            bytes: sidecar_bytes,
+            modified_unix_secs: None,
+            message: None,
+        });
+        snapshot
+    }
+
+    #[test]
+    fn poh_migration_bytes_per_sec_scales_each_lanes_block_rate_by_its_own_epochs_bytes_per_block() {
+        let root = temp_root("poh-migration-throughput");
+        // Epoch 700: 431,000 total blocks over a 4,310,000-byte sidecar (10 bytes/block),
+        // running at 100 blocks/sec -> 1,000 bytes/sec.
+        // Epoch 701: 200,000 total blocks over a 2,000,000-byte sidecar (10 bytes/block),
+        // running at 50 blocks/sec -> 500 bytes/sec. Aggregate: 1,500 bytes/sec.
+        let epochs = vec![
+            poh_migration_epoch(&root, 700, 4_310_000, ArtifactState::Pending),
+            poh_migration_epoch(&root, 701, 2_000_000, ArtifactState::Pending),
+        ];
+        let lanes = vec![
+            poh_migration_lane(700, "running", 431_000, Some(100.0)),
+            poh_migration_lane(701, "running", 200_000, Some(50.0)),
+        ];
+
+        assert_eq!(poh_migration_bytes_per_sec(&epochs, &lanes), Some(1_500.0));
+
+        // A paused lane (still `running` per the marker, but not admitted this poll) must not
+        // contribute -- only the scheduler's own view of what's actually running counts.
+        let mut paused = lanes.clone();
+        paused[1].state = "paused".to_string();
+        assert_eq!(poh_migration_bytes_per_sec(&epochs, &paused), Some(1_000.0));
+
+        // No running lanes at all -- no rate to report, not a false zero.
+        assert_eq!(poh_migration_bytes_per_sec(&epochs, &[]), None);
+
+        // A lane with no rate yet (first sample still pending) contributes nothing rather than
+        // panicking or poisoning the sum.
+        let mut unrated = lanes.clone();
+        unrated[0].progress.blocks_per_sec = None;
+        assert_eq!(poh_migration_bytes_per_sec(&epochs, &unrated), Some(500.0));
     }
 
     #[test]
@@ -19380,6 +20587,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn historical_scan_waits_for_in_range_predecessor_sidecars() {
+        let root = temp_root("historical-scan-dependency");
+        let config = test_config(&root);
+        let mut epochs = vec![
+            test_epoch(&root, 1004, HistoricalState::Complete),
+            test_epoch(&root, 1005, HistoricalState::Queued),
+            test_epoch(&root, 1006, HistoricalState::Queued),
+        ];
+
+        assert!(historical_scan_dependency_ready(&config, &epochs, 1005));
+        assert!(!historical_scan_dependency_ready(&config, &epochs, 1006));
+
+        epochs[1].state = HistoricalState::Scanning;
+        assert!(!historical_scan_dependency_ready(&config, &epochs, 1006));
+        epochs[1].state = HistoricalState::ScanReady;
+        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
+        epochs[1].state = HistoricalState::Finalizing;
+        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
+        epochs[1].state = HistoricalState::Complete;
+        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn durable_target_tail_allows_dependency_retry() {
+        let root = temp_root("historical-scan-existing-tail");
+        let config = test_config(&root);
+        let epochs = vec![
+            test_epoch(&root, 1005, HistoricalState::Failed),
+            test_epoch(&root, 1006, HistoricalState::Queued),
+        ];
+        let output = config.archive_root.join("epoch-1006");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join(PREVIOUS_BLOCKHASH_TAIL_FILE), vec![7; 40]).unwrap();
+
+        assert!(historical_scan_dependency_ready(&config, &epochs, 1006));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn acquisition_action_skips_download_when_compact_archive_exists() {
+        let root = temp_root("acquisition-action-skip-complete-archive");
+        let mut config = test_config(&root);
+        config.preflight_car = true;
+        config.car_source_url_template = Some("https://example.invalid/epoch-{epoch}.car".into());
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Queued);
+        epoch.input_path = None;
+        fs::create_dir_all(&epoch.output_path).unwrap();
+        write_historical_candidate(&epoch.output_path, true);
+
+        assert_eq!(acquisition_action(&config, &epoch), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn historical_finalizer_waits_for_queued_scan_and_scan_lanes_refill() {
         let root = temp_root("scan-sweep-order");
@@ -19393,6 +20656,7 @@ mod tests {
                 test_epoch(&root, 701, HistoricalState::ScanReady),
             ],
         );
+        fs::write(config.car_root.join("epoch-699.car"), b"car").unwrap();
         snapshot.summary.scan_capacity_admitted = 2;
         let mut runtime = RuntimeState::default();
 
@@ -20986,15 +22250,17 @@ mod tests {
             make_legacy_range_ready(&config, epoch);
         }
         snapshot.machine = legacy_scheduler_machine(&config, 4 * 1024, 4);
-        let mut runtime = RuntimeState::default();
-        runtime.finalizer = Some(
-            make_running_child(
-                ChildKind::HistoricalFinalizer { epoch: 600 },
-                root.join("finalizer-progress.json"),
-                root.join("finalizer.log"),
-            )
-            .await,
-        );
+        let mut runtime = RuntimeState {
+            finalizer: Some(
+                make_running_child(
+                    ChildKind::HistoricalFinalizer { epoch: 600 },
+                    root.join("finalizer-progress.json"),
+                    root.join("finalizer.log"),
+                )
+                .await,
+            ),
+            ..Default::default()
+        };
 
         assert_eq!(
             legacy_tuner_capacity_limit(&config, &snapshot, &runtime, unix_now()),
@@ -21034,15 +22300,17 @@ mod tests {
             make_legacy_range_ready(&config, epoch);
         }
         snapshot.machine = legacy_scheduler_machine(&config, 4 * 1024, 4);
-        let mut runtime = RuntimeState::default();
-        runtime.finalizer = Some(
-            make_running_child(
-                ChildKind::HistoricalFinalizer { epoch: 600 },
-                root.join("finalizer-progress.json"),
-                root.join("finalizer.log"),
-            )
-            .await,
-        );
+        let mut runtime = RuntimeState {
+            finalizer: Some(
+                make_running_child(
+                    ChildKind::HistoricalFinalizer { epoch: 600 },
+                    root.join("finalizer-progress.json"),
+                    root.join("finalizer.log"),
+                )
+                .await,
+            ),
+            ..Default::default()
+        };
 
         schedule_work(&config, &snapshot, &mut runtime)
             .await
