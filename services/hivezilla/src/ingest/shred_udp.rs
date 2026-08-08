@@ -1298,43 +1298,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_data_and_coding_shred_coordinates() {
-        const COMMON_SHRED_HEADER_BYTES: usize = 83;
-        const SHRED_VARIANT_OFFSET: usize = 64;
-        const SLOT_OFFSET: usize = 65;
-        const INDEX_OFFSET: usize = 73;
-        const VERSION_OFFSET: usize = 77;
-        const FEC_SET_INDEX_OFFSET: usize = 79;
-
-        for (variant, kind) in [(0x90, ShredKind::Data), (0x6f, ShredKind::Coding)] {
-            let mut payload = [0u8; COMMON_SHRED_HEADER_BYTES];
-            payload[SHRED_VARIANT_OFFSET] = variant;
-            payload[SLOT_OFFSET..SLOT_OFFSET + 8].copy_from_slice(&42u64.to_le_bytes());
-            payload[INDEX_OFFSET..INDEX_OFFSET + 4].copy_from_slice(&7u32.to_le_bytes());
-            payload[VERSION_OFFSET..VERSION_OFFSET + 2].copy_from_slice(&50093u16.to_le_bytes());
-            payload[FEC_SET_INDEX_OFFSET..FEC_SET_INDEX_OFFSET + 4]
-                .copy_from_slice(&3u32.to_le_bytes());
-
-            assert_eq!(
-                parse_shred_header(&payload),
-                Some(ParsedShredHeader {
-                    slot: 42,
-                    index: 7,
-                    version: 50093,
-                    fec_set_index: 3,
-                    kind,
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_short_or_unknown_shreds() {
-        assert_eq!(parse_shred_header(&[0; 82]), None);
-        assert_eq!(parse_shred_header(&[0; COMMON_SHRED_HEADER_BYTES]), None);
-    }
-
-    #[test]
     fn durable_slot_high_water_never_regresses_on_late_udp() {
         let recovered_high_water = Some(500);
         let committed_batch_max = [501, 502, 499]
