@@ -239,6 +239,16 @@ pub struct SchedulerArgs {
     )]
     poh_migration_concurrency: usize,
 
+    /// Rayon worker threads passed to each PoH migration child. Scheduler-managed jobs never
+    /// pass zero because the worker CLI defines zero as every available core.
+    #[arg(long, env = "BLOCKZILLA_POH_MIGRATION_THREADS", default_value_t = 1)]
+    poh_migration_threads: usize,
+
+    /// Total PoH migration Rayon workers allowed across concurrent jobs. Defaults to detected
+    /// host parallelism. This is independent of the lane-count ceiling.
+    #[arg(long, env = "BLOCKZILLA_POH_MIGRATION_CPU_BUDGET_THREADS")]
+    poh_migration_cpu_budget_threads: Option<usize>,
+
     /// Adaptively stop starting new PoH signature-count migration jobs under the same shared
     /// I/O pressure signal the legacy compact/reuse lane already respects.
     #[arg(
@@ -265,6 +275,45 @@ pub struct SchedulerArgs {
         default_value_t = 60
     )]
     poh_migration_capacity_cooldown_secs: u64,
+
+    /// Maximum concurrent first-seen to usage-sorted registry reprocess jobs. Zero keeps this
+    /// migration lane disabled until an operator explicitly opts in.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_REGISTRY_REPROCESS_CONCURRENCY",
+        default_value_t = 0
+    )]
+    registry_reprocess_concurrency: usize,
+
+    /// Worker threads passed explicitly to each registry reprocess child. The aggregate across
+    /// managed and adopted registry workers is bounded by --compact-cpu-budget-cores.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_REGISTRY_REPROCESS_THREADS",
+        default_value_t = 4
+    )]
+    registry_reprocess_threads: usize,
+
+    /// Peak-memory reservation for each registry reprocess child.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_REGISTRY_REPROCESS_MEMORY_MIB",
+        default_value_t = 2048
+    )]
+    registry_reprocess_memory_mib: u64,
+
+    /// External-sort memory passed to each registry reprocess child.
+    #[arg(
+        long,
+        env = "BLOCKZILLA_REGISTRY_REPROCESS_SORT_MEMORY_MIB",
+        default_value_t = 256
+    )]
+    registry_reprocess_sort_memory_mib: u64,
+
+    /// Root receiving immutable usage-sorted generations. Defaults to
+    /// ARCHIVE_ROOT/.usage-sorted-generations.
+    #[arg(long, env = "BLOCKZILLA_REGISTRY_REPROCESS_TARGET_ROOT")]
+    registry_reprocess_target_root: Option<PathBuf>,
 }
 
 impl SchedulerArgs {
@@ -401,8 +450,40 @@ impl SchedulerArgs {
             "--poh-migration-capacity-max must be zero or at least --poh-migration-concurrency"
         );
         anyhow::ensure!(
+            self.poh_migration_threads > 0,
+            "--poh-migration-threads must be positive"
+        );
+        let poh_migration_cpu_budget_threads = match self.poh_migration_cpu_budget_threads {
+            Some(value) => value,
+            None => std::thread::available_parallelism().map_or(1, usize::from),
+        };
+        anyhow::ensure!(
+            poh_migration_cpu_budget_threads > 0,
+            "--poh-migration-cpu-budget-threads must be positive"
+        );
+        anyhow::ensure!(
+            self.poh_migration_threads <= poh_migration_cpu_budget_threads,
+            "--poh-migration-threads must not exceed --poh-migration-cpu-budget-threads ({poh_migration_cpu_budget_threads})"
+        );
+        anyhow::ensure!(
             self.poh_migration_capacity_cooldown_secs > 0,
             "--poh-migration-capacity-cooldown-secs must be positive"
+        );
+        anyhow::ensure!(
+            self.registry_reprocess_concurrency <= 64,
+            "--registry-reprocess-concurrency must not exceed 64"
+        );
+        anyhow::ensure!(
+            (1..=256).contains(&self.registry_reprocess_threads),
+            "--registry-reprocess-threads must be in 1..=256"
+        );
+        anyhow::ensure!(
+            self.registry_reprocess_memory_mib > 0,
+            "--registry-reprocess-memory-mib must be positive"
+        );
+        anyhow::ensure!(
+            (16..=65_536).contains(&self.registry_reprocess_sort_memory_mib),
+            "--registry-reprocess-sort-memory-mib must be in 16..=65536"
         );
 
         let blockzilla_bin = match self.blockzilla_bin {
@@ -412,6 +493,13 @@ impl SchedulerArgs {
         let finalizer_lock = self
             .finalizer_lock
             .unwrap_or_else(|| self.state_root.join("first-seen-finalizer.lock"));
+        let registry_reprocess_target_root = self
+            .registry_reprocess_target_root
+            .unwrap_or_else(|| self.archive_root.join(".usage-sorted-generations"));
+        anyhow::ensure!(
+            registry_reprocess_target_root != self.archive_root,
+            "--registry-reprocess-target-root must not equal --archive-root"
+        );
 
         Ok(SchedulerConfig {
             status_bind: self.status_bind,
@@ -454,11 +542,18 @@ impl SchedulerArgs {
             poll_interval: Duration::from_secs(self.poll_interval_secs),
             finalizer_lock,
             poh_migration_concurrency: self.poh_migration_concurrency,
+            poh_migration_threads: self.poh_migration_threads,
+            poh_migration_cpu_budget_threads,
             poh_migration_auto_pause: self.poh_migration_auto_pause,
             poh_migration_capacity_max: self.poh_migration_capacity_max,
             poh_migration_capacity_cooldown: Duration::from_secs(
                 self.poh_migration_capacity_cooldown_secs,
             ),
+            registry_reprocess_concurrency: self.registry_reprocess_concurrency,
+            registry_reprocess_threads: self.registry_reprocess_threads,
+            registry_reprocess_memory_mib: self.registry_reprocess_memory_mib,
+            registry_reprocess_sort_memory_mib: self.registry_reprocess_sort_memory_mib,
+            registry_reprocess_target_root,
         })
     }
 }
@@ -536,6 +631,93 @@ mod tests {
             PathBuf::from("blockzilla-scheduler-state")
         );
         assert!(parsed.management_bind.is_none());
+    }
+
+    #[test]
+    fn poh_migration_threads_and_cpu_budget_are_explicit_and_validated() {
+        let mut args = required_args().to_vec();
+        args.extend([
+            "live",
+            "--poh-migration-concurrency",
+            "3",
+            "--poh-migration-threads",
+            "2",
+            "--poh-migration-cpu-budget-threads",
+            "5",
+        ]);
+        let config = SchedulerArgs::try_parse_from(args)
+            .unwrap()
+            .into_config()
+            .unwrap();
+        assert_eq!(config.poh_migration_concurrency, 3);
+        assert_eq!(config.poh_migration_threads, 2);
+        assert_eq!(config.poh_migration_cpu_budget_threads, 5);
+
+        let mut invalid = required_args().to_vec();
+        invalid.extend([
+            "live",
+            "--poh-migration-threads",
+            "4",
+            "--poh-migration-cpu-budget-threads",
+            "3",
+        ]);
+        assert!(
+            SchedulerArgs::try_parse_from(invalid)
+                .unwrap()
+                .into_config()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn registry_reprocess_is_disabled_by_default_and_resources_are_validated() {
+        let mut defaults = required_args().to_vec();
+        defaults.push("live");
+        let config = SchedulerArgs::try_parse_from(defaults)
+            .unwrap()
+            .into_config()
+            .unwrap();
+        assert_eq!(config.registry_reprocess_concurrency, 0);
+        assert_eq!(config.registry_reprocess_threads, 4);
+        assert_eq!(config.registry_reprocess_memory_mib, 2048);
+        assert_eq!(config.registry_reprocess_sort_memory_mib, 256);
+        assert_eq!(
+            config.registry_reprocess_target_root,
+            PathBuf::from("archives/.usage-sorted-generations")
+        );
+
+        for flag in [
+            "--registry-reprocess-threads",
+            "--registry-reprocess-memory-mib",
+            "--registry-reprocess-sort-memory-mib",
+        ] {
+            let mut invalid = required_args().to_vec();
+            invalid.extend(["live", flag, "0"]);
+            assert!(
+                SchedulerArgs::try_parse_from(invalid)
+                    .unwrap()
+                    .into_config()
+                    .is_err(),
+                "{flag}=0 must be rejected"
+            );
+        }
+
+        for (flag, value) in [
+            ("--registry-reprocess-concurrency", "65"),
+            ("--registry-reprocess-threads", "257"),
+            ("--registry-reprocess-sort-memory-mib", "15"),
+            ("--registry-reprocess-sort-memory-mib", "65537"),
+        ] {
+            let mut invalid = required_args().to_vec();
+            invalid.extend(["live", flag, value]);
+            assert!(
+                SchedulerArgs::try_parse_from(invalid)
+                    .unwrap()
+                    .into_config()
+                    .is_err(),
+                "{flag}={value} must be rejected"
+            );
+        }
     }
 
     #[test]

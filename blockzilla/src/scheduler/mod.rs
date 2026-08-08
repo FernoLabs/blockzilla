@@ -29,14 +29,19 @@ use std::{
     net::SocketAddr,
     os::{
         fd::{AsRawFd, OwnedFd},
-        unix::{ffi::OsStrExt, fs::MetadataExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt},
+        },
     },
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -92,6 +97,9 @@ const LIVE_REPAIR_AVAILABLE_POH_FILE: &str = "repair/available-poh.wincode";
 const LEGACY_LIVE_PUBLICATION_DISABLED: &str = "legacy live Archive V2 publication is disabled: gRPC captures do not carry verified shred-boundary evidence; use the Hivezilla V1 candidate/compaction path";
 const MAX_LIVE_REPAIR_MARKER_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIVE_REPAIR_COMPACTED_MARKER_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_POH_MIGRATION_MARKER_BYTES: u64 = MAX_LIVE_REPAIR_MARKER_BYTES;
+const MAX_REGISTRY_REPROCESS_MARKER_BYTES: u64 = 64 * 1024;
+const MAX_REGISTRY_REPROCESS_AUDIT_RESULT_BYTES: usize = 16 * 1024;
 const MAX_LIVE_REPAIR_META_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LIVE_REPAIR_POH_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LIVE_REPAIR_PLAN_BYTES: u64 = 256 * 1024 * 1024;
@@ -99,6 +107,10 @@ const MAX_LIVE_REPAIR_SOURCES: usize = 256;
 const MAX_LIVE_REPAIR_SOURCE_PATH_BYTES: usize = 4 * 1024;
 const PROGRESS_STALE_SECS: u64 = 120;
 const PROGRESS_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
+const POH_MIGRATION_VISIBILITY_FAILURE_KEY: &str = "poh_migration:ownership_visibility";
+// Linux pipes report PIPE_BUF=4096. The writer also checks the descriptor's actual `_PC_PIPE_BUF`
+// before its one-shot write; this is the receiver's independent memory/line-size ceiling.
+const MAX_PROGRESS_PIPE_LINE_BYTES: usize = 4096;
 const LIVE_SLOT_RATE_MIN_WINDOW_SECS: u64 = 15;
 const LIVE_SLOT_RATE_WINDOW_SECS: u64 = 60;
 const LIVE_SLOT_RATE_MAX_SAMPLES: usize = 128;
@@ -150,6 +162,7 @@ const LEGACY_TUNER_DOWNSHIFT_PAUSE_PREFIX: &str = "throughput tuner downshift:";
 const LEGACY_TUNER_GUARD_PAUSE_PREFIX: &str = "throughput tuner hard guard:";
 const LEGACY_COMPACT_OWNERSHIP_KIND: &str = "historical_compact_reuse";
 const POH_MIGRATION_OWNERSHIP_KIND: &str = "poh_signature_count_migration";
+const REGISTRY_REPROCESS_OWNERSHIP_KIND: &str = "archive_v2_registry_reprocess";
 const LEGACY_BLOCKHASH_LOCK_DIR: &str = ".blockhash.lock";
 const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
 const REGISTRY_INDEX_VERSION: u16 = 2;
@@ -220,6 +233,13 @@ pub struct SchedulerConfig {
     /// capability layered onto a live production scheduler, so it stays off until an operator
     /// explicitly opts in.
     pub poh_migration_concurrency: usize,
+    /// Rayon workers passed explicitly to each `migrate-poh-signature-counts` child. This is
+    /// deliberately never zero: a scheduler-managed child must not interpret zero as "all cores".
+    pub poh_migration_threads: usize,
+    /// Scheduler-wide sum of Rayon workers admitted across managed and safely adopted PoH
+    /// migrations. Legacy survivors without a complete persisted identity consume this entire
+    /// budget, failing closed rather than assuming they are cheap.
+    pub poh_migration_cpu_budget_threads: usize,
     /// Adaptively stop starting new PoH signature-count migration jobs under the same shared
     /// PSI pressure signal `legacy_compact_auto_pause` reacts to (`legacy_pressure_state`).
     pub poh_migration_auto_pause: bool,
@@ -231,6 +251,13 @@ pub struct SchedulerConfig {
     pub poh_migration_capacity_max: usize,
     /// Minimum time between adaptive PoH migration capacity grow/shrink steps.
     pub poh_migration_capacity_cooldown: Duration,
+    /// Opt-in ceiling for immutable first-seen -> usage-sorted generation rewrites. Zero is
+    /// disabled, not unbounded.
+    pub registry_reprocess_concurrency: usize,
+    pub registry_reprocess_threads: usize,
+    pub registry_reprocess_memory_mib: u64,
+    pub registry_reprocess_sort_memory_mib: u64,
+    pub registry_reprocess_target_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -663,6 +690,16 @@ pub struct PipelineSummary {
     pub poh_migration_capacity_effective: usize,
     #[serde(default)]
     pub poh_migration_running: usize,
+    #[serde(default)]
+    pub registry_reprocess_capacity_configured: usize,
+    #[serde(default)]
+    pub registry_reprocess_running: usize,
+    #[serde(default)]
+    pub registry_reprocess_epochs_total: usize,
+    #[serde(default)]
+    pub registry_reprocess_epochs_done: usize,
+    #[serde(default)]
+    pub registry_reprocess_admission_blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -908,6 +945,157 @@ struct AppState {
     sequence: AtomicU64,
     publication: Mutex<PublicationState>,
     runtime: Mutex<RuntimeState>,
+    registry_reprocess_auditor: RegistryReprocessAuditor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegistryReprocessAuditPurpose {
+    Ended {
+        retry_is_safe: bool,
+        reason: &'static str,
+    },
+    ExistingTarget {
+        reason: &'static str,
+    },
+    ChildExit {
+        process_success: bool,
+        log_path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryReprocessAuditRequest {
+    epoch: u64,
+    purpose: RegistryReprocessAuditPurpose,
+}
+
+#[derive(Debug)]
+struct RegistryReprocessAuditCompletion {
+    request: RegistryReprocessAuditRequest,
+    result: std::result::Result<(), String>,
+}
+
+#[derive(Debug)]
+enum RegistryReprocessAuditMessage {
+    Validate(RegistryReprocessAuditRequest),
+    Shutdown,
+}
+
+type RegistryReprocessValidator =
+    Arc<dyn Fn(&SchedulerConfig, u64) -> std::result::Result<(), String> + Send + Sync + 'static>;
+
+#[derive(Debug)]
+struct RegistryReprocessAuditor {
+    requests: SyncSender<RegistryReprocessAuditMessage>,
+    completions: StdMutex<Receiver<RegistryReprocessAuditCompletion>>,
+    worker: StdMutex<Option<JoinHandle<()>>>,
+}
+
+impl RegistryReprocessAuditor {
+    fn new(config: SchedulerConfig) -> Self {
+        Self::with_validator(
+            config,
+            Arc::new(|config, epoch| {
+                validate_registry_reprocess_output(config, epoch)
+                    .map_err(|error| format!("{error:#}"))
+            }),
+        )
+    }
+
+    fn with_validator(config: SchedulerConfig, validator: RegistryReprocessValidator) -> Self {
+        // RuntimeState dispatches only when no audit is active, so a one-item channel is enough
+        // to transfer ownership without ever blocking the scheduler mutex.
+        let (request_sender, request_receiver) = mpsc::sync_channel(1);
+        let (completion_sender, completion_receiver) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("registry-reprocess-auditor".to_string())
+            .spawn(move || {
+                while let Ok(message) = request_receiver.recv() {
+                    let RegistryReprocessAuditMessage::Validate(request) = message else {
+                        break;
+                    };
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        validator(&config, request.epoch)
+                    }))
+                    .unwrap_or_else(|_| Err("deep validator panicked".to_string()))
+                    .map_err(|error| bounded_registry_reprocess_audit_result(&error));
+                    if completion_sender
+                        .send(RegistryReprocessAuditCompletion { request, result })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn registry reprocess auditor");
+        Self {
+            requests: request_sender,
+            completions: StdMutex::new(completion_receiver),
+            worker: StdMutex::new(Some(worker)),
+        }
+    }
+
+    fn try_submit(
+        &self,
+        request: RegistryReprocessAuditRequest,
+    ) -> std::result::Result<(), String> {
+        self.requests
+            .try_send(RegistryReprocessAuditMessage::Validate(request))
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    "deep-audit handoff was unexpectedly full; refusing admission".to_string()
+                }
+                TrySendError::Disconnected(_) => {
+                    "deep-audit worker is unavailable; refusing admission".to_string()
+                }
+            })
+    }
+
+    fn try_completion(
+        &self,
+    ) -> std::result::Result<Option<RegistryReprocessAuditCompletion>, String> {
+        match self
+            .completions
+            .lock()
+            .expect("registry audit completion mutex poisoned")
+            .try_recv()
+        {
+            Ok(completion) => Ok(Some(completion)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                Err("deep-audit worker completion channel disconnected".to_string())
+            }
+        }
+    }
+
+    fn shutdown(&self) {
+        let mut worker = self
+            .worker
+            .lock()
+            .expect("registry audit worker mutex poisoned");
+        let Some(worker) = worker.take() else {
+            return;
+        };
+        let _ = self.requests.send(RegistryReprocessAuditMessage::Shutdown);
+        let _ = worker.join();
+    }
+}
+
+impl Drop for RegistryReprocessAuditor {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn bounded_registry_reprocess_audit_result(message: &str) -> String {
+    if message.len() <= MAX_REGISTRY_REPROCESS_AUDIT_RESULT_BYTES {
+        return message.to_string();
+    }
+    let mut end = MAX_REGISTRY_REPROCESS_AUDIT_RESULT_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated]", &message[..end])
 }
 
 #[derive(Debug, Default)]
@@ -980,6 +1168,32 @@ struct RuntimeState {
     scans: BTreeMap<u64, ManagedChild>,
     legacy_compacts: BTreeMap<u64, ManagedChild>,
     poh_migrations: BTreeMap<u64, ManagedChild>,
+    adopted_poh_migrations: BTreeMap<u64, AdoptedPohMigration>,
+    /// Set whenever PoH process ownership cannot be resolved exactly. Admission treats this as
+    /// consuming the whole CPU budget so an unreadable marker or process table can never create
+    /// a duplicate writer.
+    poh_migration_admission_blocked: bool,
+    registry_reprocesses: BTreeMap<u64, ManagedChild>,
+    /// A managed child whose `try_wait` returned an error no longer has a fully observed exit;
+    /// if it later becomes reapable, require deep validation rather than the managed-success
+    /// publication probe.
+    uncertain_registry_reprocesses: BTreeSet<u64>,
+    adopted_registry_reprocesses: BTreeMap<u64, AdoptedRegistryReprocess>,
+    /// Trusted outputs receive the bounded publication probe; uncertain/manual outputs receive
+    /// deep validation. Either result is cached so a five-second inventory poll never rescans an
+    /// already-published epoch generation.
+    validated_registry_reprocesses: BTreeSet<u64>,
+    examined_registry_reprocess_targets: BTreeSet<u64>,
+    /// Queued and active deep audits reserve their epoch and one registry lane. The single
+    /// auditor thread never mutates scheduler state; completions are committed by reconciliation.
+    pending_registry_reprocess_audits: BTreeSet<u64>,
+    registry_reprocess_audit_queue: VecDeque<RegistryReprocessAuditRequest>,
+    active_registry_reprocess_audit: Option<RegistryReprocessAuditRequest>,
+    /// Audit-marker publication failed, so no background work was dispatched. Keep the epoch
+    /// blocked in this controller instead of falling through to a bounded probe of stale state.
+    registry_reprocess_audit_claim_failures: BTreeSet<u64>,
+    registry_reprocess_admission_blocked: bool,
+    registry_reprocess_admission_blocked_reason: Option<String>,
     finalizer: Option<ManagedChild>,
     errors: VecDeque<PipelineError>,
     failures: BTreeMap<String, String>,
@@ -1194,6 +1408,28 @@ struct AdoptedLegacyCompact {
     identity_tainted: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AdoptedPohMigration {
+    epoch: u64,
+    pid: u32,
+    identity_trusted: bool,
+    /// Present only when both values came from the marker published atomically by the spawning
+    /// scheduler. A legacy marker with PID alone is retained as untrusted and consumes the full
+    /// CPU budget until that process demonstrably disappears.
+    process_start_ticks: Option<u64>,
+    worker_threads: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct AdoptedRegistryReprocess {
+    epoch: u64,
+    pid: u32,
+    process_start_ticks: Option<u64>,
+    threads: Option<usize>,
+    progress_path: PathBuf,
+    identity_trusted: bool,
+}
+
 /// Live progress channel for a child piloting the disk-free path (currently PoH migration
 /// only -- see `spawn_command_child`). Replaces polling `progress_path` off disk on every
 /// tick: the scheduler instead drains whatever the child has already pushed down this pipe,
@@ -1206,6 +1442,24 @@ struct ProgressPipe {
 }
 
 impl ProgressPipe {
+    fn ingest(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                // A buffer exactly at the ceiling represents an oversized line: a valid writer
+                // includes its newline within PIPE_BUF, so its JSON body is strictly smaller.
+                if !self.buffer.is_empty()
+                    && self.buffer.len() < MAX_PROGRESS_PIPE_LINE_BYTES
+                    && let Ok(snapshot) = parse_progress_bytes(&self.buffer)
+                {
+                    self.last = Some(snapshot);
+                }
+                self.buffer.clear();
+            } else if self.buffer.len() < MAX_PROGRESS_PIPE_LINE_BYTES {
+                self.buffer.push(byte);
+            }
+        }
+    }
+
     /// Reads everything currently buffered in the kernel pipe without blocking, and keeps
     /// only the last complete line. Each line is a full, self-contained snapshot (not a
     /// delta), so intermediate lines between two polls are correctly discarded rather than
@@ -1215,13 +1469,7 @@ impl ProgressPipe {
         loop {
             match self.receiver.try_read(&mut chunk) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => self.buffer.extend_from_slice(&chunk[..n]),
-            }
-        }
-        while let Some(newline) = self.buffer.iter().position(|&byte| byte == b'\n') {
-            let line: Vec<u8> = self.buffer.drain(..=newline).collect();
-            if let Ok(snapshot) = parse_progress_bytes(&line) {
-                self.last = Some(snapshot);
+                Ok(n) => self.ingest(&chunk[..n]),
             }
         }
     }
@@ -1250,6 +1498,54 @@ struct OwnershipMarker {
     message: Option<String>,
     #[serde(default)]
     pid: Option<u32>,
+}
+
+/// Dedicated durable identity for a scheduler-managed PoH migration. Do not fold the two final
+/// fields into the generic archive ownership marker: old archive owners have different adoption
+/// contracts, while these fields must be published atomically with `pid` to make PID reuse safe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PohMigrationMarker {
+    schema_version: u32,
+    kind: String,
+    id: String,
+    state: String,
+    created_unix_secs: u64,
+    updated_unix_secs: u64,
+    message: Option<String>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    process_start_ticks: Option<u64>,
+    #[serde(default)]
+    worker_threads: Option<usize>,
+}
+
+/// Registry reprocessing targets a new immutable generation, so its scheduler claim belongs
+/// under `state_root` and must never replace the source epoch's archival ownership marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RegistryReprocessMarker {
+    schema_version: u32,
+    kind: String,
+    epoch: u64,
+    state: String,
+    created_unix_secs: u64,
+    updated_unix_secs: u64,
+    message: Option<String>,
+    source: PathBuf,
+    target: PathBuf,
+    threads: usize,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    process_start_ticks: Option<u64>,
+    /// Durable policy for an `auditing` marker. False is the fail-closed default for markers
+    /// written by older binaries and child exits that require an explicit manual retry.
+    #[serde(default)]
+    audit_retry_is_safe: bool,
+    /// True only for deep validation that continues an already-admitted managed/adopted worker.
+    /// Manual/existing-target audits remain queued while registry concurrency is disabled.
+    #[serde(default)]
+    audit_is_continuation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1291,6 +1587,10 @@ enum ChildKind {
     },
     PohSignatureCountMigration {
         epoch: u64,
+    },
+    RegistryReprocess {
+        epoch: u64,
+        target: PathBuf,
     },
     // Kept so the scheduler can identify and report a legacy process that was
     // already running across an upgrade; new live finalizers are never spawned.
@@ -1337,6 +1637,7 @@ impl ChildKind {
             Self::HistoricalCompactReuse { epoch } => format!("compact_reuse:{epoch}"),
             Self::HistoricalFinalizer { epoch } => format!("finalize:{epoch}"),
             Self::PohSignatureCountMigration { epoch } => format!("poh_migration:{epoch}"),
+            Self::RegistryReprocess { epoch, .. } => format!("registry_reprocess:{epoch}"),
             Self::LiveFinalizer { id, .. } => format!("live:{id}"),
         }
     }
@@ -1368,6 +1669,22 @@ pub async fn run_scheduler(config: SchedulerConfig) -> Result<()> {
     anyhow::ensure!(
         config.download_concurrency > 0,
         "download concurrency must be positive"
+    );
+    anyhow::ensure!(
+        config.registry_reprocess_concurrency <= 64,
+        "registry reprocess concurrency must not exceed 64"
+    );
+    anyhow::ensure!(
+        (1..=256).contains(&config.registry_reprocess_threads),
+        "registry reprocess threads must be in 1..=256"
+    );
+    anyhow::ensure!(
+        config.registry_reprocess_memory_mib > 0,
+        "registry reprocess memory reservation must be positive"
+    );
+    anyhow::ensure!(
+        (16..=65_536).contains(&config.registry_reprocess_sort_memory_mib),
+        "registry reprocess sort memory must be in 16..=65536 MiB"
     );
     match (config.priority_epoch_start, config.priority_epoch_end) {
         (Some(start), Some(end)) => anyhow::ensure!(
@@ -1454,6 +1771,7 @@ pub async fn run_scheduler(config: SchedulerConfig) -> Result<()> {
     // SSE consumers only need recent snapshots; retaining dozens of cloned
     // epoch inventories makes controller memory grow with corpus size.
     let (updates, _) = broadcast::channel(4);
+    let registry_reprocess_auditor = RegistryReprocessAuditor::new(config.clone());
     let state = Arc::new(AppState {
         config: config.clone(),
         snapshot: RwLock::new(initial),
@@ -1461,6 +1779,7 @@ pub async fn run_scheduler(config: SchedulerConfig) -> Result<()> {
         sequence: AtomicU64::new(0),
         publication: Mutex::new(PublicationState::default()),
         runtime: Mutex::new(RuntimeState::default()),
+        registry_reprocess_auditor,
     });
     load_persisted_errors(&state).await;
     load_control_state(&state).await?;
@@ -1528,7 +1847,7 @@ pub async fn run_scheduler(config: SchedulerConfig) -> Result<()> {
             .route("/api/v1/jobs/{kind}/{id}/retry", post(retry_job))
             .with_state(Arc::clone(&state))
             .layer(middleware::from_fn_with_state(
-                state,
+                Arc::clone(&state),
                 enforce_management_request,
             ));
         tokio::select! {
@@ -1548,6 +1867,7 @@ pub async fn run_scheduler(config: SchedulerConfig) -> Result<()> {
     let _ = scheduler.await;
     progress_monitor.abort();
     let _ = progress_monitor.await;
+    state.registry_reprocess_auditor.shutdown();
     result
 }
 
@@ -1869,35 +2189,53 @@ async fn retry_job(
         let epoch = id.parse::<u64>().map_err(|_| {
             ControlError::BadRequest("PoH migration retry id must be an epoch number".to_string())
         })?;
-        let marker = read_poh_migration_marker(&state.config.state_root, epoch).ok_or_else(|| {
-            ControlError::NotFound(format!(
-                "epoch {epoch} has no PoH signature-count migration marker"
-            ))
-        })?;
-        if marker.state != "failed" {
+        let mut runtime = state.runtime.lock().await;
+        if runtime.poh_migrations.contains_key(&epoch)
+            || runtime.adopted_poh_migrations.contains_key(&epoch)
+        {
             return Err(ControlError::Conflict(format!(
-                "PoH signature-count migration marker for epoch {epoch} is {}, not failed",
-                marker.state
+                "PoH signature-count migration for epoch {epoch} still has managed or adopted ownership"
             )));
         }
-        let epoch_output = state.config.archive_root.join(format!("epoch-{epoch}"));
-        if marker
-            .pid
-            .is_some_and(|pid| process_cmdline_contains(pid, &epoch_output))
-        {
-            return Err(ControlError::Conflict(
-                "PoH signature-count migration process is still running".to_string(),
-            ));
+        // Re-read only after taking the mutex shared by polling, scheduling, and controls. The
+        // second equality check in the transition makes failed -> retry_ready an effective CAS
+        // under this mutex and the scheduler's process-wide pipeline lock.
+        let marker = read_poh_migration_marker_strict(&state.config.state_root, epoch)
+            .map_err(ControlError::Internal)?
+            .ok_or_else(|| {
+                ControlError::NotFound(format!(
+                    "epoch {epoch} has no PoH signature-count migration marker"
+                ))
+            })?;
+        if !poh_migration_marker_claims_epoch(&marker, epoch) || marker.state != "failed" {
+            return Err(ControlError::Conflict(format!(
+                "PoH signature-count migration marker for epoch {epoch} is not the exact failed claim"
+            )));
         }
-        let mut runtime = state.runtime.lock().await;
+        match find_poh_migration_processes(&state.config, epoch) {
+            PohProcessScan::Observable(pids) if pids.is_empty() => {}
+            PohProcessScan::Observable(pids) => {
+                return Err(ControlError::Conflict(format!(
+                    "PoH signature-count migration process is still running for epoch {epoch} (pid {})",
+                    pids[0]
+                )));
+            }
+            PohProcessScan::Unobservable => {
+                return Err(ControlError::Conflict(
+                    "PoH process liveness is unobservable; retry remains blocked".to_string(),
+                ));
+            }
+        }
         let failure_key = format!("poh_migration:{epoch}");
+        compare_and_transition_failed_poh_marker_to_retry_ready(
+            &state.config.state_root,
+            epoch,
+            &marker,
+        )
+        .map_err(ControlError::Internal)?;
         clear_runtime_failure(&state.config, &mut runtime, &failure_key);
         runtime.paused_jobs.remove(&failure_key);
         let _ = fs::remove_file(poh_migration_progress_path(&state.config.state_root, epoch));
-        write_poh_migration_marker(&state.config.state_root, epoch, "retry_ready", None)
-            .map_err(ControlError::Internal)?;
-        set_poh_migration_marker_pid(&state.config.state_root, epoch, None)
-            .map_err(ControlError::Internal)?;
         persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
         append_control_event(&state.config, "retry", &format!("{kind}/{id}"))
             .map_err(ControlError::Internal)?;
@@ -1909,6 +2247,93 @@ async fn retry_job(
             action: "retry".to_string(),
             target: format!("{kind}/{id}"),
             message: "PoH signature-count migration failure cleared; ready to retry".to_string(),
+            snapshot_sequence: sequence,
+        }));
+    }
+    if kind == REGISTRY_REPROCESS_OWNERSHIP_KIND {
+        let epoch = id.parse::<u64>().map_err(|_| {
+            ControlError::BadRequest("registry reprocess retry id must be an epoch".to_string())
+        })?;
+        let mut runtime = state.runtime.lock().await;
+        if runtime.registry_reprocesses.contains_key(&epoch)
+            || runtime.adopted_registry_reprocesses.contains_key(&epoch)
+            || runtime.pending_registry_reprocess_audits.contains(&epoch)
+        {
+            return Err(ControlError::Conflict(format!(
+                "registry reprocess for epoch {epoch} still has live ownership or a pending deep audit"
+            )));
+        }
+        let mut marker = read_registry_reprocess_marker_strict(&state.config.state_root, epoch)
+            .map_err(ControlError::Internal)?
+            .ok_or_else(|| {
+                ControlError::NotFound(format!("epoch {epoch} has no registry reprocess marker"))
+            })?;
+        if !registry_reprocess_marker_claims(&state.config, epoch, &marker)
+            || marker.state != "failed"
+            || marker.pid.is_some()
+            || marker.process_start_ticks.is_some()
+        {
+            return Err(ControlError::Conflict(format!(
+                "registry reprocess marker for epoch {epoch} is not an exact failed claim"
+            )));
+        }
+        match find_registry_reprocess_processes(&state.config, epoch) {
+            Some(pids) if pids.is_empty() => {}
+            Some(pids) => {
+                return Err(ControlError::Conflict(format!(
+                    "registry reprocess process is still running for epoch {epoch} (pid {})",
+                    pids[0]
+                )));
+            }
+            None => {
+                return Err(ControlError::Conflict(
+                    "registry reprocess liveness is unobservable; retry remains blocked"
+                        .to_string(),
+                ));
+            }
+        }
+        if reconcile_existing_registry_reprocess_target(
+            &state.config,
+            &mut runtime,
+            epoch,
+            "retry requested after a registry worker may have published",
+        ) {
+            let _ = persist_control_state(&state.config, &runtime);
+            let pending = runtime.pending_registry_reprocess_audits.contains(&epoch);
+            return Err(ControlError::Conflict(format!(
+                "registry reprocess epoch {epoch} already has an immutable target; {}",
+                if pending {
+                    "background deep validation is pending and retry remains blocked"
+                } else {
+                    "it was already examined and requires manual inspection"
+                }
+            )));
+        }
+        marker.state = "retry_ready".to_string();
+        marker.updated_unix_secs = unix_now();
+        marker.message = None;
+        publish_registry_reprocess_marker(&state.config.state_root, epoch, &marker)
+            .map_err(ControlError::Internal)?;
+        let key = format!("registry_reprocess:{epoch}");
+        clear_runtime_failure(&state.config, &mut runtime, &key);
+        runtime.paused_jobs.remove(&key);
+        reset_registry_reprocess_attempt_cache(&mut runtime, epoch);
+        let _ = fs::remove_file(registry_reprocess_progress_path(
+            &state.config.state_root,
+            epoch,
+        ));
+        persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
+        append_control_event(&state.config, "retry", &format!("{kind}/{id}"))
+            .map_err(ControlError::Internal)?;
+        drop(runtime);
+        reconcile_and_schedule(&state).await;
+        let sequence = state.snapshot.read().await.sequence;
+        return Ok(Json(ControlResponse {
+            ok: true,
+            action: "retry".to_string(),
+            target: format!("{kind}/{id}"),
+            message: "registry reprocess failure cleared; matching staging will restart safely from scratch"
+                .to_string(),
             snapshot_sequence: sequence,
         }));
     }
@@ -2231,7 +2656,10 @@ async fn job_signal_control(
 }
 
 fn controlled_signal_target(kind: &str, pid: u32, trusted_legacy_group: bool) -> libc::pid_t {
-    if matches!(kind, "car_download" | "car_preflight") || trusted_legacy_group {
+    if matches!(kind, "car_download" | "car_preflight")
+        || (kind == REGISTRY_REPROCESS_OWNERSHIP_KIND && process_is_group_leader(pid))
+        || trusted_legacy_group
+    {
         -(pid as libc::pid_t)
     } else {
         pid as libc::pid_t
@@ -2317,6 +2745,10 @@ fn control_job_key(kind: &str, id: &str) -> Result<String, ControlError> {
             .parse::<u64>()
             .map(|epoch| format!("finalize:{epoch}"))
             .map_err(|_| ControlError::BadRequest("finalizer id must be an epoch".to_string())),
+        REGISTRY_REPROCESS_OWNERSHIP_KIND => Err(ControlError::BadRequest(
+            "per-job pause/resume is not supported for registry reprocessing; use the scheduler-wide pause before admission"
+                .to_string(),
+        )),
         "live_finalizer" => Ok(format!("live:{id}")),
         _ => Err(ControlError::BadRequest(format!(
             "unsupported job kind {kind}"
@@ -2337,6 +2769,7 @@ async fn controlled_job_pid(
         .values()
         .chain(runtime.scans.values())
         .chain(runtime.legacy_compacts.values())
+        .chain(runtime.registry_reprocesses.values())
         .chain(runtime.finalizer.iter())
         .find(|child| child.kind.key() == key)
         .and_then(|child| child.pid)
@@ -2345,6 +2778,13 @@ async fn controlled_job_pid(
                 .adopted_legacy_compacts
                 .values()
                 .find(|child| format!("compact_reuse:{}", child.epoch) == key)
+                .map(|child| child.pid)
+        })
+        .or_else(|| {
+            runtime
+                .adopted_registry_reprocesses
+                .values()
+                .find(|child| format!("registry_reprocess:{}", child.epoch) == key)
                 .map(|child| child.pid)
         });
     drop(runtime);
@@ -2372,6 +2812,26 @@ async fn controlled_job_pid(
                 .or(epoch_state.progress.pid)
                 .ok_or_else(|| ControlError::NotFound(format!("no active pid for {kind}/{id}")))?;
             Ok((pid, epoch_state.output_path.clone()))
+        }
+        REGISTRY_REPROCESS_OWNERSHIP_KIND => {
+            let epoch = id.parse::<u64>().map_err(|_| {
+                ControlError::BadRequest("registry reprocess id must be an epoch".to_string())
+            })?;
+            let pid = runtime_pid.or_else(|| {
+                snapshot
+                    .lanes
+                    .iter()
+                    .find(|lane| lane.kind == kind && lane.epoch == Some(epoch))
+                    .and_then(|lane| lane.pid)
+            });
+            Ok((
+                pid.ok_or_else(|| {
+                    ControlError::NotFound(format!(
+                        "no active registry reprocess pid for epoch {epoch}"
+                    ))
+                })?,
+                registry_reprocess_target(&state.config, epoch),
+            ))
         }
         "live_finalizer" => {
             let capture = snapshot
@@ -2457,6 +2917,10 @@ fn argv_matches_job(bytes: &[u8], blockzilla_bin: &Path, expected_path: &Path, k
             args.get(1).copied() == Some(b"migrate-poh-signature-counts")
                 && args.get(2).copied() == Some(expected_path)
         }
+        REGISTRY_REPROCESS_OWNERSHIP_KIND => {
+            args.get(1).copied() == Some(b"reprocess-archive-v2-registry")
+                && args.get(3).copied() == Some(expected_path)
+        }
         "live_finalizer" => matches!(
             args.get(1).copied(),
             Some(b"prepare-archive-v2-live-registry")
@@ -2503,10 +2967,19 @@ fn drain_poh_migration_progress_pipes(runtime: &mut RuntimeState) {
 
 async fn reconcile_and_schedule(state: &Arc<AppState>) {
     let mut runtime = state.runtime.lock().await;
+    poll_registry_reprocess_audit(
+        &state.config,
+        &mut runtime,
+        &state.registry_reprocess_auditor,
+    );
     drain_poh_migration_progress_pipes(&mut runtime);
     reap_children(state, &mut runtime).await;
     reap_adopted_legacy_compacts(&state.config, &mut runtime);
     reconcile_acquisition_state(&state.config, &mut runtime);
+    if state.config.execute {
+        reconcile_poh_migration_markers(&state.config, &mut runtime);
+        reconcile_registry_reprocess_markers(&state.config, &mut runtime);
+    }
     runtime.inventory_generation = runtime.inventory_generation.saturating_add(1);
     let inventory_generation = runtime.inventory_generation;
 
@@ -2518,6 +2991,12 @@ async fn reconcile_and_schedule(state: &Arc<AppState>) {
         }
     }
     if state.config.execute {
+        admit_registry_reprocess_audit(
+            &state.config,
+            &snapshot,
+            &mut runtime,
+            &state.registry_reprocess_auditor,
+        );
         adjust_legacy_workers_for_pressure(&state.config, &snapshot, &mut runtime, unix_now());
         if let Err(error) = schedule_work(&state.config, &snapshot, &mut runtime).await {
             record_error(
@@ -2732,6 +3211,9 @@ fn lane_progress_paths(config: &SchedulerConfig, lane: &LaneSnapshot) -> Vec<Pat
         }
         ("poh_signature_count_migration", Some(epoch)) => {
             vec![poh_migration_progress_path(&config.state_root, epoch)]
+        }
+        ("archive_v2_registry_reprocess", Some(epoch)) => {
+            vec![registry_reprocess_progress_path(&config.state_root, epoch)]
         }
         ("live_finalizer", _) => lane.capture_id.as_ref().map_or_else(Vec::new, |id| {
             vec![
@@ -3567,7 +4049,12 @@ fn reconcile_filesystem(
     summary.poh_migration_bytes_total = epochs
         .iter()
         .filter_map(poh_migration_artifact)
-        .filter(|artifact| matches!(artifact.state, ArtifactState::Pending | ArtifactState::Present))
+        .filter(|artifact| {
+            matches!(
+                artifact.state,
+                ArtifactState::Pending | ArtifactState::Present
+            )
+        })
         .map(|artifact| artifact.bytes)
         .sum();
     summary.poh_migration_bytes_done = epochs
@@ -3579,7 +4066,12 @@ fn reconcile_filesystem(
     summary.poh_migration_epochs_total = epochs
         .iter()
         .filter_map(poh_migration_artifact)
-        .filter(|artifact| matches!(artifact.state, ArtifactState::Pending | ArtifactState::Present))
+        .filter(|artifact| {
+            matches!(
+                artifact.state,
+                ArtifactState::Pending | ArtifactState::Present
+            )
+        })
         .count();
     summary.poh_migration_epochs_done = epochs
         .iter()
@@ -3601,6 +4093,27 @@ fn reconcile_filesystem(
         .iter()
         .filter(|lane| lane.kind == "poh_signature_count_migration")
         .count();
+    summary.registry_reprocess_capacity_configured = config.registry_reprocess_concurrency;
+    summary.registry_reprocess_running = lanes
+        .iter()
+        .filter(|lane| lane.kind == REGISTRY_REPROCESS_OWNERSHIP_KIND)
+        .count()
+        .saturating_add(usize::from(
+            runtime.active_registry_reprocess_audit.is_some(),
+        ));
+    summary.registry_reprocess_epochs_total = epochs
+        .iter()
+        .filter(|epoch| registry_reprocess_source_candidate(epoch))
+        .count();
+    summary.registry_reprocess_epochs_done = epochs
+        .iter()
+        .filter(|epoch| {
+            registry_reprocess_source_candidate(epoch)
+                && registry_reprocess_is_validated_complete(config, runtime, epoch.epoch)
+        })
+        .count();
+    summary.registry_reprocess_admission_blocked_reason =
+        runtime.registry_reprocess_admission_blocked_reason.clone();
     let scan_pending = epochs
         .iter()
         .filter(|epoch| {
@@ -5816,11 +6329,9 @@ fn legacy_compact_capacity_admission_with_policy(
         memory_policy,
     );
     let mut first_blocked = None;
-    for epoch in prioritized_epochs(config, epochs)
-        .filter(|epoch| {
-            legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
-        })
-    {
+    for epoch in prioritized_epochs(config, epochs).filter(|epoch| {
+        legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
+    }) {
         if admitted >= resource.effective_slots {
             break;
         }
@@ -8921,6 +9432,24 @@ fn runtime_lanes(runtime: &RuntimeState) -> Vec<LaneSnapshot> {
     );
     lanes.extend(
         runtime
+            .adopted_poh_migrations
+            .values()
+            .map(|migration| lane_from_adopted_poh_migration(migration, now)),
+    );
+    lanes.extend(
+        runtime
+            .registry_reprocesses
+            .iter()
+            .map(|(epoch, child)| lane_from_child(child, Some(*epoch), None, now, runtime)),
+    );
+    lanes.extend(
+        runtime
+            .adopted_registry_reprocesses
+            .values()
+            .map(|migration| lane_from_adopted_registry_reprocess(migration, now, runtime)),
+    );
+    lanes.extend(
+        runtime
             .adopted_legacy_compacts
             .values()
             .map(|compact| lane_from_adopted_legacy(compact, now, runtime)),
@@ -8934,11 +9463,77 @@ fn runtime_lanes(runtime: &RuntimeState) -> Vec<LaneSnapshot> {
             ChildKind::LiveFinalizer { id, epoch, .. } => (*epoch, Some(id.clone())),
             ChildKind::HistoricalScan { epoch }
             | ChildKind::HistoricalCompactReuse { epoch }
-            | ChildKind::PohSignatureCountMigration { epoch } => (Some(*epoch), None),
+            | ChildKind::PohSignatureCountMigration { epoch }
+            | ChildKind::RegistryReprocess { epoch, .. } => (Some(*epoch), None),
         };
         lanes.push(lane_from_child(finalizer, epoch, capture_id, now, runtime));
     }
     lanes
+}
+
+fn lane_from_adopted_poh_migration(migration: &AdoptedPohMigration, now: u64) -> LaneSnapshot {
+    let rss_bytes = process_rss_bytes(migration.pid);
+    let mut progress = ProgressSnapshot {
+        phase: Some("poh_migration".to_string()),
+        state: Some("running".to_string()),
+        pid: Some(migration.pid),
+        rss_bytes,
+        ..ProgressSnapshot::default()
+    };
+    hide_stale_lane_rates(&mut progress, now);
+    LaneSnapshot {
+        id: format!("poh_migration:{}", migration.epoch),
+        kind: POH_MIGRATION_OWNERSHIP_KIND.to_string(),
+        epoch: Some(migration.epoch),
+        capture_id: None,
+        phase: "poh_migration".to_string(),
+        state: "running".to_string(),
+        auto_paused: false,
+        auto_pause_reason: None,
+        pid: Some(migration.pid),
+        progress,
+        rss_bytes,
+        started_unix_secs: migration
+            .process_start_ticks
+            .and_then(|ticks| process_started_unix_secs(migration.pid, ticks)),
+        updated_unix_secs: now,
+    }
+}
+
+fn lane_from_adopted_registry_reprocess(
+    migration: &AdoptedRegistryReprocess,
+    now: u64,
+    runtime: &RuntimeState,
+) -> LaneSnapshot {
+    let key = format!("registry_reprocess:{}", migration.epoch);
+    let paused = runtime.paused_jobs.contains(&key);
+    let rss_bytes = process_rss_bytes(migration.pid);
+    let mut progress = read_progress(&migration.progress_path).unwrap_or_default();
+    // Adopted progress may not survive a controller restart; identity and RSS remain useful.
+    progress.phase = progress
+        .phase
+        .or_else(|| Some("registry_reprocess".to_string()));
+    progress.state = Some(if paused { "paused" } else { "running" }.to_string());
+    progress.pid = Some(migration.pid);
+    progress.rss_bytes = rss_bytes;
+    hide_stale_lane_rates(&mut progress, now);
+    LaneSnapshot {
+        id: key,
+        kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
+        epoch: Some(migration.epoch),
+        capture_id: None,
+        phase: "registry_reprocess".to_string(),
+        state: if paused { "paused" } else { "running" }.to_string(),
+        auto_paused: false,
+        auto_pause_reason: None,
+        pid: Some(migration.pid),
+        progress,
+        rss_bytes,
+        started_unix_secs: migration
+            .process_start_ticks
+            .and_then(|ticks| process_started_unix_secs(migration.pid, ticks)),
+        updated_unix_secs: now,
+    }
 }
 
 fn lane_from_adopted_legacy(
@@ -9017,6 +9612,9 @@ fn lane_from_child(
         ChildKind::HistoricalFinalizer { .. } => ("historical_finalizer", "finalize"),
         ChildKind::PohSignatureCountMigration { .. } => {
             ("poh_signature_count_migration", "poh_migration")
+        }
+        ChildKind::RegistryReprocess { .. } => {
+            (REGISTRY_REPROCESS_OWNERSHIP_KIND, "registry_reprocess")
         }
         ChildKind::LiveFinalizer { phase, .. } => ("live_finalizer", phase.as_str()),
     };
@@ -9686,7 +10284,11 @@ fn reset_legacy_tuner_context(runtime: &mut RuntimeState, context: LegacyTunerCo
             expected_identity: start.map(|start| (epoch, pid, start)),
             reason: "scheduler context changed; re-observe resumed probe".to_string(),
         }),
-        pending_action_started_unix_secs: if paused_probe.is_some() { now } else { Default::default() },
+        pending_action_started_unix_secs: if paused_probe.is_some() {
+            now
+        } else {
+            Default::default()
+        },
         ..LegacyThroughputTuner::default()
     };
 }
@@ -9895,9 +10497,11 @@ fn observe_legacy_throughput_tuner(
                 .copied(),
             reason: format!("{LEGACY_TUNER_GUARD_PAUSE_PREFIX} {reason}"),
         });
-        tuner.pending_action_started_unix_secs = if tuner
-            .pending_action
-            .is_some() { now } else { Default::default() };
+        tuner.pending_action_started_unix_secs = if tuner.pending_action.is_some() {
+            now
+        } else {
+            Default::default()
+        };
         tuner.last_decision = Some(format!("held throughput probing: {reason}"));
         return;
     }
@@ -11488,11 +12092,9 @@ async fn top_up_legacy_compacts(
         usize::MAX
     };
     let mut started = 0usize;
-    for epoch in prioritized_epochs(config, &snapshot.epochs)
-        .filter(|epoch| {
-            legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
-        })
-    {
+    for epoch in prioritized_epochs(config, &snapshot.epochs).filter(|epoch| {
+        legacy_compact_reuse_status(config, epoch.epoch) == LegacyCompactReuseStatus::Ready
+    }) {
         if running_count >= resource_capacity {
             break;
         }
@@ -11582,6 +12184,29 @@ fn poh_migration_capacity_cooldown_elapsed(
             >= config.poh_migration_capacity_cooldown.as_secs()
 }
 
+fn poh_migration_cpu_threads_in_use(config: &SchedulerConfig, runtime: &RuntimeState) -> usize {
+    if runtime.poh_migration_admission_blocked {
+        return config.poh_migration_cpu_budget_threads;
+    }
+    let managed = runtime
+        .poh_migrations
+        .len()
+        .saturating_mul(config.poh_migration_threads);
+    runtime
+        .adopted_poh_migrations
+        .values()
+        .fold(managed, |used, migration| {
+            // Missing thread metadata identifies a legacy/incomplete marker. The old worker CLI
+            // interpreted an omitted `--threads` as every core, so consuming the full configured
+            // budget is both accurate for that binary and the fail-closed choice for ambiguity.
+            used.saturating_add(
+                migration
+                    .worker_threads
+                    .unwrap_or(config.poh_migration_cpu_budget_threads),
+            )
+        })
+}
+
 /// Admits PoH signature-count migration jobs up to the current adaptive ceiling (see
 /// `plan_poh_migration_capacity_step`; a fixed `config.poh_migration_concurrency` when capacity
 /// growth is disabled). Unlike `top_up_legacy_compacts`, this carries no throughput-tuner/
@@ -11590,13 +12215,18 @@ fn poh_migration_capacity_cooldown_elapsed(
 /// admission signal here, and a ceiling gated by the same shared PSI signal `legacy_compact_reuse`
 /// already respects is enough to keep the two contending safely for the same disk instead of
 /// fighting it.
-async fn top_up_poh_migrations(config: &SchedulerConfig, snapshot: &PipelineSnapshot, runtime: &mut RuntimeState) -> usize {
+async fn top_up_poh_migrations(
+    config: &SchedulerConfig,
+    snapshot: &PipelineSnapshot,
+    runtime: &mut RuntimeState,
+) -> usize {
     if runtime.poh_migration_capacity < config.poh_migration_concurrency {
         runtime.poh_migration_capacity = config.poh_migration_concurrency;
     }
     let now = unix_now();
     let pressure = legacy_pressure_state(config, &snapshot.machine);
-    if let Some(step) = plan_poh_migration_capacity_step(config, runtime.poh_migration_capacity, &pressure)
+    if let Some(step) =
+        plan_poh_migration_capacity_step(config, runtime.poh_migration_capacity, &pressure)
         && poh_migration_capacity_cooldown_elapsed(
             config,
             runtime.poh_migration_capacity_last_action_unix_secs,
@@ -11607,7 +12237,10 @@ async fn top_up_poh_migrations(config: &SchedulerConfig, snapshot: &PipelineSnap
             PohMigrationCapacityStep::Grow => runtime.poh_migration_capacity.saturating_add(1),
             PohMigrationCapacityStep::Shrink => runtime.poh_migration_capacity.saturating_sub(1),
         }
-        .clamp(config.poh_migration_concurrency, config.poh_migration_capacity_max);
+        .clamp(
+            config.poh_migration_concurrency,
+            config.poh_migration_capacity_max,
+        );
         if next != runtime.poh_migration_capacity {
             let action = match (&step, &pressure) {
                 (PohMigrationCapacityStep::Grow, _) => format!(
@@ -11638,14 +12271,36 @@ async fn top_up_poh_migrations(config: &SchedulerConfig, snapshot: &PipelineSnap
     if config.poh_migration_auto_pause && !matches!(pressure, LegacyPressureState::Resume) {
         return 0;
     }
-    let mut running_count = runtime.poh_migrations.len();
+    if runtime.poh_migration_capacity == 0 {
+        return 0;
+    }
+    if !poh_process_table_observable() {
+        block_poh_migration_admission(
+            config,
+            runtime,
+            "PoH migration admission requires an observable Linux /proc process table".to_string(),
+        );
+        return 0;
+    }
+    if runtime.poh_migration_admission_blocked {
+        return 0;
+    }
+    let mut running_count = runtime
+        .poh_migrations
+        .len()
+        .saturating_add(runtime.adopted_poh_migrations.len());
+    let mut cpu_threads_in_use = poh_migration_cpu_threads_in_use(config, runtime);
     let mut started = 0usize;
     for epoch in prioritized_epochs(config, &snapshot.epochs) {
-        if running_count >= runtime.poh_migration_capacity {
+        if running_count >= runtime.poh_migration_capacity
+            || cpu_threads_in_use.saturating_add(config.poh_migration_threads)
+                > config.poh_migration_cpu_budget_threads
+        {
             break;
         }
         let failure_key = format!("poh_migration:{}", epoch.epoch);
         if runtime.poh_migrations.contains_key(&epoch.epoch)
+            || runtime.adopted_poh_migrations.contains_key(&epoch.epoch)
             || runtime.failures.contains_key(&failure_key)
             || !matches!(
                 poh_migration_status(config, epoch.epoch),
@@ -11658,16 +12313,443 @@ async fn top_up_poh_migrations(config: &SchedulerConfig, snapshot: &PipelineSnap
             Ok(child) => {
                 runtime.poh_migrations.insert(epoch.epoch, child);
                 running_count = running_count.saturating_add(1);
+                cpu_threads_in_use =
+                    cpu_threads_in_use.saturating_add(config.poh_migration_threads);
                 started = started.saturating_add(1);
             }
             Err(error) => {
                 let message = format!("{failure_key} spawn failed: {error:#}");
                 set_runtime_failure(config, runtime, failure_key, message.clone());
-                record_error(config, runtime, "poh_migration", message);
+                record_error(config, runtime, "poh_migration", message.clone());
+                block_poh_migration_admission(config, runtime, message);
+                break;
             }
         }
     }
     started
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryReprocessStatus {
+    NotCandidate,
+    Ready,
+    Running,
+    Complete,
+    Failed,
+    Blocked,
+}
+
+fn registry_reprocess_source_candidate(epoch: &EpochSnapshot) -> bool {
+    epoch.state == HistoricalState::Complete && epoch.registry_order == RegistryOrder::FirstSeen
+}
+
+fn registry_reprocess_target(config: &SchedulerConfig, epoch: u64) -> PathBuf {
+    config
+        .registry_reprocess_target_root
+        .join(format!("epoch-{epoch}"))
+}
+
+fn registry_reprocess_is_validated_complete(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+) -> bool {
+    if runtime.pending_registry_reprocess_audits.contains(&epoch) {
+        return false;
+    }
+    if runtime
+        .registry_reprocess_audit_claim_failures
+        .contains(&epoch)
+    {
+        return false;
+    }
+    if runtime.validated_registry_reprocesses.contains(&epoch) {
+        return true;
+    }
+    // Observer mode never mutates/cache-binds durable completion state. It may still report a
+    // bounded, exact durable completion marker, while execute mode will not schedule from it
+    // until reconciliation has probed and cached it.
+    !config.execute
+        && read_registry_reprocess_marker_strict(&config.state_root, epoch).is_ok_and(|marker| {
+            marker.is_some_and(|marker| {
+                registry_reprocess_marker_claims(config, epoch, &marker)
+                    && marker.state == "complete"
+                    && marker.pid.is_none()
+                    && marker.process_start_ticks.is_none()
+            })
+        })
+}
+
+fn registry_reprocess_status(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: &EpochSnapshot,
+) -> RegistryReprocessStatus {
+    if !registry_reprocess_source_candidate(epoch) {
+        return RegistryReprocessStatus::NotCandidate;
+    }
+    if runtime
+        .pending_registry_reprocess_audits
+        .contains(&epoch.epoch)
+        || runtime
+            .registry_reprocess_audit_claim_failures
+            .contains(&epoch.epoch)
+    {
+        return RegistryReprocessStatus::Blocked;
+    }
+    if registry_reprocess_is_validated_complete(config, runtime, epoch.epoch) {
+        return RegistryReprocessStatus::Complete;
+    }
+    match read_registry_reprocess_marker_strict(&config.state_root, epoch.epoch) {
+        Ok(None) => RegistryReprocessStatus::Ready,
+        Ok(Some(marker)) if !registry_reprocess_marker_claims(config, epoch.epoch, &marker) => {
+            RegistryReprocessStatus::Blocked
+        }
+        Ok(Some(marker)) => match marker.state.as_str() {
+            "retry_ready" if marker.pid.is_none() && marker.process_start_ticks.is_none() => {
+                RegistryReprocessStatus::Ready
+            }
+            "running" => RegistryReprocessStatus::Running,
+            "complete" => RegistryReprocessStatus::Blocked,
+            "failed" => RegistryReprocessStatus::Failed,
+            _ => RegistryReprocessStatus::Blocked,
+        },
+        Err(_) => RegistryReprocessStatus::Blocked,
+    }
+}
+
+fn registry_reprocess_work_pending(
+    config: &SchedulerConfig,
+    snapshot: &PipelineSnapshot,
+    runtime: &RuntimeState,
+) -> bool {
+    let continuation_pending = runtime
+        .registry_reprocess_audit_queue
+        .iter()
+        .any(registry_reprocess_audit_is_continuation);
+    if !runtime.registry_reprocesses.is_empty()
+        || !runtime.adopted_registry_reprocesses.is_empty()
+        || runtime.active_registry_reprocess_audit.is_some()
+        || continuation_pending
+        || !runtime.registry_reprocess_audit_claim_failures.is_empty()
+        || runtime.registry_reprocess_admission_blocked
+    {
+        return true;
+    }
+    config.registry_reprocess_concurrency > 0
+        && (!runtime.pending_registry_reprocess_audits.is_empty()
+            || snapshot.epochs.iter().any(|epoch| {
+                matches!(
+                    registry_reprocess_status(config, runtime, epoch),
+                    RegistryReprocessStatus::Ready | RegistryReprocessStatus::Running
+                )
+            }))
+}
+
+fn registry_reprocess_capacity_in_use(runtime: &RuntimeState) -> usize {
+    runtime
+        .registry_reprocesses
+        .len()
+        .saturating_add(runtime.adopted_registry_reprocesses.len())
+        .saturating_add(usize::from(
+            runtime.active_registry_reprocess_audit.is_some(),
+        ))
+}
+
+fn registry_reprocess_conflicting_work_active(
+    snapshot: &PipelineSnapshot,
+    runtime: &RuntimeState,
+) -> bool {
+    !runtime.acquisitions.is_empty()
+        || !runtime.scans.is_empty()
+        || !runtime.legacy_compacts.is_empty()
+        || !runtime.adopted_legacy_compacts.is_empty()
+        || !runtime.poh_migrations.is_empty()
+        || !runtime.adopted_poh_migrations.is_empty()
+        || runtime.finalizer.is_some()
+        || snapshot.lanes.iter().any(|lane| {
+            lane.kind != REGISTRY_REPROCESS_OWNERSHIP_KIND
+                && !matches!(
+                    lane.state.as_str(),
+                    "done" | "complete" | "failed" | "stopped" | "idle"
+                )
+        })
+}
+
+fn closest_filesystem_capacity(path: &Path) -> Option<(u64, u64)> {
+    let mut candidate = Some(path);
+    while let Some(current) = candidate {
+        if let Some(capacity) = filesystem_capacity(current) {
+            return Some(capacity);
+        }
+        candidate = current.parent();
+    }
+    None
+}
+
+fn registry_reprocess_projected_bytes(epoch: &EpochSnapshot) -> u64 {
+    let source_bytes = epoch
+        .artifacts
+        .iter()
+        .fold(0u64, |sum, artifact| sum.saturating_add(artifact.bytes));
+    let registry_bytes = epoch
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == ArtifactKind::Registry)
+        .fold(0u64, |sum, artifact| sum.saturating_add(artifact.bytes));
+    // In addition to the target generation, peak disk retains a private source-registry
+    // snapshot (1x registry.bin) and fixed-width external-sort runs (40/32x). Round the latter
+    // up and reserve 2.25x registry bytes so admission cannot consume the operator's reserve.
+    let registry_scratch = registry_bytes
+        .saturating_mul(2)
+        .saturating_add(registry_bytes.div_ceil(4));
+    source_bytes
+        .saturating_add(registry_scratch)
+        .max(MIN_FINALIZER_SCRATCH_BYTES)
+}
+
+fn admit_registry_reprocess_audit(
+    config: &SchedulerConfig,
+    snapshot: &PipelineSnapshot,
+    runtime: &mut RuntimeState,
+    auditor: &RegistryReprocessAuditor,
+) {
+    if runtime.scheduler_paused
+        || !snapshot.inventory.complete
+        || registry_reprocess_conflicting_work_active(snapshot, runtime)
+        || !registry_reprocess_work_pending(config, snapshot, runtime)
+        || runtime.active_registry_reprocess_audit.is_some()
+        || runtime.registry_reprocess_audit_queue.is_empty()
+        || runtime.registry_reprocess_admission_blocked
+    {
+        return;
+    }
+    let allow_existing_target = config.registry_reprocess_concurrency > 0;
+    let Some(request) = runtime
+        .registry_reprocess_audit_queue
+        .iter()
+        .find(|request| allow_existing_target || registry_reprocess_audit_is_continuation(request))
+        .cloned()
+    else {
+        runtime.registry_reprocess_admission_blocked_reason = Some(
+            "manual registry deep validation is queued but registry concurrency is disabled"
+                .to_string(),
+        );
+        return;
+    };
+    let continuation = registry_reprocess_audit_is_continuation(&request);
+    let capacity_in_use = registry_reprocess_capacity_in_use(runtime);
+    let capacity_available = if config.registry_reprocess_concurrency == 0 {
+        continuation && capacity_in_use == 0
+    } else {
+        capacity_in_use < config.registry_reprocess_concurrency
+    };
+    if !capacity_available {
+        runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+            "registry deep-audit capacity blocked: {capacity_in_use} of {} slots are in use",
+            config.registry_reprocess_concurrency
+        ));
+        return;
+    }
+    let pressure = legacy_pressure_state(config, &snapshot.machine);
+    if !matches!(pressure, LegacyPressureState::Resume) {
+        runtime.registry_reprocess_admission_blocked_reason =
+            Some(match reason_for_pressure(&pressure) {
+                Some(reason) => format!("registry deep-audit pressure gate: {reason}"),
+                None => {
+                    "registry deep-audit pressure gate is waiting for resume thresholds".to_string()
+                }
+            });
+        return;
+    }
+    let cpu_budget = usize::try_from(config.legacy_compact_cpu_budget_cores)
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let managed_threads = runtime
+        .registry_reprocesses
+        .len()
+        .saturating_mul(config.registry_reprocess_threads);
+    let adopted_threads = runtime
+        .adopted_registry_reprocesses
+        .values()
+        .fold(0usize, |sum, adopted| {
+            sum.saturating_add(adopted.threads.unwrap_or(cpu_budget))
+        });
+    // Deep validation builds its Rayon pool from the immutable publication receipt rather than
+    // the controller's current spawn configuration. The bounded receipt probe is cheap; if it
+    // fails, deep validation will fail before constructing that pool, so one thread is sufficient
+    // to admit the bounded error path.
+    let audit_threads = probe_registry_reprocess_receipt(config, request.epoch)
+        .map(|receipt| receipt.threads.clamp(1, 64))
+        .unwrap_or(1);
+    let cpu_threads_in_use = managed_threads.saturating_add(adopted_threads);
+    if cpu_threads_in_use.saturating_add(audit_threads) > cpu_budget {
+        runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+            "registry deep-audit CPU admission blocked: {cpu_threads_in_use} registry threads active, audit needs {audit_threads}, budget is {cpu_budget}"
+        ));
+        return;
+    }
+    let mib = 1024u64 * 1024;
+    let reservation = config.registry_reprocess_memory_mib.saturating_mul(mib);
+    let reserve = config.memory_reserve_mib.saturating_mul(mib);
+    if snapshot.machine.memory_total_bytes > 0
+        && snapshot.machine.memory_available_bytes < reserve.saturating_add(reservation)
+    {
+        runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+            "registry deep-audit memory admission blocked: available {:.1} MiB, task {} MiB, reserve {} MiB",
+            snapshot.machine.memory_available_bytes as f64 / 1024f64.powi(2),
+            config.registry_reprocess_memory_mib,
+            config.memory_reserve_mib,
+        ));
+        return;
+    }
+    let (_, disk_available) =
+        closest_filesystem_capacity(&config.registry_reprocess_target_root).unwrap_or_default();
+    let disk_reserve = config.disk_reserve_gib.saturating_mul(1024 * 1024 * 1024);
+    // Deep validation is read-only apart from its small terminal marker. The immutable target
+    // and the rewrite's sort scratch already exist, so applying rewrite projection here would
+    // double-count them and strand a valid audit whenever the device is near its reserve.
+    let marker_headroom = MAX_REGISTRY_REPROCESS_MARKER_BYTES;
+    if disk_available == 0 || disk_available < disk_reserve.saturating_add(marker_headroom) {
+        runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+            "registry deep-audit disk admission blocked: available {:.1} GiB, marker headroom {:.1} KiB, reserve {} GiB",
+            disk_available as f64 / 1024f64.powi(3),
+            marker_headroom as f64 / 1024f64,
+            config.disk_reserve_gib,
+        ));
+        return;
+    }
+    dispatch_registry_reprocess_audit(config, runtime, auditor, allow_existing_target);
+}
+
+async fn top_up_registry_reprocesses(
+    config: &SchedulerConfig,
+    snapshot: &PipelineSnapshot,
+    runtime: &mut RuntimeState,
+) -> usize {
+    if runtime.active_registry_reprocess_audit.is_some()
+        || !runtime.pending_registry_reprocess_audits.is_empty()
+    {
+        runtime
+            .registry_reprocess_admission_blocked_reason
+            .get_or_insert_with(|| {
+                "registry deep validation owns the maintenance lane".to_string()
+            });
+        return 0;
+    }
+    runtime.registry_reprocess_admission_blocked_reason = None;
+    if config.registry_reprocess_concurrency == 0 {
+        return 0;
+    }
+    if runtime.registry_reprocess_admission_blocked {
+        runtime.registry_reprocess_admission_blocked_reason = Some(
+            "registry reprocess ownership is unresolved; refusing duplicate admission".to_string(),
+        );
+        return 0;
+    }
+    let pressure = legacy_pressure_state(config, &snapshot.machine);
+    if !matches!(pressure, LegacyPressureState::Resume) {
+        runtime.registry_reprocess_admission_blocked_reason =
+            Some(match reason_for_pressure(&pressure) {
+                Some(reason) => format!("registry reprocess pressure gate: {reason}"),
+                None => {
+                    "registry reprocess pressure gate is waiting for resume thresholds".to_string()
+                }
+            });
+        return 0;
+    }
+    let mut active = registry_reprocess_capacity_in_use(runtime);
+    let cpu_budget = usize::try_from(config.legacy_compact_cpu_budget_cores)
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let mut cpu_threads_in_use = runtime
+        .registry_reprocesses
+        .len()
+        .saturating_mul(config.registry_reprocess_threads);
+    for adopted in runtime.adopted_registry_reprocesses.values() {
+        cpu_threads_in_use =
+            cpu_threads_in_use.saturating_add(adopted.threads.unwrap_or(cpu_budget));
+    }
+    let mib = 1024u64 * 1024;
+    let reservation = config.registry_reprocess_memory_mib.saturating_mul(mib);
+    let reserve = config.memory_reserve_mib.saturating_mul(mib);
+    let mut memory_available = snapshot.machine.memory_available_bytes;
+    let (_, mut disk_available) =
+        closest_filesystem_capacity(&config.registry_reprocess_target_root).unwrap_or_default();
+    let disk_reserve = config.disk_reserve_gib.saturating_mul(1024 * 1024 * 1024);
+    let mut started = 0usize;
+    for epoch in prioritized_epochs(config, &snapshot.epochs) {
+        if active >= config.registry_reprocess_concurrency {
+            break;
+        }
+        let key = format!("registry_reprocess:{}", epoch.epoch);
+        if runtime.failures.contains_key(&key)
+            || registry_reprocess_status(config, runtime, epoch) != RegistryReprocessStatus::Ready
+        {
+            continue;
+        }
+        if cpu_threads_in_use.saturating_add(config.registry_reprocess_threads) > cpu_budget {
+            runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                "registry reprocess CPU admission blocked: {cpu_threads_in_use} threads active, task needs {}, budget is {cpu_budget}",
+                config.registry_reprocess_threads,
+            ));
+            break;
+        }
+        if snapshot.machine.memory_total_bytes > 0
+            && memory_available < reserve.saturating_add(reservation)
+        {
+            runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                "registry reprocess memory admission blocked: available {:.1} MiB, task {} MiB, reserve {} MiB",
+                memory_available as f64 / 1024f64.powi(2),
+                config.registry_reprocess_memory_mib,
+                config.memory_reserve_mib,
+            ));
+            break;
+        }
+        let projected = registry_reprocess_projected_bytes(epoch);
+        if disk_available == 0 || disk_available < disk_reserve.saturating_add(projected) {
+            runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                "registry reprocess disk admission blocked: available {:.1} GiB, projected {:.1} GiB, reserve {} GiB",
+                disk_available as f64 / 1024f64.powi(3),
+                projected as f64 / 1024f64.powi(3),
+                config.disk_reserve_gib,
+            ));
+            break;
+        }
+        match spawn_registry_reprocess(config, epoch).await {
+            Ok(Some(child)) => {
+                reset_registry_reprocess_attempt_cache(runtime, epoch.epoch);
+                runtime.registry_reprocesses.insert(epoch.epoch, child);
+                active = active.saturating_add(1);
+                cpu_threads_in_use =
+                    cpu_threads_in_use.saturating_add(config.registry_reprocess_threads);
+                started = started.saturating_add(1);
+                memory_available = memory_available.saturating_sub(reservation);
+                disk_available = disk_available.saturating_sub(projected);
+            }
+            Ok(None) => {
+                runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                    "registry reprocess epoch {} lock is held by another owner",
+                    epoch.epoch
+                ));
+                break;
+            }
+            Err(error) => {
+                let message = format!("{key} spawn failed: {error:#}");
+                set_runtime_failure(config, runtime, key, message.clone());
+                record_error(config, runtime, "registry_reprocess", message);
+                break;
+            }
+        }
+    }
+    started
+}
+
+fn reason_for_pressure(pressure: &LegacyPressureState) -> Option<String> {
+    match pressure {
+        LegacyPressureState::Pause(reason) => Some(reason.clone()),
+        LegacyPressureState::Hold | LegacyPressureState::Resume => None,
+    }
 }
 
 async fn schedule_work(
@@ -11679,6 +12761,21 @@ async fn schedule_work(
         return Ok(());
     }
     if !snapshot.inventory.complete {
+        return Ok(());
+    }
+    // Registry rewrites operate on already-complete sources but perform sustained reads and
+    // generation writes. Drain every scan/compact/finalizer/PoH lane before starting them, then
+    // keep those classes excluded until the registry lane drains. This conservative first
+    // deployment can be relaxed only after production pressure data exists.
+    if registry_reprocess_work_pending(config, snapshot, runtime) {
+        if registry_reprocess_conflicting_work_active(snapshot, runtime) {
+            runtime.registry_reprocess_admission_blocked_reason = Some(
+                "waiting for scans, compacts, finalizers, acquisitions, and PoH migrations to drain"
+                    .to_string(),
+            );
+            return Ok(());
+        }
+        top_up_registry_reprocesses(config, snapshot, runtime).await;
         return Ok(());
     }
     // PoH migration targets already-complete epochs outside the acquisition/scan/compact/
@@ -11873,12 +12970,14 @@ async fn schedule_work(
     // child counted until it has actually been reaped, while also accounting
     // for adopted scans discovered from filesystem/process state after restart.
     let active_scans = adopted_active_scans;
-    if active_scans == 0 && runtime.scans.is_empty() && !live_ready_pending
+    if active_scans == 0
+        && runtime.scans.is_empty()
+        && !live_ready_pending
         && !finalizer_ready_pending
-            && top_up_legacy_compacts(config, snapshot, runtime, adaptive_legacy_limit).await > 0
-        {
-            return Ok(());
-        }
+        && top_up_legacy_compacts(config, snapshot, runtime, adaptive_legacy_limit).await > 0
+    {
+        return Ok(());
+    }
     let slots = snapshot
         .summary
         .scan_capacity_admitted
@@ -12272,15 +13371,7 @@ async fn spawn_historical_scan(
         args.push("--previous-car".into());
         args.push(previous_car.into_os_string());
     }
-    if let Some(previous_epoch) = epoch.epoch.checked_sub(1) {
-        let previous_registry = config
-            .archive_root
-            .join(format!("epoch-{previous_epoch}/registry.bin"));
-        if is_nonempty_file(&previous_registry) {
-            args.push("--first-seen-seed-registry".into());
-            args.push(previous_registry.into_os_string());
-        }
-    }
+    args.extend(historical_scan_seed_args(config, epoch.epoch));
     let result = spawn_child(
         config,
         args,
@@ -12300,6 +13391,26 @@ async fn spawn_historical_scan(
         );
     }
     result
+}
+
+fn historical_scan_seed_args(config: &SchedulerConfig, epoch: u64) -> Vec<std::ffi::OsString> {
+    let Some(previous_epoch) = epoch.checked_sub(1) else {
+        return Vec::new();
+    };
+    // `registry.bin` is in the epoch's first-seen encounter order and must never seed the next
+    // epoch: doing so makes every historical first occurrence sticky forever. The builder's
+    // bounded hot seed is the intentional cross-epoch input.
+    let previous_hot_seed = config
+        .archive_root
+        .join(format!("epoch-{previous_epoch}/{HOT_SEED_FILE}"));
+    if is_nonempty_file(&previous_hot_seed) {
+        vec![
+            "--first-seen-seed-registry".into(),
+            previous_hot_seed.into_os_string(),
+        ]
+    } else {
+        Vec::new()
+    }
 }
 
 fn legacy_compact_reuse_args(
@@ -12402,10 +13513,16 @@ async fn spawn_legacy_compact_reuse(
     result
 }
 
-fn poh_migration_args(archive_dir: &Path) -> Vec<std::ffi::OsString> {
+fn poh_migration_args(archive_dir: &Path, threads: usize) -> Vec<std::ffi::OsString> {
+    debug_assert!(
+        threads > 0,
+        "scheduler-managed migrations never use all cores implicitly"
+    );
     vec![
         "migrate-poh-signature-counts".into(),
         archive_dir.as_os_str().to_owned(),
+        "--threads".into(),
+        threads.to_string().into(),
     ]
 }
 
@@ -12413,6 +13530,367 @@ fn poh_migration_progress_path(state_root: &Path, epoch: u64) -> PathBuf {
     state_root
         .join("progress")
         .join(format!("epoch-{epoch}-poh-migration.json"))
+}
+
+fn registry_reprocess_progress_path(state_root: &Path, epoch: u64) -> PathBuf {
+    state_root
+        .join("progress")
+        .join(format!("epoch-{epoch}-registry-reprocess.json"))
+}
+
+fn registry_reprocess_marker_path(state_root: &Path, epoch: u64) -> PathBuf {
+    state_root
+        .join("registry_reprocess")
+        .join(format!("epoch-{epoch}.json"))
+}
+
+fn registry_reprocess_lock_path(state_root: &Path, epoch: u64) -> PathBuf {
+    state_root
+        .join("registry_reprocess_locks")
+        .join(format!("epoch-{epoch}.lock"))
+}
+
+fn registry_reprocess_args(
+    config: &SchedulerConfig,
+    source: &Path,
+    target: &Path,
+    epoch: u64,
+) -> Vec<std::ffi::OsString> {
+    vec![
+        "reprocess-archive-v2-registry".into(),
+        source.as_os_str().to_owned(),
+        target.as_os_str().to_owned(),
+        "--epoch".into(),
+        epoch.to_string().into(),
+        "--threads".into(),
+        config.registry_reprocess_threads.to_string().into(),
+        "--sort-memory-mib".into(),
+        config.registry_reprocess_sort_memory_mib.to_string().into(),
+        "--level".into(),
+        config.level.to_string().into(),
+    ]
+}
+
+fn read_registry_reprocess_marker_strict(
+    state_root: &Path,
+    epoch: u64,
+) -> Result<Option<RegistryReprocessMarker>> {
+    let path = registry_reprocess_marker_path(state_root, epoch);
+    let mut file = match open_readonly_nonblocking_nofollow(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("open registry reprocess marker {}", path.display()));
+        }
+    };
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("stat registry reprocess marker {}", path.display()))?;
+    anyhow::ensure!(
+        opened_metadata.file_type().is_file(),
+        "registry reprocess marker {} is not a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        opened_metadata.len() <= MAX_REGISTRY_REPROCESS_MARKER_BYTES,
+        "registry reprocess marker {} exceeds {} bytes",
+        path.display(),
+        MAX_REGISTRY_REPROCESS_MARKER_BYTES
+    );
+    let opened_identity = poh_migration_marker_file_identity(&opened_metadata);
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    (&mut file)
+        .take(MAX_REGISTRY_REPROCESS_MARKER_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read registry reprocess marker {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_REGISTRY_REPROCESS_MARKER_BYTES,
+        "registry reprocess marker {} grew beyond its bound while reading",
+        path.display()
+    );
+    let final_metadata = file
+        .metadata()
+        .with_context(|| format!("restat registry reprocess marker {}", path.display()))?;
+    anyhow::ensure!(
+        poh_migration_marker_file_identity(&final_metadata) == opened_identity,
+        "registry reprocess marker {} changed while reading",
+        path.display()
+    );
+    let published_metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("restat published registry marker {}", path.display()))?;
+    anyhow::ensure!(
+        published_metadata.file_type().is_file()
+            && poh_migration_marker_file_identity(&published_metadata) == opened_identity,
+        "registry reprocess marker {} was replaced while reading",
+        path.display()
+    );
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse registry reprocess marker {}", path.display()))
+        .map(Some)
+}
+
+fn publish_registry_reprocess_marker(
+    state_root: &Path,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> Result<()> {
+    let path = registry_reprocess_marker_path(state_root, epoch);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create registry marker root {}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(marker)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_REGISTRY_REPROCESS_MARKER_BYTES,
+        "registry reprocess marker serialization exceeds bounded size"
+    );
+    let temp = path.with_file_name(format!(".epoch-{epoch}.json.{}.tmp", std::process::id()));
+    let mut temp_file = File::create(&temp)
+        .with_context(|| format!("create registry marker temp {}", temp.display()))?;
+    std::io::Write::write_all(&mut temp_file, &bytes)
+        .with_context(|| format!("write registry marker temp {}", temp.display()))?;
+    temp_file
+        .sync_all()
+        .with_context(|| format!("sync registry marker temp {}", temp.display()))?;
+    fs::rename(&temp, &path).with_context(|| {
+        format!(
+            "publish registry reprocess marker {} -> {}",
+            temp.display(),
+            path.display()
+        )
+    })?;
+    File::open(path.parent().expect("registry marker has a parent"))
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("sync registry marker root for {}", path.display()))
+}
+
+fn registry_reprocess_marker_claims(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    marker.schema_version == SCHEMA_VERSION
+        && marker.kind == REGISTRY_REPROCESS_OWNERSHIP_KIND
+        && marker.epoch == epoch
+        && marker.source == config.archive_root.join(format!("epoch-{epoch}"))
+        && marker.target == registry_reprocess_target(config, epoch)
+        && (1..=256).contains(&marker.threads)
+}
+
+fn write_registry_reprocess_marker(
+    config: &SchedulerConfig,
+    epoch: u64,
+    state: &str,
+    message: Option<String>,
+) -> Result<()> {
+    let existing = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+        .ok()
+        .flatten();
+    let marker = RegistryReprocessMarker {
+        schema_version: SCHEMA_VERSION,
+        kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
+        epoch,
+        state: state.to_string(),
+        created_unix_secs: existing
+            .as_ref()
+            .map(|marker| marker.created_unix_secs)
+            .unwrap_or_else(unix_now),
+        updated_unix_secs: unix_now(),
+        message,
+        source: config.archive_root.join(format!("epoch-{epoch}")),
+        target: registry_reprocess_target(config, epoch),
+        threads: config.registry_reprocess_threads,
+        pid: None,
+        process_start_ticks: None,
+        audit_retry_is_safe: false,
+        audit_is_continuation: false,
+    };
+    publish_registry_reprocess_marker(&config.state_root, epoch, &marker)
+}
+
+fn registry_reprocess_audit_retry_is_safe(request: &RegistryReprocessAuditRequest) -> bool {
+    matches!(
+        request.purpose,
+        RegistryReprocessAuditPurpose::Ended {
+            retry_is_safe: true,
+            ..
+        }
+    )
+}
+
+fn registry_reprocess_audit_is_continuation(request: &RegistryReprocessAuditRequest) -> bool {
+    !matches!(
+        request.purpose,
+        RegistryReprocessAuditPurpose::ExistingTarget { .. }
+    )
+}
+
+fn write_registry_reprocess_audit_marker(
+    config: &SchedulerConfig,
+    request: &RegistryReprocessAuditRequest,
+) -> Result<()> {
+    let epoch = request.epoch;
+    let existing = read_registry_reprocess_marker_strict(&config.state_root, epoch)?;
+    if let Some(existing) = existing.as_ref() {
+        anyhow::ensure!(
+            registry_reprocess_marker_claims(config, epoch, existing),
+            "registry reprocess marker binding changed before durable deep-audit claim"
+        );
+    }
+    let message = match request.purpose {
+        RegistryReprocessAuditPurpose::Ended { reason, .. }
+        | RegistryReprocessAuditPurpose::ExistingTarget { reason } => reason.to_string(),
+        RegistryReprocessAuditPurpose::ChildExit {
+            process_success, ..
+        } => format!(
+            "deep validation required after registry worker exited {}",
+            if process_success {
+                "successfully with uncertain ownership"
+            } else {
+                "with failure"
+            }
+        ),
+    };
+    let marker = RegistryReprocessMarker {
+        schema_version: SCHEMA_VERSION,
+        kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
+        epoch,
+        state: "auditing".to_string(),
+        created_unix_secs: existing
+            .as_ref()
+            .map(|marker| marker.created_unix_secs)
+            .unwrap_or_else(unix_now),
+        updated_unix_secs: unix_now(),
+        message: Some(message),
+        source: config.archive_root.join(format!("epoch-{epoch}")),
+        target: registry_reprocess_target(config, epoch),
+        threads: existing
+            .as_ref()
+            .map(|marker| marker.threads)
+            .unwrap_or(config.registry_reprocess_threads),
+        pid: None,
+        process_start_ticks: None,
+        audit_retry_is_safe: registry_reprocess_audit_retry_is_safe(request),
+        audit_is_continuation: registry_reprocess_audit_is_continuation(request),
+    };
+    publish_registry_reprocess_marker(&config.state_root, epoch, &marker)
+}
+
+fn set_registry_reprocess_marker_identity(
+    config: &SchedulerConfig,
+    epoch: u64,
+    pid: u32,
+    process_start_ticks: u64,
+) -> Result<()> {
+    let mut marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)?
+        .context("registry reprocess marker disappeared before identity publication")?;
+    anyhow::ensure!(
+        registry_reprocess_marker_claims(config, epoch, &marker) && marker.state == "running",
+        "registry reprocess marker changed before identity publication"
+    );
+    marker.pid = Some(pid);
+    marker.process_start_ticks = Some(process_start_ticks);
+    marker.updated_unix_secs = unix_now();
+    publish_registry_reprocess_marker(&config.state_root, epoch, &marker)
+}
+
+fn validate_registry_reprocess_output(config: &SchedulerConfig, epoch: u64) -> Result<()> {
+    let source = config.archive_root.join(format!("epoch-{epoch}"));
+    let target = registry_reprocess_target(config, epoch);
+    crate::archive_v2::registry_reprocess::validate_published_reprocess(&source, &target, epoch)
+        .map(|_| ())
+}
+
+fn probe_registry_reprocess_receipt(
+    config: &SchedulerConfig,
+    epoch: u64,
+) -> Result<crate::archive_v2::registry_reprocess::RegistryReprocessReceipt> {
+    let expected_source = fs::canonicalize(config.archive_root.join(format!("epoch-{epoch}")))
+        .with_context(|| format!("canonicalize configured source epoch {epoch}"))?;
+    let receipt = crate::archive_v2::registry_reprocess::probe_published_reprocess(
+        &registry_reprocess_target(config, epoch),
+        epoch,
+    )?;
+    anyhow::ensure!(
+        Path::new(&receipt.source_dir) == expected_source,
+        "registry reprocess receipt source_dir={} does not identify configured source {}",
+        receipt.source_dir,
+        expected_source.display()
+    );
+    Ok(receipt)
+}
+
+fn probe_registry_reprocess_output(config: &SchedulerConfig, epoch: u64) -> Result<()> {
+    probe_registry_reprocess_receipt(config, epoch).map(|_| ())
+}
+
+async fn spawn_registry_reprocess(
+    config: &SchedulerConfig,
+    epoch: &EpochSnapshot,
+) -> Result<Option<ManagedChild>> {
+    anyhow::ensure!(
+        poh_process_table_observable(),
+        "registry reprocess spawn requires an observable Linux /proc process table"
+    );
+    anyhow::ensure!(
+        registry_reprocess_source_candidate(epoch),
+        "epoch {} is not a complete first-seen source",
+        epoch.epoch
+    );
+    anyhow::ensure!(
+        find_registry_reprocess_processes(config, epoch.epoch).is_some_and(|pids| pids.is_empty()),
+        "registry reprocess process ownership for epoch {} is live or unobservable",
+        epoch.epoch
+    );
+    let Some(lock) = try_exclusive_lock(&registry_reprocess_lock_path(
+        &config.state_root,
+        epoch.epoch,
+    ))?
+    else {
+        return Ok(None);
+    };
+    fs::create_dir_all(&config.registry_reprocess_target_root).with_context(|| {
+        format!(
+            "create registry reprocess target root {}",
+            config.registry_reprocess_target_root.display()
+        )
+    })?;
+    write_registry_reprocess_marker(
+        config,
+        epoch.epoch,
+        "running",
+        Some("rewriting first-seen registry IDs into a usage-sorted generation".to_string()),
+    )?;
+    let source = epoch.output_path.clone();
+    let target = registry_reprocess_target(config, epoch.epoch);
+    let progress_path = registry_reprocess_progress_path(&config.state_root, epoch.epoch);
+    let log_path = config
+        .state_root
+        .join("logs")
+        .join(format!("epoch-{}-registry-reprocess.log", epoch.epoch));
+    let args = registry_reprocess_args(config, &source, &target, epoch.epoch);
+    let result = spawn_child(
+        config,
+        args,
+        ChildKind::RegistryReprocess {
+            epoch: epoch.epoch,
+            target,
+        },
+        progress_path,
+        log_path,
+        Some(lock),
+    )
+    .await;
+    if let Err(error) = &result {
+        let _ = write_registry_reprocess_marker(
+            config,
+            epoch.epoch,
+            "failed",
+            Some(format!("registry reprocess spawn failed: {error:#}")),
+        );
+    }
+    result.map(Some)
 }
 
 /// PoH migration ownership lives under `state_root`, never inside the epoch's own archive
@@ -12433,40 +13911,115 @@ fn poh_migration_marker_path(state_root: &Path, epoch: u64) -> PathBuf {
         .join(format!("epoch-{epoch}.json"))
 }
 
-fn read_poh_migration_marker(state_root: &Path, epoch: u64) -> Option<OwnershipMarker> {
-    serde_json::from_slice(&fs::read(poh_migration_marker_path(state_root, epoch)).ok()?).ok()
+fn read_poh_migration_marker(state_root: &Path, epoch: u64) -> Option<PohMigrationMarker> {
+    read_poh_migration_marker_strict(state_root, epoch)
+        .ok()
+        .flatten()
 }
 
-fn write_poh_migration_marker(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PohMigrationMarkerFileIdentity {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    modified_secs: i64,
+    modified_nanos: i64,
+    changed_secs: i64,
+    changed_nanos: i64,
+}
+
+fn poh_migration_marker_file_identity(metadata: &fs::Metadata) -> PohMigrationMarkerFileIdentity {
+    PohMigrationMarkerFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        bytes: metadata.len(),
+        modified_secs: metadata.mtime(),
+        modified_nanos: metadata.mtime_nsec(),
+        changed_secs: metadata.ctime(),
+        changed_nanos: metadata.ctime_nsec(),
+    }
+}
+
+fn open_readonly_nonblocking_nofollow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    options.open(path)
+}
+
+fn read_poh_migration_marker_strict(
     state_root: &Path,
     epoch: u64,
-    state: &str,
-    message: Option<String>,
+) -> Result<Option<PohMigrationMarker>> {
+    let path = poh_migration_marker_path(state_root, epoch);
+    let mut file = match open_readonly_nonblocking_nofollow(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("open PoH migration marker {}", path.display()));
+        }
+    };
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("stat open PoH migration marker {}", path.display()))?;
+    anyhow::ensure!(
+        opened_metadata.file_type().is_file(),
+        "PoH migration marker {} is not a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        opened_metadata.len() <= MAX_POH_MIGRATION_MARKER_BYTES,
+        "PoH migration marker {} has {} bytes; maximum is {MAX_POH_MIGRATION_MARKER_BYTES}",
+        path.display(),
+        opened_metadata.len()
+    );
+    let opened_identity = poh_migration_marker_file_identity(&opened_metadata);
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    (&mut file)
+        .take(MAX_POH_MIGRATION_MARKER_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read PoH migration marker {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_POH_MIGRATION_MARKER_BYTES,
+        "PoH migration marker {} grew beyond {MAX_POH_MIGRATION_MARKER_BYTES} bytes while reading",
+        path.display()
+    );
+    let final_metadata = file
+        .metadata()
+        .with_context(|| format!("restat open PoH migration marker {}", path.display()))?;
+    anyhow::ensure!(
+        poh_migration_marker_file_identity(&final_metadata) == opened_identity,
+        "PoH migration marker {} changed while being read",
+        path.display()
+    );
+    let published_metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("restat published PoH migration marker {}", path.display()))?;
+    anyhow::ensure!(
+        published_metadata.file_type().is_file()
+            && poh_migration_marker_file_identity(&published_metadata) == opened_identity,
+        "PoH migration marker {} was replaced while being read",
+        path.display()
+    );
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse PoH migration marker {}", path.display()))
+        .map(Some)
+}
+
+fn publish_poh_migration_marker(
+    state_root: &Path,
+    epoch: u64,
+    marker: &PohMigrationMarker,
 ) -> Result<()> {
     let path = poh_migration_marker_path(state_root, epoch);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create PoH migration marker directory {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!("create PoH migration marker directory {}", parent.display())
+        })?;
     }
-    let existing = read_poh_migration_marker(state_root, epoch);
-    let marker = OwnershipMarker {
-        schema_version: SCHEMA_VERSION,
-        kind: POH_MIGRATION_OWNERSHIP_KIND.to_string(),
-        id: epoch.to_string(),
-        state: state.to_string(),
-        created_unix_secs: existing
-            .as_ref()
-            .map(|marker| marker.created_unix_secs)
-            .unwrap_or_else(unix_now),
-        updated_unix_secs: unix_now(),
-        message,
-        pid: existing.and_then(|marker| marker.pid),
-    };
-    let temp = path.with_file_name(format!(
-        ".epoch-{epoch}.json.{}.tmp",
-        std::process::id()
-    ));
-    fs::write(&temp, serde_json::to_vec_pretty(&marker)?)
+    let temp = path.with_file_name(format!(".epoch-{epoch}.json.{}.tmp", std::process::id()));
+    fs::write(&temp, serde_json::to_vec_pretty(marker)?)
         .with_context(|| format!("write PoH migration marker temp {}", temp.display()))?;
     fs::rename(&temp, &path).with_context(|| {
         format!(
@@ -12477,21 +14030,89 @@ fn write_poh_migration_marker(
     })
 }
 
-fn set_poh_migration_marker_pid(state_root: &Path, epoch: u64, pid: Option<u32>) -> Result<()> {
-    let Some(mut marker) = read_poh_migration_marker(state_root, epoch) else {
-        return Ok(());
+fn write_poh_migration_marker(
+    state_root: &Path,
+    epoch: u64,
+    state: &str,
+    message: Option<String>,
+) -> Result<()> {
+    let existing = read_poh_migration_marker(state_root, epoch);
+    let marker = PohMigrationMarker {
+        schema_version: SCHEMA_VERSION,
+        kind: POH_MIGRATION_OWNERSHIP_KIND.to_string(),
+        id: epoch.to_string(),
+        state: state.to_string(),
+        created_unix_secs: existing
+            .as_ref()
+            .map(|marker| marker.created_unix_secs)
+            .unwrap_or_else(unix_now),
+        updated_unix_secs: unix_now(),
+        message,
+        // Every state transition clears the process identity in the same atomic rename. Only
+        // the post-spawn publication below may attach a PID/start-time/thread tuple.
+        pid: None,
+        process_start_ticks: None,
+        worker_threads: None,
     };
-    marker.pid = pid;
+    publish_poh_migration_marker(state_root, epoch, &marker)
+}
+
+fn set_poh_migration_marker_identity(
+    state_root: &Path,
+    epoch: u64,
+    pid: u32,
+    process_start_ticks: u64,
+    worker_threads: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        worker_threads > 0,
+        "PoH migration worker thread count must be positive"
+    );
+    let Some(mut marker) = read_poh_migration_marker_strict(state_root, epoch)? else {
+        anyhow::bail!("PoH migration marker disappeared before identity publication");
+    };
+    anyhow::ensure!(
+        marker.schema_version == SCHEMA_VERSION
+            && marker.kind == POH_MIGRATION_OWNERSHIP_KIND
+            && marker.id == epoch.to_string()
+            && marker.state == "running",
+        "PoH migration marker changed before identity publication"
+    );
+    marker.pid = Some(pid);
+    marker.process_start_ticks = Some(process_start_ticks);
+    marker.worker_threads = Some(worker_threads);
     marker.updated_unix_secs = unix_now();
-    let path = poh_migration_marker_path(state_root, epoch);
-    let temp = path.with_file_name(format!(
-        ".epoch-{epoch}.json.{}.tmp",
-        std::process::id()
-    ));
-    fs::write(&temp, serde_json::to_vec_pretty(&marker)?)
-        .with_context(|| format!("write PoH migration marker pid {}", temp.display()))?;
-    fs::rename(&temp, &path)
-        .with_context(|| format!("publish PoH migration marker pid {}", path.display()))
+    publish_poh_migration_marker(state_root, epoch, &marker)
+}
+
+fn compare_and_transition_failed_poh_marker_to_retry_ready(
+    state_root: &Path,
+    epoch: u64,
+    expected: &PohMigrationMarker,
+) -> Result<()> {
+    let current = read_poh_migration_marker_strict(state_root, epoch)?
+        .context("PoH migration marker disappeared before retry transition")?;
+    anyhow::ensure!(
+        current == *expected,
+        "PoH migration marker changed before retry transition"
+    );
+    anyhow::ensure!(
+        poh_migration_marker_claims_epoch(&current, epoch) && current.state == "failed",
+        "PoH migration retry requires the exact failed marker claim"
+    );
+    let retry_ready = PohMigrationMarker {
+        schema_version: SCHEMA_VERSION,
+        kind: POH_MIGRATION_OWNERSHIP_KIND.to_string(),
+        id: epoch.to_string(),
+        state: "retry_ready".to_string(),
+        created_unix_secs: current.created_unix_secs,
+        updated_unix_secs: unix_now(),
+        message: None,
+        pid: None,
+        process_start_ticks: None,
+        worker_threads: None,
+    };
+    publish_poh_migration_marker(state_root, epoch, &retry_ready)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12500,6 +14121,1684 @@ enum PohMigrationStatus {
     Ready,
     AlreadyMigrated,
     RetryReady,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PohMigrationProcessArgv {
+    /// `None` is the legacy/all-cores form with no positive explicit `--threads` value.
+    worker_threads: Option<usize>,
+}
+
+fn poh_migration_process_argv(
+    pid: u32,
+    blockzilla_bin: &Path,
+    archive_dir: &Path,
+) -> io::Result<Option<PohMigrationProcessArgv>> {
+    let bytes = fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline"))?;
+    Ok(poh_migration_argv(&bytes, blockzilla_bin, archive_dir))
+}
+
+fn poh_migration_argv(
+    bytes: &[u8],
+    blockzilla_bin: &Path,
+    archive_dir: &Path,
+) -> Option<PohMigrationProcessArgv> {
+    if bytes.last() != Some(&0) {
+        return None;
+    }
+    let args = bytes[..bytes.len().saturating_sub(1)]
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>();
+    if args.first().copied() != Some(blockzilla_bin.as_os_str().as_bytes()) {
+        return None;
+    }
+    poh_migration_argv_args(&args, archive_dir)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn poh_migration_argv_any_binary(
+    bytes: &[u8],
+    archive_dir: &Path,
+) -> Option<PohMigrationProcessArgv> {
+    if bytes.last() != Some(&0) {
+        return None;
+    }
+    let args = bytes[..bytes.len().saturating_sub(1)]
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>();
+    poh_migration_argv_args(&args, archive_dir)
+}
+
+fn poh_migration_argv_args(args: &[&[u8]], archive_dir: &Path) -> Option<PohMigrationProcessArgv> {
+    if args.get(1).copied() != Some(b"migrate-poh-signature-counts")
+        || args.get(2).copied() != Some(archive_dir.as_os_str().as_bytes())
+    {
+        return None;
+    }
+    let worker_threads = match args {
+        [_, _, _] => None,
+        [_, _, _, flag, value] if *flag == b"--threads" => {
+            let value = std::str::from_utf8(value).ok()?.parse::<usize>().ok()?;
+            (value > 0).then_some(value)
+        }
+        [_, _, _, flag] => {
+            let value = flag.strip_prefix(b"--threads=")?;
+            let value = std::str::from_utf8(value).ok()?.parse::<usize>().ok()?;
+            (value > 0).then_some(value)
+        }
+        _ => return None,
+    };
+    Some(PohMigrationProcessArgv { worker_threads })
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PohPidObservation {
+    Running { process_start_ticks: u64 },
+    NotRunning,
+    Absent,
+    Unobservable,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PohProcessScan {
+    Observable(Vec<u32>),
+    Unobservable,
+}
+
+#[cfg(target_os = "linux")]
+fn poh_process_table_observable() -> bool {
+    let Ok(mounts) = fs::read_to_string("/proc/mounts") else {
+        return false;
+    };
+    proc_mount_allows_full_process_visibility(&mounts)
+        && fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|stat| parse_process_stat_identity(&stat))
+            .is_some()
+        && fs::read_dir("/proc").is_ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn poh_process_table_observable() -> bool {
+    false
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_mount_allows_full_process_visibility(mounts: &str) -> bool {
+    mounts
+        .lines()
+        .find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.get(1) != Some(&"/proc") || fields.get(2) != Some(&"proc") {
+                return None;
+            }
+            Some(fields.get(3).is_some_and(|options| {
+                options.split(',').all(|option| {
+                    option
+                        .strip_prefix("hidepid=")
+                        .is_none_or(|value| matches!(value, "0" | "off"))
+                })
+            }))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn poh_pid_definitely_absent(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    if pid <= 0 {
+        return true;
+    }
+    // SAFETY: signal 0 performs an existence/permission probe without delivering a signal.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return false;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(target_os = "linux")]
+fn observe_poh_pid(pid: u32) -> PohPidObservation {
+    let pid_root = Path::new("/proc").join(pid.to_string());
+    match fs::read_to_string(pid_root.join("stat")) {
+        Ok(stat) => match parse_process_stat_identity(&stat) {
+            Some((state, _)) if matches!(state, 'Z' | 'X' | 'x') => PohPidObservation::NotRunning,
+            Some((_, process_start_ticks)) => PohPidObservation::Running {
+                process_start_ticks,
+            },
+            None => PohPidObservation::Unobservable,
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::metadata(&pid_root) {
+            Ok(_) => PohPidObservation::Unobservable,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if poh_process_table_observable() && poh_pid_definitely_absent(pid) {
+                    PohPidObservation::Absent
+                } else {
+                    PohPidObservation::Unobservable
+                }
+            }
+            Err(_) => PohPidObservation::Unobservable,
+        },
+        Err(_) => PohPidObservation::Unobservable,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn observe_poh_pid(_pid: u32) -> PohPidObservation {
+    PohPidObservation::Unobservable
+}
+
+#[cfg(target_os = "linux")]
+fn find_poh_migration_processes(config: &SchedulerConfig, epoch: u64) -> PohProcessScan {
+    if !poh_process_table_observable() {
+        return PohProcessScan::Unobservable;
+    }
+    let output = config.archive_root.join(format!("epoch-{epoch}"));
+    let entries = match fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(_) => return PohProcessScan::Unobservable,
+    };
+    let mut pids = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return PohProcessScan::Unobservable,
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let bytes = match fs::read(entry.path().join("cmdline")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match observe_poh_pid(pid) {
+                PohPidObservation::Absent | PohPidObservation::NotRunning => continue,
+                PohPidObservation::Running { .. } | PohPidObservation::Unobservable => {
+                    return PohProcessScan::Unobservable;
+                }
+            },
+            Err(_) => return PohProcessScan::Unobservable,
+        };
+        // Any executable with the exact migration subcommand and target is a potential writer.
+        // This deliberately survives binary-path upgrades when the marker itself is unreadable.
+        if poh_migration_argv_any_binary(&bytes, &output).is_some() {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    PohProcessScan::Observable(pids)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn find_poh_migration_processes(_config: &SchedulerConfig, _epoch: u64) -> PohProcessScan {
+    PohProcessScan::Unobservable
+}
+
+fn poh_migration_marker_claims_epoch(marker: &PohMigrationMarker, epoch: u64) -> bool {
+    marker.schema_version == SCHEMA_VERSION
+        && marker.kind == POH_MIGRATION_OWNERSHIP_KIND
+        && marker.id == epoch.to_string()
+}
+
+fn trusted_adopted_poh_migration(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &PohMigrationMarker,
+) -> Option<AdoptedPohMigration> {
+    if !poh_migration_marker_claims_epoch(marker, epoch) || marker.state != "running" {
+        return None;
+    }
+    let pid = marker.pid?;
+    let expected_start_ticks = marker.process_start_ticks?;
+    let worker_threads = marker.worker_threads.filter(|threads| *threads > 0)?;
+    let first_start_ticks = match observe_poh_pid(pid) {
+        PohPidObservation::Running {
+            process_start_ticks,
+        } if process_start_ticks == expected_start_ticks => process_start_ticks,
+        _ => return None,
+    };
+    let argv = poh_migration_process_argv(
+        pid,
+        &config.blockzilla_bin,
+        &config.archive_root.join(format!("epoch-{epoch}")),
+    )
+    .ok()??;
+    if argv.worker_threads != Some(worker_threads) {
+        return None;
+    }
+    let second_start_ticks = match observe_poh_pid(pid) {
+        PohPidObservation::Running {
+            process_start_ticks,
+        } => process_start_ticks,
+        _ => return None,
+    };
+    let second_marker = read_poh_migration_marker(&config.state_root, epoch)?;
+    if second_start_ticks != first_start_ticks
+        || !poh_migration_marker_claims_epoch(&second_marker, epoch)
+        || second_marker.state != "running"
+        || second_marker.pid != Some(pid)
+        || second_marker.process_start_ticks != Some(expected_start_ticks)
+        || second_marker.worker_threads != Some(worker_threads)
+    {
+        return None;
+    }
+    Some(AdoptedPohMigration {
+        epoch,
+        pid,
+        identity_trusted: true,
+        process_start_ticks: Some(expected_start_ticks),
+        worker_threads: Some(worker_threads),
+    })
+}
+
+enum PohMarkerLiveness {
+    Running(AdoptedPohMigration),
+    Ended,
+    Unobservable,
+}
+
+fn inspect_running_poh_migration(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &PohMigrationMarker,
+) -> PohMarkerLiveness {
+    if let Some(migration) = trusted_adopted_poh_migration(config, epoch, marker) {
+        return PohMarkerLiveness::Running(migration);
+    }
+    if let Some(pid) = marker.pid {
+        match observe_poh_pid(pid) {
+            PohPidObservation::Running {
+                process_start_ticks,
+            } if marker
+                .process_start_ticks
+                .is_none_or(|expected| expected == process_start_ticks) =>
+            {
+                // A live PID with missing durable identity, or the same persisted identity with
+                // changed/unreadable argv, can only be retained at the full-budget trust level.
+                return PohMarkerLiveness::Running(AdoptedPohMigration {
+                    epoch,
+                    pid,
+                    identity_trusted: false,
+                    process_start_ticks: None,
+                    worker_threads: None,
+                });
+            }
+            PohPidObservation::Unobservable => return PohMarkerLiveness::Unobservable,
+            PohPidObservation::Running { .. }
+            | PohPidObservation::NotRunning
+            | PohPidObservation::Absent => {}
+        }
+    }
+    match find_poh_migration_processes(config, epoch) {
+        PohProcessScan::Observable(pids) => pids
+            .into_iter()
+            .next()
+            .map(|pid| AdoptedPohMigration {
+                epoch,
+                pid,
+                identity_trusted: false,
+                process_start_ticks: None,
+                worker_threads: None,
+            })
+            .map_or(PohMarkerLiveness::Ended, PohMarkerLiveness::Running),
+        PohProcessScan::Unobservable => PohMarkerLiveness::Unobservable,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn untrusted_live_poh_migration(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &PohMigrationMarker,
+) -> Option<AdoptedPohMigration> {
+    match inspect_running_poh_migration(config, epoch, marker) {
+        PohMarkerLiveness::Running(migration) => Some(AdoptedPohMigration {
+            epoch,
+            pid: migration.pid,
+            identity_trusted: false,
+            process_start_ticks: None,
+            worker_threads: None,
+        }),
+        PohMarkerLiveness::Ended | PohMarkerLiveness::Unobservable => None,
+    }
+}
+
+fn retain_scanned_or_unobservable_poh_migration(
+    config: &SchedulerConfig,
+    migration: &mut AdoptedPohMigration,
+) -> bool {
+    match find_poh_migration_processes(config, migration.epoch) {
+        PohProcessScan::Observable(pids) => {
+            let Some(pid) = pids.into_iter().next() else {
+                return false;
+            };
+            migration.pid = pid;
+            migration.identity_trusted = false;
+            migration.process_start_ticks = None;
+            migration.worker_threads = None;
+            true
+        }
+        PohProcessScan::Unobservable => {
+            migration.identity_trusted = false;
+            migration.process_start_ticks = None;
+            migration.worker_threads = None;
+            true
+        }
+    }
+}
+
+fn adopted_poh_migration_still_running(
+    config: &SchedulerConfig,
+    migration: &mut AdoptedPohMigration,
+) -> bool {
+    let output = config
+        .archive_root
+        .join(format!("epoch-{}", migration.epoch));
+    if migration.identity_trusted {
+        let Some(expected_start_ticks) = migration.process_start_ticks else {
+            migration.identity_trusted = false;
+            migration.worker_threads = None;
+            return true;
+        };
+        match observe_poh_pid(migration.pid) {
+            PohPidObservation::Running {
+                process_start_ticks: observed,
+            } if observed == expected_start_ticks => {
+                match poh_migration_process_argv(migration.pid, &config.blockzilla_bin, &output) {
+                    Ok(Some(argv)) if argv.worker_threads == migration.worker_threads => true,
+                    Ok(Some(_)) | Ok(None) => {
+                        // Same kernel process identity but argv no longer matches the persisted
+                        // launch. Retain it at full budget and permanently stop trusting it.
+                        migration.identity_trusted = false;
+                        migration.process_start_ticks = None;
+                        migration.worker_threads = None;
+                        true
+                    }
+                    Err(_) => {
+                        migration.identity_trusted = false;
+                        migration.process_start_ticks = None;
+                        migration.worker_threads = None;
+                        true
+                    }
+                }
+            }
+            PohPidObservation::Unobservable => {
+                migration.identity_trusted = false;
+                migration.process_start_ticks = None;
+                migration.worker_threads = None;
+                true
+            }
+            PohPidObservation::Running { .. }
+            | PohPidObservation::NotRunning
+            | PohPidObservation::Absent => {
+                retain_scanned_or_unobservable_poh_migration(config, migration)
+            }
+        }
+    } else {
+        // No durable start ticks means this PID can never be distinguished from a reused PID.
+        // Therefore argv mismatch is not proof that the original worker ended: retain the full
+        // CPU reservation until the PID disappears (or is observably a non-running zombie).
+        // This deliberately also covers workers discovered from a PID-less legacy marker.
+        match observe_poh_pid(migration.pid) {
+            PohPidObservation::Running { .. } | PohPidObservation::Unobservable => return true,
+            PohPidObservation::NotRunning | PohPidObservation::Absent => {}
+        }
+        retain_scanned_or_unobservable_poh_migration(config, migration)
+    }
+}
+
+fn reconcile_ended_poh_migration(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    retry_is_safe: bool,
+    reason: &str,
+) -> bool {
+    let key = format!("poh_migration:{epoch}");
+    let output = config.archive_root.join(format!("epoch-{epoch}"));
+    let transition = match crate::archive_verify::poh_migration_epoch_verified(&output) {
+        Ok(true) => ("complete", None),
+        Ok(false) if retry_is_safe => (
+            "retry_ready",
+            Some(format!(
+                "{reason}; published sidecar is not fully migrated, atomic rerun is safe"
+            )),
+        ),
+        Ok(false) => (
+            "failed",
+            Some(format!(
+                "{reason}; marker had no durable process identity, so automatic retry is unsafe"
+            )),
+        ),
+        Err(error) => (
+            "failed",
+            Some(format!(
+                "{reason}; could not verify published PoH sidecar: {error:#}"
+            )),
+        ),
+    };
+    let (state, message) = transition;
+    match write_poh_migration_marker(&config.state_root, epoch, state, message.clone()) {
+        Ok(()) if state == "failed" => {
+            let message = message.unwrap_or_else(|| format!("{key} reconciliation failed"));
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "poh_migration_reconcile", message);
+            true
+        }
+        Ok(()) => {
+            clear_runtime_failure(config, runtime, &key);
+            true
+        }
+        Err(error) => {
+            let message = format!("{key} could not publish reconciled {state} marker: {error:#}");
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "poh_migration_reconcile", message);
+            false
+        }
+    }
+}
+
+fn parse_poh_migration_marker_epoch(path: &Path) -> Option<u64> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("epoch-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()
+}
+
+fn block_poh_migration_admission(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    message: String,
+) {
+    runtime.poh_migration_admission_blocked = true;
+    if !runtime
+        .failures
+        .contains_key(POH_MIGRATION_VISIBILITY_FAILURE_KEY)
+    {
+        set_runtime_failure(
+            config,
+            runtime,
+            POH_MIGRATION_VISIBILITY_FAILURE_KEY.to_string(),
+            message.clone(),
+        );
+        record_error(config, runtime, "poh_migration_visibility", message);
+    } else {
+        runtime
+            .failures
+            .insert(POH_MIGRATION_VISIBILITY_FAILURE_KEY.to_string(), message);
+    }
+}
+
+fn reconcile_untrusted_poh_marker(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    reason: &str,
+) {
+    match find_poh_migration_processes(config, epoch) {
+        PohProcessScan::Observable(pids) => {
+            if let Some(pid) = pids.into_iter().next() {
+                clear_runtime_failure(config, runtime, &format!("poh_migration:{epoch}"));
+                runtime.adopted_poh_migrations.insert(
+                    epoch,
+                    AdoptedPohMigration {
+                        epoch,
+                        pid,
+                        identity_trusted: false,
+                        process_start_ticks: None,
+                        worker_threads: None,
+                    },
+                );
+            } else if !reconcile_ended_poh_migration(config, runtime, epoch, false, reason) {
+                block_poh_migration_admission(
+                    config,
+                    runtime,
+                    format!(
+                        "poh_migration:{epoch} liveness was resolved but its marker could not be repaired"
+                    ),
+                );
+            }
+        }
+        PohProcessScan::Unobservable => block_poh_migration_admission(
+            config,
+            runtime,
+            format!(
+                "poh_migration:{epoch} ownership is unresolved because the process table or cmdline is unobservable: {reason}"
+            ),
+        ),
+    }
+}
+
+fn poh_migration_ownership_may_exist(config: &SchedulerConfig, runtime: &RuntimeState) -> bool {
+    if config.poh_migration_concurrency > 0
+        || config.poh_migration_capacity_max > 0
+        || !runtime.poh_migrations.is_empty()
+        || !runtime.adopted_poh_migrations.is_empty()
+    {
+        return true;
+    }
+    match fs::read_dir(config.state_root.join("poh_migrations")) {
+        Ok(entries) => entries.into_iter().any(|entry| {
+            entry
+                .ok()
+                .is_none_or(|entry| parse_poh_migration_marker_epoch(&entry.path()).is_some())
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+fn reconcile_poh_migration_markers(config: &SchedulerConfig, runtime: &mut RuntimeState) {
+    runtime.poh_migration_admission_blocked = false;
+    if !poh_process_table_observable() {
+        if !poh_migration_ownership_may_exist(config, runtime) {
+            clear_runtime_failure(config, runtime, POH_MIGRATION_VISIBILITY_FAILURE_KEY);
+            return;
+        }
+        for migration in runtime.adopted_poh_migrations.values_mut() {
+            migration.identity_trusted = false;
+            migration.process_start_ticks = None;
+            migration.worker_threads = None;
+        }
+        block_poh_migration_admission(
+            config,
+            runtime,
+            "PoH migration ownership is unresolved because Linux /proc is unavailable or hidden"
+                .to_string(),
+        );
+        return;
+    }
+
+    let adopted_epochs = runtime
+        .adopted_poh_migrations
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    for epoch in adopted_epochs {
+        let still_running = runtime
+            .adopted_poh_migrations
+            .get_mut(&epoch)
+            .is_some_and(|migration| adopted_poh_migration_still_running(config, migration));
+        if still_running {
+            continue;
+        }
+        runtime.adopted_poh_migrations.remove(&epoch);
+        if !reconcile_ended_poh_migration(
+            config,
+            runtime,
+            epoch,
+            true,
+            "adopted PoH migration process ended",
+        ) {
+            block_poh_migration_admission(
+                config,
+                runtime,
+                format!("poh_migration:{epoch} ended but its marker could not be reconciled"),
+            );
+        }
+    }
+
+    let marker_root = config.state_root.join("poh_migrations");
+    let entries = match fs::read_dir(&marker_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if !runtime.poh_migration_admission_blocked {
+                clear_runtime_failure(config, runtime, POH_MIGRATION_VISIBILITY_FAILURE_KEY);
+            }
+            return;
+        }
+        Err(error) => {
+            block_poh_migration_admission(
+                config,
+                runtime,
+                format!(
+                    "cannot audit PoH migration ownership markers in {}: {error}",
+                    marker_root.display()
+                ),
+            );
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                block_poh_migration_admission(
+                    config,
+                    runtime,
+                    format!(
+                        "cannot enumerate every PoH migration ownership marker in {}: {error}",
+                        marker_root.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        let Some(epoch) = parse_poh_migration_marker_epoch(&path) else {
+            continue;
+        };
+        if runtime.poh_migrations.contains_key(&epoch)
+            || runtime.adopted_poh_migrations.contains_key(&epoch)
+        {
+            continue;
+        }
+        let key = format!("poh_migration:{epoch}");
+        let Some(marker) = read_poh_migration_marker(&config.state_root, epoch) else {
+            reconcile_untrusted_poh_marker(
+                config,
+                runtime,
+                epoch,
+                &format!("marker {} is unreadable", path.display()),
+            );
+            continue;
+        };
+        let identity_is_clear = marker.pid.is_none()
+            && marker.process_start_ticks.is_none()
+            && marker.worker_threads.is_none();
+        if poh_migration_marker_claims_epoch(&marker, epoch)
+            && identity_is_clear
+            && matches!(marker.state.as_str(), "complete" | "failed" | "retry_ready")
+        {
+            continue;
+        }
+        if !poh_migration_marker_claims_epoch(&marker, epoch) || marker.state != "running" {
+            reconcile_untrusted_poh_marker(
+                config,
+                runtime,
+                epoch,
+                "marker schema/kind/id/state or terminal process identity is inconsistent",
+            );
+            continue;
+        }
+        match inspect_running_poh_migration(config, epoch, &marker) {
+            PohMarkerLiveness::Running(migration) => {
+                clear_runtime_failure(config, runtime, &key);
+                runtime.adopted_poh_migrations.insert(epoch, migration);
+            }
+            PohMarkerLiveness::Ended => {
+                if !reconcile_ended_poh_migration(
+                    config,
+                    runtime,
+                    epoch,
+                    marker.pid.is_some(),
+                    "running PoH migration marker has no live matching process",
+                ) {
+                    block_poh_migration_admission(
+                        config,
+                        runtime,
+                        format!("{key} ended but its running marker could not be reconciled"),
+                    );
+                }
+            }
+            PohMarkerLiveness::Unobservable => block_poh_migration_admission(
+                config,
+                runtime,
+                format!(
+                    "{key} process identity is unobservable; reserving the full PoH CPU budget"
+                ),
+            ),
+        }
+    }
+    if !runtime.poh_migration_admission_blocked {
+        clear_runtime_failure(config, runtime, POH_MIGRATION_VISIBILITY_FAILURE_KEY);
+    }
+}
+
+fn registry_reprocess_expected_argv(config: &SchedulerConfig, epoch: u64) -> Vec<Vec<u8>> {
+    let source = config.archive_root.join(format!("epoch-{epoch}"));
+    let target = registry_reprocess_target(config, epoch);
+    let mut expected = vec![config.blockzilla_bin.as_os_str().as_bytes().to_vec()];
+    expected.extend(
+        registry_reprocess_args(config, &source, &target, epoch)
+            .into_iter()
+            .map(|arg| arg.as_os_str().as_bytes().to_vec()),
+    );
+    expected
+}
+
+fn registry_reprocess_argv_matches_exact(
+    config: &SchedulerConfig,
+    epoch: u64,
+    bytes: &[u8],
+) -> bool {
+    if bytes.last() != Some(&0) {
+        return false;
+    }
+    let actual = bytes[..bytes.len().saturating_sub(1)]
+        .split(|byte| *byte == 0)
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    let expected = registry_reprocess_expected_argv(config, epoch);
+    actual == expected
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn process_argv_path_matches(actual: &[u8], expected: &Path) -> bool {
+    if actual == expected.as_os_str().as_bytes() {
+        return true;
+    }
+    let actual = Path::new(std::ffi::OsStr::from_bytes(actual));
+    match (fs::canonicalize(actual), fs::canonicalize(expected)) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => match (
+            lexical_absolute_path(actual),
+            lexical_absolute_path(expected),
+        ) {
+            (Some(actual), Some(expected)) => actual == expected,
+            _ => false,
+        },
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn lexical_absolute_path(path: &Path) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    Some(normalized)
+}
+
+/// Broad duplicate-writer identity. Resource arguments are deliberately ignored: an operator
+/// may launch the same epoch migration with different threads, memory, compression, or option
+/// ordering, but it still owns the same source/target publication boundary. Exact byte-for-byte
+/// argv matching remains mandatory for trusted scheduler adoption above this guard.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn registry_reprocess_argv_is_potential_writer(
+    config: &SchedulerConfig,
+    epoch: u64,
+    bytes: &[u8],
+) -> bool {
+    if bytes.last() != Some(&0) {
+        return false;
+    }
+    let args = bytes[..bytes.len().saturating_sub(1)]
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>();
+    if args.get(1).copied() != Some(b"reprocess-archive-v2-registry") {
+        return false;
+    }
+
+    let mut positionals = Vec::with_capacity(2);
+    let mut parsed_epoch = None;
+    let mut index = 2usize;
+    while index < args.len() {
+        let arg = args[index];
+        if arg == b"--epoch" {
+            let Some(value) = args.get(index + 1) else {
+                return false;
+            };
+            parsed_epoch = std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok());
+            index += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix(b"--epoch=") {
+            parsed_epoch = std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok());
+            index += 1;
+            continue;
+        }
+        if matches!(arg, b"--threads" | b"--sort-memory-mib" | b"--level") {
+            if args.get(index + 1).is_none() {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        if arg.starts_with(b"--threads=")
+            || arg.starts_with(b"--sort-memory-mib=")
+            || arg.starts_with(b"--level=")
+        {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with(b"--") {
+            // Unknown options cannot safely be classified because their following value may be
+            // positional-looking. Fail closed at spawn through the marker/lock if this is a
+            // scheduler child, but do not confuse an unrelated command with this target here.
+            return false;
+        }
+        positionals.push(arg);
+        index += 1;
+    }
+    if parsed_epoch != Some(epoch) || positionals.len() != 2 {
+        return false;
+    }
+    process_argv_path_matches(
+        positionals[0],
+        &config.archive_root.join(format!("epoch-{epoch}")),
+    ) && process_argv_path_matches(positionals[1], &registry_reprocess_target(config, epoch))
+}
+
+fn process_cmdline_matches_registry_reprocess_exact(
+    config: &SchedulerConfig,
+    epoch: u64,
+    pid: u32,
+) -> Option<bool> {
+    let bytes = fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")).ok()?;
+    Some(registry_reprocess_argv_matches_exact(config, epoch, &bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn find_registry_reprocess_processes(config: &SchedulerConfig, epoch: u64) -> Option<Vec<u32>> {
+    if !poh_process_table_observable() {
+        return None;
+    }
+    let entries = fs::read_dir("/proc").ok()?;
+    let mut pids = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        match fs::read(entry.path().join("cmdline")) {
+            Ok(bytes) => {
+                if registry_reprocess_argv_is_potential_writer(config, epoch, &bytes) {
+                    pids.push(pid);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if !matches!(
+                    observe_poh_pid(pid),
+                    PohPidObservation::Absent | PohPidObservation::NotRunning
+                ) {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    pids.sort_unstable();
+    Some(pids)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn find_registry_reprocess_processes(_config: &SchedulerConfig, _epoch: u64) -> Option<Vec<u32>> {
+    None
+}
+
+enum RegistryReprocessLiveness {
+    Running(AdoptedRegistryReprocess),
+    Ended {
+        retry_is_safe: bool,
+        probe_is_sufficient: bool,
+    },
+    Unobservable,
+}
+
+fn inspect_running_registry_reprocess(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> RegistryReprocessLiveness {
+    if !registry_reprocess_marker_claims(config, epoch, marker) || marker.state != "running" {
+        return RegistryReprocessLiveness::Unobservable;
+    }
+    if let (Some(pid), Some(expected_start_ticks)) = (marker.pid, marker.process_start_ticks) {
+        match observe_poh_pid(pid) {
+            PohPidObservation::Running {
+                process_start_ticks,
+            } if process_start_ticks == expected_start_ticks => {
+                let exact = process_cmdline_matches_registry_reprocess_exact(config, epoch, pid);
+                if exact == Some(true) {
+                    let stable = observe_poh_pid(pid).is_running_with(expected_start_ticks)
+                        && read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                            .is_ok_and(|current| current.as_ref() == Some(marker));
+                    if stable {
+                        return RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
+                            epoch,
+                            pid,
+                            process_start_ticks: Some(expected_start_ticks),
+                            threads: Some(marker.threads),
+                            progress_path: registry_reprocess_progress_path(
+                                &config.state_root,
+                                epoch,
+                            ),
+                            identity_trusted: true,
+                        });
+                    }
+                }
+                return RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
+                    epoch,
+                    pid,
+                    process_start_ticks: None,
+                    threads: None,
+                    progress_path: registry_reprocess_progress_path(&config.state_root, epoch),
+                    identity_trusted: false,
+                });
+            }
+            PohPidObservation::Unobservable => return RegistryReprocessLiveness::Unobservable,
+            PohPidObservation::Running { .. }
+            | PohPidObservation::NotRunning
+            | PohPidObservation::Absent => {}
+        }
+    } else if let Some(pid) = marker.pid {
+        match observe_poh_pid(pid) {
+            PohPidObservation::Running { .. } => {
+                return RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
+                    epoch,
+                    pid,
+                    process_start_ticks: None,
+                    threads: None,
+                    progress_path: registry_reprocess_progress_path(&config.state_root, epoch),
+                    identity_trusted: false,
+                });
+            }
+            PohPidObservation::Unobservable => return RegistryReprocessLiveness::Unobservable,
+            PohPidObservation::NotRunning | PohPidObservation::Absent => {}
+        }
+    }
+    match find_registry_reprocess_processes(config, epoch) {
+        Some(pids) if pids.is_empty() => {
+            let identity_trusted = marker.pid.is_some() && marker.process_start_ticks.is_some();
+            RegistryReprocessLiveness::Ended {
+                retry_is_safe: identity_trusted,
+                probe_is_sufficient: identity_trusted,
+            }
+        }
+        Some(pids) => RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
+            epoch,
+            pid: pids[0],
+            process_start_ticks: None,
+            threads: None,
+            progress_path: registry_reprocess_progress_path(&config.state_root, epoch),
+            identity_trusted: false,
+        }),
+        None => RegistryReprocessLiveness::Unobservable,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryReprocessValidation {
+    BoundedProbe,
+    Deep,
+}
+
+fn registry_reprocess_exit_validation(
+    success: bool,
+    ownership_was_uncertain: bool,
+) -> RegistryReprocessValidation {
+    if success && !ownership_was_uncertain {
+        RegistryReprocessValidation::BoundedProbe
+    } else {
+        // The filesystem is authoritative across the publication/exit crash window. A worker
+        // can publish and sync a valid immutable generation, then be killed (or return non-zero)
+        // before the scheduler observes its terminal status.
+        RegistryReprocessValidation::Deep
+    }
+}
+
+fn registry_reprocess_target_exists(config: &SchedulerConfig, epoch: u64) -> Result<bool> {
+    match fs::symlink_metadata(registry_reprocess_target(config, epoch)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect registry reprocess target for epoch {epoch}")),
+    }
+}
+
+fn enqueue_claimed_registry_reprocess_audit(
+    runtime: &mut RuntimeState,
+    request: RegistryReprocessAuditRequest,
+) {
+    let epoch = request.epoch;
+    if runtime.pending_registry_reprocess_audits.contains(&epoch)
+        || runtime.examined_registry_reprocess_targets.contains(&epoch)
+    {
+        return;
+    }
+    // A required deep audit is stronger than any prior bounded-probe cache entry. This removal
+    // happens before the pending claim is published so status can never expose Complete while
+    // the authoritative audit is queued or active.
+    runtime.validated_registry_reprocesses.remove(&epoch);
+    runtime.examined_registry_reprocess_targets.insert(epoch);
+    runtime.pending_registry_reprocess_audits.insert(epoch);
+    runtime.registry_reprocess_audit_queue.push_back(request);
+}
+
+fn require_registry_reprocess_audit(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    request: RegistryReprocessAuditRequest,
+) {
+    let epoch = request.epoch;
+    if runtime.pending_registry_reprocess_audits.contains(&epoch)
+        || runtime.examined_registry_reprocess_targets.contains(&epoch)
+    {
+        return;
+    }
+    if let Err(error) = write_registry_reprocess_audit_marker(config, &request) {
+        runtime.validated_registry_reprocesses.remove(&epoch);
+        runtime
+            .registry_reprocess_audit_claim_failures
+            .insert(epoch);
+        let key = format!("registry_reprocess:{epoch}");
+        let message = format!(
+            "{key} requires deep validation but its durable auditing marker could not be published; refusing bounded validation and admission: {error:#}"
+        );
+        set_runtime_failure(config, runtime, key, message.clone());
+        block_registry_reprocess_admission(runtime, message.clone());
+        record_error(config, runtime, "registry_reprocess_audit", message);
+        return;
+    }
+    runtime
+        .registry_reprocess_audit_claim_failures
+        .remove(&epoch);
+    enqueue_claimed_registry_reprocess_audit(runtime, request);
+}
+
+fn reset_registry_reprocess_attempt_cache(runtime: &mut RuntimeState, epoch: u64) {
+    runtime.validated_registry_reprocesses.remove(&epoch);
+    runtime.examined_registry_reprocess_targets.remove(&epoch);
+    runtime
+        .registry_reprocess_audit_claim_failures
+        .remove(&epoch);
+}
+
+fn registry_reprocess_audit_failure_message(
+    request: &RegistryReprocessAuditRequest,
+    error: &str,
+) -> String {
+    match &request.purpose {
+        RegistryReprocessAuditPurpose::Ended { reason, .. } => format!(
+            "{reason}; published target failed background deep validation and requires manual inspection: {error}"
+        ),
+        RegistryReprocessAuditPurpose::ExistingTarget { reason } => format!(
+            "{reason}; existing immutable target failed background deep validation and requires manual inspection: {error}"
+        ),
+        RegistryReprocessAuditPurpose::ChildExit {
+            process_success,
+            log_path,
+        } => format!(
+            "registry_reprocess:{} exited {} but its published generation failed background deep validation and requires manual inspection; log={}: {error}",
+            request.epoch,
+            if *process_success {
+                "successfully"
+            } else {
+                "with failure"
+            },
+            log_path.display(),
+        ),
+    }
+}
+
+fn commit_registry_reprocess_audit(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    request: RegistryReprocessAuditRequest,
+    result: std::result::Result<(), String>,
+) {
+    let epoch = request.epoch;
+    if !runtime.pending_registry_reprocess_audits.remove(&epoch) {
+        return;
+    }
+    let key = format!("registry_reprocess:{epoch}");
+    match result {
+        Ok(()) => {
+            if let Err(error) = write_registry_reprocess_marker(config, epoch, "complete", None) {
+                runtime.validated_registry_reprocesses.remove(&epoch);
+                let message = format!(
+                    "{key} passed background deep validation but completion marker publication failed; manual inspection required: {error:#}"
+                );
+                set_runtime_failure(config, runtime, key, message.clone());
+                record_error(config, runtime, "registry_reprocess_audit", message);
+                return;
+            }
+            runtime.validated_registry_reprocesses.insert(epoch);
+            clear_runtime_failure(config, runtime, &key);
+            runtime.paused_jobs.remove(&key);
+        }
+        Err(error)
+            if matches!(
+                &request.purpose,
+                RegistryReprocessAuditPurpose::Ended {
+                    retry_is_safe: true,
+                    ..
+                }
+            ) && registry_reprocess_target_exists(config, epoch).is_ok_and(|exists| !exists) =>
+        {
+            runtime.validated_registry_reprocesses.remove(&epoch);
+            clear_runtime_failure(config, runtime, &key);
+            let reason = match &request.purpose {
+                RegistryReprocessAuditPurpose::Ended { reason, .. } => *reason,
+                _ => unreachable!("guard proves ended audit purpose"),
+            };
+            if let Err(marker_error) = write_registry_reprocess_marker(
+                config,
+                epoch,
+                "retry_ready",
+                Some(format!(
+                    "{reason}; target is absent after background validation failed: {error}"
+                )),
+            ) {
+                let message =
+                    format!("{key} could not publish retry-ready marker: {marker_error:#}");
+                set_runtime_failure(config, runtime, key, message.clone());
+                record_error(config, runtime, "registry_reprocess_audit", message);
+            } else {
+                reset_registry_reprocess_attempt_cache(runtime, epoch);
+            }
+        }
+        Err(error) => {
+            runtime.validated_registry_reprocesses.remove(&epoch);
+            let message = bounded_registry_reprocess_audit_result(
+                &registry_reprocess_audit_failure_message(&request, &error),
+            );
+            let _ = write_registry_reprocess_marker(config, epoch, "failed", Some(message.clone()));
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "registry_reprocess_audit", message);
+        }
+    }
+}
+
+fn poll_registry_reprocess_audit(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    auditor: &RegistryReprocessAuditor,
+) {
+    let completion = match auditor.try_completion() {
+        Ok(Some(completion)) => completion,
+        Ok(None) => return,
+        Err(error) => {
+            if let Some(request) = runtime.active_registry_reprocess_audit.take() {
+                commit_registry_reprocess_audit(config, runtime, request, Err(error));
+            }
+            return;
+        }
+    };
+    let Some(active) = runtime.active_registry_reprocess_audit.take() else {
+        commit_registry_reprocess_audit(
+            config,
+            runtime,
+            completion.request,
+            Err("deep-audit completion arrived without an active scheduler claim".to_string()),
+        );
+        return;
+    };
+    if active != completion.request {
+        commit_registry_reprocess_audit(
+            config,
+            runtime,
+            active,
+            Err("deep-audit completion did not match the active scheduler claim".to_string()),
+        );
+        commit_registry_reprocess_audit(
+            config,
+            runtime,
+            completion.request,
+            Err("deep-audit completion did not match the active scheduler claim".to_string()),
+        );
+        return;
+    }
+    commit_registry_reprocess_audit(config, runtime, active, completion.result);
+}
+
+fn dispatch_registry_reprocess_audit(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    auditor: &RegistryReprocessAuditor,
+    allow_existing_target: bool,
+) {
+    if runtime.active_registry_reprocess_audit.is_some() {
+        return;
+    }
+    let Some(position) = runtime
+        .registry_reprocess_audit_queue
+        .iter()
+        .position(|request| {
+            allow_existing_target || registry_reprocess_audit_is_continuation(request)
+        })
+    else {
+        return;
+    };
+    let Some(request) = runtime.registry_reprocess_audit_queue.remove(position) else {
+        return;
+    };
+    match auditor.try_submit(request.clone()) {
+        Ok(()) => runtime.active_registry_reprocess_audit = Some(request),
+        Err(error) => commit_registry_reprocess_audit(config, runtime, request, Err(error)),
+    }
+}
+
+trait PohPidObservationExt {
+    fn is_running_with(&self, start_ticks: u64) -> bool;
+}
+
+impl PohPidObservationExt for PohPidObservation {
+    fn is_running_with(&self, start_ticks: u64) -> bool {
+        matches!(
+            self,
+            PohPidObservation::Running {
+                process_start_ticks
+            } if *process_start_ticks == start_ticks
+        )
+    }
+}
+
+fn reconcile_ended_registry_reprocess(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    retry_is_safe: bool,
+    validation: RegistryReprocessValidation,
+    reason: &'static str,
+) {
+    if validation == RegistryReprocessValidation::BoundedProbe
+        && runtime.pending_registry_reprocess_audits.contains(&epoch)
+    {
+        return;
+    }
+    if validation == RegistryReprocessValidation::Deep {
+        require_registry_reprocess_audit(
+            config,
+            runtime,
+            RegistryReprocessAuditRequest {
+                epoch,
+                purpose: RegistryReprocessAuditPurpose::Ended {
+                    retry_is_safe,
+                    reason,
+                },
+            },
+        );
+        return;
+    }
+    let key = format!("registry_reprocess:{epoch}");
+    match probe_registry_reprocess_output(config, epoch) {
+        Ok(()) => {
+            if let Err(error) = write_registry_reprocess_marker(config, epoch, "complete", None) {
+                runtime.validated_registry_reprocesses.remove(&epoch);
+                let message = format!("{key} validated but completion marker failed: {error:#}");
+                set_runtime_failure(config, runtime, key, message.clone());
+                record_error(config, runtime, "registry_reprocess_reconcile", message);
+            } else {
+                runtime.validated_registry_reprocesses.insert(epoch);
+                clear_runtime_failure(config, runtime, &key);
+            }
+        }
+        Err(error)
+            if retry_is_safe
+                && registry_reprocess_target_exists(config, epoch).is_ok_and(|exists| !exists) =>
+        {
+            runtime.validated_registry_reprocesses.remove(&epoch);
+            clear_runtime_failure(config, runtime, &key);
+            if let Err(marker_error) = write_registry_reprocess_marker(
+                config,
+                epoch,
+                "retry_ready",
+                Some(format!("{reason}; target validation failed: {error:#}")),
+            ) {
+                let message =
+                    format!("{key} could not publish retry-ready marker: {marker_error:#}");
+                set_runtime_failure(config, runtime, key, message.clone());
+                record_error(config, runtime, "registry_reprocess_reconcile", message);
+            } else {
+                reset_registry_reprocess_attempt_cache(runtime, epoch);
+            }
+        }
+        Err(error) => {
+            runtime.validated_registry_reprocesses.remove(&epoch);
+            let message = format!(
+                "{reason}; published target validation failed or immutable target state was ambiguous: {error:#}"
+            );
+            let _ = write_registry_reprocess_marker(config, epoch, "failed", Some(message.clone()));
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "registry_reprocess_reconcile", message);
+        }
+    }
+}
+
+fn parse_registry_reprocess_epoch(path: &Path) -> Option<u64> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("epoch-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()
+}
+
+fn parse_registry_reprocess_target_epoch(path: &Path) -> Option<u64> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("epoch-")?
+        .parse()
+        .ok()
+}
+
+fn block_registry_reprocess_admission(runtime: &mut RuntimeState, message: String) {
+    runtime.registry_reprocess_admission_blocked = true;
+    runtime.registry_reprocess_admission_blocked_reason = Some(message);
+}
+
+/// Resolve a target that exists before a retry can start. Published generations are immutable:
+/// a valid one is authoritative even if its worker/marker transition was interrupted, while an
+/// invalid or ambiguous one is a manual incident and must never be fed into a respawn loop.
+fn reconcile_existing_registry_reprocess_target(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    reason: &'static str,
+) -> bool {
+    let key = format!("registry_reprocess:{epoch}");
+    match registry_reprocess_target_exists(config, epoch) {
+        Ok(false) => return false,
+        Ok(true) => {}
+        Err(error) => {
+            let message = format!(
+                "{reason}; immutable target presence is ambiguous and requires manual inspection: {error:#}"
+            );
+            runtime.validated_registry_reprocesses.remove(&epoch);
+            let _ = write_registry_reprocess_marker(config, epoch, "failed", Some(message.clone()));
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "registry_reprocess_reconcile", message);
+            return true;
+        }
+    }
+    require_registry_reprocess_audit(
+        config,
+        runtime,
+        RegistryReprocessAuditRequest {
+            epoch,
+            purpose: RegistryReprocessAuditPurpose::ExistingTarget { reason },
+        },
+    );
+    true
+}
+
+fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut RuntimeState) {
+    runtime.registry_reprocess_admission_blocked = false;
+    runtime.registry_reprocess_admission_blocked_reason = None;
+
+    let adopted_epochs = runtime
+        .adopted_registry_reprocesses
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    for epoch in adopted_epochs {
+        if runtime.pending_registry_reprocess_audits.contains(&epoch) {
+            continue;
+        }
+        let Some(adopted) = runtime.adopted_registry_reprocesses.get(&epoch).cloned() else {
+            continue;
+        };
+        let liveness = if adopted.identity_trusted {
+            match (adopted.process_start_ticks, observe_poh_pid(adopted.pid)) {
+                (
+                    Some(expected),
+                    PohPidObservation::Running {
+                        process_start_ticks,
+                    },
+                ) if process_start_ticks == expected
+                    && process_cmdline_matches_registry_reprocess_exact(
+                        config,
+                        epoch,
+                        adopted.pid,
+                    ) == Some(true) =>
+                {
+                    RegistryReprocessLiveness::Running(adopted.clone())
+                }
+                (_, PohPidObservation::Unobservable) => RegistryReprocessLiveness::Unobservable,
+                _ => match find_registry_reprocess_processes(config, epoch) {
+                    Some(pids) if pids.is_empty() => RegistryReprocessLiveness::Ended {
+                        retry_is_safe: true,
+                        probe_is_sufficient: true,
+                    },
+                    Some(pids) => RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
+                        pid: pids[0],
+                        identity_trusted: false,
+                        process_start_ticks: None,
+                        threads: None,
+                        ..adopted.clone()
+                    }),
+                    None => RegistryReprocessLiveness::Unobservable,
+                },
+            }
+        } else {
+            match find_registry_reprocess_processes(config, epoch) {
+                Some(pids) if pids.is_empty() => RegistryReprocessLiveness::Ended {
+                    retry_is_safe: false,
+                    probe_is_sufficient: false,
+                },
+                Some(pids) => RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
+                    pid: pids[0],
+                    ..adopted.clone()
+                }),
+                None => RegistryReprocessLiveness::Unobservable,
+            }
+        };
+        match liveness {
+            RegistryReprocessLiveness::Running(updated) => {
+                if !updated.identity_trusted {
+                    block_registry_reprocess_admission(
+                        runtime,
+                        format!(
+                            "registry_reprocess:{epoch} has a live but untrusted process identity"
+                        ),
+                    );
+                }
+                runtime.adopted_registry_reprocesses.insert(epoch, updated);
+            }
+            RegistryReprocessLiveness::Ended {
+                retry_is_safe,
+                probe_is_sufficient,
+            } => {
+                runtime.adopted_registry_reprocesses.remove(&epoch);
+                reconcile_ended_registry_reprocess(
+                    config,
+                    runtime,
+                    epoch,
+                    retry_is_safe,
+                    if probe_is_sufficient {
+                        RegistryReprocessValidation::BoundedProbe
+                    } else {
+                        RegistryReprocessValidation::Deep
+                    },
+                    "adopted registry reprocess ended",
+                );
+            }
+            RegistryReprocessLiveness::Unobservable => block_registry_reprocess_admission(
+                runtime,
+                format!("registry_reprocess:{epoch} liveness is unobservable"),
+            ),
+        }
+    }
+
+    let marker_root = config.state_root.join("registry_reprocess");
+    let entries = match fs::read_dir(&marker_root) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            block_registry_reprocess_admission(
+                runtime,
+                format!("cannot audit registry reprocess markers: {error}"),
+            );
+            None
+        }
+    };
+    if let Some(entries) = entries {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    block_registry_reprocess_admission(
+                        runtime,
+                        format!("cannot enumerate registry reprocess markers: {error}"),
+                    );
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let Some(epoch) = parse_registry_reprocess_epoch(&path) else {
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!(
+                        "unexpected registry reprocess marker entry {}",
+                        path.display()
+                    ),
+                );
+                continue;
+            };
+            if runtime.registry_reprocesses.contains_key(&epoch)
+                || runtime.adopted_registry_reprocesses.contains_key(&epoch)
+                || runtime.pending_registry_reprocess_audits.contains(&epoch)
+                || runtime
+                    .registry_reprocess_audit_claim_failures
+                    .contains(&epoch)
+            {
+                continue;
+            }
+            let marker = match read_registry_reprocess_marker_strict(&config.state_root, epoch) {
+                Ok(Some(marker)) => marker,
+                Ok(None) => continue,
+                Err(error) => {
+                    block_registry_reprocess_admission(
+                        runtime,
+                        format!("registry_reprocess:{epoch} marker is unreadable: {error:#}"),
+                    );
+                    continue;
+                }
+            };
+            if !registry_reprocess_marker_claims(config, epoch, &marker) {
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!("registry_reprocess:{epoch} marker binding is inconsistent"),
+                );
+                continue;
+            }
+            match marker.state.as_str() {
+                "auditing" if marker.pid.is_none() && marker.process_start_ticks.is_none() => {
+                    let purpose = if marker.audit_is_continuation {
+                        RegistryReprocessAuditPurpose::Ended {
+                            retry_is_safe: marker.audit_retry_is_safe,
+                            reason: "restart reconciliation of durable deep-audit claim",
+                        }
+                    } else {
+                        RegistryReprocessAuditPurpose::ExistingTarget {
+                            reason: "restart reconciliation of durable existing-target audit",
+                        }
+                    };
+                    enqueue_claimed_registry_reprocess_audit(
+                        runtime,
+                        RegistryReprocessAuditRequest { epoch, purpose },
+                    );
+                }
+                "complete" if marker.pid.is_none() && marker.process_start_ticks.is_none() => {
+                    if !runtime.validated_registry_reprocesses.contains(&epoch) {
+                        reconcile_ended_registry_reprocess(
+                            config,
+                            runtime,
+                            epoch,
+                            false,
+                            RegistryReprocessValidation::BoundedProbe,
+                            "startup validation of completed registry generation",
+                        );
+                    }
+                }
+                "failed" | "retry_ready"
+                    if marker.pid.is_none() && marker.process_start_ticks.is_none() =>
+                {
+                    reconcile_existing_registry_reprocess_target(
+                        config,
+                        runtime,
+                        epoch,
+                        "retry reconciliation found an already-published registry generation",
+                    );
+                }
+                "running" => match inspect_running_registry_reprocess(config, epoch, &marker) {
+                    RegistryReprocessLiveness::Running(adopted) => {
+                        if !adopted.identity_trusted {
+                            block_registry_reprocess_admission(
+                                runtime,
+                                format!(
+                                    "registry_reprocess:{epoch} has a live but untrusted process identity"
+                                ),
+                            );
+                        }
+                        runtime.adopted_registry_reprocesses.insert(epoch, adopted);
+                    }
+                    RegistryReprocessLiveness::Ended {
+                        retry_is_safe,
+                        probe_is_sufficient,
+                    } => {
+                        reconcile_ended_registry_reprocess(
+                            config,
+                            runtime,
+                            epoch,
+                            retry_is_safe,
+                            if probe_is_sufficient {
+                                RegistryReprocessValidation::BoundedProbe
+                            } else {
+                                RegistryReprocessValidation::Deep
+                            },
+                            "running registry marker has no surviving process",
+                        );
+                    }
+                    RegistryReprocessLiveness::Unobservable => {
+                        block_registry_reprocess_admission(
+                            runtime,
+                            format!("registry_reprocess:{epoch} liveness is unobservable"),
+                        );
+                    }
+                },
+                _ => block_registry_reprocess_admission(
+                    runtime,
+                    format!("registry_reprocess:{epoch} marker state/identity is inconsistent"),
+                ),
+            }
+        }
+    }
+
+    // A manually completed target without a scheduler marker is queued for background deep
+    // validation at most once per controller lifetime, then bound to a durable complete marker.
+    // An invalid immutable target becomes a durable manual incident instead of entering a futile
+    // spawn/fail loop.
+    if let Ok(entries) = fs::read_dir(&config.registry_reprocess_target_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(epoch) = parse_registry_reprocess_target_epoch(&path) else {
+                continue;
+            };
+            if read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                reconcile_existing_registry_reprocess_target(
+                    config,
+                    runtime,
+                    epoch,
+                    "manually discovered registry generation",
+                );
+            }
+        }
+    }
 }
 
 /// Classifies an epoch's PoH signature-count migration eligibility. Called frequently during
@@ -12521,14 +15820,29 @@ fn poh_migration_status(config: &SchedulerConfig, epoch: u64) -> PohMigrationSta
     if !current_schema {
         return PohMigrationStatus::Ready;
     }
-    match read_poh_migration_marker(&config.state_root, epoch) {
-        None => PohMigrationStatus::AlreadyMigrated,
-        Some(marker) if marker.state == "retry_ready" => PohMigrationStatus::RetryReady,
-        Some(_) => PohMigrationStatus::NotEligible,
+    match read_poh_migration_marker_strict(&config.state_root, epoch) {
+        Ok(None) => PohMigrationStatus::AlreadyMigrated,
+        Ok(Some(marker))
+            if poh_migration_marker_claims_epoch(&marker, epoch)
+                && marker.state == "retry_ready"
+                && marker.pid.is_none()
+                && marker.process_start_ticks.is_none()
+                && marker.worker_threads.is_none() =>
+        {
+            PohMigrationStatus::RetryReady
+        }
+        Ok(Some(_)) | Err(_) => PohMigrationStatus::NotEligible,
     }
 }
 
-async fn spawn_poh_migration(config: &SchedulerConfig, epoch: &EpochSnapshot) -> Result<ManagedChild> {
+async fn spawn_poh_migration(
+    config: &SchedulerConfig,
+    epoch: &EpochSnapshot,
+) -> Result<ManagedChild> {
+    anyhow::ensure!(
+        poh_process_table_observable(),
+        "PoH migration spawn requires an observable Linux /proc process table"
+    );
     anyhow::ensure!(
         matches!(
             poh_migration_status(config, epoch.epoch),
@@ -12543,11 +15857,15 @@ async fn spawn_poh_migration(config: &SchedulerConfig, epoch: &EpochSnapshot) ->
     // here. This marker is dedicated to this job kind (see `poh_migration_marker_path`) and is
     // never the epoch's own archival ownership marker, so this never contends with or clobbers
     // the archive's real owner (first-seen / `historical_compact_reuse` / `historical_finalizer`).
-    match read_poh_migration_marker(&config.state_root, epoch.epoch) {
+    match read_poh_migration_marker_strict(&config.state_root, epoch.epoch)? {
         None => {}
         Some(marker) => anyhow::ensure!(
-            marker.state == "retry_ready" && marker.pid.is_none(),
-            "PoH signature-count migration marker already in state {} (pid {:?}) for epoch {}",
+            poh_migration_marker_claims_epoch(&marker, epoch.epoch)
+                && marker.state == "retry_ready"
+                && marker.pid.is_none()
+                && marker.process_start_ticks.is_none()
+                && marker.worker_threads.is_none(),
+            "PoH signature-count migration marker is not a clean retry-ready claim (state {}, pid {:?}) for epoch {}",
             marker.state,
             marker.pid,
             epoch.epoch
@@ -12564,7 +15882,7 @@ async fn spawn_poh_migration(config: &SchedulerConfig, epoch: &EpochSnapshot) ->
         .state_root
         .join("logs")
         .join(format!("epoch-{}-poh-migration.log", epoch.epoch));
-    let args = poh_migration_args(&epoch.output_path);
+    let args = poh_migration_args(&epoch.output_path, config.poh_migration_threads);
     let result = spawn_child(
         config,
         args,
@@ -12583,7 +15901,6 @@ async fn spawn_poh_migration(config: &SchedulerConfig, epoch: &EpochSnapshot) ->
                 "PoH signature-count migration spawn failed: {error:#}"
             )),
         );
-        let _ = set_poh_migration_marker_pid(&config.state_root, epoch.epoch, None);
     }
     result
 }
@@ -12712,7 +16029,10 @@ async fn spawn_command_child(
     // this job kind re-derives what it can reuse from its own output artifacts rather than a
     // progress checkpoint (see `migrate_poh_signature_counts`'s already-current fast path).
     let progress_pipe_ends = if matches!(&kind, ChildKind::PohSignatureCountMigration { .. }) {
-        Some(std::io::pipe().context("create progress pipe")?)
+        let ends = std::io::pipe().context("create progress pipe")?;
+        set_nonblocking_raw(ends.1.as_raw_fd())
+            .context("make progress pipe writer non-blocking")?;
+        Some(ends)
     } else {
         None
     };
@@ -12733,17 +16053,20 @@ async fn spawn_command_child(
             | ChildKind::CarPreflight { .. }
             | ChildKind::HistoricalCompactReuse { .. }
             | ChildKind::PohSignatureCountMigration { .. }
+            | ChildKind::RegistryReprocess { .. }
     ) {
         command.process_group(0);
     }
-    // Acquisition children inherit a duplicate of the epoch lock. Keep the
+    // Acquisition and registry-reprocess children inherit a duplicate of the epoch lock. Keep the
     // duplicate CLOEXEC in this multithreaded parent, then clear the bit only
     // in the post-fork child. Temporarily clearing a process-wide descriptor
     // flag before spawn could leak the lock through an unrelated concurrent
     // exec.
     let inherited_lock = if matches!(
         &kind,
-        ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. }
+        ChildKind::CarDownload { .. }
+            | ChildKind::CarPreflight { .. }
+            | ChildKind::RegistryReprocess { .. }
     ) {
         exclusive_lock
             .as_ref()
@@ -12788,6 +16111,10 @@ async fn spawn_command_child(
         .spawn()
         .with_context(|| format!("spawn {} with {}", kind.key(), executable.display()));
     drop(inherited_lock);
+    // Own the spawned process before any later setup can fail. `kill_on_drop(false)` is
+    // intentional for scheduler crashes, but it also means an early `?` after a successful
+    // spawn would otherwise orphan a live writer behind a terminal marker.
+    let mut child = child_result?;
     // The write end must close in the parent now, not merely go out of scope later: as long
     // as any copy of it stays open here, the child's exit (or its own early close) can never
     // surface as EOF on `reader`, and `ProgressPipe::drain` would read "no data yet" forever
@@ -12795,19 +16122,10 @@ async fn spawn_command_child(
     let progress_pipe = match progress_pipe_ends {
         Some((reader, writer)) => {
             drop(writer);
-            Some(
-                tokio::net::unix::pipe::Receiver::from_owned_fd(OwnedFd::from(reader))
-                    .context("wrap progress pipe reader")?,
-            )
+            Some(progress_pipe_from_spawned_child(&mut child, OwnedFd::from(reader)).await?)
         }
         None => None,
-    }
-    .map(|receiver| ProgressPipe {
-        receiver,
-        buffer: Vec::new(),
-        last: None,
-    });
-    let mut child = child_result?;
+    };
     let pid = child.id();
     let owned_output = match &kind {
         ChildKind::CarDownload { .. } | ChildKind::CarPreflight { .. } => None,
@@ -12817,6 +16135,7 @@ async fn spawn_command_child(
         | ChildKind::PohSignatureCountMigration { epoch } => {
             Some(config.archive_root.join(format!("epoch-{epoch}")))
         }
+        ChildKind::RegistryReprocess { .. } => None,
         ChildKind::LiveFinalizer { epoch, .. } => {
             epoch.map(|epoch| config.archive_root.join(format!("epoch-{epoch}")))
         }
@@ -12850,7 +16169,16 @@ async fn spawn_command_child(
     } else if let ChildKind::PohSignatureCountMigration { epoch } = &kind {
         let publication = (|| -> Result<()> {
             let pid = pid.context("spawned PoH signature-count migration has no pid")?;
-            set_poh_migration_marker_pid(&config.state_root, *epoch, Some(pid))?;
+            let (state, process_start_ticks) = process_stat_identity(pid)
+                .context("read spawned PoH migration process start identity")?;
+            anyhow::ensure!(state != 'Z', "spawned PoH migration is already a zombie");
+            set_poh_migration_marker_identity(
+                &config.state_root,
+                *epoch,
+                pid,
+                process_start_ticks,
+                config.poh_migration_threads,
+            )?;
             let marker = read_poh_migration_marker(&config.state_root, *epoch)
                 .context("PoH signature-count migration marker disappeared after spawn")?;
             anyhow::ensure!(
@@ -12858,8 +16186,10 @@ async fn spawn_command_child(
                     && marker.kind == POH_MIGRATION_OWNERSHIP_KIND
                     && marker.id == epoch.to_string()
                     && marker.state == "running"
-                    && marker.pid == Some(pid),
-                "PoH signature-count migration marker PID publication did not preserve exact schema/kind/id/state/pid"
+                    && marker.pid == Some(pid)
+                    && marker.process_start_ticks == Some(process_start_ticks)
+                    && marker.worker_threads == Some(config.poh_migration_threads),
+                "PoH signature-count migration marker identity publication did not preserve exact schema/kind/id/state/pid/start/threads"
             );
             Ok(())
         })();
@@ -12876,6 +16206,39 @@ async fn spawn_command_child(
                 "establish recoverable ownership for poh_migration:{epoch}"
             )));
         }
+    } else if let ChildKind::RegistryReprocess { epoch, .. } = &kind {
+        let publication = (|| -> Result<()> {
+            let pid = pid.context("spawned registry reprocess has no pid")?;
+            let (state, process_start_ticks) = process_stat_identity(pid)
+                .context("read spawned registry reprocess start identity")?;
+            anyhow::ensure!(
+                state != 'Z',
+                "spawned registry reprocess is already a zombie"
+            );
+            set_registry_reprocess_marker_identity(config, *epoch, pid, process_start_ticks)?;
+            let marker = read_registry_reprocess_marker_strict(&config.state_root, *epoch)?
+                .context("registry reprocess marker disappeared after spawn")?;
+            anyhow::ensure!(
+                registry_reprocess_marker_claims(config, *epoch, &marker)
+                    && marker.state == "running"
+                    && marker.pid == Some(pid)
+                    && marker.process_start_ticks == Some(process_start_ticks),
+                "registry reprocess marker identity publication did not preserve its exact binding"
+            );
+            Ok(())
+        })();
+        if let Err(error) = publication {
+            if let Some(pid) = pid {
+                // SAFETY: registry workers are isolated process-group leaders.
+                let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+            } else {
+                let _ = child.kill().await;
+            }
+            let _ = child.wait().await;
+            return Err(error.context(format!(
+                "establish recoverable ownership for registry_reprocess:{epoch}"
+            )));
+        }
     } else if let Some(output) = owned_output.as_deref() {
         let _ = set_ownership_pid(output, pid);
     }
@@ -12888,6 +16251,35 @@ async fn spawn_command_child(
         log_path,
         _exclusive_lock: exclusive_lock,
         progress_pipe,
+    })
+}
+
+async fn progress_pipe_from_spawned_child(
+    child: &mut Child,
+    reader: OwnedFd,
+) -> Result<ProgressPipe> {
+    let receiver = match tokio::net::unix::pipe::Receiver::from_owned_fd(reader) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            // Once spawn succeeds, every fallible setup path must establish ownership or reap
+            // the process. Leaving this child alive would hide its CPU and archive writer behind
+            // the caller's identity-cleared `failed` marker.
+            let group_killed = child.id().is_some_and(|pid| {
+                // SAFETY: progress pipes are created only for PoH children, which are spawned as
+                // leaders of isolated process groups. A negative PID targets that entire group.
+                unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) == 0 }
+            });
+            if !group_killed {
+                let _ = child.kill().await;
+            }
+            let _ = child.wait().await;
+            return Err(error).context("wrap progress pipe reader after spawn");
+        }
+    };
+    Ok(ProgressPipe {
+        receiver,
+        buffer: Vec::new(),
+        last: None,
     })
 }
 
@@ -12960,6 +16352,7 @@ async fn reap_children(state: &Arc<AppState>, runtime: &mut RuntimeState) {
     }
     reap_legacy_compacts(&state.config, runtime);
     reap_poh_migrations(&state.config, runtime);
+    reap_registry_reprocesses(state, runtime);
     let finalizer_result = runtime
         .finalizer
         .as_mut()
@@ -13218,23 +16611,84 @@ fn reap_poh_migrations(config: &SchedulerConfig, runtime: &mut RuntimeState) {
                 handle_child_exit(config, runtime, child, status.success());
             }
             Some(Err(error)) => {
-                let child = runtime
+                retain_poh_migration_after_poll_error(config, runtime, epoch, &error);
+            }
+            None => {
+                if let Some(key) = runtime
                     .poh_migrations
+                    .get(&epoch)
+                    .map(|child| child.kind.key())
+                {
+                    clear_runtime_failure(config, runtime, &key);
+                }
+            }
+        }
+    }
+}
+
+fn reap_registry_reprocesses(state: &Arc<AppState>, runtime: &mut RuntimeState) {
+    let epochs = runtime
+        .registry_reprocesses
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    for epoch in epochs {
+        let result = runtime
+            .registry_reprocesses
+            .get_mut(&epoch)
+            .and_then(|child| child.child.try_wait().transpose());
+        match result {
+            Some(Ok(status)) => {
+                let child = runtime
+                    .registry_reprocesses
                     .remove(&epoch)
-                    .expect("PoH migration child exists");
-                let message = format!("poll {}: {error:#}", child.kind.key());
-                set_runtime_failure(config, runtime, child.kind.key(), message.clone());
-                let _ = write_poh_migration_marker(
-                    &config.state_root,
-                    epoch,
-                    "failed",
-                    Some(message.clone()),
+                    .expect("registry reprocess child exists");
+                handle_registry_reprocess_child_exit(
+                    &state.config,
+                    runtime,
+                    child,
+                    status.success(),
                 );
-                let _ = set_poh_migration_marker_pid(&config.state_root, epoch, None);
-                record_error(config, runtime, "child", message);
+            }
+            Some(Err(error)) => {
+                let key = format!("registry_reprocess:{epoch}");
+                let message =
+                    format!("poll {key}: {error:#}; retaining ownership until exit is observable");
+                if !runtime.failures.contains_key(&key) {
+                    record_error(
+                        &state.config,
+                        runtime,
+                        "registry_reprocess",
+                        message.clone(),
+                    );
+                }
+                set_runtime_failure(&state.config, runtime, key, message);
+                runtime.registry_reprocess_admission_blocked = true;
+                runtime.uncertain_registry_reprocesses.insert(epoch);
             }
             None => {}
         }
+    }
+}
+
+fn retain_poh_migration_after_poll_error(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    error: &io::Error,
+) {
+    let Some(key) = runtime
+        .poh_migrations
+        .get(&epoch)
+        .map(|child| child.kind.key())
+    else {
+        return;
+    };
+    let first_uncertain_poll = !runtime.failures.contains_key(&key);
+    let message = format!("poll {key}: {error:#}; retaining live ownership until exit is known");
+    set_runtime_failure(config, runtime, key, message.clone());
+    if first_uncertain_poll {
+        record_error(config, runtime, "child", message);
     }
 }
 
@@ -13275,6 +16729,82 @@ fn clear_legacy_pause_state_after_exit(
     }
 }
 
+fn finish_registry_reprocess_exit(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    log_path: &Path,
+    process_success: bool,
+    published_generation_valid: bool,
+) {
+    let key = format!("registry_reprocess:{epoch}");
+    if published_generation_valid {
+        // Publication is the commit point. The process status can be non-zero when it exits in
+        // the narrow window after syncing/renaming the generation but before returning success.
+        if let Err(error) = write_registry_reprocess_marker(config, epoch, "complete", None) {
+            runtime.validated_registry_reprocesses.remove(&epoch);
+            let message = format!(
+                "{key} output validated but completion marker publication failed: {error:#}"
+            );
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "child_exit", message);
+        } else {
+            runtime.validated_registry_reprocesses.insert(epoch);
+            clear_runtime_failure(config, runtime, &key);
+        }
+    } else {
+        runtime.validated_registry_reprocesses.remove(&epoch);
+        let message = format!(
+            "{} exited {} but published-generation validation failed; log={}",
+            key,
+            if process_success {
+                "successfully"
+            } else {
+                "with failure"
+            },
+            log_path.display()
+        );
+        set_runtime_failure(config, runtime, key, message.clone());
+        let _ = write_registry_reprocess_marker(config, epoch, "failed", Some(message.clone()));
+        record_error(config, runtime, "child_exit", message);
+    }
+}
+
+fn handle_registry_reprocess_child_exit(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    child: ManagedChild,
+    success: bool,
+) {
+    let ChildKind::RegistryReprocess { epoch, .. } = child.kind else {
+        unreachable!("registry exit handler received a non-registry child")
+    };
+    let ownership_was_uncertain = runtime.uncertain_registry_reprocesses.remove(&epoch);
+    match registry_reprocess_exit_validation(success, ownership_was_uncertain) {
+        RegistryReprocessValidation::BoundedProbe => finish_registry_reprocess_exit(
+            config,
+            runtime,
+            epoch,
+            &child.log_path,
+            success,
+            probe_registry_reprocess_output(config, epoch).is_ok(),
+        ),
+        RegistryReprocessValidation::Deep => {
+            require_registry_reprocess_audit(
+                config,
+                runtime,
+                RegistryReprocessAuditRequest {
+                    epoch,
+                    purpose: RegistryReprocessAuditPurpose::ChildExit {
+                        process_success: success,
+                        log_path: child.log_path,
+                    },
+                },
+            );
+        }
+    }
+}
+
 fn handle_child_exit(
     config: &SchedulerConfig,
     runtime: &mut RuntimeState,
@@ -13291,6 +16821,7 @@ fn handle_child_exit(
         | ChildKind::PohSignatureCountMigration { epoch } => {
             config.archive_root.join(format!("epoch-{epoch}"))
         }
+        ChildKind::RegistryReprocess { target, .. } => target.clone(),
         ChildKind::LiveFinalizer { epoch, .. } => epoch
             .map(|epoch| config.archive_root.join(format!("epoch-{epoch}")))
             .unwrap_or_else(|| config.archive_root.join("unknown-live-epoch")),
@@ -13328,6 +16859,9 @@ fn handle_child_exit(
             )
             .unwrap_or(false)
         }
+        ChildKind::RegistryReprocess { .. } => {
+            unreachable!("registry children use handle_registry_reprocess_child_exit")
+        }
         ChildKind::LiveFinalizer { epoch, phase, .. } => epoch.is_some_and(|epoch| {
             let output = config.archive_root.join(format!("epoch-{epoch}"));
             match phase {
@@ -13348,19 +16882,25 @@ fn handle_child_exit(
         if success && valid {
             clear_runtime_failure(config, runtime, &key);
             let _ = write_poh_migration_marker(&config.state_root, *epoch, "complete", None);
-            let _ = set_poh_migration_marker_pid(&config.state_root, *epoch, None);
         } else {
             let message = format!(
                 "{} exited {} but filesystem validation {}; log={}",
                 key,
-                if success { "successfully" } else { "with failure" },
+                if success {
+                    "successfully"
+                } else {
+                    "with failure"
+                },
                 if valid { "passed" } else { "failed" },
                 child.log_path.display()
             );
             set_runtime_failure(config, runtime, key, message.clone());
-            let _ =
-                write_poh_migration_marker(&config.state_root, *epoch, "failed", Some(message.clone()));
-            let _ = set_poh_migration_marker_pid(&config.state_root, *epoch, None);
+            let _ = write_poh_migration_marker(
+                &config.state_root,
+                *epoch,
+                "failed",
+                Some(message.clone()),
+            );
             record_error(config, runtime, "child_exit", message);
         }
         return;
@@ -13392,6 +16932,7 @@ fn handle_child_exit(
                 // Handled by the dedicated PoH-migration-marker branch above, which returns
                 // before this generic shared-ownership-marker path is ever reached.
                 ChildKind::PohSignatureCountMigration { .. } => unreachable!(),
+                ChildKind::RegistryReprocess { .. } => unreachable!(),
                 ChildKind::LiveFinalizer { phase, .. } => match phase {
                     LiveFinalizerPhase::Registry => "registry_ready",
                     LiveFinalizerPhase::Mphf => "mphf_ready",
@@ -13503,6 +17044,21 @@ fn set_close_on_exec(file: &File, close_on_exec: bool) -> Result<()> {
     // SAFETY: the descriptor remains owned by file for the duration of this call.
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, updated) } < 0 {
         return Err(std::io::Error::last_os_error()).context("update lock descriptor flags");
+    }
+    Ok(())
+}
+
+fn set_nonblocking_raw(fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl only reads and updates status flags for this live descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // O_NONBLOCK is an open-file-description flag and therefore remains set on the descriptor
+    // inherited across exec. The child can consequently drop telemetry on EAGAIN without a
+    // blocking syscall ever entering its migration hot path.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -13824,22 +17380,22 @@ fn merge_live_journal_progress(
             && let Some(delta_secs) = baseline_updated
                 .map(|baseline| journal_updated.saturating_sub(baseline))
                 .filter(|delta| *delta > 0)
-            {
-                // A minimal legacy progress file has no elapsed clock. Its
-                // last slot and timestamp form the exact observed interval;
-                // using first_slot here would combine unlike intervals and
-                // overstate the rate.
-                if baseline_elapsed_secs.is_none() {
-                    progress.slots_per_sec = baseline_last_slot.zip(progress.last_slot).and_then(
-                        |(baseline_slot, last_slot)| {
-                            let advanced = last_slot.saturating_sub(baseline_slot);
-                            positive_finite_option(Some(advanced as f64 / delta_secs as f64))
-                        },
-                    );
-                }
-                progress.elapsed_secs =
-                    Some(progress.elapsed_secs.unwrap_or(0.0).max(0.0) + delta_secs as f64);
+        {
+            // A minimal legacy progress file has no elapsed clock. Its
+            // last slot and timestamp form the exact observed interval;
+            // using first_slot here would combine unlike intervals and
+            // overstate the rate.
+            if baseline_elapsed_secs.is_none() {
+                progress.slots_per_sec = baseline_last_slot.zip(progress.last_slot).and_then(
+                    |(baseline_slot, last_slot)| {
+                        let advanced = last_slot.saturating_sub(baseline_slot);
+                        positive_finite_option(Some(advanced as f64 / delta_secs as f64))
+                    },
+                );
             }
+            progress.elapsed_secs =
+                Some(progress.elapsed_secs.unwrap_or(0.0).max(0.0) + delta_secs as f64);
+        }
         progress.updated_unix_secs = Some(
             progress
                 .updated_unix_secs
@@ -14063,6 +17619,10 @@ fn process_started_unix_secs(pid: u32, expected_start_ticks: u64) -> Option<u64>
 
 fn process_stat_identity(pid: u32) -> Option<(char, u64)> {
     let stat = fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("stat")).ok()?;
+    parse_process_stat_identity(&stat)
+}
+
+fn parse_process_stat_identity(stat: &str) -> Option<(char, u64)> {
     // comm may contain spaces and parentheses, so fields only become stable
     // after the final ") ". The remaining token 0 is field 3 (state), and
     // token 19 is field 22 (process start time in clock ticks).
@@ -14393,7 +17953,8 @@ fn source_input_window_rate_mib(
                 .sampled_at
                 .duration_since(previous.sampled_at)
                 .as_secs_f64();
-            (SOURCE_READ_RATE_MIN_WINDOW_SECS..=SOURCE_READ_RATE_MAX_WINDOW_SECS).contains(&elapsed)
+            (SOURCE_READ_RATE_MIN_WINDOW_SECS..=SOURCE_READ_RATE_MAX_WINDOW_SECS)
+                .contains(&elapsed)
                 .then_some((elapsed, previous))
         })
         .max_by(|(left, _), (right, _)| left.total_cmp(right))
@@ -15781,9 +19342,16 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             finalizer_lock: root.join("finalizer.lock"),
             poh_migration_concurrency: 0,
+            poh_migration_threads: 1,
+            poh_migration_cpu_budget_threads: 1,
             poh_migration_auto_pause: true,
             poh_migration_capacity_max: 0,
             poh_migration_capacity_cooldown: Duration::from_secs(60),
+            registry_reprocess_concurrency: 0,
+            registry_reprocess_threads: 4,
+            registry_reprocess_memory_mib: 2048,
+            registry_reprocess_sort_memory_mib: 256,
+            registry_reprocess_target_root: root.join("archives").join(".usage-sorted-generations"),
         }
     }
 
@@ -15796,6 +19364,1300 @@ mod tests {
             "blockzilla-scheduler-{label}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    fn test_hex_digest(bytes: impl AsRef<[u8]>) -> String {
+        bytes
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn test_registry_generation_digest(
+        files: &BTreeMap<String, crate::archive_v2::registry_reprocess::FileBinding>,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"blockzilla.registry-reprocess.generation.v1");
+        hasher.update((files.len() as u64).to_le_bytes());
+        for (name, binding) in files {
+            hasher.update((name.len() as u64).to_le_bytes());
+            hasher.update(name.as_bytes());
+            hasher.update(binding.bytes.to_le_bytes());
+            hasher.update(binding.sha256.as_bytes());
+        }
+        test_hex_digest(hasher.finalize())
+    }
+
+    fn write_probe_only_registry_files(
+        directory: &Path,
+        first_seen_source: bool,
+    ) -> BTreeMap<String, crate::archive_v2::registry_reprocess::FileBinding> {
+        use crate::archive_v2::registry_reprocess::FileBinding;
+
+        let mut names = vec![
+            BLOCKS_FILE,
+            BLOCK_INDEX_FILE,
+            META_FILE,
+            REGISTRY_FILE,
+            REGISTRY_COUNTS_FILE,
+            REGISTRY_INDEX_FILE,
+            SIGNATURES_FILE,
+            BLOCKHASH_REGISTRY_FILE,
+            POH_FILE,
+            SHREDDING_FILE,
+        ];
+        if first_seen_source {
+            names.push(FIRST_SEEN_MANIFEST_FILE);
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let bytes = format!("probe-only:{name}").into_bytes();
+                fs::write(directory.join(name), &bytes).unwrap();
+                let binding = FileBinding {
+                    bytes: bytes.len() as u64,
+                    sha256: test_hex_digest(Sha256::digest(&bytes)),
+                };
+                (name.to_string(), binding)
+            })
+            .collect()
+    }
+
+    fn write_probe_only_registry_receipt_for_source(
+        config: &SchedulerConfig,
+        epoch: u64,
+        source: &Path,
+    ) -> (PathBuf, PathBuf) {
+        use crate::archive_v2::registry_reprocess::{
+            REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt, SemanticBinding,
+        };
+
+        let target = registry_reprocess_target(config, epoch);
+        fs::create_dir_all(source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let source = fs::canonicalize(source).unwrap();
+        let target = fs::canonicalize(target).unwrap();
+        let source_files = write_probe_only_registry_files(&source, true);
+        let target_files = write_probe_only_registry_files(&target, false);
+        let semantics = SemanticBinding {
+            blocks: 0,
+            transactions: 0,
+            pubkey_references: 0,
+            reference_sha256: "00".repeat(32),
+            normalized_structure_sha256: "00".repeat(32),
+        };
+        let receipt = RegistryReprocessReceipt {
+            version: 1,
+            algorithm: "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v1".to_string(),
+            epoch,
+            threads: config.registry_reprocess_threads,
+            sort_memory_mib: config.registry_reprocess_sort_memory_mib as usize,
+            level: config.level,
+            source_anchor_sha256: "00".repeat(32),
+            source_dir: source.to_string_lossy().into_owned(),
+            target_dir: target.to_string_lossy().into_owned(),
+            source_generation_sha256: test_registry_generation_digest(&source_files),
+            target_generation_sha256: test_registry_generation_digest(&target_files),
+            source_files,
+            target_files,
+            source_registry_keys: 1,
+            target_registry_keys: 1,
+            eligible_references: 0,
+            source_semantics: semantics.clone(),
+            target_semantics: semantics,
+        };
+        fs::write(
+            target.join(REGISTRY_REPROCESS_RECEIPT_FILE),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        (source, target)
+    }
+
+    fn write_probe_only_registry_receipt(
+        config: &SchedulerConfig,
+        epoch: u64,
+    ) -> (PathBuf, PathBuf) {
+        write_probe_only_registry_receipt_for_source(
+            config,
+            epoch,
+            &config.archive_root.join(format!("epoch-{epoch}")),
+        )
+    }
+
+    fn registry_audit_test_snapshot(
+        config: &SchedulerConfig,
+        root: &Path,
+        epoch: u64,
+    ) -> PipelineSnapshot {
+        let mut snapshot = empty_snapshot(false);
+        snapshot.inventory.complete = true;
+        snapshot.inventory.generation = 1;
+        let mut candidate = test_epoch(root, epoch, HistoricalState::Complete);
+        candidate.registry_order = RegistryOrder::FirstSeen;
+        snapshot.epochs.push(candidate);
+        snapshot.machine = legacy_scheduler_machine(config, 8 * 1024, 512);
+        snapshot
+    }
+
+    #[test]
+    fn historical_scan_seeds_only_from_previous_hot_seed() {
+        let root = temp_root("historical-hot-seed");
+        let config = test_config(&root);
+        let previous = config.archive_root.join("epoch-699");
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join(REGISTRY_FILE), b"sticky-first-seen").unwrap();
+        assert!(historical_scan_seed_args(&config, 700).is_empty());
+
+        let hot_seed = previous.join(HOT_SEED_FILE);
+        fs::write(&hot_seed, b"bounded-hot-seed").unwrap();
+        assert_eq!(
+            historical_scan_seed_args(&config, 700),
+            vec![
+                std::ffi::OsString::from("--first-seen-seed-registry"),
+                hot_seed.into_os_string(),
+            ]
+        );
+        assert!(historical_scan_seed_args(&config, 0).is_empty());
+    }
+
+    #[test]
+    fn registry_reprocess_eligibility_is_exact_and_disabled_by_default() {
+        let root = temp_root("registry-reprocess-eligibility");
+        let config = test_config(&root);
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        assert!(registry_reprocess_source_candidate(&epoch));
+        assert_eq!(
+            registry_reprocess_status(&config, &RuntimeState::default(), &epoch),
+            RegistryReprocessStatus::Ready
+        );
+        let mut snapshot = empty_snapshot(false);
+        snapshot.epochs.push(epoch.clone());
+        assert!(
+            !registry_reprocess_work_pending(&config, &snapshot, &RuntimeState::default()),
+            "zero concurrency is an opt-in boundary, not unbounded capacity"
+        );
+
+        epoch.registry_order = RegistryOrder::UsageSorted;
+        assert!(!registry_reprocess_source_candidate(&epoch));
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        epoch.state = HistoricalState::ScanReady;
+        assert!(!registry_reprocess_source_candidate(&epoch));
+    }
+
+    #[test]
+    fn registry_reprocess_argv_and_paths_are_deterministic() {
+        let root = temp_root("registry-reprocess-argv");
+        let config = test_config(&root);
+        let source = config.archive_root.join("epoch-700");
+        let target = registry_reprocess_target(&config, 700);
+        assert_eq!(
+            registry_reprocess_args(&config, &source, &target, 700),
+            vec![
+                std::ffi::OsString::from("reprocess-archive-v2-registry"),
+                source.into_os_string(),
+                target.clone().into_os_string(),
+                std::ffi::OsString::from("--epoch"),
+                std::ffi::OsString::from("700"),
+                std::ffi::OsString::from("--threads"),
+                std::ffi::OsString::from("4"),
+                std::ffi::OsString::from("--sort-memory-mib"),
+                std::ffi::OsString::from("256"),
+                std::ffi::OsString::from("--level"),
+                std::ffi::OsString::from("1"),
+            ]
+        );
+        assert_eq!(
+            target,
+            config
+                .archive_root
+                .join(".usage-sorted-generations/epoch-700")
+        );
+        assert_eq!(
+            registry_reprocess_progress_path(&config.state_root, 700),
+            config
+                .state_root
+                .join("progress/epoch-700-registry-reprocess.json")
+        );
+    }
+
+    #[test]
+    fn registry_reprocess_duplicate_scan_ignores_resource_args_and_order() {
+        let root = temp_root("registry-reprocess-potential-writer");
+        let config = test_config(&root);
+        let source = config.archive_root.join("epoch-700");
+        let target = registry_reprocess_target(&config, 700);
+        let args = [
+            b"/opt/manual/blockzilla".as_slice(),
+            b"reprocess-archive-v2-registry".as_slice(),
+            b"--threads".as_slice(),
+            b"23".as_slice(),
+            b"--level=-4".as_slice(),
+            source.as_os_str().as_bytes(),
+            b"--epoch=700".as_slice(),
+            b"--sort-memory-mib".as_slice(),
+            b"4096".as_slice(),
+            target.as_os_str().as_bytes(),
+        ];
+        let mut bytes = Vec::new();
+        for arg in args {
+            bytes.extend_from_slice(arg);
+            bytes.push(0);
+        }
+        assert!(registry_reprocess_argv_is_potential_writer(
+            &config, 700, &bytes
+        ));
+        assert!(
+            !registry_reprocess_argv_matches_exact(&config, 700, &bytes),
+            "different binary/resources/order must never qualify for trusted adoption"
+        );
+
+        let wrong_target = bytes
+            .windows(target.as_os_str().as_bytes().len())
+            .position(|window| window == target.as_os_str().as_bytes())
+            .unwrap();
+        bytes[wrong_target] ^= 1;
+        assert!(!registry_reprocess_argv_is_potential_writer(
+            &config, 700, &bytes
+        ));
+    }
+
+    #[test]
+    fn validated_registry_reprocess_cache_skips_completed_target_without_deep_polling() {
+        let root = temp_root("registry-reprocess-complete-cache");
+        let mut config = test_config(&root);
+        config.execute = true;
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        let mut runtime = RuntimeState::default();
+        runtime.validated_registry_reprocesses.insert(700);
+        assert_eq!(
+            registry_reprocess_status(&config, &runtime, &epoch),
+            RegistryReprocessStatus::Complete
+        );
+    }
+
+    #[test]
+    fn completed_registry_restart_uses_bounded_probe_not_deep_rescan() {
+        let root = temp_root("registry-reprocess-complete-restart-probe");
+        let mut config = test_config(&root);
+        config.execute = true;
+        fs::create_dir_all(&config.state_root).unwrap();
+        let (source, target) = write_probe_only_registry_receipt(&config, 700);
+        assert!(probe_registry_reprocess_output(&config, 700).is_ok());
+        assert!(
+            crate::archive_v2::registry_reprocess::validate_published_reprocess(
+                &source, &target, 700
+            )
+            .is_err(),
+            "the synthetic generation is a valid bounded receipt but not a valid archive"
+        );
+        write_registry_reprocess_marker(&config, 700, "complete", None).unwrap();
+
+        let mut runtime = RuntimeState::default();
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+
+        assert!(runtime.validated_registry_reprocesses.contains(&700));
+        assert!(!runtime.failures.contains_key("registry_reprocess:700"));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "complete"
+        );
+    }
+
+    #[test]
+    fn trusted_adopted_registry_end_uses_bounded_probe_not_deep_rescan() {
+        let root = temp_root("registry-reprocess-adopted-end-probe");
+        let mut config = test_config(&root);
+        config.execute = true;
+        fs::create_dir_all(&config.state_root).unwrap();
+        let (source, target) = write_probe_only_registry_receipt(&config, 700);
+        assert!(
+            crate::archive_v2::registry_reprocess::validate_published_reprocess(
+                &source, &target, 700
+            )
+            .is_err()
+        );
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let mut runtime = RuntimeState::default();
+        reconcile_ended_registry_reprocess(
+            &config,
+            &mut runtime,
+            700,
+            true,
+            RegistryReprocessValidation::BoundedProbe,
+            "trusted adopted registry reprocess ended",
+        );
+
+        assert!(runtime.validated_registry_reprocesses.contains(&700));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "complete"
+        );
+    }
+
+    #[test]
+    fn registry_probe_rejects_receipt_bound_to_wrong_source_epoch() {
+        let root = temp_root("registry-reprocess-wrong-source-probe");
+        let config = test_config(&root);
+        let expected_source = config.archive_root.join("epoch-700");
+        fs::create_dir_all(&expected_source).unwrap();
+        let wrong_source = root.join("unmanaged-source/epoch-700");
+        let (_source, target) =
+            write_probe_only_registry_receipt_for_source(&config, 700, &wrong_source);
+        assert!(
+            crate::archive_v2::registry_reprocess::probe_published_reprocess(&target, 700).is_ok(),
+            "the receipt is internally valid before applying scheduler configuration binding"
+        );
+        let error = probe_registry_reprocess_output(&config, 700).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not identify configured source"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn nonzero_registry_exit_accepts_a_deep_validated_publication() {
+        let root = temp_root("registry-reprocess-publish-exit-window");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        assert_eq!(
+            registry_reprocess_exit_validation(false, false),
+            RegistryReprocessValidation::Deep,
+            "a non-zero exit must authenticate the filesystem publication instead of trusting process status"
+        );
+
+        let mut runtime = RuntimeState::default();
+        finish_registry_reprocess_exit(
+            &config,
+            &mut runtime,
+            700,
+            &config.state_root.join("logs/registry-reprocess.log"),
+            false,
+            true,
+        );
+
+        assert!(runtime.validated_registry_reprocesses.contains(&700));
+        assert!(!runtime.failures.contains_key("registry_reprocess:700"));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "complete"
+        );
+    }
+
+    #[test]
+    fn retry_ready_with_invalid_immutable_target_becomes_manual_incident() {
+        let root = temp_root("registry-reprocess-retry-invalid-target");
+        let mut config = test_config(&root);
+        config.execute = true;
+        fs::create_dir_all(&config.state_root).unwrap();
+        let (_source, _target) = write_probe_only_registry_receipt(&config, 700);
+        write_registry_reprocess_marker(&config, 700, "retry_ready", None).unwrap();
+
+        let auditor = RegistryReprocessAuditor::new(config.clone());
+        let mut runtime = RuntimeState::default();
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+        assert!(runtime.pending_registry_reprocess_audits.contains(&700));
+        wait_for_registry_reprocess_audits(&config, &mut runtime, &auditor);
+
+        assert!(runtime.failures.contains_key("registry_reprocess:700"));
+        assert!(!runtime.validated_registry_reprocesses.contains(&700));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "failed",
+            "an immutable target that fails deep validation must never be respawned over"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_deep_audit_does_not_hold_controller_or_status_mutexes() {
+        use std::sync::Barrier;
+
+        let root = temp_root("registry-reprocess-audit-lock-release");
+        let mut config = test_config(&root);
+        config.execute = false;
+        fs::create_dir_all(registry_reprocess_target(&config, 700)).unwrap();
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let validator: RegistryReprocessValidator = {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            Arc::new(move |_, _| {
+                started.wait();
+                release.wait();
+                Ok(())
+            })
+        };
+        let state = test_app_state_with_registry_validator(config.clone(), validator);
+        {
+            let mut runtime = state.runtime.lock().await;
+            assert!(reconcile_existing_registry_reprocess_target(
+                &config,
+                &mut runtime,
+                700,
+                "barrier-backed manual target",
+            ));
+            assert!(runtime.pending_registry_reprocess_audits.contains(&700));
+            dispatch_registry_reprocess_audit(
+                &config,
+                &mut runtime,
+                &state.registry_reprocess_auditor,
+                true,
+            );
+        }
+
+        started.wait();
+        assert!(
+            state.runtime.try_lock().is_ok(),
+            "deep validation held the scheduler/controller mutex"
+        );
+        assert!(
+            state.snapshot.try_read().is_ok(),
+            "deep validation held the published status mutex"
+        );
+        assert!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .is_some_and(|marker| marker.state == "auditing"),
+            "the audit worker must never commit scheduler markers itself"
+        );
+        release.wait();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            reconcile_and_schedule(&state).await;
+            if state
+                .runtime
+                .lock()
+                .await
+                .pending_registry_reprocess_audits
+                .is_empty()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "audit completion was not polled");
+            tokio::task::yield_now().await;
+        }
+        let runtime = state.runtime.lock().await;
+        assert!(runtime.validated_registry_reprocesses.contains(&700));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_deep_audits_are_deduplicated_serial_and_reserve_concurrency() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        };
+
+        let root = temp_root("registry-reprocess-audit-serial");
+        let mut config = test_config(&root);
+        config.execute = true;
+        config.registry_reprocess_concurrency = 1;
+        fs::create_dir_all(&config.state_root).unwrap();
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let validator: RegistryReprocessValidator = {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            let calls = Arc::clone(&calls);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            Arc::new(move |_, epoch| {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let now_active = active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                max_active.fetch_max(now_active, AtomicOrdering::SeqCst);
+                if epoch == 700 {
+                    started.wait();
+                    release.wait();
+                }
+                active.fetch_sub(1, AtomicOrdering::SeqCst);
+                Ok(())
+            })
+        };
+        let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
+        let mut runtime = RuntimeState::default();
+        let first = RegistryReprocessAuditRequest {
+            epoch: 700,
+            purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                reason: "first manual target",
+            },
+        };
+        enqueue_claimed_registry_reprocess_audit(&mut runtime, first.clone());
+        enqueue_claimed_registry_reprocess_audit(&mut runtime, first);
+        enqueue_claimed_registry_reprocess_audit(
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 701,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "second manual target",
+                },
+            },
+        );
+        dispatch_registry_reprocess_audit(&config, &mut runtime, &auditor, true);
+        started.wait();
+
+        assert_eq!(runtime.pending_registry_reprocess_audits.len(), 2);
+        assert_eq!(runtime.registry_reprocess_audit_queue.len(), 1);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(max_active.load(AtomicOrdering::SeqCst), 1);
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        assert_eq!(
+            registry_reprocess_status(&config, &runtime, &epoch),
+            RegistryReprocessStatus::Blocked,
+            "a pending audit must make the same epoch ineligible for respawn"
+        );
+        let mut snapshot = empty_snapshot(false);
+        snapshot.epochs.push(epoch);
+        snapshot.machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+        assert_eq!(registry_reprocess_capacity_in_use(&runtime), 1);
+        assert!(
+            registry_reprocess_work_pending(&config, &snapshot, &runtime),
+            "an active deep audit must reserve the exclusive maintenance lane"
+        );
+        assert_eq!(
+            top_up_registry_reprocesses(&config, &snapshot, &mut runtime).await,
+            0,
+            "the active deep audit must consume the sole configured registry slot"
+        );
+
+        dispatch_registry_reprocess_audit(&config, &mut runtime, &auditor, true);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        release.wait();
+        wait_for_registry_reprocess_audits(&config, &mut runtime, &auditor);
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(max_active.load(AtomicOrdering::SeqCst), 1);
+        assert!(runtime.validated_registry_reprocesses.contains(&700));
+        assert!(runtime.validated_registry_reprocesses.contains(&701));
+        assert!(runtime.registry_reprocess_audit_queue.is_empty());
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+    }
+
+    #[test]
+    fn failed_registry_deep_audit_commits_one_durable_manual_incident() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let root = temp_root("registry-reprocess-audit-failure-once");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let validator: RegistryReprocessValidator = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Err("injected invalid immutable generation".to_string())
+            })
+        };
+        let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
+        let mut runtime = RuntimeState::default();
+        let request = RegistryReprocessAuditRequest {
+            epoch: 700,
+            purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                reason: "manually discovered registry generation",
+            },
+        };
+        enqueue_claimed_registry_reprocess_audit(&mut runtime, request.clone());
+        enqueue_claimed_registry_reprocess_audit(&mut runtime, request.clone());
+        dispatch_registry_reprocess_audit(&config, &mut runtime, &auditor, true);
+        wait_for_registry_reprocess_audits(&config, &mut runtime, &auditor);
+        let errors_after_commit = runtime.errors.len();
+
+        enqueue_claimed_registry_reprocess_audit(&mut runtime, request);
+        dispatch_registry_reprocess_audit(&config, &mut runtime, &auditor, true);
+        poll_registry_reprocess_audit(&config, &mut runtime, &auditor);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(runtime.errors.len(), errors_after_commit);
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "failed"
+        );
+        assert!(runtime.failures["registry_reprocess:700"].contains("manual inspection"));
+    }
+
+    #[test]
+    fn registry_disk_projection_includes_snapshot_and_external_sort_runs() {
+        let root = temp_root("registry-reprocess-disk-projection");
+        let gib = 1024u64 * 1024 * 1024;
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.artifacts = vec![
+            ArtifactSnapshot {
+                kind: ArtifactKind::Registry,
+                state: ArtifactState::Present,
+                requirement: ArtifactRequirement::FinalOutput,
+                required_now: true,
+                bytes: 4 * gib,
+                modified_unix_secs: None,
+                message: None,
+            },
+            ArtifactSnapshot {
+                kind: ArtifactKind::Blocks,
+                state: ArtifactState::Present,
+                requirement: ArtifactRequirement::FinalOutput,
+                required_now: true,
+                bytes: gib,
+                modified_unix_secs: None,
+                message: None,
+            },
+        ];
+        assert_eq!(registry_reprocess_projected_bytes(&epoch), 14 * gib);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_running_registry_marker_with_wrong_argv_fails_closed_on_restart() {
+        let root = temp_root("registry-reprocess-restart-safety");
+        let mut config = test_config(&root);
+        config.execute = true;
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let (_, start_ticks) = process_stat_identity(std::process::id()).unwrap();
+        set_registry_reprocess_marker_identity(&config, 700, std::process::id(), start_ticks)
+            .unwrap();
+
+        let mut runtime = RuntimeState::default();
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+        assert!(runtime.registry_reprocess_admission_blocked);
+        assert!(runtime.adopted_registry_reprocesses.contains_key(&700));
+        assert!(
+            !runtime.adopted_registry_reprocesses[&700].identity_trusted,
+            "a live PID/starttime with non-matching argv must reserve ownership but never be trusted"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_reprocess_exit_requires_published_receipt_probe() {
+        let root = temp_root("registry-reprocess-exit-validation");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let target = registry_reprocess_target(&config, 700);
+        let child = make_finished_child(
+            ChildKind::RegistryReprocess { epoch: 700, target },
+            registry_reprocess_progress_path(&config.state_root, 700),
+            config
+                .state_root
+                .join("logs/epoch-700-registry-reprocess.log"),
+        )
+        .await;
+        let mut runtime = RuntimeState::default();
+        handle_registry_reprocess_child_exit(&config, &mut runtime, child, true);
+        assert!(runtime.failures.contains_key("registry_reprocess:700"));
+        let marker = read_registry_reprocess_marker_strict(&config.state_root, 700)
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.state, "failed");
+        assert!(marker.pid.is_none());
+        assert!(marker.process_start_ticks.is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_managed_registry_success_uses_bounded_probe_not_deep_rescan() {
+        let root = temp_root("registry-reprocess-managed-probe");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        let (source, target) = write_probe_only_registry_receipt(&config, 700);
+        assert!(
+            crate::archive_v2::registry_reprocess::probe_published_reprocess(&target, 700).is_ok()
+        );
+        assert!(
+            crate::archive_v2::registry_reprocess::validate_published_reprocess(
+                &source, &target, 700
+            )
+            .is_err(),
+            "the synthetic receipt intentionally lacks deep-bound artifacts"
+        );
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let child = make_finished_child(
+            ChildKind::RegistryReprocess { epoch: 700, target },
+            registry_reprocess_progress_path(&config.state_root, 700),
+            config
+                .state_root
+                .join("logs/epoch-700-registry-reprocess.log"),
+        )
+        .await;
+        let mut runtime = RuntimeState::default();
+        handle_registry_reprocess_child_exit(&config, &mut runtime, child, true);
+        assert!(!runtime.failures.contains_key("registry_reprocess:700"));
+        assert!(runtime.validated_registry_reprocesses.contains(&700));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertain_managed_registry_exit_still_requires_deep_validation() {
+        let root = temp_root("registry-reprocess-uncertain-deep");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        let (_source, target) = write_probe_only_registry_receipt(&config, 700);
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let child = make_finished_child(
+            ChildKind::RegistryReprocess { epoch: 700, target },
+            registry_reprocess_progress_path(&config.state_root, 700),
+            config
+                .state_root
+                .join("logs/epoch-700-registry-reprocess.log"),
+        )
+        .await;
+        let auditor = RegistryReprocessAuditor::new(config.clone());
+        let mut runtime = RuntimeState::default();
+        runtime.uncertain_registry_reprocesses.insert(700);
+        handle_registry_reprocess_child_exit(&config, &mut runtime, child, true);
+        assert!(runtime.pending_registry_reprocess_audits.contains(&700));
+        wait_for_registry_reprocess_audits(&config, &mut runtime, &auditor);
+        assert!(runtime.failures.contains_key("registry_reprocess:700"));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_nonzero_exit_audit_never_falls_back_to_bounded_completion() {
+        use std::sync::Barrier;
+
+        let root = temp_root("registry-reprocess-pending-dominates-probe");
+        let mut config = test_config(&root);
+        config.execute = true;
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 8;
+        config.disk_reserve_gib = 0;
+        fs::create_dir_all(&config.state_root).unwrap();
+        let (_source, target) = write_probe_only_registry_receipt(&config, 700);
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        set_registry_reprocess_marker_identity(&config, 700, u32::MAX, 1).unwrap();
+        let child = make_finished_child(
+            ChildKind::RegistryReprocess { epoch: 700, target },
+            registry_reprocess_progress_path(&config.state_root, 700),
+            config
+                .state_root
+                .join("logs/epoch-700-registry-reprocess.log"),
+        )
+        .await;
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let validator: RegistryReprocessValidator = {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            Arc::new(move |_, _| {
+                started.wait();
+                release.wait();
+                Err("injected deep validation failure".to_string())
+            })
+        };
+        let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
+        let mut runtime = RuntimeState::default();
+        handle_registry_reprocess_child_exit(&config, &mut runtime, child, false);
+
+        assert!(runtime.pending_registry_reprocess_audits.contains(&700));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "auditing"
+        );
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+        assert!(!runtime.validated_registry_reprocesses.contains(&700));
+        let snapshot = registry_audit_test_snapshot(&config, &root, 700);
+        assert_eq!(
+            registry_reprocess_status(&config, &runtime, &snapshot.epochs[0]),
+            RegistryReprocessStatus::Blocked
+        );
+
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        started.wait();
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "auditing"
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&700));
+        release.wait();
+        wait_for_registry_reprocess_audits(&config, &mut runtime, &auditor);
+
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "failed"
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&700));
+        assert!(runtime.registry_reprocesses.is_empty());
+        assert_eq!(
+            top_up_registry_reprocesses(&config, &snapshot, &mut runtime).await,
+            0,
+            "a failed deep audit must not respawn the epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_auditing_marker_survives_controller_restart_without_bounded_probe() {
+        let root = temp_root("registry-reprocess-audit-restart");
+        let mut config = test_config(&root);
+        config.execute = true;
+        fs::create_dir_all(&config.state_root).unwrap();
+        let (_source, target) = write_probe_only_registry_receipt(&config, 700);
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let child = make_finished_child(
+            ChildKind::RegistryReprocess { epoch: 700, target },
+            registry_reprocess_progress_path(&config.state_root, 700),
+            config
+                .state_root
+                .join("logs/epoch-700-registry-reprocess.log"),
+        )
+        .await;
+        let mut before_restart = RuntimeState::default();
+        handle_registry_reprocess_child_exit(&config, &mut before_restart, child, false);
+        assert!(
+            before_restart
+                .pending_registry_reprocess_audits
+                .contains(&700)
+        );
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "auditing"
+        );
+
+        let mut after_restart = RuntimeState::default();
+        reconcile_registry_reprocess_markers(&config, &mut after_restart);
+        assert!(
+            after_restart
+                .pending_registry_reprocess_audits
+                .contains(&700)
+        );
+        assert!(!after_restart.validated_registry_reprocesses.contains(&700));
+        let auditor = RegistryReprocessAuditor::with_validator(
+            config.clone(),
+            Arc::new(|_, _| Err("restart deep validation failed".to_string())),
+        );
+        dispatch_registry_reprocess_audit(&config, &mut after_restart, &auditor, true);
+        wait_for_registry_reprocess_audits(&config, &mut after_restart, &auditor);
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "failed"
+        );
+        assert!(!after_restart.validated_registry_reprocesses.contains(&700));
+    }
+
+    #[tokio::test]
+    async fn retry_ready_resets_audit_dedupe_for_the_next_generation_attempt() {
+        let root = temp_root("registry-reprocess-audit-retry-generation");
+        let mut config = test_config(&root);
+        config.execute = true;
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let mut runtime = RuntimeState::default();
+        runtime.examined_registry_reprocess_targets.insert(700);
+        reconcile_ended_registry_reprocess(
+            &config,
+            &mut runtime,
+            700,
+            true,
+            RegistryReprocessValidation::BoundedProbe,
+            "first attempt ended without a target",
+        );
+        assert!(!runtime.examined_registry_reprocess_targets.contains(&700));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "retry_ready"
+        );
+
+        let (_source, target) = write_probe_only_registry_receipt(&config, 700);
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let child = make_finished_child(
+            ChildKind::RegistryReprocess { epoch: 700, target },
+            registry_reprocess_progress_path(&config.state_root, 700),
+            config
+                .state_root
+                .join("logs/epoch-700-registry-reprocess.log"),
+        )
+        .await;
+        handle_registry_reprocess_child_exit(&config, &mut runtime, child, false);
+        assert!(runtime.pending_registry_reprocess_audits.contains(&700));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "auditing"
+        );
+        let auditor = RegistryReprocessAuditor::with_validator(
+            config.clone(),
+            Arc::new(|_, _| Err("next generation is invalid".to_string())),
+        );
+        dispatch_registry_reprocess_audit(&config, &mut runtime, &auditor, true);
+        wait_for_registry_reprocess_audits(&config, &mut runtime, &auditor);
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .unwrap()
+                .state,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn deep_audit_claim_publication_failure_blocks_without_dispatch() {
+        let root = temp_root("registry-reprocess-audit-claim-failure");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        fs::write(
+            config.state_root.join("registry_reprocess"),
+            b"not a directory",
+        )
+        .unwrap();
+        let mut runtime = RuntimeState::default();
+        runtime.validated_registry_reprocesses.insert(700);
+        require_registry_reprocess_audit(
+            &config,
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target requires validation",
+                },
+            },
+        );
+        assert!(
+            runtime
+                .registry_reprocess_audit_claim_failures
+                .contains(&700)
+        );
+        assert!(!runtime.pending_registry_reprocess_audits.contains(&700));
+        assert!(runtime.registry_reprocess_audit_queue.is_empty());
+        assert!(!runtime.validated_registry_reprocesses.contains(&700));
+        assert!(runtime.registry_reprocess_admission_blocked);
+        assert!(runtime.failures.contains_key("registry_reprocess:700"));
+    }
+
+    #[test]
+    fn bounded_success_is_not_cached_when_complete_marker_publication_fails() {
+        let root = temp_root("registry-reprocess-complete-marker-failure");
+        let config = test_config(&root);
+        write_probe_only_registry_receipt(&config, 700);
+        fs::create_dir_all(&config.state_root).unwrap();
+        fs::write(
+            config.state_root.join("registry_reprocess"),
+            b"not a directory",
+        )
+        .unwrap();
+        let mut runtime = RuntimeState::default();
+        reconcile_ended_registry_reprocess(
+            &config,
+            &mut runtime,
+            700,
+            false,
+            RegistryReprocessValidation::BoundedProbe,
+            "bounded restart validation",
+        );
+        finish_registry_reprocess_exit(
+            &config,
+            &mut runtime,
+            701,
+            &config.state_root.join("logs/epoch-701.log"),
+            true,
+            true,
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&700));
+        assert!(!runtime.validated_registry_reprocesses.contains(&701));
+        assert!(runtime.failures.contains_key("registry_reprocess:700"));
+        assert!(runtime.failures.contains_key("registry_reprocess:701"));
+    }
+
+    #[test]
+    fn registry_pause_resume_is_rejected_before_persisted_intent() {
+        let error = control_job_key(REGISTRY_REPROCESS_OWNERSHIP_KIND, "700").unwrap_err();
+        assert!(matches!(error, ControlError::BadRequest(_)));
+    }
+
+    #[test]
+    fn audit_admission_honors_pause_inventory_and_conflicting_maintenance_lanes() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let root = temp_root("registry-reprocess-audit-common-gates");
+        let mut config = test_config(&root);
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 8;
+        config.disk_reserve_gib = 0;
+        write_probe_only_registry_receipt(&config, 700);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let validator: RegistryReprocessValidator = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(())
+            })
+        };
+        let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
+        let mut runtime = RuntimeState::default();
+        enqueue_claimed_registry_reprocess_audit(
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+            },
+        );
+        let mut snapshot = registry_audit_test_snapshot(&config, &root, 700);
+        runtime.scheduler_paused = true;
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+        runtime.scheduler_paused = false;
+        snapshot.inventory.complete = false;
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+        snapshot.inventory.complete = true;
+        snapshot.lanes.push(queue_lane(701, "running", 0, 1, None));
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn audit_admission_uses_receipt_threads_instead_of_current_spawn_config() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let root = temp_root("registry-reprocess-audit-receipt-threads");
+        let mut receipt_config = test_config(&root);
+        receipt_config.registry_reprocess_threads = 64;
+        write_probe_only_registry_receipt(&receipt_config, 700);
+        let mut config = receipt_config.clone();
+        config.registry_reprocess_threads = 4;
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 8;
+        config.disk_reserve_gib = 0;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let validator: RegistryReprocessValidator = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(())
+            })
+        };
+        let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
+        let mut runtime = RuntimeState::default();
+        enqueue_claimed_registry_reprocess_audit(
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+            },
+        );
+        let snapshot = registry_audit_test_snapshot(&config, &root, 700);
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(
+            runtime
+                .registry_reprocess_admission_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("audit needs 64"))
+        );
+    }
+
+    #[test]
+    fn read_only_audit_does_not_reserve_the_rewrite_disk_projection() {
+        let root = temp_root("registry-reprocess-audit-read-only-disk");
+        let mut config = test_config(&root);
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 8;
+        write_probe_only_registry_receipt(&config, 700);
+        let (_, available) =
+            closest_filesystem_capacity(&config.registry_reprocess_target_root).unwrap();
+        let gib = 1024u64 * 1024 * 1024;
+        config.disk_reserve_gib = available / gib;
+        assert!(
+            available
+                > config
+                    .disk_reserve_gib
+                    .saturating_mul(gib)
+                    .saturating_add(MAX_REGISTRY_REPROCESS_MARKER_BYTES)
+        );
+        let auditor =
+            RegistryReprocessAuditor::with_validator(config.clone(), Arc::new(|_, _| Ok(())));
+        let mut runtime = RuntimeState::default();
+        enqueue_claimed_registry_reprocess_audit(
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+            },
+        );
+        let snapshot = registry_audit_test_snapshot(&config, &root, 700);
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        assert!(runtime.active_registry_reprocess_audit.is_some());
+        wait_for_registry_reprocess_audits(&config, &mut runtime, &auditor);
+        assert!(runtime.validated_registry_reprocesses.contains(&700));
+    }
+
+    #[tokio::test]
+    async fn manual_audit_waits_for_configured_registry_capacity() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let root = temp_root("registry-reprocess-audit-capacity");
+        let mut config = test_config(&root);
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 8;
+        config.disk_reserve_gib = 0;
+        write_probe_only_registry_receipt(&config, 700);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let validator: RegistryReprocessValidator = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(())
+            })
+        };
+        let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
+        let mut runtime = RuntimeState::default();
+        enqueue_claimed_registry_reprocess_audit(
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+            },
+        );
+        let active = make_finished_child(
+            ChildKind::RegistryReprocess {
+                epoch: 701,
+                target: registry_reprocess_target(&config, 701),
+            },
+            registry_reprocess_progress_path(&config.state_root, 701),
+            config.state_root.join("logs/epoch-701.log"),
+        )
+        .await;
+        runtime.registry_reprocesses.insert(701, active);
+        let snapshot = registry_audit_test_snapshot(&config, &root, 700);
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(
+            runtime
+                .registry_reprocess_admission_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("capacity blocked"))
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrency_zero_adopted_registry_owner_keeps_scheduler_exclusive() {
+        let root = temp_root("registry-reprocess-zero-adopted-exclusive");
+        let mut config = test_config(&root);
+        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
+        let snapshot =
+            schedulable_snapshot(&root, vec![test_epoch(&root, 700, HistoricalState::Queued)]);
+        let mut runtime = RuntimeState::default();
+        runtime.adopted_registry_reprocesses.insert(
+            699,
+            AdoptedRegistryReprocess {
+                epoch: 699,
+                pid: u32::MAX,
+                process_start_ticks: Some(1),
+                threads: Some(4),
+                progress_path: registry_reprocess_progress_path(&config.state_root, 699),
+                identity_trusted: true,
+            },
+        );
+        assert!(registry_reprocess_work_pending(
+            &config, &snapshot, &runtime
+        ));
+        schedule_work(&config, &snapshot, &mut runtime)
+            .await
+            .unwrap();
+        assert!(runtime.scans.is_empty());
+        assert!(!runtime.failures.contains_key("scan:700"));
+    }
+
+    #[tokio::test]
+    async fn concurrency_zero_manual_audit_waits_without_blocking_unrelated_work() {
+        let root = temp_root("registry-reprocess-zero-manual-audit");
+        let mut config = test_config(&root);
+        config.blockzilla_bin = PathBuf::from("/usr/bin/true");
+        config.start_epoch = Some(701);
+        config.end_epoch = Some(701);
+        let snapshot =
+            schedulable_snapshot(&root, vec![test_epoch(&root, 701, HistoricalState::Queued)]);
+        fs::write(config.car_root.join("epoch-700.car"), b"car").unwrap();
+        let auditor = RegistryReprocessAuditor::new(config.clone());
+        let mut runtime = RuntimeState::default();
+        enqueue_claimed_registry_reprocess_audit(
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+            },
+        );
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+        assert!(!registry_reprocess_work_pending(
+            &config, &snapshot, &runtime
+        ));
+        schedule_work(&config, &snapshot, &mut runtime)
+            .await
+            .unwrap();
+        assert!(runtime.scans.contains_key(&701));
+        for child in runtime.scans.values_mut() {
+            let _ = child.child.wait().await;
+        }
     }
 
     #[test]
@@ -15815,8 +20677,7 @@ mod tests {
         );
 
         let legacy_path = root.join("legacy-poh.wincode");
-        let mut writer =
-            WincodeLeb128FramedWriter::new(File::create(&legacy_path).unwrap());
+        let mut writer = WincodeLeb128FramedWriter::new(File::create(&legacy_path).unwrap());
         writer
             .write(&WincodeArchiveV2PohRecordLegacyNoSignatureCount {
                 block_id: 0,
@@ -15831,11 +20692,15 @@ mod tests {
         drop(writer);
         let legacy_artifact = poh_signature_count_migration_artifact(&legacy_path);
         assert_eq!(legacy_artifact.state, ArtifactState::Pending);
-        assert!(legacy_artifact.message.unwrap().contains("migrate-poh-signature-counts"));
+        assert!(
+            legacy_artifact
+                .message
+                .unwrap()
+                .contains("migrate-poh-signature-counts")
+        );
 
         let current_path = root.join("current-poh.wincode");
-        let mut writer =
-            WincodeLeb128FramedWriter::new(File::create(&current_path).unwrap());
+        let mut writer = WincodeLeb128FramedWriter::new(File::create(&current_path).unwrap());
         writer
             .write(&WincodeArchiveV2PohRecord {
                 block_id: 0,
@@ -15931,11 +20796,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn progress_pipe_discards_oversized_line_with_bounded_memory_and_recovers() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let receiver =
+            tokio::net::unix::pipe::Receiver::from_owned_fd(OwnedFd::from(reader)).unwrap();
+        let mut pipe = ProgressPipe {
+            receiver,
+            buffer: Vec::new(),
+            last: None,
+        };
+
+        pipe.ingest(&vec![b'x'; MAX_PROGRESS_PIPE_LINE_BYTES * 4]);
+        assert_eq!(
+            pipe.buffer.len(),
+            MAX_PROGRESS_PIPE_LINE_BYTES,
+            "an unterminated or malicious writer cannot grow scheduler memory without bound"
+        );
+        pipe.ingest(b"\n{\"blocks_done\":17}\n");
+        assert_eq!(pipe.buffer.len(), 0);
+        assert_eq!(
+            pipe.last
+                .expect("valid line after overflow is parsed")
+                .blocks_done,
+            17
+        );
+    }
+
+    #[test]
+    fn progress_pipe_writer_is_configured_nonblocking() {
+        let (_reader, writer) = std::io::pipe().unwrap();
+        set_nonblocking_raw(writer.as_raw_fd()).unwrap();
+        // SAFETY: fcntl only reads flags from this live test descriptor.
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    }
+
+    #[tokio::test]
+    async fn progress_pipe_setup_failure_kills_process_group_and_reaps_child() {
+        let root = temp_root("progress-pipe-post-spawn-failure");
+        fs::create_dir_all(&root).unwrap();
+        let descendant_pid_path = root.join("descendant.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 60 & echo $! > \"$1\"; wait")
+            .arg("sh")
+            .arg(&descendant_pid_path)
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let child_pid = child.id().unwrap();
+        let mut descendant_pid = None;
+        for _ in 0..200 {
+            if let Ok(pid) = fs::read_to_string(&descendant_pid_path)
+                && let Ok(pid) = pid.trim().parse::<u32>()
+            {
+                descendant_pid = Some(pid);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let descendant_pid = match descendant_pid {
+            Some(pid) => pid,
+            None => {
+                // SAFETY: this test spawned the child as this isolated process-group leader.
+                let _ = unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+                let _ = child.wait().await;
+                panic!("shell did not publish descendant pid");
+            }
+        };
+        // SAFETY: getpgid only queries the live descendant created by this test.
+        assert_eq!(
+            unsafe { libc::getpgid(descendant_pid as libc::pid_t) },
+            child_pid as libc::pid_t
+        );
+        let not_a_pipe = OwnedFd::from(File::create(root.join("regular-file")).unwrap());
+
+        assert!(
+            progress_pipe_from_spawned_child(&mut child, not_a_pipe)
+                .await
+                .is_err()
+        );
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "a fallible post-spawn setup path must reap the child before returning"
+        );
+        let mut descendant_gone = false;
+        for _ in 0..200 {
+            // SAFETY: signal 0 performs an existence probe without delivering a signal.
+            let exists_by_signal = unsafe { libc::kill(descendant_pid as libc::pid_t, 0) } == 0
+                || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+            let running = process_stat_identity(descendant_pid)
+                .map_or(exists_by_signal, |(state, _)| {
+                    !matches!(state, 'Z' | 'X' | 'x')
+                });
+            if !running {
+                descendant_gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        if !descendant_gone {
+            // Keep a failed regression from leaking its fixture into subsequent tests.
+            // SAFETY: this PID belongs to the descendant created above.
+            let _ = unsafe { libc::kill(descendant_pid as libc::pid_t, libc::SIGKILL) };
+        }
+        assert!(
+            descendant_gone,
+            "post-spawn setup failure must not leave a rapidly spawned descendant alive"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
     async fn lane_from_child_prefers_the_progress_pipe_cache_over_reading_progress_path() {
         let root = temp_root("lane-from-child-prefers-pipe");
         fs::create_dir_all(&root).unwrap();
         let (reader, _writer) = std::io::pipe().unwrap();
-        let receiver = tokio::net::unix::pipe::Receiver::from_owned_fd(OwnedFd::from(reader)).unwrap();
+        let receiver =
+            tokio::net::unix::pipe::Receiver::from_owned_fd(OwnedFd::from(reader)).unwrap();
         let mut child = make_running_child(
             ChildKind::PohSignatureCountMigration { epoch: 700 },
             root.join("nonexistent-progress.json"),
@@ -15951,7 +20930,13 @@ mod tests {
             }),
         });
 
-        let lane = lane_from_child(&child, Some(700), None, unix_now(), &RuntimeState::default());
+        let lane = lane_from_child(
+            &child,
+            Some(700),
+            None,
+            unix_now(),
+            &RuntimeState::default(),
+        );
         assert_eq!(
             lane.progress.blocks_done, 42,
             "the pipe's cached snapshot must win even though progress_path has no file at all"
@@ -15962,7 +20947,180 @@ mod tests {
     }
 
     #[test]
-    fn poh_migration_marker_roundtrips_through_write_read_and_set_pid() {
+    fn poh_migration_args_always_pass_a_positive_explicit_thread_count() {
+        assert_eq!(
+            poh_migration_args(Path::new("/archives/epoch-700"), 3),
+            vec![
+                std::ffi::OsString::from("migrate-poh-signature-counts"),
+                std::ffi::OsString::from("/archives/epoch-700"),
+                std::ffi::OsString::from("--threads"),
+                std::ffi::OsString::from("3"),
+            ]
+        );
+    }
+
+    #[test]
+    fn poh_migration_argv_distinguishes_bounded_and_legacy_all_core_workers() {
+        let blockzilla = Path::new("/opt/blockzilla/bin/blockzilla");
+        let archive = Path::new("/archives/epoch-700");
+        let bounded = b"/opt/blockzilla/bin/blockzilla\0migrate-poh-signature-counts\0/archives/epoch-700\0--threads\03\0";
+        assert_eq!(
+            poh_migration_argv(bounded, blockzilla, archive),
+            Some(PohMigrationProcessArgv {
+                worker_threads: Some(3)
+            })
+        );
+        assert_eq!(
+            poh_migration_argv_any_binary(bounded, archive),
+            Some(PohMigrationProcessArgv {
+                worker_threads: Some(3)
+            }),
+            "ownership scans recognize an exact writer after its binary path changes"
+        );
+        let legacy =
+            b"/opt/blockzilla/bin/blockzilla\0migrate-poh-signature-counts\0/archives/epoch-700\0";
+        assert_eq!(
+            poh_migration_argv(legacy, blockzilla, archive),
+            Some(PohMigrationProcessArgv {
+                worker_threads: None
+            })
+        );
+    }
+
+    #[test]
+    fn proc_mount_visibility_rejects_hidden_or_unknown_process_tables() {
+        assert!(proc_mount_allows_full_process_visibility(
+            "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+        ));
+        assert!(proc_mount_allows_full_process_visibility(
+            "proc /proc proc rw,hidepid=0 0 0\n"
+        ));
+        assert!(!proc_mount_allows_full_process_visibility(
+            "proc /proc proc rw,hidepid=1 0 0\n"
+        ));
+        assert!(!proc_mount_allows_full_process_visibility(
+            "proc /proc proc rw,hidepid=invisible 0 0\n"
+        ));
+        assert!(!proc_mount_allows_full_process_visibility(
+            "tmpfs /proc tmpfs rw 0 0\n"
+        ));
+    }
+
+    #[test]
+    fn poh_migration_cpu_budget_charges_untrusted_legacy_survivor_as_full_budget() {
+        let root = temp_root("poh-migration-cpu-budget");
+        let mut config = test_config(&root);
+        config.poh_migration_threads = 2;
+        config.poh_migration_cpu_budget_threads = 8;
+        let mut runtime = RuntimeState::default();
+        runtime.adopted_poh_migrations.insert(
+            700,
+            AdoptedPohMigration {
+                epoch: 700,
+                pid: 100,
+                identity_trusted: true,
+                process_start_ticks: Some(1),
+                worker_threads: Some(3),
+            },
+        );
+        assert_eq!(poh_migration_cpu_threads_in_use(&config, &runtime), 3);
+        runtime.adopted_poh_migrations.insert(
+            701,
+            AdoptedPohMigration {
+                epoch: 701,
+                pid: 101,
+                identity_trusted: false,
+                process_start_ticks: None,
+                worker_threads: None,
+            },
+        );
+        assert_eq!(
+            poh_migration_cpu_threads_in_use(&config, &runtime),
+            11,
+            "the ambiguous legacy worker consumes the whole eight-thread budget"
+        );
+        runtime.poh_migration_admission_blocked = true;
+        assert_eq!(
+            poh_migration_cpu_threads_in_use(&config, &runtime),
+            config.poh_migration_cpu_budget_threads,
+            "unresolved global ownership reserves the entire configured budget"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_poh_reconciliation_fixture(output: &Path, index_signatures: u32, poh_signatures: u32) {
+        use blockzilla_format::{
+            ArchiveV2HotBlockIndexRow, CompactPohEntry, WincodeArchiveV2PohRecord,
+            WincodeLeb128FramedWriter, write_archive_v2_hot_block_index,
+        };
+
+        fs::create_dir_all(output).unwrap();
+        let rows = vec![ArchiveV2HotBlockIndexRow {
+            block_id: 0,
+            slot: 100,
+            compressed_offset: 0,
+            compressed_len: 1,
+            uncompressed_len: 1,
+            tx_count: 0,
+            first_tx_ordinal: 0,
+            first_signature_ordinal: 0,
+            signature_count: index_signatures,
+        }];
+        write_archive_v2_hot_block_index(&output.join(BLOCK_INDEX_FILE), 1, 1, 0, &rows).unwrap();
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(output.join(POH_FILE)).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                    signature_count: poh_signatures,
+                }],
+            })
+            .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn poh_marker_reconciliation_verifies_complete_retries_safe_stale_and_fails_pidless_claim() {
+        let root = temp_root("poh-marker-reconcile");
+        let config = test_config(&root);
+
+        let complete = config.archive_root.join("epoch-700");
+        write_poh_reconciliation_fixture(&complete, 1, 1);
+        write_poh_migration_marker(&config.state_root, 700, "running", None).unwrap();
+        set_poh_migration_marker_identity(&config.state_root, 700, u32::MAX, 1, 1).unwrap();
+
+        let retryable = config.archive_root.join("epoch-701");
+        write_poh_reconciliation_fixture(&retryable, 1, 0);
+        write_poh_migration_marker(&config.state_root, 701, "running", None).unwrap();
+        set_poh_migration_marker_identity(&config.state_root, 701, u32::MAX - 1, 1, 1).unwrap();
+
+        let pidless = config.archive_root.join("epoch-702");
+        write_poh_reconciliation_fixture(&pidless, 1, 0);
+        write_poh_migration_marker(&config.state_root, 702, "running", None).unwrap();
+
+        let mut runtime = RuntimeState::default();
+        reconcile_poh_migration_markers(&config, &mut runtime);
+
+        let complete = read_poh_migration_marker(&config.state_root, 700).unwrap();
+        assert_eq!(complete.state, "complete");
+        assert!(complete.pid.is_none());
+        let retryable = read_poh_migration_marker(&config.state_root, 701).unwrap();
+        assert_eq!(retryable.state, "retry_ready");
+        assert!(retryable.pid.is_none());
+        let pidless = read_poh_migration_marker(&config.state_root, 702).unwrap();
+        assert_eq!(pidless.state, "failed");
+        assert!(runtime.failures.contains_key("poh_migration:702"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_migration_marker_publishes_and_clears_process_identity_atomically() {
         let root = temp_root("poh-migration-marker-roundtrip");
         fs::create_dir_all(&root).unwrap();
 
@@ -15974,20 +21132,268 @@ mod tests {
         assert_eq!(marker.id, "42");
         assert_eq!(marker.state, "running");
         assert_eq!(marker.pid, None);
+        assert_eq!(marker.process_start_ticks, None);
+        assert_eq!(marker.worker_threads, None);
 
-        set_poh_migration_marker_pid(&root, 42, Some(1234)).unwrap();
-        assert_eq!(read_poh_migration_marker(&root, 42).unwrap().pid, Some(1234));
+        set_poh_migration_marker_identity(&root, 42, 1234, 5678, 2).unwrap();
+        let marker = read_poh_migration_marker(&root, 42).unwrap();
+        assert_eq!(marker.pid, Some(1234));
+        assert_eq!(marker.process_start_ticks, Some(5678));
+        assert_eq!(marker.worker_threads, Some(2));
 
-        // write_poh_migration_marker preserves pid across a state transition, mirroring
-        // write_ownership -- pid is only ever cleared by an explicit set_*_pid(None) call.
+        // Terminal/retry state and identity clearing are one rename, so no observer can see a
+        // complete marker still pointing at a PID that is free to be reused.
         write_poh_migration_marker(&root, 42, "complete", None).unwrap();
         let marker = read_poh_migration_marker(&root, 42).unwrap();
         assert_eq!(marker.state, "complete");
+        assert_eq!(marker.pid, None);
+        assert_eq!(marker.process_start_ticks, None);
+        assert_eq!(marker.worker_threads, None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_migration_marker_reader_rejects_oversized_and_fifo_without_blocking() {
+        let root = temp_root("poh-migration-marker-bounded-read");
+        let marker_path = poh_migration_marker_path(&root, 42);
+        fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+
+        let oversized = File::create(&marker_path).unwrap();
+        oversized
+            .set_len(MAX_POH_MIGRATION_MARKER_BYTES + 1)
+            .unwrap();
+        drop(oversized);
+        let error = read_poh_migration_marker_strict(&root, 42).unwrap_err();
+        assert!(
+            error.to_string().contains("maximum is 16777216"),
+            "unexpected oversized-marker error: {error:#}"
+        );
+
+        fs::remove_file(&marker_path).unwrap();
+        let c_path = std::ffi::CString::new(marker_path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a valid, NUL-terminated path and the parent directory exists.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let child_root = root.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = read_poh_migration_marker_strict(&child_root, 42)
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}"));
+            sender.send(result).unwrap();
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("FIFO marker read blocked instead of failing closed");
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("is not a regular file"),
+            "unexpected FIFO-marker error: {error}"
+        );
+        reader.join().unwrap();
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn uncertain_poh_child_poll_retains_runtime_and_marker_ownership() {
+        let root = temp_root("poh-poll-uncertainty-retains-ownership");
+        let config = test_config(&root);
+        let epoch = 700;
+        let child = make_running_child(
+            ChildKind::PohSignatureCountMigration { epoch },
+            poh_migration_progress_path(&config.state_root, epoch),
+            config.state_root.join("logs/poh-migration-700.log"),
+        )
+        .await;
+        let pid = child.pid.unwrap();
+        write_poh_migration_marker(&config.state_root, epoch, "running", None).unwrap();
+        set_poh_migration_marker_identity(
+            &config.state_root,
+            epoch,
+            pid,
+            123,
+            config.poh_migration_threads,
+        )
+        .unwrap();
+        let marker_before = read_poh_migration_marker(&config.state_root, epoch).unwrap();
+        let mut runtime = RuntimeState::default();
+        runtime.poh_migrations.insert(epoch, child);
+
+        retain_poh_migration_after_poll_error(
+            &config,
+            &mut runtime,
+            epoch,
+            &io::Error::other("injected uncertain wait status"),
+        );
+
+        assert!(runtime.poh_migrations.contains_key(&epoch));
+        assert_eq!(
+            poh_migration_cpu_threads_in_use(&config, &runtime),
+            config.poh_migration_threads
+        );
+        assert_eq!(
+            read_poh_migration_marker(&config.state_root, epoch).unwrap(),
+            marker_before,
+            "an uncertain poll must preserve the durable running identity"
+        );
+        assert!(runtime.failures.contains_key("poh_migration:700"));
+
+        let mut child = runtime.poh_migrations.remove(&epoch).unwrap();
+        let _ = child.child.kill().await;
+        let _ = child.child.wait().await;
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_retry_marker_transition_is_compare_and_swap() {
+        let root = temp_root("poh-retry-marker-cas");
+        write_poh_migration_marker(&root, 42, "failed", Some("old failure".to_string())).unwrap();
+        let stale_failed = read_poh_migration_marker(&root, 42).unwrap();
+
+        write_poh_migration_marker(&root, 42, "running", None).unwrap();
+        set_poh_migration_marker_identity(&root, 42, 1234, 5678, 2).unwrap();
+        assert!(
+            compare_and_transition_failed_poh_marker_to_retry_ready(&root, 42, &stale_failed)
+                .is_err()
+        );
+        let running = read_poh_migration_marker(&root, 42).unwrap();
+        assert_eq!(running.state, "running");
+        assert_eq!(running.pid, Some(1234));
+        assert_eq!(running.process_start_ticks, Some(5678));
+        assert_eq!(running.worker_threads, Some(2));
+
+        write_poh_migration_marker(&root, 43, "failed", None).unwrap();
+        let current_failed = read_poh_migration_marker(&root, 43).unwrap();
+        compare_and_transition_failed_poh_marker_to_retry_ready(&root, 43, &current_failed)
+            .unwrap();
+        assert_eq!(
+            read_poh_migration_marker(&root, 43).unwrap().state,
+            "retry_ready"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unavailable_process_table_keeps_running_marker_and_reserves_budget() {
+        let root = temp_root("poh-process-table-unavailable");
+        let config = test_config(&root);
+        let mut disabled_runtime = RuntimeState::default();
+        reconcile_poh_migration_markers(&config, &mut disabled_runtime);
+        assert!(
+            !disabled_runtime.poh_migration_admission_blocked,
+            "a disabled lane with no ownership does not manufacture an operational failure"
+        );
+
+        write_poh_migration_marker(&config.state_root, 700, "running", None).unwrap();
+        set_poh_migration_marker_identity(&config.state_root, 700, 1234, 5678, 1).unwrap();
+
+        let mut runtime = RuntimeState::default();
+        reconcile_poh_migration_markers(&config, &mut runtime);
+
+        assert!(runtime.poh_migration_admission_blocked);
+        assert_eq!(
+            poh_migration_cpu_threads_in_use(&config, &runtime),
+            config.poh_migration_cpu_budget_threads
+        );
+        let marker = read_poh_migration_marker(&config.state_root, 700).unwrap();
+        assert_eq!(marker.state, "running");
         assert_eq!(marker.pid, Some(1234));
+        fs::remove_dir_all(&root).ok();
+    }
 
-        set_poh_migration_marker_pid(&root, 42, None).unwrap();
-        assert_eq!(read_poh_migration_marker(&root, 42).unwrap().pid, None);
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_marker_directory_reserves_global_budget() {
+        let root = temp_root("poh-marker-directory-unreadable");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        fs::write(config.state_root.join("poh_migrations"), b"not a directory").unwrap();
 
+        let mut runtime = RuntimeState::default();
+        reconcile_poh_migration_markers(&config, &mut runtime);
+        assert!(runtime.poh_migration_admission_blocked);
+        assert_eq!(
+            poh_migration_cpu_threads_in_use(&config, &runtime),
+            config.poh_migration_cpu_budget_threads
+        );
+        assert!(
+            runtime
+                .failures
+                .contains_key(POH_MIGRATION_VISIBILITY_FAILURE_KEY)
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn poh_migration_adoption_requires_persisted_start_ticks_and_threads() {
+        let root = temp_root("poh-migration-adoption-identity");
+        let mut config = test_config(&root);
+        config.blockzilla_bin = compile_idle_legacy_worker(&root.join("worker"));
+        config.poh_migration_threads = 2;
+        config.poh_migration_cpu_budget_threads = 8;
+        let output = config.archive_root.join("epoch-700");
+        fs::create_dir_all(&output).unwrap();
+
+        let mut command = Command::new(&config.blockzilla_bin);
+        command.args(poh_migration_args(&output, config.poh_migration_threads));
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let (_, start_ticks) = process_stat_identity(pid).unwrap();
+        write_poh_migration_marker(&config.state_root, 700, "running", None).unwrap();
+        set_poh_migration_marker_identity(
+            &config.state_root,
+            700,
+            pid,
+            start_ticks,
+            config.poh_migration_threads,
+        )
+        .unwrap();
+
+        let marker = read_poh_migration_marker(&config.state_root, 700).unwrap();
+        let adopted = trusted_adopted_poh_migration(&config, 700, &marker).unwrap();
+        assert!(adopted.identity_trusted);
+        assert_eq!(adopted.worker_threads, Some(2));
+
+        // Simulate a marker written by the previous binary. Current `/proc` observations are not
+        // allowed to manufacture a durable start identity after restart; it stays untrusted and
+        // therefore consumes the full scheduler budget.
+        let mut legacy_marker = marker;
+        legacy_marker.process_start_ticks = None;
+        legacy_marker.worker_threads = None;
+        publish_poh_migration_marker(&config.state_root, 700, &legacy_marker).unwrap();
+        assert!(trusted_adopted_poh_migration(&config, 700, &legacy_marker).is_none());
+        let legacy = untrusted_live_poh_migration(&config, 700, &legacy_marker).unwrap();
+        assert!(!legacy.identity_trusted);
+        assert!(legacy.worker_threads.is_none());
+
+        legacy_marker.state = "failed".to_string();
+        publish_poh_migration_marker(&config.state_root, 700, &legacy_marker).unwrap();
+        let mut runtime = RuntimeState::default();
+        reconcile_poh_migration_markers(&config, &mut runtime);
+        assert!(runtime.adopted_poh_migrations.contains_key(&700));
+        assert_eq!(
+            poh_migration_cpu_threads_in_use(&config, &runtime),
+            config.poh_migration_cpu_budget_threads,
+            "a live exact worker behind an inconsistent marker consumes the full budget"
+        );
+
+        let mut reused_pid_hold = AdoptedPohMigration {
+            epoch: 700,
+            pid: std::process::id(),
+            identity_trusted: false,
+            process_start_ticks: None,
+            worker_threads: None,
+        };
+        assert!(
+            adopted_poh_migration_still_running(&config, &mut reused_pid_hold),
+            "a legacy marker cannot use current argv mismatch to trust a potentially reused PID"
+        );
+
+        child.kill().await.unwrap();
+        let _ = child.wait().await;
         fs::remove_dir_all(&root).ok();
     }
 
@@ -16017,9 +21423,8 @@ mod tests {
 
         // A full migration lifecycle against the dedicated marker.
         write_poh_migration_marker(&config.state_root, 700, "running", None).unwrap();
-        set_poh_migration_marker_pid(&config.state_root, 700, Some(9999)).unwrap();
+        set_poh_migration_marker_identity(&config.state_root, 700, 9999, 123, 1).unwrap();
         write_poh_migration_marker(&config.state_root, 700, "complete", None).unwrap();
-        set_poh_migration_marker_pid(&config.state_root, 700, None).unwrap();
 
         let after = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
         assert_eq!(
@@ -16082,14 +21487,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(poh_migration_status(&config, 700), PohMigrationStatus::Ready);
+        assert_eq!(
+            poh_migration_status(&config, 700),
+            PohMigrationStatus::Ready
+        );
 
         fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn poh_migration_status_transitions_through_already_migrated_and_retry_ready() {
-        use blockzilla_format::{CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter};
+        use blockzilla_format::{
+            CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter,
+        };
 
         let root = temp_root("poh-migration-status-current-schema");
         let config = test_config(&root);
@@ -16337,7 +21747,10 @@ mod tests {
             })
             .unwrap();
         drop(writer);
-        assert_eq!(poh_migration_status(&config, 700), PohMigrationStatus::Ready);
+        assert_eq!(
+            poh_migration_status(&config, 700),
+            PohMigrationStatus::Ready
+        );
 
         let mut snapshot = empty_snapshot(false);
         snapshot.epochs = vec![test_epoch(&root, 700, HistoricalState::Complete)];
@@ -16412,7 +21825,7 @@ mod tests {
         let archival_marker_before = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
 
         write_poh_migration_marker(&config.state_root, 700, "running", None).unwrap();
-        set_poh_migration_marker_pid(&config.state_root, 700, Some(4242)).unwrap();
+        set_poh_migration_marker_identity(&config.state_root, 700, 4242, 123, 1).unwrap();
 
         let log = config.state_root.join("logs/poh-migration-700.log");
         fs::write(&log, b"").unwrap();
@@ -16461,7 +21874,7 @@ mod tests {
         let archival_marker_before = fs::read(output.join(OWNERSHIP_MARKER)).unwrap();
 
         write_poh_migration_marker(&config.state_root, 701, "running", None).unwrap();
-        set_poh_migration_marker_pid(&config.state_root, 701, Some(4343)).unwrap();
+        set_poh_migration_marker_identity(&config.state_root, 701, 4343, 123, 1).unwrap();
 
         let log = config.state_root.join("logs/poh-migration-701.log");
         fs::write(&log, b"").unwrap();
@@ -18064,7 +23477,12 @@ mod tests {
         assert_eq!(summarize_epochs(&[complete]).blocks_per_sec, 0.0);
     }
 
-    fn poh_migration_lane(epoch: u64, state: &str, blocks_total: u64, blocks_per_sec: Option<f64>) -> LaneSnapshot {
+    fn poh_migration_lane(
+        epoch: u64,
+        state: &str,
+        blocks_total: u64,
+        blocks_per_sec: Option<f64>,
+    ) -> LaneSnapshot {
         LaneSnapshot {
             id: format!("poh_migration:{epoch}"),
             kind: "poh_signature_count_migration".to_string(),
@@ -18086,7 +23504,12 @@ mod tests {
         }
     }
 
-    fn poh_migration_epoch(root: &Path, epoch: u64, sidecar_bytes: u64, artifact_state: ArtifactState) -> EpochSnapshot {
+    fn poh_migration_epoch(
+        root: &Path,
+        epoch: u64,
+        sidecar_bytes: u64,
+        artifact_state: ArtifactState,
+    ) -> EpochSnapshot {
         let mut snapshot = test_epoch(root, epoch, HistoricalState::Complete);
         snapshot.artifacts.push(ArtifactSnapshot {
             kind: ArtifactKind::PohSignatureCountMigration,
@@ -18101,7 +23524,8 @@ mod tests {
     }
 
     #[test]
-    fn poh_migration_bytes_per_sec_scales_each_lanes_block_rate_by_its_own_epochs_bytes_per_block() {
+    fn poh_migration_bytes_per_sec_scales_each_lanes_block_rate_by_its_own_epochs_bytes_per_block()
+    {
         let root = temp_root("poh-migration-throughput");
         // Epoch 700: 431,000 total blocks over a 4,310,000-byte sidecar (10 bytes/block),
         // running at 100 blocks/sec -> 1,000 bytes/sec.
@@ -18323,8 +23747,10 @@ mod tests {
         });
         let (updates, _) = broadcast::channel(4);
         let mut receiver = updates.subscribe();
+        let config = test_config(&root);
         let state = Arc::new(AppState {
-            config: test_config(&root),
+            registry_reprocess_auditor: RegistryReprocessAuditor::new(config.clone()),
+            config,
             snapshot: RwLock::new(snapshot),
             updates,
             sequence: AtomicU64::new(0),
@@ -19085,6 +24511,7 @@ mod tests {
     fn test_app_state(config: SchedulerConfig) -> Arc<AppState> {
         let (updates, _) = broadcast::channel(4);
         Arc::new(AppState {
+            registry_reprocess_auditor: RegistryReprocessAuditor::new(config.clone()),
             config,
             snapshot: RwLock::new(empty_snapshot(false)),
             updates,
@@ -19092,6 +24519,42 @@ mod tests {
             publication: Mutex::new(PublicationState::default()),
             runtime: Mutex::new(RuntimeState::default()),
         })
+    }
+
+    fn test_app_state_with_registry_validator(
+        config: SchedulerConfig,
+        validator: RegistryReprocessValidator,
+    ) -> Arc<AppState> {
+        let (updates, _) = broadcast::channel(4);
+        Arc::new(AppState {
+            registry_reprocess_auditor: RegistryReprocessAuditor::with_validator(
+                config.clone(),
+                validator,
+            ),
+            config,
+            snapshot: RwLock::new(empty_snapshot(false)),
+            updates,
+            sequence: AtomicU64::new(0),
+            publication: Mutex::new(PublicationState::default()),
+            runtime: Mutex::new(RuntimeState::default()),
+        })
+    }
+
+    fn wait_for_registry_reprocess_audits(
+        config: &SchedulerConfig,
+        runtime: &mut RuntimeState,
+        auditor: &RegistryReprocessAuditor,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runtime.pending_registry_reprocess_audits.is_empty() {
+            poll_registry_reprocess_audit(config, runtime, auditor);
+            dispatch_registry_reprocess_audit(config, runtime, auditor, true);
+            assert!(
+                Instant::now() < deadline,
+                "background registry audit did not complete"
+            );
+            std::thread::yield_now();
+        }
     }
 
     fn write_live_candidate(output: &Path) {
