@@ -194,10 +194,9 @@ struct ReplayExecutionScratch {
     call_frames: Vec<CallFrame>,
     /// Bytes of stack written by the previous invocation that still need zeroing.
     stack_dirty_len: usize,
-    /// Bytes of heap written/allocated by the previous invocation that still
-    /// need zeroing. Launch-era programs use the bump allocator tracked by
-    /// [`ReplayContext::heap_position`]; raw stores beyond that watermark are
-    /// outside the supported ABI surface for this runtime.
+    /// Bytes of heap that still need zeroing. The complete mapped heap is guest
+    /// writable, so every completed invocation marks the full allocation dirty;
+    /// a fresh zero-filled lease retains the zero-length fast path.
     heap_dirty_len: usize,
     /// When true, call frames carry residual state from the previous invoke.
     call_frames_dirty: bool,
@@ -251,11 +250,11 @@ impl ReplayExecutionScratch {
 
     /// Record residual state after a VM invoke so the next [`Self::reset`]
     /// only clears bytes that may be non-zero.
-    fn mark_used_after_execute(&mut self, heap_position: u64, stack_fully_used: bool) {
-        let heap_used = usize::try_from(heap_position)
-            .unwrap_or(self.heap.len())
-            .min(self.heap.len());
-        self.heap_dirty_len = self.heap_dirty_len.max(heap_used);
+    fn mark_used_after_execute(&mut self, _heap_position: u64, stack_fully_used: bool) {
+        // `heap_position` tracks only the bump allocator. A guest can also
+        // write directly through the mapped heap or through a syscall-provided
+        // destination, so no smaller watermark safely bounds residual bytes.
+        self.heap_dirty_len = self.heap.len();
         if stack_fully_used {
             self.stack_dirty_len = self.stack.len();
         }
@@ -2203,6 +2202,20 @@ mod tests {
     }
 
     #[test]
+    fn scratch_reset_clears_heap_writes_beyond_allocator_watermark() {
+        let config = ReplayCompiler::new().config;
+        let mut scratch = ReplayExecutionScratch::new(&config);
+        let last_heap_byte = scratch.heap.len() - 1;
+        scratch.heap.as_slice_mut()[last_heap_byte] = 0xa5;
+
+        // A direct guest store does not advance `ReplayContext::heap_position`.
+        scratch.mark_used_after_execute(0, false);
+        scratch.reset(&config);
+
+        assert_eq!(scratch.heap.as_slice_mut()[last_heap_byte], 0);
+    }
+
+    #[test]
     fn thread_local_scratch_supports_shared_parallel_execution() {
         let compiler = ReplayCompiler::new();
         let program = compiler
@@ -2425,11 +2438,19 @@ mod tests {
                 data: vec![10, 11].into(),
             },
         );
-        let mut input =
-            crate::launch_bpf_execute::serialize_parameters(program_id, &metas, &crate::CowAccountMap::detached(bank.clone()), &[12, 13])
-                .unwrap();
-        let verifier_baselines =
-            crate::launch_bpf_execute::launch_pre_accounts(program_id, &metas, &crate::CowAccountMap::detached(bank.clone())).unwrap();
+        let mut input = crate::launch_bpf_execute::serialize_parameters(
+            program_id,
+            &metas,
+            &crate::CowAccountMap::detached(bank.clone()),
+            &[12, 13],
+        )
+        .unwrap();
+        let verifier_baselines = crate::launch_bpf_execute::launch_pre_accounts(
+            program_id,
+            &metas,
+            &crate::CowAccountMap::detached(bank.clone()),
+        )
+        .unwrap();
         let compiler = ReplayCompiler::new();
         let input_len = input.len();
         let input_ptr: *mut [u8] = input.as_mut_slice();
@@ -2514,11 +2535,19 @@ mod tests {
                 data: vec![4, 5, 6].into(),
             },
         )]);
-        let serialized =
-            crate::launch_bpf_execute::serialize_parameters(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone()), &[])
-                .unwrap();
-        let verifier_baselines =
-            crate::launch_bpf_execute::launch_pre_accounts(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone())).unwrap();
+        let serialized = crate::launch_bpf_execute::serialize_parameters(
+            PROGRAM_ID,
+            &metas,
+            &crate::CowAccountMap::detached(bank.clone()),
+            &[],
+        )
+        .unwrap();
+        let verifier_baselines = crate::launch_bpf_execute::launch_pre_accounts(
+            PROGRAM_ID,
+            &metas,
+            &crate::CowAccountMap::detached(bank.clone()),
+        )
+        .unwrap();
         let mutations = [
             ("pubkey", PUBKEY_OFFSET..PUBKEY_OFFSET + 1, vec![0xff]),
             ("signer", SIGNER_OFFSET..SIGNER_OFFSET + 1, vec![1]),
@@ -2581,13 +2610,21 @@ mod tests {
                 data: vec![4, 5, 6].into(),
             },
         )]);
-        let mut input =
-            crate::launch_bpf_execute::serialize_parameters(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone()), &[])
-                .unwrap();
+        let mut input = crate::launch_bpf_execute::serialize_parameters(
+            PROGRAM_ID,
+            &metas,
+            &crate::CowAccountMap::detached(bank.clone()),
+            &[],
+        )
+        .unwrap();
         input[LAMPORTS_OFFSET..LAMPORTS_OFFSET + 8].copy_from_slice(&99_u64.to_le_bytes());
         input[DATA_OFFSET..DATA_OFFSET + 3].copy_from_slice(&[7, 8, 9]);
-        let verifier_baselines =
-            crate::launch_bpf_execute::launch_pre_accounts(PROGRAM_ID, &metas, &crate::CowAccountMap::detached(bank.clone())).unwrap();
+        let verifier_baselines = crate::launch_bpf_execute::launch_pre_accounts(
+            PROGRAM_ID,
+            &metas,
+            &crate::CowAccountMap::detached(bank.clone()),
+        )
+        .unwrap();
         let compiler = ReplayCompiler::new();
 
         let bindings =

@@ -35,13 +35,12 @@ use crate::launch_vote::{
     try_apply_launch_vote_direct_cached_lazy,
 };
 use crate::{
-    AccountBatchCommit, AccountMap, AccountSnapshot, AccountStoreError, AccountWriteBatch,
-    CowAccountMap,
+    AccountBatchCommit, AccountSnapshot, AccountStoreError, AccountWriteBatch,
     BPF_LOADER_PROGRAM_ID, CLOCK_SYSVAR_ID, CONFIG_PROGRAM_ID, CompactArchivedTransactionOutcome,
     CompactGenerationContext, CompactGenesisProbe, CompactGenesisSource, CompactInstructionData,
     CompactInstructionProbe, CompactMessageVersion, CompactProbeError, CompactSlotProbe,
     CompactTransactionProbe, CompactVisitConfig, CompactVisitControl, CompactVisitEvent,
-    CompactVisitSummary, CompiledProgram, DiffBoundary, DiffDisposition, DiffPolicy,
+    CompactVisitSummary, CompiledProgram, CowAccountMap, DiffBoundary, DiffDisposition, DiffPolicy,
     InlineInstructionPath, InstructionDiff, LaunchAccountMeta, LaunchBankSysvarState,
     LaunchBpfExecutionError, LaunchBpfExecutionMutation, LaunchBpfLoaderContext,
     LaunchBpfLoaderError, LaunchBpfLoaderMutation, LaunchBpfLoaderProfile, LaunchBpfLoaderRent,
@@ -49,8 +48,8 @@ use crate::{
     LaunchStakeHistory, LaunchStakeMutation, LaunchSystemError, LaunchSystemMutation,
     LaunchSysvarError, LaunchVoteError, LaunchVoteMutation, LoaderAccountKind, MemoryAccountStore,
     ReplayCompiler, SLOT_HISTORY_SYSVAR_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
-    apply_launch_bpf_loader_instruction_on_overlay,
-    apply_launch_config_instruction_on_overlay, apply_launch_stake_instruction_on_overlay,
+    apply_launch_bpf_loader_instruction_on_overlay, apply_launch_config_instruction_on_overlay,
+    apply_launch_stake_instruction_on_overlay,
     apply_launch_system_instruction_for_epoch_on_overlay, checkpoint::CompactCheckpointCursor,
     checkpoint::LaunchCheckpointDescriptor, checkpoint::RecordedCompactCheckpoint,
     checkpoint_file::publish_frozen_checkpoint, checkpoint_file::read_trusted_frozen_checkpoint,
@@ -3008,10 +3007,22 @@ impl LaunchReplay {
                 self.prepare_generic_transaction(transaction_metas.account_keys);
             }
 
+            let vote_program = self.vote_program;
+            let config_program = self.config_program;
+            let system_program = self.system_program;
+            let stake_program = self.stake_program;
+            let bpf_loader_active = self.bpf_loader_is_active();
+            let bpf_loader_context = self.bpf_loader_context();
+            let stake_history = &self.stake_history;
+            let bpf_compiler = &self.bpf_compiler;
+            let bpf_program_cache = &self.bpf_program_cache;
+            let vote_state_cache = &mut self.vote_state_cache;
+            let canonical_account_state = &self.outcome.account_state;
+
             // Layered overlay: readonly accounts stay in the Bank store until a
             // write forces a local clone. If a later instruction fails, the
             // local overlay is discarded.
-            let mut overlay = CowAccountMap::layered(&self.outcome.account_state);
+            let mut overlay = CowAccountMap::layered(canonical_account_state);
             let mut absent_overlay_accounts = AbsentOverlayAccounts::new();
             seed_absent_covered_pre_balances(
                 transaction,
@@ -3045,7 +3056,7 @@ impl LaunchReplay {
                         instruction,
                         &transaction_metas,
                     )?;
-                    let (kind, captured) = if instruction.program_id == self.vote_program {
+                    let (kind, captured) = if instruction.program_id == vote_program {
                         let vote_metas = instruction_metas;
                         let vote_account = vote_metas.first().map(|meta| meta.pubkey).ok_or(
                             LaunchReplayError::MissingVoteAccount {
@@ -3056,7 +3067,7 @@ impl LaunchReplay {
                         )?;
                         let use_vote_state_cache = transaction.instructions.len() == 1;
                         if !use_vote_state_cache {
-                            self.vote_state_cache.invalidate(vote_account);
+                            vote_state_cache.invalidate(vote_account);
                         }
                         for meta in &vote_metas {
                             if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
@@ -3073,7 +3084,7 @@ impl LaunchReplay {
                             CompactInstructionData::Raw(bytes)
                             | CompactInstructionData::UnknownVote(bytes) => bytes.as_slice(),
                             _ => {
-                                self.vote_state_cache.invalidate(vote_account);
+                                vote_state_cache.invalidate(vote_account);
                                 return Err(LaunchReplayError::UnsupportedVoteEncoding {
                                     slot: slot.slot,
                                     transaction_index: transaction.tx_index,
@@ -3094,7 +3105,7 @@ impl LaunchReplay {
                                 &vote_metas,
                                 &mut overlay,
                                 slot_clock.epoch,
-                                &mut self.vote_state_cache,
+                                vote_state_cache,
                             )
                             .map(|(mutation, _cache_hit)| mutation)
                         } else {
@@ -3118,7 +3129,7 @@ impl LaunchReplay {
                                 transaction.tx_index,
                                 instruction,
                                 instruction_path_index,
-                                self.vote_program,
+                                vote_program,
                                 journal,
                                 &overlay,
                                 &vote_metas,
@@ -3143,7 +3154,7 @@ impl LaunchReplay {
                             None
                         };
                         (LaunchInstructionKind::Vote, captured)
-                    } else if instruction.program_id == self.config_program {
+                    } else if instruction.program_id == config_program {
                         let config_metas = instruction_metas;
                         for meta in &config_metas {
                             if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
@@ -3189,7 +3200,7 @@ impl LaunchReplay {
                                 transaction.tx_index,
                                 instruction,
                                 instruction_path_index,
-                                self.config_program,
+                                config_program,
                                 journal,
                                 &overlay,
                                 &config_metas,
@@ -3211,7 +3222,7 @@ impl LaunchReplay {
                             None
                         };
                         (LaunchInstructionKind::Config, captured)
-                    } else if instruction.program_id == self.system_program {
+                    } else if instruction.program_id == system_program {
                         let system_metas = instruction_metas;
                         for meta in &system_metas {
                             if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
@@ -3263,7 +3274,7 @@ impl LaunchReplay {
                                 transaction.tx_index,
                                 instruction,
                                 instruction_path_index,
-                                self.system_program,
+                                system_program,
                                 journal,
                                 &overlay,
                                 &system_metas,
@@ -3285,7 +3296,7 @@ impl LaunchReplay {
                             None
                         };
                         (LaunchInstructionKind::System, captured)
-                    } else if instruction.program_id == self.stake_program {
+                    } else if instruction.program_id == stake_program {
                         let stake_metas = instruction_metas;
                         for meta in &stake_metas {
                             if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
@@ -3318,7 +3329,7 @@ impl LaunchReplay {
                             &mut overlay,
                             LaunchStakeContext {
                                 clock: slot_clock,
-                                stake_history: &self.stake_history,
+                                stake_history,
                             },
                         )
                         .map_err(|source| {
@@ -3335,7 +3346,7 @@ impl LaunchReplay {
                                 transaction.tx_index,
                                 instruction,
                                 instruction_path_index,
-                                self.stake_program,
+                                stake_program,
                                 journal,
                                 &overlay,
                                 &stake_metas,
@@ -3357,9 +3368,7 @@ impl LaunchReplay {
                             None
                         };
                         (LaunchInstructionKind::Stake, captured)
-                    } else if instruction.program_id == BPF_LOADER_PROGRAM_ID
-                        && self.bpf_loader_is_active()
-                    {
+                    } else if instruction.program_id == BPF_LOADER_PROGRAM_ID && bpf_loader_active {
                         let loader_metas = instruction_metas;
                         for meta in &loader_metas {
                             if !meta.is_writable || overlay.local_contains_key(&meta.pubkey) {
@@ -3391,8 +3400,8 @@ impl LaunchReplay {
                             loader_instruction,
                             &loader_metas,
                             &mut overlay,
-                            &self.bpf_compiler,
-                            self.bpf_loader_context(),
+                            bpf_compiler,
+                            bpf_loader_context,
                         )
                         .map_err(|source| {
                             LaunchReplayError::BpfLoaderMutation {
@@ -3433,10 +3442,10 @@ impl LaunchReplay {
                             None
                         };
                         (LaunchInstructionKind::BpfLoader, captured)
-                    } else if self.bpf_loader_is_active()
+                    } else if bpf_loader_active
                         && overlay
                             .get(&instruction.program_id)
-                            .or_else(|| self.outcome.account_state.get(&instruction.program_id))
+                            .or_else(|| canonical_account_state.get(&instruction.program_id))
                             .is_some_and(|account| {
                                 account.executable && account.owner == BPF_LOADER_PROGRAM_ID
                             })
@@ -3453,17 +3462,16 @@ impl LaunchReplay {
                                 absent_overlay_accounts.insert(meta.pubkey);
                             }
                         }
-                        if !self.bpf_program_cache.contains_key(&instruction.program_id)
+                        if !bpf_program_cache.contains_key(&instruction.program_id)
                             && !pending_bpf_programs
                                 .iter()
                                 .any(|(program_id, _)| *program_id == instruction.program_id)
                         {
                             let program_account = overlay
                                 .get(&instruction.program_id)
-                                .or_else(|| self.outcome.account_state.get(&instruction.program_id))
+                                .or_else(|| canonical_account_state.get(&instruction.program_id))
                                 .expect("legacy BPF dispatch predicate validated program state");
-                            let compiled = self
-                                .bpf_compiler
+                            let compiled = bpf_compiler
                                 .compile_account(LoaderAccountKind::Legacy, &program_account.data)
                                 .map_err(|error| LaunchReplayError::BpfProgramLoad {
                                     slot: slot.slot,
@@ -3488,8 +3496,7 @@ impl LaunchReplay {
                                 instruction_index: instruction.instruction_index,
                             },
                         )?;
-                        let compiled_program = self
-                            .bpf_program_cache
+                        let compiled_program = bpf_program_cache
                             .get(&instruction.program_id)
                             .or_else(|| {
                                 pending_bpf_programs.iter().rev().find_map(
@@ -3505,9 +3512,9 @@ impl LaunchReplay {
                             bpf_instruction,
                             &bpf_metas,
                             &mut overlay,
-                            &self.bpf_compiler,
+                            bpf_compiler,
                             compiled_program,
-                            self.bpf_loader_context().bank_rent,
+                            bpf_loader_context.bank_rent,
                             smallvec::SmallVec::from_slice(&[instruction.program_id]),
                         )
                         .map_err(|source| {
@@ -4486,7 +4493,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        CompactGenesisAccount, CompactGenesisBuiltin, CompactInstructionProbe,
+        AccountMap, CompactGenesisAccount, CompactGenesisBuiltin, CompactInstructionProbe,
         CompactRecentBlockhashProbe, CompactTransactionProbe, LaunchStakeAuthorized,
         LaunchStakeLockup, LaunchStakeMeta, LaunchStakeState, decode_launch_stake_state,
     };

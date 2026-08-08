@@ -1,7 +1,7 @@
 //! Canonical account storage for replay.
 //!
 //! The execution hot path is deliberately in-process. Transaction-local maps
-//! remain small `BTreeMap` overlays; this module owns the much larger canonical
+//! remain small hash-table overlays; this module owns the much larger canonical
 //! state and publishes an overlay through one validated batch. Hash-table
 //! iteration order is never observable: hashes and future checkpoints visit
 //! accounts in lexicographic pubkey order.
@@ -232,26 +232,31 @@ impl FromIterator<(AccountPubkey, AccountSnapshot)> for MemoryAccountStore {
 /// Readonly accounts stay in the parent until a write forces a local clone.
 /// The commit path only inspects [`Self::into_local`].
 ///
-/// The parent is stored as a raw pointer so the overlay can live across
-/// `&mut self` uses in the replay loop. Callers must not mutate the parent
-/// store for the lifetime of the overlay (replay only publishes through
-/// `apply_batch` after the overlay is dropped).
+/// The parent borrow is carried by the overlay's lifetime, so safe Rust cannot
+/// outlive or mutably alias the canonical store while the overlay can read it.
+/// Replay publishes through `apply_batch` only after the overlay is dropped.
+///
+/// ```compile_fail
+/// use blockzilla_replay::{CowAccountMap, MemoryAccountStore};
+///
+/// let overlay = {
+///     let parent = MemoryAccountStore::new();
+///     CowAccountMap::layered(&parent)
+/// };
+/// let _ = overlay.local();
+/// ```
 #[derive(Debug)]
-pub struct CowAccountMap {
+pub struct CowAccountMap<'parent> {
     local: AccountMap,
-    parent: Option<*const MemoryAccountStore>,
+    parent: Option<&'parent MemoryAccountStore>,
 }
 
-impl CowAccountMap {
+impl<'parent> CowAccountMap<'parent> {
     /// Replay hot path: empty local overlay layered on the Bank account store.
-    ///
-    /// # Safety contract
-    /// `parent` must outlive the returned overlay and must not be mutated
-    /// through another alias while the overlay is live.
-    pub fn layered(parent: &MemoryAccountStore) -> Self {
+    pub fn layered(parent: &'parent MemoryAccountStore) -> Self {
         Self {
             local: AccountMap::new(),
-            parent: Some(parent as *const MemoryAccountStore),
+            parent: Some(parent),
         }
     }
 
@@ -265,9 +270,7 @@ impl CowAccountMap {
 
     #[inline]
     fn parent(&self) -> Option<&MemoryAccountStore> {
-        // SAFETY: layered() requires the parent outlives this overlay and is
-        // not mutated while the overlay is live.
-        self.parent.map(|ptr| unsafe { &*ptr })
+        self.parent
     }
 
     pub fn local(&self) -> &AccountMap {
@@ -347,7 +350,7 @@ impl CowAccountMap {
     }
 }
 
-impl std::ops::Index<&AccountPubkey> for CowAccountMap {
+impl std::ops::Index<&AccountPubkey> for CowAccountMap<'_> {
     type Output = AccountSnapshot;
 
     fn index(&self, key: &AccountPubkey) -> &Self::Output {
@@ -716,5 +719,21 @@ mod tests {
         assert_eq!(store.get(&key).unwrap().data[3], 42);
         assert_eq!(store.get(&key).unwrap().data.as_ptr(), data_pointer);
         assert!(store.get_mut(&missing).is_none());
+    }
+
+    #[test]
+    fn layered_overlay_borrows_until_first_write() {
+        let key = [12; 32];
+        let mut parent = MemoryAccountStore::new();
+        parent.insert(key, account(7, 8));
+
+        let mut overlay = CowAccountMap::layered(&parent);
+        assert_eq!(overlay.get(&key), parent.get(&key));
+        assert!(!overlay.local_contains_key(&key));
+
+        overlay.get_mut(&key).unwrap().lamports = 123;
+        assert!(overlay.local_contains_key(&key));
+        assert_eq!(overlay.get(&key).unwrap().lamports, 123);
+        assert_eq!(parent.get(&key).unwrap().lamports, 7);
     }
 }

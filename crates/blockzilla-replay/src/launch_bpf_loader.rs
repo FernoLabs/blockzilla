@@ -186,7 +186,11 @@ pub fn apply_launch_bpf_loader_instruction_in_place(
 ) -> Result<LaunchBpfLoaderApply, LaunchBpfLoaderError> {
     let mut cow = CowAccountMap::detached(std::mem::take(accounts));
     let result = apply_launch_bpf_loader_instruction_on_overlay(
-        instruction_data, account_metas, &mut cow, compiler, context,
+        instruction_data,
+        account_metas,
+        &mut cow,
+        compiler,
+        context,
     );
     *accounts = cow.into_local();
     result

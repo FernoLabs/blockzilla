@@ -13,8 +13,8 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{
-    AccountData, AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, CompiledProgram, CowAccountMap,
-    ExecutionEngine, LaunchAccountMeta, LaunchBpfLoaderRent, ReplayCompiler,
+    AccountData, AccountMap, AccountSnapshot, BPF_LOADER_PROGRAM_ID, CompiledProgram,
+    CowAccountMap, ExecutionEngine, LaunchAccountMeta, LaunchBpfLoaderRent, ReplayCompiler,
 };
 
 const MAX_LAUNCH_BPF_INSTRUCTION_ACCOUNTS: usize = 256;
@@ -521,18 +521,30 @@ fn deserialize_parameters_with_plan(
         let data = buffer
             .get(data_offset..data_end)
             .ok_or(LaunchBpfExecutionError::MalformedParameterBuffer)?;
-        let account =
-            accounts
-                .get_mut(&meta.pubkey)
-                .ok_or(LaunchBpfExecutionError::MissingAccountState {
-                    pubkey: meta.pubkey,
-                })?;
-        if account.lamports != lamports {
+        let (lamports_changed, data_changed) = accounts
+            .get(&meta.pubkey)
+            .map(|account| {
+                (
+                    account.lamports != lamports,
+                    account.data.as_slice() != data,
+                )
+            })
+            .ok_or(LaunchBpfExecutionError::MissingAccountState {
+                pubkey: meta.pubkey,
+            })?;
+        if !lamports_changed && !data_changed {
+            continue;
+        }
+
+        let account = accounts
+            .get_mut(&meta.pubkey)
+            .expect("immutable copyback comparison validated account state");
+        if lamports_changed {
             account.lamports = lamports;
         }
         // AccountData is copy-on-write. Avoid mutable access for the common
         // no-op case so a shared payload stays shared through VM copyback.
-        if account.data.as_slice() != data {
+        if data_changed {
             account.data.set_from_slice(data);
         }
     }
@@ -791,17 +803,18 @@ fn read_u64(bytes: &[u8], start: usize) -> Result<u64, LaunchBpfExecutionError> 
 
 #[cfg(test)]
 mod tests {
-    fn cow(accounts: &AccountMap) -> CowAccountMap {
+    fn cow(accounts: &AccountMap) -> CowAccountMap<'static> {
         CowAccountMap::detached(accounts.clone())
     }
-    fn cow_mut(accounts: &mut AccountMap) -> CowAccountMap {
+    fn cow_mut(accounts: &mut AccountMap) -> CowAccountMap<'static> {
         CowAccountMap::detached(std::mem::take(accounts))
     }
-    fn restore(accounts: &mut AccountMap, cow: CowAccountMap) {
+    fn restore(accounts: &mut AccountMap, cow: CowAccountMap<'static>) {
         *accounts = cow.into_local();
     }
 
     use super::*;
+    use crate::MemoryAccountStore;
 
     const PROGRAM: [u8; 32] = [9; 32];
     const OWNED: [u8; 32] = [7; 32];
@@ -838,7 +851,8 @@ mod tests {
             (EXTERNAL, account([6; 32], 12, &[4, 5])),
         ]);
         let instruction_data = [0xaa, 0xbb];
-        let expected = serialize_parameters(PROGRAM, &metas, &cow(&accounts), &instruction_data).unwrap();
+        let expected =
+            serialize_parameters(PROGRAM, &metas, &cow(&accounts), &instruction_data).unwrap();
         let plan = LaunchBpfSerializationPlan::collect(&metas, &cow(&accounts)).unwrap();
 
         let mut lease = LegacyBpfParameterBufferLease::acquire();
@@ -1016,7 +1030,8 @@ mod tests {
 
         let mut duplicate_at_last = metas.clone();
         duplicate_at_last[255] = duplicate_at_last[254].clone();
-        let plan = LaunchBpfSerializationPlan::collect(&duplicate_at_last, &cow(&accounts)).unwrap();
+        let plan =
+            LaunchBpfSerializationPlan::collect(&duplicate_at_last, &cow(&accounts)).unwrap();
         assert_eq!(
             plan.entries.last(),
             Some(&LaunchBpfSerializationEntry::Duplicate {
@@ -1075,6 +1090,37 @@ mod tests {
         restore(&mut accounts, overlay);
 
         assert!(accounts[&OWNED].data.shares_allocation_with(&shared_before));
+    }
+
+    #[test]
+    fn layered_copyback_localizes_only_an_account_with_an_actual_change() {
+        let metas = [meta(OWNED, true), meta(EXTERNAL, false)];
+        let mut parent = MemoryAccountStore::new();
+        parent.insert(OWNED, account(PROGRAM, 11, &[1, 2, 3]));
+        parent.insert(EXTERNAL, account([6; 32], 12, &[4, 5]));
+
+        let mut unchanged = CowAccountMap::layered(&parent);
+        let bytes = serialize_parameters(PROGRAM, &metas, &unchanged, &[]).unwrap();
+        deserialize_parameters(&metas, &mut unchanged, &bytes).unwrap();
+        assert!(unchanged.into_local().is_empty());
+
+        let mut changed = CowAccountMap::layered(&parent);
+        let plan = LaunchBpfSerializationPlan::collect(&metas, &changed).unwrap();
+        let mut bytes = serialize_parameters(PROGRAM, &metas, &changed, &[]).unwrap();
+        let LaunchBpfSerializationEntry::Unique {
+            lamports_offset, ..
+        } = plan.entries[0]
+        else {
+            panic!("first account is unique");
+        };
+        bytes[lamports_offset..lamports_offset + 8].copy_from_slice(&19_u64.to_le_bytes());
+        deserialize_parameters_with_plan(&metas, &mut changed, &bytes, &plan).unwrap();
+
+        assert!(changed.local_contains_key(&OWNED));
+        assert!(!changed.local_contains_key(&EXTERNAL));
+        let local = changed.into_local();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[&OWNED].lamports, 19);
     }
 
     #[test]

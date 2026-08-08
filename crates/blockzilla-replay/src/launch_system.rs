@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{AccountMap, CowAccountMap, AccountSnapshot, RECENT_BLOCKHASHES_SYSVAR_ID, RENT_SYSVAR_ID};
+use crate::{
+    AccountMap, AccountSnapshot, CowAccountMap, RECENT_BLOCKHASHES_SYSVAR_ID, RENT_SYSVAR_ID,
+};
 
 pub const SYSTEM_PROGRAM_ID: [u8; 32] = [0; 32];
 const SYSVAR_OWNER_ID: [u8; 32] = [
@@ -242,7 +244,10 @@ pub fn apply_launch_system_instruction_for_epoch_in_place(
 ) -> Result<LaunchSystemMutation, LaunchSystemError> {
     let mut cow = CowAccountMap::detached(std::mem::take(accounts));
     let result = apply_launch_system_instruction_for_epoch_on_overlay(
-        instruction, account_metas, &mut cow, epoch,
+        instruction,
+        account_metas,
+        &mut cow,
+        epoch,
     );
     *accounts = cow.into_local();
     result

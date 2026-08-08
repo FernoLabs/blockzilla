@@ -1229,19 +1229,13 @@ fn duplicate_position(metas: &[LaunchAccountMeta], pubkey: [u8; 32]) -> Option<u
     metas.iter().position(|meta| meta.pubkey == pubkey)
 }
 
-fn required_account(
-    accounts: &AccountMap,
-    pubkey: [u8; 32],
-) -> Result<&AccountSnapshot> {
+fn required_account(accounts: &AccountMap, pubkey: [u8; 32]) -> Result<&AccountSnapshot> {
     accounts
         .get(&pubkey)
         .with_context(|| format!("missing account {pubkey:?}"))
 }
 
-fn account_data_allocations_are_shared(
-    left: &AccountMap,
-    right: &AccountMap,
-) -> bool {
+fn account_data_allocations_are_shared(left: &AccountMap, right: &AccountMap) -> bool {
     left.len() == right.len()
         && left.iter().all(|(pubkey, left_account)| {
             right.get(pubkey).is_some_and(|right_account| {
@@ -1252,10 +1246,7 @@ fn account_data_allocations_are_shared(
         })
 }
 
-fn embedded_fixture_mutated_exactly_first_account(
-    before: &AccountMap,
-    after: &AccountMap,
-) -> bool {
+fn embedded_fixture_mutated_exactly_first_account(before: &AccountMap, after: &AccountMap) -> bool {
     if before.len() != after.len() {
         return false;
     }
@@ -1386,7 +1377,10 @@ fn execution_semantic_fingerprint(outcome: &ExecutionOutcome) -> [u8; 32] {
 fn account_state_fingerprint(accounts: &AccountMap) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"blockzilla-bpf-bench-account-state-v1\0");
-    for (pubkey, account) in accounts {
+    let mut pubkeys = accounts.keys().copied().collect::<Vec<_>>();
+    pubkeys.sort_unstable();
+    for pubkey in pubkeys {
+        let account = &accounts[&pubkey];
         digest.update(pubkey);
         digest.update(account.lamports.to_le_bytes());
         digest.update(account.owner);
@@ -1516,6 +1510,27 @@ mod tests {
     }
 
     #[test]
+    fn account_state_fingerprint_ignores_hashmap_insertion_order() {
+        let fixture = full_abi_fixture(8, 31);
+        let mut entries = fixture.accounts.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(pubkey, _)| **pubkey);
+
+        let mut ascending = AccountMap::with_capacity(entries.len());
+        for (pubkey, account) in &entries {
+            ascending.insert(**pubkey, (**account).clone());
+        }
+        let mut descending = AccountMap::with_capacity(entries.len());
+        for (pubkey, account) in entries.iter().rev() {
+            descending.insert(**pubkey, (**account).clone());
+        }
+
+        assert_eq!(
+            account_state_fingerprint(&ascending),
+            account_state_fingerprint(&descending)
+        );
+    }
+
+    #[test]
     fn patched_mutation_fixture_interpreter_and_native_are_equivalent_when_available() {
         let mut elf = STANDARD
             .decode(include_str!("../../fixtures/relative_call_sbpfv0.so.b64").trim())
@@ -1599,13 +1614,17 @@ mod tests {
                 &accounts
             ));
 
-            let first_pubkey = *fixture.accounts.keys().next().unwrap();
+            let first_pubkey = fixture.metas[0].pubkey;
             assert!(
                 !accounts[&first_pubkey]
                     .data
                     .shares_allocation_with(&fixture.accounts[&first_pubkey].data)
             );
-            for pubkey in fixture.accounts.keys().skip(1) {
+            for pubkey in fixture
+                .accounts
+                .keys()
+                .filter(|pubkey| **pubkey != first_pubkey)
+            {
                 assert!(
                     accounts[pubkey]
                         .data
