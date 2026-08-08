@@ -8,34 +8,35 @@
 //! connected SSE client as a `PatchSignals` payload. Datastar merges that
 //! into each browser's signal store, and every `data-text` /
 //! `data-attr:style` binding in the page updates itself without us
-//! touching the DOM from the server.
+//! touching the DOM from the server. Changes that affect page structure
+//! also emit `StreamEvent::Structure`; each subscriber renders that marker
+//! for its own route and morphs the stable dashboard frame.
 
-use std::sync::{Mutex, OnceLock};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
-use crate::components::{render_epoch_list, render_poh_migration_lane_list};
 use crate::snapshot::{self, PipelineSnapshot};
 
 /// One item on the `/api/stream` broadcast: either a signal-value delta
 /// (the common case -- pct/blocks/eta/label/phase ticking on rows that
-/// already exist) or a full HTML replacement for a list container whose
-/// *membership* changed (a row appeared or disappeared -- a `data-text`
-/// patch has nothing to bind to for a row that doesn't exist in the DOM
-/// yet, and never removes one that's gone). `PatchElements`' default mode
-/// morphs the new HTML into the element matched by `selector` id-for-id,
-/// so rows that persist (matched by their own `epoch-N` id) keep their
-/// live signal bindings and in-flight transitions; only the add/remove
-/// diff actually touches the DOM.
+/// already exist) or a marker that page structure changed. The stream
+/// handler turns `Structure` into a fresh, route-specific
+/// `#dashboard-frame` morph. Keeping rendering out of this global
+/// broadcast matters because subscribers can be on five different pages.
 #[derive(Clone, Debug)]
 pub enum StreamEvent {
     Signals(serde_json::Value),
-    Elements {
-        selector: &'static str,
-        html: String,
-    },
+    Structure,
 }
+
+/// Overview is deliberately concise; `/epochs` retains and renders the
+/// complete non-finished queue.
+pub const OVERVIEW_EPOCH_LIMIT: usize = 12;
 
 /// Controls how much of a real snapshot reaches the rendered dashboard.
 /// This binary has no authentication of its own -- see
@@ -50,10 +51,9 @@ pub enum RedactionTier {
     /// Anonymous, public-internet-safe. Drops the process table entirely
     /// (real process names/PIDs are host fingerprinting, not something a
     /// public viewer needs) and runs free-text fields through the same
-    /// path/credential scrubber `blockzilla-watcher-gateway`'s
-    /// `public_json` already applies upstream -- defense in depth, not a
-    /// second independent redaction policy, in case that filter is ever
-    /// bypassed or the wire schema grows a field it doesn't know about.
+    /// monitor's audited path/credential scrubber.
+    /// This protects the public surface even though the monitor reads the
+    /// scheduler's private loopback status endpoint directly.
     #[default]
     Public,
     /// Full detail, including the process table and unscrubbed text.
@@ -75,17 +75,14 @@ fn tier() -> RedactionTier {
     TIER.get().copied().unwrap_or_default()
 }
 
-/// Defense-in-depth text scrub for the public tier -- a no-op pass-through
-/// on the full tier. Reuses `blockzilla-watcher-gateway`'s already-audited
-/// regexes rather than a second, possibly-divergent implementation. Takes
+/// Text scrub for the public tier -- a no-op pass-through on the full tier.
+/// Reuses the monitor's audited regexes. Takes
 /// `tier` explicitly (rather than reading the global) so `from_snapshot`
 /// stays a pure function of its inputs and is testable for both tiers
 /// without mutating shared process-global state.
 fn redact_text(tier: RedactionTier, text: &str) -> String {
     match tier {
-        RedactionTier::Public => {
-            blockzilla_watcher_gateway::public_json::sanitize_public_string(text)
-        }
+        RedactionTier::Public => crate::public_json::sanitize_public_string(text),
         RedactionTier::Full => text.to_string(),
     }
 }
@@ -204,8 +201,8 @@ impl SchedulerReasoning {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DashboardState {
-    /// True once we have ever received a real (or demo) snapshot. Drives
-    /// whether pages render live content or `service_unavailable`.
+    /// True while the current state is backed by a real (or demo)
+    /// snapshot. Set back to false when the upstream goes offline.
     pub live: bool,
     pub connection_state: String,
     pub connection_message: String,
@@ -256,7 +253,7 @@ impl Default for DashboardState {
         DashboardState {
             live: false,
             connection_state: "connecting".into(),
-            connection_message: "Connecting to blockzilla-watcher-gateway".into(),
+            connection_message: "Connecting to Blockzilla scheduler".into(),
             demo: false,
             scheduler_paused: false,
             updated_unix_secs: 0,
@@ -339,6 +336,37 @@ impl DashboardState {
         }
     }
 
+    pub fn last_updated_label(&self) -> String {
+        self.last_updated_label_at(unix_now())
+    }
+
+    fn last_updated_label_at(&self, now_unix_secs: u64) -> String {
+        if self.updated_unix_secs == 0 {
+            return "No scheduler update received".to_string();
+        }
+        let age = now_unix_secs.saturating_sub(self.updated_unix_secs);
+        if age < 5 {
+            "Updated just now".to_string()
+        } else {
+            format!("Updated {} ago", format_duration(age))
+        }
+    }
+
+    /// Epochs shown on Overview, after dropping stale failed/blocked rows
+    /// and prioritizing work an operator can act on. The cap belongs here,
+    /// at the presentation boundary: `self.epochs` remains complete for
+    /// `/epochs` and for structural-membership detection.
+    pub fn overview_epochs(&self) -> Vec<&EpochTask> {
+        let mut visible: Vec<_> = self
+            .epochs
+            .iter()
+            .filter(|task| !task.hidden_from_overview)
+            .collect();
+        visible.sort_by_key(|task| (overview_priority(task), task.epoch));
+        visible.truncate(OVERVIEW_EPOCH_LIMIT);
+        visible
+    }
+
     /// Flattens state into the exact signal names the views bind to
     /// (`$queued`, `$archive_pct`, `$epoch_790_pct`, ...). This -- not the
     /// nested struct itself -- is what `PatchSignals::json` should send,
@@ -350,6 +378,10 @@ impl DashboardState {
         map.insert(
             "connection_state".into(),
             self.connection_state.clone().into(),
+        );
+        map.insert(
+            "last_updated_label".into(),
+            self.last_updated_label().into(),
         );
         map.insert("runnable_eta_label".into(), self.eta_label().into());
         map.insert("queued".into(), self.queued.into());
@@ -400,7 +432,11 @@ impl DashboardState {
         // archive-complete and migration-eligible, in `poh_migration_lanes`
         // -- never both), so both can share the same `epoch_{N}_*` signal
         // names without collision.
-        for task in self.epochs.iter().chain(self.poh_migration_lanes.iter()) {
+        for task in self
+            .overview_epochs()
+            .into_iter()
+            .chain(self.poh_migration_lanes.iter())
+        {
             let sig = format!("epoch_{}", task.epoch);
             map.insert(format!("{sig}_pct"), task.pct.into());
             map.insert(
@@ -441,7 +477,6 @@ impl DashboardState {
                     hidden_from_overview: is_failed_or_blocked && active_lane.is_none(),
                 }
             })
-            .take(12)
             .collect();
 
         let poh_migration_lanes = snapshot
@@ -625,10 +660,28 @@ impl DashboardState {
     }
 }
 
+fn overview_priority(task: &EpochTask) -> u8 {
+    if !task.phase.is_empty() {
+        return 0;
+    }
+    match snapshot::normalize(&task.label).as_str() {
+        "scanning" | "finalizing" | "running" | "capturing" | "compacting" => 0,
+        "ready" => 1,
+        "queued" => 2,
+        _ => 3,
+    }
+}
+
 /// One decimal place, pre-formatted as a string -- see the comment at its
 /// call sites in `to_signals` for why a raw rounded float isn't enough.
 fn format_pct(v: f32) -> String {
     format!("{v:.1}")
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Shared with `components.rs` so the initial server-render and the live
@@ -679,6 +732,11 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 struct Shared {
+    /// Serializes every mutation that can replace the published dashboard
+    /// state. Without this gate, a local-process recomputation could clone
+    /// an old snapshot, race `set_offline`, and publish that stale clone as
+    /// live after the disconnect was already visible.
+    publication: AsyncMutex<()>,
     current: Mutex<DashboardState>,
     /// The signal map from the most recent broadcast (or the initial
     /// `DashboardState::default()` before anything has published), kept
@@ -686,20 +744,24 @@ struct Shared {
     /// same delta stream -- see `publish` for why that's safe even though
     /// subscribers can join at different times.
     last_signals: Mutex<serde_json::Value>,
-    /// Epoch numbers in `DashboardState::epochs` as of the last publish --
-    /// compared by value (not just length) so a swap (one epoch completing
-    /// while another is admitted in the same tick) is still detected as a
-    /// membership change. See `StreamEvent::Elements`.
+    /// All non-complete epoch numbers as of the last publish. A change
+    /// affects `/epochs`, even when Overview's selected twelve stay the
+    /// same.
     last_epoch_ids: Mutex<Vec<u32>>,
-    /// Same idea as `last_epoch_ids`, for `poh_migration_lanes` -- this is
-    /// the list the reported bug was actually about (a finished worker
-    /// stuck in the DOM, a new one never appearing without a reload).
+    /// The prioritized/capped epoch membership actually rendered on
+    /// Overview. A priority change can swap a row without changing the
+    /// complete epoch set.
+    last_overview_epoch_ids: Mutex<Vec<u32>>,
+    /// Same idea for the currently rendered PoH migration lanes.
     last_poh_lane_ids: Mutex<Vec<u32>>,
+    /// The stable frame must morph when a previously live dashboard goes
+    /// offline or an offline-first page receives its first snapshot.
+    last_live: Mutex<bool>,
     tx: broadcast::Sender<StreamEvent>,
     /// The raw ingredients the `/calendar` page needs that `DashboardState`
-    /// doesn't otherwise keep: the *full* epoch list (the main dashboard
-    /// only retains the top 12 non-complete epochs) and any
-    /// live-authoritative `epoch_calendar` entries. Kept separately and
+    /// doesn't otherwise keep: epoch status fields needed by the calendar
+    /// and any live-authoritative `epoch_calendar` entries. Kept
+    /// separately and
     /// computed into a year-grid lazily, only when `/calendar` is actually
     /// requested, rather than on every snapshot tick -- unlike the rest of
     /// `DashboardState`, nothing here needs to be live-patched over SSE.
@@ -739,9 +801,12 @@ fn shared() -> &'static Shared {
         let (tx, _rx) = broadcast::channel(64);
         let initial = DashboardState::default();
         Shared {
+            publication: AsyncMutex::new(()),
             last_signals: Mutex::new(initial.to_signals()),
             last_epoch_ids: Mutex::new(Vec::new()),
+            last_overview_epoch_ids: Mutex::new(Vec::new()),
             last_poh_lane_ids: Mutex::new(Vec::new()),
+            last_live: Mutex::new(initial.live),
             current: Mutex::new(initial),
             tx,
             calendar_source: Mutex::new(CalendarSource::default()),
@@ -766,18 +831,6 @@ pub async fn snapshot() -> DashboardState {
         .clone()
 }
 
-/// The full current signal map, matching what the SSR page seeds into
-/// `data-signals`. Used to open a new `/api/stream` connection and to
-/// self-heal a client that fell behind the broadcast buffer -- both cases
-/// need a complete, not incremental, payload.
-pub fn full_signals() -> serde_json::Value {
-    shared()
-        .last_signals
-        .lock()
-        .expect("state mutex poisoned")
-        .clone()
-}
-
 /// Subscribe to future updates. Every `/api/stream` connection gets its own
 /// receiver; `broadcast` means one upstream feeds every open browser tab.
 /// Each item is a signal-map *delta*: only keys that changed since the
@@ -788,51 +841,33 @@ pub fn subscribe() -> broadcast::Receiver<StreamEvent> {
     shared().tx.subscribe()
 }
 
-/// Renders `epoch_list`/`poh_migration_lane_list` and broadcasts an
-/// element patch when the *set* of epochs in `ids` differs from
-/// `last_ids` -- a row appearing or disappearing, not just an existing
-/// row's fields changing (that's `diff_signals`' job below). Cheap to
-/// call on every publish: the id-vector comparison is the only work
-/// unless something actually changed, and full-list renders are small
-/// (the Overview epoch list caps at 12 rows).
-async fn publish_list_if_membership_changed(
-    last_ids: &Mutex<Vec<u32>>,
-    ids: Vec<u32>,
-    selector: &'static str,
-    render: impl std::future::Future<Output = topcoat::Result<topcoat::view::View>>,
-    tx: &broadcast::Sender<StreamEvent>,
-) {
-    let changed = {
-        let mut last = last_ids.lock().expect("state mutex poisoned");
-        let changed = *last != ids;
-        *last = ids;
-        changed
-    };
-    if !changed {
-        return;
-    }
-    if let Ok(view) = render.await {
-        let html = view.render(&topcoat::context::Cx::default());
-        let _ = tx.send(StreamEvent::Elements { selector, html });
-    }
+fn remember_if_changed<T: PartialEq>(last: &Mutex<T>, next: T) -> bool {
+    let mut last = last.lock().expect("state mutex poisoned");
+    let changed = *last != next;
+    *last = next;
+    changed
 }
 
 async fn publish(state: DashboardState) {
     let shared = shared();
     let new_signals = state.to_signals();
     let epoch_ids: Vec<u32> = state.epochs.iter().map(|task| task.epoch).collect();
+    let overview_epoch_ids: Vec<u32> = state
+        .overview_epochs()
+        .into_iter()
+        .map(|task| task.epoch)
+        .collect();
     let poh_lane_ids: Vec<u32> = state
         .poh_migration_lanes
         .iter()
         .map(|task| task.epoch)
         .collect();
+    let live = state.live;
 
     *shared.current.lock().expect("state mutex poisoned") = state.clone();
 
-    // Scoped (rather than an explicit `drop`) so the `MutexGuard` -- not
-    // `Send`, and this function crosses `.await` points below -- is
-    // provably gone from the async fn's generated state before then, not
-    // just logically unused.
+    // Update the canonical full map at the same time we calculate the
+    // delta, so the next publisher always diffs from exactly this state.
     let delta = {
         let mut last_signals = shared.last_signals.lock().expect("state mutex poisoned");
         let delta = diff_signals(&last_signals, &new_signals);
@@ -848,22 +883,21 @@ async fn publish(state: DashboardState) {
         let _ = shared.tx.send(StreamEvent::Signals(delta));
     }
 
-    publish_list_if_membership_changed(
-        &shared.last_epoch_ids,
-        epoch_ids,
-        "#epoch-list",
-        render_epoch_list(&state),
-        &shared.tx,
-    )
-    .await;
-    publish_list_if_membership_changed(
-        &shared.last_poh_lane_ids,
-        poh_lane_ids,
-        "#poh-migration-lane-list",
-        render_poh_migration_lane_list(&state),
-        &shared.tx,
-    )
-    .await;
+    // Evaluate every comparison independently: short-circuiting would
+    // leave later remembered values stale and emit redundant structure
+    // events on the following tick.
+    let epoch_membership_changed = remember_if_changed(&shared.last_epoch_ids, epoch_ids);
+    let overview_membership_changed =
+        remember_if_changed(&shared.last_overview_epoch_ids, overview_epoch_ids);
+    let poh_membership_changed = remember_if_changed(&shared.last_poh_lane_ids, poh_lane_ids);
+    let live_changed = remember_if_changed(&shared.last_live, live);
+    if epoch_membership_changed
+        || overview_membership_changed
+        || poh_membership_changed
+        || live_changed
+    {
+        let _ = shared.tx.send(StreamEvent::Structure);
+    }
 }
 
 /// Keys present (with a different value) in `new` but not `old`, or
@@ -890,26 +924,27 @@ fn diff_signals(old: &serde_json::Value, new: &serde_json::Value) -> serde_json:
 
 /// Called by `client.rs` whenever a fresh real snapshot arrives.
 pub async fn set_snapshot(snapshot: PipelineSnapshot) {
-    *shared()
-        .calendar_source
-        .lock()
-        .expect("state mutex poisoned") = CalendarSource {
+    let shared = shared();
+    let _publication = shared.publication.lock().await;
+    *shared.calendar_source.lock().expect("state mutex poisoned") = CalendarSource {
         epochs: snapshot.epochs.clone(),
         epoch_calendar: snapshot.epoch_calendar.clone(),
         now_unix_secs: snapshot.now_unix_secs,
     };
-    *shared().last_snapshot.lock().expect("state mutex poisoned") = Some(snapshot);
-    recompute_and_publish().await;
+    *shared.last_snapshot.lock().expect("state mutex poisoned") = Some(snapshot);
+    recompute_and_publish_locked().await;
 }
 
 /// Called by `runtime_operations.rs` on its own ~5s sampling tick,
 /// independent of when the next upstream snapshot/patch happens to arrive.
 pub async fn set_local_process_io(io: snapshot::ProcessIoSnapshot) {
-    *shared()
+    let shared = shared();
+    let _publication = shared.publication.lock().await;
+    *shared
         .local_process_io
         .lock()
         .expect("state mutex poisoned") = Some(io);
-    recompute_and_publish().await;
+    recompute_and_publish_locked().await;
 }
 
 /// Merges the last upstream snapshot with the last locally-collected
@@ -917,7 +952,7 @@ pub async fn set_local_process_io(io: snapshot::ProcessIoSnapshot) {
 /// snapshot arrives, and after `set_offline` -- there is nothing live to
 /// merge into, and publishing here would otherwise let a `runtime_operations.rs`
 /// tick that lands while offline resurrect a stale "live" dashboard.
-async fn recompute_and_publish() {
+async fn recompute_and_publish_locked() {
     let Some(mut snapshot) = shared()
         .last_snapshot
         .lock()
@@ -991,21 +1026,34 @@ pub fn gap_index() -> (Option<snapshot::BlockTimeGapIndex>, Option<String>) {
     )
 }
 
-/// Called by `client.rs` when the upstream gateway is unreachable or sends
+/// Called by `client.rs` when the upstream scheduler is unreachable or sends
 /// something we can't parse. Keeps the dashboard honestly in the
 /// `service_unavailable` state instead of freezing on stale numbers.
 pub async fn set_offline(reason: String) {
-    *shared().last_snapshot.lock().expect("state mutex poisoned") = None;
+    let shared = shared();
+    let _publication = shared.publication.lock().await;
+    *shared.last_snapshot.lock().expect("state mutex poisoned") = None;
+    let last_updated = shared
+        .current
+        .lock()
+        .expect("state mutex poisoned")
+        .updated_unix_secs;
+    let connection_state = if last_updated == 0 {
+        "offline"
+    } else {
+        "stale"
+    };
     publish(DashboardState {
         live: false,
-        connection_state: "offline".into(),
+        connection_state: connection_state.into(),
         connection_message: reason,
+        updated_unix_secs: last_updated,
         ..DashboardState::default()
     })
     .await;
 }
 
-/// Deterministic in-process demo data, for UI iteration with no gateway
+/// Deterministic in-process demo data, for UI iteration with no scheduler
 /// running. Only started when the binary is launched with `--demo`; never
 /// the default, so this dashboard cannot accidentally present fabricated
 /// numbers as real telemetry.
@@ -1015,7 +1063,7 @@ pub fn start_demo_simulation() {
         state.live = true;
         state.demo = true;
         state.connection_state = "live".into();
-        state.connection_message = "Demo data (--demo, no gateway connected)".into();
+        state.connection_message = "Demo data (--demo, no scheduler connected)".into();
         publish(state.clone()).await;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -1406,6 +1454,22 @@ mod tests {
     }
 
     #[test]
+    fn last_updated_label_reports_missing_recent_and_stale_ages() {
+        let missing = DashboardState::default();
+        assert_eq!(
+            missing.last_updated_label_at(100),
+            "No scheduler update received"
+        );
+
+        let state = DashboardState {
+            updated_unix_secs: 100,
+            ..Default::default()
+        };
+        assert_eq!(state.last_updated_label_at(103), "Updated just now");
+        assert_eq!(state.last_updated_label_at(165), "Updated 1m 5s ago");
+    }
+
+    #[test]
     fn poh_migration_lanes_lists_running_workers_by_epoch_and_ignores_other_lane_kinds() {
         let snapshot = PipelineSnapshot {
             lanes: vec![
@@ -1567,6 +1631,56 @@ mod tests {
     }
 
     #[test]
+    fn state_retains_all_epochs_while_overview_filters_then_prioritizes_and_caps() {
+        let mut epochs: Vec<_> = (1..=14)
+            .map(|epoch| snapshot::EpochStatus {
+                epoch,
+                state: "failed".into(),
+                ..Default::default()
+            })
+            .collect();
+        epochs.extend((20..=32).map(|epoch| snapshot::EpochStatus {
+            epoch,
+            state: "queued".into(),
+            ..Default::default()
+        }));
+        // Deliberately last: the old `.take(12)` in `from_snapshot` lost
+        // this active row behind stale hidden failures.
+        epochs.push(snapshot::EpochStatus {
+            epoch: 99,
+            state: "scanning".into(),
+            ..Default::default()
+        });
+        let snapshot = PipelineSnapshot {
+            epochs,
+            lanes: vec![snapshot::LaneStatus {
+                epoch: Some(99),
+                state: "running".into(),
+                phase: "Archive V2 Hot Write".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+        let overview: Vec<u32> = state
+            .overview_epochs()
+            .into_iter()
+            .map(|task| task.epoch)
+            .collect();
+
+        assert_eq!(state.epochs.len(), 28, "/epochs must retain every row");
+        assert_eq!(overview.len(), OVERVIEW_EPOCH_LIMIT);
+        assert_eq!(overview[0], 99, "active work must be prioritized");
+        assert!(overview.iter().all(|epoch| *epoch > 14));
+
+        let signals = state.to_signals();
+        assert!(signals.get("epoch_99_pct").is_some());
+        assert!(signals.get("epoch_1_pct").is_none());
+        assert!(signals.get("epoch_32_pct").is_none());
+    }
+
+    #[test]
     fn diff_signals_only_includes_changed_keys() {
         let old = json!({"a": 1, "b": 2, "c": 3});
         let new = json!({"a": 1, "b": 5, "c": 3});
@@ -1604,6 +1718,109 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn publish_marks_live_offline_transitions_as_structural() {
+        let _guard = GLOBAL_STATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let offline = DashboardState {
+            live: false,
+            connection_state: "offline".into(),
+            ..Default::default()
+        };
+        publish(offline).await;
+        let mut rx = subscribe();
+
+        publish(DashboardState {
+            live: true,
+            connection_state: "live".into(),
+            ..Default::default()
+        })
+        .await;
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Structure)),
+            "offline-to-live must morph the stable frame"
+        );
+
+        publish(DashboardState {
+            live: false,
+            connection_state: "offline".into(),
+            ..Default::default()
+        })
+        .await;
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Structure)),
+            "live-to-offline must morph the stable frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_after_a_snapshot_is_stale_and_preserves_last_update() {
+        let _guard = GLOBAL_STATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set_snapshot(PipelineSnapshot {
+            now_unix_secs: 123,
+            ..Default::default()
+        })
+        .await;
+        set_offline("application freshness deadline exceeded".into()).await;
+
+        let state = snapshot_blocking();
+        assert!(!state.live);
+        assert_eq!(state.connection_state, "stale");
+        assert_eq!(state.updated_unix_secs, 123);
+        assert_ne!(
+            state.last_updated_label_at(183),
+            "No scheduler update received"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_gate_prevents_queued_local_recompute_from_resurrecting_offline_state() {
+        let _guard = GLOBAL_STATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set_snapshot(PipelineSnapshot {
+            now_unix_secs: 456,
+            ..Default::default()
+        })
+        .await;
+
+        let held = shared().publication.lock().await;
+        let local = tokio::spawn(set_local_process_io(snapshot::ProcessIoSnapshot {
+            state: "ready".into(),
+            active_count: 7,
+            ..Default::default()
+        }));
+        tokio::task::yield_now().await;
+        let offline = tokio::spawn(set_offline("upstream disconnected".into()));
+        tokio::task::yield_now().await;
+        assert!(!local.is_finished() && !offline.is_finished());
+        drop(held);
+        local.await.unwrap();
+        offline.await.unwrap();
+
+        let state = snapshot_blocking();
+        assert!(!state.live);
+        assert_eq!(state.connection_state, "stale");
+        assert_eq!(state.updated_unix_secs, 456);
+        assert!(
+            shared()
+                .last_snapshot
+                .lock()
+                .expect("state mutex poisoned")
+                .is_none()
+        );
+    }
+
     fn poh_lane_task(epoch: u32) -> EpochTask {
         EpochTask {
             epoch,
@@ -1621,11 +1838,11 @@ mod tests {
     /// an existing row's field values -- `diff_signals` alone has nothing
     /// to add/remove a DOM row for, since Datastar's signal patches only
     /// update bindings on elements that already exist. `publish` must also
-    /// broadcast a `StreamEvent::Elements` for `#poh-migration-lane-list`
-    /// whenever that set changes, so the list actually gains/loses rows
-    /// without a manual refresh.
+    /// broadcast a `StreamEvent::Structure` whenever that set changes, so
+    /// each connected route can morph its complete stable frame and the
+    /// Overview list actually gains/loses rows without a manual refresh.
     #[tokio::test]
-    async fn publish_broadcasts_an_element_patch_when_poh_lane_membership_changes() {
+    async fn publish_broadcasts_structure_when_poh_lane_membership_changes() {
         let _guard = GLOBAL_STATE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1642,7 +1859,7 @@ mod tests {
         let mut rx = subscribe();
 
         // Same membership, only a field value changing: signals only, no
-        // element patch -- the row already exists and `data-text` covers it.
+        // structural patch -- the row already exists and `data-text` covers it.
         publish(DashboardState {
             poh_migration_lanes: vec![EpochTask {
                 pct: 41,
@@ -1655,32 +1872,26 @@ mod tests {
             (0..8)
                 .map(|_| rx.try_recv())
                 .take_while(Result::is_ok)
-                .all(|event| !matches!(event, Ok(StreamEvent::Elements { .. }))),
-            "a same-membership publish must not emit an element patch"
+                .all(|event| !matches!(event, Ok(StreamEvent::Structure))),
+            "a same-membership publish must not emit a structural patch"
         );
 
         // Epoch 493 finishes (drops out), epoch 494 starts (appears): a
-        // real membership change must emit an element patch for the list.
+        // real membership change must emit one structural frame marker.
         publish(DashboardState {
             poh_migration_lanes: vec![poh_lane_task(494)],
             ..snapshot_blocking()
         })
         .await;
-        let mut saw_element_patch = false;
+        let mut saw_structure = false;
         while let Ok(event) = rx.try_recv() {
-            if let StreamEvent::Elements { selector, html } = event {
-                assert_eq!(selector, "#poh-migration-lane-list");
-                assert!(html.contains("epoch-494"), "new row should be in the patch");
-                assert!(
-                    !html.contains("epoch-493"),
-                    "finished worker's row should be gone from the patch"
-                );
-                saw_element_patch = true;
+            if matches!(event, StreamEvent::Structure) {
+                saw_structure = true;
             }
         }
         assert!(
-            saw_element_patch,
-            "a membership change must broadcast a StreamEvent::Elements patch"
+            saw_structure,
+            "a membership change must broadcast a StreamEvent::Structure marker"
         );
     }
 

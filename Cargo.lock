@@ -759,18 +759,18 @@ name = "blockzilla-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "blockzilla-watcher-gateway",
  "clap 4.6.5",
  "futures-core",
  "futures-util",
+ "libc",
  "rand 0.8.7",
+ "regex",
  "reqwest 0.13.4",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
- "tokio-stream",
  "topcoat",
- "tower",
  "tower-http 0.6.11",
 ]
 
@@ -849,26 +849,6 @@ dependencies = [
  "tracing-subscriber",
  "wincode 0.5.5",
  "zstd",
-]
-
-[[package]]
-name = "blockzilla-watcher-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "clap 4.6.5",
- "futures-util",
- "http-body",
- "http-body-util",
- "libc",
- "regex",
- "reqwest 0.13.4",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "topcoat",
 ]
 
 [[package]]

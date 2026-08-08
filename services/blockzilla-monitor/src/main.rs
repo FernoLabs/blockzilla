@@ -1,8 +1,9 @@
+use std::num::NonZeroUsize;
+
 use clap::{Parser, ValueEnum};
 use topcoat::router::{
     HeaderName, HeaderValue, Path, Router, RouterBuilderDiscoverExt, tower::TowerLayer,
 };
-use tower::limit::ConcurrencyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 mod api;
@@ -11,6 +12,8 @@ mod calendar;
 mod calendar_view;
 mod client;
 mod components;
+mod process_telemetry;
+mod public_json;
 mod runtime_operations;
 mod snapshot;
 mod state;
@@ -29,12 +32,11 @@ enum Tier {
 }
 
 /// Blockzilla task/health monitor -- a Topcoat + Datastar dashboard fed by
-/// `blockzilla-watcher-gateway`'s public status API and event stream.
+/// the scheduler's loopback-only status API and event stream.
 #[derive(Parser, Debug)]
 struct Cli {
-    /// Base URL of the redacted, public-safe blockzilla-watcher-gateway
-    /// (see services/blockzilla-watcher-gateway). This dashboard never talks
-    /// to the scheduler's raw status port directly.
+    /// Base URL of the Blockzilla scheduler's read-only status listener.
+    /// Keep this listener private; the monitor is the curated public boundary.
     #[arg(
         long,
         env = "BLOCKZILLA_MONITOR_UPSTREAM",
@@ -43,7 +45,7 @@ struct Cli {
     upstream: String,
 
     /// Run against a synthetic, in-process ticker instead of a real
-    /// gateway -- for local UI iteration only. Never the default: this
+    /// scheduler -- for local UI iteration only. Never the default: this
     /// dashboard should not silently show fabricated numbers as live
     /// telemetry.
     #[arg(long)]
@@ -56,25 +58,21 @@ struct Cli {
     tier: Tier,
 
     /// Caps concurrent open `/api/stream` connections. Each open dashboard
-    /// tab holds one for as long as it's open; nothing else in this binary
-    /// or the framework bounds that, so an anonymous public deployment
-    /// needs this. Past the cap, `tower::limit::ConcurrencyLimitLayer`
-    /// queues new connections rather than rejecting them outright.
-    #[arg(long, default_value_t = 512)]
-    max_stream_connections: usize,
+    /// tab holds one permit until its SSE response body is dropped. Past
+    /// the cap, new streams receive 503 and the dashboard retries with
+    /// backoff. Zero is rejected because it would disable all updates.
+    #[arg(long, default_value = "512")]
+    max_stream_connections: NonZeroUsize,
 
     /// Local filesystem path to a `blockzilla build-block-time-gap-index`
     /// output (see docs/reference/block-time-gap-sidecar.md). When set,
     /// this is read directly from disk on a poll loop instead of fetched
-    /// over HTTP through the gateway's `/api/v1/sidecars/block-time-gaps/index.json`
-    /// proxy -- that route has no backend handler in the scheduler as of
-    /// this writing (see docs/operations/blockzilla-monitor-roadmap.md),
-    /// so this only works when this binary runs on the same host as the
+    /// over HTTP. The scheduler has no handler for that sidecar route, so
+    /// this only works when the monitor runs on the same host as the
     /// archive. The file itself contains nothing more sensitive than the
     /// bundled reference calendar (epoch numbers, timestamps, slot
     /// numbers, a source SHA-256) -- reading it locally doesn't cross the
-    /// gateway's redaction boundary the way talking to the scheduler's raw
-    /// status port would.
+    /// monitor's curated public status surface.
     #[arg(long)]
     gap_index_file: Option<std::path::PathBuf>,
 }
@@ -82,6 +80,9 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    api::configure_stream_limit(cli.max_stream_connections)
+        .expect("stream connection limit must only be configured once");
 
     state::set_tier(match cli.tier {
         Tier::Public => RedactionTier::Public,
@@ -101,10 +102,6 @@ async fn main() {
 
     let router = Router::builder()
         .discover()
-        .layer(TowerLayer::new(
-            Path::new("/api/stream"),
-            ConcurrencyLimitLayer::new(cli.max_stream_connections),
-        ))
         // Operational telemetry has no business in a search index, on
         // either tier.
         .layer(TowerLayer::new(
@@ -117,4 +114,15 @@ async fn main() {
         .build();
 
     topcoat::start(router).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_stream_limit_is_rejected_by_cli() {
+        let parsed = Cli::try_parse_from(["blockzilla-monitor", "--max-stream-connections", "0"]);
+        assert!(parsed.is_err());
+    }
 }

@@ -1,21 +1,33 @@
 //! Wire types for the real `PipelineSnapshot` schema served by
-//! `blockzilla-watcher-gateway` at `GET /api/v1/status` and streamed over
+//! the Blockzilla scheduler at `GET /api/v1/status` and streamed over
 //! `GET /api/v1/events` (see `docs/operations/scheduler-control-protocol.md`
 //! section 1, and the canonical TypeScript types in
 //! `apps/blockzilla-watcher/src/lib/pipeline-snapshot.ts`, which this module
 //! mirrors).
 //!
-//! Every struct derives `Default` and carries a container-level
-//! `#[serde(default)]`: the real payload has many more fields than we read
-//! here (compaction internals, tuning knobs, artifact detail, ...), and each
-//! one still receives new fields over time. Deserializing tolerantly means
-//! this dashboard degrades by omission instead of by refusing the whole
-//! snapshot when the producer adds or reorders something we don't model yet.
+//! Unknown fields remain accepted, so schema-v3 can grow additive optional
+//! detail without breaking this client. Core fields are intentionally not
+//! container-defaulted: omitting `summary`, `machine`, or a row's identity
+//! must fail closed instead of silently becoming a plausible zero. The
+//! validation pass below then enforces v3, finite/ranged metrics, internal
+//! summary consistency, unique identities, and bounded collections.
 
-use serde::Deserialize;
+use anyhow::{Result, ensure};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+pub const STATUS_SCHEMA_VERSION: u64 = 3;
+const MAX_EPOCHS: usize = 4_096;
+const MAX_LANES: usize = 1_024;
+const MAX_LIVE_CAPTURES: usize = 4_096;
+const MAX_ERRORS: usize = 256;
+const MAX_COMPACTIONS: usize = 4_096;
+const MAX_PROCESS_ROWS: usize = 64;
+const MAX_CALENDAR_ENTRIES: usize = 4_096;
+const MAX_GAP_DAYS: usize = 16_384;
+const MAX_IDENTIFIER_BYTES: usize = 1_024;
+const MAX_TEXT_BYTES: usize = 16 * 1_024;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PipelineSnapshot {
     pub schema_version: u64,
     pub sequence: u64,
@@ -28,7 +40,9 @@ pub struct PipelineSnapshot {
     pub lanes: Vec<LaneStatus>,
     pub live: Vec<LiveStatus>,
     pub errors: Vec<PipelineError>,
+    #[serde(default)]
     pub recent_compactions: Vec<CompactionHistoryEntry>,
+    #[serde(default)]
     pub process_io: Option<ProcessIoSnapshot>,
     /// Live-authoritative epoch date timings, merged over the bundled
     /// reference calendar (`calendar::reference_calendar`) -- currently
@@ -36,12 +50,13 @@ pub struct PipelineSnapshot {
     /// yet), but the merge is field-for-field with
     /// `apps/blockzilla-watcher/src/lib/epoch-calendar.ts` so this starts
     /// working the moment it does, with no client change needed.
+    #[serde(default)]
     pub epoch_calendar: Vec<EpochCalendarEntry>,
 }
 
 /// One epoch's real-world date range. Mirrors `EpochCalendarEntry` in
 /// `apps/blockzilla-watcher/src/lib/epoch-calendar.ts`.
-#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EpochCalendarEntry {
     pub epoch: u32,
     pub start_unix_secs: u64,
@@ -49,22 +64,20 @@ pub struct EpochCalendarEntry {
     pub precision: CalendarPrecision,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CalendarPrecision {
     Observed,
     Estimated,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SchedulerSnapshot {
     pub paused: bool,
     pub updated_unix_secs: u64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PipelineSummary {
     pub epochs_total: u32,
     pub queued: u32,
@@ -119,8 +132,7 @@ impl PipelineSummary {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct MachineStatus {
     pub memory_total_bytes: u64,
     pub memory_used_bytes: u64,
@@ -137,8 +149,7 @@ pub struct MachineStatus {
     pub io_pressure_full_avg10: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ProgressSnapshot {
     pub blocks_done: u64,
     pub blocks_total: u64,
@@ -148,8 +159,7 @@ pub struct ProgressSnapshot {
     pub updated_unix_secs: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct EpochStatus {
     pub epoch: u32,
     pub state: String,
@@ -163,8 +173,7 @@ pub struct EpochStatus {
     pub registry_order: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LaneStatus {
     pub id: String,
     pub kind: String,
@@ -193,8 +202,7 @@ impl LaneStatus {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LiveStatus {
     pub id: String,
     pub epoch: Option<u32>,
@@ -202,16 +210,14 @@ pub struct LiveStatus {
     pub is_current: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PipelineError {
     pub at_unix_secs: u64,
     pub scope: String,
     pub message: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct CompactionHistoryEntry {
     pub id: String,
     pub epoch: u32,
@@ -220,8 +226,7 @@ pub struct CompactionHistoryEntry {
     pub duration_secs: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ProcessIoSnapshot {
     pub state: String,
     pub sampled_unix_secs: Option<u64>,
@@ -231,8 +236,7 @@ pub struct ProcessIoSnapshot {
     pub processes: Vec<ProcessIoEntry>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ProcessIoEntry {
     pub id: String,
     pub pid: u32,
@@ -252,8 +256,7 @@ pub struct ProcessIoEntry {
 /// Mirrors `BlockTimeGapIndex` in
 /// `apps/blockzilla-watcher/src/lib/block-time-gap-index.ts`, trimmed to
 /// the fields the calendar view actually renders.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BlockTimeGapIndex {
     pub schema_version: u64,
     pub generated_unix_secs: u64,
@@ -262,16 +265,14 @@ pub struct BlockTimeGapIndex {
     pub days: Vec<BlockTimeInterruptionDay>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BlockTimeGapCoverage {
     pub start_epoch: u32,
     pub end_epoch: u32,
     pub missing_epochs: Vec<u32>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BlockTimeInterruptionDay {
     pub day_start_unix_secs: u64,
     pub interruption_count: u32,
@@ -289,8 +290,7 @@ pub struct BlockTimeInterruptionDay {
 /// `Option` here (on top of already being optional on the base type) so a
 /// patch that omits the key can be told apart from one that includes it as
 /// empty -- see `apply_to` below.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PipelineSnapshotPatch {
     pub schema_version: u64,
     pub sequence: u64,
@@ -304,11 +304,61 @@ pub struct PipelineSnapshotPatch {
     pub lanes: Vec<LaneStatus>,
     pub live: Vec<LiveStatus>,
     pub errors: Vec<PipelineError>,
+    #[serde(default)]
     pub recent_compactions: Option<Vec<CompactionHistoryEntry>>,
+    #[serde(default)]
     pub process_io: Option<ProcessIoSnapshot>,
 }
 
 impl PipelineSnapshot {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema_version == STATUS_SCHEMA_VERSION,
+            "unsupported scheduler status schema {}; expected {STATUS_SCHEMA_VERSION}",
+            self.schema_version
+        );
+        ensure!(
+            self.sequence <= i64::MAX as u64,
+            "scheduler sequence exceeds the supported signed range"
+        );
+        ensure!(self.now_unix_secs > 0, "scheduler timestamp is missing");
+        ensure!(
+            self.epochs.len() <= MAX_EPOCHS,
+            "scheduler epoch collection exceeds {MAX_EPOCHS} rows"
+        );
+        ensure!(
+            self.lanes.len() <= MAX_LANES,
+            "scheduler lane collection exceeds {MAX_LANES} rows"
+        );
+        ensure!(
+            self.live.len() <= MAX_LIVE_CAPTURES,
+            "scheduler live-capture collection exceeds {MAX_LIVE_CAPTURES} rows"
+        );
+        ensure!(
+            self.errors.len() <= MAX_ERRORS,
+            "scheduler error collection exceeds {MAX_ERRORS} rows"
+        );
+        ensure!(
+            self.recent_compactions.len() <= MAX_COMPACTIONS,
+            "scheduler compaction collection exceeds {MAX_COMPACTIONS} rows"
+        );
+        ensure!(
+            self.epoch_calendar.len() <= MAX_CALENDAR_ENTRIES,
+            "scheduler calendar collection exceeds {MAX_CALENDAR_ENTRIES} rows"
+        );
+
+        validate_summary(&self.summary)?;
+        validate_machine(&self.machine)?;
+        validate_epochs(&self.epochs, Some(&self.summary))?;
+        validate_lanes(&self.lanes)?;
+        validate_live(&self.live)?;
+        validate_errors(&self.errors)?;
+        validate_compactions(&self.recent_compactions)?;
+        validate_process_io(self.process_io.as_ref())?;
+        validate_calendar(&self.epoch_calendar)?;
+        Ok(())
+    }
+
     /// Applies a patch in place: reconciles `epochs` by key, replaces every
     /// other field wholesale. Faithful port of `applySnapshotPatch` in
     /// `snapshot-patch.ts` -- see that file for the reference semantics.
@@ -345,6 +395,446 @@ impl PipelineSnapshot {
     }
 }
 
+impl PipelineSnapshotPatch {
+    pub fn validate_shape(&self) -> Result<()> {
+        ensure!(
+            self.schema_version == STATUS_SCHEMA_VERSION,
+            "unsupported scheduler patch schema {}; expected {STATUS_SCHEMA_VERSION}",
+            self.schema_version
+        );
+        ensure!(
+            self.sequence <= i64::MAX as u64,
+            "scheduler patch sequence exceeds the supported signed range"
+        );
+        ensure!(
+            self.now_unix_secs > 0,
+            "scheduler patch timestamp is missing"
+        );
+        ensure!(
+            self.epochs_changed.len() <= MAX_EPOCHS,
+            "scheduler changed-epoch collection exceeds {MAX_EPOCHS} rows"
+        );
+        ensure!(
+            self.epochs_removed.len() <= MAX_EPOCHS,
+            "scheduler removed-epoch collection exceeds {MAX_EPOCHS} rows"
+        );
+        ensure!(
+            self.lanes.len() <= MAX_LANES,
+            "scheduler patch lane collection exceeds {MAX_LANES} rows"
+        );
+        ensure!(
+            self.live.len() <= MAX_LIVE_CAPTURES,
+            "scheduler patch live-capture collection exceeds {MAX_LIVE_CAPTURES} rows"
+        );
+        ensure!(
+            self.errors.len() <= MAX_ERRORS,
+            "scheduler patch error collection exceeds {MAX_ERRORS} rows"
+        );
+        if let Some(compactions) = &self.recent_compactions {
+            ensure!(
+                compactions.len() <= MAX_COMPACTIONS,
+                "scheduler patch compaction collection exceeds {MAX_COMPACTIONS} rows"
+            );
+            validate_compactions(compactions)?;
+        }
+
+        validate_summary(&self.summary)?;
+        validate_machine(&self.machine)?;
+        validate_epochs(&self.epochs_changed, None)?;
+        validate_lanes(&self.lanes)?;
+        validate_live(&self.live)?;
+        validate_errors(&self.errors)?;
+        validate_process_io(self.process_io.as_ref())?;
+
+        let changed: std::collections::BTreeSet<_> = self
+            .epochs_changed
+            .iter()
+            .map(|epoch| epoch.epoch)
+            .collect();
+        let removed: std::collections::BTreeSet<_> = self.epochs_removed.iter().copied().collect();
+        ensure!(
+            changed.len() == self.epochs_changed.len(),
+            "scheduler patch contains duplicate changed epochs"
+        );
+        ensure!(
+            removed.len() == self.epochs_removed.len(),
+            "scheduler patch contains duplicate removed epochs"
+        );
+        ensure!(
+            changed.is_disjoint(&removed),
+            "scheduler patch changes and removes the same epoch"
+        );
+        Ok(())
+    }
+}
+
+impl BlockTimeGapIndex {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema_version == 1,
+            "unsupported block-time-gap schema"
+        );
+        ensure!(
+            self.generated_unix_secs > 0,
+            "gap index timestamp is missing"
+        );
+        ensure!(
+            self.minimum_interruption_secs > 1,
+            "gap index interruption threshold is invalid"
+        );
+        ensure!(
+            self.coverage.start_epoch <= self.coverage.end_epoch,
+            "gap index coverage is reversed"
+        );
+        let expected = usize::try_from(
+            u64::from(self.coverage.end_epoch) - u64::from(self.coverage.start_epoch) + 1,
+        )
+        .unwrap_or(usize::MAX);
+        ensure!(
+            expected <= MAX_EPOCHS,
+            "gap index coverage exceeds {MAX_EPOCHS} epochs"
+        );
+        ensure!(
+            self.coverage.missing_epochs.len() <= expected,
+            "gap index has more missing epochs than its coverage"
+        );
+        ensure!(
+            self.days.len() <= MAX_GAP_DAYS,
+            "gap index exceeds {MAX_GAP_DAYS} day rows"
+        );
+
+        let mut previous_missing = None;
+        for epoch in &self.coverage.missing_epochs {
+            ensure!(
+                *epoch >= self.coverage.start_epoch && *epoch <= self.coverage.end_epoch,
+                "gap index missing epoch lies outside coverage"
+            );
+            ensure!(
+                previous_missing.is_none_or(|previous| *epoch > previous),
+                "gap index missing epochs are not unique and sorted"
+            );
+            previous_missing = Some(*epoch);
+        }
+        let mut previous_day = None;
+        for day in &self.days {
+            ensure!(
+                day.day_start_unix_secs > 0 && day.day_start_unix_secs % 86_400 == 0,
+                "gap index contains a non-UTC day boundary"
+            );
+            ensure!(
+                previous_day.is_none_or(|previous| day.day_start_unix_secs > previous),
+                "gap index days are not unique and sorted"
+            );
+            ensure!(
+                day.interruption_count > 0
+                    && day.boundary_interruption_count <= day.interruption_count,
+                "gap index day counters are inconsistent"
+            );
+            previous_day = Some(day.day_start_unix_secs);
+        }
+        Ok(())
+    }
+}
+
+fn validate_summary(summary: &PipelineSummary) -> Result<()> {
+    ensure_percent("summary progress", summary.progress_pct as f64)?;
+    ensure_nonnegative("summary block rate", summary.blocks_per_sec as f64)?;
+    ensure_optional_nonnegative("summary ETA", summary.eta_secs)?;
+    ensure_optional_nonnegative("summary queue ETA", summary.queue_eta_secs)?;
+    ensure_optional_nonnegative("PoH migration rate", summary.poh_migration_bytes_per_sec)?;
+    ensure_optional_nonnegative("PoH migration ETA", summary.poh_migration_eta_secs)?;
+    ensure_optional_text("queue ETA reason", summary.queue_eta_reason.as_deref())?;
+    ensure_optional_text(
+        "admission blocked reason",
+        summary.admission_blocked_reason.as_deref(),
+    )?;
+    ensure_optional_text(
+        "legacy admission blocked reason",
+        summary.legacy_compact_admission_blocked_reason.as_deref(),
+    )?;
+    ensure_optional_text(
+        "finalizer admission blocked reason",
+        summary.finalizer_admission_blocked_reason.as_deref(),
+    )?;
+    ensure_optional_text(
+        "legacy compact last action",
+        summary.legacy_compact_last_action.as_deref(),
+    )?;
+    ensure_optional_text(
+        "legacy tuning decision",
+        summary.legacy_compact_tuning_last_decision.as_deref(),
+    )?;
+
+    let classified = [
+        summary.queued,
+        summary.scanning,
+        summary.scan_ready,
+        summary.finalizing,
+        summary.complete,
+        summary.failed,
+        summary.blocked,
+    ]
+    .into_iter()
+    .map(u64::from)
+    .sum::<u64>();
+    ensure!(
+        classified == u64::from(summary.epochs_total),
+        "scheduler summary state counts do not equal epochs_total"
+    );
+    ensure!(
+        summary.poh_migration_bytes_done <= summary.poh_migration_bytes_total,
+        "PoH migrated bytes exceed total bytes"
+    );
+    ensure!(
+        summary.poh_migration_epochs_done <= summary.poh_migration_epochs_total,
+        "PoH migrated epochs exceed total epochs"
+    );
+    Ok(())
+}
+
+fn validate_machine(machine: &MachineStatus) -> Result<()> {
+    ensure!(
+        machine.memory_used_bytes <= machine.memory_total_bytes
+            && machine.memory_available_bytes <= machine.memory_total_bytes,
+        "machine memory counters exceed total memory"
+    );
+    ensure!(
+        machine.swap_used_bytes <= machine.swap_total_bytes,
+        "machine swap counters exceed total swap"
+    );
+    ensure!(
+        machine.disk_used_bytes <= machine.disk_total_bytes
+            && machine.disk_available_bytes <= machine.disk_total_bytes,
+        "machine disk counters exceed total disk"
+    );
+    ensure_nonnegative("machine load", machine.load_1m as f64)?;
+    ensure_optional_nonnegative_f32(
+        "archive device read rate",
+        machine.archive_device_read_mib_per_sec,
+    )?;
+    ensure_optional_nonnegative_f32(
+        "archive device write rate",
+        machine.archive_device_write_mib_per_sec,
+    )?;
+    ensure_optional_percent("memory pressure", machine.memory_pressure_full_avg10)?;
+    ensure_optional_percent("I/O pressure", machine.io_pressure_full_avg10)?;
+    Ok(())
+}
+
+fn validate_epochs(epochs: &[EpochStatus], summary: Option<&PipelineSummary>) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut counts = [0_u32; 7];
+    for epoch in epochs {
+        ensure!(
+            ids.insert(epoch.epoch),
+            "scheduler contains duplicate epochs"
+        );
+        let state_index = match epoch.state.as_str() {
+            "queued" => 0,
+            "scanning" => 1,
+            "scan_ready" => 2,
+            "finalizing" => 3,
+            "complete" => 4,
+            "failed" => 5,
+            "blocked" => 6,
+            _ => anyhow::bail!("scheduler epoch has an unknown state"),
+        };
+        counts[state_index] += 1;
+        validate_progress(&epoch.progress)?;
+        ensure_optional_text("epoch message", epoch.message.as_deref())?;
+        ensure!(
+            matches!(
+                epoch.registry_order.as_deref(),
+                Some("usage_sorted" | "first_seen" | "unknown")
+            ),
+            "scheduler epoch registry_order is missing or invalid"
+        );
+    }
+    if let Some(summary) = summary {
+        ensure!(
+            usize::try_from(summary.epochs_total).ok() == Some(epochs.len()),
+            "scheduler summary epochs_total does not match the epoch collection"
+        );
+        ensure!(
+            counts
+                == [
+                    summary.queued,
+                    summary.scanning,
+                    summary.scan_ready,
+                    summary.finalizing,
+                    summary.complete,
+                    summary.failed,
+                    summary.blocked,
+                ],
+            "scheduler summary state counts do not match epoch rows"
+        );
+    }
+    Ok(())
+}
+
+fn validate_lanes(lanes: &[LaneStatus]) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for lane in lanes {
+        ensure_identifier("lane id", &lane.id)?;
+        ensure!(
+            ids.insert(lane.id.as_str()),
+            "scheduler contains duplicate lane ids"
+        );
+        ensure_identifier("lane kind", &lane.kind)?;
+        ensure_identifier("lane state", &lane.state)?;
+        ensure_text_len("lane phase", &lane.phase, MAX_IDENTIFIER_BYTES)?;
+        ensure_optional_text("lane pause reason", lane.auto_pause_reason.as_deref())?;
+        validate_progress(&lane.progress)?;
+    }
+    Ok(())
+}
+
+fn validate_live(live: &[LiveStatus]) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for capture in live {
+        ensure_identifier("live capture id", &capture.id)?;
+        ensure!(
+            ids.insert(capture.id.as_str()),
+            "scheduler contains duplicate live-capture ids"
+        );
+        ensure!(
+            matches!(
+                capture.state.as_str(),
+                "capturing"
+                    | "repair_gate"
+                    | "repair_required"
+                    | "ready_to_package"
+                    | "packaging"
+                    | "packaged"
+                    | "complete"
+                    | "failed"
+                    | "blocked"
+            ),
+            "scheduler live capture has an unknown state"
+        );
+    }
+    Ok(())
+}
+
+fn validate_errors(errors: &[PipelineError]) -> Result<()> {
+    for error in errors {
+        ensure_identifier("error scope", &error.scope)?;
+        ensure_text_len("error message", &error.message, MAX_TEXT_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validate_compactions(entries: &[CompactionHistoryEntry]) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in entries {
+        ensure_identifier("compaction id", &entry.id)?;
+        ensure!(ids.insert(entry.id.as_str()), "duplicate compaction ids");
+        ensure_identifier("compaction workflow", &entry.workflow)?;
+        ensure_optional_nonnegative("compaction duration", entry.duration_secs)?;
+    }
+    Ok(())
+}
+
+fn validate_process_io(process_io: Option<&ProcessIoSnapshot>) -> Result<()> {
+    let Some(process_io) = process_io else {
+        return Ok(());
+    };
+    ensure_identifier("process I/O state", &process_io.state)?;
+    ensure!(
+        process_io.processes.len() <= MAX_PROCESS_ROWS,
+        "process I/O collection exceeds {MAX_PROCESS_ROWS} rows"
+    );
+    ensure!(
+        usize::try_from(process_io.active_count).unwrap_or(usize::MAX)
+            >= process_io.processes.len(),
+        "process I/O active_count is smaller than the row collection"
+    );
+    let mut ids = std::collections::BTreeSet::new();
+    for process in &process_io.processes {
+        ensure_identifier("process id", &process.id)?;
+        ensure!(ids.insert(process.id.as_str()), "duplicate process ids");
+        ensure_text_len("process name", &process.name, MAX_IDENTIFIER_BYTES)?;
+        ensure_optional_nonnegative("process read rate", process.read_mib_per_sec)?;
+        ensure_optional_nonnegative("process write rate", process.write_mib_per_sec)?;
+        ensure_optional_nonnegative("process CPU", process.cpu_percent)?;
+    }
+    Ok(())
+}
+
+fn validate_calendar(entries: &[EpochCalendarEntry]) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in entries {
+        ensure!(ids.insert(entry.epoch), "duplicate calendar epochs");
+        ensure!(entry.start_unix_secs > 0, "calendar start time is missing");
+        ensure!(
+            entry
+                .end_unix_secs
+                .is_none_or(|end| end >= entry.start_unix_secs),
+            "calendar epoch ends before it starts"
+        );
+    }
+    Ok(())
+}
+
+fn validate_progress(progress: &ProgressSnapshot) -> Result<()> {
+    if let Some(percent) = progress.progress_pct {
+        ensure_percent("row progress", percent as f64)?;
+    }
+    ensure_optional_nonnegative("row ETA", progress.eta_secs)?;
+    Ok(())
+}
+
+fn ensure_identifier(label: &str, value: &str) -> Result<()> {
+    ensure!(!value.trim().is_empty(), "{label} is empty");
+    ensure_text_len(label, value, MAX_IDENTIFIER_BYTES)
+}
+
+fn ensure_optional_text(label: &str, value: Option<&str>) -> Result<()> {
+    if let Some(value) = value {
+        ensure_text_len(label, value, MAX_TEXT_BYTES)?;
+    }
+    Ok(())
+}
+
+fn ensure_text_len(label: &str, value: &str, max: usize) -> Result<()> {
+    ensure!(value.len() <= max, "{label} exceeds {max} bytes");
+    Ok(())
+}
+
+fn ensure_nonnegative(label: &str, value: f64) -> Result<()> {
+    ensure!(
+        value.is_finite() && value >= 0.0,
+        "{label} is not finite and nonnegative"
+    );
+    Ok(())
+}
+
+fn ensure_optional_nonnegative(label: &str, value: Option<f64>) -> Result<()> {
+    if let Some(value) = value {
+        ensure_nonnegative(label, value)?;
+    }
+    Ok(())
+}
+
+fn ensure_optional_nonnegative_f32(label: &str, value: Option<f32>) -> Result<()> {
+    ensure_optional_nonnegative(label, value.map(f64::from))
+}
+
+fn ensure_percent(label: &str, value: f64) -> Result<()> {
+    ensure!(
+        value.is_finite() && (0.0..=100.0).contains(&value),
+        "{label} is outside 0..=100"
+    );
+    Ok(())
+}
+
+fn ensure_optional_percent(label: &str, value: Option<f32>) -> Result<()> {
+    if let Some(value) = value {
+        ensure_percent(label, f64::from(value))?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SequenceAction {
     Apply,
@@ -378,6 +868,15 @@ pub fn humanize(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_snapshot() -> PipelineSnapshot {
+        PipelineSnapshot {
+            schema_version: STATUS_SCHEMA_VERSION,
+            sequence: 1,
+            now_unix_secs: 1,
+            ..Default::default()
+        }
+    }
 
     fn epoch(n: u32, state: &str) -> EpochStatus {
         EpochStatus {
@@ -494,5 +993,61 @@ mod tests {
         );
         assert_eq!(sequence_action(5, 6), SequenceAction::Apply, "contiguous");
         assert_eq!(sequence_action(5, 8), SequenceAction::Resync, "gap");
+    }
+
+    #[test]
+    fn schema_v3_accepts_unknown_additive_fields_but_requires_core_fields() {
+        let mut value = serde_json::to_value(valid_snapshot()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("future_optional_detail".into(), serde_json::json!({"x": 1}));
+        let decoded: PipelineSnapshot = serde_json::from_value(value.clone()).unwrap();
+        decoded.validate().unwrap();
+
+        value.as_object_mut().unwrap().remove("summary");
+        assert!(
+            serde_json::from_value::<PipelineSnapshot>(value).is_err(),
+            "missing core objects must not silently default to zero"
+        );
+    }
+
+    #[test]
+    fn validation_rejects_wrong_schema_inconsistent_summary_and_oversized_rows() {
+        let mut wrong_schema = valid_snapshot();
+        wrong_schema.schema_version = 2;
+        assert!(wrong_schema.validate().is_err());
+
+        let mut inconsistent = valid_snapshot();
+        inconsistent.epochs = vec![EpochStatus {
+            epoch: 1,
+            state: "queued".into(),
+            registry_order: Some("unknown".into()),
+            ..Default::default()
+        }];
+        assert!(inconsistent.validate().is_err());
+
+        let mut oversized = valid_snapshot();
+        oversized.epochs = vec![EpochStatus::default(); MAX_EPOCHS + 1];
+        assert!(oversized.validate().is_err());
+    }
+
+    #[test]
+    fn patch_validation_rejects_duplicate_or_conflicting_epoch_operations() {
+        let changed = EpochStatus {
+            epoch: 7,
+            state: "queued".into(),
+            registry_order: Some("unknown".into()),
+            ..Default::default()
+        };
+        let patch = PipelineSnapshotPatch {
+            schema_version: STATUS_SCHEMA_VERSION,
+            sequence: 2,
+            now_unix_secs: 2,
+            epochs_changed: vec![changed],
+            epochs_removed: vec![7],
+            ..Default::default()
+        };
+        assert!(patch.validate_shape().is_err());
     }
 }

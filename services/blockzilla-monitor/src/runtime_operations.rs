@@ -1,15 +1,10 @@
 //! Background task that periodically samples non-blockzilla-owned process
 //! I/O on this host and feeds it into `state::set_local_process_io`.
 //!
-//! This used to be a separate process (`blockzilla-watcher-gateway
-//! runtime-operations publish`, run as `blockzilla-watcher-runtime-
-//! operations.service`) writing a JSON sidecar that the retired gateway
-//! `serve` command proxied to this dashboard. Now that this dashboard talks
-//! directly to the scheduler (no gateway hop), nothing served that sidecar
-//! anymore, so the collection runs in-process here instead -- reusing
-//! `blockzilla_watcher_gateway::runtime_operations`'s already-tested procfs
-//! collector directly rather than re-implementing it. See
-//! docs/operations/nas-deployment-layout.md.
+//! This used to be a separate publisher writing a JSON sidecar for the
+//! retired proxy service. The collection now runs in-process and reuses
+//! this monitor's tested procfs collector. See
+//! `docs/operations/nas-deployment-layout.md`.
 
 use std::{
     collections::BTreeMap,
@@ -17,7 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use blockzilla_watcher_gateway::runtime_operations::{
+use crate::process_telemetry::{
     ProcessIoEntry, ProcessIoStatus, ProcessSample, collect_processes, process_io_status,
 };
 

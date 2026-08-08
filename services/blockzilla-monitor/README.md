@@ -4,15 +4,13 @@ A server-rendered task/health dashboard for Blockzilla, built on
 [Topcoat](https://github.com/tokio-rs/topcoat) with live updates pushed
 over Server-Sent Events via `topcoat::datastar`.
 
-It is fed by **`services/blockzilla-watcher-gateway`** -- the redacted,
-public-safe proxy in front of the scheduler's status API -- never by the
-scheduler directly. That boundary strips secrets and absolute paths before
-anything reaches this process; see `public_json.rs` in the gateway crate.
+It reads the scheduler's private, read-only status API directly. The monitor
+validates that wire data, maps it into an explicitly curated view model, and
+applies public-tier path and credential redaction before serving browsers.
 
 ## Running it
 
-Start the gateway first (see `services/blockzilla-watcher-gateway`, or
-`TODO.md` at the repo root for the exact invocation), then:
+Start the scheduler's status listener, then:
 
 ```
 cargo run -p blockzilla-monitor -- --upstream http://127.0.0.1:8787
@@ -30,13 +28,20 @@ binary has no authentication of its own, so a `full` instance must only be
 reachable from a network-gated path (Cloudflare Access, Tailscale, an IP
 allowlist) -- see `docs/operations/blockzilla-monitor-roadmap.md` §3 for
 the intended two-instance deployment shape. `--max-stream-connections`
-(default `512`) caps concurrent `/api/stream` subscribers.
+(default `512`) caps concurrent `/api/stream` subscribers for the full
+lifetime of each SSE response body. Zero is rejected. A tab that reaches
+the cap receives `503 Service Unavailable` and retries with backoff.
 
-If the gateway isn't reachable, every page shows an honest "Gateway
-unavailable" screen with the real connection error -- this dashboard never
-substitutes fabricated numbers for a missing snapshot.
+If the scheduler isn't reachable, every page shows an honest "Scheduler
+unavailable" screen with the real connection error. If a previously healthy
+stream stops delivering bytes or valid scheduler state for 45 seconds, the
+page becomes "Scheduler telemetry stale", removes the old task numbers, and
+shows when the last accepted update arrived. This dashboard never substitutes
+fabricated or default-zero numbers for a missing snapshot. Offline and stale
+screens still own the normal live stream, so they recover in place when the
+next valid snapshot arrives instead of requiring a reload.
 
-For local UI iteration without a gateway running:
+For local UI iteration without a scheduler running:
 
 ```
 cargo run -p blockzilla-monitor -- --demo
@@ -68,23 +73,26 @@ src/
                    markup) -- kept separate from calendar.rs so the date
                    math stays independently testable without a view! macro
                    in the loop
-  snapshot.rs      tolerant Rust types for the real PipelineSnapshot wire
-                   schema served by blockzilla-watcher-gateway at
+  snapshot.rs      fail-closed schema-v3 Rust types and invariant/collection
+                   validation for the real PipelineSnapshot wire served by
+                   the scheduler at
                    /api/v1/status and /api/v1/events (mirrors
                    apps/blockzilla-watcher/src/lib/pipeline-snapshot.ts),
                    plus the patch type and incremental apply_patch/
-                   sequence_action logic (mirrors snapshot-patch.ts)
+                   sequence_action logic (mirrors snapshot-patch.ts). Unknown
+                   additive fields remain accepted
   client.rs        background task: bootstraps from GET /api/v1/status,
                    then applies incremental snapshot_patch events from SSE
-                   /api/v1/events to an in-memory snapshot, republished
-                   into state.rs
+                   /api/v1/events to an in-memory snapshot, with bounded
+                   bodies, freshness watchdogs, and validated resync before
+                   publication into state.rs
   state.rs         DashboardState model (the flat signal-map serializer),
                    the real-snapshot -> DashboardState mapping, and the
                    --demo ticker
   api/stream.rs    GET /api/stream -- this app's own SSE endpoint that
-                   Datastar subscribes to on every page. Concurrent
-                   subscribers are capped by a tower ConcurrencyLimitLayer
-                   registered in main.rs (--max-stream-connections)
+                   Datastar subscribes to on every page. A body-owned
+                   semaphore permit caps concurrent subscribers for their
+                   actual connection lifetime (--max-stream-connections)
   api/styles.rs    GET /app.css -- serves the pre-compiled stylesheet below
   api/scripts.rs   GET /datastar.js -- serves the vendored Datastar bundle
                    below, instead of loading it from a CDN
@@ -124,15 +132,19 @@ assets/mainnet-epoch-calendar.json
 
 ## How the live updates flow
 
-Two independent hops, both incremental end to end -- nothing here
-re-fetches or re-sends a full snapshot on a routine update, only on
-connect, on an explicit `resync`, or when a sequence gap forces one.
+Two independent hops stay incremental for routine scalar updates. Full
+state is fetched/sent on connect, explicit `resync`, or a sequence gap;
+rare structural changes morph one complete route frame so list membership
+and offline/live state cannot drift.
 
-**Gateway -> this process** (`client.rs`, `snapshot.rs`):
+**Scheduler -> this process** (`client.rs`, `snapshot.rs`):
 
 1. `client.rs` fetches `GET {upstream}/api/v1/status` once at startup
    (building the in-memory `PipelineSnapshot` in `Session`) and opens
-   `GET {upstream}/api/v1/events`.
+   `GET {upstream}/api/v1/events`. Both operations have connection/body
+   bounds. The 45-second transport and application-freshness deadlines cover
+   nine default 5-second scheduler reconciles and three 15-second SSE
+   keep-alive windows.
 2. A `snapshot` SSE event replaces that in-memory snapshot wholesale. A
    `snapshot_patch` event is applied in place with
    `PipelineSnapshot::apply_patch` -- epochs are reconciled by key
@@ -144,7 +156,12 @@ connect, on an explicit `resync`, or when a sequence gap forces one.
    decides per patch whether to apply it, ignore it as stale/duplicate, or
    fall back to a full `GET /api/v1/status` because of a sequence gap. An
    explicit `resync` SSE event always does the full `GET`.
-4. Every accepted snapshot or applied patch calls `state::set_snapshot`.
+4. Full and patch payloads must deserialize as schema v3 and pass collection,
+   identity, state, counter, finite-number, and summary-consistency checks.
+   Unknown additive fields remain tolerated. A malformed event triggers a
+   validated full resync; if that fails, the dashboard goes stale/offline.
+   Only an accepted snapshot or fully validated patch candidate calls
+   `state::set_snapshot`.
 
 **This process -> the browser** (`state.rs`, `api/stream.rs`):
 
@@ -153,29 +170,51 @@ connect, on an explicit `resync`, or when a sequence gap forces one.
    publish (`diff_signals`), and broadcasts only the changed keys -- keys
    that disappeared (e.g. an epoch leaving the active list) are sent as
    `null`, which Datastar's signal-patch protocol treats as "remove this
-   signal." If nothing changed, nothing is broadcast.
-2. `GET /api/stream` (this app's own endpoint, not the gateway's) sends one
-   full signal map the moment a tab connects -- a delta-only stream can't
-   self-correct a value that changed in the gap between this page's server
-   render and the SSE connection opening, the way a full-payload stream
-   always could -- and then relays each subsequent delta as one
-   `PatchSignals::json` Datastar event. A client that falls behind the
-   broadcast buffer (`Err(Lagged)`) gets a fresh full map instead of
-   silently missing whatever it dropped.
+   signal." If scalar values did not change, no signal event is broadcast.
+   Changes to live/offline state or any rendered list membership also emit
+   one `Structure` marker; each subscriber turns it into a fresh frame for
+   the route that tab is actually viewing.
+2. `GET /api/stream` (the monitor's browser-facing endpoint) sends one
+   full signal map and one freshly rendered `#dashboard-frame` the moment
+   a tab connects -- a delta-only stream cannot self-correct values or rows
+   that changed in the gap between the page render and stream opening --
+   and then relays subsequent deltas. A client that falls behind the
+   broadcast buffer (`Err(Lagged)`) gets the same complete signal + frame
+   resync instead of silently missing whatever it dropped.
 3. Every page wraps its content in `components::dashboard_shell`, which
    seeds `data-signals` from the current server-rendered state (first
    paint, before any SSE has connected) and opens `/api/stream` via
-   `data-on:load`. All four pages need this, not just Overview -- the
-   header's live dot and connection-state text bind to `$live` /
-   `$connection_state`, and a page without the shell references signals
-   Datastar never seeded.
+   `data-on:load`. The shell remains mounted around the route-specific
+   `#dashboard-frame` in both live and offline states, so offline-first
+   pages recover and live pages morph to the honest offline view without a
+   manual refresh.
+
+Snapshot, offline, and independently sampled local process-I/O publications
+share one async publication gate. Recompute and broadcast therefore preserve
+arrival order; a slow process sample cannot publish an older snapshot after a
+disconnect or newer scheduler update. The optional local gap-index reader also
+opens one nonblocking, no-follow file descriptor, accepts regular files only,
+reads at most the configured maximum plus one byte, and rechecks file/path
+identity after the read. A path swap, FIFO, or sparse oversized artifact is
+rejected without an unbounded read.
 
 ## Known gaps
 
+### Remaining hardening follow-ups from the 2026-08 monitor review
+
+- Make non-Overview content intentionally live. History, System, Epoch
+  field values, and Calendar are still primarily server-rendered snapshots;
+  routine scalar ticks do not rebuild those page bodies unless a structural
+  resync also occurs.
+- Wire a real producer for `recent_compactions`; the History page and wire
+  field exist, but the current scheduler path does not populate a useful
+  completion history.
+- Add collection timestamps/error state to local process telemetry so a
+  stalled sampler is visibly stale rather than silently retaining its last
+  successful values.
 - **The scheduler has no HTTP route for the block-time-gap sidecar at
-  all.** `blockzilla-watcher-gateway` allowlists
-  `GET /api/v1/sidecars/block-time-gaps/index.json` and will proxy it, but
-  the scheduler's status server never registered a handler for that path
+  all.** The scheduler's status server never registered a handler for
+  `GET /api/v1/sidecars/block-time-gaps/index.json`
   (nor for `runtime-operations` or `shred-ingest`) -- every request 502s
   regardless of whether the index has been generated. Confirmed by grepping
   `blockzilla/src/scheduler/mod.rs` for any of those route strings: nothing.
@@ -190,7 +229,7 @@ connect, on an explicit `resync`, or when a sequence gap forces one.
   `docs/reference/block-time-gap-sidecar.md`) aggregates them into one JSON
   file in seconds, read-only against the archive. `--gap-index-file <path>`
   (see `main.rs`) has this binary read that file directly from local disk
-  on the same poll loop, instead of going over HTTP through the gateway --
+  on the same poll loop, instead of going over HTTP --
   safe because this binary already runs on the same host as the archive,
   and the file itself contains nothing more sensitive than epoch numbers,
   timestamps, slot numbers, and a source SHA-256 (comparable to the bundled
@@ -231,7 +270,6 @@ connect, on an explicit `resync`, or when a sequence gap forces one.
   auto-paused lanes -- all real fields the scheduler already serves, just
   not previously read here. But the scheduler overwrites these in place
   every tick rather than logging them, so this can only ever show "right
-  now," never "what happened at 3am." A real audit trail would read back
-  `blockzilla-watcher-gateway`'s already-built (but currently
-  HTTP-unreachable) `scheduler_incidents.rs` event log -- tracked as
+  now," never "what happened at 3am." A real audit trail needs a scheduler-
+  owned durable event stream and a bounded read-only endpoint -- tracked as
   roadmap §5, not done here.
