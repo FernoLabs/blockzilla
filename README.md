@@ -73,6 +73,7 @@ cargo test --workspace --all-targets --locked
 ```
 
 Read the [documentation index](docs/README.md) before working on formats,
-deployments, or credential-handling code.
+deployments, or credential-handling code. Cross-cutting future work and product
+decisions are tracked in the [project backlog](TODO.md).
 
 Blockzilla is available under the [MIT License](LICENSE).
