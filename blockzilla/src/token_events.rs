@@ -2221,7 +2221,6 @@ fn scan_car_token_instruction_tx_outer(
     mint_filter: Option<KnownHotKey>,
     stats: &mut TokenInstructionStats,
 ) -> Result<()> {
-    
     match &tx.message {
         VersionedMessage::Legacy(message) => scan_car_token_instruction_refs_outer(
             &message.account_keys,

@@ -11,18 +11,22 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256, block_api::compress256};
-use tracing::warn;
 use std::{
     cell::RefCell,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read},
-    path::Path,
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
+use tracing::warn;
 
 const SIGNATURE_BYTES: usize = 64;
 const POH_READER_BUFFER_BYTES: usize = 8 << 20;
 const MAX_POH_FRAME_BYTES: usize = 64 << 20;
+const POH_MIGRATION_LOCK_FILE: &str = ".poh-signature-count-migration.lock";
+static POH_MIGRATION_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Rows read and buffered per migration batch before their "needs patch" subset is dispatched
 /// to the worker pool. Large enough to amortize the rayon fork/join per batch instead of per
 /// block; the buffered state per row is small (a `WincodeArchiveV2PohRecord`, tens of entries)
@@ -213,6 +217,102 @@ struct PohMigrationBatchItem<'idx> {
     needs_patch: bool,
 }
 
+struct PohMigrationTemp {
+    path: PathBuf,
+    published: bool,
+}
+
+impl PohMigrationTemp {
+    fn mark_published(&mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for PohMigrationTemp {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                "failed to remove incomplete PoH migration temp {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+fn acquire_poh_migration_lock(archive_dir: &Path) -> Result<File> {
+    let path = archive_dir.join(POH_MIGRATION_LOCK_FILE);
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options
+        .open(&path)
+        .with_context(|| format!("open PoH migration lock {}", path.display()))?;
+    anyhow::ensure!(
+        file.metadata()
+            .with_context(|| format!("stat PoH migration lock {}", path.display()))?
+            .file_type()
+            .is_file(),
+        "PoH migration lock {} is not a regular file",
+        path.display()
+    );
+    // SAFETY: `file` owns this valid descriptor until the migration returns. Keeping the
+    // descriptor alive makes the advisory lock cover reads, temp creation, publication, and the
+    // final directory sync.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(file);
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) || error.raw_os_error() == Some(libc::EAGAIN)
+    {
+        anyhow::bail!(
+            "another PoH signature-count migration already holds archive lock {}",
+            path.display()
+        );
+    }
+    Err(error).with_context(|| format!("lock PoH migration guard {}", path.display()))
+}
+
+fn create_poh_migration_temp(archive_dir: &Path) -> Result<(PohMigrationTemp, File)> {
+    for _ in 0..1024 {
+        let sequence = POH_MIGRATION_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = archive_dir.join(format!(
+            ".{ARCHIVE_V2_POH_FILE}.migrate.{}.{sequence}.tmp",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                return Ok((
+                    PohMigrationTemp {
+                        path,
+                        published: false,
+                    },
+                    file,
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create PoH migration temp {}", path.display()));
+            }
+        }
+    }
+    anyhow::bail!(
+        "could not create a unique PoH migration temp in {} after 1024 attempts",
+        archive_dir.display()
+    )
+}
+
 /// Backfills `signature_count` into an already-built archive's `poh.wincode`, without
 /// recomputing any PoH hashes. For each block, only decompresses the hot block (to read
 /// `tx_rows`) when the sidecar's current counts don't already sum correctly — see
@@ -232,6 +332,7 @@ pub(crate) fn migrate_poh_signature_counts(
     archive_dir: &Path,
     requested_threads: usize,
 ) -> Result<PohSignatureCountMigrationReport> {
+    let _migration_lock = acquire_poh_migration_lock(archive_dir)?;
     let index_path = archive_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
     let index = read_archive_v2_hot_block_index(&index_path)?;
     anyhow::ensure!(
@@ -260,17 +361,9 @@ pub(crate) fn migrate_poh_signature_counts(
     let mut poh_reader =
         WincodeLeb128FramedReader::new(BufReader::with_capacity(POH_READER_BUFFER_BYTES, poh_file));
 
-    let tmp_path = archive_dir.join(format!("{ARCHIVE_V2_POH_FILE}.migrate.tmp"));
-    if crate::file_nonempty(&tmp_path) {
-        std::fs::remove_file(&tmp_path)
-            .with_context(|| format!("remove stale {}", tmp_path.display()))?;
-    }
-    let tmp_file =
-        File::create(&tmp_path).with_context(|| format!("create {}", tmp_path.display()))?;
-    let mut poh_writer = WincodeLeb128FramedWriter::new(BufWriter::with_capacity(
-        POH_READER_BUFFER_BYTES,
-        tmp_file,
-    ));
+    let (mut migration_temp, tmp_file) = create_poh_migration_temp(archive_dir)?;
+    let mut poh_writer =
+        WincodeLeb128FramedWriter::new(BufWriter::with_capacity(POH_READER_BUFFER_BYTES, tmp_file));
 
     let worker_threads = if requested_threads == 0 {
         std::thread::available_parallelism().map_or(1, usize::from)
@@ -464,18 +557,20 @@ pub(crate) fn migrate_poh_signature_counts(
     );
 
     poh_writer.flush().context("flush migrated PoH sidecar")?;
-    drop(poh_writer);
-    File::open(&tmp_path)
-        .with_context(|| format!("open {} for sync", tmp_path.display()))?
+    let buffered_tmp_file = poh_writer.into_inner();
+    buffered_tmp_file
+        .get_ref()
         .sync_all()
-        .with_context(|| format!("sync {}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, &poh_path).with_context(|| {
+        .with_context(|| format!("sync {}", migration_temp.path.display()))?;
+    drop(buffered_tmp_file);
+    std::fs::rename(&migration_temp.path, &poh_path).with_context(|| {
         format!(
             "rename {} to {}",
-            tmp_path.display(),
+            migration_temp.path.display(),
             poh_path.display()
         )
     })?;
+    migration_temp.mark_published();
     crate::first_seen_finalization::sync_directory(archive_dir)?;
     progress.final_report();
 
@@ -975,10 +1070,7 @@ fn hash_prefixed_65(prefix: u8, a: &[u8], b: &[u8]) -> [u8; 32] {
     // 520-bit (65-byte) message length, big-endian, at the last 8 bytes of block 1.
     buf[126] = 0x02;
     buf[127] = 0x08;
-    let blocks: [[u8; 64]; 2] = [
-        buf[..64].try_into().unwrap(),
-        buf[64..].try_into().unwrap(),
-    ];
+    let blocks: [[u8; 64]; 2] = [buf[..64].try_into().unwrap(), buf[64..].try_into().unwrap()];
     let mut state = SHA256_IV;
     compress256(&mut state, &blocks);
     let mut out = [0u8; 32];
@@ -1126,8 +1218,9 @@ mod tests {
             .unwrap();
 
         let write_poh = |records: &[WincodeArchiveV2PohRecord]| {
-            let mut writer =
-                WincodeLeb128FramedWriter::new(File::create(root.join(ARCHIVE_V2_POH_FILE)).unwrap());
+            let mut writer = WincodeLeb128FramedWriter::new(
+                File::create(root.join(ARCHIVE_V2_POH_FILE)).unwrap(),
+            );
             for record in records {
                 writer.write(record).unwrap();
             }
@@ -1279,9 +1372,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut writer = WincodeLeb128FramedWriter::new(
-            File::create(root.join(ARCHIVE_V2_POH_FILE)).unwrap(),
-        );
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(root.join(ARCHIVE_V2_POH_FILE)).unwrap());
         writer
             .write(&WincodeArchiveV2PohRecord {
                 block_id: 0,
@@ -1321,7 +1413,8 @@ mod tests {
         assert_eq!(report.blocks_patched, 1);
         assert_eq!(report.blocks_already_current, 1);
 
-        let mut reader = WincodeLeb128FramedReader::new(File::open(root.join(ARCHIVE_V2_POH_FILE)).unwrap());
+        let mut reader =
+            WincodeLeb128FramedReader::new(File::open(root.join(ARCHIVE_V2_POH_FILE)).unwrap());
         let (_, migrated_block_0) = reader
             .read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
                 blockzilla_format::deserialize_archive_v2_poh_record(bytes)
@@ -1345,6 +1438,101 @@ mod tests {
 
         assert!(poh_migration_epoch_verified(&root).unwrap());
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn poh_migration_lock_rejects_contender_without_touching_published_sidecar() {
+        use blockzilla_format::{
+            ArchiveV2HotBlockIndexRow, CompactPohEntry, write_archive_v2_hot_block_index,
+        };
+
+        const CHILD_ARCHIVE_ENV: &str = "BLOCKZILLA_TEST_POH_MIGRATION_LOCK_ARCHIVE";
+        const CHILD_SENTINEL: &str = "poh-migration-lock-contention-observed";
+        if let Some(root) = std::env::var_os(CHILD_ARCHIVE_ENV) {
+            let error = migrate_poh_signature_counts(Path::new(&root), 1).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("another PoH signature-count migration already holds archive lock"),
+                "unexpected contention error: {error:#}"
+            );
+            println!("{CHILD_SENTINEL}");
+            return;
+        }
+
+        let root = poh_migration_verify_fixture_root("poh-migration-lock");
+        // The block is already current, so the blob contents are never decoded; the one byte is
+        // present solely because an empty file cannot be memory-mapped on every supported OS.
+        std::fs::write(root.join(ARCHIVE_V2_BLOCKS_FILE), [0]).unwrap();
+        write_archive_v2_hot_block_index(
+            &root.join(ARCHIVE_V2_BLOCK_INDEX_FILE),
+            1,
+            0,
+            0,
+            &[ArchiveV2HotBlockIndexRow {
+                block_id: 0,
+                slot: 100,
+                compressed_offset: 0,
+                compressed_len: 0,
+                uncompressed_len: 0,
+                tx_count: 0,
+                first_tx_ordinal: 0,
+                first_signature_ordinal: 0,
+                signature_count: 0,
+            }],
+        )
+        .unwrap();
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(root.join(ARCHIVE_V2_POH_FILE)).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 1,
+                    hash: [0; 32],
+                    tx_count: 0,
+                    signature_count: 0,
+                }],
+            })
+            .unwrap();
+        writer.flush().unwrap();
+
+        // Publish once, then hold the same archive lock while a separate process attempts the
+        // migration. A process boundary is intentional: it exercises the OS lock instead of
+        // relying on platform-specific same-process `flock` semantics.
+        migrate_poh_signature_counts(&root, 1).unwrap();
+        let published = std::fs::read(root.join(ARCHIVE_V2_POH_FILE)).unwrap();
+        let lock = acquire_poh_migration_lock(&root).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "archive_verify::tests::poh_migration_lock_rejects_contender_without_touching_published_sidecar",
+            )
+            .arg("--nocapture")
+            .env(CHILD_ARCHIVE_ENV, &root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "contending migration child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(CHILD_SENTINEL),
+            "the child test did not execute its lock-contention branch:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read(root.join(ARCHIVE_V2_POH_FILE)).unwrap(),
+            published,
+            "contending migration changed the already-published canonical sidecar"
+        );
+
+        drop(lock);
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -131,6 +131,7 @@ use crate::{
     },
 };
 
+pub(crate) mod registry_reprocess;
 pub(crate) mod repair;
 
 const ARCHIVE_FILE: &str = "archive-v2.wincode";
@@ -1705,7 +1706,8 @@ pub(crate) fn build_hot_blocks_first_seen(
     // records each id once instead of relying on `normalize_first_seen_access_pubkeys` to sort
     // and dedupe the full duplicate multiset afterward. Reused and cleared per block; still
     // catches one id resolving to two different pubkeys within a block, same as before.
-    let mut first_seen_access_pubkey_seen = GxHashMap::<u32, [u8; 32]>::with_hasher(GxBuildHasher::default());
+    let mut first_seen_access_pubkey_seen =
+        GxHashMap::<u32, [u8; 32]>::with_hasher(GxBuildHasher::default());
     let mut blockhashes = Vec::<[u8; 32]>::new();
 
     let mut blockhash_index_v3 = full_blockhash_index_v3_publisher(output_dir, max_blocks)?;
@@ -2808,8 +2810,9 @@ fn build_pre_hot_spool(
                 )?;
                 let slot = pending.last_slot;
                 let block_time = record.header.compact.block_time;
-                let raw_pubkey_refs = crate::pre_hot::count_pubkeys(&record, |key| counter.add32(key))
-                    .with_context(|| format!("slot {slot} count PreHot pubkeys"))?;
+                let raw_pubkey_refs =
+                    crate::pre_hot::count_pubkeys(&record, |key| counter.add32(key))
+                        .with_context(|| format!("slot {slot} count PreHot pubkeys"))?;
                 let raw_pubkey_refs_u32 = u32::try_from(raw_pubkey_refs)
                     .context("PreHot block raw pubkey reference count exceeds u32::MAX")?;
                 writer.write(&LivePreHotRecord::Block(LivePreHotBlock::new(
@@ -4177,8 +4180,7 @@ fn build_live_no_registry_pubkey_registry(
     .with_context(|| format!("write {}", registry_path.display()))?;
     write_live_registry_counts(
         registry_counts_path,
-        std::iter::repeat_n(0, missing_builtins.len())
-            .chain(items.iter().map(|(_, count)| *count)),
+        std::iter::repeat_n(0, missing_builtins.len()).chain(items.iter().map(|(_, count)| *count)),
     )
     .with_context(|| format!("write {}", registry_counts_path.display()))?;
     info!(
@@ -4251,8 +4253,7 @@ fn build_live_pubkey_registry_from_counts(
     .with_context(|| format!("write {}", registry_path.display()))?;
     write_live_registry_counts(
         registry_counts_path,
-        std::iter::repeat_n(0, missing_builtins.len())
-            .chain(items.iter().map(|(_, count)| *count)),
+        std::iter::repeat_n(0, missing_builtins.len()).chain(items.iter().map(|(_, count)| *count)),
     )
     .with_context(|| format!("write {}", registry_counts_path.display()))?;
 
@@ -8877,26 +8878,27 @@ fn load_or_build_previous_tail(
     }
 
     if let Some(previous_epoch) = parse_epoch_from_path(previous_car)
-        && let Some(sidecar_dir) = find_previous_epoch_sidecar_dir(output_dir, previous_epoch)? {
-            match read_blockhash_tail_from_sidecars(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY) {
-                Ok(tail) => {
-                    write_prev_blockhash_tail(output_dir, &tail)?;
-                    info!(
-                        "Loaded previous blockhash tail from sidecars: epoch={} tail={} dir={}",
-                        previous_epoch,
-                        tail.len(),
-                        sidecar_dir.display()
-                    );
-                    return Ok(tail);
-                }
-                Err(error) => warn!(
-                    "Previous epoch sidecars are incomplete or invalid; falling back to CAR: epoch={} dir={} error={:#}",
+        && let Some(sidecar_dir) = find_previous_epoch_sidecar_dir(output_dir, previous_epoch)?
+    {
+        match read_blockhash_tail_from_sidecars(&sidecar_dir, ROLLING_BLOCKHASH_CAPACITY) {
+            Ok(tail) => {
+                write_prev_blockhash_tail(output_dir, &tail)?;
+                info!(
+                    "Loaded previous blockhash tail from sidecars: epoch={} tail={} dir={}",
                     previous_epoch,
-                    sidecar_dir.display(),
-                    error
-                ),
+                    tail.len(),
+                    sidecar_dir.display()
+                );
+                return Ok(tail);
             }
+            Err(error) => warn!(
+                "Previous epoch sidecars are incomplete or invalid; falling back to CAR: epoch={} dir={} error={:#}",
+                previous_epoch,
+                sidecar_dir.display(),
+                error
+            ),
         }
+    }
 
     let tail = read_blockhash_tail_from_car(previous_car, ROLLING_BLOCKHASH_CAPACITY)
         .with_context(|| {
@@ -16464,10 +16466,15 @@ pub(crate) fn inspect(input: &Path, max_blocks: Option<u64>, top: usize) -> Resu
         // Every frame in this sidecar shares one schema; probing per-frame would decode a
         // legacy (pre-`signature_count`) sidecar twice on every single block.
         let mut poh_schema = blockzilla_format::PohRecordSchema::default();
-        while let Some((len, record)) = poh_reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
-            blockzilla_format::deserialize_archive_v2_poh_record_with_schema(bytes, &mut poh_schema)
+        while let Some((len, record)) =
+            poh_reader.read_bytes_with_limit(MAX_POH_FRAME_BYTES, |bytes| {
+                blockzilla_format::deserialize_archive_v2_poh_record_with_schema(
+                    bytes,
+                    &mut poh_schema,
+                )
                 .map_err(anyhow::Error::from)
-        })? {
+            })?
+        {
             poh_sidecar_records += 1;
             poh_entries_serialized_bytes += len as u64;
             max_poh_entries_per_block = max_poh_entries_per_block.max(record.entries.len());
@@ -17216,10 +17223,7 @@ pub(crate) fn patch_poh_entry_signature_counts(
         let rows = tx_rows
             .get(cursor..end)
             .context("PoH entry consumes transactions beyond the block's tx_rows")?;
-        entry.signature_count = rows
-            .iter()
-            .map(|row| u32::from(row.signature_count))
-            .sum();
+        entry.signature_count = rows.iter().map(|row| u32::from(row.signature_count)).sum();
         cursor = end;
     }
     anyhow::ensure!(

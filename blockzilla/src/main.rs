@@ -7,7 +7,7 @@ use std::{
     fs::File,
     io::Write as _,
     num::NonZeroU64,
-    os::fd::{FromRawFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, RawFd},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -336,6 +336,38 @@ enum Commands {
         /// Defaults to a machine-wide lock in the system temporary directory.
         #[arg(long)]
         finalizer_lock: Option<PathBuf>,
+    },
+
+    /// Rewrite a complete first-seen Compact V2 archive as a fresh usage-sorted generation.
+    ///
+    /// The source is read-only and the target must not exist. The command makes two bounded
+    /// passes over the compact block frames, rebuilds every registry-ID-bearing artifact, checks
+    /// semantic parity, and publishes the target generation atomically.
+    ReprocessArchiveV2Registry {
+        /// Complete first-seen Compact V2 source directory. It is never modified.
+        source_dir: PathBuf,
+        /// Fresh sibling generation directory. Existing paths are never replaced.
+        target_dir: PathBuf,
+        /// Epoch encoded by the source and required in every target block.
+        #[arg(long)]
+        epoch: u64,
+        /// Parallel block decode/rewrite workers.
+        #[arg(
+            long,
+            default_value_t = 4,
+            value_parser = clap::value_parser!(u16).range(1..=256)
+        )]
+        threads: u16,
+        /// Memory budget for registry ordering scratch space.
+        #[arg(
+            long,
+            default_value_t = 256,
+            value_parser = clap::value_parser!(u32).range(16..=65_536)
+        )]
+        sort_memory_mib: u32,
+        /// Zstd compression level for rewritten independent block frames.
+        #[arg(long, default_value_t = 1)]
+        level: i32,
     },
 
     /// Build blockhash_registry.bin, blockhash_index_v3.bin, and its gap sidecar from a CAR file.
@@ -1004,9 +1036,6 @@ enum Commands {
         #[arg(long)]
         entry: Option<usize>,
     },
-
-    /// TEMPORARY: reset every PoH entry's signature_count to zero, for benchmark prep.
-    DebugResetPohSignatureCounts { input: PathBuf, output: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1272,6 +1301,25 @@ fn main() -> Result<()> {
             &output_dir,
             finalizer_lock.as_deref(),
         ),
+        Commands::ReprocessArchiveV2Registry {
+            source_dir,
+            target_dir,
+            epoch,
+            threads,
+            sort_memory_mib,
+            level,
+        } => archive_v2::registry_reprocess::reprocess_first_seen_registry(
+            &archive_v2::registry_reprocess::RegistryReprocessOptions {
+                source_dir,
+                target_dir,
+                epoch,
+                threads: usize::from(threads),
+                sort_memory_mib: usize::try_from(sort_memory_mib)
+                    .expect("bounded u32 sort memory fits usize"),
+                level,
+            },
+        )
+        .map(|_| ()),
         Commands::BuildBlockhashRegistry {
             input,
             output_dir,
@@ -1734,9 +1782,6 @@ fn main() -> Result<()> {
         Commands::DumpCarPohEntry { input, slot, entry } => {
             car_debug::dump_car_poh_entry(&input, slot, entry)
         }
-        Commands::DebugResetPohSignatureCounts { input, output } => {
-            car_debug::debug_reset_poh_signature_counts(&input, &output)
-        }
         Commands::VerifyArchiveV2Poh {
             archive_dir,
             threads,
@@ -2060,9 +2105,19 @@ impl ProgressTracker {
         );
 
         if let Some(fd) = self.progress_fd.as_mut() {
-            // Best-effort, like the file path below: a scheduler that already exited (or a
-            // full pipe it stopped draining) must never fail or block this job's real work.
-            let _ = fd.write_all(json.as_bytes());
+            // The scheduler makes this descriptor non-blocking before exec. Keep each snapshot
+            // at or below this pipe's atomic-write bound, then make exactly one write attempt:
+            // a full pipe drops telemetry instead of ever stalling the migration's real work.
+            let pipe_buf = unsafe { libc::fpathconf(fd.as_raw_fd(), libc::_PC_PIPE_BUF) };
+            let pipe_buf = usize::try_from(pipe_buf).unwrap_or(512);
+            if json.len() <= pipe_buf {
+                match fd.write(json.as_bytes()) {
+                    Ok(written) if written == json.len() => {}
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {}
+                }
+            }
             return;
         }
         let Some(path) = self.progress_path.as_deref() else {
@@ -2440,6 +2495,35 @@ mod cli_tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn progress_tracker_drops_snapshot_when_nonblocking_pipe_is_full() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        // SAFETY: fcntl only reads and updates status flags for this live test descriptor.
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                >= 0
+        );
+
+        let chunk = [0u8; 4096];
+        loop {
+            match writer.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill nonblocking progress pipe: {error}"),
+            }
+        }
+
+        let mut tracker = ProgressTracker::new("test migration");
+        tracker.progress_path = None;
+        tracker.progress_fd = Some(File::from(std::os::fd::OwnedFd::from(writer)));
+        tracker.update(1, 0);
+        // A full pipe must make this a best-effort drop, not a wait for the scheduler reader.
+        tracker.final_report();
+        drop(reader);
+    }
+
     /// A fixed-size migration (e.g. `migrate-poh-signature-counts`, which knows its exact
     /// row count upfront) reports progress against that count rather than the
     /// `SLOTS_PER_EPOCH` default meant for slot-density-unknown scan/download phases.
@@ -2548,6 +2632,68 @@ mod cli_tests {
                 );
             }
             _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn registry_reprocess_command_parses_bounded_resources() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "reprocess-archive-v2-registry",
+            "/archives/epoch-1000",
+            "/archives/.usage-sorted-generations/epoch-1000",
+            "--epoch",
+            "1000",
+            "--threads",
+            "8",
+            "--sort-memory-mib",
+            "512",
+            "--level",
+            "2",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ReprocessArchiveV2Registry {
+                source_dir,
+                target_dir,
+                epoch,
+                threads,
+                sort_memory_mib,
+                level,
+            } => {
+                assert_eq!(source_dir, Path::new("/archives/epoch-1000"));
+                assert_eq!(
+                    target_dir,
+                    Path::new("/archives/.usage-sorted-generations/epoch-1000")
+                );
+                assert_eq!(epoch, 1000);
+                assert_eq!(threads, 8);
+                assert_eq!(sort_memory_mib, 512);
+                assert_eq!(level, 2);
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        for (option, value) in [
+            ("--threads", "0"),
+            ("--threads", "257"),
+            ("--sort-memory-mib", "15"),
+            ("--sort-memory-mib", "65537"),
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "blockzilla",
+                    "reprocess-archive-v2-registry",
+                    "source",
+                    "target",
+                    "--epoch",
+                    "1000",
+                    option,
+                    value,
+                ])
+                .is_err(),
+                "{option}={value} must be rejected before touching the target"
+            );
         }
     }
 
