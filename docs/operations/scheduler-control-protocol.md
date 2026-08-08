@@ -14,7 +14,7 @@ today and the agreed design for its replacement:
 
 - `blockzilla` control/processing CLI surface,
 - `blockzilla scheduler` local control HTTP protocol,
-- watcher gateway/public proxy endpoint protocols used by the operator UI.
+- the monitor's read-only public endpoint used by the operator UI.
 
 It is written for operational usage and later migration to a Unix-socket command
 channel. Implementation is intentionally deferred while higher-priority archive
@@ -151,7 +151,7 @@ Patch events are bounded by changed epochs/lanes and carry a monotonic `sequence
 - `inspect-car-order`
 - `find-poh-gaps`
 
-## 3) Watcher/public service commands and endpoints (adjacent protocol)
+## 3) Public read service commands and endpoints (adjacent protocol)
 
 ### `blockzilla-archive-gateway`
 
@@ -165,19 +165,11 @@ Served routes:
 - `GET /v1/epochs/{epoch}/manifest`
 - `GET /v1/epochs/{epoch}/files/{name}`
 
-### `blockzilla-watcher-gateway`
-
-Top-level:
-- default run serves as gateway
-- `serve` (compatibility alias)
-- `publish-runtime-operations`
-
-Public proxy routes: pass-through with redaction and limits for:
-- `/api/v1/events`
-- `/api/v1/status`
-- several read-only sidecar status paths
-
 ### `blockzilla-monitor` (topcoat demo/runtime status UI)
+
+The monitor consumes the scheduler's private `GET /api/v1/status` and
+`GET /api/v1/events` endpoints. It validates and projects the snapshot into a
+curated browser model; it does not proxy raw scheduler responses.
 
 Runtime API:
 - `GET /api/stream` (Datastar/SSE patch stream used by dashboard UI)

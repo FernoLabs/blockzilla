@@ -1,6 +1,6 @@
 # NAS Deployment Layout
 
-Current as of 2026-08-06 against `Blockzilla-00` (192.168.1.45, Debian 12
+Current as of 2026-08-06 against `Blockzilla-00` (`<nas-lan-ip>`, Debian 12
 bookworm, x86_64). Supersedes the ad hoc `nohup` + dated-directory
 deployment history described in earlier revisions of this document.
 
@@ -26,7 +26,7 @@ deployment history described in earlier revisions of this document.
 │                        benefit. Revisit when live indexing is in scope.
 ├── bin/
 │   ├── blockzilla                  (built from this repo, see DEPLOYED.md)
-│   ├── blockzilla-watcher-gateway
+│   ├── blockzilla-watcher-gateway  (retired binary; no longer built)
 │   └── blockzilla-monitor
 ├── config/
 │   └── nas-pipeline-v2.env  sourced via EnvironmentFile= by
@@ -85,7 +85,7 @@ pipeline-v2.env` is the one file that's specific to this machine.
 |---|---|---|
 | `blockzilla-archive.service` | `/volume1/blockzilla/bin/blockzilla` | enabled, **running** |
 | `blockzilla-monitor-public.service` | `/volume1/blockzilla/bin/blockzilla-monitor` | enabled, **running** (talks directly to the scheduler's `/api/v1/status` + `/api/v1/events`, no gateway hop) |
-| `blockzilla-watcher-tunnel.service` | `/home/ach/.local/bin/cloudflared` | enabled, **running** -- ingress `watcher.blockzilla.dev` → `http://192.168.1.45:8787` |
+| `blockzilla-watcher-tunnel.service` | `/home/ach/.local/bin/cloudflared` | enabled, **running** -- ingress `watcher.blockzilla.dev` → `http://<nas-lan-ip>:8787` |
 | `blockzilla-gateway-internal.service` | (retired) | **disabled**, kept as a reference file in `systemd/`, not deleted |
 | `blockzilla-watcher-runtime-operations.service` | (retired) | **disabled**, kept as a reference file, not deleted -- see below |
 | `blockzilla-live-indexer.service` | (live-capture, out of scope) | enabled, was already inactive |
@@ -125,18 +125,17 @@ Investigated and confirmed rather than assumed:
   competing for resources -- explicitly filtering out anything
   scheduler-owned to avoid double-reporting
   (`is_scheduler_managed_aria_child`, `is_blockzilla_owned` in
-  `services/blockzilla-watcher-gateway/src/runtime_operations.rs`). The
+  `services/blockzilla-monitor/src/process_telemetry.rs`). The
   scheduler's job is orchestrating its own children; this is system-wide
   observability, which belongs with monitor (the other observability
   process), not with the orchestrator.
 - **2026-08-06: ported into monitor, service retired.** Rather than
-  re-implementing the ~1900-line `/proc` scanner, `blockzilla-monitor`'s
-  `Cargo.toml` already depended on `blockzilla-watcher-gateway` as a
-  library (for `public_json::sanitize_public_string`), so the reuse was
-  direct: `collect_processes`, `process_io_status`,
+  re-implementing the procfs scanner, the audited implementation was moved
+  directly into `blockzilla-monitor`. The monitor calls `collect_processes`,
+  `process_io_status`,
   `ProcessSample`/`ProcessCollection`/`ProcessIoStatus`/`ProcessIoEntry`
   in `runtime_operations.rs` were made `pub` (no behavior change -- same
-  functions, same tests, all 47 gateway tests still pass unmodified), and
+  functions, with their existing tests), and
   a new `services/blockzilla-monitor/src/runtime_operations.rs` (~90
   lines) calls them directly on its own 5s tokio task -- no JSON file, no
   HTTP hop. Only the `process_io` portion of the old sidecar schema was
@@ -192,14 +191,6 @@ Investigated and confirmed rather than assumed:
 - **Future, not now**: monitor will also gain a Unix domain socket to a
   live-indexer service, once live indexing itself is in scope (explicitly
   deferred -- "next chapter").
-
-A known architectural wart, not yet fixed: `blockzilla-watcher-runtime-
-operations.service`'s `--output` still points at `blockzilla-pipeline/
-releases/blockzilla-nas-pipeline-2026.07.25-auto-retry-1/ui/api/v1/
-sidecars/runtime-operations/status.json` -- a dated release directory,
-i.e. mutable runtime output written into what should be an immutable
-build artifact location. Moot once this is folded into monitor (no more
-separate sidecar file at all).
 
 ## PoH migration: stale-binary incident, backlog clear, byte-based progress (2026-08-06/07)
 
@@ -407,7 +398,7 @@ job kind), not to resurrect the standalone version.
    (`~/.ssh/blockzilla_deploy_key` on the NAS) but not yet added to
    `FernoLabs/blockzilla`'s deploy keys on GitHub -- blocking. Once added,
    `git clone git@github.com-blockzilla:FernoLabs/blockzilla.git` closes
-   the "unknown exact commit" gap in `DEPLOYED.md` for the gateway and
+   the "unknown exact commit" gap in `DEPLOYED.md` for the scheduler and
    monitor binaries, and enables building from a tagged commit on the NAS
    itself with `cargo deb` (discussed, not yet started -- see the
    packaging discussion in this session for the FHS-vs-custom-tree
@@ -419,6 +410,3 @@ job kind), not to resurrect the standalone version.
    archive or delete anything under `~/dev/` without first grepping
    `~/.config/systemd/user/*.service` for references, the way this
    session should have from the start.
-4. **`blockzilla-watcher-runtime-operations.service`'s output path** (see
-   above) should move out of a dated release directory once confirmed
-   safe.

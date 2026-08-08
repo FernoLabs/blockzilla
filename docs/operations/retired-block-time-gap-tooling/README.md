@@ -27,8 +27,7 @@ at time of retirement:
 - **`blockzilla-watcher-block-time-gaps.service`** ran
   [`publish-block-time-gap-backfill.py`](publish-block-time-gap-backfill.py) —
   reads the above's `status.json` and republishes a bounded, secret-free
-  public view of it (same shape as the other `blockzilla-watcher-gateway
-  publish-*` sidecars).
+  public view of it for the retired watcher UI.
 
 ## Why retired rather than repaired
 
