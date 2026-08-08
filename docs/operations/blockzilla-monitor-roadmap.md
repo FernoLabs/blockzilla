@@ -22,11 +22,10 @@
 
 ## 1. Where things stand today
 
-`blockzilla-monitor` (this crate) talks to `blockzilla-watcher-gateway`'s
-`GET /api/v1/status` + `GET /api/v1/events` (SSE), which itself proxies
-`blockzilla scheduler`'s status API. Four pages exist: Overview, History,
-System, Epochs — all real data, no fabricated placeholders, verified
-end-to-end against the live NAS deployment.
+`blockzilla-monitor` talks directly to `blockzilla scheduler`'s private
+`GET /api/v1/status` + `GET /api/v1/events` (SSE) endpoints. Four pages
+exist: Overview, History, System, Epochs — all real data, no fabricated
+placeholders, verified end-to-end against the live NAS deployment.
 
 ### 1.1 Topcoat/Datastar framework compliance
 
@@ -49,7 +48,7 @@ Gaps:
 
 ### 1.2 Scheduler explainability — the highest-leverage finding
 
-The gateway's live snapshot already carries rich "why" data, populated every
+The scheduler's live snapshot already carries rich "why" data, populated every
 tick, already served over the wire:
 
 | Field | Where | Currently read by monitor? |
@@ -69,25 +68,10 @@ schema is additive/tolerant (`#[serde(default)]` throughout), so this is
 purely a monitor-side change: extend the structs, map them into
 `DashboardState`, add a "Scheduler reasoning" panel.
 
-Bigger finding: `services/blockzilla-watcher-gateway/src/scheduler_incidents.rs`
-is a **complete, already-built audit-trail pipeline** that nothing reads
-back over HTTP:
-- Typed `Reason` enum with `{code, observed, threshold, unit}`
-  (`scheduler_incidents.rs:170-232`)
-- Host metrics + process context snapshot at decision time
-  (`HostMetrics`/`ProcessContext`, lines 171-255)
-- A pre-event sample ring (`SampleSummary`, lines 258-263)
-- A full `Incident` record with content-addressed `id`
-  (`Incident`, lines 266-279; `make_event`, line 1224)
-- Durable, rotating, permission-locked storage: `append_jsonl`
-  (lines 1481-1524, `0600` perms, `O_NOFOLLOW`/`O_CLOEXEC`)
-
-`record()` (line 338) is a standalone recorder process. Grepping the whole
-gateway tree for readers of its `events.jsonl` output turns up nothing —
-**it's write-only today.** Separately, `scheduler/mod.rs` also writes a
-lower-level `control-events.jsonl` (raw `{at_unix_secs, action, target}`
-lines, `append_control_event`, `mod.rs:14956-14972`) that's likewise never
-read back.
+The retired gateway contained a write-only incident recorder. It was removed
+with the gateway instead of preserving an unserved second source of truth.
+The scheduler still writes a lower-level `control-events.jsonl` (raw
+`{at_unix_secs, action, target}` lines) that has no read endpoint.
 
 Caveat: the scheduler itself has **zero structured logging** — `grep -c
 "tracing::\|log::\|info!\|warn!\|error!\|debug!"` over all 23k+ lines of
@@ -100,34 +84,28 @@ logged).
 
 ### 1.3 Public-exposure security audit — fix before/alongside going live
 
-The gateway's redaction for `/api/v1/status` and `/api/v1/events` is
-**denylist-based** (`public_json.rs:9-91`): it strips known-bad key names
-and regex-matches paths/tokens/credentials inside string values. It does
-not know which fields are *safe* — anything it didn't anticipate passes
-through. Contrast with `/api/v1/sidecars/ingest-pipeline/status.json`
-(`ingest_contract.rs:531-667`), which is a true allowlist/typed projection.
+The monitor now receives the private scheduler snapshot but never proxies it.
+It validates the schema and maps fields into an explicit `DashboardState`;
+the public tier additionally redacts path and credential patterns. Unknown
+wire fields cannot appear in browser output without an explicit mapping.
 
-Concrete leaks today, none of which `blockzilla-monitor`'s own `state.rs`
-adds further redaction for:
+The original exposure audit identified these fields for treatment:
 - **Process table** (`ProcessIoEntry.name`/`.pid`, `snapshot.rs:182-191`,
   kept for all non-Blockzilla processes at `state.rs:235`) — real host
   fingerprinting: reveals what other software runs on the box, live PIDs.
-  Neither `name` nor `pid` is in the gateway's sensitive-key list.
-- `PipelineError.message` — free-text operator strings, passed through
-  as-is; the gateway's path regex only catches a fixed prefix list.
+  The public tier now drops the process table.
+- `PipelineError.message` — free-text operator strings. The public tier now
+  applies the support crate's path and credential redaction.
 - `LaneStatus.id`/`.kind`, `CompactionHistoryEntry.workflow`/`.id` —
   internal naming/workflow identifiers.
 - `MachineStatus` — exact hardware specs (total memory/disk).
 
-Also unaddressed:
-- **No connection/rate limit on `/api/stream`** — unbounded concurrent SSE
-  subscribers. `blockzilla-watcher-gateway/src/public_proxy.rs:199-201,383-388`
-  already solves this class of problem with an `Arc<Semaphore>`
-  (`--max-requests`, default 64, returns 503 when exhausted) that we never
-  ported over.
-- `client.rs`'s hand-rolled SSE line parser has no size cap (the gateway's
-  equivalent path uses `MAX_SSE_LINE_BYTES`/`read_limited`).
-- No `robots.txt` / `X-Robots-Tag: noindex` anywhere.
+Hardening completed since the original audit:
+
+- `/api/stream` uses a body-owned semaphore and
+  `--max-stream-connections` limit.
+- `client.rs` bounds full status bodies and SSE lines.
+- Every route emits `X-Robots-Tag: noindex, nofollow`.
 
 ## 2. Immediate: security hardening (do this regardless of what else gets built)
 
@@ -141,14 +119,13 @@ launch grows the audience:
    highest-risk field set found.
 2. **Add a defense-in-depth redaction pass** in the same mapping function
    for `message`/`id`/`workflow` strings, reusing the same class of
-   path/credential regex `public_json.rs` already has, in case the gateway's
-   filter is ever bypassed or the schema grows a new leaky field.
-3. **Rate-limit `/api/stream`.** Port the gateway's semaphore pattern
-   (`public_proxy.rs:199-201`) — cap concurrent subscribers, return 503 past
-   the cap.
+   path/credential regex in the monitor so the browser
+   boundary does not depend on upstream filtering.
+3. **Rate-limit `/api/stream`.** Cap concurrent subscribers and return 503
+   past the cap.
 4. **Cap the SSE line parser buffer** in `client.rs` (currently unbounded
-   `Vec<u8>` grown until `\n`) — same fix the gateway already has, lower
-   urgency since the peer is the trusted internal gateway, but cheap.
+   `Vec<u8>` grown until `\n`). The peer is the private scheduler, but the
+   monitor still fails closed on oversized frames.
 5. **Self-host `datastar.js`** instead of the jsdelivr CDN tag — same
    pattern already used for Tailwind (`api/styles.rs`), removes a
    third-party dependency, a visitor-IP leak to jsdelivr, and closes the
@@ -206,17 +183,15 @@ sharing a broadcast channel and leaking full data to a public subscriber.
    real durable history (`errors.jsonl`), just needs better presentation
    (level/scope grouping, search).
 
-Everything in this phase is monitor-only work; zero gateway/scheduler
-changes required.
+Everything in this phase is monitor-only work; zero scheduler changes required.
 
 ## 5. Real decision audit trail (needs one new backend endpoint)
 
-Wires up the orphaned `scheduler_incidents.rs` pipeline described in §1.2:
+Adds a single scheduler-owned durable audit trail:
 
-1. Add a `GET` endpoint on `blockzilla-watcher-gateway` that reads back
-   `scheduler_incidents.rs`'s `events.jsonl` (rotating, `.1` backup) —
-   paginated/time-windowed, not a full-file dump given it rotates at
-   `MAX_PRIVATE_LOG_BYTES`.
+1. Persist typed scheduler decision events and add a bounded read-only
+   endpoint on the scheduler status listener. Make it paginated or
+   time-windowed rather than exposing a full log file.
 2. Decide whether to also expose the lower-level `control-events.jsonl`
    (raw `{action, target}` lines, `scheduler/mod.rs:14956-14972`) as a
    fallback for events that predate/exceed the incident recorder's window,
@@ -250,9 +225,8 @@ absolute timestamps, level-colored line markers.
 
 ## 7. Hivezilla integration
 
-Hivezilla already exposes exactly the kind of endpoint `blockzilla-monitor`
-already knows how to consume — same shape as the blockzilla gateway
-pattern:
+Hivezilla already exposes the kind of bounded endpoint `blockzilla-monitor`
+knows how to consume:
 - `services/hivezilla/src/shred_status.rs`: `GET
   /api/v1/sidecars/shred-ingest/status.json` + `/healthz`, explicitly
   designed for external polling (README shows `--cors-origin
@@ -277,7 +251,7 @@ configured.
 
 Minimal viable shape that fits existing conventions: a static config list
 (`--peers name=url,name=url` flag or a small TOML/JSON config file) of
-`{name, base_url}` entries, one per blockzilla-gateway or hivezilla instance,
+`{name, base_url}` entries, one per scheduler or Hivezilla instance,
 polled in parallel — mirroring the single-upstream pattern `client.rs`
 already uses, fanned out to N.
 
@@ -302,8 +276,8 @@ Roughly by leverage (cheap + high value first), not a hard sequence:
    tier) — unlocks putting richer data (full error text, process table) in
    front of the team without putting it in front of the whole internet.
 4. §7 hivezilla integration — the endpoint already exists; mechanically
-   similar to work already done for the blockzilla gateway.
-5. §5 decision audit trail — needs one new gateway endpoint, biggest UI
+   similar to the existing scheduler client.
+5. §5 decision audit trail — needs one new scheduler endpoint, biggest UI
    lift, highest value for "understand why the scheduler did things."
 6. §8 multi-machine — do the routing groundwork whenever §7 or another
    page-shape change is already in flight, to avoid a second migration.

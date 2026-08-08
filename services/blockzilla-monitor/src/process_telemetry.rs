@@ -1,4 +1,4 @@
-//! Bounded, secret-free telemetry for NAS processes owned by this service's UID.
+//! Bounded, secret-free telemetry for processes owned by the monitor's UID.
 //!
 //! Process command lines are used only for local classification and are never
 //! copied to the published document.
@@ -866,8 +866,8 @@ fn has_blockzilla_command_marker(sample: &ProcessSample) -> bool {
         "blockzilla-archive-gateway",
         "blockzilla-get-block",
         "blockzilla-live-producer",
+        "blockzilla-monitor",
         "blockzilla-replay-poc",
-        "blockzilla-watcher-gateway",
         "hivezilla",
     ];
     if process_executable_name(sample).is_some_and(|name| RUST_EXECUTABLES.contains(&name)) {
@@ -1455,6 +1455,20 @@ mod tests {
         let serialized = serde_json::to_string(&result).unwrap();
         assert!(!serialized.contains("secret-path"));
         assert!(!serialized.contains("args"));
+    }
+
+    #[test]
+    fn monitor_process_is_not_reported_as_competing_host_io() {
+        let monitor = sample(
+            44,
+            &[
+                "/volume1/blockzilla/bin/blockzilla-monitor",
+                "--upstream",
+                "http://127.0.0.1:8786",
+            ],
+        );
+        let samples = BTreeMap::from([(monitor.pid, monitor.clone())]);
+        assert!(is_blockzilla_owned(&samples, &monitor));
     }
 
     #[test]

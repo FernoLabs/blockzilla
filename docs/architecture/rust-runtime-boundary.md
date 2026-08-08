@@ -70,11 +70,11 @@ are then removed rather than maintained indefinitely in parallel.
 Completed:
 
 1. Verified predecessor-tail discovery/publication is a Blockzilla subcommand.
-2. Runtime-operations collection is a Rust watcher-gateway subcommand.
+2. Runtime process telemetry runs inside `blockzilla-monitor`.
 3. CAR acquisition orchestration is Rust-owned while `aria2c` remains the byte
    transfer engine.
-4. The public status boundary is the Rust watcher gateway; its superseded
-   Python implementation has been retired.
+4. `blockzilla-monitor` is the curated public status boundary and reads the
+   scheduler's private status listener directly.
 5. The bounded shred-status collector is `hivezilla serve-shred-status`; its
    Docker and Compose entrypoints no longer execute Python. The frozen Python
    implementation remains only as a CI parity oracle until the first live
@@ -102,8 +102,7 @@ mistaken for approved permanent exceptions:
   long-running status or alert loops. `shred_status_server.py` is frozen and
   retained only as the temporary differential-parity oracle for its Rust
   replacement; it is no longer a production entrypoint.
-- watcher incident and block-time-gap publishers still need typed Rust event
-  consumers.
+- Scheduler incidents still need a typed durable producer and bounded reader.
 - replay-marathon, Compact sync, archive-retirement, RPC-corpus, and benchmark
   scripts remain migration inputs for product subcommands or `xtask`.
 

@@ -1,57 +1,199 @@
+use std::{
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context, Poll},
+};
+
 use futures_core::Stream;
 use futures_util::{StreamExt, stream};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use topcoat::{
     Result,
+    context::Cx,
     datastar::{PatchElements, PatchSignals},
     router::{
+        IntoResponse, Response, StatusCode,
         content::sse::{Event, KeepAlive, Sse},
-        route,
+        query_params, route,
     },
 };
 
-use crate::state::{StreamEvent, full_signals, subscribe};
+use crate::{
+    app::{DashboardPage, render_dashboard_frame},
+    state::{DashboardState, StreamEvent, snapshot, subscribe},
+};
 
-/// One long-lived connection per open dashboard tab. `data-on:load` on
-/// `#dashboard` opens this with `@get('/api/stream')`. Most events are a
-/// `PatchSignals` carrying only the values that changed since the previous
-/// publish (`state::publish`'s diff, not a full re-serialization), with
-/// removed signals set to `null` so Datastar deletes them from the
-/// client's store. When a list's *membership* changes -- a row appearing
-/// or disappearing, not just an existing row's fields ticking -- a
-/// `PatchElements` morphs the affected container's freshly rendered HTML
-/// into the DOM instead, since a signal patch has nothing to bind a new
-/// row to and never removes a stale one; see `StreamEvent`.
-///
-/// The very first event is always a full signal map, sent before this
-/// subscribes to the broadcast: `data-signals` on the page already seeded
-/// the state as of the *server render*, but a value can change in the gap
-/// between that render and this connection opening, and a delta-only
-/// stream would never repeat a change that already happened. Diff-less
-/// full sends can't have that gap (the next full tick always corrects it);
-/// diff-based ones need this instead. The same fix covers a client that
-/// falls behind the broadcast buffer (`Err(Lagged)` below): resend the
-/// full map rather than silently skip, so a slow tab self-heals instead of
-/// permanently missing whatever changed while it was behind -- membership
-/// is self-healing too, since a full signal map implies a full page load's
-/// worth of state and the list containers were already rendered fresh as
-/// of that same server render.
-#[route(GET "/api/stream")]
-async fn stream() -> Result<Sse<impl Stream<Item = Result<Event>> + use<>>> {
-    let rx = subscribe();
+static STREAM_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
-    let initial = stream::once(async { StreamEvent::Signals(full_signals()) });
-    let updates = BroadcastStream::new(rx).map(|msg| match msg {
-        Ok(event) => event,
-        Err(_lagged) => StreamEvent::Signals(full_signals()),
-    });
+/// Installs the process-wide stream limit before the router starts. A
+/// `NonZeroUsize` makes zero an invalid CLI/configuration value instead of
+/// producing a monitor that can never establish its own update stream.
+pub(crate) fn configure_stream_limit(max: NonZeroUsize) -> std::result::Result<(), &'static str> {
+    STREAM_LIMIT
+        .set(Arc::new(Semaphore::new(max.get())))
+        .map_err(|_| "stream connection limit already configured")
+}
 
-    let events = initial.chain(updates).map(|event| match event {
-        StreamEvent::Signals(signals) => PatchSignals::json(&signals).map(Into::into),
-        StreamEvent::Elements { selector, html } => {
-            Ok(PatchElements::new(html).selector(selector).into())
+#[topcoat::router::query_params(error = bad_request)]
+struct StreamQuery {
+    view: Option<DashboardPage>,
+}
+
+/// The permit is deliberately a field of the stream that becomes the SSE
+/// response body. Dropping the route-handler future is not enough: an open
+/// tab must consume capacity until its body is dropped on disconnect.
+struct PermitStream {
+    inner: Pin<Box<dyn Stream<Item = Result<Event>> + Send>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Stream for PermitStream {
+    type Item = Result<Event>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
+
+fn full_resync_events(state: &DashboardState) -> [StreamEvent; 2] {
+    [
+        StreamEvent::Signals(state.to_signals()),
+        StreamEvent::Structure,
+    ]
+}
+
+async fn next_update_batch(rx: &mut broadcast::Receiver<StreamEvent>) -> Option<Vec<StreamEvent>> {
+    match rx.recv().await {
+        Ok(event) => Some(vec![event]),
+        Err(broadcast::error::RecvError::Closed) => None,
+        Err(broadcast::error::RecvError::Lagged(_)) => {
+            // Drop the receiver's retained-but-stale tail before taking the
+            // replacement snapshot. Anything published after resubscribe
+            // is queued and replayed (possibly redundantly); replaying old
+            // deltas after a full resync could otherwise regress the tab.
+            *rx = rx.resubscribe();
+            let state = snapshot().await;
+            Some(full_resync_events(&state).into())
         }
-    });
+    }
+}
 
-    Ok(Sse::new(events).keep_alive(KeepAlive::new()))
+async fn encode_event(page: DashboardPage, event: StreamEvent) -> Result<Event> {
+    match event {
+        StreamEvent::Signals(signals) => PatchSignals::json(&signals).map(Into::into),
+        StreamEvent::Structure => {
+            let state = snapshot().await;
+            let view = render_dashboard_frame(page, &state).await?;
+            let html = view.render(&Cx::default());
+            Ok(PatchElements::new(html).selector("#dashboard-frame").into())
+        }
+    }
+}
+
+async fn stream_response(cx: &Cx, page: DashboardPage, limit: Arc<Semaphore>) -> Result<Response> {
+    let permit = match limit.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "dashboard stream capacity reached; retry shortly",
+            )
+                .into_response(cx);
+        }
+    };
+
+    // Subscribe before taking the initial snapshot. If a publish races
+    // this gap, it is queued in `rx`; replaying a harmless duplicate after
+    // the full resync is preferable to missing that update permanently.
+    let rx = subscribe();
+    let initial_state = snapshot().await;
+    let initial = stream::iter(full_resync_events(&initial_state));
+    let updates = stream::unfold(rx, |mut rx| async move {
+        next_update_batch(&mut rx).await.map(|events| (events, rx))
+    })
+    .flat_map(stream::iter);
+    let events = initial
+        .chain(updates)
+        .then(move |event| encode_event(page, event));
+    let events = PermitStream {
+        inner: Box::pin(events),
+        _permit: permit,
+    };
+
+    Sse::new(events)
+        .keep_alive(KeepAlive::new())
+        .into_response(cx)
+}
+
+/// One long-lived connection per open dashboard tab. Every initial
+/// connection and lag recovery sends both a complete signal map and a
+/// freshly rendered route-specific `#dashboard-frame`; a slow client can
+/// therefore repair missing/stale rows as well as scalar values.
+#[route(GET "/api/stream")]
+async fn stream(cx: &Cx) -> Result<Response> {
+    let page = query_params::<StreamQuery>(cx)?
+        .view
+        .unwrap_or(DashboardPage::Overview);
+    let limit = STREAM_LIMIT
+        .get()
+        .expect("stream connection limit must be configured before serving")
+        .clone();
+    stream_response(cx, page, limit).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_resync_includes_signals_and_structure() {
+        let events = full_resync_events(&DashboardState::default());
+        assert!(matches!(events[0], StreamEvent::Signals(_)));
+        assert!(matches!(events[1], StreamEvent::Structure));
+    }
+
+    #[tokio::test]
+    async fn lag_resync_discards_retained_stale_deltas() {
+        let (tx, mut rx) = broadcast::channel(2);
+        for value in 1..=3 {
+            tx.send(StreamEvent::Signals(serde_json::json!({ "queued": value })))
+                .unwrap();
+        }
+
+        let batch = next_update_batch(&mut rx).await.unwrap();
+        assert!(matches!(batch[0], StreamEvent::Signals(_)));
+        assert!(matches!(batch[1], StreamEvent::Structure));
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "retained pre-resync deltas must not replay after the full state"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_permit_is_held_for_the_response_body_lifetime() {
+        let cx = &Cx::default();
+        let limit = Arc::new(Semaphore::new(1));
+
+        let first = stream_response(cx, DashboardPage::Overview, limit.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(limit.available_permits(), 0);
+
+        let rejected = stream_response(cx, DashboardPage::Overview, limit.clone())
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(limit.available_permits(), 0);
+
+        drop(first);
+        assert_eq!(limit.available_permits(), 1);
+
+        let replacement = stream_response(cx, DashboardPage::Overview, limit.clone())
+            .await
+            .unwrap();
+        assert_eq!(replacement.status(), StatusCode::OK);
+        assert_eq!(limit.available_permits(), 0);
+    }
 }

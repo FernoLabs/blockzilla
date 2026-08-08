@@ -1,7 +1,7 @@
 //! View components for the Blockzilla monitor dashboard.
 //!
 //! Everything here binds to `DashboardState` (see `state.rs`), which is
-//! populated either from the real gateway snapshot (`client.rs`) or, only
+//! populated either from the real scheduler snapshot (`client.rs`) or, only
 //! when the binary is launched with `--demo`, a synthetic ticker. Nothing in
 //! this file should fabricate data on its own -- if a real field isn't
 //! available yet, the component should say so rather than interpolate a
@@ -36,9 +36,11 @@ const CARD: &str = "rounded-lg border border-zinc-800/70 bg-white/[0.02]";
 const EYEBROW: &str = "text-[11px] font-medium uppercase tracking-wider text-zinc-500";
 const FOCUS_RING: &str = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950";
 
-/// Page chrome shared by every route: a fixed-width column (so nothing
-/// shifts horizontally between pages), the header/nav, and Datastar's
-/// signal seed + live-stream subscription.
+/// Stable outer root shared by every route, including the offline-first
+/// state. It owns Datastar's signal seed and stream subscription, while
+/// `dashboard_frame` below is the only region the stream morphs. Keeping
+/// the subscription outside that morph lets an offline page recover and a
+/// live page transition offline without losing its connection machinery.
 ///
 /// This used to be two things -- an outer shell in `app.rs` duplicated on
 /// every page with slightly different widths and padding (`max-w-[1500px]
@@ -47,14 +49,34 @@ const FOCUS_RING: &str = "focus-visible:outline-none focus-visible:ring-2 focus-
 /// -- which is exactly why navigating between pages visibly shifted
 /// content. One shell, one set of numbers, used everywhere.
 #[component]
-pub async fn dashboard_shell(state: &DashboardState, active: &str, child: View) -> Result<View> {
+pub async fn dashboard_shell(
+    state: &DashboardState,
+    stream_view: &str,
+    child: View,
+) -> Result<View> {
     let initial_signals = state.to_signals().to_string();
+    let stream_action = format!(
+        "@get('/api/stream?view={stream_view}', {{retry: 'always', retryMaxCount: 1000000}})"
+    );
     view! {
         <div
             id="dashboard"
             data-signals=(initial_signals)
-            data-on:load__window="@get('/api/stream')"
+            data-on:load__window=(stream_action)
         >
+            (child)
+        </div>
+    }
+}
+
+/// Live page chrome shared by every route: a fixed-width column (so
+/// nothing shifts horizontally between pages), the header/nav, and the
+/// route-specific content. `#dashboard-frame` is deliberately present in
+/// both live and offline renderings and is the structural SSE patch target.
+#[component]
+pub async fn dashboard_frame(state: &DashboardState, active: &str, child: View) -> Result<View> {
+    view! {
+        <div id="dashboard-frame">
             <div class="mx-auto max-w-[1400px] px-6">
                 header_nav(active: active, state: state)
                 <main class="flex flex-col gap-6 py-8">(child)</main>
@@ -107,27 +129,36 @@ async fn header_nav(active: &str, state: &DashboardState) -> Result<View> {
                 if state.scheduler_paused {
                     badge_pill(label: "scheduler paused", tone: "amber")
                 }
-                <div id="live-indicator" class="flex items-center gap-2 text-zinc-400">
-                    <span class="relative flex h-2 w-2">
-                        <span
-                            data-class="{ 'animate-ping': $live }"
-                            class=(if state.live {
-                                "absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"
-                            } else {
-                                "hidden"
-                            })
-                        ></span>
-                        <span
-                            data-class="{ 'bg-emerald-400': $live, 'bg-zinc-600': !$live }"
-                            class=(if state.live {
-                                "relative inline-flex h-2 w-2 rounded-full bg-emerald-400"
-                            } else {
-                                "relative inline-flex h-2 w-2 rounded-full bg-zinc-600"
-                            })
-                        ></span>
-                    </span>
-                    <span data-text="$connection_state" class="tabular-nums">
-                        (state.connection_state.clone())
+                <div class="flex flex-col gap-0.5 text-right">
+                    <div id="live-indicator" class="flex items-center gap-2 text-zinc-400">
+                        <span class="relative flex h-2 w-2">
+                            <span
+                                data-class="{ 'animate-ping': $live }"
+                                class=(if state.live {
+                                    "absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"
+                                } else {
+                                    "hidden"
+                                })
+                            ></span>
+                            <span
+                                data-class="{ 'bg-emerald-400': $live, 'bg-zinc-600': !$live }"
+                                class=(if state.live {
+                                    "relative inline-flex h-2 w-2 rounded-full bg-emerald-400"
+                                } else {
+                                    "relative inline-flex h-2 w-2 rounded-full bg-zinc-600"
+                                })
+                            ></span>
+                        </span>
+                        <span data-text="$connection_state" class="tabular-nums">
+                            (state.connection_state.clone())
+                        </span>
+                    </div>
+                    <span
+                        id="last-updated"
+                        data-text="$last_updated_label"
+                        class="text-xs tabular-nums text-zinc-600"
+                    >
+                        (state.last_updated_label())
                     </span>
                 </div>
             </div>
@@ -340,12 +371,14 @@ pub async fn live_capture_banner(state: &DashboardState) -> Result<View> {
 #[component]
 pub async fn epoch_list(state: &DashboardState) -> Result<View> {
     let card = CARD;
-    let visible: Vec<&EpochTask> = state
+    let visible = state.overview_epochs();
+    let hidden_count = state
         .epochs
         .iter()
-        .filter(|task| !task.hidden_from_overview)
-        .collect();
-    let hidden_count = state.epochs.len() - visible.len();
+        .filter(|task| task.hidden_from_overview)
+        .count();
+    let eligible_count = state.epochs.len() - hidden_count;
+    let overflow_count = eligible_count.saturating_sub(visible.len());
     view! {
         <div id="epoch-list" class="flex flex-col gap-2">
             <div class=(format!("divide-y divide-zinc-800/70 {card}"))>
@@ -374,29 +407,23 @@ pub async fn epoch_list(state: &DashboardState) -> Result<View> {
                     "."
                 </p>
             }
+            if overflow_count > 0 {
+                <p class="px-1 text-xs text-zinc-600">
+                    (format!(
+                        "{overflow_count} additional non-complete {} available -- see ",
+                        if overflow_count == 1 { "epoch is" } else { "epochs are" }
+                    ))
+                    <a
+                        href="/epochs"
+                        class="text-zinc-400 underline underline-offset-2 hover:text-zinc-300"
+                    >
+                        "Epochs"
+                    </a>
+                    "."
+                </p>
+            }
         </div>
     }
-}
-
-/// Plain (non-`#[component]`) wrappers around `epoch_list`/
-/// `poh_migration_lane_list`, for `state.rs`'s `publish` to call and
-/// `.await` directly. `#[component]`-annotated functions use a call
-/// convention (keyword args, a `PhantomData`-backed marker type) that only
-/// resolves correctly from inside a surrounding `view! { ... }` block --
-/// they aren't plain async fns callable from ordinary code, even though
-/// they're declared `async fn`. These two exist solely to cross that
-/// boundary: `view!` around a single component call just forwards to it.
-/// Outside a `#[component]`/`#[page]`/route body there's no ambient request
-/// context to render against, so the leading `cx =>` names an owned,
-/// contextless one -- fine here since neither component reads `cx` itself.
-pub async fn render_epoch_list(state: &DashboardState) -> Result<View> {
-    let cx = &topcoat::context::Cx::default();
-    view! { cx => epoch_list(state: state) }
-}
-
-pub async fn render_poh_migration_lane_list(state: &DashboardState) -> Result<View> {
-    let cx = &topcoat::context::Cx::default();
-    view! { cx => poh_migration_lane_list(state: state) }
 }
 
 #[component]
@@ -872,19 +899,28 @@ async fn error_log(errors: &[ErrorEntry]) -> Result<View> {
     }
 }
 
-/// A compact placeholder while the gateway is unavailable or starting.
+/// A compact placeholder while the scheduler is unavailable or starting.
 #[component]
-pub async fn service_unavailable(connection_state: &str, connection_message: &str) -> Result<View> {
-    let is_retry = connection_state == "retrying" || connection_state == "offline";
-    let status_title = if is_retry {
-        "Gateway unavailable"
+pub async fn service_unavailable(
+    connection_state: &str,
+    connection_message: &str,
+    last_updated_label: &str,
+) -> Result<View> {
+    let is_stale = connection_state == "stale";
+    let is_retry = connection_state == "retrying" || connection_state == "offline" || is_stale;
+    let status_title = if is_stale {
+        "Scheduler telemetry stale"
+    } else if is_retry {
+        "Scheduler unavailable"
     } else {
-        "Connecting to watcher gateway"
+        "Connecting to scheduler"
     };
-    let status_body = if is_retry {
-        "blockzilla-watcher-gateway did not respond. This monitor never shows fabricated numbers in place of a real snapshot."
+    let status_body = if is_stale {
+        "No valid scheduler state arrived within the freshness window. Stale task numbers have been removed while this monitor reconnects."
+    } else if is_retry {
+        "The Blockzilla scheduler did not respond. This monitor never shows fabricated numbers in place of a real snapshot."
     } else {
-        "Waiting for the first snapshot from blockzilla-watcher-gateway."
+        "Waiting for the first snapshot from the Blockzilla scheduler."
     };
     view! {
         <main class="grid min-h-[70vh] place-items-center px-4 py-10">
@@ -898,6 +934,12 @@ pub async fn service_unavailable(connection_state: &str, connection_message: &st
                 <p class="text-sm text-zinc-300">(status_body)</p>
                 <p class="mt-2 text-sm text-zinc-500">
                     "Retrying automatically every few seconds."
+                </p>
+                <p
+                    data-text="$last_updated_label"
+                    class="mt-2 text-xs tabular-nums text-zinc-600"
+                >
+                    (last_updated_label)
                 </p>
                 <button
                     onclick="window.location.reload()"

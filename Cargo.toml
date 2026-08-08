@@ -11,7 +11,6 @@ members = [
     "services/blockzilla-archive-gateway",
     "services/blockzilla-monitor",
     "workers/blockzilla-get-block",
-    "services/blockzilla-watcher-gateway",
     "workers/old-faithful-get-block",
     "crates/hivezilla-protocol",
     "crates/blockzilla-compaction-protocol",
