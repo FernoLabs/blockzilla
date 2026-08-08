@@ -44,3 +44,10 @@ overflow-checks = false
 inherits = "release"
 debug = true
 strip = false
+
+# clap's derive for blockzilla's large flat command tree produces a >2 MiB
+# stack frame at opt-level 0, which overflows libtest's default worker stack.
+# Keep this package's tests representative while compiling that generated
+# builder down to a bounded frame; release settings are unchanged.
+[profile.test.package.blockzilla]
+opt-level = 1

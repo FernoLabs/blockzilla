@@ -57,3 +57,5 @@ scripts/personal/
 *.log
 __pycache__/
 *.pyc
+
+.claude/

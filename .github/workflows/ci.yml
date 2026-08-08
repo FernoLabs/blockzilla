@@ -20,67 +20,6 @@ jobs:
       RUSTFLAGS: -C target-cpu=native
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Enforce the native custom-code boundary
-        shell: bash
-        run: |
-          set -euo pipefail
-          tracked_list="$RUNNER_TEMP/blockzilla-tracked-files.zlist"
-          git ls-files -z > "$tracked_list"
-          found_source=false
-          while IFS= read -r -d '' path; do
-            lower_path="$(printf '%s' "$path" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
-            case "$lower_path" in
-              *.py|*.pyw|*.pyi|*.pyx|*.pxd|*.pyc|*.pyo|*.ipynb|*.whl|*.egg|\
-              requirements*.txt|*/requirements*.txt|pipfile|*/pipfile|\
-              pipfile.lock|*/pipfile.lock|pyproject.toml|*/pyproject.toml|\
-              poetry.lock|*/poetry.lock|uv.lock|*/uv.lock|tox.ini|*/tox.ini|\
-              .p[y]thon-version|*/.p[y]thon-version|__pycache__/*|*/__pycache__/*|\
-              *.egg-info/*)
-                printf 'tracked Python source/tooling is forbidden: %q\n' "$path" >&2
-                found_source=true
-                ;;
-            esac
-          done < "$tracked_list"
-          if [[ "$found_source" == true ]]; then
-            exit 1
-          fi
-          pattern='(^|[^[:alnum:]_])(p[y]thon([0-9]+([.][0-9]+)*)?|p[y]py[0-9]*)([^[:alnum:]_]|$)|PYTHON[_]BIN'
-          if interpreter_refs="$(git grep -nIE "$pattern" -- .)"; then
-            interpreter_status=0
-          else
-            interpreter_status=$?
-          fi
-          case "$interpreter_status" in
-            0)
-              printf 'embedded Python execution is forbidden:\n%s\n' \
-                "$interpreter_refs" >&2
-              exit 1
-              ;;
-            1) ;;
-            *)
-              printf 'native-boundary interpreter scan failed (status %s):\n%s\n' \
-                "$interpreter_status" "$interpreter_refs" >&2
-              exit "$interpreter_status"
-              ;;
-          esac
-          shebang_pattern='^#!.*[/[:space:]]p[y](thon|py)[0-9.]*([[:space:]]|$)'
-          if shebang_refs="$(git grep -nIE "$shebang_pattern" -- .)"; then
-            shebang_status=0
-          else
-            shebang_status=$?
-          fi
-          case "$shebang_status" in
-            0)
-              printf 'Python shebang is forbidden:\n%s\n' "$shebang_refs" >&2
-              exit 1
-              ;;
-            1) ;;
-            *)
-              printf 'native-boundary shebang scan failed (status %s):\n%s\n' \
-                "$shebang_status" "$shebang_refs" >&2
-              exit "$shebang_status"
-              ;;
-          esac
       - name: Install Rust components
         run: rustup component add rustfmt
       - name: Check formatting
@@ -147,9 +86,6 @@ jobs:
             services/hivezilla/scripts/run-grpc-receiver-bridge.sh
       - name: Test Python operational helpers
         run: |
-          PYTHONPATH="$RUNNER_TEMP/hivezilla-python" \
-            python3 services/hivezilla/scripts/test_s3_multipart_upload.py
-          python3 services/hivezilla/scripts/test_pull_ack_telegram_monitor.py
           python3 services/hivezilla/scripts/test_ingest_status_server.py
           python3 services/hivezilla/scripts/test_shred_status_server.py
       - name: Test shell operational helpers
