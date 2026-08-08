@@ -41,4 +41,4 @@ heapless = { version = "0.9.3", features = ["serde"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 gxhash = "3.5.0"
-ph = { version = "0.11.0", default-features = false }
+ph = { version = "=0.11.0", default-features = false }

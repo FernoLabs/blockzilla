@@ -675,6 +675,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockzilla-firebase-indexer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-format",
+ "blockzilla-read-sdk",
+ "bs58",
+ "clap 4.6.5",
+ "pprof",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "smallvec",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
+ "tracing-subscriber",
+ "wincode 0.5.5",
+]
+
+[[package]]
 name = "blockzilla-format"
 version = "0.1.0"
 dependencies = [
@@ -758,6 +780,7 @@ version = "0.1.0"
 dependencies = [
  "blockzilla-format",
  "reqwest 0.13.4",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",

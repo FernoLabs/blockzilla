@@ -480,10 +480,7 @@ pub fn compact_meta_from_proto(
     })
 }
 
-pub fn compact_meta_from_protobuf_visit(
-    bytes: &[u8],
-    index: &KeyIndex,
-) -> Result<CompactMetaV1> {
+pub fn compact_meta_from_protobuf_visit(bytes: &[u8], index: &KeyIndex) -> Result<CompactMetaV1> {
     let mut visitor = CompactMetaVisitor::new(index);
     visit_protobuf_transaction_status_meta(bytes, &mut visitor)
         .map_err(|err| anyhow::anyhow!("protobuf visit: {err}"))?;

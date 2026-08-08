@@ -159,6 +159,57 @@ pub fn compute_generation_digest(manifest: &GenerationManifest) -> Result<String
     Ok(hex_lower(&hasher.finalize()))
 }
 
+/// Caller-supplied identity for a generation whose manifest is synthesized
+/// from real file sizes rather than loaded from a published
+/// `archive-v2-generation.json`.
+///
+/// Used only by [`crate::ArchiveReader::open_trusted`], for sources the
+/// caller already trusts (e.g. a local NAS directory) where the manifest's
+/// cross-service integrity contract — a durable published digest, protection
+/// against partial writes or untrusted network transport — isn't needed.
+/// Unlike a published manifest, none of these fields are independently
+/// verified against the archive's own content; the caller is asserting them.
+#[derive(Debug, Clone)]
+pub struct TrustedGenerationIdentity {
+    pub cluster_id: String,
+    pub epoch: u64,
+    pub generation_id: String,
+    pub slots_per_epoch: u64,
+}
+
+/// Build a self-consistent [`GenerationManifest`] from real file sizes but
+/// placeholder (all-zero) content hashes.
+///
+/// Only safe to open with [`crate::HashVerification::SizesOnly`], which never
+/// compares a file's declared hash against its actual bytes;
+/// [`crate::ArchiveReader::open_trusted`] enforces this.
+pub(crate) fn synthesize_trusted_manifest(
+    identity: TrustedGenerationIdentity,
+    files: Vec<(String, u64)>,
+) -> Result<GenerationManifest> {
+    let placeholder = "0".repeat(64);
+    let files = files
+        .into_iter()
+        .map(|(name, size)| GenerationFile {
+            name,
+            size,
+            sha256: placeholder.clone(),
+        })
+        .collect();
+    let mut manifest = GenerationManifest {
+        schema_version: GENERATION_MANIFEST_SCHEMA_VERSION,
+        cluster_id: identity.cluster_id,
+        epoch: identity.epoch,
+        generation_id: identity.generation_id,
+        generation_digest: placeholder,
+        slots_per_epoch: identity.slots_per_epoch,
+        complete: true,
+        files,
+    };
+    manifest.generation_digest = compute_generation_digest(&manifest)?;
+    Ok(manifest)
+}
+
 pub(crate) fn validate_object_name(name: &str) -> std::result::Result<(), &'static str> {
     if name.is_empty() {
         return Err("file name is empty");

@@ -360,6 +360,63 @@ impl<S: RangeSource> ArchiveReader<S> {
         })
     }
 
+    /// Open a generation without a published `archive-v2-generation.json` and
+    /// without hashing any file content, for a source the caller already
+    /// trusts (e.g. a local NAS directory).
+    ///
+    /// This skips the manifest's cross-service integrity contract entirely:
+    /// `identity` is taken as given, not verified against the archive's own
+    /// content, and every declared file gets a placeholder hash. Structural
+    /// validation (index/metadata bounds, registry shape, footer totals) still
+    /// runs in full via [`validate_generation_structure`] — only the
+    /// published-manifest and content-hash steps are skipped. Requires
+    /// `options.hash_verification == HashVerification::SizesOnly`, since a
+    /// placeholder hash would otherwise fail any real comparison.
+    pub fn open_trusted(
+        source: S,
+        identity: crate::manifest::TrustedGenerationIdentity,
+        options: OpenOptions,
+    ) -> Result<Self> {
+        if options.hash_verification != HashVerification::SizesOnly {
+            return Err(Error::InvalidManifest(
+                "open_trusted requires HashVerification::SizesOnly".into(),
+            ));
+        }
+
+        let mut files = Vec::with_capacity(REQUIRED_GENERATION_FILES.len() + 2);
+        for name in REQUIRED_GENERATION_FILES {
+            let size = source
+                .size(name)?
+                .ok_or_else(|| Error::MissingFile(name.to_owned()))?;
+            files.push((name.to_owned(), size));
+        }
+        if let Some(size) = source.size(SIGNATURES_FILE)? {
+            files.push((SIGNATURES_FILE.to_owned(), size));
+        }
+        if identity.epoch == 0
+            && let Some(size) = source.size(GENESIS_BIN_FILE)?
+        {
+            files.push((GENESIS_BIN_FILE.to_owned(), size));
+        }
+
+        let manifest = crate::manifest::synthesize_trusted_manifest(identity, files)?;
+        let validated = validate_generation_structure(&source, &manifest, &options)?;
+
+        Ok(Self {
+            source,
+            manifest,
+            index: validated.index,
+            genesis: validated.genesis,
+            genesis_bin: validated.genesis_bin,
+            metadata_footer: validated.metadata_footer,
+            binding: validated.binding,
+            registry_entries: validated.registry_entries,
+            total_signatures: validated.total_signatures,
+            signatures_available: validated.signatures_available,
+            options,
+        })
+    }
+
     pub fn source(&self) -> &S {
         &self.source
     }
@@ -2271,6 +2328,52 @@ mod tests {
                 .push((object.to_owned(), offset, length));
             self.inner.read_range(object, offset, length)
         }
+    }
+
+    #[test]
+    fn open_trusted_opens_without_a_published_manifest() {
+        let fixture = Fixture::build();
+        fs::remove_file(fixture.directory.path().join(GENERATION_MANIFEST_FILE)).unwrap();
+
+        let identity = crate::manifest::TrustedGenerationIdentity {
+            cluster_id: "testnet".into(),
+            epoch: EPOCH,
+            generation_id: "trusted-fixture".into(),
+            slots_per_epoch: SLOTS_PER_EPOCH,
+        };
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_trusted(fixture.source(), identity, options).unwrap();
+        assert_eq!(archive.index().rows.len(), 2);
+        assert_eq!(archive.manifest().epoch, EPOCH);
+
+        let raw_filter = archive.compile_pubkey_filter([RAW_KEY]).unwrap();
+        let first = archive.scan(&raw_filter).unwrap().next().unwrap().unwrap();
+        assert_eq!(
+            first.transactions[0].outcome,
+            TransactionMatch::Match {
+                static_account: true,
+                loaded_address: false,
+            }
+        );
+    }
+
+    #[test]
+    fn open_trusted_rejects_non_sizes_only_verification() {
+        let fixture = Fixture::build();
+        fs::remove_file(fixture.directory.path().join(GENERATION_MANIFEST_FILE)).unwrap();
+
+        let identity = crate::manifest::TrustedGenerationIdentity {
+            cluster_id: "testnet".into(),
+            epoch: EPOCH,
+            generation_id: "trusted-fixture".into(),
+            slots_per_epoch: SLOTS_PER_EPOCH,
+        };
+        let error = ArchiveReader::open_trusted(fixture.source(), identity, OpenOptions::default())
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidManifest(_)));
     }
 
     #[test]
