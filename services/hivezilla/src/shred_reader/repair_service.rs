@@ -4,7 +4,10 @@ use std::{
     collections::HashSet,
     io::{self, ErrorKind},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,13 +16,13 @@ use solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol};
 use solana_ledger_compat::Shred;
 use tokio::{
     sync::{mpsc, watch},
-    task::{AbortHandle, JoinHandle},
+    task::{AbortHandle, JoinHandle, JoinSet},
     time::MissedTickBehavior,
 };
 use tracing::{debug, info, warn};
 
 use super::{
-    leader_schedule::LeaderScheduleCache,
+    leader_schedule::{LeaderScheduleCache, RefreshOutcome},
     metrics::{Metrics, RepairMetricsUpdate},
     repair_runtime::{RepairPeer, RepairRuntime, RepairRuntimeConfig},
     repair_tracker::{RepairTracker, RepairTrackerConfig},
@@ -32,15 +35,25 @@ use super::{
 };
 
 const REPAIR_TICK: Duration = Duration::from_millis(50);
+const REPAIR_RESPONSE_DRAIN_TICK: Duration = Duration::from_millis(5);
 const SETTLE_TIME: Duration = Duration::from_millis(200);
-const SLOT_RETENTION: Duration = Duration::from_secs(12);
+// At the target 400 ms slot cadence, 120 seconds covers about 300 slots. The 512-slot cap leaves
+// headroom for faster bursts while keeping both tracker and trust state deterministically bounded.
+const SLOT_RETENTION: Duration = Duration::from_secs(120);
+const MAX_TRACKED_SLOTS: usize = 512;
+// Exhaustion suppression must be shorter than retention. Reusing SLOT_RETENTION here would allow
+// one five-attempt cycle and then suppress the request until the tracker evicts the slot.
+const REPAIR_EXHAUSTION_COOLDOWN: Duration = Duration::from_secs(1);
 const LEADER_REFRESH_RETRY: Duration = Duration::from_secs(10);
 const LEADER_REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(60);
 const PERSISTENT_STORAGE_RETRY: Duration = Duration::from_secs(15 * 60);
 const HEALTHY_ATTEMPT_RESET: Duration = Duration::from_secs(5 * 60);
-const ATTEMPT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const REPAIR_STAGED_DRAIN_BUDGET: Duration = Duration::from_secs(15);
+// Leave room beyond the 15-second staged-response drain for its final WAL flush and task joins,
+// while remaining below the receiver's 45-second repair-supervisor safeguard.
+const ATTEMPT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[derive(Clone, Debug)]
 pub struct RepairServiceConfig {
@@ -54,6 +67,8 @@ pub struct RepairServiceConfig {
     pub max_peers: usize,
     pub shred_version: u16,
     pub observation_queue_capacity: usize,
+    pub udp_recv_buffer_bytes: usize,
+    pub response_queue_capacity: usize,
 }
 
 struct Components {
@@ -77,6 +92,17 @@ impl Drop for AbortTaskOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+struct LeaderRefreshCompletion {
+    trigger_slot: u64,
+    result: LeaderRefreshResult,
+}
+
+enum LeaderRefreshResult {
+    Refreshed(RefreshOutcome),
+    Failed(anyhow::Error),
+    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -136,12 +162,14 @@ pub async fn run(
         }
         metrics.mark_repair_starting();
         let (attempt_tx, attempt_rx) = mpsc::channel(config.observation_queue_capacity);
+        let attempt_queue_depth = Arc::new(AtomicUsize::new(0));
         let (active_tx, active_rx) = watch::channel(None);
         let mut attempt = tokio::spawn(run_attempt(
             config.clone(),
             cluster_info.clone(),
             metrics.clone(),
             attempt_rx,
+            attempt_queue_depth.clone(),
             shutdown.clone(),
             active_tx,
         ));
@@ -154,7 +182,12 @@ pub async fn run(
                     if changed.is_err() || *shutdown.borrow() {
                         metrics.mark_repair_stopping();
                         drop(attempt_tx);
-                        stop_attempt(attempt, &metrics).await;
+                        let stop = stop_attempt(attempt, &metrics).await;
+                        record_residual_attempt_observation_drops(
+                            &attempt_queue_depth,
+                            &metrics,
+                        );
+                        stop?;
                         return Ok(());
                     }
                 }
@@ -172,20 +205,38 @@ pub async fn run(
                     let Some(observation) = observation else {
                         metrics.mark_repair_stopping();
                         drop(attempt_tx);
-                        stop_attempt(attempt, &metrics).await;
+                        let stop = stop_attempt(attempt, &metrics).await;
+                        record_residual_attempt_observation_drops(
+                            &attempt_queue_depth,
+                            &metrics,
+                        );
+                        stop?;
                         if *shutdown.borrow() {
                             return Ok(());
                         }
                         bail!("repair observation channel closed before shutdown");
                     };
-                    if attempt_tx.try_send(observation).is_err() {
-                        // This queue is deliberately lossy. A blocked/restarting repair path may
-                        // never apply backpressure to the raw receive and forwarding boundary.
-                        metrics.record_repair_observation_queue_drop();
+                    match attempt_tx.try_reserve() {
+                        Ok(permit) => {
+                            // Increment before publishing through the permit, so the attempt can
+                            // never dequeue an item whose accounting has not become visible yet.
+                            attempt_queue_depth.fetch_add(1, Ordering::Relaxed);
+                            permit.send(observation);
+                        }
+                        Err(_) => {
+                            // This queue is deliberately lossy. A blocked/restarting repair path
+                            // may never backpressure raw receive and forwarding.
+                            metrics.record_repair_observation_queue_drop();
+                        }
                     }
                 }
             }
         };
+
+        // The receiver belonging to the completed attempt has gone away. Any item the supervisor
+        // published but the attempt never dequeued was discarded with that receiver and must be
+        // visible in the same loss counter as a full-queue rejection.
+        record_residual_attempt_observation_drops(&attempt_queue_depth, &metrics);
 
         let was_healthy = active_rx
             .borrow()
@@ -233,9 +284,22 @@ pub async fn run(
     }
 }
 
-async fn stop_attempt(mut attempt: JoinHandle<Result<()>>, metrics: &Metrics) {
+async fn stop_attempt(mut attempt: JoinHandle<Result<()>>, metrics: &Metrics) -> Result<()> {
     match tokio::time::timeout(ATTEMPT_SHUTDOWN_TIMEOUT, &mut attempt).await {
-        Ok(_) => {}
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => {
+            let detail = format!("{error:#}");
+            metrics.record_repair_runtime_error(&detail);
+            warn!(error = %detail, "repair attempt reported an orderly shutdown failure");
+            Err(error).context("repair attempt failed during orderly shutdown")
+        }
+        Ok(Err(error)) => {
+            metrics.record_repair_runtime_error(&format!(
+                "repair attempt panicked during shutdown: {error}"
+            ));
+            warn!(%error, "repair attempt panicked during shutdown");
+            Err(anyhow::Error::from(error)).context("repair attempt panicked during shutdown")
+        }
         Err(_) => {
             attempt.abort();
             let _ = attempt.await;
@@ -244,7 +308,18 @@ async fn stop_attempt(mut attempt: JoinHandle<Result<()>>, metrics: &Metrics) {
                 timeout_seconds = ATTEMPT_SHUTDOWN_TIMEOUT.as_secs(),
                 "aborted repair attempt during shutdown; blocking WAL cleanup remains isolated"
             );
+            bail!(
+                "repair attempt did not stop within the {}-second orderly shutdown timeout",
+                ATTEMPT_SHUTDOWN_TIMEOUT.as_secs()
+            )
         }
+    }
+}
+
+fn record_residual_attempt_observation_drops(depth: &AtomicUsize, metrics: &Metrics) {
+    let dropped = depth.swap(0, Ordering::Relaxed) as u64;
+    if dropped != 0 {
+        metrics.record_repair_observation_queue_drops(dropped);
     }
 }
 
@@ -253,6 +328,7 @@ async fn run_attempt(
     cluster_info: Arc<ClusterInfo>,
     metrics: Arc<Metrics>,
     mut observations: mpsc::Receiver<Arc<[u8]>>,
+    observation_queue_depth: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
     active: watch::Sender<Option<Instant>>,
 ) -> Result<()> {
@@ -260,10 +336,14 @@ async fn run_attempt(
     let mut components: Option<Components> = None;
     let mut latest_slot = None;
     let mut last_leader_refresh_attempt = None;
+    let mut leader_refreshes = JoinSet::new();
     let mut warned_trust_conflict_slots = HashSet::new();
     let mut timer = tokio::time::interval(REPAIR_TICK);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     timer.tick().await;
+    let mut response_timer = tokio::time::interval(REPAIR_RESPONSE_DRAIN_TICK);
+    response_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    response_timer.tick().await;
 
     info!(
         rpc_url = %config.rpc_url,
@@ -279,18 +359,58 @@ async fn run_attempt(
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    if let Some(components) = &mut components {
-                        components.runtime.flush_repair_wal(Instant::now())
-                            .await
-                            .context("flush repair provenance WAL during shutdown")?;
-                    }
+                    leader_refreshes.shutdown().await;
+                    shutdown_components(&mut components, &metrics, &config).await?;
                     return Ok(());
+                }
+            }
+            refresh = leader_refreshes.join_next(), if !leader_refreshes.is_empty() => {
+                match refresh {
+                    Some(Ok(LeaderRefreshCompletion {
+                        trigger_slot: _,
+                        result: LeaderRefreshResult::Refreshed(outcome),
+                    })) => info!(
+                        epoch = outcome.epoch,
+                        first_slot = outcome.first_slot,
+                        slots_in_epoch = outcome.slots_in_epoch,
+                        inserted = outcome.inserted,
+                        cached_epochs = outcome.cached_epochs,
+                        "leader schedule ready for repair verification"
+                    ),
+                    Some(Ok(LeaderRefreshCompletion {
+                        trigger_slot,
+                        result: LeaderRefreshResult::Failed(error),
+                    })) => {
+                        metrics.record_repair_runtime_error(&error.to_string());
+                        warn!(slot = trigger_slot, %error, "cannot refresh leader schedule; repair remains fail-closed");
+                    }
+                    Some(Ok(LeaderRefreshCompletion {
+                        trigger_slot,
+                        result: LeaderRefreshResult::TimedOut,
+                    })) => {
+                        metrics.record_repair_runtime_error("leader schedule refresh timed out");
+                        warn!(slot = trigger_slot, "leader schedule refresh timed out; repair remains fail-closed");
+                    }
+                    Some(Err(error)) => {
+                        metrics.record_repair_runtime_error(&format!(
+                            "leader schedule refresh task failed: {error}"
+                        ));
+                        warn!(%error, "leader schedule refresh task failed; repair remains fail-closed");
+                    }
+                    None => {}
                 }
             }
             observation = observations.recv() => {
                 let Some(payload) = observation else {
+                    // The supervisor deliberately closes this channel during shutdown, and the
+                    // watch notification may race this select branch. Never let that race bypass
+                    // the staged-response drain.
+                    leader_refreshes.shutdown().await;
+                    shutdown_components(&mut components, &metrics, &config).await?;
                     return Ok(());
                 };
+                let previous_depth = observation_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                debug_assert!(previous_depth > 0, "attempt observation queue depth underflow");
                 let Ok(shred) = Shred::new_from_serialized_shred(payload.to_vec()) else {
                     metrics.record_repair_error();
                     continue;
@@ -299,29 +419,26 @@ async fn run_attempt(
 
                 if leaders.leader(slot).is_none()
                     && retry_due(last_leader_refresh_attempt, LEADER_REFRESH_RETRY)
+                    && leader_refreshes.is_empty()
                 {
                     last_leader_refresh_attempt = Some(Instant::now());
-                    match tokio::time::timeout(
-                        LEADER_REFRESH_TIMEOUT,
-                        leaders.refresh_current(),
-                    ).await {
-                        Ok(Ok(outcome)) => info!(
-                            epoch = outcome.epoch,
-                            first_slot = outcome.first_slot,
-                            slots_in_epoch = outcome.slots_in_epoch,
-                            inserted = outcome.inserted,
-                            cached_epochs = outcome.cached_epochs,
-                            "leader schedule ready for repair verification"
-                        ),
-                        Ok(Err(error)) => {
-                            metrics.record_repair_runtime_error(&error.to_string());
-                            warn!(slot, %error, "cannot refresh leader schedule; repair remains fail-closed");
+                    let leaders = leaders.clone();
+                    leader_refreshes.spawn(async move {
+                        let result = match tokio::time::timeout(
+                            LEADER_REFRESH_TIMEOUT,
+                            leaders.refresh_current(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(outcome)) => LeaderRefreshResult::Refreshed(outcome),
+                            Ok(Err(error)) => LeaderRefreshResult::Failed(error),
+                            Err(_) => LeaderRefreshResult::TimedOut,
+                        };
+                        LeaderRefreshCompletion {
+                            trigger_slot: slot,
+                            result,
                         }
-                        Err(_) => {
-                            metrics.record_repair_runtime_error("leader schedule refresh timed out");
-                            warn!(slot, "leader schedule refresh timed out; repair remains fail-closed");
-                        }
-                    }
+                    });
                 }
 
                 if components.is_none()
@@ -329,9 +446,14 @@ async fn run_attempt(
                 {
                     match initialize_components(&config, &cluster_info, leaders.clone(), slot).await {
                         Ok(initialized) => {
+                            let runtime_stats = initialized.runtime.stats();
                             info!(
                                 peers = initialized.peer_count,
                                 repair_socket = %initialized.runtime.local_addr()?,
+                                requested_udp_recv_buffer = runtime_stats.socket_requested_recv_buffer_bytes,
+                                effective_udp_recv_buffer = runtime_stats.socket_effective_recv_buffer_bytes,
+                                socket_rxq_overflow_supported = runtime_stats.socket_rxq_overflow_supported,
+                                response_queue_capacity = runtime_stats.response_queue_capacity,
                                 "bounded repair transport is active"
                             );
                             update_metrics(&metrics, &initialized, &config);
@@ -373,6 +495,31 @@ async fn run_attempt(
                     }
                 }
             }
+            _ = response_timer.tick() => {
+                let Some(components) = &mut components else {
+                    continue;
+                };
+                let now = Instant::now();
+                let poll = components
+                    .runtime
+                    .service_responses(now, unix_millis())
+                    .await
+                    .context("drain bounded repair responses");
+                // Snapshot attempt-local monotonic counters even when the runtime is about to
+                // fail. The supervisor resets the per-attempt delta baseline before restarting,
+                // so delaying this update until after `?` would permanently hide final drops.
+                let poll = match poll {
+                    Ok(poll) => poll,
+                    Err(error) => {
+                        update_metrics(&metrics, components, &config);
+                        return Err(error);
+                    }
+                };
+                for accepted in poll.accepted {
+                    components.tracker.observe(&accepted.shred, now);
+                }
+                update_metrics(&metrics, components, &config);
+            }
             _ = timer.tick() => {
                 let Some(components) = &mut components else {
                     continue;
@@ -388,7 +535,14 @@ async fn run_attempt(
                     .runtime
                     .service_tracker_requests(requests, now, unix_millis())
                     .await
-                    .context("service bounded repair requests")?;
+                    .context("service bounded repair requests");
+                let poll = match poll {
+                    Ok(poll) => poll,
+                    Err(error) => {
+                        update_metrics(&metrics, components, &config);
+                        return Err(error);
+                    }
+                };
                 for accepted in poll.accepted {
                     components.tracker.observe(&accepted.shred, now);
                 }
@@ -400,6 +554,38 @@ async fn run_attempt(
             }
         }
     }
+}
+
+async fn shutdown_components(
+    components: &mut Option<Components>,
+    metrics: &Metrics,
+    config: &RepairServiceConfig,
+) -> Result<()> {
+    let Some(components) = components else {
+        return Ok(());
+    };
+    let summary = components
+        .runtime
+        .shutdown_orderly(Instant::now(), unix_millis(), REPAIR_STAGED_DRAIN_BUDGET)
+        .await
+        .context("orderly repair ingress/WAL shutdown");
+    // Shutdown failures can carry the most important final socket-overflow or queue-drop sample.
+    // Publish it before propagating the error and discarding this attempt's delta baseline.
+    let summary = match summary {
+        Ok(summary) => summary,
+        Err(error) => {
+            update_metrics(metrics, components, config);
+            return Err(error);
+        }
+    };
+    update_metrics(metrics, components, config);
+    info!(
+        staged_datagrams_processed = summary.staged_datagrams_processed,
+        accepted_shreds = summary.accepted_shreds,
+        remaining_staged_datagrams = summary.remaining_staged_datagrams,
+        "repair ingress stopped and its staged response prefix is durable"
+    );
+    Ok(())
 }
 
 async fn initialize_components(
@@ -417,7 +603,7 @@ async fn initialize_components(
     let trust = RepairTrustStore::new(
         RepairTrustStoreConfig {
             shred_version: config.shred_version,
-            max_slots: 256,
+            max_slots: MAX_TRACKED_SLOTS,
             max_fec_sets_per_slot: 1_024,
             max_authorized_peers: config.max_peers,
         },
@@ -438,7 +624,7 @@ async fn initialize_components(
     .context("open isolated repair provenance WAL")?;
     let runtime = RepairRuntime::bind_with_wal_worker(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        cluster_info.keypair(),
+        cluster_info.keypair().clone(),
         trust.clone(),
         peers,
         RepairRuntimeConfig {
@@ -448,9 +634,11 @@ async fn initialize_components(
             max_new_requests_per_tick: 64,
             max_packets_per_tick: 512,
             max_packet_bytes: 2_048,
+            recv_buffer_bytes: config.udp_recv_buffer_bytes,
+            response_queue_capacity: config.response_queue_capacity,
             max_suppressed_requests: 16_384,
             request_timeout: Duration::from_millis(150),
-            exhaustion_cooldown: SLOT_RETENTION,
+            exhaustion_cooldown: REPAIR_EXHAUSTION_COOLDOWN,
             max_retries: 4,
             initial_nonce: unix_millis() as u32,
         },
@@ -463,7 +651,7 @@ async fn initialize_components(
         tracker: RepairTracker::new(RepairTrackerConfig {
             settle_time: SETTLE_TIME,
             slot_retention: SLOT_RETENTION,
-            max_slots: 256,
+            max_slots: MAX_TRACKED_SLOTS,
             max_fec_sets_per_slot: 1_024,
             max_requests_per_slot: 32,
             max_requests_per_poll: 128,
@@ -480,6 +668,9 @@ fn select_repair_peers(cluster_info: &ClusterInfo, slot: u64, maximum: usize) ->
         .filter_map(|contact| {
             contact
                 .serve_repair(Protocol::UDP)
+                // This runtime binds one IPv4 socket. An IPv6 target would make send_to fail and
+                // unnecessarily restart the isolated repair path.
+                .filter(SocketAddr::is_ipv4)
                 .map(|repair_addr| RepairPeer {
                     pubkey: *contact.pubkey(),
                     repair_addr,
@@ -505,6 +696,15 @@ fn update_metrics(metrics: &Metrics, components: &Components, config: &RepairSer
         peers: components.peer_count,
         tracked_slots: components.tracker.tracked_slot_count(),
         outstanding: components.runtime.outstanding_count(),
+        socket_datagrams_received: stats.socket_datagrams_received,
+        response_datagrams_processed: stats.packets_received,
+        socket_requested_recv_buffer_bytes: stats.socket_requested_recv_buffer_bytes,
+        socket_effective_recv_buffer_bytes: stats.socket_effective_recv_buffer_bytes,
+        socket_rxq_overflow_supported: stats.socket_rxq_overflow_supported,
+        socket_rxq_overflow: stats.socket_rxq_overflow,
+        response_queue_capacity: stats.response_queue_capacity,
+        response_queue_depth: stats.response_queue_depth,
+        response_queue_dropped: stats.response_queue_dropped,
         requests_sent: stats.requests_sent,
         retries_sent: stats.retries_sent,
         requests_exhausted: stats.requests_exhausted,
@@ -528,6 +728,7 @@ fn update_metrics(metrics: &Metrics, components: &Components, config: &RepairSer
         wal_v3_sealed: stats.repair_wal_v3_sealed,
         wal_syncs: stats.repair_wal_syncs,
     });
+    metrics.set_repair_wal_error(components.runtime.filesystem_refresh_error());
 }
 
 async fn initialize_repair_wal_metrics(config: &RepairServiceConfig, metrics: &Metrics) {
@@ -665,5 +866,21 @@ mod tests {
         backoff.reset(initial);
 
         assert_eq!(backoff.after_failure(false), Duration::from_millis(10));
+    }
+
+    #[tokio::test]
+    async fn orderly_attempt_failure_is_propagated_with_exact_shutdown_counts() {
+        let metrics = Metrics::new(8).unwrap();
+        let attempt = tokio::spawn(async {
+            bail!(
+                "remaining_staged_datagrams=7; current_datagram_unpersisted=1; total_unpersisted_datagrams=8"
+            )
+        });
+
+        let error = stop_attempt(attempt, &metrics).await.unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("repair attempt failed during orderly shutdown"));
+        assert!(error.contains("remaining_staged_datagrams=7"));
+        assert!(error.contains("total_unpersisted_datagrams=8"));
     }
 }

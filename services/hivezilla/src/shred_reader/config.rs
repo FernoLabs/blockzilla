@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 
 const DEFAULT_ENTRYPOINTS: &str = "entrypoint.mainnet-beta.solana.com:8001,entrypoint2.mainnet-beta.solana.com:8001,entrypoint3.mainnet-beta.solana.com:8001";
 const MAX_FORWARD_QUEUE_CAPACITY: usize = 131_072;
+const MAX_REPAIR_RESPONSE_QUEUE_CAPACITY: usize = 16_384;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -29,6 +30,9 @@ pub struct Config {
     pub sample_interval: Duration,
     pub loss_telemetry_interfaces: Vec<String>,
     pub shred_forward_addrs: Vec<SocketAddr>,
+    /// Optional fixed UDP source address used to attribute this reader at the downstream durable
+    /// recorder. Unset preserves the existing wildcard-IP, ephemeral-port behavior.
+    pub shred_forward_bind_addr: Option<SocketAddr>,
     pub forward_queue_capacity: usize,
     pub repair_enabled: bool,
     pub repair_rpc_url: String,
@@ -43,6 +47,8 @@ pub struct Config {
     pub repair_wal_filesystem_reserve_bytes: u64,
     pub repair_max_peers: usize,
     pub repair_observation_queue_capacity: usize,
+    pub repair_udp_recv_buffer_bytes: usize,
+    pub repair_response_queue_capacity: usize,
 }
 
 impl Config {
@@ -64,6 +70,10 @@ impl Config {
             sample_interval: Duration::from_secs(env_parse("SAMPLE_INTERVAL_SECS", "15")?),
             loss_telemetry_interfaces: parse_names(&env_string("LOSS_TELEMETRY_INTERFACES", "")),
             shred_forward_addrs: parse_socket_addrs(&env_string("SHRED_FORWARD_ADDRS", ""))?,
+            shred_forward_bind_addr: parse_forward_bind_addr(&env_string(
+                "SHRED_FORWARD_BIND_ADDR",
+                "",
+            ))?,
             forward_queue_capacity: env_parse("FORWARD_QUEUE_CAPACITY", "16384")?,
             repair_enabled: env_parse("REPAIR_ENABLED", "false")?,
             repair_rpc_url: env_string("REPAIR_RPC_URL", "https://api.mainnet-beta.solana.com"),
@@ -90,6 +100,8 @@ impl Config {
                 "REPAIR_OBSERVATION_QUEUE_CAPACITY",
                 "32768",
             )?,
+            repair_udp_recv_buffer_bytes: env_parse("REPAIR_UDP_RECV_BUFFER_BYTES", "67108864")?,
+            repair_response_queue_capacity: env_parse("REPAIR_RESPONSE_QUEUE_CAPACITY", "4096")?,
         };
         config.validate()?;
         Ok(config)
@@ -125,6 +137,25 @@ impl Config {
         {
             bail!("SHRED_FORWARD_ADDRS must contain at least one destination in production");
         }
+        if let Some(bind_addr) = self.shred_forward_bind_addr {
+            if self.shred_forward_addrs.is_empty() {
+                bail!(
+                    "SHRED_FORWARD_BIND_ADDR requires at least one SHRED_FORWARD_ADDRS destination"
+                );
+            }
+            if bind_addr.port() == 0 {
+                bail!("SHRED_FORWARD_BIND_ADDR must use a nonzero fixed source port");
+            }
+            if self
+                .shred_forward_addrs
+                .iter()
+                .any(|target| target.is_ipv4() != bind_addr.is_ipv4())
+            {
+                bail!(
+                    "SHRED_FORWARD_BIND_ADDR and every SHRED_FORWARD_ADDRS destination must use the same IP address family"
+                );
+            }
+        }
         if self.forward_queue_capacity == 0
             || self.forward_queue_capacity > MAX_FORWARD_QUEUE_CAPACITY
         {
@@ -139,6 +170,16 @@ impl Config {
             {
                 bail!(
                     "REPAIR_OBSERVATION_QUEUE_CAPACITY must be between 1 and {MAX_FORWARD_QUEUE_CAPACITY}"
+                );
+            }
+            if self.repair_udp_recv_buffer_bytes < 2_048 {
+                bail!("REPAIR_UDP_RECV_BUFFER_BYTES must be at least 2048");
+            }
+            if self.repair_response_queue_capacity == 0
+                || self.repair_response_queue_capacity > MAX_REPAIR_RESPONSE_QUEUE_CAPACITY
+            {
+                bail!(
+                    "REPAIR_RESPONSE_QUEUE_CAPACITY must be between 1 and {MAX_REPAIR_RESPONSE_QUEUE_CAPACITY}"
                 );
             }
             if !self
@@ -205,6 +246,17 @@ fn parse_socket_addrs(value: &str) -> Result<Vec<SocketAddr>> {
         }
     }
     Ok(addresses)
+}
+
+fn parse_forward_bind_addr(value: &str) -> Result<Option<SocketAddr>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<SocketAddr>()
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("invalid SHRED_FORWARD_BIND_ADDR {value:?}: {error}"))
 }
 
 fn env_string(name: &str, default: &str) -> String {
@@ -312,6 +364,7 @@ mod tests {
             sample_interval: Duration::from_secs(15),
             loss_telemetry_interfaces: Vec::new(),
             shred_forward_addrs: Vec::new(),
+            shred_forward_bind_addr: None,
             forward_queue_capacity: 1_024,
             repair_enabled: false,
             repair_rpc_url: "http://127.0.0.1:8899".to_owned(),
@@ -323,6 +376,8 @@ mod tests {
             repair_wal_filesystem_reserve_bytes: 1,
             repair_max_peers: 3,
             repair_observation_queue_capacity: 1_024,
+            repair_udp_recv_buffer_bytes: 65_536,
+            repair_response_queue_capacity: 64,
         }
     }
 
@@ -373,6 +428,44 @@ mod tests {
                 "127.0.0.1:18003".parse().unwrap(),
                 "192.0.2.1:9000".parse().unwrap(),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_optional_exact_forward_bind_address() {
+        assert_eq!(parse_forward_bind_addr("  ").unwrap(), None);
+        assert_eq!(
+            parse_forward_bind_addr("127.0.0.1:18104").unwrap(),
+            Some("127.0.0.1:18104".parse().unwrap())
+        );
+        assert!(
+            parse_forward_bind_addr("127.0.0.1")
+                .unwrap_err()
+                .to_string()
+                .contains("SHRED_FORWARD_BIND_ADDR")
+        );
+    }
+
+    #[test]
+    fn rejects_forward_bind_family_mismatch_and_ephemeral_port() {
+        let mut config = valid_config();
+        config.shred_forward_addrs = vec!["127.0.0.1:18003".parse().unwrap()];
+        config.shred_forward_bind_addr = Some("[::1]:18104".parse().unwrap());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("same IP address family")
+        );
+
+        config.shred_forward_bind_addr = Some("127.0.0.1:0".parse().unwrap());
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("nonzero fixed source port")
         );
     }
 
@@ -464,6 +557,30 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("FILESYSTEM_RESERVE")
+        );
+    }
+
+    #[test]
+    fn repair_socket_memory_bounds_are_validated() {
+        let mut config = valid_config();
+        config.repair_enabled = true;
+        config.repair_udp_recv_buffer_bytes = 2_047;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("REPAIR_UDP_RECV_BUFFER_BYTES")
+        );
+
+        config.repair_udp_recv_buffer_bytes = 2_048;
+        config.repair_response_queue_capacity = MAX_REPAIR_RESPONSE_QUEUE_CAPACITY + 1;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("REPAIR_RESPONSE_QUEUE_CAPACITY")
         );
     }
 }

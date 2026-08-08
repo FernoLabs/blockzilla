@@ -16,9 +16,9 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use hivezilla::ingest::{
     FecThresholdDeficit, LogicalKey, ShredKind, SpoolJournalIdentity, SpoolLocation, SpoolRecord,
-    ZSTD_SOLANA_SHRED_V1, decode_stored_shred, deshred_complete_data_slot,
-    read_spool_committed_snapshot_after, read_spool_record, recover_slot_data_shreds,
-    shred_reconstruction_failure_category, spool_journal_dir_path,
+    decode_stored_shred_for_format, deshred_complete_data_slot,
+    ensure_parseable_shred_header_matches, read_spool_committed_snapshot_after, read_spool_record,
+    recover_slot_data_shreds, shred_reconstruction_failure_category, spool_journal_dir_path,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -898,10 +898,6 @@ fn decode_epoch_record(
     coverage_start: u64,
     coverage_end: u64,
 ) -> Result<Option<(u64, u64, Vec<u8>)>> {
-    ensure!(
-        record.metadata.payload_format_version == ZSTD_SOLANA_SHRED_V1,
-        "epoch audit accepts only canonical compressed raw shreds"
-    );
     let LogicalKey::Shred {
         slot,
         kind,
@@ -914,7 +910,9 @@ fn decode_epoch_record(
     if slot < coverage_start || slot > coverage_end {
         return Ok(None);
     }
-    let datagram = decode_stored_shred(&record.payload)?;
+    let datagram =
+        decode_stored_shred_for_format(record.metadata.payload_format_version, &record.payload)?;
+    ensure_parseable_shred_header_matches(&record.metadata, &datagram)?;
     let shred = Shred::new_from_serialized_shred(datagram.clone())
         .map_err(|error| anyhow::anyhow!("parse stored Solana shred: {error:?}"))?;
     let decoded_kind = if shred.is_code() {

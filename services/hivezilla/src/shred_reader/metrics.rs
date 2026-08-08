@@ -44,6 +44,15 @@ pub struct Metrics {
     repair_tracked_slots: AtomicU64,
     repair_outstanding: AtomicU64,
     repair_observation_queue_dropped: AtomicU64,
+    repair_socket_datagrams_received: AtomicU64,
+    repair_response_datagrams_processed: AtomicU64,
+    repair_socket_requested_recv_buffer_bytes: AtomicU64,
+    repair_socket_effective_recv_buffer_bytes: AtomicU64,
+    repair_socket_rxq_overflow_supported: AtomicU64,
+    repair_socket_rxq_overflow: AtomicU64,
+    repair_response_queue_capacity: AtomicU64,
+    repair_response_queue_depth: AtomicU64,
+    repair_response_queue_dropped: AtomicU64,
     repair_requests_sent: AtomicU64,
     repair_retries_sent: AtomicU64,
     repair_requests_exhausted: AtomicU64,
@@ -83,6 +92,10 @@ struct ReceiverState {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RepairCounterSamples {
+    socket_datagrams_received: u64,
+    response_datagrams_processed: u64,
+    socket_rxq_overflow: u64,
+    response_queue_dropped: u64,
     requests_sent: u64,
     retries_sent: u64,
     requests_exhausted: u64,
@@ -98,6 +111,10 @@ struct RepairCounterSamples {
 impl RepairCounterSamples {
     fn take_delta(&mut self, update: &RepairMetricsUpdate) -> Self {
         let next = Self {
+            socket_datagrams_received: update.socket_datagrams_received,
+            response_datagrams_processed: update.response_datagrams_processed,
+            socket_rxq_overflow: update.socket_rxq_overflow,
+            response_queue_dropped: update.response_queue_dropped,
             requests_sent: update.requests_sent,
             retries_sent: update.retries_sent,
             requests_exhausted: update.requests_exhausted,
@@ -110,6 +127,18 @@ impl RepairCounterSamples {
             wal_syncs: update.wal_syncs,
         };
         let delta = Self {
+            socket_datagrams_received: next
+                .socket_datagrams_received
+                .saturating_sub(self.socket_datagrams_received),
+            response_datagrams_processed: next
+                .response_datagrams_processed
+                .saturating_sub(self.response_datagrams_processed),
+            socket_rxq_overflow: next
+                .socket_rxq_overflow
+                .saturating_sub(self.socket_rxq_overflow),
+            response_queue_dropped: next
+                .response_queue_dropped
+                .saturating_sub(self.response_queue_dropped),
             requests_sent: next.requests_sent.saturating_sub(self.requests_sent),
             retries_sent: next.retries_sent.saturating_sub(self.retries_sent),
             requests_exhausted: next
@@ -173,6 +202,9 @@ pub struct Snapshot {
     pub data_total: u64,
     pub code_total: u64,
     pub forward_targets: usize,
+    /// Effective local UDP source address used for downstream attribution. None when forwarding
+    /// is disabled; an ephemeral port is still reported when no fixed bind was configured.
+    pub forward_sender_addr: Option<String>,
     pub forwarded_datagrams_total: u64,
     pub forward_errors_total: u64,
     pub forward_send_errors_total: u64,
@@ -198,6 +230,15 @@ pub struct Snapshot {
     pub repair_tracked_slots: u64,
     pub repair_outstanding: u64,
     pub repair_observation_queue_dropped_total: u64,
+    pub repair_socket_datagrams_received_total: u64,
+    pub repair_response_datagrams_processed_total: u64,
+    pub repair_socket_requested_recv_buffer_bytes: u64,
+    pub repair_socket_effective_recv_buffer_bytes: u64,
+    pub repair_socket_rxq_overflow_supported: bool,
+    pub repair_socket_rxq_overflow_total: Option<u64>,
+    pub repair_response_queue_capacity: u64,
+    pub repair_response_queue_depth: u64,
+    pub repair_response_queue_dropped_total: u64,
     pub repair_requests_sent_total: u64,
     pub repair_retries_sent_total: u64,
     pub repair_requests_exhausted_total: u64,
@@ -244,6 +285,7 @@ pub struct ServiceState {
     pub tvu_port: u16,
     pub shred_version: u16,
     pub forward_targets: usize,
+    pub forward_sender_addr: Option<String>,
     pub repair_enabled: bool,
 }
 
@@ -253,6 +295,15 @@ pub struct RepairMetricsUpdate {
     pub peers: usize,
     pub tracked_slots: usize,
     pub outstanding: usize,
+    pub socket_datagrams_received: u64,
+    pub response_datagrams_processed: u64,
+    pub socket_requested_recv_buffer_bytes: u64,
+    pub socket_effective_recv_buffer_bytes: u64,
+    pub socket_rxq_overflow_supported: bool,
+    pub socket_rxq_overflow: u64,
+    pub response_queue_capacity: u64,
+    pub response_queue_depth: u64,
+    pub response_queue_dropped: u64,
     pub requests_sent: u64,
     pub retries_sent: u64,
     pub requests_exhausted: u64,
@@ -307,6 +358,15 @@ impl Metrics {
             repair_tracked_slots: AtomicU64::new(0),
             repair_outstanding: AtomicU64::new(0),
             repair_observation_queue_dropped: AtomicU64::new(0),
+            repair_socket_datagrams_received: AtomicU64::new(0),
+            repair_response_datagrams_processed: AtomicU64::new(0),
+            repair_socket_requested_recv_buffer_bytes: AtomicU64::new(0),
+            repair_socket_effective_recv_buffer_bytes: AtomicU64::new(0),
+            repair_socket_rxq_overflow_supported: AtomicU64::new(0),
+            repair_socket_rxq_overflow: AtomicU64::new(0),
+            repair_response_queue_capacity: AtomicU64::new(0),
+            repair_response_queue_depth: AtomicU64::new(0),
+            repair_response_queue_dropped: AtomicU64::new(0),
             repair_requests_sent: AtomicU64::new(0),
             repair_retries_sent: AtomicU64::new(0),
             repair_requests_exhausted: AtomicU64::new(0),
@@ -426,8 +486,12 @@ impl Metrics {
     }
 
     pub fn record_repair_observation_queue_drop(&self) {
+        self.record_repair_observation_queue_drops(1);
+    }
+
+    pub fn record_repair_observation_queue_drops(&self, dropped: u64) {
         self.repair_observation_queue_dropped
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(dropped, Ordering::Relaxed);
     }
 
     pub fn record_repair_error(&self) {
@@ -521,6 +585,7 @@ impl Metrics {
         self.repair_peers.store(0, Ordering::Relaxed);
         self.repair_tracked_slots.store(0, Ordering::Relaxed);
         self.repair_outstanding.store(0, Ordering::Relaxed);
+        self.repair_response_queue_depth.store(0, Ordering::Relaxed);
     }
 
     pub fn update_repair(&self, update: RepairMetricsUpdate) {
@@ -548,6 +613,26 @@ impl Metrics {
             .store(update.tracked_slots as u64, Ordering::Relaxed);
         self.repair_outstanding
             .store(update.outstanding as u64, Ordering::Relaxed);
+        self.repair_socket_datagrams_received
+            .fetch_add(delta.socket_datagrams_received, Ordering::Relaxed);
+        self.repair_response_datagrams_processed
+            .fetch_add(delta.response_datagrams_processed, Ordering::Relaxed);
+        self.repair_socket_requested_recv_buffer_bytes
+            .store(update.socket_requested_recv_buffer_bytes, Ordering::Relaxed);
+        self.repair_socket_effective_recv_buffer_bytes
+            .store(update.socket_effective_recv_buffer_bytes, Ordering::Relaxed);
+        self.repair_socket_rxq_overflow_supported.store(
+            u64::from(update.socket_rxq_overflow_supported),
+            Ordering::Relaxed,
+        );
+        self.repair_socket_rxq_overflow
+            .fetch_add(delta.socket_rxq_overflow, Ordering::Relaxed);
+        self.repair_response_queue_capacity
+            .store(update.response_queue_capacity, Ordering::Relaxed);
+        self.repair_response_queue_depth
+            .store(update.response_queue_depth, Ordering::Relaxed);
+        self.repair_response_queue_dropped
+            .fetch_add(delta.response_queue_dropped, Ordering::Relaxed);
         self.repair_requests_sent
             .fetch_add(delta.requests_sent, Ordering::Relaxed);
         self.repair_retries_sent
@@ -614,6 +699,10 @@ impl Metrics {
             .tvu_socket_rxq_overflow_supported
             .load(Ordering::Relaxed)
             != 0;
+        let repair_socket_rxq_overflow_supported = self
+            .repair_socket_rxq_overflow_supported
+            .load(Ordering::Relaxed)
+            != 0;
         let repair_wal_bytes = self.repair_wal_bytes.load(Ordering::Relaxed);
         let repair_wal_max_bytes = self.repair_wal_max_bytes.load(Ordering::Relaxed);
         let repair_wal_active_segment_bytes =
@@ -669,6 +758,7 @@ impl Metrics {
             data_total: self.data.load(Ordering::Relaxed),
             code_total: self.code.load(Ordering::Relaxed),
             forward_targets: service.forward_targets,
+            forward_sender_addr: service.forward_sender_addr.clone(),
             forwarded_datagrams_total: self.forwarded.load(Ordering::Relaxed),
             forward_errors_total: forward_send_errors.saturating_add(forward_queue_dropped),
             forward_send_errors_total: forward_send_errors,
@@ -706,6 +796,28 @@ impl Metrics {
             repair_outstanding: self.repair_outstanding.load(Ordering::Relaxed),
             repair_observation_queue_dropped_total: self
                 .repair_observation_queue_dropped
+                .load(Ordering::Relaxed),
+            repair_socket_datagrams_received_total: self
+                .repair_socket_datagrams_received
+                .load(Ordering::Relaxed),
+            repair_response_datagrams_processed_total: self
+                .repair_response_datagrams_processed
+                .load(Ordering::Relaxed),
+            repair_socket_requested_recv_buffer_bytes: self
+                .repair_socket_requested_recv_buffer_bytes
+                .load(Ordering::Relaxed),
+            repair_socket_effective_recv_buffer_bytes: self
+                .repair_socket_effective_recv_buffer_bytes
+                .load(Ordering::Relaxed),
+            repair_socket_rxq_overflow_supported,
+            repair_socket_rxq_overflow_total: repair_socket_rxq_overflow_supported
+                .then(|| self.repair_socket_rxq_overflow.load(Ordering::Relaxed)),
+            repair_response_queue_capacity: self
+                .repair_response_queue_capacity
+                .load(Ordering::Relaxed),
+            repair_response_queue_depth: self.repair_response_queue_depth.load(Ordering::Relaxed),
+            repair_response_queue_dropped_total: self
+                .repair_response_queue_dropped
                 .load(Ordering::Relaxed),
             repair_requests_sent_total: self.repair_requests_sent.load(Ordering::Relaxed),
             repair_retries_sent_total: self.repair_retries_sent.load(Ordering::Relaxed),
@@ -920,6 +1032,20 @@ mod tests {
     }
 
     #[test]
+    fn residual_attempt_observation_drops_can_be_counted_in_bulk() {
+        let metrics = Metrics::new(16).unwrap();
+        metrics.record_repair_observation_queue_drop();
+        metrics.record_repair_observation_queue_drops(7);
+
+        assert_eq!(
+            metrics
+                .repair_observation_queue_dropped
+                .load(Ordering::Relaxed),
+            8
+        );
+    }
+
+    #[test]
     fn tvu_socket_overflow_support_and_counter_remain_separate() {
         let metrics = Metrics::new(16).unwrap();
         assert_eq!(
@@ -941,6 +1067,111 @@ mod tests {
             1
         );
         assert_eq!(metrics.tvu_socket_rxq_overflow.load(Ordering::Relaxed), 12);
+    }
+
+    #[test]
+    fn repair_socket_gauges_and_attempt_counters_have_unambiguous_units() {
+        let metrics = Metrics::new(16).unwrap();
+        metrics.mark_repair_starting();
+        metrics.update_repair(RepairMetricsUpdate {
+            active: true,
+            socket_datagrams_received: 12,
+            response_datagrams_processed: 9,
+            socket_requested_recv_buffer_bytes: 64 * 1_024 * 1_024,
+            socket_effective_recv_buffer_bytes: 15_000_000,
+            socket_rxq_overflow_supported: true,
+            socket_rxq_overflow: 2,
+            response_queue_capacity: 4_096,
+            response_queue_depth: 3,
+            response_queue_dropped: 1,
+            ..RepairMetricsUpdate::default()
+        });
+        metrics.update_repair(RepairMetricsUpdate {
+            active: true,
+            socket_datagrams_received: 15,
+            response_datagrams_processed: 13,
+            socket_requested_recv_buffer_bytes: 64 * 1_024 * 1_024,
+            socket_effective_recv_buffer_bytes: 15_000_000,
+            socket_rxq_overflow_supported: true,
+            socket_rxq_overflow: 5,
+            response_queue_capacity: 4_096,
+            response_queue_depth: 2,
+            response_queue_dropped: 2,
+            ..RepairMetricsUpdate::default()
+        });
+
+        assert_eq!(
+            metrics
+                .repair_socket_datagrams_received
+                .load(Ordering::Relaxed),
+            15
+        );
+        assert_eq!(
+            metrics
+                .repair_response_datagrams_processed
+                .load(Ordering::Relaxed),
+            13
+        );
+        assert_eq!(
+            metrics
+                .repair_socket_effective_recv_buffer_bytes
+                .load(Ordering::Relaxed),
+            15_000_000
+        );
+        assert_eq!(
+            metrics.repair_socket_rxq_overflow.load(Ordering::Relaxed),
+            5
+        );
+        assert_eq!(
+            metrics
+                .repair_response_queue_dropped
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            metrics.repair_response_queue_depth.load(Ordering::Relaxed),
+            2
+        );
+
+        metrics.mark_repair_backoff("test restart");
+        metrics.mark_repair_starting();
+        metrics.update_repair(RepairMetricsUpdate {
+            active: true,
+            socket_datagrams_received: 4,
+            response_datagrams_processed: 3,
+            socket_requested_recv_buffer_bytes: 64 * 1_024 * 1_024,
+            socket_effective_recv_buffer_bytes: 32_000_000,
+            socket_rxq_overflow_supported: true,
+            socket_rxq_overflow: 1,
+            response_queue_capacity: 4_096,
+            response_queue_depth: 1,
+            response_queue_dropped: 1,
+            ..RepairMetricsUpdate::default()
+        });
+        assert_eq!(
+            metrics
+                .repair_socket_datagrams_received
+                .load(Ordering::Relaxed),
+            19,
+            "socket counters must remain monotonic across supervised socket replacement"
+        );
+        assert_eq!(
+            metrics.repair_socket_rxq_overflow.load(Ordering::Relaxed),
+            6
+        );
+        assert_eq!(
+            metrics
+                .repair_response_queue_dropped
+                .load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics
+                .repair_socket_effective_recv_buffer_bytes
+                .load(Ordering::Relaxed),
+            32_000_000,
+            "effective buffer is a current-socket gauge, not an accumulated counter"
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ default = []
 shred-reconstruction = [
     "shred-reconstruction-backend-own",
     "dep:reed-solomon-erasure",
+    "dep:solana-address",
     "dep:solana-entry",
     "dep:solana-gossip",
     "dep:solana-hash",
@@ -44,6 +45,8 @@ shred-reconstruction = [
     "dep:solana-net-utils",
     "dep:solana-pubkey",
     "dep:solana-rpc-client",
+    "dep:solana-reward-info",
+    "dep:solana-signature",
 ]
 shred-reconstruction-backend-own = ["dep:solana-ledger-compat"]
 
@@ -71,13 +74,18 @@ rustls = { version = "0.23.40", features = ["ring"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 blockzilla-shred-codec = { path = "../../crates/shred-codec" }
-solana-entry = { version = "=4.1.2", optional = true }
+solana-entry = { version = "=4.1.2", features = ["agave-unstable-api"], optional = true }
 solana-gossip = { path = "../../crates/solana-gossip-compat", optional = true }
-solana-hash = { version = "4.3.0", features = ["serde"], optional = true }
+# Agave 4.1.2's message codec still uses wincode 0.5. Keep its split SDK value types on the
+# last compatible releases; newer semver-compatible releases moved those impls to wincode 0.6.
+solana-address = { version = "=2.6.1", optional = true }
+solana-hash = { version = "=4.4.0", features = ["serde"], optional = true }
 solana-keypair = { version = "=3.1.2", optional = true }
 solana-net-utils = { version = "=4.1.2", features = ["agave-unstable-api"], optional = true }
-solana-pubkey = { version = "4.2.0", optional = true }
+solana-pubkey = { version = "=4.2.0", optional = true }
 solana-rpc-client = { version = "=4.1.2", optional = true }
+solana-reward-info = { version = "=6.2.0", optional = true }
+solana-signature = { version = "=3.4.1", optional = true }
 solana-ledger-compat = { path = "../../crates/solana-ledger-compat", optional = true }
 sha2 = "0.11.0"
 socket2 = "0.6"

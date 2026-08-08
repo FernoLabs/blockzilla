@@ -35,7 +35,21 @@
         "bind": "127.0.0.1:18003",
         "multicast_group": null,
         "interface": null,
-        "auth": null
+        "auth": null,
+        "durable_source_allowlist": [
+          {
+            "name": "blue",
+            "address": "127.0.0.1:18004"
+          },
+          {
+            "name": "green",
+            "address": "127.0.0.1:18104"
+          },
+          {
+            "name": "final",
+            "address": "127.0.0.1:18204"
+          }
+        ]
       }
     }
   ]

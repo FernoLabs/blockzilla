@@ -4,6 +4,12 @@
 //! choose repair peers, mutate the live receive path, correlate outstanding nonces, or schedule
 //! retry backoff. A future repair transport can feed every valid shred into
 //! [`RepairTracker::observe`] and periodically consume [`RepairTracker::repair_plans_due`].
+//!
+//! The gap evidence and settle clocks below are intentionally process-local. The repair WAL only
+//! proves accepted repair responses; it cannot restore trusted original Turbine observations,
+//! wholly absent FEC ranges, or outstanding retry state after a crash. Crash-durable scheduling
+//! therefore requires a trusted raw-WAL/blockstore side index that can replay slot/FEC metadata,
+//! not serialization of these `Instant` values or inference from the repair WAL alone.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,7 +35,9 @@ type MerkleRoot = [u8; 32];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepairTrackerConfig {
-    /// Quiet time after the last newly observed shred before a slot becomes repairable.
+    /// Quiet time after the last newly observed shred in one FEC before that FEC becomes
+    /// repairable. Wholly absent FECs start this timer when a later data FEC first proves their
+    /// range, while highest-window repair follows only data-frontier progress.
     pub settle_time: Duration,
     /// Time since the last packet for a slot before its state is discarded. Must be at least
     /// `settle_time`, otherwise no slot could become repairable before expiry.
@@ -156,6 +164,9 @@ struct FecState {
     merkle_root: MerkleRoot,
     first_coding_index: Option<u32>,
     coding_positions: BTreeSet<u16>,
+    /// Quiet time is measured per FEC. Progress in a later FEC must not postpone an older FEC's
+    /// repair deadline.
+    last_progress_at: Instant,
 }
 
 #[derive(Debug)]
@@ -165,7 +176,11 @@ struct SlotState {
     completion: Option<CompletionMarker>,
     highest_data_index: Option<u32>,
     conflicts: BTreeSet<RepairConflict>,
-    last_progress_at: Instant,
+    /// First time an otherwise wholly absent FEC became bounded by a higher observed data index.
+    /// Keeping this separate from observed FEC state lets conservative gaps settle independently.
+    conservative_gap_discovered_at: BTreeMap<u32, Instant>,
+    /// Highest-window repair follows only frontier progress, not unrelated data/parity arrivals.
+    highest_window_progress_at: Instant,
     last_seen_at: Instant,
 }
 
@@ -177,7 +192,8 @@ impl SlotState {
             completion: None,
             highest_data_index: None,
             conflicts: BTreeSet::new(),
-            last_progress_at: now,
+            conservative_gap_discovered_at: BTreeMap::new(),
+            highest_window_progress_at: now,
             last_seen_at: now,
         }
     }
@@ -187,6 +203,7 @@ impl SlotState {
         fec_set_index: u32,
         merkle_root: MerkleRoot,
         capacity: usize,
+        now: Instant,
     ) -> Result<bool, RepairConflict> {
         if let Some(fec) = self.fec_sets.get(&fec_set_index) {
             return if fec.merkle_root == merkle_root {
@@ -206,21 +223,49 @@ impl SlotState {
                 merkle_root,
                 first_coding_index: None,
                 coding_positions: BTreeSet::new(),
+                last_progress_at: now,
             },
         );
+        self.conservative_gap_discovered_at.remove(&fec_set_index);
         Ok(true)
     }
 
-    fn block<I>(&mut self, conflicts: I, now: Instant)
+    fn block<I>(&mut self, conflicts: I)
     where
         I: IntoIterator<Item = RepairConflict>,
     {
-        let mut changed = false;
         for conflict in conflicts {
-            changed |= self.conflicts.insert(conflict);
+            self.conflicts.insert(conflict);
         }
-        if changed {
-            self.last_progress_at = now;
+    }
+
+    fn scan_end(&self) -> u32 {
+        self.completion
+            .map(|marker| marker.index)
+            .or(self.highest_data_index)
+            .and_then(|index| index.checked_add(1))
+            .map_or(0, |end| end.min(MAX_DATA_SHREDS_PER_SLOT as u32))
+    }
+
+    /// Registers only newly exposed wholly absent FECs. Existing discovery times never move, so
+    /// later progress in another FEC cannot restart their settle period.
+    fn discover_new_conservative_gaps(&mut self, previous_scan_end: u32, now: Instant) {
+        let scan_end = self.scan_end();
+        if scan_end <= previous_scan_end {
+            return;
+        }
+        let mut fec_set_index = if previous_scan_end == 0 {
+            0
+        } else {
+            previous_scan_end.div_ceil(DATA_SHREDS_PER_FEC) * DATA_SHREDS_PER_FEC
+        };
+        while fec_set_index < scan_end {
+            if !self.fec_sets.contains_key(&fec_set_index) {
+                self.conservative_gap_discovered_at
+                    .entry(fec_set_index)
+                    .or_insert(now);
+            }
+            fec_set_index = fec_set_index.saturating_add(DATA_SHREDS_PER_FEC);
         }
     }
 }
@@ -255,6 +300,11 @@ impl ValidatedObservation {
 pub struct RepairTracker {
     config: RepairTrackerConfig,
     slots: BTreeMap<u64, SlotState>,
+    /// Inclusive slot at which the next bounded poll starts. A cursor is required because
+    /// transport eligibility (trust, outstanding nonces, and exhaustion cooldown) is applied
+    /// after this pure tracker returns. Always starting at the oldest slot would let an
+    /// ineligible old backlog consume every poll budget forever.
+    next_poll_slot: Option<u64>,
 }
 
 impl RepairTracker {
@@ -279,6 +329,7 @@ impl RepairTracker {
         Self {
             config,
             slots: BTreeMap::new(),
+            next_poll_slot: None,
         }
     }
 
@@ -309,6 +360,7 @@ impl RepairTracker {
         if !state.conflicts.is_empty() {
             return;
         }
+        let previous_scan_end = state.scan_end();
 
         match observation {
             ValidatedObservation::Data {
@@ -369,36 +421,46 @@ impl RepairTracker {
                     conflicts.push(RepairConflict::DataIndexFork { index });
                 }
                 if !conflicts.is_empty() {
-                    state.block(conflicts, now);
+                    state.block(conflicts);
                     return;
                 }
 
-                let mut progressed = match state.ensure_fec(
+                let inserted_fec = match state.ensure_fec(
                     fec_set_index,
                     merkle_root,
                     self.config.max_fec_sets_per_slot,
+                    now,
                 ) {
                     Ok(inserted) => inserted,
                     Err(conflict) => {
-                        state.block([conflict], now);
+                        state.block([conflict]);
                         return;
                     }
                 };
-                progressed |= state.data_indices.insert(index, identity).is_none();
+                let inserted_data = state.data_indices.insert(index, identity).is_none();
+                let mut frontier_progressed = false;
                 if state
                     .highest_data_index
                     .is_none_or(|highest| index > highest)
                 {
                     state.highest_data_index = Some(index);
-                    progressed = true;
+                    frontier_progressed = true;
                 }
                 if last_in_slot && state.completion.is_none() {
                     state.completion = Some(marker);
-                    progressed = true;
+                    frontier_progressed = true;
                 }
-                if progressed {
-                    state.last_progress_at = now;
+                if inserted_fec || inserted_data || frontier_progressed {
+                    state
+                        .fec_sets
+                        .get_mut(&fec_set_index)
+                        .expect("the FEC set was inserted or already present")
+                        .last_progress_at = now;
                 }
+                if frontier_progressed {
+                    state.highest_window_progress_at = now;
+                }
+                state.discover_new_conservative_gaps(previous_scan_end, now);
             }
             ValidatedObservation::Coding {
                 fec_set_index,
@@ -410,24 +472,22 @@ impl RepairTracker {
                 if let Some(completion) = state.completion {
                     let represented_tail = fec_set_index.saturating_add(DATA_SHREDS_PER_FEC - 1);
                     if represented_tail > completion.index {
-                        state.block(
-                            [RepairConflict::ObservedBeyondCompletion {
-                                completion_index: completion.index,
-                                observed_index: represented_tail,
-                            }],
-                            now,
-                        );
+                        state.block([RepairConflict::ObservedBeyondCompletion {
+                            completion_index: completion.index,
+                            observed_index: represented_tail,
+                        }]);
                         return;
                     }
                 }
-                let mut progressed = match state.ensure_fec(
+                let inserted_fec = match state.ensure_fec(
                     fec_set_index,
                     merkle_root,
                     self.config.max_fec_sets_per_slot,
+                    now,
                 ) {
                     Ok(inserted) => inserted,
                     Err(conflict) => {
-                        state.block([conflict], now);
+                        state.block([conflict]);
                         return;
                     }
                 };
@@ -435,45 +495,56 @@ impl RepairTracker {
                     .first_coding_index
                     .is_some_and(|first| first != first_coding_index);
                 if coding_base_conflict {
-                    state.block([RepairConflict::FecCodingIndex { fec_set_index }], now);
+                    state.block([RepairConflict::FecCodingIndex { fec_set_index }]);
                     return;
                 }
                 let fec = state
                     .fec_sets
                     .get_mut(&fec_set_index)
                     .expect("the FEC set was inserted or already present");
+                let mut progressed = inserted_fec;
                 if fec.first_coding_index.is_none() {
                     fec.first_coding_index = Some(first_coding_index);
                     progressed = true;
                 }
                 progressed |= fec.coding_positions.insert(position);
                 if progressed {
-                    state.last_progress_at = now;
+                    fec.last_progress_at = now;
                 }
             }
         }
     }
 
-    /// Returns repair work for settled slots, ordered by slot and then data index.
+    /// Returns settled repair work in a bounded round-robin over slots, with requests within one
+    /// slot ordered deterministically by data index.
     ///
     /// This describes current need, not transport state: repeated calls can return the same request.
     /// Outstanding nonce correlation, retry backoff, peer selection, and response deadlines remain
     /// the repair transport's responsibility. Both request caps are applied before returning.
     pub fn repair_plans_due(&mut self, now: Instant) -> Vec<SlotRepairPlan> {
         self.evict_expired(now);
+        if self.slots.is_empty() {
+            self.next_poll_slot = None;
+            return Vec::new();
+        }
+
+        let slots = self.poll_order();
         let mut poll_budget = self.config.max_requests_per_poll;
         let mut plans = Vec::new();
-        for (&slot, state) in self
-            .slots
-            .iter()
-            .filter(|(_, state)| elapsed(now, state.last_progress_at) >= self.config.settle_time)
-        {
+        let mut last_visited = None;
+        for slot in slots {
+            let state = &self.slots[&slot];
             let slot_budget = self.config.max_requests_per_slot.min(poll_budget);
-            if let Some(plan) = plan_slot(slot, state, slot_budget) {
+            if let Some(plan) = plan_slot(slot, state, slot_budget, now, self.config.settle_time) {
                 poll_budget = poll_budget.saturating_sub(plan.request_count());
                 plans.push(plan);
             }
+            last_visited = Some(slot);
+            if poll_budget == 0 {
+                break;
+            }
         }
+        self.next_poll_slot = last_visited.and_then(|slot| self.slot_after(slot));
         plans
     }
 
@@ -510,9 +581,38 @@ impl RepairTracker {
             self.slots.remove(&slot);
         }
     }
+
+    fn poll_order(&self) -> Vec<u64> {
+        let start = self.next_poll_slot.unwrap_or_else(|| {
+            *self
+                .slots
+                .first_key_value()
+                .expect("nonempty slots checked by caller")
+                .0
+        });
+        self.slots
+            .range(start..)
+            .chain(self.slots.range(..start))
+            .map(|(&slot, _)| slot)
+            .collect()
+    }
+
+    fn slot_after(&self, slot: u64) -> Option<u64> {
+        self.slots
+            .range((std::ops::Bound::Excluded(slot), std::ops::Bound::Unbounded))
+            .next()
+            .or_else(|| self.slots.first_key_value())
+            .map(|(&slot, _)| slot)
+    }
 }
 
-fn plan_slot(slot: u64, state: &SlotState, request_limit: usize) -> Option<SlotRepairPlan> {
+fn plan_slot(
+    slot: u64,
+    state: &SlotState,
+    request_limit: usize,
+    now: Instant,
+    settle_time: Duration,
+) -> Option<SlotRepairPlan> {
     let completion_index = state.completion.map(|marker| marker.index);
     if !state.conflicts.is_empty() {
         return Some(SlotRepairPlan {
@@ -526,10 +626,7 @@ fn plan_slot(slot: u64, state: &SlotState, request_limit: usize) -> Option<SlotR
         });
     }
 
-    let scan_end = completion_index
-        .or(state.highest_data_index)
-        .and_then(|index| index.checked_add(1))
-        .map_or(0, |end| end.min(MAX_DATA_SHREDS_PER_SLOT as u32));
+    let scan_end = state.scan_end();
     let mut mapped = vec![false; scan_end as usize];
     let mut threshold_missing = BTreeSet::new();
     let mut conservative_missing = BTreeSet::new();
@@ -537,6 +634,9 @@ fn plan_slot(slot: u64, state: &SlotState, request_limit: usize) -> Option<SlotR
     for (&fec_set_index, fec) in &state.fec_sets {
         let fec_end = fec_set_index + DATA_SHREDS_PER_FEC;
         mark_range(&mut mapped, fec_set_index, fec_end);
+        if elapsed(now, fec.last_progress_at) < settle_time {
+            continue;
+        }
         let observed_data = state
             .data_indices
             .range(fec_set_index..fec_end)
@@ -558,22 +658,29 @@ fn plan_slot(slot: u64, state: &SlotState, request_limit: usize) -> Option<SlotR
 
     // A whole FEC set can be absent, leaving no root or parity metadata at all. Once a tail (or at
     // least a highest observed index) bounds the scan, request every uncovered hole conservatively.
-    for index in 0..scan_end {
-        if !mapped[index as usize] && !state.data_indices.contains_key(&index) {
-            conservative_missing.insert(index);
+    for (&fec_set_index, &discovered_at) in &state.conservative_gap_discovered_at {
+        if elapsed(now, discovered_at) < settle_time {
+            continue;
+        }
+        let fec_end = fec_set_index
+            .saturating_add(DATA_SHREDS_PER_FEC)
+            .min(scan_end);
+        for index in fec_set_index..fec_end {
+            if !mapped[index as usize] && !state.data_indices.contains_key(&index) {
+                conservative_missing.insert(index);
+            }
         }
     }
 
-    let highest_window_candidate =
-        completion_index
-            .is_none()
-            .then_some(RepairRequest::HighestWindowIndex {
-                slot,
-                next_expected_data_index: state
-                    .highest_data_index
-                    .and_then(|index| index.checked_add(1))
-                    .unwrap_or(0),
-            });
+    let highest_window_candidate = (completion_index.is_none()
+        && elapsed(now, state.highest_window_progress_at) >= settle_time)
+        .then_some(RepairRequest::HighestWindowIndex {
+            slot,
+            next_expected_data_index: state
+                .highest_data_index
+                .and_then(|index| index.checked_add(1))
+                .unwrap_or(0),
+        });
     let total_candidates = usize::from(highest_window_candidate.is_some())
         + threshold_missing.len()
         + conservative_missing.len();
@@ -628,7 +735,7 @@ fn validated_observation(shred: &Shred) -> Option<ValidatedObservation> {
     {
         return None;
     }
-    let merkle_root = shred.merkle_root().ok()?.to_bytes();
+    let merkle_root = shred.merkle_root().ok()?;
 
     if shred.is_data() {
         let index = shred.index();
@@ -706,7 +813,7 @@ mod tests {
     use solana_hash::Hash;
     use solana_keypair::{Keypair, Signer};
 
-    use super::{
+    use super::super::{
         repair_runtime::RepairPeer,
         repair_trust_store::{RepairTrustStore, RepairTrustStoreConfig},
     };
@@ -968,6 +1075,93 @@ mod tests {
     }
 
     #[test]
+    fn progress_in_one_fec_does_not_restart_another_fec_settle_clock() {
+        let now = Instant::now();
+        let mut tracker = RepairTracker::new(config());
+
+        observe_data(&mut tracker, 100, 0, 0, ROOT_A, false, now);
+        observe_data(&mut tracker, 100, 31, 0, ROOT_A, false, now);
+        for position in 0..29 {
+            observe_coding(&mut tracker, 100, 0, ROOT_A, 0, position, now);
+        }
+
+        let later = now + SETTLE / 2;
+        observe_data(&mut tracker, 100, 32, 32, ROOT_B, false, later);
+        observe_data(&mut tracker, 100, 63, 32, ROOT_B, true, later);
+        for position in 0..29 {
+            observe_coding(&mut tracker, 100, 32, ROOT_B, 32, position, later);
+        }
+
+        let plans = tracker.repair_plans_due(now + SETTLE);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].fec_threshold_missing_data_indices, [1]);
+        assert!(plans[0].conservative_missing_data_indices.is_empty());
+
+        let plans = tracker.repair_plans_due(later + SETTLE);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].fec_threshold_missing_data_indices, [1, 33]);
+        assert!(plans[0].conservative_missing_data_indices.is_empty());
+    }
+
+    #[test]
+    fn later_fec_progress_does_not_restart_inferred_whole_fec_gaps() {
+        let now = Instant::now();
+        let mut tracker = RepairTracker::new(config());
+        observe_data(&mut tracker, 100, 64, 64, ROOT_A, false, now);
+        observe_data(&mut tracker, 100, 95, 64, ROOT_A, true, now);
+
+        // FECs 0 and 32 were inferred absent when FEC64 first appeared. New FEC64 parity must only
+        // move FEC64's own clock, not either inferred predecessor clock.
+        observe_coding(&mut tracker, 100, 64, ROOT_A, 64, 0, now + SETTLE / 2);
+
+        let plans = tracker.repair_plans_due(now + SETTLE);
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].fec_threshold_missing_data_indices.is_empty());
+        assert_eq!(
+            plans[0].conservative_missing_data_indices,
+            (0..64).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn completed_under_threshold_fec_remains_due_past_twelve_seconds_until_expiry() {
+        let now = Instant::now();
+        let mut bounded = config();
+        bounded.slot_retention = Duration::from_secs(120);
+        let mut tracker = RepairTracker::new(bounded);
+        observe_data(&mut tracker, 100, 0, 0, ROOT_A, false, now);
+        observe_data(&mut tracker, 100, 31, 0, ROOT_A, true, now);
+        for position in 0..29 {
+            observe_coding(&mut tracker, 100, 0, ROOT_A, 0, position, now);
+        }
+
+        assert_eq!(
+            tracker.repair_plans_due(now + SETTLE)[0].fec_threshold_missing_data_indices,
+            [1]
+        );
+
+        // The old production horizon was twelve seconds. A still-incomplete FEC must remain due
+        // well beyond it, through the exact inclusive edge of the new bounded recent-slot window.
+        assert_eq!(
+            tracker.repair_plans_due(now + Duration::from_secs(13))[0]
+                .fec_threshold_missing_data_indices,
+            [1]
+        );
+        assert_eq!(
+            tracker.repair_plans_due(now + bounded.slot_retention)[0]
+                .fec_threshold_missing_data_indices,
+            [1]
+        );
+
+        assert!(
+            tracker
+                .repair_plans_due(now + bounded.slot_retention + Duration::from_nanos(1))
+                .is_empty()
+        );
+        assert_eq!(tracker.tracked_slot_count(), 0);
+    }
+
+    #[test]
     fn different_merkle_roots_block_fec_repair() {
         let now = Instant::now();
         let mut tracker = RepairTracker::new(config());
@@ -1085,6 +1279,48 @@ mod tests {
                 .sum::<usize>(),
             4
         );
+    }
+
+    #[test]
+    fn bounded_polls_rotate_past_old_work_rejected_by_later_transport_filters() {
+        let now = Instant::now();
+        let mut bounded = config();
+        bounded.max_requests_per_slot = 1;
+        bounded.max_requests_per_poll = 1;
+        let mut tracker = RepairTracker::new(bounded);
+        for slot in [100, 101, 102] {
+            observe_data(&mut tracker, slot, 0, 0, ROOT_A, false, now);
+        }
+
+        // Model the production ordering: the pure tracker applies its bound first, then trust and
+        // runtime state reject work that is untrusted, outstanding, or cooling down. Slot 102 must
+        // still become visible within one bounded round instead of old slot 100 consuming every
+        // poll forever.
+        let eligible = |request: &RepairRequest| {
+            matches!(request, RepairRequest::HighestWindowIndex { slot: 102, .. })
+        };
+        assert!(
+            tracker
+                .repair_requests_due(now + SETTLE)
+                .iter()
+                .all(|request| !eligible(request))
+        );
+        assert!(
+            tracker
+                .repair_requests_due(now + SETTLE)
+                .iter()
+                .all(|request| !eligible(request))
+        );
+        assert!(
+            tracker
+                .repair_requests_due(now + SETTLE)
+                .iter()
+                .any(eligible)
+        );
+        assert!(matches!(
+            tracker.repair_requests_due(now + SETTLE).as_slice(),
+            [RepairRequest::HighestWindowIndex { slot: 100, .. }]
+        ));
     }
 
     #[test]

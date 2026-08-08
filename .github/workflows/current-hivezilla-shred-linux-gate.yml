@@ -1,0 +1,433 @@
+name: Current Hivezilla shred Linux gate
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/current-hivezilla-shred-linux-gate.yml
+      - .github/workflows/publish-current-shred-images.yml
+      - Cargo.lock
+      - Cargo.toml
+      - .dockerignore
+      - crates/**
+      - docker-compose.hivezilla-shred-pull-source.yml
+      - docker-compose.hivezilla-shred-pull-source-gc-canary.yml
+      - services/hivezilla/**
+      - docs/operations/current-hivezilla-shred-hardening-rollout.md
+      - docs/operations/raw-shred-nas-replication.md
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/current-hivezilla-shred-linux-gate.yml
+      - .github/workflows/publish-current-shred-images.yml
+      - Cargo.lock
+      - Cargo.toml
+      - .dockerignore
+      - crates/**
+      - docker-compose.hivezilla-shred-pull-source.yml
+      - docker-compose.hivezilla-shred-pull-source-gc-canary.yml
+      - services/hivezilla/**
+      - docs/operations/current-hivezilla-shred-hardening-rollout.md
+      - docs/operations/raw-shred-nas-replication.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: current-hivezilla-shred-linux-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  operational-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate source-trial and clone-only GC contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.gc == {"enabled": false}' \
+            services/hivezilla/config/raw-shred-pull-source.example.json >/dev/null
+          jq -e '
+            .gc == {
+              "enabled": true,
+              "control_uid": 0,
+              "recorder_gid": 10001,
+              "max_retirements_per_process": 1
+            }
+          ' services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json >/dev/null
+          jq -e '
+            .bind == "127.0.0.1:19443"
+              and .origin_node_id == "hivezilla-shred-gc-canary"
+              and .source_id == "shred-reader-gc-canary"
+              and .journal_id == "__GC_CANARY_JOURNAL_ID__"
+              and .recorder_status_file == "/status/gc-canary-recorder.json"
+              and .cumulative_ack_wal_file == "/control/gc-canary-ack.wal"
+              and .expected_primary_id == "blockzilla-gc-canary"
+              and .trusted_receipt_keys == [{
+                "key_id": "gc-canary-receipt",
+                "public_key_file": "/run/secrets/hivezilla_shred_pull_receipt_public_key"
+              }]
+          ' services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json >/dev/null
+          jq -s -e '
+            .[0] as $live | .[1] as $canary
+            | $live.bind != $canary.bind
+              and $live.origin_node_id != $canary.origin_node_id
+              and $live.source_id != $canary.source_id
+              and $live.journal_id != $canary.journal_id
+              and $live.recorder_status_file != $canary.recorder_status_file
+              and $live.cumulative_ack_wal_file != $canary.cumulative_ack_wal_file
+              and $live.ack_status_file != $canary.ack_status_file
+              and $live.expected_primary_id != $canary.expected_primary_id
+              and $live.trusted_receipt_keys[0].key_id
+                != $canary.trusted_receipt_keys[0].key_id
+          ' \
+            services/hivezilla/config/raw-shred-pull-source.example.json \
+            services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json >/dev/null
+          jq -e '.source.protocol == "v2"' \
+            services/hivezilla/config/raw-shred-pull-client.example.json >/dev/null
+          jq -e '
+            [.sources[] | select(.enabled == true)] as $enabled
+            | ($enabled | length) == 1
+              and $enabled[0].id == "shred-reader-loopback"
+              and $enabled[0].input.kind == "shred_udp"
+              and $enabled[0].input.bind == "127.0.0.1:18003"
+              and (
+                $enabled[0].input.durable_source_allowlist | sort_by(.name)
+              ) == [
+                {"name": "blue", "address": "127.0.0.1:18004"},
+                {"name": "final", "address": "127.0.0.1:18204"},
+                {"name": "green", "address": "127.0.0.1:18104"}
+              ]
+          ' services/hivezilla/config/ingest-shred-udp.example.json >/dev/null
+
+          base=docker-compose.hivezilla-shred-pull-source.yml
+          canary=docker-compose.hivezilla-shred-pull-source-gc-canary.yml
+          if docker compose --file "$base" config --quiet 2>/dev/null; then
+            echo "source trial accepted missing digest, volumes, config, or credentials" >&2
+            exit 1
+          fi
+
+          digest="sha256:$(printf '0%.0s' {1..64})"
+          export HIVEZILLA_SHRED_IMAGE_DIGEST="$digest"
+          export HIVEZILLA_SHRED_DATA_VOLUME=live-data
+          export HIVEZILLA_SHRED_STATUS_VOLUME=live-status
+          export HIVEZILLA_SHRED_CONTROL_VOLUME=live-control
+          export HIVEZILLA_SHRED_PULL_CONFIG_PATH=./services/hivezilla/config/raw-shred-pull-source.example.json
+          export HIVEZILLA_SHRED_PULL_SERVER_CERTIFICATE_PATH=services/hivezilla/config/raw-shred-pull-source.example.json
+          export HIVEZILLA_SHRED_PULL_SERVER_PRIVATE_KEY_PATH=services/hivezilla/config/raw-shred-pull-source.example.json
+          export HIVEZILLA_SHRED_PULL_CLIENT_CA_PATH=services/hivezilla/config/raw-shred-pull-source.example.json
+          export HIVEZILLA_SHRED_PULL_ALLOWED_NODES_PATH=services/hivezilla/config/raw-shred-pull-source.example.json
+          export HIVEZILLA_SHRED_PULL_RECEIPT_PUBLIC_KEY_PATH=services/hivezilla/config/raw-shred-pull-source.example.json
+
+          rendered="$(docker compose --file "$base" config --format json)"
+          jq -e --arg image "ghcr.io/fernolabs/blockzilla-hivezilla-shred@$digest" '
+            .services["hivezilla-shred-pull-source"] as $source
+            | $source.image == $image
+              and $source.platform == "linux/amd64"
+              and $source.user == "0:0"
+              and ($source.group_add | index("10001")) != null
+              and ($source.cap_add | index("DAC_READ_SEARCH")) != null
+              and $source.read_only == true
+              and $source.restart == "unless-stopped"
+              and ([ $source.volumes[] | select(.target == "/data") ][0].read_only == true)
+              and ([ $source.volumes[] | select(.target == "/status") ][0].read_only == true)
+              and ([ $source.volumes[] | select(.target == "/control") ][0].read_only != true)
+          ' <<<"$rendered" >/dev/null
+          jq -e '
+            .volumes["hivezilla-shred-data"].name == "live-data"
+              and .volumes["hivezilla-shred-status"].name == "live-status"
+              and .volumes["hivezilla-shred-control"].name == "live-control"
+          ' <<<"$rendered" >/dev/null
+
+          export HIVEZILLA_SHRED_GC_CANARY_DATA_CLONE_VOLUME=clone-data
+          export HIVEZILLA_SHRED_GC_CANARY_STATUS_CLONE_VOLUME=clone-status
+          export HIVEZILLA_SHRED_GC_CANARY_CONTROL_CLONE_VOLUME=clone-control
+          export HIVEZILLA_SHRED_GC_CANARY_SERVER_CERTIFICATE_PATH=services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json
+          export HIVEZILLA_SHRED_GC_CANARY_SERVER_PRIVATE_KEY_PATH=services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json
+          export HIVEZILLA_SHRED_GC_CANARY_CLIENT_CA_PATH=services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json
+          export HIVEZILLA_SHRED_GC_CANARY_ALLOWED_NODES_PATH=services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json
+          export HIVEZILLA_SHRED_GC_CANARY_RECEIPT_PUBLIC_KEY_PATH=services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json
+          export HIVEZILLA_SHRED_PULL_CONFIG_PATH=./services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json
+          rendered_inert="$(
+            docker compose --file "$base" --file "$canary" config --format json
+          )"
+          jq -e '(.services // {}) | has("hivezilla-shred-pull-source") | not' \
+            <<<"$rendered_inert" >/dev/null
+          rendered_canary="$(
+            docker compose --profile gc-canary \
+              --file "$base" --file "$canary" config --format json
+          )"
+          jq -e '
+            .services["hivezilla-shred-pull-source"] as $source
+            | $source.restart == "no"
+              and ($source.profiles | index("gc-canary")) != null
+              and ([ $source.volumes[] | select(.target == "/data") ][0].read_only != true)
+              and .volumes["hivezilla-shred-data"].name == "clone-data"
+              and .volumes["hivezilla-shred-status"].name == "clone-status"
+              and .volumes["hivezilla-shred-control"].name == "clone-control"
+              and ([.secrets[] | .file | endswith("raw-shred-pull-source-gc-canary.example.json")] | all)
+          ' <<<"$rendered_canary" >/dev/null
+
+      - name: Validate host socket ceilings
+        shell: bash
+        run: |
+          set -euo pipefail
+          sysctl_file=services/hivezilla/host/90-hivezilla-shred-sockets.conf
+          test "$(grep -Ec '^net\.core\.rmem_max = 134217728$' "$sysctl_file")" = 1
+          test "$(grep -Ec '^net\.core\.wmem_max = 134217728$' "$sysctl_file")" = 1
+          if grep -Eq \
+            '^[[:space:]]*net\.core\.(rmem_default|netdev_max_backlog)[[:space:]]*=' \
+            "$sysctl_file"; then
+            echo "host asset changes an unproven global default" >&2
+            exit 1
+          fi
+
+      - name: Validate integrated receiver deployment settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          env_example=services/hivezilla/config/shred-reader.env.example
+          grep -F 'REPAIR_UDP_RECV_BUFFER_BYTES=67108864' "$env_example"
+          grep -F 'REPAIR_RESPONSE_QUEUE_CAPACITY=4096' "$env_example"
+          grep -F '# SHRED_FORWARD_BIND_ADDR=127.0.0.1:18104' "$env_example"
+
+      - name: Validate manual SHA-only publisher contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          publisher=.github/workflows/publish-current-shred-images.yml
+          grep -F 'workflow_dispatch:' "$publisher"
+          grep -F 'packages: write' "$publisher"
+          test "$(grep -Fc 'environment: hivezilla-shred-release' "$publisher")" = 2
+          grep -F 'github.event.repository.default_branch' "$publisher"
+          test "$(grep -Fc 'refs/heads/$DEFAULT_BRANCH' "$publisher")" = 2
+          test "$(grep -Fc 'refs/remotes/origin/$DEFAULT_BRANCH' "$publisher")" = 2
+          grep -F 'published-image-digests.json' "$publisher"
+          grep -F 'ghcr.io/fernolabs/blockzilla-hivezilla-shred' "$publisher"
+          grep -F 'ghcr.io/fernolabs/blockzilla-hivezilla-shred-status' "$publisher"
+          if grep -F 'blockzilla-shred-reader' "$publisher"; then
+            echo "publisher revived the retired standalone shred-reader image" >&2
+            exit 1
+          fi
+          if grep -Eq ':(edge|latest)([^[:alnum:]_-]|$)' "$publisher"; then
+            echo "publisher contains a mutable edge/latest tag" >&2
+            exit 1
+          fi
+          action_count=0
+          while IFS= read -r action_ref; do
+            action_count=$((action_count + 1))
+            action="${action_ref%@*}"
+            revision="${action_ref##*@}"
+            case "$action" in
+              actions/checkout|actions/upload-artifact|docker/setup-buildx-action|\
+              docker/login-action|docker/build-push-action)
+                ;;
+              *)
+                echo "publisher uses an unapproved action: $action" >&2
+                exit 1
+                ;;
+            esac
+            if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "publisher action is not pinned by a full commit SHA: $action_ref" >&2
+              exit 1
+            fi
+          done < <(
+            sed -nE \
+              's/^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*([^[:space:]#]+).*/\1/p' \
+              "$publisher"
+          )
+          test "$action_count" -gt 0
+
+  hivezilla-shred-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Verify the explicit runtime CPU floor
+        run: grep -qw aes /proc/cpuinfo
+
+      - name: Reclaim runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+
+      - name: Build and inspect integrated Hivezilla shred image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="hivezilla-shred-ci:$GITHUB_SHA"
+          DOCKER_BUILDKIT=1 docker build \
+            --target runtime \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$image" \
+            --file services/hivezilla/Dockerfile.shred \
+            .
+          docker run --rm --entrypoint ldd "$image" /usr/local/bin/hivezilla \
+            | tee "$RUNNER_TEMP/hivezilla-shred-ldd.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/hivezilla-shred-ldd.txt"; then
+            exit 1
+          fi
+          help="$(docker run --rm "$image" --help)"
+          grep -F 'serve-shred-reader' <<<"$help"
+          grep -F 'record-shred-udp' <<<"$help"
+          grep -F 'serve-shred-spool-pull-source' <<<"$help"
+          grep -F 'serve-shred-status' <<<"$help"
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          test "$(docker run --rm --entrypoint id "$image" -g)" = 10001
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$GITHUB_SHA"
+
+      - name: Smoke-test the integrated receiver and orderly stop
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="hivezilla-shred-ci:$GITHUB_SHA"
+          container="hivezilla-shred-reader-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm --force "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach \
+            --name "$container" \
+            --publish 127.0.0.1::19090 \
+            --tmpfs /data:rw,noexec,nosuid,size=16m,uid=10001,gid=10001,mode=0700 \
+            --env APP_ENV=production \
+            --env SOLANA_ENTRYPOINTS=127.0.0.1:8001 \
+            --env ADVERTISED_IP=1.1.1.1 \
+            --env SHRED_VERSION=50093 \
+            --env REQUIRE_REACHABILITY=false \
+            --env IDENTITY_PATH=/data/identity.json \
+            --env METRICS_ADDR=0.0.0.0:19090 \
+            --env SHRED_FORWARD_ADDRS=127.0.0.1:18003 \
+            --env SHRED_FORWARD_BIND_ADDR=127.0.0.1:18104 \
+            --env REPAIR_ENABLED=false \
+            --env REPAIR_UDP_RECV_BUFFER_BYTES=67108864 \
+            --env REPAIR_RESPONSE_QUEUE_CAPACITY=4096 \
+            "$image" serve-shred-reader
+          metrics_port="$(docker port "$container" 19090/tcp | sed -n 's/.*://p')"
+          test -n "$metrics_port"
+          for _ in {1..60}; do
+            if curl --fail --silent "http://127.0.0.1:$metrics_port/healthz" >/dev/null; then
+              break
+            fi
+            if test "$(docker inspect --format '{{.State.Running}}' "$container")" != true; then
+              docker logs "$container"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent "http://127.0.0.1:$metrics_port/healthz" >/dev/null
+          docker exec "$container" test -s /data/identity.json
+          # The offline smoke injects no gossip peer or TVU traffic, so readiness must fail closed.
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            "http://127.0.0.1:$metrics_port/readyz")" = 503
+          timeout --signal=KILL 60s docker stop --time 59 "$container" >/dev/null
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
+
+  hivezilla-shred-status-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Verify the explicit runtime CPU floor
+        run: grep -qw aes /proc/cpuinfo
+
+      - name: Reclaim runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+
+      - name: Build and inspect Rust status image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="hivezilla-shred-status-ci:$GITHUB_SHA"
+          DOCKER_BUILDKIT=1 docker build \
+            --target runtime \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$image" \
+            --file services/hivezilla/Dockerfile.shred-status \
+            .
+          docker run --rm --entrypoint ldd "$image" /usr/local/bin/hivezilla \
+            | tee "$RUNNER_TEMP/hivezilla-shred-status-ldd.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/hivezilla-shred-status-ldd.txt"; then
+            exit 1
+          fi
+          docker run --rm "$image" --help >/dev/null
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          test "$(docker run --rm --entrypoint id "$image" -g)" = 10001
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$GITHUB_SHA"
+
+  reconstruction-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Verify the explicit runtime CPU floor
+        run: grep -qw aes /proc/cpuinfo
+
+      - name: Reclaim runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+
+      - name: Test reconstruction build
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --target test \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --file services/hivezilla/Dockerfile.shred-audit \
+            .
+
+      - name: Build and inspect read-only reconstruction image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="hivezilla-shred-audit-ci:$GITHUB_SHA"
+          DOCKER_BUILDKIT=1 docker build \
+            --target runtime \
+            --build-arg "BUILD_REVISION=$GITHUB_SHA" \
+            --tag "$image" \
+            --file services/hivezilla/Dockerfile.shred-audit \
+            .
+          for binary in shred-epoch-audit repair-wal-inspect; do
+            docker run --rm --entrypoint ldd "$image" "/usr/local/bin/$binary" \
+              | tee "$RUNNER_TEMP/$binary-ldd.txt"
+            if grep -q 'not found' "$RUNNER_TEMP/$binary-ldd.txt"; then
+              exit 1
+            fi
+            docker run --rm --entrypoint "/usr/local/bin/$binary" "$image" --help \
+              >/dev/null
+          done
+          test "$(docker run --rm --entrypoint id "$image" -u)" = 10001
+          test "$(docker run --rm --entrypoint id "$image" -g)" = 10001
+          revision="$(docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          test "$revision" = "$GITHUB_SHA"

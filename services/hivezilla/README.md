@@ -181,14 +181,19 @@ hivezilla serve-shred-status \
   --cors-origin https://watcher.blockzilla.dev
 ```
 
-The supplied `docker-compose.hivezilla-shred.dokploy.yml` keeps metrics on host
-loopback, mounts recorder status read-only into the Rust collector, and exposes
-only the sanitized JSON through a separate read-only web container.
+The Rust status collector has its own digest-pinned image, but no deployment-platform-specific
+manifest is authoritative in this repository. Keep receiver metrics on host loopback, mount
+recorder status read-only into the collector, and expose only its sanitized snapshot.
 
 `shred-reader` itself is now merged into the Hivezilla binary; use
 `hivezilla serve-shred-reader` (with environment variables described in
 `services/hivezilla/config/shred-reader.env.example`) to run the same gossip/TVU runtime without
-a separate service process.
+a separate binary or image. The
+[current hardening rollout](../../docs/operations/current-hivezilla-shred-hardening-rollout.md)
+documents the Linux image gate, manual SHA-only publisher, host socket ceiling, and overlap
+requirements. Production receiver deployments must carry the fixed forwarding source binding and
+bounded repair ingress settings from that example (`SHRED_FORWARD_BIND_ADDR`,
+`REPAIR_UDP_RECV_BUFFER_BYTES`, and `REPAIR_RESPONSE_QUEUE_CAPACITY`).
 
 This is a bounded raw shred recorder, not block reconstruction or indexing. Its
 example spool fails closed at 20 GiB, and the recorder itself never deletes.
@@ -198,8 +203,12 @@ the NAS opens an mTLS pull connection to Hetzner and writes the same compressed
 shred records to its own durable spool. In that legacy deployment, after the
 exact NAS **staging ACK** crosses the source's cumulative-ACK WAL fsync boundary,
 the pull source may retire only sealed segments strictly before the retained
-ACK-anchor segment. This is not a V1 custody ACK and must not enable V1 GC. An
-unsigned, unpersisted, mismatched, or merely visible ACK never enables deletion.
+ACK-anchor segment. This is not a V1 custody ACK and must not enable V1 GC. The checked source
+trial keeps `gc.enabled=false` and mounts the live spool read-only; the only supplied GC canary is
+default-off and clone-only. An unsigned, unpersisted, mismatched, or merely visible ACK never
+enables deletion. See the
+[NAS replication runbook](../../docs/operations/raw-shred-nas-replication.md) before operating the
+pull source.
 
 The `scripts/` directory contains portable launch, PKI, object-storage, and
 monitoring helpers. They intentionally contain no deployment manifest or real

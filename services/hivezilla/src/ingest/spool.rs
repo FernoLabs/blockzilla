@@ -14,13 +14,16 @@ use std::{
 #[cfg(unix)]
 use std::os::{
     fd::AsRawFd,
-    unix::fs::{OpenOptionsExt, PermissionsExt},
+    unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use super::dedup::{ContentDigest, IngressRecordMeta, compute_content_digest};
+use super::{
+    dedup::{ContentDigest, IngressRecordMeta, compute_content_digest},
+    replication::DurableGcAuthorization,
+};
 
 const SEGMENT_MAGIC: &[u8; 8] = b"BZIWAL01";
 const FRAME_MAGIC: &[u8; 4] = b"BZIF";
@@ -33,6 +36,14 @@ const MAX_METADATA_BYTES: usize = 64 * 1024;
 const RECOVERY_BUFFER_BYTES: usize = 64 * 1024;
 const RETIRED_PREFIX_MARKER_FILE: &str = ".retired-prefix.v1.json";
 const RETIRED_PREFIX_MARKER_MAX_BYTES: u64 = 64 * 1024;
+const RETENTION_LOCK_FILE: &str = ".retention.lock";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpoolRetiredPrefixTail {
+    location: SpoolLocation,
+    metadata: IngressRecordMeta,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +54,31 @@ struct SpoolRetiredPrefixMarker {
     acknowledged_through_sequence: u64,
     acknowledged_through_content_digest: ContentDigest,
     acknowledgement_anchor: SpoolLocation,
+    /// Present in schema v2. It binds a transcoded ACK to the exact physical local frame.
+    #[serde(default)]
+    acknowledgement_anchor_metadata: Option<IngressRecordMeta>,
+    /// Present in schema v2. It proves the removed segment's complete tail and the next retained
+    /// segment continue directly from one another.
+    #[serde(default)]
+    retired_tail: Option<SpoolRetiredPrefixTail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SpoolSegmentRetirementOutcome {
+    Busy,
+    NothingToRetire,
+    Retired(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RetentionLockMode {
+    Shared,
+    ExclusiveNonblocking,
+}
+
+#[derive(Debug)]
+struct RetentionGuard {
+    _file: File,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +96,17 @@ pub struct SpoolJournalIdentity {
     pub origin_node_id: String,
     pub source_id: String,
     pub journal_id: [u8; 16],
+}
+
+/// Unix ownership boundary required before a pull source may retire raw-spool segments.
+///
+/// The recorder owns segment files while the control UID owns every identity directory, the
+/// sticky/setgid journal leaf, and retention control files. This prevents the recorder from
+/// replacing a trusted marker or lock through ordinary directory writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpoolGcNamespacePolicy {
+    pub control_uid: u32,
+    pub recorder_gid: u32,
 }
 
 impl Default for SpoolOptions {
@@ -180,6 +227,156 @@ pub fn spool_journal_dir_path(
         .join(hex_journal_id(identity.journal_id)))
 }
 
+/// Validate the privilege-separated namespace required by destructive spool retention.
+///
+/// This deliberately requires an already-created retention lock. A recorder may lazily create a
+/// cooperative lock while GC is disabled, but that state cannot authorize deletion: an operator
+/// must first replace it with a control-UID-owned file and protect the full identity path.
+pub fn validate_spool_gc_namespace(
+    spool_root: impl AsRef<Path>,
+    identity: &SpoolJournalIdentity,
+    policy: SpoolGcNamespacePolicy,
+) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (spool_root.as_ref(), identity, policy);
+        bail!("raw-spool GC namespace protection requires Linux")
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `geteuid` has no preconditions and reads the current process credential.
+        let effective_uid = unsafe { libc::geteuid() };
+        ensure!(
+            effective_uid == policy.control_uid,
+            "raw-spool GC control UID does not match the effective process UID"
+        );
+        ensure!(
+            policy.control_uid == 0,
+            "raw-spool GC currently requires the root control UID"
+        );
+        ensure!(
+            policy.recorder_gid != 0,
+            "raw-spool GC recorder group must be unprivileged"
+        );
+        let spool_root = spool_root.as_ref();
+        ensure!(
+            spool_root.is_absolute() && spool_root != Path::new("/"),
+            "raw-spool GC root must be absolute and non-root"
+        );
+        for path in spool_root.ancestors().skip(1) {
+            let metadata = fs::symlink_metadata(path).with_context(|| {
+                format!("inspect raw-spool GC anchor directory {}", path.display())
+            })?;
+            let mode = metadata.mode();
+            let recorder_can_traverse =
+                mode & 0o001 != 0 || (metadata.gid() == policy.recorder_gid && mode & 0o010 != 0);
+            let replacement_is_blocked = mode & 0o022 == 0 || mode & 0o1000 != 0;
+            ensure!(
+                metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && (metadata.uid() == 0 || metadata.uid() == policy.control_uid)
+                    && recorder_can_traverse
+                    && replacement_is_blocked,
+                "raw-spool GC anchor ownership or permissions are unsafe: {}",
+                path.display()
+            );
+        }
+        let journal_dir = spool_journal_dir_path(spool_root, identity)?;
+        let protected_directories = [
+            spool_root.to_path_buf(),
+            spool_root.join(&identity.cluster_id),
+            spool_root
+                .join(&identity.cluster_id)
+                .join(&identity.origin_node_id),
+            spool_root
+                .join(&identity.cluster_id)
+                .join(&identity.origin_node_id)
+                .join(&identity.source_id),
+        ];
+        for path in protected_directories {
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect protected spool directory {}", path.display()))?;
+            ensure!(
+                metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.uid() == policy.control_uid
+                    && metadata.gid() == policy.recorder_gid
+                    && metadata.mode() & 0o700 == 0o700
+                    && metadata.mode() & 0o050 == 0o050
+                    && metadata.mode() & 0o022 == 0,
+                "protected spool directory ownership or permissions are unsafe: {}",
+                path.display()
+            );
+        }
+
+        let journal_metadata = fs::symlink_metadata(&journal_dir).with_context(|| {
+            format!("inspect protected spool journal {}", journal_dir.display())
+        })?;
+        ensure!(
+            journal_metadata.is_dir()
+                && !journal_metadata.file_type().is_symlink()
+                && journal_metadata.uid() == policy.control_uid
+                && journal_metadata.gid() == policy.recorder_gid
+                && journal_metadata.mode() & 0o7777 == 0o3770,
+            "spool journal must be control-owned mode 03770: {}",
+            journal_dir.display()
+        );
+
+        validate_gc_control_file(
+            &journal_dir.join(RETENTION_LOCK_FILE),
+            policy,
+            "retention lock",
+            false,
+        )?;
+        validate_gc_control_file(
+            &journal_dir.join(RETIRED_PREFIX_MARKER_FILE),
+            policy,
+            "retired-prefix marker",
+            true,
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_gc_control_file(
+    path: &Path,
+    policy: SpoolGcNamespacePolicy,
+    label: &str,
+    optional: bool,
+) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if optional && error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect raw-spool {label} {}", path.display()));
+        }
+    };
+    validate_gc_control_metadata(&metadata, policy, label, path)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_gc_control_metadata(
+    metadata: &fs::Metadata,
+    policy: SpoolGcNamespacePolicy,
+    label: &str,
+    path: &Path,
+) -> Result<()> {
+    ensure!(
+        metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.nlink() == 1
+            && metadata.uid() == policy.control_uid
+            && metadata.gid() == policy.recorder_gid
+            && metadata.mode() & 0o7777 == 0o640,
+        "raw-spool {label} ownership or permissions are unsafe: {}",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Read-only validation result that keeps the journal's exclusive writer lock held.
 ///
 /// Holding the lock makes the reported durable tail stable for the lifetime of this value. The
@@ -190,6 +387,7 @@ pub struct LockedSpoolAudit {
     journal_dir: PathBuf,
     last_record: Option<DurableSpoolRecord>,
     incomplete_tail_bytes: u64,
+    _retention_guard: RetentionGuard,
     _journal_lock: File,
 }
 
@@ -210,6 +408,9 @@ impl LockedSpoolAudit {
             .join(&identity.origin_node_id)
             .join(&identity.source_id)
             .join(hex_journal_id(identity.journal_id));
+
+        let retention_guard = acquire_retention_guard(&journal_dir, RetentionLockMode::Shared)?
+            .context("shared spool retention lock unexpectedly unavailable")?;
 
         let lock_path = journal_dir.join("writer.lock");
         let journal_lock = open_regular_file_read_only(&lock_path)?;
@@ -262,6 +463,7 @@ impl LockedSpoolAudit {
             journal_dir,
             last_record,
             incomplete_tail_bytes,
+            _retention_guard: retention_guard,
             _journal_lock: journal_lock,
         })
     }
@@ -321,6 +523,8 @@ impl SpoolWriter {
             sync_directory(&journal_dir)?;
         }
 
+        let _retention_guard = acquire_retention_guard(&journal_dir, RetentionLockMode::Shared)?
+            .context("shared spool retention lock unexpectedly unavailable")?;
         let segment_ids = segment_ids(&journal_dir, &identity, options.max_record_bytes)?;
         let mut last_record = None;
         if segment_ids.len() > 1 {
@@ -396,6 +600,8 @@ impl SpoolWriter {
             sync_directory(&journal_dir)?;
         }
 
+        let _retention_guard = acquire_retention_guard(&journal_dir, RetentionLockMode::Shared)?
+            .context("shared spool retention lock unexpectedly unavailable")?;
         let segment_ids = segment_ids(&journal_dir, &identity, options.max_record_bytes)?;
         ensure!(
             checkpoint.is_some() || segment_ids.len() <= 1,
@@ -918,6 +1124,7 @@ struct RecoveredSegment {
     valid_len: u64,
     first_record: Option<DurableSpoolRecord>,
     last_record: Option<DurableSpoolRecord>,
+    exact_sequence_contiguous: bool,
 }
 
 fn recover_segment(
@@ -943,6 +1150,7 @@ fn recover_segment(
     let mut valid_len = SEGMENT_HEADER_LEN;
     let mut first_record = None;
     let mut last_record = None;
+    let mut exact_sequence_contiguous = true;
     loop {
         let frame_offset = valid_len;
         let mut frame_magic = [0u8; 4];
@@ -1050,6 +1258,7 @@ fn recover_segment(
                     valid_len,
                     first_record,
                     last_record,
+                    exact_sequence_contiguous,
                 });
             }
             crc.update(&buffer[..chunk]);
@@ -1100,6 +1309,11 @@ fn recover_segment(
         };
         if let Some(previous) = last_record.as_ref() {
             ensure_record_follows(previous, &recovered_record)?;
+            if previous.metadata.observation.sequence.checked_add(1)
+                != Some(recovered_record.metadata.observation.sequence)
+            {
+                exact_sequence_contiguous = false;
+            }
         }
         if first_record.is_none() {
             first_record = Some(recovered_record.clone());
@@ -1110,6 +1324,7 @@ fn recover_segment(
         valid_len,
         first_record,
         last_record,
+        exact_sequence_contiguous,
     })
 }
 
@@ -1370,6 +1585,8 @@ where
         "spool snapshot record limit must be non-zero"
     );
     let journal_dir = spool_journal_dir_path(spool_root, &identity)?;
+    let _retention_guard = acquire_retention_guard(&journal_dir, RetentionLockMode::Shared)?
+        .context("shared spool retention lock unexpectedly unavailable")?;
     let segment_ids = segment_ids(&journal_dir, &identity, max_record_bytes)?;
     ensure!(
         !segment_ids.is_empty(),
@@ -1561,35 +1778,83 @@ fn read_exact_or_incomplete_tail<R: Read>(
     }
 }
 
-/// Retire at most one sealed segment strictly before a durably acknowledged record.
+/// Retire at most one fully validated sealed segment strictly before a durable ACK capability.
 ///
-/// The acknowledged record's segment is retained as a restart anchor. Before removing any file we
-/// durably publish a marker authorizing the missing prefix; readers otherwise continue to require a
-/// journal to begin at segment zero. Repeating this operation is idempotent and advances the marker
-/// monotonically as later ACKs cross segment boundaries.
+/// The ACK WAL capability, retention lock, complete candidate scan, exact successor proof, and
+/// durable prefix marker are all required before unlinking. The acknowledged physical frame stays
+/// retained as a restart anchor. A pass is deliberately bounded to one segment.
+#[cfg(test)]
 pub(crate) fn retire_one_spool_segment_before_ack(
     spool_root: impl AsRef<Path>,
     identity: &SpoolJournalIdentity,
     max_record_bytes: u64,
-    acknowledged_through_sequence: u64,
-    acknowledged_through_content_digest: ContentDigest,
-    acknowledgement_anchor: SpoolLocation,
-) -> Result<Option<PathBuf>> {
+    authorization: &DurableGcAuthorization,
+) -> Result<SpoolSegmentRetirementOutcome> {
+    retire_one_spool_segment_before_ack_inner(
+        spool_root,
+        identity,
+        max_record_bytes,
+        authorization,
+        None,
+    )
+}
+
+/// Production retention variant that revalidates the privilege-separated namespace while the
+/// exclusive retention lock is held and accepts only a control-owned prefix marker.
+pub(crate) fn retire_one_spool_segment_before_ack_in_namespace(
+    spool_root: impl AsRef<Path>,
+    identity: &SpoolJournalIdentity,
+    max_record_bytes: u64,
+    authorization: &DurableGcAuthorization,
+    namespace_policy: SpoolGcNamespacePolicy,
+) -> Result<SpoolSegmentRetirementOutcome> {
+    retire_one_spool_segment_before_ack_inner(
+        spool_root,
+        identity,
+        max_record_bytes,
+        authorization,
+        Some(namespace_policy),
+    )
+}
+
+fn retire_one_spool_segment_before_ack_inner(
+    spool_root: impl AsRef<Path>,
+    identity: &SpoolJournalIdentity,
+    max_record_bytes: u64,
+    authorization: &DurableGcAuthorization,
+    namespace_policy: Option<SpoolGcNamespacePolicy>,
+) -> Result<SpoolSegmentRetirementOutcome> {
     ensure!(
         max_record_bytes > 0,
         "spool retirement record-byte limit must be non-zero"
     );
+    let spool_root = spool_root.as_ref();
     let journal_dir = spool_journal_dir_path(spool_root, identity)?;
+    let Some(_retention_guard) =
+        acquire_retention_guard(&journal_dir, RetentionLockMode::ExclusiveNonblocking)?
+    else {
+        return Ok(SpoolSegmentRetirementOutcome::Busy);
+    };
+    if let Some(policy) = namespace_policy {
+        validate_spool_gc_namespace(spool_root, identity, policy)?;
+    }
+
+    let ack = authorization.ack();
+    ensure!(
+        ack.stream.cluster_id == identity.cluster_id
+            && ack.stream.origin_node_id == identity.origin_node_id
+            && ack.stream.source_id == identity.source_id
+            && ack.stream.journal_id == identity.journal_id,
+        "spool ACK retirement authorization belongs to a different journal"
+    );
+    let acknowledgement_anchor = authorization.local_location();
     let anchor = read_spool_record(&journal_dir, acknowledgement_anchor, max_record_bytes)
         .context("read spool ACK retirement anchor")?;
     ensure_spool_record_identity(&anchor, identity)?;
     ensure!(
-        anchor.metadata.observation.sequence == acknowledged_through_sequence,
-        "spool ACK retirement anchor sequence does not match durable ACK"
-    );
-    ensure!(
-        anchor.metadata.content_digest == acknowledged_through_content_digest,
-        "spool ACK retirement anchor digest does not match durable ACK"
+        anchor.metadata == *authorization.local_metadata()
+            && anchor.metadata.observation.sequence == ack.through_sequence,
+        "spool ACK retirement anchor no longer matches its durable ACK-WAL binding"
     );
 
     let segment_ids = segment_ids(&journal_dir, identity, max_record_bytes)?;
@@ -1603,27 +1868,66 @@ pub(crate) fn retire_one_spool_segment_before_ack(
         "spool ACK retirement anchor segment is not retained"
     );
     if oldest >= acknowledgement_anchor.segment_id {
-        return Ok(None);
+        return Ok(SpoolSegmentRetirementOutcome::NothingToRetire);
     }
 
+    let successor_id = oldest
+        .checked_add(1)
+        .context("spool retirement successor id overflow")?;
+    ensure!(
+        segment_ids.binary_search(&successor_id).is_ok(),
+        "spool retirement candidate has no contiguous retained successor"
+    );
+    let candidate = recover_complete_segment(
+        &journal_dir,
+        oldest,
+        max_record_bytes,
+        identity,
+        "spool retirement candidate",
+    )?;
+    let candidate_tail = candidate
+        .last_record
+        .context("cannot retire an empty spool segment")?;
+    ensure!(
+        candidate_tail.metadata.observation.sequence <= ack.through_sequence,
+        "durable ACK does not cover the complete spool retirement candidate"
+    );
+    let successor_first =
+        read_first_spool_record(&journal_dir, successor_id, max_record_bytes, identity)?;
+    ensure_exact_retention_successor(&candidate_tail, &successor_first)
+        .context("spool retirement candidate/successor boundary is discontinuous")?;
+
     let marker = SpoolRetiredPrefixMarker {
-        schema_version: 1,
+        schema_version: 2,
         identity: identity.clone(),
-        first_retained_segment_id: acknowledgement_anchor.segment_id,
-        acknowledged_through_sequence,
-        acknowledged_through_content_digest,
+        first_retained_segment_id: successor_id,
+        acknowledged_through_sequence: ack.through_sequence,
+        acknowledged_through_content_digest: ack.through_content_digest,
         acknowledgement_anchor,
+        acknowledgement_anchor_metadata: Some(anchor.metadata),
+        retired_tail: Some(SpoolRetiredPrefixTail {
+            location: candidate_tail.location,
+            metadata: candidate_tail.metadata,
+        }),
     };
-    if let Some(previous) = read_retired_prefix_marker(&journal_dir)? {
+    if let Some(previous) = read_retired_prefix_marker_with_policy(&journal_dir, namespace_policy)?
+    {
         ensure!(
             previous.identity == marker.identity,
             "spool retired-prefix marker identity changed"
         );
         ensure!(
-            previous.first_retained_segment_id <= marker.first_retained_segment_id
-                && previous.acknowledged_through_sequence <= marker.acknowledged_through_sequence,
+            previous.acknowledged_through_sequence <= marker.acknowledged_through_sequence,
             "spool retired-prefix marker cannot move backward"
         );
+        // Schema v1 stored the ACK-anchor segment, not the exact first retained segment. The
+        // complete candidate/successor proof above establishes the first exact schema-v2 boundary.
+        if previous.schema_version == 2 {
+            ensure!(
+                previous.first_retained_segment_id <= marker.first_retained_segment_id,
+                "schema-v2 spool retired-prefix marker cannot move backward"
+            );
+        }
     }
     write_retired_prefix_marker(&journal_dir, &marker)?;
 
@@ -1631,10 +1935,17 @@ pub(crate) fn retire_one_spool_segment_before_ack(
     fs::remove_file(&retired)
         .with_context(|| format!("retire acknowledged spool segment {}", retired.display()))?;
     sync_directory(&journal_dir)?;
-    Ok(Some(retired))
+    Ok(SpoolSegmentRetirementOutcome::Retired(retired))
 }
 
 fn read_retired_prefix_marker(journal_dir: &Path) -> Result<Option<SpoolRetiredPrefixMarker>> {
+    read_retired_prefix_marker_with_policy(journal_dir, None)
+}
+
+fn read_retired_prefix_marker_with_policy(
+    journal_dir: &Path,
+    namespace_policy: Option<SpoolGcNamespacePolicy>,
+) -> Result<Option<SpoolRetiredPrefixMarker>> {
     let path = journal_dir.join(RETIRED_PREFIX_MARKER_FILE);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -1650,20 +1961,90 @@ fn read_retired_prefix_marker(journal_dir: &Path) -> Result<Option<SpoolRetiredP
         "spool retired-prefix marker is not a regular file: {}",
         path.display()
     );
+    #[cfg(target_os = "linux")]
+    if let Some(policy) = namespace_policy {
+        validate_gc_control_metadata(&metadata, policy, "retired-prefix marker", &path)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    ensure!(
+        namespace_policy.is_none(),
+        "raw-spool GC marker protection requires Linux"
+    );
     ensure!(
         metadata.len() <= RETIRED_PREFIX_MARKER_MAX_BYTES,
         "spool retired-prefix marker exceeds maximum size"
     );
     let mut file = open_regular_file_read_only(&path)?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)?;
+    let opened = file.metadata()?;
+    #[cfg(target_os = "linux")]
+    if let Some(policy) = namespace_policy {
+        validate_gc_control_metadata(&opened, policy, "opened retired-prefix marker", &path)?;
+    }
+    ensure!(
+        opened.len() <= RETIRED_PREFIX_MARKER_MAX_BYTES,
+        "opened spool retired-prefix marker exceeds maximum size"
+    );
+    #[cfg(unix)]
+    ensure!(
+        opened.dev() == metadata.dev() && opened.ino() == metadata.ino() && opened.nlink() == 1,
+        "spool retired-prefix marker changed while it was opened"
+    );
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    (&mut file)
+        .take(RETIRED_PREFIX_MARKER_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= RETIRED_PREFIX_MARKER_MAX_BYTES,
+        "spool retired-prefix marker exceeds maximum size while reading"
+    );
+    #[cfg(unix)]
+    {
+        let linked_after = fs::symlink_metadata(&path)?;
+        #[cfg(target_os = "linux")]
+        if let Some(policy) = namespace_policy {
+            validate_gc_control_metadata(
+                &linked_after,
+                policy,
+                "linked retired-prefix marker",
+                &path,
+            )?;
+        }
+        ensure!(
+            opened.dev() == linked_after.dev() && opened.ino() == linked_after.ino(),
+            "spool retired-prefix marker was replaced while it was read"
+        );
+    }
     let marker: SpoolRetiredPrefixMarker =
         serde_json::from_slice(&bytes).context("decode spool retired-prefix marker")?;
-    ensure!(
-        marker.schema_version == 1
-            && marker.first_retained_segment_id == marker.acknowledgement_anchor.segment_id,
-        "invalid spool retired-prefix marker"
-    );
+    match marker.schema_version {
+        1 => ensure!(
+            marker.first_retained_segment_id == marker.acknowledgement_anchor.segment_id
+                && marker.acknowledgement_anchor_metadata.is_none()
+                && marker.retired_tail.is_none(),
+            "invalid legacy spool retired-prefix marker"
+        ),
+        2 => {
+            let anchor_metadata = marker
+                .acknowledgement_anchor_metadata
+                .as_ref()
+                .context("schema-v2 spool retired-prefix marker lacks anchor metadata")?;
+            let retired_tail = marker
+                .retired_tail
+                .as_ref()
+                .context("schema-v2 spool retired-prefix marker lacks retired tail")?;
+            ensure!(
+                anchor_metadata.observation.sequence == marker.acknowledged_through_sequence
+                    && retired_tail
+                        .location
+                        .segment_id
+                        .checked_add(1)
+                        .is_some_and(|next| next == marker.first_retained_segment_id)
+                    && marker.first_retained_segment_id <= marker.acknowledgement_anchor.segment_id,
+                "invalid schema-v2 spool retired-prefix marker"
+            );
+        }
+        version => bail!("unsupported spool retired-prefix marker schema {version}"),
+    }
     Ok(Some(marker))
 }
 
@@ -1689,11 +2070,11 @@ fn write_retired_prefix_marker(
         );
         serde_json::to_writer(&mut file, marker).context("encode spool retired-prefix marker")?;
         file.write_all(b"\n")?;
-        // The pull source normally runs as root while the recorder runs as the unprivileged
-        // `app` user. The marker contains no secret material and must remain readable across that
-        // process boundary so the recorder can reopen an ACK-compacted journal after a restart.
+        // The pull source normally runs as root while the recorder runs as an unprivileged group
+        // member. The marker contains no secret material and must remain readable across that
+        // process boundary.
         #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(0o644))
+        file.set_permissions(fs::Permissions::from_mode(0o640))
             .context("make spool retired-prefix marker readable by the recorder")?;
         file.sync_all()?;
         fs::rename(&temporary, &path).with_context(|| {
@@ -1744,7 +2125,18 @@ fn segment_ids(
     }
     ids.sort_unstable();
     ids.dedup();
-    let retired = validate_retired_prefix_marker_anchor(journal_dir, identity, max_record_bytes)?;
+    for pair in ids.windows(2) {
+        ensure!(
+            pair[1] == pair[0] + 1,
+            "non-consecutive spool segments {} then {} in {}",
+            pair[0],
+            pair[1],
+            journal_dir.display()
+        );
+    }
+
+    let retired =
+        validate_retired_prefix_marker_anchor(journal_dir, identity, max_record_bytes, &ids)?;
     ensure!(
         !ids.is_empty() || retired.is_none(),
         "spool retired-prefix marker exists but no restart anchor segment remains in {}",
@@ -1758,27 +2150,24 @@ fn segment_ids(
                 first,
                 journal_dir.display()
             ),
+            Some(marker) if marker.schema_version == 1 => ensure!(
+                *first <= marker.first_retained_segment_id
+                    && ids.binary_search(&marker.first_retained_segment_id).is_ok(),
+                "legacy spool segment prefix is not covered by its durable retirement marker"
+            ),
             Some(marker) => {
+                let retired_id = marker
+                    .retired_tail
+                    .as_ref()
+                    .context("schema-v2 marker lacks retired tail")?
+                    .location
+                    .segment_id;
                 ensure!(
-                    marker.identity == *identity,
-                    "spool retired-prefix marker identity does not match journal"
-                );
-                ensure!(
-                    *first <= marker.first_retained_segment_id
-                        && ids.binary_search(&marker.first_retained_segment_id).is_ok(),
-                    "spool segment prefix is not covered by its durable retirement marker"
+                    *first == marker.first_retained_segment_id || *first == retired_id,
+                    "spool segment prefix is not covered by its schema-v2 retirement marker"
                 );
             }
         }
-    }
-    for pair in ids.windows(2) {
-        ensure!(
-            pair[1] == pair[0] + 1,
-            "non-consecutive spool segments {} then {} in {}",
-            pair[0],
-            pair[1],
-            journal_dir.display()
-        );
     }
     Ok(ids)
 }
@@ -1787,6 +2176,7 @@ fn validate_retired_prefix_marker_anchor(
     journal_dir: &Path,
     identity: &SpoolJournalIdentity,
     max_record_bytes: u64,
+    segment_ids: &[u64],
 ) -> Result<Option<SpoolRetiredPrefixMarker>> {
     let Some(marker) = read_retired_prefix_marker(journal_dir)? else {
         return Ok(None);
@@ -1795,6 +2185,12 @@ fn validate_retired_prefix_marker_anchor(
         marker.identity == *identity,
         "spool retired-prefix marker identity does not match journal"
     );
+    ensure!(
+        segment_ids
+            .binary_search(&marker.acknowledgement_anchor.segment_id)
+            .is_ok(),
+        "spool retired-prefix ACK anchor segment is not retained"
+    );
     let anchor = read_spool_record(journal_dir, marker.acknowledgement_anchor, max_record_bytes)
         .context("validate spool retired-prefix restart anchor")?;
     ensure_spool_record_identity(&anchor, identity)?;
@@ -1802,11 +2198,120 @@ fn validate_retired_prefix_marker_anchor(
         anchor.metadata.observation.sequence == marker.acknowledged_through_sequence,
         "spool retired-prefix restart anchor sequence does not match marker"
     );
+    if marker.schema_version == 1 {
+        ensure!(
+            anchor.metadata.content_digest == marker.acknowledged_through_content_digest,
+            "legacy spool retired-prefix restart anchor digest does not match marker"
+        );
+        return Ok(Some(marker));
+    }
+
     ensure!(
-        anchor.metadata.content_digest == marker.acknowledged_through_content_digest,
-        "spool retired-prefix restart anchor digest does not match marker"
+        marker.acknowledgement_anchor_metadata.as_ref() == Some(&anchor.metadata),
+        "spool retired-prefix physical ACK anchor metadata does not match marker"
     );
+    let retired_tail = marker
+        .retired_tail
+        .as_ref()
+        .context("schema-v2 spool retired-prefix marker lacks retired tail")?;
+    let first_retained = read_first_spool_record(
+        journal_dir,
+        marker.first_retained_segment_id,
+        max_record_bytes,
+        identity,
+    )?;
+    let retired = DurableSpoolRecord {
+        location: retired_tail.location,
+        metadata: retired_tail.metadata.clone(),
+    };
+    ensure_exact_retention_successor(&retired, &first_retained)
+        .context("spool retired-prefix boundary is discontinuous")?;
+
+    // A crash after publishing the marker but before unlinking the candidate is valid only when
+    // the still-present candidate has the exact tail recorded in the marker.
+    if segment_ids.first().copied() == Some(retired_tail.location.segment_id) {
+        let recovered = recover_complete_segment(
+            journal_dir,
+            retired_tail.location.segment_id,
+            max_record_bytes,
+            identity,
+            "published-but-not-yet-unlinked retirement candidate",
+        )?;
+        ensure!(
+            recovered.last_record.as_ref() == Some(&retired),
+            "published spool retirement candidate tail changed before unlink"
+        );
+    }
     Ok(Some(marker))
+}
+
+fn recover_complete_segment(
+    journal_dir: &Path,
+    segment_id: u64,
+    max_record_bytes: u64,
+    identity: &SpoolJournalIdentity,
+    label: &str,
+) -> Result<RecoveredSegment> {
+    let path = segment_path(journal_dir, segment_id);
+    let mut file = open_regular_file_read_only(&path)?;
+    let file_len = file.metadata()?.len();
+    let recovered = recover_segment(&mut file, &path, segment_id, max_record_bytes, identity)
+        .with_context(|| format!("validate {label}"))?;
+    ensure!(
+        recovered.valid_len == file_len,
+        "{label} has an incomplete tail: {}",
+        path.display()
+    );
+    ensure!(
+        recovered.exact_sequence_contiguous,
+        "{label} contains a non-contiguous observation sequence"
+    );
+    Ok(recovered)
+}
+
+fn ensure_exact_retention_successor(
+    previous: &DurableSpoolRecord,
+    next: &DurableSpoolRecord,
+) -> Result<()> {
+    ensure_record_follows(previous, next)?;
+    ensure!(
+        previous.metadata.observation.sequence.checked_add(1)
+            == Some(next.metadata.observation.sequence),
+        "retained observation sequence {} does not immediately follow {}",
+        next.metadata.observation.sequence,
+        previous.metadata.observation.sequence
+    );
+    Ok(())
+}
+
+fn read_first_spool_record(
+    journal_dir: &Path,
+    segment_id: u64,
+    max_record_bytes: u64,
+    identity: &SpoolJournalIdentity,
+) -> Result<DurableSpoolRecord> {
+    let path = segment_path(journal_dir, segment_id);
+    let mut file = open_regular_file_read_only(&path)?;
+    let mut segment_magic = [0u8; 8];
+    file.read_exact(&mut segment_magic)
+        .with_context(|| format!("read retained spool segment header {}", path.display()))?;
+    ensure!(
+        &segment_magic == SEGMENT_MAGIC,
+        "invalid retained spool segment header in {}",
+        path.display()
+    );
+    let header = read_spool_frame_header(&mut file, &path, SEGMENT_HEADER_LEN, max_record_bytes)?;
+    let location = SpoolLocation {
+        segment_id,
+        frame_offset: SEGMENT_HEADER_LEN,
+        frame_len: header.frame_len,
+    };
+    let record = read_spool_frame_body(&mut file, &path, location, header)?;
+    ensure_spool_record_identity(&record, identity)?;
+    Ok(DurableSpoolRecord::from_verified_committed_read(
+        record.location,
+        record.metadata,
+    ))
 }
 
 fn segment_path(journal_dir: &Path, segment_id: u64) -> PathBuf {
@@ -1834,6 +2339,103 @@ fn hex_journal_id(journal_id: [u8; 16]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+fn acquire_retention_guard(
+    journal_dir: &Path,
+    mode: RetentionLockMode,
+) -> Result<Option<RetentionGuard>> {
+    let path = journal_dir.join(RETENTION_LOCK_FILE);
+    let linked_before = match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "spool retention lock is not a regular file: {}",
+                path.display()
+            );
+            Some(metadata)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect spool retention lock {}", path.display()));
+        }
+    };
+    let created = linked_before.is_none();
+    let mut options = OpenOptions::new();
+    if matches!(mode, RetentionLockMode::Shared) && !created {
+        options.read(true);
+    } else {
+        options.read(true).write(true).create(true);
+    }
+    #[cfg(unix)]
+    options
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(&path)
+        .with_context(|| format!("open spool retention lock {}", path.display()))?;
+    if created {
+        #[cfg(unix)]
+        file.set_permissions(fs::Permissions::from_mode(0o644))?;
+        file.sync_all()?;
+        sync_directory(journal_dir)?;
+    }
+    let opened = file.metadata()?;
+    ensure!(
+        opened.is_file(),
+        "spool retention lock is not a file: {}",
+        path.display()
+    );
+    let linked_after = fs::symlink_metadata(&path)?;
+    #[cfg(unix)]
+    {
+        ensure!(
+            opened.dev() == linked_after.dev() && opened.ino() == linked_after.ino(),
+            "spool retention lock changed while it was opened"
+        );
+        if let Some(linked_before) = linked_before.as_ref() {
+            ensure!(
+                opened.dev() == linked_before.dev() && opened.ino() == linked_before.ino(),
+                "spool retention lock was replaced while it was opened"
+            );
+        }
+        let journal_owner = fs::metadata(journal_dir)?.uid();
+        ensure!(
+            (opened.uid() == 0 || opened.uid() == journal_owner)
+                && opened.mode() & 0o022 == 0
+                && opened.nlink() == 1,
+            "spool retention lock ownership, permissions, or link count are unsafe"
+        );
+        let operation = match mode {
+            RetentionLockMode::Shared => libc::LOCK_SH,
+            RetentionLockMode::ExclusiveNonblocking => libc::LOCK_EX | libc::LOCK_NB,
+        };
+        // SAFETY: the guard owns this descriptor for the complete lock lifetime.
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if matches!(mode, RetentionLockMode::ExclusiveNonblocking)
+                && error.kind() == ErrorKind::WouldBlock
+            {
+                return Ok(None);
+            }
+            return Err(error).context("acquire spool retention lock");
+        }
+    }
+    #[cfg(not(unix))]
+    match mode {
+        RetentionLockMode::Shared => file.lock().context("acquire spool retention lock")?,
+        RetentionLockMode::ExclusiveNonblocking => {
+            if let Err(error) = file.try_lock() {
+                if error.kind() == ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
+                return Err(error).context("acquire spool retention lock");
+            }
+        }
+    }
+    Ok(Some(RetentionGuard { _file: file }))
 }
 
 fn open_regular_file(path: &Path, create_if_missing: bool) -> Result<(File, bool)> {
@@ -1975,6 +2577,24 @@ impl Crc32c {
 mod tests {
     use super::*;
     use crate::ingest::dedup::{ContentDigest, LogicalKey, ObservationId};
+    use crate::ingest::replication::{
+        CumulativeAckSignatureVerifier, CumulativeAckWal, CumulativePrimaryAck,
+        ExpectedCumulativeAck, REPLICATION_PROTOCOL_VERSION, ReceiptDisposition,
+        ReplicationStreamId, verify_cumulative_ack,
+    };
+
+    struct AcceptCumulativeAckSignature;
+
+    impl CumulativeAckSignatureVerifier for AcceptCumulativeAckSignature {
+        fn verify_cumulative_ack_signature(
+            &self,
+            _key_id: &str,
+            _signing_bytes: &[u8],
+            _signature: &[u8],
+        ) -> bool {
+            true
+        }
+    }
 
     fn temp_root(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -2019,6 +2639,48 @@ mod tests {
             source_id: "grpc-a".to_string(),
             journal_id: [7; 16],
         }
+    }
+
+    fn durable_gc_authorization(
+        root: &Path,
+        identity: &SpoolJournalIdentity,
+        anchor: &DurableSpoolRecord,
+    ) -> DurableGcAuthorization {
+        let stream = ReplicationStreamId {
+            cluster_id: identity.cluster_id.clone(),
+            origin_node_id: identity.origin_node_id.clone(),
+            source_id: identity.source_id.clone(),
+            journal_id: identity.journal_id,
+        };
+        let ack = CumulativePrimaryAck {
+            protocol_version: REPLICATION_PROTOCOL_VERSION,
+            stream: stream.clone(),
+            primary_id: "test-primary".to_string(),
+            primary_term: 1,
+            through_sequence: anchor.metadata().observation.sequence,
+            through_content_digest: anchor.metadata().content_digest,
+            rolling_chain_digest: ContentDigest([9; 32]),
+            disposition: ReceiptDisposition::DurablyStored,
+            durable_lsn: 1,
+            signing_key_id: "test-key".to_string(),
+            signature: vec![1; 64],
+        };
+        let expected = ExpectedCumulativeAck {
+            stream: &ack.stream,
+            primary_id: &ack.primary_id,
+            minimum_primary_term: 1,
+            through_sequence: ack.through_sequence,
+            through_content_digest: ack.through_content_digest,
+            rolling_chain_digest: ack.rolling_chain_digest,
+        };
+        let verified =
+            verify_cumulative_ack(ack.clone(), expected, &AcceptCumulativeAckSignature).unwrap();
+        let ack_wal_path = root.join("test-cumulative-acks.wal");
+        let mut ack_wal = CumulativeAckWal::open(&ack_wal_path).unwrap();
+        ack_wal.commit_verified(verified, anchor).unwrap();
+        let authorization = ack_wal.durable_gc_authorization(&stream).unwrap().unwrap();
+        drop(ack_wal);
+        authorization
     }
 
     #[test]
@@ -2599,17 +3261,18 @@ mod tests {
         assert_eq!(first.location().segment_id, 0);
         assert_eq!(second.location().segment_id, 1);
         assert_eq!(anchor.location().segment_id, 2);
+        let authorization = durable_gc_authorization(&root, &identity, &anchor);
 
         let retired = retire_one_spool_segment_before_ack(
             &root,
             &identity,
             options.max_record_bytes,
-            3,
-            anchor.metadata().content_digest,
-            anchor.location(),
+            &authorization,
         )
-        .unwrap()
         .unwrap();
+        let SpoolSegmentRetirementOutcome::Retired(retired) = retired else {
+            panic!("first segment should retire")
+        };
         assert_eq!(retired, segment_path(spool.journal_dir(), 0));
         assert!(!retired.exists());
         assert!(segment_path(spool.journal_dir(), 1).exists());
@@ -2621,31 +3284,29 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777;
-            assert_eq!(marker_mode, 0o644);
+            assert_eq!(marker_mode, 0o640);
         }
 
         let retired = retire_one_spool_segment_before_ack(
             &root,
             &identity,
             options.max_record_bytes,
-            3,
-            anchor.metadata().content_digest,
-            anchor.location(),
+            &authorization,
         )
-        .unwrap()
         .unwrap();
+        let SpoolSegmentRetirementOutcome::Retired(retired) = retired else {
+            panic!("second segment should retire")
+        };
         assert_eq!(retired, segment_path(spool.journal_dir(), 1));
-        assert!(
+        assert_eq!(
             retire_one_spool_segment_before_ack(
                 &root,
                 &identity,
                 options.max_record_bytes,
-                3,
-                anchor.metadata().content_digest,
-                anchor.location(),
+                &authorization,
             )
-            .unwrap()
-            .is_none()
+            .unwrap(),
+            SpoolSegmentRetirementOutcome::NothingToRetire
         );
 
         // The active writer continues from the retained anchor, and a cold restart accepts the
@@ -2688,7 +3349,8 @@ mod tests {
             Err(error) => error,
         };
         assert!(
-            format!("{error:#}").contains("validate spool retired-prefix restart anchor"),
+            format!("{error:#}")
+                .contains("spool retired-prefix ACK anchor segment is not retained"),
             "{error:#}"
         );
         fs::remove_dir_all(root).unwrap();
@@ -2712,13 +3374,12 @@ mod tests {
         let anchor = spool
             .append_and_sync(metadata(3, &[3; 64]), &[3; 64])
             .unwrap();
+        let authorization = durable_gc_authorization(&root, &identity, &anchor);
         retire_one_spool_segment_before_ack(
             &root,
             &identity,
             options.max_record_bytes,
-            3,
-            anchor.metadata().content_digest,
-            anchor.location(),
+            &authorization,
         )
         .unwrap();
         drop(spool);

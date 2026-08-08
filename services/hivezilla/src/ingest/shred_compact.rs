@@ -13,7 +13,7 @@ use solana_ledger_compat::{DATA_SHREDS_PER_FEC_BLOCK, Shred};
 
 use super::{
     LogicalKey, ShredKind, SpoolJournalIdentity, read_spool_committed_snapshot_after,
-    shred_udp::{ZSTD_SOLANA_SHRED_V1, decode_stored_shred},
+    shred_udp::{decode_stored_shred_for_format, ensure_parseable_shred_header_matches},
 };
 
 /// A block reconstructed solely from a complete, internally consistent set of data shreds.
@@ -95,6 +95,7 @@ pub struct ShredSpoolTrialReport {
     pub scanned_records: u64,
     pub decoded_data_shreds: u64,
     pub decoded_coding_shreds: u64,
+    pub invalid_stored_shred_records: u64,
     pub fec_recovered_data_shreds: u64,
     pub fec_under_threshold_sets: u64,
     pub candidate_slots: usize,
@@ -110,6 +111,7 @@ pub struct ShredSpoolTrialReport {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ShredSpoolTrialFailures {
+    pub invalid_stored_shred_slots: usize,
     pub fec_recovery_error_slots: usize,
     pub fec_identity_conflict_slots: usize,
     pub fec_geometry_conflict_slots: usize,
@@ -148,6 +150,7 @@ pub struct ProvisionalShredBlockSummary {
 #[derive(Default)]
 struct TrialSlot {
     datagrams: Vec<Vec<u8>>,
+    invalid_stored_shred_records: u64,
 }
 
 /// Search a bounded durable spool prefix for one complete data-shred slot and deshred it.
@@ -170,6 +173,7 @@ pub fn trial_deshred_spool(config: ShredSpoolTrialConfig) -> Result<ShredSpoolTr
     let mut scanned_records = 0u64;
     let mut decoded_data_shreds = 0u64;
     let mut decoded_coding_shreds = 0u64;
+    let mut invalid_stored_shred_records = 0u64;
     let mut fec_recovered_data_shreds = 0u64;
     let mut fec_under_threshold_sets = 0u64;
     let mut failures = ShredSpoolTrialFailures::default();
@@ -195,13 +199,28 @@ pub fn trial_deshred_spool(config: ShredSpoolTrialConfig) -> Result<ShredSpoolTr
             if config.min_slot.is_some_and(|minimum| slot < minimum) {
                 return Ok(());
             }
-            ensure!(
-                record.metadata.payload_format_version == ZSTD_SOLANA_SHRED_V1,
-                "trial deshredder accepts only canonical compressed raw shreds"
-            );
-            let datagram = decode_stored_shred(&record.payload)
-                .context("decode compressed raw shred from durable spool")?;
-            let shred = parse_shred(&datagram, "decode raw Solana shred from durable spool")?;
+            let datagram = decode_stored_shred_for_format(
+                record.metadata.payload_format_version,
+                &record.payload,
+            )
+            .context("decode versioned raw shred from durable spool")?;
+            ensure_parseable_shred_header_matches(&record.metadata, &datagram)?;
+            let shred = match parse_shred(&datagram, "decode raw Solana shred from durable spool") {
+                Ok(shred) => shred,
+                Err(_) => {
+                    invalid_stored_shred_records = invalid_stored_shred_records.saturating_add(1);
+                    if retain_latest_candidate_slot(
+                        &mut candidates,
+                        slot,
+                        config.max_candidate_slots,
+                    ) {
+                        let candidate = candidates.entry(slot).or_default();
+                        candidate.invalid_stored_shred_records =
+                            candidate.invalid_stored_shred_records.saturating_add(1);
+                    }
+                    return Ok(());
+                }
+            };
             let decoded_kind = if shred.is_code() {
                 ShredKind::Coding
             } else {
@@ -237,6 +256,20 @@ pub fn trial_deshred_spool(config: ShredSpoolTrialConfig) -> Result<ShredSpoolTr
     let mut reconstructed_slots = 0usize;
     let mut reconstructed = None;
     for (&slot_number, slot) in &candidates {
+        if slot.invalid_stored_shred_records > 0 {
+            let error = anyhow::anyhow!(
+                "slot contains {} invalid stored shred record(s)",
+                slot.invalid_stored_shred_records
+            );
+            record_trial_failure(
+                &mut failures,
+                &mut failure_samples,
+                config.max_failure_samples,
+                slot_number,
+                &error,
+            );
+            continue;
+        }
         let recovered = match recover_slot_data_shreds(&slot.datagrams) {
             Ok(recovered) => recovered,
             Err(error) => {
@@ -293,6 +326,7 @@ pub fn trial_deshred_spool(config: ShredSpoolTrialConfig) -> Result<ShredSpoolTr
         scanned_records,
         decoded_data_shreds,
         decoded_coding_shreds,
+        invalid_stored_shred_records,
         fec_recovered_data_shreds,
         fec_under_threshold_sets,
         candidate_slots: candidates.len(),
@@ -593,7 +627,9 @@ fn record_trial_failure(
 ) {
     let message = format!("{error:#}");
     let category = shred_reconstruction_failure_category(error);
-    let counter = if category == "chained_merkle_conflict" {
+    let counter = if category == "invalid_stored_shred" {
+        &mut failures.invalid_stored_shred_slots
+    } else if category == "chained_merkle_conflict" {
         &mut failures.chained_merkle_conflict_slots
     } else if category == "conflicting_duplicate" {
         &mut failures.conflicting_duplicate_slots
@@ -640,7 +676,11 @@ fn record_trial_failure(
 /// Detailed error text remains diagnostic-only; callers should aggregate this returned value.
 pub fn shred_reconstruction_failure_category(error: &anyhow::Error) -> &'static str {
     let message = format!("{error:#}");
-    if message.contains("conflicting chained Merkle roots") {
+    if message.contains("invalid stored shred record")
+        || message.contains("decode raw Solana shred for FEC recovery")
+    {
+        "invalid_stored_shred"
+    } else if message.contains("conflicting chained Merkle roots") {
         "chained_merkle_conflict"
     } else if message.contains("conflicting duplicate") {
         "conflicting_duplicate"
@@ -755,12 +795,10 @@ fn fec_identity(shred: &Shred, datagram: &[u8]) -> Result<FecIdentity> {
         leader_signature,
         merkle_root: shred
             .merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?,
         chained_merkle_root: shred
             .chained_merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?,
         proof_size: variant & 0x0f,
         resigned: matches!(high, 0x70 | 0xb0),
     })

@@ -5,6 +5,7 @@
 //! key. The compressed representation is what is replicated to a remote durable spool.
 
 use std::{
+    collections::{BTreeMap, HashMap},
     ffi::CString,
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -28,12 +29,13 @@ use tokio::{
 };
 
 use super::{
-    IngestConfig, IngestRoleConfig, IngressRecordMeta, LogicalKey, ObservationId,
-    SourceInputConfig, SpoolFullPolicy, SpoolJournalIdentity, SpoolOptions, SpoolWriter,
+    IngestConfig, IngestRoleConfig, IngressRecordMeta, LogicalKey, MAX_SHRED_UDP_DURABLE_SOURCES,
+    ObservationId, ShredUdpDurableSourceConfig, SourceInputConfig, SpoolFullPolicy,
+    SpoolJournalIdentity, SpoolOptions, SpoolWriter,
 };
 pub use blockzilla_shred_codec::{
-    ParsedShredHeader, RAW_SOLANA_SHRED_V1, ZSTD_SOLANA_SHRED_V1, decode_stored_shred,
-    parse_shred_header,
+    COMMON_SHRED_HEADER_BYTES, ParsedShredHeader, RAW_SOLANA_SHRED_V1, ShredKind,
+    ZSTD_SOLANA_SHRED_V1, decode_stored_shred, parse_shred_header,
 };
 
 const MAX_UDP_DATAGRAM_BYTES: usize = blockzilla_shred_codec::MAX_UDP_DATAGRAM_BYTES;
@@ -45,6 +47,27 @@ const QUOTA_ENTRY_MIN_BYTES: u64 = 4_096;
 const STATUS_SCHEMA_VERSION: u32 = 1;
 const STATUS_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVING_FRESHNESS: Duration = Duration::from_secs(15);
+
+/// Decode one stored raw-shred record according to its durable payload format.
+///
+/// Current recorder output is canonical zstd v4. Raw v3 remains readable only for historical
+/// journals that predate that envelope; unknown formats fail closed.
+pub fn decode_stored_shred_for_format(
+    payload_format_version: u16,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    match payload_format_version {
+        RAW_SOLANA_SHRED_V1 => {
+            ensure!(
+                payload.len() <= MAX_UDP_DATAGRAM_BYTES,
+                "historical raw shred exceeds UDP datagram maximum"
+            );
+            Ok(payload.to_vec())
+        }
+        ZSTD_SOLANA_SHRED_V1 => decode_stored_shred(payload),
+        version => anyhow::bail!("unsupported stored shred payload format {version}"),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ShredUdpRecordConfig {
@@ -94,6 +117,112 @@ struct ShredRecorderStatus {
     ingest_queue_backpressured: bool,
     socket_rxq_overflow_supported: bool,
     socket_rxq_overflow_total: Option<u64>,
+    durable_sources: BTreeMap<String, DurableSourceStatus>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct DurableSourceStatus {
+    committed_datagrams_total: u64,
+    last_durable_unix_secs: Option<u64>,
+    last_durable_sequence: Option<u64>,
+    last_durable_slot: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingDurableSourceAttribution {
+    source: SocketAddr,
+    sequence: u64,
+    slot: u64,
+}
+
+#[derive(Debug, Default)]
+struct DurableSourceTracker {
+    names_by_address: HashMap<SocketAddr, String>,
+    status_by_name: BTreeMap<String, DurableSourceStatus>,
+}
+
+impl DurableSourceTracker {
+    fn from_config(sources: &[ShredUdpDurableSourceConfig]) -> Result<Self> {
+        ensure!(
+            sources.len() <= MAX_SHRED_UDP_DURABLE_SOURCES,
+            "at most {MAX_SHRED_UDP_DURABLE_SOURCES} durable UDP sources may be configured"
+        );
+        let mut tracker = Self::default();
+        for source in sources {
+            let mut characters = source.name.chars();
+            ensure!(
+                source.name.len() <= 32
+                    && characters
+                        .next()
+                        .is_some_and(|character| character.is_ascii_alphabetic())
+                    && characters.all(|character| character.is_ascii_alphanumeric()
+                        || matches!(character, '-' | '_')),
+                "durable UDP source name is not public-safe"
+            );
+            let address = source
+                .address
+                .parse::<SocketAddr>()
+                .with_context(|| format!("parse durable UDP source {:?}", source.name))?;
+            ensure!(
+                tracker
+                    .names_by_address
+                    .insert(address, source.name.clone())
+                    .is_none(),
+                "durable UDP source address is configured more than once"
+            );
+            ensure!(
+                tracker
+                    .status_by_name
+                    .insert(source.name.clone(), DurableSourceStatus::default())
+                    .is_none(),
+                "durable UDP source name is configured more than once"
+            );
+        }
+        Ok(tracker)
+    }
+
+    fn record_committed_batch(
+        &mut self,
+        evidence: &[PendingDurableSourceAttribution],
+        committed_unix_secs: u64,
+    ) -> Result<()> {
+        for evidence in evidence {
+            let Some(name) = self.names_by_address.get(&evidence.source) else {
+                continue;
+            };
+            let status = self
+                .status_by_name
+                .get_mut(name)
+                .context("configured durable UDP source has no status entry")?;
+            status.committed_datagrams_total = status
+                .committed_datagrams_total
+                .checked_add(1)
+                .context("durable UDP source datagram counter exhausted")?;
+            status.last_durable_unix_secs = Some(committed_unix_secs);
+            status.last_durable_sequence = Some(evidence.sequence);
+            status.last_durable_slot = Some(evidence.slot);
+        }
+        Ok(())
+    }
+
+    fn statuses(&self) -> BTreeMap<String, DurableSourceStatus> {
+        self.status_by_name.clone()
+    }
+}
+
+/// Advance attribution only after the append returned its post-sync durability token.
+fn attribute_successful_commit<T>(
+    committed: Result<T>,
+    validate_commit: impl FnOnce(&T) -> Result<()>,
+    durable_sources: &mut DurableSourceTracker,
+    evidence: &[PendingDurableSourceAttribution],
+    committed_time: impl FnOnce() -> Result<u64>,
+) -> Result<(T, u64)> {
+    let committed = committed?;
+    validate_commit(&committed)?;
+    let committed_unix_secs = committed_time()?;
+    durable_sources.record_committed_batch(evidence, committed_unix_secs)?;
+    Ok((committed, committed_unix_secs))
 }
 
 #[derive(Debug, Default)]
@@ -193,6 +322,7 @@ impl UdpIngestMetrics {
 
 #[derive(Debug)]
 struct QueuedDatagram {
+    source: SocketAddr,
     payload: Vec<u8>,
     original_length: usize,
     oversized: bool,
@@ -208,6 +338,7 @@ impl QueuedDatagram {
 
 #[derive(Debug, Clone, Copy)]
 struct ReceivedDatagram {
+    source: SocketAddr,
     length: usize,
     socket_rxq_overflow: Option<u32>,
 }
@@ -253,6 +384,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
         multicast_group,
         interface,
         auth,
+        durable_source_allowlist,
     } = &source.input
     else {
         anyhow::bail!("source {:?} is not a shred_udp input", source.id);
@@ -296,13 +428,8 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             .checked_add(1)
             .context("shred UDP observation sequence exhausted")
     })?;
-    let recovered_header = spool
-        .last_record()
-        .map(|record| spool.read_record(record))
-        .transpose()
-        .context("read last recovered shred UDP observation")?
-        .and_then(|record| decode_stored_shred(&record.payload).ok())
-        .and_then(|payload| parse_shred_header(&payload));
+    let recovered_header =
+        recover_last_shred_header(&spool).context("recover last durable shred UDP observation")?;
 
     let queue_capacity_bytes = usize::try_from(source.queue.max_bytes)
         .context("shred UDP queue byte capacity does not fit this platform")?;
@@ -316,6 +443,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
     join_multicast(&socket, multicast_group.as_deref(), interface.as_deref())?;
 
     let metrics = Arc::new(UdpIngestMetrics::default());
+    let mut durable_sources = DurableSourceTracker::from_config(durable_source_allowlist)?;
     let event_budget = Arc::new(Semaphore::new(source.queue.max_events));
     let byte_budget = Arc::new(Semaphore::new(queue_capacity_bytes));
     let (queue_tx, mut queue_rx) = mpsc::channel(source.queue.max_events);
@@ -361,6 +489,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
         source.queue.max_events,
         source.queue.max_bytes,
         socket_rxq_overflow_supported,
+        &durable_sources,
     )?;
     let drain_metrics = Arc::clone(&metrics);
     let drain_event_budget = Arc::clone(&event_budget);
@@ -417,6 +546,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                         source.queue.max_events,
                         source.queue.max_bytes,
                         socket_rxq_overflow_supported,
+                        &durable_sources,
                     ) {
                         tracing::warn!(error = %format!("{error:#}"), "publish shred UDP recorder status");
                     }
@@ -441,6 +571,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             };
             let datagrams = collect_durable_batch(first, &mut queue_rx).await;
             let mut pending = Vec::with_capacity(datagrams.len());
+            let mut pending_source_attribution = Vec::with_capacity(datagrams.len());
             let mut pending_raw_bytes = 0u64;
             let mut pending_last_header = None;
             let mut pending_max_slot = None;
@@ -480,6 +611,11 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                     ZSTD_SOLANA_SHRED_V1,
                     &payload,
                 );
+                pending_source_attribution.push(PendingDurableSourceAttribution {
+                    source: datagram.source,
+                    sequence: pending_next_sequence,
+                    slot: header.slot,
+                });
                 pending.push((metadata, payload));
                 pending_raw_bytes = pending_raw_bytes
                     .checked_add(datagram.original_length as u64)
@@ -527,14 +663,23 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
                     .is_some_and(|required| available_bytes >= required),
                 "shred UDP filesystem reserve would be crossed"
             );
-            let committed = spool
+            let append_result = spool
                 .append_batch_and_sync(pending)
-                .context("durably append shred UDP observation batch")?;
-            ensure!(
-                committed.records.len() as u64 == pending_count
-                    && committed.additional_bytes == projected_bytes,
-                "shred UDP group commit did not match its validated projection"
-            );
+                .context("durably append shred UDP observation batch");
+            let (committed, committed_unix_secs) = attribute_successful_commit(
+                append_result,
+                |committed| {
+                    ensure!(
+                        committed.records.len() as u64 == pending_count
+                            && committed.additional_bytes == projected_bytes,
+                        "shred UDP group commit did not match its validated projection"
+                    );
+                    Ok(())
+                },
+                &mut durable_sources,
+                &pending_source_attribution,
+                unix_time_secs,
+            )?;
             spool_bytes = spool_bytes
                 .checked_add(committed.additional_bytes)
                 .context("shred UDP spool byte accounting overflow")?;
@@ -549,7 +694,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
             let durable_slot_high_water =
                 latest_slot.context("committed shred batch did not advance a slot high-water")?;
             shred_version = Some(last_header.version);
-            last_durable_unix_secs = Some(unix_time_secs()?);
+            last_durable_unix_secs = Some(committed_unix_secs);
             last_durable_at = Some(Instant::now());
 
             if last_report.elapsed() >= Duration::from_secs(10) {
@@ -620,6 +765,7 @@ pub async fn record_shred_udp(config: ShredUdpRecordConfig) -> Result<()> {
         source.queue.max_events,
         source.queue.max_bytes,
         socket_rxq_overflow_supported,
+        &durable_sources,
     ) {
         tracing::warn!(error = %format!("{error:#}"), "publish stopped shred UDP recorder status");
     }
@@ -673,6 +819,7 @@ async fn socket_drain_loop(
             &byte_budget,
             max_event_bytes,
             &metrics,
+            received.source,
             &buffer[..received.length],
         )
         .await?;
@@ -693,6 +840,7 @@ async fn socket_drain_loop(
                 &byte_budget,
                 max_event_bytes,
                 &metrics,
+                received.source,
                 &buffer[..received.length],
             )
             .await?;
@@ -728,6 +876,7 @@ async fn enqueue_datagram(
     byte_budget: &Arc<Semaphore>,
     max_event_bytes: u64,
     metrics: &UdpIngestMetrics,
+    source: SocketAddr,
     datagram: &[u8],
 ) -> Result<()> {
     use tokio::sync::{TryAcquireError, mpsc::error::TrySendError};
@@ -797,6 +946,7 @@ async fn enqueue_datagram(
     };
     metrics.record_enqueued(queued_bytes);
     queue_permit.send(QueuedDatagram {
+        source,
         payload,
         original_length: datagram.len(),
         oversized,
@@ -844,7 +994,8 @@ async fn receive_socket_datagram(
     socket
         .recv_from(buffer)
         .await
-        .map(|(length, _)| ReceivedDatagram {
+        .map(|(length, source)| ReceivedDatagram {
+            source,
             length,
             socket_rxq_overflow: None,
         })
@@ -869,7 +1020,8 @@ fn try_receive_socket_datagram(
 ) -> io::Result<ReceivedDatagram> {
     socket
         .try_recv_from(buffer)
-        .map(|(length, _)| ReceivedDatagram {
+        .map(|(length, source)| ReceivedDatagram {
+            source,
             length,
             socket_rxq_overflow: None,
         })
@@ -896,10 +1048,14 @@ fn recvmsg_socket_datagram(socket: &UdpSocket, buffer: &mut [u8]) -> io::Result<
     // A usize array gives cmsghdr its required native alignment. SO_RXQ_OVFL contains one u32;
     // the extra space tolerates any kernel alignment without heap allocation per datagram.
     let mut control = [0usize; 8];
+    // SAFETY: zero is a valid initialized sockaddr_storage before recvmsg fills it.
+    let mut source = unsafe { mem::zeroed::<libc::sockaddr_storage>() };
     // SAFETY: every pointer in the message references writable storage that remains alive for the
     // syscall. MSG_DONTWAIT preserves Tokio's readiness contract and MSG_TRUNC exposes any
     // impossible-over-65KiB truncation rather than silently accepting a partial datagram.
     let mut message = unsafe { mem::zeroed::<libc::msghdr>() };
+    message.msg_name = (&mut source as *mut libc::sockaddr_storage).cast();
+    message.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
     message.msg_iov = &mut io_vector;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
@@ -928,6 +1084,7 @@ fn recvmsg_socket_datagram(socket: &UdpSocket, buffer: &mut [u8]) -> io::Result<
             "shred UDP ancillary data was truncated",
         ));
     }
+    let source = socket_address_from_storage(&source, message.msg_namelen)?;
 
     let mut socket_rxq_overflow = None;
     // SAFETY: recvmsg initialized the control region and its reported length. SO_RXQ_OVFL is the
@@ -944,9 +1101,53 @@ fn recvmsg_socket_datagram(socket: &UdpSocket, buffer: &mut [u8]) -> io::Result<
         }
     }
     Ok(ReceivedDatagram {
+        source,
         length,
         socket_rxq_overflow,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn socket_address_from_storage(
+    storage: &libc::sockaddr_storage,
+    length: libc::socklen_t,
+) -> io::Result<SocketAddr> {
+    use std::{
+        mem,
+        net::{Ipv4Addr, Ipv6Addr},
+    };
+
+    match storage.ss_family as libc::c_int {
+        libc::AF_INET
+            if usize::try_from(length).unwrap_or(0) >= mem::size_of::<libc::sockaddr_in>() =>
+        {
+            // SAFETY: recvmsg reported AF_INET and at least a complete sockaddr_in.
+            let address =
+                unsafe { &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            Ok(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr))),
+                u16::from_be(address.sin_port),
+            ))
+        }
+        libc::AF_INET6
+            if usize::try_from(length).unwrap_or(0) >= mem::size_of::<libc::sockaddr_in6>() =>
+        {
+            // SAFETY: recvmsg reported AF_INET6 and at least a complete sockaddr_in6.
+            let address = unsafe {
+                &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>()
+            };
+            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
+                Ipv6Addr::from(address.sin6_addr.s6_addr),
+                u16::from_be(address.sin6_port),
+                address.sin6_flowinfo,
+                address.sin6_scope_id,
+            )))
+        }
+        family => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("shred UDP recvmsg returned unsupported source address family {family}"),
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -971,6 +1172,7 @@ fn publish_recorder_status(
     queue_capacity_events: usize,
     queue_capacity_bytes: u64,
     socket_rxq_overflow_supported: bool,
+    durable_sources: &DurableSourceTracker,
 ) -> Result<()> {
     let Some(path) = path else {
         return Ok(());
@@ -1009,6 +1211,7 @@ fn publish_recorder_status(
         socket_rxq_overflow_supported,
         socket_rxq_overflow_total: socket_rxq_overflow_supported
             .then_some(metrics.socket_rxq_overflow_total),
+        durable_sources: durable_sources.statuses(),
     };
     write_json_atomic(path, &status)
 }
@@ -1023,6 +1226,40 @@ fn recorder_state(last_durable_at: Option<Instant>) -> ShredRecorderState {
 
 fn advance_slot_high_water(current: Option<u64>, committed_slot: u64) -> Option<u64> {
     Some(current.map_or(committed_slot, |slot| slot.max(committed_slot)))
+}
+
+fn recover_last_shred_header(spool: &SpoolWriter) -> Result<Option<ParsedShredHeader>> {
+    let Some(durable) = spool.last_record() else {
+        return Ok(None);
+    };
+    let record = spool
+        .read_record(durable)
+        .context("read last recovered shred UDP observation")?;
+    let raw =
+        decode_stored_shred_for_format(record.metadata.payload_format_version, &record.payload)
+            .context("decode last recovered shred UDP observation")?;
+    ensure_parseable_shred_header_matches(&record.metadata, &raw)
+        .map(Some)
+        .context("validate last recovered shred UDP observation")
+}
+
+/// Parse the common shred header and bind it to the durable logical key.
+pub fn ensure_parseable_shred_header_matches(
+    metadata: &IngressRecordMeta,
+    raw: &[u8],
+) -> Result<ParsedShredHeader> {
+    let header = parse_shred_header(raw).context("stored raw shred lacks a parseable header")?;
+    let expected = LogicalKey::Shred {
+        slot: header.slot,
+        kind: header.kind,
+        shred_index: header.index,
+        fec_set_index: Some(header.fec_set_index),
+    };
+    ensure!(
+        metadata.logical_key == expected,
+        "stored shred metadata differs from its decoded payload header"
+    );
+    Ok(header)
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -1356,6 +1593,7 @@ mod tests {
         let mut previous = u32::MAX;
         observe_socket_overflow(
             ReceivedDatagram {
+                source: "127.0.0.1:1".parse().unwrap(),
                 length: 1,
                 socket_rxq_overflow: Some(2),
             },
@@ -1449,6 +1687,7 @@ mod tests {
             &byte_budget,
             2,
             &metrics,
+            "127.0.0.1:1".parse().unwrap(),
             &[1, 2, 3],
         )
         .await
@@ -1459,6 +1698,89 @@ mod tests {
         assert!(datagram.payload.is_empty());
         assert_eq!(metrics.snapshot().received_total, 1);
         assert_eq!(metrics.snapshot().queue_depth_bytes, 0);
+    }
+
+    #[test]
+    fn durable_source_attribution_handles_named_and_unknown_senders() {
+        let mut tracker = DurableSourceTracker::from_config(&[
+            ShredUdpDurableSourceConfig {
+                name: "blue".to_string(),
+                address: "127.0.0.1:18004".to_string(),
+            },
+            ShredUdpDurableSourceConfig {
+                name: "green".to_string(),
+                address: "127.0.0.1:18104".to_string(),
+            },
+        ])
+        .expect("test source allowlist");
+        let evidence = [
+            PendingDurableSourceAttribution {
+                source: "127.0.0.1:18004".parse().unwrap(),
+                sequence: 7,
+                slot: 42,
+            },
+            PendingDurableSourceAttribution {
+                source: "127.0.0.1:18104".parse().unwrap(),
+                sequence: 8,
+                slot: 43,
+            },
+            PendingDurableSourceAttribution {
+                source: "127.0.0.1:19999".parse().unwrap(),
+                sequence: 9,
+                slot: 44,
+            },
+            PendingDurableSourceAttribution {
+                source: "127.0.0.1:18004".parse().unwrap(),
+                sequence: 10,
+                slot: 41,
+            },
+        ];
+
+        let ((), timestamp) =
+            attribute_successful_commit(Ok(()), |_| Ok(()), &mut tracker, &evidence, || Ok(123))
+                .expect("attribute committed batch");
+        assert_eq!(timestamp, 123);
+        let statuses = tracker.statuses();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses["blue"].committed_datagrams_total, 2);
+        assert_eq!(statuses["blue"].last_durable_sequence, Some(10));
+        assert_eq!(statuses["green"].committed_datagrams_total, 1);
+        assert_eq!(statuses["green"].last_durable_sequence, Some(8));
+        assert!(!statuses.contains_key("127.0.0.1:19999"));
+    }
+
+    #[test]
+    fn failed_append_cannot_advance_durable_source_attribution() {
+        let mut tracker = DurableSourceTracker::from_config(&[ShredUdpDurableSourceConfig {
+            name: "green".to_string(),
+            address: "127.0.0.1:18104".to_string(),
+        }])
+        .expect("test source allowlist");
+        let evidence = [PendingDurableSourceAttribution {
+            source: "127.0.0.1:18104".parse().unwrap(),
+            sequence: 7,
+            slot: 42,
+        }];
+        let mut validation_called = false;
+        let mut clock_called = false;
+        let error = attribute_successful_commit::<()>(
+            Err(anyhow::anyhow!("simulated sync failure")),
+            |_| {
+                validation_called = true;
+                Ok(())
+            },
+            &mut tracker,
+            &evidence,
+            || {
+                clock_called = true;
+                Ok(123)
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("simulated sync failure"));
+        assert!(!validation_called);
+        assert!(!clock_called);
+        assert_eq!(tracker.statuses()["green"], DurableSourceStatus::default());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1508,6 +1830,7 @@ mod tests {
             ingest_queue_backpressured: false,
             socket_rxq_overflow_supported: true,
             socket_rxq_overflow_total: Some(3),
+            durable_sources: BTreeMap::new(),
         };
 
         write_json_atomic(&path, &status).expect("publish status");
@@ -1517,7 +1840,7 @@ mod tests {
         assert_eq!(actual["durable_through_sequence"], 7);
         assert_eq!(actual["ingest_queue_high_water_events"], 4);
         assert_eq!(actual["socket_rxq_overflow_total"], 3);
-        assert_eq!(actual.as_object().expect("object").len(), 29);
+        assert_eq!(actual.as_object().expect("object").len(), 30);
         for forbidden in ["bind", "peer", "source_id", "journal_id", "token", "secret"] {
             assert!(!raw.contains(forbidden));
         }

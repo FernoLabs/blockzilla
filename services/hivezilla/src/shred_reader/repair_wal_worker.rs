@@ -35,7 +35,7 @@ pub struct RepairWalSnapshot {
 
 enum Command {
     Append {
-        provenance: RepairProvenance,
+        provenance: Box<RepairProvenance>,
         shred_payload: Vec<u8>,
         now: Instant,
         reply: oneshot::Sender<io::Result<(RepairWalAppend, RepairWalSnapshot)>>,
@@ -46,6 +46,9 @@ enum Command {
     },
     Flush {
         now: Instant,
+        reply: oneshot::Sender<io::Result<RepairWalSnapshot>>,
+    },
+    RefreshFilesystem {
         reply: oneshot::Sender<io::Result<RepairWalSnapshot>>,
     },
 }
@@ -119,7 +122,7 @@ impl RepairWalWorker {
     ) -> io::Result<RepairWalAppend> {
         let (reply, response) = oneshot::channel();
         self.send(Command::Append {
-            provenance,
+            provenance: Box::new(provenance),
             shred_payload,
             now,
             reply,
@@ -150,6 +153,15 @@ impl RepairWalWorker {
         self.snapshot = receive(response)
             .await
             .map_err(|error| operation_error("flush", error))?;
+        Ok(())
+    }
+
+    pub async fn refresh_filesystem_available(&mut self) -> io::Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(Command::RefreshFilesystem { reply }).await?;
+        self.snapshot = receive(response)
+            .await
+            .map_err(|error| operation_error("filesystem availability refresh", error))?;
         Ok(())
     }
 
@@ -204,6 +216,12 @@ fn run_worker(mut wal: RepairWal, mut commands: mpsc::Receiver<Command>) {
                 let result = wal.flush_and_sync(now).map(|_| snapshot(&wal));
                 let _ = reply.send(result);
             }
+            Command::RefreshFilesystem { reply } => {
+                let result = wal
+                    .refresh_filesystem_available_bytes()
+                    .map(|_| snapshot(&wal));
+                let _ = reply.send(result);
+            }
         }
     }
     // Any best-effort sync performed by RepairWal::drop also remains confined to this thread.
@@ -233,7 +251,7 @@ mod tests {
     use std::{num::NonZeroU64, time::Duration};
     use tempfile::tempdir;
 
-    use super::{repair_wal::RepairWalFsyncPolicy, repair_wire::ShredRepairRequest};
+    use super::super::{repair_wal::RepairWalFsyncPolicy, repair_wire::ShredRepairRequest};
     use solana_hash::Hash;
     use solana_keypair::Signature;
     use solana_pubkey::Pubkey;
@@ -334,5 +352,42 @@ mod tests {
             .unwrap();
         assert!(append.synced);
         assert_eq!(worker.snapshot().durable_through_sequence, Some(0));
+    }
+
+    #[tokio::test]
+    async fn filesystem_refresh_runs_on_worker_and_reports_statvfs_failure() {
+        let directory = tempdir().unwrap();
+        let wal_directory = directory.path().join("active");
+        std::fs::create_dir(&wal_directory).unwrap();
+        let path = wal_directory.join("worker.repair.wal");
+        let mut worker = RepairWalWorker::open(
+            RepairWalConfig {
+                path,
+                fsync: RepairWalFsyncPolicy::EveryRecord,
+                max_file_bytes: 1024 * 1024,
+                max_retained_bytes: 8 * 1024 * 1024,
+                filesystem_reserve_bytes: 1,
+            },
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+        worker.refresh_filesystem_available().await.unwrap();
+        let available = worker.snapshot().filesystem_available_bytes;
+        assert!(available > 0);
+
+        std::fs::rename(&wal_directory, directory.path().join("moved")).unwrap();
+        let error = worker.refresh_filesystem_available().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("filesystem availability refresh")
+        );
+        assert_eq!(
+            worker.snapshot().filesystem_available_bytes,
+            available,
+            "a failed refresh must not publish a fabricated availability value"
+        );
     }
 }

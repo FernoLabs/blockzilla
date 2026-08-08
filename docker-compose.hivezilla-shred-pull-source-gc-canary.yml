@@ -1,0 +1,36 @@
+services:
+  hivezilla-shred-pull-source:
+    # The overlay is inert unless the operator explicitly enables this profile. A one-retirement
+    # process budget must never be renewed by an automatic restart.
+    profiles:
+      - gc-canary
+    restart: "no"
+    volumes:
+      - hivezilla-shred-data:/data:rw
+
+# Clone-only: never inherit the live external volumes from the base source-trial definition.
+volumes:
+  hivezilla-shred-data:
+    external: true
+    name: ${HIVEZILLA_SHRED_GC_CANARY_DATA_CLONE_VOLUME:?HIVEZILLA_SHRED_GC_CANARY_DATA_CLONE_VOLUME must be a frozen clone}
+  hivezilla-shred-status:
+    external: true
+    name: ${HIVEZILLA_SHRED_GC_CANARY_STATUS_CLONE_VOLUME:?HIVEZILLA_SHRED_GC_CANARY_STATUS_CLONE_VOLUME must be a frozen clone}
+  hivezilla-shred-control:
+    external: true
+    name: ${HIVEZILLA_SHRED_GC_CANARY_CONTROL_CLONE_VOLUME:?HIVEZILLA_SHRED_GC_CANARY_CONTROL_CLONE_VOLUME must be a frozen clone}
+
+# Never reuse the production pull source's server identity, client CA/allowlist, or receipt key.
+# Reusing the service secret names replaces the base file definitions while preserving the fixed
+# in-container paths referenced by the canary config.
+secrets:
+  hivezilla_shred_pull_server_certificate:
+    file: ${HIVEZILLA_SHRED_GC_CANARY_SERVER_CERTIFICATE_PATH:?HIVEZILLA_SHRED_GC_CANARY_SERVER_CERTIFICATE_PATH is required}
+  hivezilla_shred_pull_server_private_key:
+    file: ${HIVEZILLA_SHRED_GC_CANARY_SERVER_PRIVATE_KEY_PATH:?HIVEZILLA_SHRED_GC_CANARY_SERVER_PRIVATE_KEY_PATH is required}
+  hivezilla_shred_pull_client_ca:
+    file: ${HIVEZILLA_SHRED_GC_CANARY_CLIENT_CA_PATH:?HIVEZILLA_SHRED_GC_CANARY_CLIENT_CA_PATH is required}
+  hivezilla_shred_pull_allowed_nodes:
+    file: ${HIVEZILLA_SHRED_GC_CANARY_ALLOWED_NODES_PATH:?HIVEZILLA_SHRED_GC_CANARY_ALLOWED_NODES_PATH is required}
+  hivezilla_shred_pull_receipt_public_key:
+    file: ${HIVEZILLA_SHRED_GC_CANARY_RECEIPT_PUBLIC_KEY_PATH:?HIVEZILLA_SHRED_GC_CANARY_RECEIPT_PUBLIC_KEY_PATH is required}

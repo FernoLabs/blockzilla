@@ -6,8 +6,9 @@ live-first, permanent-raw-dataset contract is defined in the
 [Hivezilla record and sync specification](../design/hivezilla-record-and-sync-protocol.md).
 
 This rollout records and durably replicates shreds only. It does not reconstruct blocks, compact
-records, or publish archives. After the NAS has fsynced and signed a cumulative ACK, Hetzner may
-retire older sealed spool segments while retaining the exact ACK segment as a restart anchor.
+records, or publish archives. ACK/replay and deletion are separate stages: the checked live source
+defaults to `gc.enabled=false`, so a NAS ACK advances only the fsynced cumulative-ACK WAL. Retention
+is tested separately with a one-retirement canary against frozen clone volumes.
 
 ```text
 Solana gossip / TVU
@@ -27,9 +28,10 @@ keeps crash recovery and NAS replay exact without paying one disk flush per UDP 
 cannot request an arbitrary cursor. The source selects its oldest unacknowledged durable records,
 and repeats the same batch until the NAS has fsynced its copy and returned a signed cumulative ACK.
 
-An ACK first advances the Hetzner replay cursor stored in its fsynced ACK WAL. Only after that
-durability boundary may one older sealed source segment be retired. The active segment, the
-segment containing the ACK, and every unacknowledged record remain on Hetzner.
+An ACK first advances the Hetzner replay cursor stored in its fsynced ACK WAL. Only when GC is
+separately enabled after namespace, provenance, continuity, and rollout gates may an older sealed
+source segment be considered for retirement. The active segment, ACK-anchor segment, its exact
+successor, and every unacknowledged record must remain.
 
 ## Deployment inputs
 
@@ -38,12 +40,24 @@ Prepare the two examples as private regular files, never as symlinks:
 - Hetzner: [raw-shred-pull-source.example.json](../../services/hivezilla/config/raw-shred-pull-source.example.json)
 - NAS client: [raw-shred-pull-client.example.json](../../services/hivezilla/config/raw-shred-pull-client.example.json)
 
-The Hetzner Dokploy Compose file is
-[services/hivezilla/docker-compose.hivezilla-shred.dokploy.yml](../../services/hivezilla/docker-compose.hivezilla-shred.dokploy.yml).
-It now runs the pull listener instead of the old local-only `bridge-shred-spool` copy. Before
-deploying it, provision its private `deploy/hivezilla-shred/{tls,replication,receipts,secrets}`
-mounts and set `SHRED_JOURNAL_ID` to the active journal ID. The small container entrypoint renders
-that non-secret ID into a private temporary runtime config; keys remain mounted files.
+The Hetzner pull source is the separately invoked, digest-pinned
+[source-trial Compose](../../docker-compose.hivezilla-shred-pull-source.yml). It reuses three
+inspected external volumes: live recorder data, recorder status, and the control volume containing
+the incumbent cumulative-ACK WAL. It does not define or modify the recorder deployment. The
+[current hardening rollout](current-hivezilla-shred-hardening-rollout.md) is authoritative for
+publishing, host preparation, source handoff, and rollback.
+
+Render the source example as a private regular file, replace `__SHRED_JOURNAL_ID__` with the active
+journal ID, and keep `gc.enabled=false`. Compose mounts TLS material, the client allowlist, and the
+NAS receipt key as secrets below `/run/secrets`. Resolve each external volume with
+`docker volume inspect`; an empty replacement ACK volume is a cutover failure. If the incumbent
+uses a host directory, map that exact canonical directory through a bind-backed external volume
+instead of copying it.
+
+The integrated `blockzilla-hivezilla-shred` image must be selected by its published `sha256:`
+digest. The same image runs `record-shred-udp`, `serve-shred-reader`, and
+`serve-shred-spool-pull-source`; do not revive a standalone reader image or a platform-specific
+deployment manifest.
 
 The TLS layout needs two independent mTLS relationships:
 
@@ -54,20 +68,52 @@ The receiver must permit the exact stream `(solana-mainnet, hivezilla-shred-01,
 shred-reader-loopback, SHRED_JOURNAL_ID)` and use a `4 KiB` record limit. The same NAS receipt
 public key is placed on Hetzner so it can authenticate the ACK before recording it.
 
-## Startup order
+## Sequential source handoff
 
 1. Start `record-shred-udp` on Hetzner and wait for `/status/recorder.json` to report a non-null
    `durable_through_sequence`.
-2. Start `serve-shred-spool-pull-source --config /etc/hivezilla/raw-shred-pull.json` on Hetzner.
-   It listens on `18443` in the example. Allow this port only from the NAS egress IP.
-3. Start the NAS durable receiver first, then run
+2. Record the incumbent stream tuple, durable ACK, retained segment manifest, and the exact ACK-WAL
+   and lock device/inode, owner, mode, size, and SHA-256. Measure spool growth and prove enough disk
+   runway for the complete GC-off trial and rollback window.
+3. Stop and fence only the incumbent pull source. Leave the recorder and NAS receiver live, and
+   prove both ACK locks were released. The candidate must reuse the same WAL and stream identity.
+4. Render the source-trial Compose with a unique project name, the exact external volume names,
+   secret paths, private config, and immutable image digest. Confirm `/data` and `/status` are
+   read-only, `/control` is the incumbent volume, and the config has `gc.enabled=false`.
+5. Start `serve-shred-spool-pull-source`. It listens on `18443` in the example; allow that port only
+   from the NAS egress IP. Startup must fail closed on a wrong stream, invalid recovered ACK
+   signature, missing retained anchor/successor, replaceable control state, or inconsistent prefix.
+6. Start the NAS durable receiver first, then run
    `pull-grpc-raw --config /etc/hivezilla/raw-shred-pull-client.json --protocol v2` on the NAS.
-4. Confirm the Hetzner ACK status advances and the NAS spool sequence matches it.
+7. Confirm the first offer is exactly durable ACK + 1, then confirm the Hetzner ACK status advances
+   only after the NAS durable sequence matches it.
 
-Deploy the prefix-marker-aware recorder and pull source as one compatibility unit. Once a durable
-ACK covers a later segment, startup maintenance drains all older sealed segments before serving;
-caught-up sessions continue bounded maintenance. Never roll the recorder back to a binary that
-requires segment zero after the first prefix marker is published.
+The live source trial cannot delete because `/data` is read-only. Stop it inside the approved disk
+window and restore the unchanged incumbent if any source preflight or replay invariant fails. Never
+delete state to make startup pass.
+
+### Clone-only retention canary
+
+Do not enable live GC. Prepare three distinct, disposable canary clone volumes and prove none
+resolves to live data. Do not reuse the production ACK WAL or production stream tuple. Replay a
+bounded frozen raw-shred sample through an offline recorder into the distinct
+`hivezilla-shred-gc-canary/shred-reader-gc-canary/<canary-journal>` namespace, then use the checked
+[GC canary config](../../services/hivezilla/config/raw-shred-pull-source-gc-canary.example.json)
+and combine the base Compose with the
+[GC canary overlay](../../docker-compose.hivezilla-shred-pull-source-gc-canary.yml). The overlay is
+default-off behind the explicit `gc-canary` profile, changes only cloned `/data` to read-write, and
+sets `restart: "no"`.
+
+The canary binds only `127.0.0.1:19443`, authorizes at most one retirement per process, and requires
+control UID `0` plus recorder GID `10001`. Use a canary-only server certificate, client CA,
+single-local-client allowlist, receipt signer, expected primary `blockzilla-gc-canary`, and fresh
+`gc-canary-ack.wal`. Never point the production NAS client at it. Automatic restart is forbidden
+because it renews the process budget. Before starting, run the exact ACK/GC namespace checks in the
+[hardening rollout](current-hivezilla-shred-hardening-rollout.md), prove every rendered volume is a
+clone, and confirm the controlled local client can reach the source only through loopback.
+Afterward, store before/after manifests and prove no more than one fully covered sealed segment was
+removed while the anchor, exact successor, active segment, and all unacknowledged records remained.
+This clone test does not authorize a live read-write source.
 
 ## Failure behavior
 
@@ -76,10 +122,13 @@ requires segment zero after the first prefix marker is published.
 - Hetzner restart: the local ACK WAL finds the next source sequence; replay remains at-least-once.
 - Gossip gaps: this system cannot synthesize missing shreds. The recorder's accepted count and
   freshness remain separate health signals.
+- GC-off disk pressure: stop the trial within its measured runway and restore the incumbent. Do not
+  turn on live deletion as an emergency response.
 
 ### Missing-shred repair boundary
 
-The Dokploy reader enables bounded live repair by default. It runs behind an isolated supervisor,
+The integrated `hivezilla serve-shred-reader` runtime supports bounded live repair. It runs behind
+an isolated supervisor,
 uses authenticated gossip repair peers, correlates nonces and retry deadlines, and accepts only
 data shreds whose request identity, shred version, scheduled-leader signature, Merkle identity, and
 recorded chained-root trust path all validate. Transient failures restart only the repair worker;
@@ -109,7 +158,7 @@ send success alone is not a durable receipt.
 ## Verified reconstruction diagnostic
 
 Block reconstruction is an offline diagnostic feature, not part of the small live ingest binary.
-Build it with `--bin shred-reconstruct-trial` after the usual crate build (no feature flag is required).
+Build it explicitly with `--features shred-reconstruction --bin shred-reconstruct-trial`.
 
 On 2026-07-22, the final ordered-component reader scanned a 500,000-record NAS sample from journal
 `d574db1d3e3faab86f06f08a2ce33cfd`. From 256 candidate slots it reconstructed 187 exact,

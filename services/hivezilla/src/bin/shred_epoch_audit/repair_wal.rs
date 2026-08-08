@@ -1426,16 +1426,14 @@ fn decode_and_validate_body(body: &[u8]) -> Result<ValidatedRepairRecord> {
     );
     let actual_merkle_root = shred
         .merkle_root()
-        .map_err(|error| anyhow::anyhow!("derive repair shred Merkle root: {error:?}"))?
-        .to_bytes();
+        .map_err(|error| anyhow::anyhow!("derive repair shred Merkle root: {error:?}"))?;
     ensure!(
         actual_merkle_root == fec_merkle_root,
         "repair WAL FEC Merkle root provenance differs from its shred payload"
     );
     let actual_chained_root = shred
         .chained_merkle_root()
-        .map_err(|error| anyhow::anyhow!("derive repair shred chained Merkle root: {error:?}"))?
-        .to_bytes();
+        .map_err(|error| anyhow::anyhow!("derive repair shred chained Merkle root: {error:?}"))?;
     let chained_merkle_root = chained_merkle_root
         .context("accepted repair WAL provenance omitted its chained Merkle root")?;
     ensure!(
@@ -1548,12 +1546,10 @@ fn fec_identity(shred: &Shred) -> Result<FecIdentity> {
         leader_signature,
         merkle_root: shred
             .merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?,
         chained_merkle_root: shred
             .chained_merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?,
         proof_size: variant & 0x0f,
         resigned: matches!(high, 0x70 | 0xb0),
     })

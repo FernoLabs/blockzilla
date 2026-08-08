@@ -173,6 +173,7 @@ pub fn validate_raw_replication_batch(
     let mut compressed_total = 0u64;
     let mut uncompressed_total = 0u64;
     let mut previous_sequence: Option<u64> = None;
+    let mut payload_profile = None;
     for record in records {
         compressed_total = compressed_total
             .checked_add(record.compressed_payload.len() as u64)
@@ -201,6 +202,15 @@ pub fn validate_raw_replication_batch(
         }
         previous_sequence = Some(record.offer.record.sequence);
         validate_raw_replication_record(record, stream, limits)?;
+        let next_profile = receiver_payload_profile(&record.offer)?;
+        if let Some(expected) = payload_profile {
+            ensure!(
+                next_profile == expected,
+                "receiver batch cannot mix payload profiles"
+            );
+        } else {
+            payload_profile = Some(next_profile);
+        }
     }
     Ok(())
 }
@@ -514,6 +524,11 @@ impl BlockzillaRawReceiver {
         let mut uncompressed_total = 0u64;
         let mut validated = Vec::with_capacity(records.len());
         let mut previous_sequence: Option<u64> = None;
+        let mut payload_profile = self
+            .progress
+            .latest()
+            .map(|frame| receiver_payload_profile(&frame.offer))
+            .transpose()?;
         for record in records {
             compressed_total = compressed_total
                 .checked_add(record.compressed_payload.len() as u64)
@@ -541,7 +556,17 @@ impl BlockzillaRawReceiver {
                 );
             }
             previous_sequence = Some(record.offer.record.sequence);
-            validated.push(self.validate_record(record)?);
+            let validated_record = self.validate_record(record)?;
+            let next_profile = receiver_payload_profile(&validated_record.offer)?;
+            if let Some(expected) = payload_profile {
+                ensure!(
+                    next_profile == expected,
+                    "receiver stream payload profile changed"
+                );
+            } else {
+                payload_profile = Some(next_profile);
+            }
+            validated.push(validated_record);
         }
         Ok(validated)
     }
@@ -851,18 +876,35 @@ fn validate_offer_identity(offer: &ReplicationOffer, stream: &ReplicationStreamI
         ReplicationStreamId::from_offer(offer) == *stream,
         "receiver replication offer belongs to a different stream"
     );
-    match offer.payload_format_version {
-        RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1 => ensure!(
+    match receiver_payload_profile(offer)? {
+        ReceiverPayloadProfile::GrpcBlock => ensure!(
             offer.commitment == CommitmentEvidence::Confirmed,
             "receiver accepts only confirmed raw gRPC block observations"
         ),
-        ZSTD_SOLANA_SHRED_V1 => ensure!(
+        ReceiverPayloadProfile::SolanaShred => ensure!(
             offer.commitment == CommitmentEvidence::Unknown,
             "receiver accepts raw shred observations only with unknown commitment"
         ),
-        format => anyhow::bail!("unsupported receiver raw payload format {format}"),
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverPayloadProfile {
+    GrpcBlock,
+    SolanaShred,
+}
+
+fn receiver_payload_profile(offer: &ReplicationOffer) -> Result<ReceiverPayloadProfile> {
+    match (&offer.logical_key, offer.payload_format_version) {
+        (LogicalKey::Block { .. }, RAW_GRPC_ZSTD_PROTOBUF_UPDATE_V1) => {
+            Ok(ReceiverPayloadProfile::GrpcBlock)
+        }
+        (LogicalKey::Shred { .. }, ZSTD_SOLANA_SHRED_V1) => Ok(ReceiverPayloadProfile::SolanaShred),
+        _ => Err(anyhow!(
+            "unsupported receiver logical-key/payload-format combination"
+        )),
+    }
 }
 
 fn validate_decoded_record_with_raw(

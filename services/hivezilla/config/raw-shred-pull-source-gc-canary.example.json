@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "bind": "0.0.0.0:18443",
+  "bind": "127.0.0.1:19443",
   "tls": {
     "server_certificate_file": "/run/secrets/hivezilla_shred_pull_server_certificate",
     "server_private_key_file": "/run/secrets/hivezilla_shred_pull_server_private_key",
@@ -10,21 +10,24 @@
   "allowed_nodes_file": "/run/secrets/hivezilla_shred_pull_allowed_nodes",
   "spool_root": "/data/shred-ingest",
   "cluster_id": "solana-mainnet",
-  "origin_node_id": "hivezilla-shred-01",
-  "source_id": "shred-reader-loopback",
-  "journal_id": "__SHRED_JOURNAL_ID__",
-  "recorder_status_file": "/status/recorder.json",
-  "cumulative_ack_wal_file": "/control/nas-shred-ack.wal",
-  "ack_status_file": "/control/nas-shred-ack-status.json",
-  "expected_primary_id": "blockzilla-nas",
+  "origin_node_id": "hivezilla-shred-gc-canary",
+  "source_id": "shred-reader-gc-canary",
+  "journal_id": "__GC_CANARY_JOURNAL_ID__",
+  "recorder_status_file": "/status/gc-canary-recorder.json",
+  "cumulative_ack_wal_file": "/control/gc-canary-ack.wal",
+  "ack_status_file": "/control/gc-canary-ack-status.json",
+  "expected_primary_id": "blockzilla-gc-canary",
   "trusted_receipt_keys": [
     {
-      "key_id": "nas-receipt-current",
+      "key_id": "gc-canary-receipt",
       "public_key_file": "/run/secrets/hivezilla_shred_pull_receipt_public_key"
     }
   ],
   "gc": {
-    "enabled": false
+    "enabled": true,
+    "control_uid": 0,
+    "recorder_gid": 10001,
+    "max_retirements_per_process": 1
   },
   "limits": {
     "max_records": 256,

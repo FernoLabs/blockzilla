@@ -224,6 +224,7 @@ impl RepairWal {
         reject_symlink(&writer_lock_path(&config.path), "repair WAL writer lock")?;
         let writer_lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(writer_lock_path(&config.path))?;
@@ -573,6 +574,16 @@ impl RepairWal {
         self.filesystem_available_bytes
     }
 
+    /// Refreshes the cached filesystem headroom without admitting or writing a repair record.
+    /// This is called on the blocking WAL worker so a slow `statvfs` can never stall raw TVU
+    /// receive. Keeping the cache current also accounts for bytes consumed by the independent raw
+    /// spool and other writers on the same filesystem.
+    pub fn refresh_filesystem_available_bytes(&mut self) -> io::Result<u64> {
+        let available = filesystem_available_bytes(&self.path)?;
+        self.filesystem_available_bytes = available;
+        Ok(available)
+    }
+
     pub fn v3_sealed(&self) -> bool {
         self.base_sealed
     }
@@ -656,7 +667,7 @@ impl RepairWal {
         }
 
         self.file.write_all(&frame)?;
-        self.chain_digest = extend_chain_digest(self.chain_digest.clone(), &frame);
+        self.chain_digest = extend_chain_digest(self.chain_digest, &frame);
         self.file_len = next_file_len;
         self.retained_bytes = self
             .retained_bytes
@@ -754,7 +765,7 @@ impl RepairWal {
             id,
             first_sequence: self.next_sequence,
             previous_last_sequence,
-            previous_chain_digest: self.chain_digest.clone(),
+            previous_chain_digest: self.chain_digest,
         };
         let header_bytes = encode_segment_header(&header);
         let path = segment_path(&self.path, id)?;
@@ -929,9 +940,11 @@ fn filesystem_available_bytes(path: &Path) -> io::Result<u64> {
     }
     // SAFETY: statvfs returned success and initialized the output structure.
     let status = unsafe { status.assume_init() };
-    (status.f_bavail as u64)
-        .checked_mul(status.f_frsize as u64)
-        .ok_or_else(|| io::Error::new(ErrorKind::StorageFull, "filesystem size overflow"))
+    let available = u128::from(status.f_bavail)
+        .checked_mul(u128::from(status.f_frsize))
+        .ok_or_else(|| io::Error::new(ErrorKind::StorageFull, "filesystem size overflow"))?;
+    u64::try_from(available)
+        .map_err(|_| io::Error::new(ErrorKind::StorageFull, "filesystem size overflow"))
 }
 
 #[cfg(not(unix))]
@@ -1311,7 +1324,7 @@ fn create_v3_seal_from_values(
     }
     let seal = V3Seal {
         next_sequence,
-        base_chain_digest: base_chain_digest.clone(),
+        base_chain_digest: *base_chain_digest,
     };
     let seal_path = v3_seal_path(path);
     let file = create_segment_file(&seal_path, &encode_v3_seal(&seal))?;
@@ -2245,6 +2258,36 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_refresh_updates_cache_and_preserves_last_value_on_failure() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("refresh.repair.wal");
+        let mut wal = RepairWal::open(
+            RepairWalConfig {
+                path,
+                fsync: RepairWalFsyncPolicy::EveryRecord,
+                max_file_bytes: 1024 * 1024,
+                max_retained_bytes: 8 * 1024 * 1024,
+                filesystem_reserve_bytes: 1,
+            },
+            Instant::now(),
+        )
+        .unwrap();
+
+        wal.filesystem_available_bytes = 0;
+        let refreshed = wal.refresh_filesystem_available_bytes().unwrap();
+        assert!(refreshed > 0);
+        assert_eq!(wal.filesystem_available_bytes(), refreshed);
+
+        wal.path = directory.path().join("missing-parent/wal.repair.wal");
+        assert!(wal.refresh_filesystem_available_bytes().is_err());
+        assert_eq!(
+            wal.filesystem_available_bytes(),
+            refreshed,
+            "a failed statvfs must not replace the cache with a plausible zero"
+        );
+    }
+
+    #[test]
     fn refuses_non_repair_file_and_wrong_suffix() {
         let directory = tempdir().unwrap();
         let wrong_suffix = directory.path().join("raw.wal");
@@ -3012,7 +3055,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("repair_wal::tests::bare_relative_path_rolls_and_reopens")
+            .arg("shred_reader::repair_wal::tests::bare_relative_path_rolls_and_reopens")
             .env(CHILD_ENV, "1")
             .current_dir(directory.path())
             .status()

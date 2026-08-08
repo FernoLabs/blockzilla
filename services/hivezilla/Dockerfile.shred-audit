@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+ARG BUILD_REVISION=unknown
+FROM rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
+
+ARG BUILD_REVISION
+ENV CARGO_BUILD_JOBS=2 \
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+    CARGO_PROFILE_RELEASE_LTO=false \
+    CARGO_PROFILE_RELEASE_STRIP=symbols \
+    RUSTFLAGS="-C target-feature=+aes,+sse2" \
+    SHRED_AUDIT_BUILD_REVISION=$BUILD_REVISION
+
+RUN test "$(dpkg --print-architecture)" = amd64 \
+    && apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        clang \
+        cmake \
+        libclang-dev \
+        libssl-dev \
+        libudev-dev \
+        make \
+        pkg-config \
+        protobuf-compiler \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --locked --release \
+        --package hivezilla \
+        --features shred-reconstruction \
+        --bin shred-epoch-audit \
+        --bin repair-wal-inspect \
+    && cp target/release/shred-epoch-audit /tmp/shred-epoch-audit \
+    && cp target/release/repair-wal-inspect /tmp/repair-wal-inspect
+
+FROM builder AS test
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo test --locked --release \
+        --package hivezilla \
+        --features shred-reconstruction \
+        --lib \
+        --bins
+
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
+
+ARG BUILD_REVISION
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        libssl3 \
+        libstdc++6 \
+        libudev1 \
+        zlib1g \
+    && groupadd --gid 10001 audit \
+    && useradd --create-home --uid 10001 --gid 10001 audit \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /tmp/shred-epoch-audit /usr/local/bin/shred-epoch-audit
+COPY --from=builder /tmp/repair-wal-inspect /usr/local/bin/repair-wal-inspect
+
+LABEL org.opencontainers.image.source="https://github.com/FernoLabs/blockzilla"
+LABEL org.opencontainers.image.revision="$BUILD_REVISION"
+
+USER audit
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/shred-epoch-audit"]

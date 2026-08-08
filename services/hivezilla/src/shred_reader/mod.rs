@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod receiver;
 pub mod repair_runtime;
 pub mod repair_service;
+pub mod repair_socket;
 pub mod repair_tracker;
 pub mod repair_trust_store;
 pub mod repair_wal;
