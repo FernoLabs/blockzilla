@@ -15,7 +15,9 @@ use serde::{
 };
 use thiserror::Error;
 
-use crate::{AccountMap, CowAccountMap, AccountSnapshot, LaunchAccountMeta, default_system_account};
+use crate::{
+    AccountMap, AccountSnapshot, CowAccountMap, LaunchAccountMeta, default_system_account,
+};
 
 const MAX_INSTRUCTION_LEN: usize = 1_232;
 
@@ -99,9 +101,8 @@ pub fn apply_launch_config_instruction_in_place(
     accounts: &mut AccountMap,
 ) -> Result<LaunchConfigMutation, LaunchConfigError> {
     let mut cow = CowAccountMap::detached(std::mem::take(accounts));
-    let result = apply_launch_config_instruction_on_overlay(
-        instruction_data, account_metas, &mut cow,
-    );
+    let result =
+        apply_launch_config_instruction_on_overlay(instruction_data, account_metas, &mut cow);
     *accounts = cow.into_local();
     result
 }
@@ -117,8 +118,18 @@ pub fn apply_launch_config_instruction_on_overlay(
         .first()
         .ok_or(LaunchConfigError::MissingAccount { position: 0 })?;
 
+    accounts.materialize_writable(
+        account_metas
+            .iter()
+            .map(|meta| (meta.pubkey, meta.is_writable)),
+        default_system_account,
+    );
+    // Preserve the public/native API's historical absent-account defaults
+    // without cloning readonly accounts that already live in the parent store.
     for meta in account_metas {
-        accounts.entry_or_insert_with(meta.pubkey, default_system_account);
+        if !accounts.contains_key(&meta.pubkey) {
+            accounts.insert(meta.pubkey, default_system_account());
+        }
     }
     let pre_accounts = launch_pre_accounts(account_metas, accounts);
 
@@ -509,6 +520,7 @@ mod short_vec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemoryAccountStore;
 
     const CONFIG: [u8; 32] = [11; 32];
     const SIGNER_A: [u8; 32] = [12; 32];
@@ -578,6 +590,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(accounts[&CONFIG].data, incoming);
+    }
+
+    #[test]
+    fn layered_update_keeps_readonly_signer_in_parent() {
+        let current = wire(&[(SIGNER_A, true)], &[0; 4]);
+        let incoming = wire(&[(SIGNER_A, true)], &[9; 4]);
+        let mut parent = MemoryAccountStore::new();
+        parent.insert(CONFIG, config_account(current.clone()));
+        parent.insert(SIGNER_A, default_system_account());
+        let mut overlay = CowAccountMap::layered(&parent);
+
+        apply_launch_config_instruction_on_overlay(
+            &incoming,
+            &[meta(CONFIG, false, true), meta(SIGNER_A, true, false)],
+            &mut overlay,
+        )
+        .unwrap();
+
+        assert!(overlay.local_contains_key(&CONFIG));
+        assert!(!overlay.local_contains_key(&SIGNER_A));
+        let local = overlay.into_local();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[&CONFIG].data, incoming);
+        assert_eq!(parent[&CONFIG].data, current);
     }
 
     #[test]

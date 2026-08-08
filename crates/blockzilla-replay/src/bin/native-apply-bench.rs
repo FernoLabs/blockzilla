@@ -23,8 +23,8 @@ use std::{
 use blockzilla_format::ArchiveV2SystemInstructionData;
 use blockzilla_replay::{
     AccountMap, AccountSnapshot, LaunchAccountMeta, SYSTEM_PROGRAM_ID,
-    apply_launch_system_instruction_for_epoch,
-    apply_launch_system_instruction_for_epoch_in_place, default_system_account,
+    apply_launch_system_instruction_for_epoch, apply_launch_system_instruction_for_epoch_in_place,
+    default_system_account,
 };
 
 const DEFAULT_ITERS: usize = 50_000;
@@ -159,7 +159,10 @@ fn build_overlay(size: usize) -> AccountMap {
     for i in 0..size {
         let with_data = i >= 2;
         let lamports = 1_000_000 + (i as u64) * 1_000;
-        overlay.insert(pubkey(i as u64), seeded_account(i as u64, lamports, with_data));
+        overlay.insert(
+            pubkey(i as u64),
+            seeded_account(i as u64, lamports, with_data),
+        );
     }
     overlay
 }
@@ -267,31 +270,22 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--iters" => {
-                iters = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(|| {
-                        eprintln!("--iters requires a positive integer");
-                        process::exit(2);
-                    });
+                iters = args.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("--iters requires a positive integer");
+                    process::exit(2);
+                });
             }
             "--warmups" => {
-                warmups = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(|| {
-                        eprintln!("--warmups requires a non-negative integer");
-                        process::exit(2);
-                    });
+                warmups = args.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("--warmups requires a non-negative integer");
+                    process::exit(2);
+                });
             }
             "--rounds" => {
-                rounds = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(|| {
-                        eprintln!("--rounds requires a positive integer");
-                        process::exit(2);
-                    });
+                rounds = args.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("--rounds requires a positive integer");
+                    process::exit(2);
+                });
             }
             "--overlay-sizes" => {
                 let raw = args.next().unwrap_or_else(|| {

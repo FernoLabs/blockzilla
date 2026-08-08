@@ -15,7 +15,9 @@ use std::{
 };
 use thiserror::Error;
 
-use crate::{AccountMap, CowAccountMap, AccountSnapshot, CLOCK_SYSVAR_ID, LaunchAccountMeta, RENT_SYSVAR_ID};
+use crate::{
+    AccountMap, AccountSnapshot, CLOCK_SYSVAR_ID, CowAccountMap, LaunchAccountMeta, RENT_SYSVAR_ID,
+};
 
 const MAX_LOCKOUT_HISTORY: usize = 31;
 const MAX_EPOCH_CREDITS_HISTORY: usize = 64;
@@ -487,7 +489,10 @@ pub(crate) fn apply_launch_vote_instruction_in_place(
 ) -> Result<LaunchVoteMutation, LaunchVoteError> {
     let mut cow = CowAccountMap::detached(std::mem::take(accounts));
     let result = apply_launch_vote_instruction_on_overlay(
-        instruction_data, account_metas, &mut cow, trusted_vote_epoch,
+        instruction_data,
+        account_metas,
+        &mut cow,
+        trusted_vote_epoch,
     );
     *accounts = cow.into_local();
     result
@@ -521,7 +526,11 @@ pub(crate) fn apply_launch_vote_instruction_in_place_cached(
 ) -> Result<(LaunchVoteMutation, bool), LaunchVoteError> {
     let mut cow = CowAccountMap::detached(std::mem::take(accounts));
     let result = apply_launch_vote_instruction_on_overlay_cached(
-        instruction_data, account_metas, &mut cow, trusted_vote_epoch, cache,
+        instruction_data,
+        account_metas,
+        &mut cow,
+        trusted_vote_epoch,
+        cache,
     );
     *accounts = cow.into_local();
     result

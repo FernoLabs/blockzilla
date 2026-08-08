@@ -471,9 +471,7 @@ pub fn apply_launch_stake_instruction_in_place(
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
     let mut cow = CowAccountMap::detached(std::mem::take(accounts));
-    let result = apply_launch_stake_instruction_on_overlay(
-        data, account_metas, &mut cow, context,
-    );
+    let result = apply_launch_stake_instruction_on_overlay(data, account_metas, &mut cow, context);
     *accounts = cow.into_local();
     result
 }
@@ -484,8 +482,18 @@ pub fn apply_launch_stake_instruction_on_overlay(
     accounts: &mut CowAccountMap,
     context: LaunchStakeContext<'_>,
 ) -> Result<LaunchStakeMutation, LaunchStakeError> {
+    accounts.materialize_writable(
+        account_metas
+            .iter()
+            .map(|meta| (meta.pubkey, meta.is_writable)),
+        default_system_account,
+    );
+    // Missing accounts retain the launch/native default-account behavior, but
+    // parent-backed readonly sysvars and verifier baselines stay borrowed.
     for meta in account_metas {
-        accounts.entry_or_insert_with(meta.pubkey, default_system_account);
+        if !accounts.contains_key(&meta.pubkey) {
+            accounts.insert(meta.pubkey, default_system_account());
+        }
     }
     let pre_accounts = launch_pre_accounts(account_metas, accounts);
     let mutation = apply_inner(data, account_metas, accounts, context)?;
@@ -1611,6 +1619,7 @@ fn verify_launch_stake_instruction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemoryAccountStore;
 
     fn meta(pubkey: [u8; 32], is_signer: bool, is_writable: bool) -> LaunchAccountMeta {
         LaunchAccountMeta {
@@ -1881,6 +1890,48 @@ mod tests {
             LaunchStakeError::ReadonlyDataModified { pubkey } if pubkey == stake_pubkey
         ));
         assert_eq!(readonly, before);
+    }
+
+    #[test]
+    fn layered_initialize_keeps_readonly_rent_sysvar_in_parent() {
+        let stake_pubkey = [0x41; 32];
+        let authorized = LaunchStakeAuthorized {
+            staker: [0x42; 32],
+            withdrawer: [0x43; 32],
+        };
+        let lockup = LaunchStakeLockup::default();
+        let instruction =
+            wincode::serialize(&LaunchStakeInstructionV100::Initialize(authorized, lockup))
+                .unwrap();
+        let rent = LaunchStakeRent {
+            lamports_per_byte_year: 3_480,
+            exemption_threshold: 2.0,
+            burn_percent: 100,
+        };
+        let reserve = rent.minimum_balance(LAUNCH_STAKE_ACCOUNT_DATA_LEN);
+        let original_stake = stake_account(reserve + 1, LaunchStakeState::Uninitialized);
+        let mut parent = MemoryAccountStore::new();
+        parent.insert(stake_pubkey, original_stake.clone());
+        parent.insert(RENT_SYSVAR_ID, rent_account(rent));
+        let mut overlay = CowAccountMap::layered(&parent);
+
+        apply_launch_stake_instruction_on_overlay(
+            &instruction,
+            &[
+                meta(stake_pubkey, false, true),
+                meta(RENT_SYSVAR_ID, false, false),
+            ],
+            &mut overlay,
+            context(),
+        )
+        .unwrap();
+
+        assert!(overlay.local_contains_key(&stake_pubkey));
+        assert!(!overlay.local_contains_key(&RENT_SYSVAR_ID));
+        let local = overlay.into_local();
+        assert_eq!(local.len(), 1);
+        assert!(local.contains_key(&stake_pubkey));
+        assert_eq!(parent[&stake_pubkey], original_stake);
     }
 
     #[test]
