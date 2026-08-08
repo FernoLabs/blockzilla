@@ -340,13 +340,14 @@ enum Commands {
 
     /// Rewrite a complete first-seen Compact V2 archive as a fresh usage-sorted generation.
     ///
-    /// The source is read-only and the target must not exist. The command makes two bounded
-    /// passes over the compact block frames, rebuilds every registry-ID-bearing artifact, checks
-    /// semantic parity, and publishes the target generation atomically.
+    /// The source is read-only. A new target is published atomically; an exact existing published
+    /// target is deep-validated and reused, while any invalid existing target is left untouched.
+    /// The command makes two bounded passes over the compact block frames, rebuilds every
+    /// registry-ID-bearing artifact, and checks semantic parity.
     ReprocessArchiveV2Registry {
         /// Complete first-seen Compact V2 source directory. It is never modified.
         source_dir: PathBuf,
-        /// Fresh sibling generation directory. Existing paths are never replaced.
+        /// Sibling generation directory. Existing paths are validated but never replaced.
         target_dir: PathBuf,
         /// Epoch encoded by the source and required in every target block.
         #[arg(long)]
