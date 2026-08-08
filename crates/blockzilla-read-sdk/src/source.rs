@@ -1,10 +1,13 @@
 use std::{
+    collections::HashMap,
     fs::File,
     io::{self, Read},
-    os::unix::fs::FileExt,
+    os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
+
+use rustix::fs::{Mode, OFlags};
 
 use crate::{SourceError, manifest::validate_object_name};
 
@@ -200,6 +203,235 @@ impl RangeSource for LocalRangeSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnixFileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+impl UnixFileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PinnedFile {
+    file: Arc<File>,
+    identity: UnixFileIdentity,
+}
+
+/// Random-access source that pins every opened object to one file descriptor.
+///
+/// This is intended for long-running local archive scans. The first lookup of
+/// an object opens it and captures its Unix identity; later size and range
+/// reads use that same handle even if the pathname is replaced. Missing
+/// objects are cached as missing because a published generation is immutable.
+#[derive(Debug, Clone)]
+pub struct PinnedLocalRangeSource {
+    root: PathBuf,
+    files: Arc<Mutex<HashMap<String, Option<PinnedFile>>>>,
+}
+
+impl PinnedLocalRangeSource {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            files: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn path(&self, object: &str) -> SourceResult<PathBuf> {
+        validate_object_name(object).map_err(|_| SourceError::InvalidName(object.to_owned()))?;
+        Ok(self.root.join(object))
+    }
+
+    fn pinned_file(&self, object: &str) -> SourceResult<Option<PinnedFile>> {
+        self.pinned_file_with(object, |path| {
+            rustix::fs::open(
+                path,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(io::Error::from)
+        })
+    }
+
+    fn pinned_file_with(
+        &self,
+        object: &str,
+        open: impl FnOnce(&Path) -> io::Result<File>,
+    ) -> SourceResult<Option<PinnedFile>> {
+        let path = self.path(object)?;
+        {
+            let files = self.files.lock().map_err(|_| {
+                SourceError::Protocol("pinned local source file cache is poisoned".to_owned())
+            })?;
+            if let Some(file) = files.get(object) {
+                return Ok(file.clone());
+            }
+        }
+
+        // Opening a local/NAS object can involve filesystem I/O, so never hold the source-wide
+        // cache mutex across it. Multiple first-open racers are reconciled below: whichever
+        // result enters the cache first becomes the one pinned identity returned to every caller.
+        let file = match open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let mut files = self.files.lock().map_err(|_| {
+                    SourceError::Protocol("pinned local source file cache is poisoned".to_owned())
+                })?;
+                return Ok(files.entry(object.to_owned()).or_insert(None).clone());
+            }
+            Err(source) => {
+                return Err(SourceError::Io {
+                    object: object.to_owned(),
+                    source,
+                });
+            }
+        };
+        let metadata = file.metadata().map_err(|source| SourceError::Io {
+            object: object.to_owned(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(SourceError::Protocol(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        let pinned = PinnedFile {
+            file: Arc::new(file),
+            identity: UnixFileIdentity::from_metadata(&metadata),
+        };
+        let mut files = self.files.lock().map_err(|_| {
+            SourceError::Protocol("pinned local source file cache is poisoned".to_owned())
+        })?;
+        Ok(files
+            .entry(object.to_owned())
+            .or_insert_with(|| Some(pinned))
+            .clone())
+    }
+
+    /// Verify that every object opened so far still has its captured file
+    /// identity, size, and modification/change timestamps.
+    pub fn verify_unchanged(&self) -> SourceResult<()> {
+        let files: Vec<(String, PinnedFile)> = self
+            .files
+            .lock()
+            .map_err(|_| {
+                SourceError::Protocol("pinned local source file cache is poisoned".to_owned())
+            })?
+            .iter()
+            .filter_map(|(object, file)| file.as_ref().map(|file| (object.clone(), file.clone())))
+            .collect();
+
+        for (object, file) in files {
+            let metadata = file.file.metadata().map_err(|source| SourceError::Io {
+                object: object.clone(),
+                source,
+            })?;
+            if !metadata.is_file() || UnixFileIdentity::from_metadata(&metadata) != file.identity {
+                return Err(SourceError::Protocol(format!(
+                    "object {object} changed after it was opened"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RangeSource for PinnedLocalRangeSource {
+    fn size(&self, object: &str) -> SourceResult<Option<u64>> {
+        Ok(self.pinned_file(object)?.map(|file| file.identity.size))
+    }
+
+    fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.read_range_into(object, offset, length, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        bytes: &mut Vec<u8>,
+    ) -> SourceResult<()> {
+        let pinned = self
+            .pinned_file(object)?
+            .ok_or_else(|| SourceError::NotFound(object.to_owned()))?;
+        let size = pinned.identity.size;
+        let length_u64 = u64::try_from(length).map_err(|_| SourceError::OutOfBounds {
+            object: object.to_owned(),
+            offset,
+            length,
+            size,
+        })?;
+        let end = offset
+            .checked_add(length_u64)
+            .ok_or_else(|| SourceError::OutOfBounds {
+                object: object.to_owned(),
+                offset,
+                length,
+                size,
+            })?;
+        if end > size {
+            return Err(SourceError::OutOfBounds {
+                object: object.to_owned(),
+                offset,
+                length,
+                size,
+            });
+        }
+
+        if bytes.len() < length {
+            bytes.resize(length, 0);
+        } else {
+            bytes.truncate(length);
+        }
+        let mut read = 0usize;
+        while read < length {
+            let read_offset = offset + read as u64;
+            let count = pinned
+                .file
+                .read_at(&mut bytes[read..], read_offset)
+                .map_err(|source| SourceError::Io {
+                    object: object.to_owned(),
+                    source,
+                })?;
+            if count == 0 {
+                return Err(SourceError::ShortRead {
+                    object: object.to_owned(),
+                    expected: length,
+                    actual: read,
+                });
+            }
+            read += count;
+        }
+        Ok(())
+    }
+}
+
 /// Route objects found in `primary` there, and all other objects to `fallback`.
 ///
 /// The intended Mac setup uses a local cache as `primary` for manifest,
@@ -325,7 +557,7 @@ impl<S: RangeSource> Read for RangeSourceReader<'_, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, thread, time::Duration};
 
     use tempfile::tempdir;
 
@@ -351,5 +583,126 @@ mod tests {
         assert_eq!(reusable, b"789");
         assert!(source.read_range("../object.bin", 0, 1).is_err());
         assert!(source.read_range("object.bin", 9, 2).is_err());
+    }
+
+    #[test]
+    fn pinned_source_keeps_reading_open_file_after_path_replacement() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("object.bin");
+        fs::write(&path, b"original").unwrap();
+        let source = PinnedLocalRangeSource::new(directory.path());
+
+        assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+        fs::rename(&path, directory.path().join("original.bin")).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+
+        assert_eq!(source.size("object.bin").unwrap(), Some(8));
+        assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+    }
+
+    #[test]
+    fn pinned_source_detects_same_length_in_place_mutation() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("object.bin");
+        fs::write(&path, b"before").unwrap();
+        let source = PinnedLocalRangeSource::new(directory.path());
+
+        assert_eq!(source.read_range("object.bin", 0, 6).unwrap(), b"before");
+        thread::sleep(Duration::from_millis(2));
+        fs::write(&path, b"after!").unwrap();
+
+        assert!(source.verify_unchanged().is_err());
+    }
+
+    #[test]
+    fn pinned_source_rejects_fifo_without_blocking() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("object.bin");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let source = PinnedLocalRangeSource::new(directory.path());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            sender.send(source.size("object.bin")).unwrap();
+        });
+        let error = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("opening a FIFO blocked before the regular-file check")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not a regular file"),
+            "unexpected FIFO error: {error}"
+        );
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn pinned_source_does_not_hold_cache_lock_while_opening_and_converges_first_open_racers() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("ready.bin"), b"ready").unwrap();
+        fs::write(directory.path().join("slow.bin"), b"slow").unwrap();
+        fs::write(directory.path().join("raced.bin"), b"raced").unwrap();
+        let source = PinnedLocalRangeSource::new(directory.path());
+        assert_eq!(source.size("ready.bin").unwrap(), Some(5));
+
+        let (open_started_sender, open_started_receiver) = std::sync::mpsc::channel();
+        let (release_open_sender, release_open_receiver) = std::sync::mpsc::channel();
+        let slow_source = source.clone();
+        let slow_open = thread::spawn(move || {
+            slow_source
+                .pinned_file_with("slow.bin", |path| {
+                    open_started_sender.send(()).unwrap();
+                    release_open_receiver.recv().unwrap();
+                    File::open(path)
+                })
+                .unwrap()
+        });
+        open_started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let cached_source = source.clone();
+        let (cached_sender, cached_receiver) = std::sync::mpsc::channel();
+        let cached_read = thread::spawn(move || {
+            cached_sender.send(cached_source.size("ready.bin")).unwrap();
+        });
+        assert_eq!(
+            cached_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("a slow filesystem open held the source-wide cache mutex")
+                .unwrap(),
+            Some(5)
+        );
+        cached_read.join().unwrap();
+        release_open_sender.send(()).unwrap();
+        assert!(slow_open.join().unwrap().is_some());
+
+        let source = std::sync::Arc::new(source);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let handles = (0..16)
+            .map(|_| {
+                let source = source.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    source.pinned_file("raced.bin").unwrap().unwrap().file
+                })
+            })
+            .collect::<Vec<_>>();
+        let files = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            files
+                .iter()
+                .all(|file| std::sync::Arc::ptr_eq(file, &files[0])),
+            "concurrent first-open callers did not converge on one cached handle"
+        );
     }
 }

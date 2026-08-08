@@ -4,6 +4,12 @@ use ph::fmph;
 use solana_pubkey::Pubkey;
 #[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{Cursor, Seek, SeekFrom};
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+use std::os::unix::fs::FileExt as _;
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+use std::os::windows::fs::FileExt as _;
 use std::str::FromStr;
 use std::{
     fs::File,
@@ -34,6 +40,36 @@ pub struct KeyIndex {
     /// Key -> 1-based id fallback for wasm builds, where the native MPHF dependency is unavailable.
     #[cfg(target_arch = "wasm32")]
     ids: HashMap<[u8; 32], u32>,
+}
+
+/// Read-only registry lookup that keeps the large MPHF value/tag tables
+/// file-backed. Only the compact [`fmph::GOFunction`] tail is decoded into
+/// owned memory; a member lookup performs one positioned read for its `u64`
+/// membership tag and one for its `u32` value.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct FileBackedKeyIndex {
+    file: File,
+    mphf: fmph::GOFunction,
+    len: usize,
+    values_offset: u64,
+    tags_offset: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct KeyIndexLayout {
+    len: usize,
+    values_offset: u64,
+    tags_offset: u64,
+    mphf_offset: u64,
+    file_len: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GoFunctionLayout {
+    level_count: usize,
+    group_count: usize,
 }
 
 pub trait PubkeyCompactor {
@@ -193,47 +229,52 @@ impl KeyIndex {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let mut reader = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, file);
+        let layout = key_index_layout(&file, path)?;
+        let mphf = load_preflighted_go_function(&file, layout, path)?;
+        let mut reader = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, &file);
+        reader.seek(SeekFrom::Start(layout.values_offset))?;
 
-        let mut magic = [0u8; 8];
-        reader.read_exact(&mut magic)?;
-        anyhow::ensure!(
-            &magic == KEY_INDEX_MAGIC,
-            "invalid registry index magic in {}",
-            path.display()
-        );
-
-        let version = read_u16_le(&mut reader)?;
-        anyhow::ensure!(
-            version == KEY_INDEX_VERSION,
-            "unsupported registry index version {version} in {}",
-            path.display()
-        );
-        let header_len = read_u16_le(&mut reader)? as usize;
-        anyhow::ensure!(
-            header_len == KEY_INDEX_HEADER_LEN,
-            "unsupported registry index header length {header_len} in {}",
-            path.display()
-        );
-
-        let len = read_u64_le(&mut reader)?;
-        anyhow::ensure!(
-            len <= u32::MAX as u64,
-            "registry index key count {len} exceeds compact id range"
-        );
-        let len = len as usize;
-
-        let mut values = Vec::with_capacity(len);
-        for _ in 0..len {
-            values.push(read_u32_le(&mut reader)?);
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(layout.len)
+            .context("reserve registry index value table")?;
+        let seen_words = layout
+            .len
+            .checked_add(63)
+            .context("registry index id-set length overflow")?
+            / 64;
+        let mut seen_ids = Vec::new();
+        seen_ids
+            .try_reserve_exact(seen_words)
+            .context("reserve registry index id-set")?;
+        seen_ids.resize(seen_words, 0u64);
+        for _ in 0..layout.len {
+            let id = read_u32_le(&mut reader)?;
+            anyhow::ensure!(
+                id != 0 && id as usize <= layout.len,
+                "registry index id {id} is outside 1..={} in {}",
+                layout.len,
+                path.display()
+            );
+            let zero_based = id as usize - 1;
+            let word = &mut seen_ids[zero_based / 64];
+            let mask = 1u64 << (zero_based % 64);
+            anyhow::ensure!(
+                *word & mask == 0,
+                "registry index contains duplicate id {id} in {}",
+                path.display()
+            );
+            *word |= mask;
+            values.push(id);
         }
 
-        let mut tags = Vec::with_capacity(len);
-        for _ in 0..len {
+        let mut tags = Vec::new();
+        tags.try_reserve_exact(layout.len)
+            .context("reserve registry index tag table")?;
+        for _ in 0..layout.len {
             tags.push(read_u64_le(&mut reader)?);
         }
 
-        let mphf = fmph::GOFunction::read(&mut reader).context("read registry MPHF")?;
         Ok(Self { mphf, values, tags })
     }
 
@@ -247,7 +288,7 @@ impl KeyIndex {
                 return None;
             }
             let id = self.values[idx];
-            (id != 0).then_some(id)
+            (id != 0 && id as usize <= self.values.len()).then_some(id)
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -281,6 +322,412 @@ impl KeyIndex {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl FileBackedKeyIndex {
+    pub fn load(path: &Path) -> Result<Self> {
+        let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        Self::load_file(file, path)
+    }
+
+    /// Load from an already-open file handle.
+    ///
+    /// Callers that authenticate `registry.mphf` can hash and identify one
+    /// retained handle, then pass that same file generation here without a
+    /// path reopen (and its accompanying swap race).
+    pub fn load_file(file: File, path: &Path) -> Result<Self> {
+        let layout = key_index_layout(&file, path)?;
+        let mphf = load_preflighted_go_function(&file, layout, path)?;
+        Ok(Self {
+            file,
+            mphf,
+            len: layout.len,
+            values_offset: layout.values_offset,
+            tags_offset: layout.tags_offset,
+        })
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    pub fn lookup(&self, key: &[u8; 32]) -> Result<Option<u32>> {
+        let Some(index) = self
+            .mphf
+            .get(key)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            return Ok(None);
+        };
+        if index >= self.len {
+            return Ok(None);
+        }
+        let tag_offset = self
+            .tags_offset
+            .checked_add(
+                (index as u64)
+                    .checked_mul(8)
+                    .context("registry tag offset overflow")?,
+            )
+            .context("registry tag offset overflow")?;
+        let mut tag = [0u8; 8];
+        read_exact_at(&self.file, &mut tag, tag_offset).context("read registry index tag")?;
+        let tag = u64::from_le_bytes(tag);
+        if tag != key_tag(key) {
+            return Ok(None);
+        }
+        let value_offset = self
+            .values_offset
+            .checked_add(
+                (index as u64)
+                    .checked_mul(4)
+                    .context("registry value offset overflow")?,
+            )
+            .context("registry value offset overflow")?;
+        let mut id = [0u8; 4];
+        read_exact_at(&self.file, &mut id, value_offset).context("read registry index value")?;
+        let id = u32::from_le_bytes(id);
+        anyhow::ensure!(
+            id != 0 && id as usize <= self.len,
+            "registry index id {id} is outside 1..={}",
+            self.len
+        );
+        Ok(Some(id))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn key_index_layout(file: &File, path: &Path) -> Result<KeyIndexLayout> {
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    anyhow::ensure!(
+        file_len >= KEY_INDEX_HEADER_LEN as u64,
+        "registry index is shorter than its header in {}",
+        path.display()
+    );
+
+    let mut header = [0u8; KEY_INDEX_HEADER_LEN];
+    read_exact_at(file, &mut header, 0)
+        .with_context(|| format!("read registry index header in {}", path.display()))?;
+    anyhow::ensure!(
+        &header[..KEY_INDEX_MAGIC.len()] == KEY_INDEX_MAGIC,
+        "invalid registry index magic in {}",
+        path.display()
+    );
+
+    let version = u16::from_le_bytes(header[8..10].try_into().unwrap());
+    anyhow::ensure!(
+        version == KEY_INDEX_VERSION,
+        "unsupported registry index version {version} in {}",
+        path.display()
+    );
+    let header_len = u16::from_le_bytes(header[10..12].try_into().unwrap()) as usize;
+    anyhow::ensure!(
+        header_len == KEY_INDEX_HEADER_LEN,
+        "unsupported registry index header length {header_len} in {}",
+        path.display()
+    );
+
+    let len_u64 = u64::from_le_bytes(header[12..20].try_into().unwrap());
+    anyhow::ensure!(
+        len_u64 <= u32::MAX as u64,
+        "registry index key count {len_u64} exceeds compact id range"
+    );
+    let len = usize::try_from(len_u64).context("registry index key count exceeds usize")?;
+    let values_offset = header_len as u64;
+    let values_bytes = len_u64
+        .checked_mul(4)
+        .context("registry index value table length overflow")?;
+    let tags_offset = values_offset
+        .checked_add(values_bytes)
+        .context("registry index tag offset overflow")?;
+    let tags_bytes = len_u64
+        .checked_mul(8)
+        .context("registry index tag table length overflow")?;
+    let mphf_offset = tags_offset
+        .checked_add(tags_bytes)
+        .context("registry index MPHF offset overflow")?;
+    anyhow::ensure!(
+        mphf_offset <= file_len,
+        "registry index tables exceed file length in {}",
+        path.display()
+    );
+
+    Ok(KeyIndexLayout {
+        len,
+        values_offset,
+        tags_offset,
+        mphf_offset,
+        file_len,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_preflighted_go_function(
+    file: &File,
+    layout: KeyIndexLayout,
+    path: &Path,
+) -> Result<fmph::GOFunction> {
+    let tail_len_u64 = layout
+        .file_len
+        .checked_sub(layout.mphf_offset)
+        .context("registry index MPHF offset exceeds file length")?;
+
+    // Validate directly from the bounded file region before trusting its
+    // length for allocation. This makes a short valid tail followed by a huge
+    // amount of junk fail without allocating the declared tail size.
+    let expected = {
+        let mut reader = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, file);
+        reader.seek(SeekFrom::Start(layout.mphf_offset))?;
+        preflight_go_function(&mut reader, tail_len_u64, layout.len)
+            .with_context(|| format!("preflight registry MPHF in {}", path.display()))?
+    };
+
+    let tail_len =
+        usize::try_from(tail_len_u64).context("registry index MPHF tail length exceeds usize")?;
+    let mut tail = Vec::new();
+    tail.try_reserve_exact(tail_len)
+        .context("reserve registry index MPHF tail")?;
+    tail.resize(tail_len, 0);
+    read_exact_at(file, &mut tail, layout.mphf_offset)
+        .with_context(|| format!("read registry MPHF in {}", path.display()))?;
+
+    let copied = preflight_go_function(tail.as_slice(), tail_len_u64, layout.len)
+        .with_context(|| format!("preflight copied registry MPHF in {}", path.display()))?;
+    anyhow::ensure!(
+        copied == expected,
+        "registry MPHF changed while it was being loaded in {}",
+        path.display()
+    );
+    let mut cursor = Cursor::new(tail.as_slice());
+    let mphf = fmph::GOFunction::read(&mut cursor).context("read registry MPHF")?;
+    anyhow::ensure!(
+        cursor.position() == tail_len_u64,
+        "registry MPHF decoder did not consume the exact tail in {}",
+        path.display()
+    );
+    let decoded_group_count = mphf.level_sizes().iter().try_fold(0usize, |sum, groups| {
+        sum.checked_add(*groups)
+            .context("decoded registry MPHF group count overflow")
+    })?;
+    anyhow::ensure!(
+        mphf.level_sizes().len() == expected.level_count
+            && decoded_group_count == expected.group_count,
+        "decoded registry MPHF geometry differs from its preflight in {}",
+        path.display()
+    );
+    Ok(mphf)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Validates the exact default `ph` 0.11.0 `GOFunction` wire layout before its
+/// decoder sees any serialized allocation count or lookup geometry.
+fn preflight_go_function(
+    input: impl Read,
+    serialized_len: u64,
+    expected_keys: usize,
+) -> Result<GoFunctionLayout> {
+    let mut reader = TailReader::new(input, serialized_len);
+    let group_bits = reader.read_u8().context("read MPHF group size")?;
+    anyhow::ensure!(group_bits == 16, "registry MPHF group size must be 16 bits");
+
+    let level_count = reader.read_vbyte_usize().context("read MPHF level count")?;
+    anyhow::ensure!(
+        level_count <= usize::try_from(reader.remaining()).unwrap_or(usize::MAX),
+        "registry MPHF level count exceeds its remaining bytes"
+    );
+    anyhow::ensure!(
+        (expected_keys == 0) == (level_count == 0),
+        "registry MPHF must have no levels exactly when the key count is zero"
+    );
+
+    let mut group_count = 0usize;
+    for _ in 0..level_count {
+        let groups = reader.read_vbyte_usize().context("read MPHF level size")?;
+        anyhow::ensure!(groups != 0, "registry MPHF levels must be non-empty");
+        anyhow::ensure!(
+            groups.is_multiple_of(4),
+            "registry MPHF level group count must preserve 64-bit padding"
+        );
+        group_count = group_count
+            .checked_add(groups)
+            .context("registry MPHF group count overflow")?;
+    }
+
+    let array_bits = group_count
+        .checked_mul(16)
+        .context("registry MPHF array bit count overflow")?;
+    let array_words = array_bits
+        .checked_add(63)
+        .context("registry MPHF array word count overflow")?
+        / 64;
+    let mut cardinality = 0usize;
+    for _ in 0..array_words {
+        cardinality = cardinality
+            .checked_add(
+                reader
+                    .read_u64_le()
+                    .context("read registry MPHF bit array")?
+                    .count_ones() as usize,
+            )
+            .context("registry MPHF cardinality overflow")?;
+    }
+    anyhow::ensure!(
+        cardinality == expected_keys,
+        "registry MPHF cardinality {cardinality} does not match key count {expected_keys}"
+    );
+
+    let seed_bits = reader.read_u8().context("read MPHF seed size")?;
+    anyhow::ensure!(seed_bits == 4, "registry MPHF seed size must be 4 bits");
+    let seed_bits_total = group_count
+        .checked_mul(4)
+        .context("registry MPHF seed bit count overflow")?;
+    let seed_words = seed_bits_total
+        .checked_add(63)
+        .context("registry MPHF seed word count overflow")?
+        / 64;
+    let seed_bytes = seed_words
+        .checked_mul(8)
+        .context("registry MPHF seed byte count overflow")?;
+    reader
+        .skip(seed_bytes as u64)
+        .context("read registry MPHF seed array")?;
+    anyhow::ensure!(reader.remaining() == 0, "registry MPHF has trailing bytes");
+
+    Ok(GoFunctionLayout {
+        level_count,
+        group_count,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct TailReader<R> {
+    input: R,
+    remaining: u64,
+    position: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<R: Read> TailReader<R> {
+    fn new(input: R, serialized_len: u64) -> Self {
+        Self {
+            input,
+            remaining: serialized_len,
+            position: 0,
+        }
+    }
+
+    fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
+    fn read_u8(&mut self) -> Result<u8> {
+        let mut byte = [0u8; 1];
+        self.read_exact(&mut byte)?;
+        Ok(byte[0])
+    }
+
+    fn read_u64_le(&mut self) -> Result<u64> {
+        let mut bytes = [0u8; 8];
+        self.read_exact(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn read_vbyte_usize(&mut self) -> Result<usize> {
+        let mut value = 0u64;
+        for index in 0..8u32 {
+            let byte = self.read_u8()?;
+            value |= u64::from(byte & 0x7f) << (index * 7);
+            if byte < 0x80 {
+                anyhow::ensure!(
+                    index as usize + 1 == vbyte_len(value),
+                    "registry MPHF uses a non-canonical variable-length integer"
+                );
+                return usize::try_from(value).context("registry MPHF integer exceeds usize");
+            }
+        }
+        let byte = self.read_u8()?;
+        value |= u64::from(byte) << 56;
+        anyhow::ensure!(
+            vbyte_len(value) == 9,
+            "registry MPHF uses a non-canonical variable-length integer"
+        );
+        usize::try_from(value).context("registry MPHF integer exceeds usize")
+    }
+
+    fn skip(&mut self, mut byte_count: u64) -> Result<()> {
+        let mut buffer = [0u8; 8192];
+        while byte_count != 0 {
+            let chunk_len = usize::try_from(byte_count.min(buffer.len() as u64)).unwrap();
+            self.read_exact(&mut buffer[..chunk_len])?;
+            byte_count -= chunk_len as u64;
+        }
+        Ok(())
+    }
+
+    fn read_exact(&mut self, bytes: &mut [u8]) -> Result<()> {
+        let byte_count = bytes.len() as u64;
+        anyhow::ensure!(
+            byte_count <= self.remaining,
+            "unexpected end of registry MPHF"
+        );
+        self.input
+            .read_exact(bytes)
+            .context("unexpected end of registry MPHF")?;
+        self.remaining -= byte_count;
+        self.position = self
+            .position
+            .checked_add(byte_count)
+            .context("registry MPHF read offset overflow")?;
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn vbyte_len(value: u64) -> usize {
+    if value >= (1u64 << 56) {
+        9
+    } else {
+        let significant_bits = (u64::BITS - value.leading_zeros()) as usize;
+        significant_bits.div_ceil(7).max(1)
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    file.read_exact_at(buffer, offset)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        let read = file.seek_read(buffer, offset)?;
+        if read == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        offset = offset
+            .checked_add(read as u64)
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
+fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+    let mut cloned = file.try_clone()?;
+    cloned.seek(SeekFrom::Start(offset))?;
+    cloned.read_exact(buffer)
+}
+
 impl PubkeyCompactor for KeyIndex {
     #[inline]
     fn compact_str(&self, k: &str) -> Option<CompactPubkey> {
@@ -296,12 +743,6 @@ fn key_tag(key: &[u8; 32]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
-}
-
-fn read_u16_le(reader: &mut impl Read) -> Result<u16> {
-    let mut buf = [0u8; 2];
-    reader.read_exact(&mut buf)?;
-    Ok(u16::from_le_bytes(buf))
 }
 
 fn read_u32_le(reader: &mut impl Read) -> Result<u32> {
@@ -390,6 +831,24 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn temporary_index_path(label: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "blockzilla-key-index-{label}-{}-{unique}.mphf",
+            std::process::id()
+        ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn assert_native_loaders_reject(path: &Path) {
+        assert!(KeyIndex::load(path).is_err());
+        assert!(FileBackedKeyIndex::load(path).is_err());
+    }
+
     #[test]
     fn lookup_ids_are_one_based_and_missing_keys_fall_back_to_raw() {
         let first = [0u8; 32];
@@ -412,21 +871,176 @@ mod tests {
         let missing = [3u8; 32];
         let index = KeyIndex::build(vec![first, second, third]);
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("blockzilla-key-index-{unique}.mphf"));
+        let path = temporary_index_path("round-trip");
 
         index.write(&path).unwrap();
         let loaded = KeyIndex::load(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        let file_backed = FileBackedKeyIndex::load(&path).unwrap();
 
         assert_eq!(loaded.len(), 3);
         assert_eq!(loaded.lookup(&first), Some(1));
         assert_eq!(loaded.lookup(&second), Some(2));
         assert_eq!(loaded.lookup(&third), Some(3));
         assert_eq!(loaded.lookup(&missing), None);
+        assert_eq!(file_backed.len(), loaded.len());
+        assert_eq!(file_backed.lookup(&first).unwrap(), Some(1));
+        assert_eq!(file_backed.lookup(&second).unwrap(), Some(2));
+        assert_eq!(file_backed.lookup(&third).unwrap(), Some(3));
+        assert_eq!(file_backed.lookup(&missing).unwrap(), None);
+        drop(file_backed);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    fn file_backed_loader_uses_the_supplied_retained_generation() {
+        let first = [7u8; 32];
+        let second = [8u8; 32];
+        let path = temporary_index_path("retained-handle");
+        let old_path = path.with_extension("old.mphf");
+        KeyIndex::build(vec![first, second]).write(&path).unwrap();
+        let retained = File::open(&path).unwrap();
+
+        std::fs::rename(&path, &old_path).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+
+        let loaded = FileBackedKeyIndex::load_file(retained, &path).unwrap();
+        assert_eq!(loaded.lookup(&first).unwrap(), Some(1));
+        assert_eq!(loaded.lookup(&second).unwrap(), Some(2));
+
+        drop(loaded);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(old_path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn empty_key_index_round_trips_to_both_loaders() {
+        let path = temporary_index_path("empty");
+        KeyIndex::build(Vec::new()).write(&path).unwrap();
+
+        let owned = KeyIndex::load(&path).unwrap();
+        let file_backed = FileBackedKeyIndex::load(&path).unwrap();
+        assert!(owned.is_empty());
+        assert!(file_backed.is_empty());
+        assert_eq!(file_backed.lookup(&[1; 32]).unwrap(), None);
+
+        drop(file_backed);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn loaders_reject_truncation_tail_corruption_and_trailing_bytes() {
+        let keys = vec![[11u8; 32], [22u8; 32], [33u8; 32]];
+        let index = KeyIndex::build(keys);
+        let path = temporary_index_path("corruption");
+        index.write(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mphf_offset = KEY_INDEX_HEADER_LEN + index.len() * 12;
+
+        for truncated_len in [
+            0,
+            KEY_INDEX_HEADER_LEN - 1,
+            mphf_offset - 1,
+            original.len() - 1,
+        ] {
+            std::fs::write(&path, &original[..truncated_len]).unwrap();
+            assert_native_loaders_reject(&path);
+        }
+
+        let mut corrupted = original.clone();
+        corrupted[mphf_offset] = 8;
+        std::fs::write(&path, &corrupted).unwrap();
+        assert_native_loaders_reject(&path);
+
+        let mut corrupted = original.clone();
+        corrupted[mphf_offset + 1] = 0xff;
+        std::fs::write(&path, &corrupted).unwrap();
+        assert_native_loaders_reject(&path);
+
+        let tail_bytes = &original[mphf_offset..];
+        let mut tail = TailReader::new(tail_bytes, tail_bytes.len() as u64);
+        assert_eq!(tail.read_u8().unwrap(), 16);
+        let level_count = tail.read_vbyte_usize().unwrap();
+        let mut group_count = 0usize;
+        for _ in 0..level_count {
+            group_count += tail.read_vbyte_usize().unwrap();
+        }
+        let content_offset = mphf_offset + tail.position as usize;
+        let content_bytes = group_count / 4 * 8;
+
+        let mut corrupted = original.clone();
+        corrupted[content_offset..content_offset + content_bytes].fill(0);
+        std::fs::write(&path, &corrupted).unwrap();
+        assert_native_loaders_reject(&path);
+
+        let mut corrupted = original.clone();
+        corrupted[content_offset + content_bytes] = 8;
+        std::fs::write(&path, &corrupted).unwrap();
+        assert_native_loaders_reject(&path);
+
+        let mut corrupted = original.clone();
+        corrupted.push(0);
+        std::fs::write(&path, &corrupted).unwrap();
+        assert_native_loaders_reject(&path);
+
+        std::fs::write(&path, &original).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(original.len() as u64 + (4u64 << 30))
+            .unwrap();
+        assert_native_loaders_reject(&path);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn invalid_value_ids_are_rejected_without_out_of_bounds_lookup() {
+        let first = [41u8; 32];
+        let keys = vec![first, [42u8; 32], [43u8; 32]];
+        let index = KeyIndex::build(keys);
+        let value_index = index.mphf.get_or_panic(&first) as usize;
+        let path = temporary_index_path("invalid-id");
+        index.write(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let value_offset = KEY_INDEX_HEADER_LEN + value_index * 4;
+
+        for invalid_id in [0, index.len() as u32 + 1] {
+            let mut corrupted = original.clone();
+            corrupted[value_offset..value_offset + 4].copy_from_slice(&invalid_id.to_le_bytes());
+            std::fs::write(&path, corrupted).unwrap();
+
+            assert!(KeyIndex::load(&path).is_err());
+            let file_backed = FileBackedKeyIndex::load(&path).unwrap();
+            assert!(file_backed.lookup(&first).is_err());
+        }
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn file_backed_lookup_reports_post_load_truncation() {
+        let first = [51u8; 32];
+        let index = KeyIndex::build(vec![first, [52u8; 32]]);
+        let path = temporary_index_path("post-load-truncate");
+        index.write(&path).unwrap();
+        let file_backed = FileBackedKeyIndex::load(&path).unwrap();
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(KEY_INDEX_HEADER_LEN as u64)
+            .unwrap();
+        assert!(file_backed.lookup(&first).is_err());
+
+        drop(file_backed);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -467,10 +1081,14 @@ mod tests {
         assert_eq!(low_a_bytes, default_bytes);
 
         let loaded = KeyIndex::load(&low_a_path).unwrap();
+        let file_backed = FileBackedKeyIndex::load(&low_a_path).unwrap();
         for (index, key) in keys.iter().enumerate() {
             assert_eq!(loaded.lookup(key), Some(index as u32 + 1));
+            assert_eq!(file_backed.lookup(key).unwrap(), Some(index as u32 + 1));
         }
         assert_eq!(loaded.lookup(&[0xff; 32]), None);
+        assert_eq!(file_backed.lookup(&[0xff; 32]).unwrap(), None);
+        drop(file_backed);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

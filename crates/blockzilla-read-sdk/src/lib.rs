@@ -21,4 +21,6 @@ pub use reader::{
     ScannedTransaction, SignatureReference, TransactionMatch, ValidatedGeneration,
     validate_generation_structure,
 };
-pub use source::{LocalRangeSource, OverlayRangeSource, RangeSource, SourceResult};
+pub use source::{
+    LocalRangeSource, OverlayRangeSource, PinnedLocalRangeSource, RangeSource, SourceResult,
+};
