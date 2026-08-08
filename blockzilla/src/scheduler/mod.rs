@@ -12637,14 +12637,17 @@ async fn top_up_registry_reprocesses(
             });
         return 0;
     }
-    runtime.registry_reprocess_admission_blocked_reason = None;
-    if config.registry_reprocess_concurrency == 0 {
+    if runtime.registry_reprocess_admission_blocked {
+        runtime
+            .registry_reprocess_admission_blocked_reason
+            .get_or_insert_with(|| {
+                "registry reprocess ownership is unresolved; refusing duplicate admission"
+                    .to_string()
+            });
         return 0;
     }
-    if runtime.registry_reprocess_admission_blocked {
-        runtime.registry_reprocess_admission_blocked_reason = Some(
-            "registry reprocess ownership is unresolved; refusing duplicate admission".to_string(),
-        );
+    runtime.registry_reprocess_admission_blocked_reason = None;
+    if config.registry_reprocess_concurrency == 0 {
         return 0;
     }
     let pressure = legacy_pressure_state(config, &snapshot.machine);
@@ -15533,8 +15536,26 @@ fn reconcile_existing_registry_reprocess_target(
 }
 
 fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut RuntimeState) {
-    runtime.registry_reprocess_admission_blocked = false;
-    runtime.registry_reprocess_admission_blocked_reason = None;
+    if let Some(epoch) = runtime
+        .registry_reprocess_audit_claim_failures
+        .iter()
+        .next()
+        .copied()
+    {
+        runtime.registry_reprocess_admission_blocked = true;
+        runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+            "registry_reprocess:{epoch} audit claim publication failed ({} blocked epoch{}); refusing all registry admission until explicit recovery",
+            runtime.registry_reprocess_audit_claim_failures.len(),
+            if runtime.registry_reprocess_audit_claim_failures.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    } else {
+        runtime.registry_reprocess_admission_blocked = false;
+        runtime.registry_reprocess_admission_blocked_reason = None;
+    }
 
     let adopted_epochs = runtime
         .adopted_registry_reprocesses
@@ -20346,10 +20367,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn deep_audit_claim_publication_failure_blocks_without_dispatch() {
+    #[tokio::test]
+    async fn deep_audit_claim_publication_failure_persistently_blocks_all_registry_admission() {
         let root = temp_root("registry-reprocess-audit-claim-failure");
-        let config = test_config(&root);
+        let mut config = test_config(&root);
+        config.execute = true;
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 8;
+        config.disk_reserve_gib = 0;
         fs::create_dir_all(&config.state_root).unwrap();
         fs::write(
             config.state_root.join("registry_reprocess"),
@@ -20378,6 +20403,33 @@ mod tests {
         assert!(!runtime.validated_registry_reprocesses.contains(&700));
         assert!(runtime.registry_reprocess_admission_blocked);
         assert!(runtime.failures.contains_key("registry_reprocess:700"));
+
+        // Repair the marker directory to prove the in-memory claim failure itself, rather than
+        // the original filesystem error, remains a global fail-closed condition next poll.
+        fs::remove_file(config.state_root.join("registry_reprocess")).unwrap();
+        fs::create_dir_all(config.state_root.join("registry_reprocess")).unwrap();
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+        let snapshot = registry_audit_test_snapshot(&config, &root, 701);
+        assert!(runtime.registry_reprocess_admission_blocked);
+        assert!(
+            runtime
+                .registry_reprocess_admission_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("audit claim publication failed"))
+        );
+        assert_eq!(
+            top_up_registry_reprocesses(&config, &snapshot, &mut runtime).await,
+            0
+        );
+        assert!(!runtime.registry_reprocesses.contains_key(&701));
+        assert!(!runtime.failures.contains_key("registry_reprocess:701"));
+        assert!(
+            runtime
+                .registry_reprocess_admission_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("audit claim publication failed")),
+            "top-up must preserve the persistent claim-failure reason"
+        );
     }
 
     #[test]
