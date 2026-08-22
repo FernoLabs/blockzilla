@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::format::{
     GenerationBindingKind, IndexFileBinding, IndexManifest, IndexReader, ProgramMapReader,
-    RegistryFileIdentity, open_file,
+    ProgramUsage, RegistryFileIdentity, open_file,
 };
 
 const MAX_GENERATION_MANIFEST_BYTES: u64 = 4 << 20;
@@ -28,7 +28,41 @@ pub struct QueryResult {
     pub epoch: u64,
     pub index_wallet_count: u64,
     pub index_program_count: u64,
-    pub programs: Vec<String>,
+    pub programs: Vec<ProgramUsageResult>,
+}
+
+/// Human-readable form of one bound wallet/program usage aggregate.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ProgramUsageResult {
+    pub program: String,
+    pub direct_instruction_count: u32,
+    pub inner_instruction_count: u32,
+    pub transaction_count: u32,
+    pub first_seen_slot: u64,
+    pub last_seen_slot: u64,
+    pub min_block_time: Option<i64>,
+    pub max_block_time: Option<i64>,
+    pub timed_transaction_count: u32,
+    pub average_time_between_timed_transactions_seconds: Option<f64>,
+}
+
+impl ProgramUsageResult {
+    fn from_usage(program: String, usage: ProgramUsage) -> Self {
+        let has_time = usage.timed_transaction_count != 0;
+        Self {
+            program,
+            direct_instruction_count: usage.direct_instruction_count,
+            inner_instruction_count: usage.inner_instruction_count,
+            transaction_count: usage.transaction_count,
+            first_seen_slot: usage.first_seen_slot,
+            last_seen_slot: usage.last_seen_slot,
+            min_block_time: has_time.then_some(usage.min_block_time),
+            max_block_time: has_time.then_some(usage.max_block_time),
+            timed_transaction_count: usage.timed_transaction_count,
+            average_time_between_timed_transactions_seconds: usage
+                .average_timed_transaction_gap_seconds(),
+        }
+    }
 }
 
 /// Query a published-manifest-bound index. `trust_local` is an explicit
@@ -140,21 +174,24 @@ pub fn query_index(
     let shard_binding = manifest.shard_binding(wallet_id)?;
     let reader = IndexReader::open_verified(&shard_dir, shard_binding)
         .with_context(|| format!("open shard at {}", shard_dir.display()))?;
-    let program_ids = reader
+    let usages = reader
         .query(wallet_id)
         .with_context(|| format!("query shard at {}", shard_dir.display()))?;
     let program_map =
         ProgramMapReader::open_verified(index_dir, &manifest.program_map, manifest.program_count)
             .with_context(|| format!("open bound program map at {}", index_dir.display()))?;
 
-    let mut programs = Vec::with_capacity(program_ids.len());
-    for id in program_ids {
+    let mut programs = Vec::with_capacity(usages.len());
+    for usage in usages {
         let pubkey = program_map
-            .resolve(id)
-            .with_context(|| format!("resolve bound program registry id {id}"))?;
-        programs.push(bs58::encode(pubkey).into_string());
+            .resolve(usage.program_id)
+            .with_context(|| format!("resolve bound program registry id {}", usage.program_id))?;
+        programs.push(ProgramUsageResult::from_usage(
+            bs58::encode(pubkey).into_string(),
+            usage,
+        ));
     }
-    programs.sort_unstable();
+    programs.sort_unstable_by(|left, right| left.program.cmp(&right.program));
 
     reader
         .verify_unchanged()
@@ -217,7 +254,9 @@ fn verify_published_binding(archive_root: &Path, index: &IndexManifest) -> Resul
         generation.cluster_id == index.cluster_id
             && generation.epoch == index.epoch
             && generation.generation_id == index.generation_id
-            && generation.generation_digest == index.generation_digest,
+            && generation.generation_digest == index.generation_digest
+            && blockzilla_read_sdk::ArchiveV2WireProfile::for_published_manifest(&generation)?
+                == index.archive_wire_profile,
         "archive generation identity does not match the built index"
     );
     let registry = generation
@@ -397,6 +436,13 @@ mod tests {
         archive: &Path,
         registry: &IndexFileBinding,
     ) -> GenerationManifest {
+        let profile = blockzilla_read_sdk::ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1;
+        let marker = blockzilla_read_sdk::wire_profile_marker(profile);
+        fs::write(
+            archive.join(&marker.name),
+            blockzilla_read_sdk::wire_profile_marker_bytes(profile),
+        )
+        .unwrap();
         let mut generation = GenerationManifest {
             schema_version: GENERATION_MANIFEST_SCHEMA_VERSION,
             cluster_id: "testnet".into(),
@@ -405,11 +451,14 @@ mod tests {
             generation_digest: "0".repeat(64),
             slots_per_epoch: 432_000,
             complete: true,
-            files: vec![GenerationFile {
-                name: ARCHIVE_V2_PUBKEY_REGISTRY_FILE.into(),
-                size: registry.size,
-                sha256: registry.sha256.clone(),
-            }],
+            files: vec![
+                GenerationFile {
+                    name: ARCHIVE_V2_PUBKEY_REGISTRY_FILE.into(),
+                    size: registry.size,
+                    sha256: registry.sha256.clone(),
+                },
+                marker,
+            ],
         };
         generation.generation_digest = compute_generation_digest(&generation).unwrap();
         fs::write(
@@ -435,7 +484,10 @@ mod tests {
 
         let shard = index.join("shard-0");
         let mut builder = IndexBuilder::new(1, 2, 2);
-        builder.record(1, 2);
+        builder.record(
+            1,
+            ProgramUsage::new_transaction(2, 3, 4, 100, Some(1_000)).unwrap(),
+        );
         builder.write(&shard).unwrap();
         let shards = vec![bind_shard(0, &shard, 2, 2).unwrap()];
         let program_map = write_program_map(&index, &[(2, program)]).unwrap();
@@ -452,6 +504,8 @@ mod tests {
             archive_root: fs::canonicalize(&archive).unwrap().display().to_string(),
             generation_id: generation.generation_id,
             generation_digest: generation.generation_digest,
+            archive_wire_profile:
+                blockzilla_read_sdk::ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             registry,
             registry_file_identity,
             registry_index: registry_index.clone(),
@@ -594,11 +648,24 @@ mod tests {
         let fixture = query_fixture(directory.path());
         let wallet = bs58::encode(fixture.wallet).into_string();
         let expected_program = bs58::encode(fixture.program).into_string();
+        let programs = query_index(&fixture.index, &fixture.archive, &wallet, false)
+            .unwrap()
+            .programs;
+        assert_eq!(programs.len(), 1);
         assert_eq!(
-            query_index(&fixture.index, &fixture.archive, &wallet, false)
-                .unwrap()
-                .programs,
-            vec![expected_program]
+            programs[0],
+            ProgramUsageResult {
+                program: expected_program,
+                direct_instruction_count: 3,
+                inner_instruction_count: 4,
+                transaction_count: 1,
+                first_seen_slot: 100,
+                last_seen_slot: 100,
+                min_block_time: Some(1_000),
+                max_block_time: Some(1_000),
+                timed_transaction_count: 1,
+                average_time_between_timed_transactions_seconds: None,
+            }
         );
 
         let relocated = directory.path().join("relocated-archive");

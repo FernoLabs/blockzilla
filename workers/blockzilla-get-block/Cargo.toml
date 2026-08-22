@@ -70,5 +70,5 @@ tracing-subscriber = { version = "0.3.23", optional = true }
 wasm-bindgen = { version = "0.2.121", optional = true }
 wasm-bindgen-futures = { version = "0.4.71", optional = true }
 worker = { version = "0.8.3", features = ["http"], optional = true }
-wincode = "0.5.4"
+wincode = "=0.5.5"
 zstd = { version = "0.13.3", optional = true }

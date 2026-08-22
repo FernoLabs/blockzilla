@@ -1,5 +1,6 @@
 use super::{SchedulerConfig, validate_management_bind};
 use anyhow::{Context, Result};
+use blockzilla_read_sdk::ArchiveV2WireProfile;
 use clap::{Args, Parser};
 use std::{ffi::OsString, net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -314,6 +315,11 @@ pub struct SchedulerArgs {
     /// ARCHIVE_ROOT/.usage-sorted-generations.
     #[arg(long, env = "BLOCKZILLA_REGISTRY_REPROCESS_TARGET_ROOT")]
     registry_reprocess_target_root: Option<PathBuf>,
+
+    /// One generation-wide message grammar for scheduler-managed registry rewrites. Required when
+    /// the registry lane is enabled; it is never inferred from individual messages.
+    #[arg(long, env = "BLOCKZILLA_REGISTRY_REPROCESS_WIRE_PROFILE")]
+    registry_reprocess_wire_profile: Option<ArchiveV2WireProfile>,
 }
 
 impl SchedulerArgs {
@@ -474,6 +480,11 @@ impl SchedulerArgs {
             "--registry-reprocess-concurrency must not exceed 64"
         );
         anyhow::ensure!(
+            self.registry_reprocess_concurrency == 0
+                || self.registry_reprocess_wire_profile.is_some(),
+            "--registry-reprocess-wire-profile is required when registry reprocessing is enabled"
+        );
+        anyhow::ensure!(
             (1..=256).contains(&self.registry_reprocess_threads),
             "--registry-reprocess-threads must be in 1..=256"
         );
@@ -554,6 +565,7 @@ impl SchedulerArgs {
             registry_reprocess_memory_mib: self.registry_reprocess_memory_mib,
             registry_reprocess_sort_memory_mib: self.registry_reprocess_sort_memory_mib,
             registry_reprocess_target_root,
+            registry_reprocess_wire_profile: self.registry_reprocess_wire_profile,
         })
     }
 }
@@ -681,9 +693,37 @@ mod tests {
         assert_eq!(config.registry_reprocess_threads, 4);
         assert_eq!(config.registry_reprocess_memory_mib, 2048);
         assert_eq!(config.registry_reprocess_sort_memory_mib, 256);
+        assert_eq!(config.registry_reprocess_wire_profile, None);
         assert_eq!(
             config.registry_reprocess_target_root,
             PathBuf::from("archives/.usage-sorted-generations")
+        );
+
+        let mut enabled_without_profile = required_args().to_vec();
+        enabled_without_profile.extend(["live", "--registry-reprocess-concurrency", "1"]);
+        assert!(
+            SchedulerArgs::try_parse_from(enabled_without_profile)
+                .unwrap()
+                .into_config()
+                .is_err(),
+            "an enabled registry lane must not infer a wire profile"
+        );
+
+        let mut enabled = required_args().to_vec();
+        enabled.extend([
+            "live",
+            "--registry-reprocess-concurrency",
+            "1",
+            "--registry-reprocess-wire-profile",
+            "pre-unknown-instruction-fallbacks-v1",
+        ]);
+        let enabled = SchedulerArgs::try_parse_from(enabled)
+            .unwrap()
+            .into_config()
+            .unwrap();
+        assert_eq!(
+            enabled.registry_reprocess_wire_profile,
+            Some(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1)
         );
 
         for flag in [

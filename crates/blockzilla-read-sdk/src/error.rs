@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::{ArchiveV2WireProfile, MessageProjectionError};
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
@@ -53,6 +55,33 @@ pub enum Error {
 
     #[error("integer overflow while reading {0}")]
     Overflow(&'static str),
+
+    #[error("Archive V2 publication lock error: {0}")]
+    PublicationLock(String),
+
+    #[error("Archive V2 wire-profile audit error: {0}")]
+    WireProfileAudit(String),
+
+    #[error(
+        "selected Archive V2 wire profile {profile} rejected slot {slot} transaction {tx_index}: {source}"
+    )]
+    SelectedWireProfileDecodeRejected {
+        profile: ArchiveV2WireProfile,
+        slot: u64,
+        tx_index: u32,
+        #[source]
+        source: MessageProjectionError,
+    },
+
+    #[error(
+        "selected Archive V2 wire profile {profile} is not semantically consistent at slot {slot} transaction {tx_index}: {message}"
+    )]
+    SelectedWireProfileSemanticRejected {
+        profile: ArchiveV2WireProfile,
+        slot: u64,
+        tx_index: u32,
+        message: String,
+    },
 }
 
 #[derive(Debug, Error)]

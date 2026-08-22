@@ -50,6 +50,15 @@ The checked-in `systemd` timer invokes the `blockzilla-current` release. The
 superseded Python implementation was retired after fixture and live dry-run
 parity; Rust is the only maintained implementation.
 
+For an explicit target, the command first uses the predecessor V3 blockhash
+index. If V3 is absent, it verifies the complete canonical hot-block index,
+the compact block blob, and the blockhash registry before it derives the last
+300 hash-and-slot rows. A complete scheduler-owned target is accepted only
+when its ownership marker is schema-current, bound to the target epoch, in the
+`complete` state, and has no process ID. Publication never replaces an
+existing tail. Use `--dry-run` to perform all checks without writing a tail or
+receipt.
+
 ## Checkpointed replay marathon
 
 `run-replay-marathon.sh` is the safe wrapper for a long continuation from an

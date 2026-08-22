@@ -31,6 +31,19 @@ right choice for a completed local download, but it intentionally reads and
 hashes the entire blocks and signatures files before opening. Do **not** use the
 default for lazy HTTP streaming.
 
+Canonical local publication and authority paths must also manifest-bind
+`registry.mphf` and call
+`validate_manifest_bound_pinned_local_registry_index`. This one-pass proof
+rejects duplicate registry keys and an MPHF that does not map every key to its
+exact one-based row ID. The generic streaming reader does not require this
+optional lookup sidecar.
+
+The proof reads `registry.bin` once in row order and touches 12 bytes of
+file-backed MPHF value/tag tables per key. At 45 million keys, this is about
+1.44 GB of sequential registry reads plus 540 MB of mapped table pages. The
+540 MB is not copied to the Rust heap; the operating system manages those
+read-only pages. The compact MPHF function is still decoded in memory.
+
 ## Mac cache plus HTTP streaming
 
 Enable the HTTP source:

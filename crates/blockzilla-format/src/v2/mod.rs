@@ -22,7 +22,7 @@ use crate::{
     CompactBlockHeader, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
     CompactPubkey, CompactReward, CompactShredding, CompactTransactionError,
     OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
-    SplitCompactIndexRecord, wincode_leb128_config,
+    SplitCompactIndexRecord, bounded_wincode_leb128_config, wincode_leb128_config,
 };
 
 mod archive;
@@ -30,6 +30,9 @@ pub use archive::*;
 
 mod block_time_gaps;
 pub use block_time_gaps::*;
+
+mod wire_rewrite;
+pub use wire_rewrite::*;
 
 pub const WINCODE_LOG_ARCHIVE_V2_VERSION: u16 = 2;
 pub const WINCODE_LOG_ARCHIVE_KEYS_FREQUENCY_SORTED: u32 = 1 << 0;
@@ -41,6 +44,12 @@ pub const WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION: u16 = 2;
 /// Producers and consumers share this bound so an index can never advertise a frame that a
 /// validator refuses to allocate or decode.
 pub const ARCHIVE_V2_BLOCK_ACCESS_MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum one-sequence allocation admitted by the Archive V2 object decoders.
+///
+/// This matches the existing registry-reprocess retained-sequence limit. It
+/// prevents a short hostile input from using a forged sequence count to
+/// request an unbounded allocation before input exhaustion.
+pub const ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 pub const WINCODE_BLOCKZILLA_GET_BLOCK_BUNDLE_VERSION: u16 = 1;
 /// Archive records use unsigned LEB128 integer encoding.
 pub const WINCODE_ARCHIVE_V2_FLAG_LEB128: u32 = 1 << 0;
@@ -240,6 +249,9 @@ fn decode_unsigned_leb128<'de>(mut reader: impl Reader<'de>, max_bits: u32) -> R
         if byte & 0x80 == 0 {
             if value > max {
                 return Err(invalid_value("LEB128 integer overflow"));
+            }
+            if unsigned_leb128_size(value) != index + 1 {
+                return Err(invalid_value("non-minimal LEB128 integer"));
             }
             return Ok(value);
         }
@@ -485,10 +497,10 @@ pub fn deserialize_archive_v2_poh_record_with_schema(
 ) -> ReadResult<WincodeArchiveV2PohRecord> {
     match schema {
         PohRecordSchema::Current => {
-            match wincode::config::deserialize(bytes, wincode_leb128_config()) {
+            match wincode::config::deserialize_exact(bytes, wincode_leb128_config()) {
                 Ok(record) => Ok(record),
                 Err(primary_error) => {
-                    match wincode::config::deserialize::<
+                    match wincode::config::deserialize_exact::<
                         WincodeArchiveV2PohRecordLegacyNoSignatureCount,
                         _,
                     >(bytes, wincode_leb128_config())
@@ -503,18 +515,21 @@ pub fn deserialize_archive_v2_poh_record_with_schema(
             }
         }
         PohRecordSchema::LegacyNoSignatureCount => {
-            match wincode::config::deserialize::<WincodeArchiveV2PohRecordLegacyNoSignatureCount, _>(
-                bytes,
-                wincode_leb128_config(),
-            ) {
+            match wincode::config::deserialize_exact::<
+                WincodeArchiveV2PohRecordLegacyNoSignatureCount,
+                _,
+            >(bytes, wincode_leb128_config())
+            {
                 Ok(record) => Ok(record.into()),
-                Err(_) => match wincode::config::deserialize(bytes, wincode_leb128_config()) {
-                    Ok(record) => {
-                        *schema = PohRecordSchema::Current;
-                        Ok(record)
+                Err(_) => {
+                    match wincode::config::deserialize_exact(bytes, wincode_leb128_config()) {
+                        Ok(record) => {
+                            *schema = PohRecordSchema::Current;
+                            Ok(record)
+                        }
+                        Err(current_error) => Err(current_error),
                     }
-                    Err(current_error) => Err(current_error),
-                },
+                }
             }
         }
     }
@@ -797,18 +812,23 @@ pub fn deserialize_archive_v2_hot_block_slot_time(bytes: &[u8]) -> ReadResult<(u
 }
 
 pub fn deserialize_archive_v2_hot_block_blob(bytes: &[u8]) -> ReadResult<ArchiveV2HotBlockBlob> {
-    match wincode::config::deserialize(bytes, wincode_leb128_config()) {
+    match wincode::config::deserialize_exact(
+        bytes,
+        bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
+    ) {
         Ok(block) => Ok(block),
         Err(primary_error) => {
-            if let Ok(block) = wincode::config::deserialize::<ArchiveV2HotBlockBlobLegacyShredding, _>(
-                bytes,
-                wincode_leb128_config(),
-            ) {
+            if let Ok(block) =
+                wincode::config::deserialize_exact::<ArchiveV2HotBlockBlobLegacyShredding, _>(
+                    bytes,
+                    bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
+                )
+            {
                 return Ok(block.into());
             }
-            match wincode::config::deserialize::<ArchiveV2HotBlockBlobLegacyRewardsVec, _>(
+            match wincode::config::deserialize_exact::<ArchiveV2HotBlockBlobLegacyRewardsVec, _>(
                 bytes,
-                wincode_leb128_config(),
+                bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
             ) {
                 Ok(block) => Ok(block.into()),
                 Err(_) => Err(primary_error),
@@ -831,7 +851,10 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
         &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
         &[u8],
         &[u8],
-    ) = wincode::config::deserialize(bytes, wincode_leb128_config())?;
+    ) = wincode::config::deserialize_exact(
+        bytes,
+        bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
+    )?;
     Ok(BorrowedArchiveV2HotBlockBlob {
         header,
         tx_count,
@@ -891,7 +914,10 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
         &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
         &[u8],
         &[u8],
-    ) = wincode::config::deserialize_exact(bytes, wincode_leb128_config())?;
+    ) = wincode::config::deserialize_exact(
+        bytes,
+        bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
+    )?;
     Ok(BorrowedArchiveV2HotBlockBlobWithoutRewards {
         header: ArchiveV2HotBlockHeader {
             slot: header.slot,
@@ -1068,6 +1094,26 @@ mod hot_block_slot_time_tests {
     }
 
     #[test]
+    fn archive_v2_leb128_rejects_non_minimal_integer_encodings() {
+        assert!(
+            wincode::config::deserialize_exact::<u32, _>(&[0x80, 0x00], wincode_leb128_config())
+                .is_err()
+        );
+        assert!(
+            wincode::config::deserialize_exact::<u32, _>(
+                &[0x81, 0x80, 0x00],
+                wincode_leb128_config()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            wincode::config::deserialize_exact::<u32, _>(&[0x80, 0x01], wincode_leb128_config())
+                .unwrap(),
+            128
+        );
+    }
+
+    #[test]
     fn poh_record_decoder_falls_back_to_pre_signature_count_encoding() {
         let record = WincodeArchiveV2PohRecordLegacyNoSignatureCount {
             block_id: 42,
@@ -1087,6 +1133,43 @@ mod hot_block_slot_time_tests {
         // Not recoverable from a legacy record; callers must treat this as "unknown", never as
         // a real zero-signature entry.
         assert_eq!(decoded.entries[0].signature_count, 0);
+    }
+
+    #[test]
+    fn poh_record_decoders_reject_trailing_bytes() {
+        let current = WincodeArchiveV2PohRecord {
+            block_id: 42,
+            slot: 999,
+            entries: vec![crate::CompactPohEntry {
+                num_hashes: 10,
+                hash: [7; 32],
+                tx_count: 2,
+                signature_count: 3,
+            }],
+        };
+        let legacy = WincodeArchiveV2PohRecordLegacyNoSignatureCount {
+            block_id: 42,
+            slot: 999,
+            entries: vec![crate::CompactPohEntryLegacyNoSignatureCount {
+                num_hashes: 10,
+                hash: [7; 32],
+                tx_count: 2,
+            }],
+        };
+
+        for (mut bytes, mut schema) in [
+            (
+                wincode::config::serialize(&current, wincode_leb128_config()).unwrap(),
+                PohRecordSchema::Current,
+            ),
+            (
+                wincode::config::serialize(&legacy, wincode_leb128_config()).unwrap(),
+                PohRecordSchema::LegacyNoSignatureCount,
+            ),
+        ] {
+            bytes.push(0xff);
+            assert!(deserialize_archive_v2_poh_record_with_schema(&bytes, &mut schema).is_err());
+        }
     }
 
     #[test]
@@ -1187,6 +1270,25 @@ mod hot_block_slot_time_tests {
     }
 
     #[test]
+    fn hot_block_decoders_reject_hostile_reward_preallocation() {
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: Vec::new(),
+        });
+        let header = wincode::config::serialize(&block.header, wincode_leb128_config()).unwrap();
+        assert_eq!(header.last(), Some(&0));
+        let mut bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let hostile_count = wincode::config::serialize(&u64::MAX, wincode_leb128_config()).unwrap();
+        bytes.splice(header.len() - 1..header.len(), hostile_count);
+
+        let borrowed = deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).unwrap_err();
+        assert!(borrowed.to_string().contains("preallocation"));
+        let owned = deserialize_archive_v2_hot_block_blob(&bytes).unwrap_err();
+        assert!(owned.to_string().contains("preallocation"));
+    }
+
+    #[test]
     fn reward_discarding_decoder_rejects_truncated_and_trailing_frames() {
         let mut block = current_hot_block_fixture();
         block.header.rewards = Some(ArchiveV2HotRewards {
@@ -1219,6 +1321,77 @@ mod hot_block_slot_time_tests {
 
         assert!(deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).is_err());
         assert!(deserialize_archive_v2_hot_block_blob(&bytes).is_err());
+    }
+
+    #[test]
+    fn current_full_block_decoders_reject_trailing_bytes() {
+        let mut bytes =
+            wincode::config::serialize(&current_hot_block_fixture(), wincode_leb128_config())
+                .unwrap();
+        bytes.push(0xff);
+
+        assert!(deserialize_archive_v2_hot_block_blob(&bytes).is_err());
+        assert!(deserialize_archive_v2_hot_block_blob_borrowed_current(&bytes).is_err());
+        assert!(
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes).is_err()
+        );
+        assert_eq!(
+            deserialize_archive_v2_hot_block_slot_time(&bytes).unwrap(),
+            (123, Some(1_700_000_123))
+        );
+    }
+
+    #[test]
+    fn legacy_full_block_decoders_reject_trailing_bytes() {
+        let legacy_shredding = ArchiveV2HotBlockBlobLegacyShredding {
+            header: ArchiveV2HotBlockHeaderLegacyShredding {
+                slot: 456,
+                parent_slot: 455,
+                blockhash_id: 9,
+                previous_blockhash_id: 8,
+                block_time: None,
+                block_height: Some(450),
+                shredding: vec![
+                    CompactShredding {
+                        entry_end_idx: 3,
+                        shred_end_idx: 4,
+                    },
+                    CompactShredding {
+                        entry_end_idx: 5,
+                        shred_end_idx: 6,
+                    },
+                ],
+                rewards: None,
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let legacy_rewards = ArchiveV2HotBlockBlobLegacyRewardsVec {
+            header: ArchiveV2HotBlockHeaderLegacyRewardsVec {
+                slot: 789,
+                parent_slot: 788,
+                blockhash_id: 11,
+                previous_blockhash_id: 10,
+                block_time: Some(-42),
+                block_height: None,
+                rewards: vec![reward_fixture(17), reward_fixture(29)],
+            },
+            tx_count: 0,
+            tx_rows: Vec::new(),
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+
+        for mut bytes in [
+            wincode::config::serialize(&legacy_shredding, wincode_leb128_config()).unwrap(),
+            wincode::config::serialize(&legacy_rewards, wincode_leb128_config()).unwrap(),
+        ] {
+            assert!(deserialize_archive_v2_hot_block_blob(&bytes).is_ok());
+            bytes.push(0xff);
+            assert!(deserialize_archive_v2_hot_block_blob(&bytes).is_err());
+        }
     }
 
     #[test]
@@ -1259,6 +1432,175 @@ mod hot_block_slot_time_tests {
         let decoded = deserialize_archive_v2_hot_block_blob(&bytes).unwrap();
         assert_eq!(decoded.header.slot, 456);
         assert!(decoded.tx_rows.is_empty());
+    }
+
+    #[test]
+    fn persisted_instruction_tags_are_frozen() {
+        let update = ArchiveV2VoteStateUpdate {
+            root: None,
+            lockout_offsets: Vec::new(),
+            hash: ArchiveV2VoteHashRef::Zero,
+            timestamp: None,
+        };
+        let cases = [
+            (ArchiveV2HotInstructionData::Raw(Vec::new()), 0),
+            (ArchiveV2HotInstructionData::UnknownSystem(Vec::new()), 1),
+            (ArchiveV2HotInstructionData::UnknownVote(Vec::new()), 2),
+            (
+                ArchiveV2HotInstructionData::ComputeBudget(
+                    ArchiveV2ComputeBudgetInstructionData::Unused,
+                ),
+                3,
+            ),
+            (
+                ArchiveV2HotInstructionData::System(
+                    ArchiveV2SystemInstructionData::AdvanceNonceAccount,
+                ),
+                4,
+            ),
+            (
+                ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update.clone()),
+                5,
+            ),
+            (
+                ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
+                    update: update.clone(),
+                    switch_proof_hash: ArchiveV2VoteHashRef::Zero,
+                },
+                6,
+            ),
+            (
+                ArchiveV2HotInstructionData::VoteTowerSync(ArchiveV2VoteTowerSync {
+                    update: update.clone(),
+                    block_id_hash: ArchiveV2VoteHashRef::Zero,
+                }),
+                7,
+            ),
+            (
+                ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
+                    tower: ArchiveV2VoteTowerSync {
+                        update,
+                        block_id_hash: ArchiveV2VoteHashRef::Zero,
+                    },
+                    switch_proof_hash: ArchiveV2VoteHashRef::Zero,
+                },
+                8,
+            ),
+        ];
+
+        for (value, expected_tag) in cases {
+            let encoded = wincode::config::serialize(&value, wincode_leb128_config()).unwrap();
+            assert_eq!(encoded.first().copied(), Some(expected_tag));
+        }
+
+        let compute_budget = [
+            (ArchiveV2ComputeBudgetInstructionData::Unused, 0),
+            (
+                ArchiveV2ComputeBudgetInstructionData::RequestHeapFrame(0),
+                1,
+            ),
+            (
+                ArchiveV2ComputeBudgetInstructionData::SetComputeUnitLimit(0),
+                2,
+            ),
+            (
+                ArchiveV2ComputeBudgetInstructionData::SetComputeUnitPrice(0),
+                3,
+            ),
+            (
+                ArchiveV2ComputeBudgetInstructionData::SetLoadedAccountsDataSizeLimit(0),
+                4,
+            ),
+        ];
+        for (value, expected_tag) in compute_budget {
+            let encoded = wincode::config::serialize(&value, wincode_leb128_config()).unwrap();
+            assert_eq!(encoded.first().copied(), Some(expected_tag));
+        }
+
+        let key = [0; 32];
+        let system = [
+            (
+                ArchiveV2SystemInstructionData::CreateAccount {
+                    lamports: 0,
+                    space: 0,
+                    owner: key,
+                },
+                0,
+            ),
+            (ArchiveV2SystemInstructionData::Assign { owner: key }, 1),
+            (ArchiveV2SystemInstructionData::Transfer { lamports: 0 }, 2),
+            (
+                ArchiveV2SystemInstructionData::CreateAccountWithSeed {
+                    base: key,
+                    seed: String::new(),
+                    lamports: 0,
+                    space: 0,
+                    owner: key,
+                },
+                3,
+            ),
+            (ArchiveV2SystemInstructionData::AdvanceNonceAccount, 4),
+            (
+                ArchiveV2SystemInstructionData::WithdrawNonceAccount { lamports: 0 },
+                5,
+            ),
+            (
+                ArchiveV2SystemInstructionData::InitializeNonceAccount { authority: key },
+                6,
+            ),
+            (
+                ArchiveV2SystemInstructionData::AuthorizeNonceAccount { authority: key },
+                7,
+            ),
+            (ArchiveV2SystemInstructionData::Allocate { space: 0 }, 8),
+            (
+                ArchiveV2SystemInstructionData::AllocateWithSeed {
+                    base: key,
+                    seed: String::new(),
+                    space: 0,
+                    owner: key,
+                },
+                9,
+            ),
+            (
+                ArchiveV2SystemInstructionData::AssignWithSeed {
+                    base: key,
+                    seed: String::new(),
+                    owner: key,
+                },
+                10,
+            ),
+            (
+                ArchiveV2SystemInstructionData::TransferWithSeed {
+                    lamports: 0,
+                    from_seed: String::new(),
+                    from_owner: key,
+                },
+                11,
+            ),
+            (ArchiveV2SystemInstructionData::UpgradeNonceAccount, 12),
+            (
+                ArchiveV2SystemInstructionData::CreateAccountAllowPrefund {
+                    lamports: 0,
+                    space: 0,
+                    owner: key,
+                },
+                13,
+            ),
+        ];
+        for (value, expected_tag) in system {
+            let encoded = wincode::config::serialize(&value, wincode_leb128_config()).unwrap();
+            assert_eq!(encoded.first().copied(), Some(expected_tag));
+        }
+
+        for (value, expected_tag) in [
+            (ArchiveV2VoteHashRef::Zero, 0),
+            (ArchiveV2VoteHashRef::Block(0), 1),
+            (ArchiveV2VoteHashRef::Raw([0; 32]), 2),
+        ] {
+            let encoded = wincode::config::serialize(&value, wincode_leb128_config()).unwrap();
+            assert_eq!(encoded.first().copied(), Some(expected_tag));
+        }
     }
 }
 
@@ -1388,7 +1730,9 @@ pub enum ArchiveV2HotMetaRecord {
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum ArchiveV2HotMessagePayload {
+    #[wincode(tag = 0)]
     Legacy(ArchiveV2HotLegacyMessage),
+    #[wincode(tag = 1)]
     V0(ArchiveV2HotV0Message),
 }
 
@@ -1418,17 +1762,26 @@ pub struct ArchiveV2HotInstruction {
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum ArchiveV2HotInstructionData {
+    #[wincode(tag = 0)]
     Raw(Vec<u8>),
+    #[wincode(tag = 1)]
     UnknownSystem(Vec<u8>),
+    #[wincode(tag = 2)]
     UnknownVote(Vec<u8>),
+    #[wincode(tag = 3)]
     ComputeBudget(ArchiveV2ComputeBudgetInstructionData),
+    #[wincode(tag = 4)]
     System(ArchiveV2SystemInstructionData),
+    #[wincode(tag = 5)]
     VoteCompactUpdateVoteState(ArchiveV2VoteStateUpdate),
+    #[wincode(tag = 6)]
     VoteCompactUpdateVoteStateSwitch {
         update: ArchiveV2VoteStateUpdate,
         switch_proof_hash: ArchiveV2VoteHashRef,
     },
+    #[wincode(tag = 7)]
     VoteTowerSync(ArchiveV2VoteTowerSync),
+    #[wincode(tag = 8)]
     VoteTowerSyncSwitch {
         tower: ArchiveV2VoteTowerSync,
         switch_proof_hash: ArchiveV2VoteHashRef,
@@ -1437,26 +1790,31 @@ pub enum ArchiveV2HotInstructionData {
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum ArchiveV2ComputeBudgetInstructionData {
+    #[wincode(tag = 0)]
     Unused,
+    #[wincode(tag = 1)]
     RequestHeapFrame(u32),
+    #[wincode(tag = 2)]
     SetComputeUnitLimit(u32),
+    #[wincode(tag = 3)]
     SetComputeUnitPrice(u64),
+    #[wincode(tag = 4)]
     SetLoadedAccountsDataSizeLimit(u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum ArchiveV2SystemInstructionData {
+    #[wincode(tag = 0)]
     CreateAccount {
         lamports: u64,
         space: u64,
         owner: [u8; 32],
     },
-    Assign {
-        owner: [u8; 32],
-    },
-    Transfer {
-        lamports: u64,
-    },
+    #[wincode(tag = 1)]
+    Assign { owner: [u8; 32] },
+    #[wincode(tag = 2)]
+    Transfer { lamports: u64 },
+    #[wincode(tag = 3)]
     CreateAccountWithSeed {
         base: [u8; 32],
         seed: String,
@@ -1464,36 +1822,38 @@ pub enum ArchiveV2SystemInstructionData {
         space: u64,
         owner: [u8; 32],
     },
+    #[wincode(tag = 4)]
     AdvanceNonceAccount,
-    WithdrawNonceAccount {
-        lamports: u64,
-    },
-    InitializeNonceAccount {
-        authority: [u8; 32],
-    },
-    AuthorizeNonceAccount {
-        authority: [u8; 32],
-    },
-    Allocate {
-        space: u64,
-    },
+    #[wincode(tag = 5)]
+    WithdrawNonceAccount { lamports: u64 },
+    #[wincode(tag = 6)]
+    InitializeNonceAccount { authority: [u8; 32] },
+    #[wincode(tag = 7)]
+    AuthorizeNonceAccount { authority: [u8; 32] },
+    #[wincode(tag = 8)]
+    Allocate { space: u64 },
+    #[wincode(tag = 9)]
     AllocateWithSeed {
         base: [u8; 32],
         seed: String,
         space: u64,
         owner: [u8; 32],
     },
+    #[wincode(tag = 10)]
     AssignWithSeed {
         base: [u8; 32],
         seed: String,
         owner: [u8; 32],
     },
+    #[wincode(tag = 11)]
     TransferWithSeed {
         lamports: u64,
         from_seed: String,
         from_owner: [u8; 32],
     },
+    #[wincode(tag = 12)]
     UpgradeNonceAccount,
+    #[wincode(tag = 13)]
     CreateAccountAllowPrefund {
         lamports: u64,
         space: u64,
@@ -1528,8 +1888,11 @@ pub struct ArchiveV2VoteLockoutOffset {
 /// `block_id`, it resolves through the same row's Agave block-id column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum ArchiveV2VoteHashRef {
+    #[wincode(tag = 0)]
     Zero,
+    #[wincode(tag = 1)]
     Block(u32),
+    #[wincode(tag = 2)]
     Raw([u8; 32]),
 }
 

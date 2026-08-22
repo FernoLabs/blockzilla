@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use anyhow::Result;
+use blockzilla_read_sdk::ArchiveV2WireProfile;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
     fmt::Write as _,
@@ -64,16 +65,52 @@ enum Commands {
 
     /// Backfill CompactPohEntry::signature_count into an already-built archive's poh.wincode.
     ///
-    /// Decompresses each block only when its current signature_count doesn't already sum
-    /// correctly against the block index (an archive generation older than the field, or one
-    /// already migrated is a fast no-op pass-through). Never recomputes PoH hashes. Publishes
-    /// via a temp file and atomic rename, so a crash mid-run or a concurrent reader never
-    /// observes a partially written sidecar. Safe to rerun.
+    /// Decompresses every hot block and validates each entry against canonical transaction order.
+    /// It changes only entries whose signature counts differ. It never recomputes PoH hashes.
+    /// Publication uses a temp file and atomic rename, so a crash or concurrent reader never
+    /// observes a partial sidecar. Safe to rerun.
     MigratePohSignatureCounts {
         /// Compact V2 epoch directory.
         archive_dir: PathBuf,
-        /// Worker threads used to decompress and patch blocks that need it. 0 uses every
+        /// Worker threads used to validate and, when necessary, patch blocks. 0 uses every
         /// available core.
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+    },
+
+    /// Repair one diagnosed PoH-only orphan suffix after strict cross-plane validation.
+    ///
+    /// This manual incident command requires the exact indexed and orphan coordinates. It
+    /// preserves the original under a no-clobber quarantine, publishes by sync and atomic
+    /// rename, and performs a full post-verification. The normal migration remains strict.
+    RepairPohOrphanTail {
+        /// Compact V2 epoch directory. Its basename must be `epoch-N`.
+        archive_dir: PathBuf,
+        /// Exact epoch number expected from the directory and metadata.
+        #[arg(long)]
+        epoch: u64,
+        /// Exact hot-index row count established by the incident diagnosis.
+        #[arg(long)]
+        expected_indexed_blocks: u64,
+        /// Exact number of PoH-only records after the hot-index terminal block.
+        #[arg(long)]
+        expected_trailing_records: u32,
+        /// Exact first orphan block ID. It must follow the indexed terminal ID.
+        #[arg(long)]
+        expected_first_trailing_block_id: u32,
+        /// Exact first orphan slot. It must follow the indexed terminal slot.
+        #[arg(long)]
+        expected_first_trailing_slot: u64,
+        /// Exact last orphan slot. All orphan slots must be contiguous.
+        #[arg(long)]
+        expected_last_trailing_slot: u64,
+        /// Exact lowercase SHA-256 of the canonical PoH file before repair.
+        #[arg(long)]
+        expected_old_poh_sha256: String,
+        /// Independently certified predecessor blockhash for the first indexed PoH entry.
+        #[arg(long)]
+        expected_predecessor_blockhash: String,
+        /// Worker threads used to migrate indexed signature counts. 0 uses all cores.
         #[arg(long, default_value_t = 0)]
         threads: usize,
     },
@@ -338,12 +375,11 @@ enum Commands {
         finalizer_lock: Option<PathBuf>,
     },
 
-    /// Rewrite a complete first-seen Compact V2 archive as a fresh usage-sorted generation.
+    /// Rewrite a complete first-seen Compact V2 archive into a durable registry-only staging area.
     ///
-    /// The source is read-only. A new target is published atomically; an exact existing published
-    /// target is deep-validated and reused, while any invalid existing target is left untouched.
-    /// The command makes two bounded passes over the compact block frames, rebuilds every
-    /// registry-ID-bearing artifact, and checks semantic parity.
+    /// The source is read-only. This phase makes two bounded passes over compact block frames and
+    /// writes no block-access, signature, receipt, or published target. It writes a durable handoff
+    /// last for the separate access-completion command.
     ReprocessArchiveV2Registry {
         /// Complete first-seen Compact V2 source directory. It is never modified.
         source_dir: PathBuf,
@@ -369,6 +405,50 @@ enum Commands {
         /// Zstd compression level for rewritten independent block frames.
         #[arg(long, default_value_t = 1)]
         level: i32,
+        /// Scheduler-owned generation attempt identity.
+        #[arg(long)]
+        attempt_id: String,
+        /// Exact private sibling staging directory for this attempt.
+        #[arg(long)]
+        staging_dir: PathBuf,
+        /// Authoritative hot-message wire grammar for the complete source generation.
+        #[arg(long)]
+        wire_profile: ArchiveV2WireProfile,
+        /// Exact reviewed recovery receipt for a marker-free source generation.
+        #[arg(long)]
+        wire_profile_authority_receipt: Option<PathBuf>,
+    },
+
+    /// Complete block-access for a durable staged registry rewrite and publish it atomically.
+    ///
+    /// This phase remaps the trusted source block-access stream. It never reads signature data
+    /// from signatures.bin. It creates the target signature sidecar as a strict same-filesystem
+    /// hard link, writes receipt v3 last, and publishes only a complete generation.
+    CompleteArchiveV2RegistryAccess {
+        /// Complete first-seen Compact V2 source directory. It is never modified.
+        source_dir: PathBuf,
+        /// Exact private staging directory returned by the core phase.
+        staging_dir: PathBuf,
+        /// Final sibling generation directory. It is never replaced.
+        target_dir: PathBuf,
+        /// Epoch bound by the durable handoff.
+        #[arg(long)]
+        epoch: u64,
+        /// Exact scheduler-owned generation attempt identity.
+        #[arg(long)]
+        attempt_id: String,
+        /// SHA-256 of the durable handoff returned by the core phase.
+        #[arg(long)]
+        handoff_sha256: String,
+        /// Scheduler-admitted access continuation state. The command fails if staging changed.
+        #[arg(long, value_enum)]
+        expected_continuation_state: RegistryReprocessAccessContinuationStateArg,
+        /// Exact wire profile bound by the core handoff.
+        #[arg(long)]
+        wire_profile: ArchiveV2WireProfile,
+        /// Same exact recovery receipt used by the marker-free core phase.
+        #[arg(long)]
+        wire_profile_authority_receipt: Option<PathBuf>,
     },
 
     /// Build blockhash_registry.bin, blockhash_index_v3.bin, and its gap sidecar from a CAR file.
@@ -1046,6 +1126,27 @@ enum BlockTimeGapSourceArg {
     Archive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RegistryReprocessAccessContinuationStateArg {
+    #[value(name = "receipt-ready")]
+    ReceiptReady,
+    #[value(name = "core-or-partial-rebuild")]
+    CoreOrPartialRebuild,
+}
+
+impl From<RegistryReprocessAccessContinuationStateArg>
+    for archive_v2::registry_reprocess::RegistryReprocessAccessContinuationState
+{
+    fn from(value: RegistryReprocessAccessContinuationStateArg) -> Self {
+        match value {
+            RegistryReprocessAccessContinuationStateArg::ReceiptReady => Self::ReceiptReady,
+            RegistryReprocessAccessContinuationStateArg::CoreOrPartialRebuild => {
+                Self::CoreOrPartialRebuild
+            }
+        }
+    }
+}
+
 impl From<BlockTimeGapSourceArg> for block_time_gaps::BuildBlockTimeGapsSource {
     fn from(value: BlockTimeGapSourceArg) -> Self {
         match value {
@@ -1309,6 +1410,10 @@ fn main() -> Result<()> {
             threads,
             sort_memory_mib,
             level,
+            attempt_id,
+            staging_dir,
+            wire_profile,
+            wire_profile_authority_receipt,
         } => archive_v2::registry_reprocess::reprocess_first_seen_registry(
             &archive_v2::registry_reprocess::RegistryReprocessOptions {
                 source_dir,
@@ -1318,9 +1423,43 @@ fn main() -> Result<()> {
                 sort_memory_mib: usize::try_from(sort_memory_mib)
                     .expect("bounded u32 sort memory fits usize"),
                 level,
+                attempt_id,
+                staging_dir,
+                wire_profile,
+                wire_profile_authority_receipt,
             },
         )
-        .map(|_| ()),
+        .and_then(|result| {
+            println!("{}", serde_json::to_string(&result)?);
+            Ok(())
+        }),
+        Commands::CompleteArchiveV2RegistryAccess {
+            source_dir,
+            staging_dir,
+            target_dir,
+            epoch,
+            attempt_id,
+            handoff_sha256,
+            expected_continuation_state,
+            wire_profile,
+            wire_profile_authority_receipt,
+        } => archive_v2::registry_reprocess::complete_first_seen_registry_access(
+            &archive_v2::registry_reprocess::RegistryReprocessAccessOptions {
+                source_dir,
+                staging_dir,
+                target_dir,
+                epoch,
+                attempt_id,
+                handoff_sha256,
+                expected_continuation_state: expected_continuation_state.into(),
+                wire_profile,
+                wire_profile_authority_receipt,
+            },
+        )
+        .and_then(|receipt| {
+            println!("{}", serde_json::to_string(&receipt)?);
+            Ok(())
+        }),
         Commands::BuildBlockhashRegistry {
             input,
             output_dir,
@@ -1798,6 +1937,37 @@ fn main() -> Result<()> {
                 );
             })
         }
+        Commands::RepairPohOrphanTail {
+            archive_dir,
+            epoch,
+            expected_indexed_blocks,
+            expected_trailing_records,
+            expected_first_trailing_block_id,
+            expected_first_trailing_slot,
+            expected_last_trailing_slot,
+            expected_old_poh_sha256,
+            expected_predecessor_blockhash,
+            threads,
+        } => archive_verify::repair_poh_orphan_tail(
+            &archive_verify::PohOrphanTailRepairOptions {
+                archive_dir,
+                epoch,
+                expected_indexed_blocks,
+                expected_trailing_records,
+                expected_first_trailing_block_id,
+                expected_first_trailing_slot,
+                expected_last_trailing_slot,
+                expected_old_poh_sha256,
+                expected_predecessor_blockhash,
+                threads,
+            },
+        )
+        .map(|report| {
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("serialize PoH orphan-tail repair report")
+            );
+        }),
         #[cfg(feature = "benchmark-tools")]
         Commands::BenchArchiveV2PohCore {
             entries,
@@ -1863,6 +2033,7 @@ pub(crate) struct ProgressTracker {
     txs: u64,
     report_interval: Duration,
     estimated_total_blocks: u64,
+    total_blocks_is_exact: bool,
     first_slot: Option<u64>,
     last_slot: Option<u64>,
     blocks_since_report: u64,
@@ -1897,6 +2068,7 @@ impl ProgressTracker {
             txs: 0,
             report_interval: Duration::from_secs(PROGRESS_REPORT_INTERVAL_SECS),
             estimated_total_blocks: SLOTS_PER_EPOCH,
+            total_blocks_is_exact: false,
             first_slot: None,
             last_slot: None,
             blocks_since_report: 0,
@@ -1926,6 +2098,45 @@ impl ProgressTracker {
     #[inline(always)]
     pub(crate) fn set_estimated_total_blocks(&mut self, total: u64) {
         self.estimated_total_blocks = total;
+        self.total_blocks_is_exact = true;
+    }
+
+    fn progress_metrics(
+        &self,
+        slots_processed: Option<u64>,
+        blocks_per_sec: f64,
+    ) -> (Option<f64>, Option<f64>) {
+        let completed_units = if self.total_blocks_is_exact {
+            Some(self.blocks)
+        } else {
+            slots_processed
+        };
+        let progress_pct = completed_units.map(|completed| {
+            if self.estimated_total_blocks == 0 {
+                100.0
+            } else {
+                (completed as f64 / self.estimated_total_blocks as f64 * 100.0).min(100.0)
+            }
+        });
+        let eta_secs = completed_units.and_then(|completed| {
+            let remaining = self.estimated_total_blocks.saturating_sub(completed);
+            if remaining == 0 {
+                return Some(0.0);
+            }
+            if !blocks_per_sec.is_finite() || blocks_per_sec <= 0.0 {
+                return None;
+            }
+            if self.total_blocks_is_exact {
+                return Some(remaining as f64 / blocks_per_sec);
+            }
+            if completed == 0 {
+                return None;
+            }
+            let blocks_per_unit = self.blocks as f64 / completed as f64;
+            let eta = remaining as f64 * blocks_per_unit / blocks_per_sec;
+            (eta.is_finite() && eta >= 0.0).then_some(eta)
+        });
+        (progress_pct, eta_secs)
     }
 
     /// Records cumulative useful input bytes consumed by this phase. This is
@@ -1975,44 +2186,42 @@ impl ProgressTracker {
 
         let blocks_per_sec = self.blocks as f64 / elapsed;
         let txs_per_sec = self.txs as f64 / elapsed;
+        let slots_processed = self
+            .first_slot
+            .zip(self.last_slot)
+            .map(|(first, last)| last.saturating_sub(first));
+        let (progress_pct, eta_secs) = self.progress_metrics(slots_processed, blocks_per_sec);
+        let slot_summary = self
+            .first_slot
+            .zip(self.last_slot)
+            .map_or_else(String::new, |(first, last)| {
+                format!(" | slots={first}-{last} ({})", last.saturating_sub(first))
+            });
 
-        if let (Some(first), Some(last)) = (self.first_slot, self.last_slot) {
-            let slots_processed = last.saturating_sub(first);
-            let progress_pct =
-                (slots_processed as f64 / self.estimated_total_blocks as f64) * 100.0;
-
-            if blocks_per_sec > 0.0 && slots_processed > 0 {
-                let slots_remaining = self.estimated_total_blocks.saturating_sub(slots_processed);
-                let blocks_per_slot = self.blocks as f64 / slots_processed as f64;
-                let estimated_remaining_blocks = (slots_remaining as f64 * blocks_per_slot) as u64;
-                let eta_seconds = estimated_remaining_blocks as f64 / blocks_per_sec;
-
+        if let Some(progress_pct) = progress_pct {
+            if let Some(eta_secs) = eta_secs {
                 info!(
-                    "[{}] progress={:.1}% ETA={} | blocks={} ({:.0} blk/s) txs={} ({:.0} tx/s) | slots={}-{} ({}) | elapsed={}",
+                    "[{}] progress={:.1}% ETA={} | blocks={} ({:.0} blk/s) txs={} ({:.0} tx/s){} | elapsed={}",
                     self.phase,
                     progress_pct,
-                    format_duration(eta_seconds),
+                    format_duration(eta_secs),
                     self.blocks,
                     blocks_per_sec,
                     self.txs,
                     txs_per_sec,
-                    first,
-                    last,
-                    slots_processed,
+                    slot_summary,
                     format_duration(elapsed)
                 );
             } else {
                 info!(
-                    "[{}] progress={:.1}% | blocks={} ({:.0} blk/s) txs={} ({:.0} tx/s) | slots={}-{} ({}) | elapsed={}",
+                    "[{}] progress={:.1}% | blocks={} ({:.0} blk/s) txs={} ({:.0} tx/s){} | elapsed={}",
                     self.phase,
                     progress_pct,
                     self.blocks,
                     blocks_per_sec,
                     self.txs,
                     txs_per_sec,
-                    first,
-                    last,
-                    slots_processed,
+                    slot_summary,
                     format_duration(elapsed)
                 );
             }
@@ -2068,17 +2277,7 @@ impl ProgressTracker {
             .first_slot
             .zip(self.last_slot)
             .map(|(first, last)| last.saturating_sub(first));
-        let progress_pct = slots_processed.map(|slots| {
-            (slots as f64 / self.estimated_total_blocks.max(1) as f64 * 100.0).min(100.0)
-        });
-        let eta_secs = slots_processed.and_then(|slots| {
-            if slots == 0 || blocks_per_sec <= 0.0 {
-                return None;
-            }
-            let slots_remaining = self.estimated_total_blocks.saturating_sub(slots);
-            let blocks_per_slot = self.blocks as f64 / slots as f64;
-            Some(slots_remaining as f64 * blocks_per_slot / blocks_per_sec)
-        });
+        let (progress_pct, eta_secs) = self.progress_metrics(slots_processed, blocks_per_sec);
         let updated_unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs());
@@ -2153,6 +2352,53 @@ fn json_f64(value: Option<f64>) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn poh_orphan_tail_repair_cli_requires_exact_incident_coordinates() {
+        let args = [
+            "blockzilla",
+            "repair-poh-orphan-tail",
+            "/archives/epoch-998",
+            "--epoch",
+            "998",
+            "--expected-indexed-blocks",
+            "369334",
+            "--expected-trailing-records",
+            "5",
+            "--expected-first-trailing-block-id",
+            "369334",
+            "--expected-first-trailing-slot",
+            "431559125",
+            "--expected-last-trailing-slot",
+            "431559129",
+            "--expected-old-poh-sha256",
+            "b8d64f16f5da7f696cc15611c01575fac106d9e5faa5c9d7bc63ff73c0789eb0",
+            "--expected-predecessor-blockhash",
+            "a58c285531b7a3bd7a76756207b5f068935030f5a1be0374e1cba8ce3ef9d5f9",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::RepairPohOrphanTail {
+                epoch: 998,
+                expected_indexed_blocks: 369334,
+                expected_trailing_records: 5,
+                expected_first_trailing_block_id: 369334,
+                expected_first_trailing_slot: 431559125,
+                expected_last_trailing_slot: 431559129,
+                expected_old_poh_sha256,
+                expected_predecessor_blockhash,
+                threads: 0,
+                ..
+            } if expected_old_poh_sha256
+                == "b8d64f16f5da7f696cc15611c01575fac106d9e5faa5c9d7bc63ff73c0789eb0"
+                && expected_predecessor_blockhash
+                    == "a58c285531b7a3bd7a76756207b5f068935030f5a1be0374e1cba8ce3ef9d5f9"
+        ));
+        let mut missing_predecessor = args.to_vec();
+        missing_predecessor.truncate(missing_predecessor.len() - 2);
+        assert!(Cli::try_parse_from(missing_predecessor).is_err());
+    }
 
     #[test]
     fn compact_v1_commands_are_not_exposed() {
@@ -2525,11 +2771,10 @@ mod cli_tests {
         drop(reader);
     }
 
-    /// A fixed-size migration (e.g. `migrate-poh-signature-counts`, which knows its exact
-    /// row count upfront) reports progress against that count rather than the
-    /// `SLOTS_PER_EPOCH` default meant for slot-density-unknown scan/download phases.
+    /// A fixed-size migration reports completed rows against its exact row count. Real block
+    /// slots can be sparse, so their span must remain telemetry rather than the numerator.
     #[test]
-    fn progress_tracker_set_estimated_total_blocks_overrides_default_epoch_estimate() {
+    fn progress_tracker_exact_total_uses_blocks_for_percentage_and_eta() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2540,18 +2785,53 @@ mod cli_tests {
         ));
         let mut tracker = ProgressTracker::new("test migration");
         tracker.progress_path = Some(path.clone());
-        tracker.set_estimated_total_blocks(937);
+        tracker.start_time = Instant::now() - Duration::from_secs(4);
+        tracker.set_estimated_total_blocks(4);
         tracker.update_slot(100);
         tracker.update(1, 0);
-        tracker.update_slot(1_037);
-        tracker.final_report();
+        tracker.update_slot(110);
+        tracker.update(1, 0);
+        tracker.write_progress_snapshot("running");
 
-        let json = std::fs::read_to_string(&path).unwrap();
-        assert!(json.contains("\"blocks_total_estimate\":937"));
-        // slots_processed = 1037-100 = 937, so progress against the 937-unit override
-        // reads 100%, not the ~0.2% it would read against the 432,000-slot default.
-        assert!(json.contains("\"progress_pct\":100.000"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["blocks_done"], 2);
+        assert_eq!(json["blocks_total_estimate"], 4);
+        assert_eq!(json["slots_processed"], 10);
+        assert_eq!(json["progress_pct"], 50.0);
+        let eta_secs = json["eta_secs"].as_f64().unwrap();
+        assert!((3.9..=4.1).contains(&eta_secs), "eta_secs={eta_secs}");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn progress_tracker_default_total_keeps_slot_span_basis() {
+        let mut tracker = ProgressTracker::new("test scan");
+        tracker.update_slot(100);
+        tracker.update(1, 0);
+        tracker.update_slot(110);
+        tracker.update(1, 0);
+
+        let (progress_pct, eta_secs) = tracker.progress_metrics(Some(10), 1.0);
+        let expected_pct = 10.0 / SLOTS_PER_EPOCH as f64 * 100.0;
+        assert!((progress_pct.unwrap() - expected_pct).abs() < f64::EPSILON);
+        let expected_eta = (SLOTS_PER_EPOCH - 10) as f64 * (2.0 / 10.0);
+        assert!((eta_secs.unwrap() - expected_eta).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_tracker_shared_metrics_never_exceed_one_hundred_percent() {
+        let mut exact = ProgressTracker::new("test exact");
+        exact.set_estimated_total_blocks(4);
+        exact.update(5, 0);
+        let (exact_pct, exact_eta) = exact.progress_metrics(Some(u64::MAX), 1.0);
+        assert_eq!(exact_pct, Some(100.0));
+        assert_eq!(exact_eta, Some(0.0));
+
+        let slot_based = ProgressTracker::new("test slots");
+        let (slot_pct, slot_eta) = slot_based.progress_metrics(Some(SLOTS_PER_EPOCH + 1), 1.0);
+        assert_eq!(slot_pct, Some(100.0));
+        assert_eq!(slot_eta, Some(0.0));
     }
 
     /// A migration invoked by hand (e.g. an operator running `migrate-poh-signature-counts`
@@ -2651,6 +2931,14 @@ mod cli_tests {
             "512",
             "--level",
             "2",
+            "--attempt-id",
+            "pilot-1000",
+            "--staging-dir",
+            "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging",
+            "--wire-profile",
+            "pre-unknown-instruction-fallbacks-v1",
+            "--wire-profile-authority-receipt",
+            "/state/registry-reprocess-epoch-1000.authority.json",
         ])
         .unwrap();
         match cli.command {
@@ -2661,6 +2949,10 @@ mod cli_tests {
                 threads,
                 sort_memory_mib,
                 level,
+                attempt_id,
+                staging_dir,
+                wire_profile,
+                wire_profile_authority_receipt,
             } => {
                 assert_eq!(source_dir, Path::new("/archives/epoch-1000"));
                 assert_eq!(
@@ -2671,6 +2963,23 @@ mod cli_tests {
                 assert_eq!(threads, 8);
                 assert_eq!(sort_memory_mib, 512);
                 assert_eq!(level, 2);
+                assert_eq!(attempt_id, "pilot-1000");
+                assert_eq!(
+                    staging_dir,
+                    Path::new(
+                        "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging"
+                    )
+                );
+                assert_eq!(
+                    wire_profile,
+                    ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1
+                );
+                assert_eq!(
+                    wire_profile_authority_receipt.as_deref(),
+                    Some(Path::new(
+                        "/state/registry-reprocess-epoch-1000.authority.json"
+                    ))
+                );
             }
             _ => panic!("unexpected command"),
         }
@@ -2689,6 +2998,12 @@ mod cli_tests {
                     "target",
                     "--epoch",
                     "1000",
+                    "--attempt-id",
+                    "pilot-1000",
+                    "--staging-dir",
+                    "/archives/.target.registry-reprocess.pilot-1000.staging",
+                    "--wire-profile",
+                    "post-unknown-instruction-fallbacks-v1",
                     option,
                     value,
                 ])
@@ -2696,6 +3011,151 @@ mod cli_tests {
                 "{option}={value} must be rejected before touching the target"
             );
         }
+    }
+
+    #[test]
+    fn registry_access_completion_command_parses_exact_handoff_identity() {
+        let cli = Cli::try_parse_from([
+            "blockzilla",
+            "complete-archive-v2-registry-access",
+            "/archives/epoch-1000",
+            "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging",
+            "/archives/.usage-sorted-generations/epoch-1000",
+            "--epoch",
+            "1000",
+            "--attempt-id",
+            "pilot-1000",
+            "--handoff-sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--expected-continuation-state",
+            "receipt-ready",
+            "--wire-profile",
+            "post-unknown-instruction-fallbacks-v1",
+            "--wire-profile-authority-receipt",
+            "/state/registry-reprocess-epoch-1000.authority.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::CompleteArchiveV2RegistryAccess {
+                source_dir,
+                staging_dir,
+                target_dir,
+                epoch,
+                attempt_id,
+                handoff_sha256,
+                expected_continuation_state,
+                wire_profile,
+                wire_profile_authority_receipt,
+            } => {
+                assert_eq!(source_dir, Path::new("/archives/epoch-1000"));
+                assert_eq!(
+                    staging_dir,
+                    Path::new(
+                        "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging"
+                    )
+                );
+                assert_eq!(
+                    target_dir,
+                    Path::new("/archives/.usage-sorted-generations/epoch-1000")
+                );
+                assert_eq!(epoch, 1000);
+                assert_eq!(attempt_id, "pilot-1000");
+                assert_eq!(
+                    handoff_sha256,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                );
+                assert_eq!(
+                    expected_continuation_state,
+                    RegistryReprocessAccessContinuationStateArg::ReceiptReady
+                );
+                assert_eq!(
+                    wire_profile,
+                    ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+                );
+                assert_eq!(
+                    wire_profile_authority_receipt.as_deref(),
+                    Some(Path::new(
+                        "/state/registry-reprocess-epoch-1000.authority.json"
+                    ))
+                );
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn registry_access_completion_requires_an_exact_continuation_state() {
+        let base = [
+            "blockzilla",
+            "complete-archive-v2-registry-access",
+            "/archives/epoch-1000",
+            "/archives/.usage-sorted-generations/.epoch-1000.registry-reprocess.pilot-1000.staging",
+            "/archives/.usage-sorted-generations/epoch-1000",
+            "--epoch",
+            "1000",
+            "--attempt-id",
+            "pilot-1000",
+            "--handoff-sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--wire-profile",
+            "post-unknown-instruction-fallbacks-v1",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+
+        for value in ["receipt_ready", "core", "unknown"] {
+            let mut args = base.to_vec();
+            args.extend(["--expected-continuation-state", value]);
+            assert!(Cli::try_parse_from(args).is_err(), "accepted {value}");
+        }
+
+        let mut args = base.to_vec();
+        args.extend(["--expected-continuation-state", "core-or-partial-rebuild"]);
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::CompleteArchiveV2RegistryAccess {
+                expected_continuation_state:
+                    RegistryReprocessAccessContinuationStateArg::CoreOrPartialRebuild,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn registry_reprocess_commands_require_an_explicit_wire_profile() {
+        assert!(
+            Cli::try_parse_from([
+                "blockzilla",
+                "reprocess-archive-v2-registry",
+                "source",
+                "target",
+                "--epoch",
+                "1000",
+                "--attempt-id",
+                "pilot-1000",
+                "--staging-dir",
+                "/archives/.target.registry-reprocess.pilot-1000.staging",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "blockzilla",
+                "complete-archive-v2-registry-access",
+                "source",
+                "staging",
+                "target",
+                "--epoch",
+                "1000",
+                "--attempt-id",
+                "pilot-1000",
+                "--handoff-sha256",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "--expected-continuation-state",
+                "receipt-ready",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

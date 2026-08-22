@@ -17206,24 +17206,80 @@ fn block_sidecar_from_entries(
     })
 }
 
-/// Fills in each entry's `signature_count` from the block's already-decoded `tx_rows`, in the
-/// same block-order-based grouping `verify_archive_v2_poh` relies on. Must run after a build
-/// path decodes its hot block (real per-transaction signature counts aren't known any earlier)
-/// and before the PoH sidecar is written; `block_sidecar_from_entries` only populates a `0`
-/// placeholder for `signature_count`.
+/// Maps canonical transaction index to hot-row storage position. Compact V2 permits hot rows
+/// (and their signature regions) to be stored in a different order from `tx_index`, while PoH
+/// entries always group transactions in canonical `tx_index` order.
+pub(crate) fn canonical_poh_tx_storage_positions(
+    tx_rows: &[ArchiveV2HotTxRow],
+    storage_positions: &mut Vec<usize>,
+) -> Result<bool> {
+    storage_positions.clear();
+    storage_positions.resize(tx_rows.len(), usize::MAX);
+    let mut storage_order_is_canonical = true;
+    for (storage_position, row) in tx_rows.iter().enumerate() {
+        let canonical_position =
+            usize::try_from(row.tx_index).context("hot transaction index exceeds usize")?;
+        anyhow::ensure!(
+            canonical_position < tx_rows.len(),
+            "hot transaction index {} is outside 0..{}",
+            row.tx_index,
+            tx_rows.len()
+        );
+        anyhow::ensure!(
+            storage_positions[canonical_position] == usize::MAX,
+            "duplicate hot transaction index {}",
+            row.tx_index
+        );
+        storage_positions[canonical_position] = storage_position;
+        storage_order_is_canonical &= canonical_position == storage_position;
+    }
+    anyhow::ensure!(
+        storage_positions
+            .iter()
+            .all(|&position| position != usize::MAX),
+        "hot transaction indices are not a complete 0..{} permutation",
+        tx_rows.len()
+    );
+    Ok(storage_order_is_canonical)
+}
+
+/// Fills in each entry's `signature_count` from the block's already-decoded `tx_rows`, in
+/// canonical `tx_index` order. Must run after a build path decodes its hot block (real
+/// per-transaction signature counts aren't known any earlier) and before the PoH sidecar is
+/// written; `block_sidecar_from_entries` only populates a `0` placeholder for
+/// `signature_count`.
 pub(crate) fn patch_poh_entry_signature_counts(
     poh_entries: &mut [CompactPohEntry],
     tx_rows: &[ArchiveV2HotTxRow],
 ) -> Result<()> {
+    let storage_order_is_canonical = tx_rows
+        .iter()
+        .enumerate()
+        .all(|(position, row)| row.tx_index as usize == position);
+    let mut canonical_storage_positions = Vec::new();
+    if !storage_order_is_canonical {
+        canonical_poh_tx_storage_positions(tx_rows, &mut canonical_storage_positions)?;
+    }
+
     let mut cursor = 0usize;
     for entry in poh_entries.iter_mut() {
         let end = cursor
             .checked_add(entry.tx_count as usize)
             .context("PoH entry tx_count overflow while patching signature counts")?;
-        let rows = tx_rows
-            .get(cursor..end)
-            .context("PoH entry consumes transactions beyond the block's tx_rows")?;
-        entry.signature_count = rows.iter().map(|row| u32::from(row.signature_count)).sum();
+        anyhow::ensure!(
+            end <= tx_rows.len(),
+            "PoH entry consumes transactions beyond the block's tx_rows"
+        );
+        entry.signature_count = (cursor..end).try_fold(0u32, |total, canonical_position| {
+            let storage_position = if storage_order_is_canonical {
+                canonical_position
+            } else {
+                canonical_storage_positions[canonical_position]
+            };
+            total
+                .checked_add(u32::from(tx_rows[storage_position].signature_count))
+                .context("PoH entry signature_count overflow")
+        })?;
         cursor = end;
     }
     anyhow::ensure!(

@@ -1,3 +1,6 @@
+use crate::archive_v2::registry_reprocess::{
+    RegistryReprocessAccessContinuationProbe, RegistryReprocessAccessContinuationState,
+};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -17,6 +20,7 @@ use blockzilla_format::{
     WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
     WincodeArchiveV2PohRecord, WincodeLeb128FramedReader, wincode_leb128_config, write_u32_varint,
 };
+use blockzilla_read_sdk::ArchiveV2WireProfile;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -25,13 +29,13 @@ use std::{
     convert::Infallible,
     ffi::CString,
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     net::SocketAddr,
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::{
             ffi::OsStrExt,
-            fs::{MetadataExt, OpenOptionsExt},
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         },
     },
     path::{Component, Path, PathBuf},
@@ -78,6 +82,7 @@ const BLOCKHASH_REGISTRY_FILE: &str = "blockhash_registry.bin";
 const BLOCKS_FILE: &str = "archive-v2-blocks.zstd";
 const BLOCK_INDEX_FILE: &str = "archive-v2-blocks.index";
 const POH_FILE: &str = "poh.wincode";
+const POH_MIGRATION_LOCK_FILE: &str = ".poh-signature-count-migration.lock";
 const SHREDDING_FILE: &str = "shredding.wincode";
 const SIGNATURES_FILE: &str = "signatures.bin";
 const VOTE_HASH_REGISTRY_FILE: &str = "vote_hash_registry.bin";
@@ -99,7 +104,140 @@ const MAX_LIVE_REPAIR_MARKER_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LIVE_REPAIR_COMPACTED_MARKER_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_POH_MIGRATION_MARKER_BYTES: u64 = MAX_LIVE_REPAIR_MARKER_BYTES;
 const MAX_REGISTRY_REPROCESS_MARKER_BYTES: u64 = 64 * 1024;
+const MAX_REGISTRY_REPROCESS_PROGRESS_BYTES: u64 = 1024 * 1024;
 const MAX_REGISTRY_REPROCESS_AUDIT_RESULT_BYTES: usize = 16 * 1024;
+const REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION: u32 = 4;
+const REGISTRY_REPROCESS_ACCESS_CPU_THREADS: usize = 1;
+const REGISTRY_REPROCESS_ACCESS_FIXED_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+const REGISTRY_REPROCESS_RECEIPT_READY_MEMORY_MIB: u64 = 64;
+const MIB_BYTES: u64 = 1024 * 1024;
+const REGISTRY_REPROCESS_ACCESS_TEMP_SUFFIX: &str = ".registry-access.tmp";
+// Covers the fixed 432,000-row get-block index, the bounded receipt and its temporary name,
+// directory entries, fs metadata, and publication headroom. Signature data is hard-linked.
+const REGISTRY_REPROCESS_ACCESS_OUTPUT_HEADROOM_BYTES: u64 = 64 * MIB_BYTES;
+const REGISTRY_REPROCESS_RECEIPT_READY_DISK_HEADROOM_BYTES: u64 = 64 * MIB_BYTES;
+// One production incident published these seven registry generations before their source PoH
+// migrations finished. Keep the recovery authorization closed over the exact observed set and
+// exact audit error. Any future incident must get a new, reviewed recovery contract.
+const STALE_POH_REGISTRY_RECOVERY_EPOCHS: [u64; 7] = [1001, 1002, 1003, 1004, 1005, 1006, 1008];
+const STALE_POH_REGISTRY_RECOVERY_MESSAGE: &str = "retry reconciliation found an already-published registry generation; existing immutable target failed background deep validation and requires manual inspection: published artifact size mismatch for poh.wincode";
+const STALE_POH_REGISTRY_RECEIPT_ALGORITHM: &str =
+    "compact_v2_first_seen_v1_to_usage_sorted_staged_access_v3";
+const MAX_STALE_POH_REGISTRY_RECEIPT_BYTES: u64 = 1024 * 1024;
+// One legacy cohort was published before Archive V2 receipts carried a wire-profile binding.
+// Recovery never adopts those targets. It preserves each exact old generation, then authorizes
+// one clean schema-v4 Post-profile rebuild. Keep the authority closed over the exact read-only
+// production inventory. A different receipt or cohort requires a new reviewed incident contract.
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID: &str =
+    "profile-neutral-registry-reprocess-post-rebuild-2026-08-14-v1";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256: &str =
+    "f471bb2078e719da508c4a8d22980a59e7d99140fe0682289bacb401ea10b5cf";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_MARKER_MESSAGE: &str =
+    "retry reconciliation found an already-published registry generation";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_SCHEMA_VERSION: u32 = 2;
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_KIND: &str =
+    "archive_v2_profile_neutral_registry_rebuild";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE: &str = "profile_neutral_rebuild_recovery";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_DOMAIN: &[u8] =
+    b"blockzilla.registry-reprocess.profile-neutral-rebuild-authority.v1\0";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_KIND: &str =
+    "archive_v2_wire_profile_attestation";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_ALGORITHM: &str =
+    "archive-v2-borrowed-dual-profile-full-generation-v2";
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_GENERATION_KIND: &str =
+    "registry-receipt-source-files-v1";
+const MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_BYTES: u64 = 64 * 1024;
+const MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_BYTES: u64 = 64 * 1024;
+const MAX_REGISTRY_READER_CGROUP_BYTES: u64 = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProfileNeutralRegistryRebuildAuthority {
+    epoch: u64,
+    receipt_version: u32,
+    receipt_sha256: &'static str,
+    source_generation_sha256: &'static str,
+    target_generation_sha256: &'static str,
+}
+
+const PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES: [ProfileNeutralRegistryRebuildAuthority; 11] = [
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 305,
+        receipt_version: 1,
+        receipt_sha256: "c674f51fad3e22e185c17c76c733de8e3ad88c71a328ce7b2925aa45f90e9b17",
+        source_generation_sha256: "5ee2077966ae54f3e42424597c5d779baba1aa99f9c36cd6b78fef6dbbe79a6f",
+        target_generation_sha256: "fca639213c23226516d24b1f3fbb789af23793fc584f277721799e51217cc924",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 404,
+        receipt_version: 2,
+        receipt_sha256: "299cf01de99f06738f30413c6e24b5322ada7d21b9ae866073ab381a6cc39d14",
+        source_generation_sha256: "d5e90c4096b7d73911740ed7d72f2223288a7b28de46b92e6dd2a8674331d376",
+        target_generation_sha256: "f37af441ff02ea9a5f0ba3a5dddfa3268bf429a92e3f76b5033ff2815aab09b7",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 405,
+        receipt_version: 2,
+        receipt_sha256: "988b0875b3d347627efd187f8788337a3403575dfb82843c19a1fed3b589d886",
+        source_generation_sha256: "f229e57ee373feb5f9b73101d59f382e397ac9f85cbc9feb6ff5ccd38a876c9c",
+        target_generation_sha256: "5269f4218827ec0bcd22987c1ce7ad3993b4514f50cb1dcaf157314b7e319338",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 501,
+        receipt_version: 2,
+        receipt_sha256: "834b821bae74e79dcaa372654b4453263ee5658f6d3321c4078337b460e597e9",
+        source_generation_sha256: "995a22303a86d603c3c4510e8901578187b4cb0dc521092056f776da6cddf425",
+        target_generation_sha256: "2ebee8b7abe7288d2d670acf75caada3a51f977d0c929afc83bb9d21619379b1",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 502,
+        receipt_version: 2,
+        receipt_sha256: "d59f3c4a38dd2a7a3cdd60f7a24fb278899ef3a469351661b11d5910e0d7e11e",
+        source_generation_sha256: "fffea7443758dc75d5fe2107ab726c246857fd29ec2d40800e6290df239dfe28",
+        target_generation_sha256: "61419ca6389ccd1a68d63af5bf94227c6f92f7de6c6b07b079f4fde9560757ac",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 503,
+        receipt_version: 2,
+        receipt_sha256: "a3b4b192de9656b3fa16aae98ebf4984f3e04e3b29f0d7283e8ee2581bb9dbe2",
+        source_generation_sha256: "6df2e91dd0c9b39d1f1748c077da5e7b4547cd33d420fc15990cbb58a61fde5e",
+        target_generation_sha256: "d9f228f74177594b3e3e00aa968a36a6ecba89bff28fa8e7f70118c55ba0eeef",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 504,
+        receipt_version: 2,
+        receipt_sha256: "57bdd578f5a16bc82aaff73fb5cd93cd651533726732efa7680d27cacf345493",
+        source_generation_sha256: "e8968325694f00973b8a696640b292a0b449c2a953b1abf8ed8c363e780d722c",
+        target_generation_sha256: "c598e7d3d248f8ebb99792526f8bcbe9dae85966eeee6c49656a64487dfede3d",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 505,
+        receipt_version: 2,
+        receipt_sha256: "b60707aeea95ec25471febbed081b4324021cdb4c77f7642b96fc75df192b2a5",
+        source_generation_sha256: "140296e509f4a86e7e93f2764198beb6f19aa69a50addd19f046872c5d311195",
+        target_generation_sha256: "acc537045772da389cb6f2879c72ee72db88fb0394a1445500c9ecd07be3d59f",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 864,
+        receipt_version: 2,
+        receipt_sha256: "4909fb75938fc5faaa17a92529fa679172cbfabde13d76bf096e02d52242c62c",
+        source_generation_sha256: "dd6d0f77f2463be40b9c5659831a07bd6af929392048ec1dfdac7ee8fc385067",
+        target_generation_sha256: "a36dbef4ecf6872e142c264827c9344648949cd166f21b528a0239695b90105e",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 997,
+        receipt_version: 1,
+        receipt_sha256: "ede95aa5c868e5d2c502e97808c6eb2163c0d0b7d90a2f9471f864430a4a6f9a",
+        source_generation_sha256: "b7d216975d136e9e0c23421487b60147f63204053f81eb82aeef2d446bc05522",
+        target_generation_sha256: "6874518ff2c9da93b289d3d27cf1c9ae2c7b30c763e71cabdca5eb4ee8d6bdca",
+    },
+    ProfileNeutralRegistryRebuildAuthority {
+        epoch: 1000,
+        receipt_version: 2,
+        receipt_sha256: "5e5e7f7ea2ca3dbd3d14dc2379fd8618c9b6ac714c8fd87bf41b3a9e6517fa04",
+        source_generation_sha256: "c7b8d45a9d89b984ffc89f9e82901cd2590e66697043cba153169a41a71f76d4",
+        target_generation_sha256: "5711922e7651eaecbd227baf5a53d764fb9f707b762701611bbf91073bc9e197",
+    },
+];
 const MAX_LIVE_REPAIR_META_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LIVE_REPAIR_POH_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LIVE_REPAIR_PLAN_BYTES: u64 = 256 * 1024 * 1024;
@@ -258,6 +396,7 @@ pub struct SchedulerConfig {
     pub registry_reprocess_memory_mib: u64,
     pub registry_reprocess_sort_memory_mib: u64,
     pub registry_reprocess_target_root: PathBuf,
+    pub registry_reprocess_wire_profile: Option<ArchiveV2WireProfile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,6 +811,10 @@ pub struct PipelineSummary {
     pub poh_migration_epochs_total: usize,
     #[serde(default)]
     pub poh_migration_epochs_done: usize,
+    /// Epochs that satisfy the same per-epoch predicate used by PoH migration admission.
+    /// Durable failed markers and in-memory failures that require an explicit retry are excluded.
+    #[serde(default)]
+    pub poh_migration_epochs_runnable: usize,
     /// Aggregate current throughput across running migration workers, in bytes/sec -- each
     /// lane's `blocks_per_sec` (from its `ProgressTracker`) scaled by that epoch's PoH sidecar
     /// bytes-per-block, summed. `None` when nothing is running or reporting a rate yet.
@@ -698,6 +841,15 @@ pub struct PipelineSummary {
     pub registry_reprocess_epochs_total: usize,
     #[serde(default)]
     pub registry_reprocess_epochs_done: usize,
+    /// Epochs that satisfy the same per-epoch predicate used by registry reprocess admission.
+    /// Durable failed markers and in-memory failures that require an explicit retry are excluded.
+    #[serde(default)]
+    pub registry_reprocess_epochs_runnable: usize,
+    /// Deep validation claims that are active or satisfy the same non-resource eligibility rule
+    /// used by audit admission. A manual existing-target audit is excluded while registry
+    /// concurrency is disabled; an Access/exit continuation remains runnable.
+    #[serde(default)]
+    pub registry_reprocess_audits_runnable: usize,
     #[serde(default)]
     pub registry_reprocess_admission_blocked_reason: Option<String>,
 }
@@ -759,6 +911,10 @@ pub struct PipelineSnapshot {
     pub schema_version: u32,
     pub sequence: u64,
     pub now_unix_secs: u64,
+    /// Time of the last complete reconciliation and admission-control publication. Progress-only
+    /// updates never change this value, so resource controllers cannot mistake a fresh progress
+    /// sample for fresh scheduler control state.
+    pub control_reconciled_unix_secs: u64,
     /// Epoch currently being captured by the canonical live producer.
     pub current_epoch: Option<u64>,
     pub observer_mode: bool,
@@ -824,6 +980,7 @@ struct SnapshotPatch {
     schema_version: u32,
     sequence: u64,
     now_unix_secs: u64,
+    control_reconciled_unix_secs: u64,
     current_epoch: Option<u64>,
     observer_mode: bool,
     capabilities: CapabilitySnapshot,
@@ -867,6 +1024,7 @@ impl SnapshotPatch {
             schema_version: current.schema_version,
             sequence: current.sequence,
             now_unix_secs: current.now_unix_secs,
+            control_reconciled_unix_secs: current.control_reconciled_unix_secs,
             current_epoch: current.current_epoch,
             observer_mode: current.observer_mode,
             capabilities: current.capabilities.clone(),
@@ -889,6 +1047,7 @@ impl SnapshotPatch {
             schema_version: current.schema_version,
             sequence: current.sequence,
             now_unix_secs: current.now_unix_secs,
+            control_reconciled_unix_secs: current.control_reconciled_unix_secs,
             current_epoch: current.current_epoch,
             observer_mode: current.observer_mode,
             capabilities: current.capabilities.clone(),
@@ -967,6 +1126,17 @@ enum RegistryReprocessAuditPurpose {
 struct RegistryReprocessAuditRequest {
     epoch: u64,
     purpose: RegistryReprocessAuditPurpose,
+    admission: Option<RegistryReprocessAuditAdmission>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryReprocessAuditAdmission {
+    /// Exact bounded receipt admitted for CPU accounting. A continuation whose
+    /// target cannot yet be probed can instead carry only its exact schema-v4
+    /// marker; the validator must obtain a matching receipt before deep decode.
+    receipt: Option<crate::archive_v2::registry_reprocess::RegistryReprocessReceipt>,
+    marker: RegistryReprocessMarker,
+    threads: usize,
 }
 
 #[derive(Debug)]
@@ -993,16 +1163,14 @@ struct RegistryReprocessAuditor {
 
 impl RegistryReprocessAuditor {
     fn new(config: SchedulerConfig) -> Self {
-        Self::with_validator(
-            config,
-            Arc::new(|config, epoch| {
-                validate_registry_reprocess_output(config, epoch)
-                    .map_err(|error| format!("{error:#}"))
-            }),
-        )
+        Self::spawn(config, None)
     }
 
     fn with_validator(config: SchedulerConfig, validator: RegistryReprocessValidator) -> Self {
+        Self::spawn(config, Some(validator))
+    }
+
+    fn spawn(config: SchedulerConfig, validator: Option<RegistryReprocessValidator>) -> Self {
         // RuntimeState dispatches only when no audit is active, so a one-item channel is enough
         // to transfer ownership without ever blocking the scheduler mutex.
         let (request_sender, request_receiver) = mpsc::sync_channel(1);
@@ -1014,11 +1182,16 @@ impl RegistryReprocessAuditor {
                     let RegistryReprocessAuditMessage::Validate(request) = message else {
                         break;
                     };
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        validator(&config, request.epoch)
-                    }))
-                    .unwrap_or_else(|_| Err("deep validator panicked".to_string()))
-                    .map_err(|error| bounded_registry_reprocess_audit_result(&error));
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match validator
+                            .as_ref()
+                        {
+                            Some(validator) => validator(&config, request.epoch),
+                            None => validate_registry_reprocess_output(&config, &request)
+                                .map_err(|error| format!("{error:#}")),
+                        }))
+                        .unwrap_or_else(|_| Err("deep validator panicked".to_string()))
+                        .map_err(|error| bounded_registry_reprocess_audit_result(&error));
                     if completion_sender
                         .send(RegistryReprocessAuditCompletion { request, result })
                         .is_err()
@@ -1192,6 +1365,15 @@ struct RuntimeState {
     /// Audit-marker publication failed, so no background work was dispatched. Keep the epoch
     /// blocked in this controller instead of falling through to a bounded probe of stale state.
     registry_reprocess_audit_claim_failures: BTreeSet<u64>,
+    /// A profile-neutral incident is usable only after its complete durable preservation proof
+    /// has been validated. Each cache value binds the receipt digest and the exact marker file,
+    /// so an epoch-only cache hit can never authorize a different state transition.
+    validated_profile_neutral_registry_rebuild_retries:
+        BTreeMap<u64, ProfileNeutralRegistryIncidentProofBinding>,
+    /// Sticky controller history for an incident that was once observed or validated. Proof
+    /// failure clears authorization caches, but it must not let a damaged marker fall back to an
+    /// ordinary registry retry during the same controller lifetime.
+    profile_neutral_registry_incident_history: BTreeSet<u64>,
     registry_reprocess_admission_blocked: bool,
     registry_reprocess_admission_blocked_reason: Option<String>,
     finalizer: Option<ManagedChild>,
@@ -1420,6 +1602,64 @@ struct AdoptedPohMigration {
     worker_threads: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RegistryReprocessPhase {
+    /// A legacy single-process rewrite. It has the same peak-capacity behavior as core work.
+    Legacy,
+    Core,
+    Access,
+}
+
+impl RegistryReprocessPhase {
+    fn is_core_capacity(self) -> bool {
+        matches!(self, Self::Legacy | Self::Core)
+    }
+
+    fn running_state(self) -> &'static str {
+        match self {
+            Self::Legacy => "running",
+            Self::Core => "core_running",
+            Self::Access => "access_running",
+        }
+    }
+
+    fn lane_phase(self) -> &'static str {
+        match self {
+            Self::Legacy => "registry_reprocess",
+            Self::Core => "registry_reprocess_core",
+            Self::Access => "registry_reprocess_access",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RegistryReprocessExpectedAccessState {
+    ReceiptReady,
+    CoreOrPartialRebuild,
+}
+
+impl RegistryReprocessExpectedAccessState {
+    fn cli_value(self) -> &'static str {
+        match self {
+            Self::ReceiptReady => "receipt-ready",
+            Self::CoreOrPartialRebuild => "core-or-partial-rebuild",
+        }
+    }
+}
+
+impl From<RegistryReprocessAccessContinuationState> for RegistryReprocessExpectedAccessState {
+    fn from(state: RegistryReprocessAccessContinuationState) -> Self {
+        match state {
+            RegistryReprocessAccessContinuationState::ReceiptReady => Self::ReceiptReady,
+            RegistryReprocessAccessContinuationState::CoreOrPartialRebuild => {
+                Self::CoreOrPartialRebuild
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AdoptedRegistryReprocess {
     epoch: u64,
@@ -1428,6 +1668,12 @@ struct AdoptedRegistryReprocess {
     threads: Option<usize>,
     progress_path: PathBuf,
     identity_trusted: bool,
+    phase: RegistryReprocessPhase,
+    attempt_id: Option<String>,
+    staging_dir: Option<PathBuf>,
+    handoff_sha256: Option<String>,
+    expected_access_state: Option<RegistryReprocessExpectedAccessState>,
+    wire_profile: Option<ArchiveV2WireProfile>,
 }
 
 /// Live progress channel for a child piloting the disk-free path (currently PoH migration
@@ -1534,6 +1780,34 @@ struct RegistryReprocessMarker {
     source: PathBuf,
     target: PathBuf,
     threads: usize,
+    /// Generation-wide message grammar. Current attempt markers require this field.
+    #[serde(default)]
+    wire_profile: Option<ArchiveV2WireProfile>,
+    /// None is valid only for v1/v2 markers created by the single-stage scheduler.
+    #[serde(default)]
+    phase: Option<RegistryReprocessPhase>,
+    /// Scheduler-generated identity for a current two-stage attempt.
+    #[serde(default)]
+    attempt_id: Option<String>,
+    /// Exact private same-parent workspace for this attempt.
+    #[serde(default)]
+    staging_dir: Option<PathBuf>,
+    /// SHA-256 of the publication-last core handoff. It appears only after core completion.
+    #[serde(default)]
+    handoff_sha256: Option<String>,
+    /// Exact access branch charged before spawn. Present only while the access child can run.
+    #[serde(default)]
+    expected_access_state: Option<RegistryReprocessExpectedAccessState>,
+    /// Fixed recovery incident lineage. Both fields are absent for ordinary generations and are
+    /// preserved through every state of a profile-neutral Post rebuild until completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_incident_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_receipt_sha256: Option<String>,
+    /// Full identity of the immutable recovery receipt. The digest alone cannot detect a
+    /// same-byte file replacement, so every incident state carries both bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_receipt_identity: Option<ProfileNeutralRegistryRebuildFileIdentity>,
     #[serde(default)]
     pid: Option<u32>,
     #[serde(default)]
@@ -1591,6 +1865,12 @@ enum ChildKind {
     RegistryReprocess {
         epoch: u64,
         target: PathBuf,
+        phase: RegistryReprocessPhase,
+        attempt_id: String,
+        staging_dir: PathBuf,
+        handoff_sha256: Option<String>,
+        expected_access_state: Option<RegistryReprocessExpectedAccessState>,
+        wire_profile: Option<ArchiveV2WireProfile>,
     },
     // Kept so the scheduler can identify and report a legacy process that was
     // already running across an upgrade; new live finalizers are never spawned.
@@ -1845,6 +2125,14 @@ pub async fn run_scheduler(config: SchedulerConfig) -> Result<()> {
             .route("/api/v1/jobs/{kind}/{id}/pause", post(pause_job))
             .route("/api/v1/jobs/{kind}/{id}/resume", post(resume_job))
             .route("/api/v1/jobs/{kind}/{id}/retry", post(retry_job))
+            .route(
+                "/api/v1/jobs/{kind}/{id}/rebuild-profile-neutral",
+                post(rebuild_profile_neutral_registry_job),
+            )
+            .route(
+                "/api/v1/jobs/{kind}/{id}/reconcile-repaired",
+                post(reconcile_repaired_poh_job),
+            )
             .with_state(Arc::clone(&state))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -1959,6 +2247,48 @@ struct ControlResponse {
     target: String,
     message: String,
     snapshot_sequence: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileNeutralRegistryRebuildRequest {
+    incident_id: String,
+    authority_sha256: String,
+}
+
+fn authorize_profile_neutral_registry_rebuild_request(
+    kind: &str,
+    id: &str,
+    request: &ProfileNeutralRegistryRebuildRequest,
+) -> Result<&'static ProfileNeutralRegistryRebuildAuthority, ControlError> {
+    if kind != REGISTRY_REPROCESS_OWNERSHIP_KIND {
+        return Err(ControlError::BadRequest(
+            "profile-neutral rebuild supports only archive_v2_registry_reprocess".to_string(),
+        ));
+    }
+    let epoch = id.parse::<u64>().map_err(|_| {
+        ControlError::BadRequest("profile-neutral rebuild id must be an epoch".to_string())
+    })?;
+    let authority = profile_neutral_registry_rebuild_authority(epoch).ok_or_else(|| {
+        ControlError::BadRequest(format!(
+            "epoch {epoch} is not in the closed profile-neutral rebuild cohort"
+        ))
+    })?;
+    let computed_authority = profile_neutral_registry_rebuild_authority_sha256();
+    if computed_authority != PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256 {
+        return Err(ControlError::Internal(anyhow::anyhow!(
+            "compiled profile-neutral rebuild authority digest differs from its pinned value"
+        )));
+    }
+    if request.incident_id != PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID
+        || request.authority_sha256 != PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256
+    {
+        return Err(ControlError::BadRequest(
+            "profile-neutral rebuild request does not name the exact compiled incident authority"
+                .to_string(),
+        ));
+    }
+    Ok(authority)
 }
 
 #[derive(Debug)]
@@ -2133,6 +2463,378 @@ async fn resume_job(
     job_signal_control(state, kind, id, false).await
 }
 
+fn repaired_poh_queued_registry_audits_are_durable(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+) -> bool {
+    if runtime.active_registry_reprocess_audit.is_some()
+        || runtime.pending_registry_reprocess_audits.len()
+            != runtime.registry_reprocess_audit_queue.len()
+    {
+        return false;
+    }
+    let mut queued_epochs = BTreeSet::new();
+    for request in &runtime.registry_reprocess_audit_queue {
+        if !queued_epochs.insert(request.epoch) {
+            return false;
+        }
+        let marker = match read_registry_reprocess_marker_strict(&config.state_root, request.epoch)
+        {
+            Ok(Some(marker)) => marker,
+            Ok(None) | Err(_) => return false,
+        };
+        let restart_recoverable_shape = match marker.state.as_str() {
+            "auditing" => {
+                registry_reprocess_marker_is_legacy(&marker)
+                    && registry_reprocess_marker_identity_is_clear(&marker)
+            }
+            "final_auditing" => {
+                registry_reprocess_marker_identity_is_clear(&marker)
+                    && registry_reprocess_marker_has_attempt(config, request.epoch, &marker)
+                    && marker.phase == Some(RegistryReprocessPhase::Access)
+                    && marker.handoff_sha256.is_some()
+                    && marker.expected_access_state.is_none()
+            }
+            _ => false,
+        };
+        if !restart_recoverable_shape
+            || !registry_reprocess_audit_marker_matches_request(config, request, &marker)
+        {
+            return false;
+        }
+    }
+    queued_epochs == runtime.pending_registry_reprocess_audits
+}
+
+fn ensure_repaired_poh_runtime_quiescent(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    snapshot: &PipelineSnapshot,
+) -> Result<(), ControlError> {
+    if !runtime.scheduler_paused {
+        return Err(ControlError::Conflict(
+            "scheduler must remain globally paused during repaired-PoH completion".to_string(),
+        ));
+    }
+    // A paused controller can recover durable `auditing` markers into its in-memory queue before
+    // this one-shot completion action runs. Those requests own no worker, reader, or audit thread,
+    // and the runtime mutex held by the caller prevents dispatch during proof validation. Accept
+    // only a one-to-one queue whose requests still match their exact durable marker claims. An
+    // active audit or any malformed/in-memory-only pending claim remains a hard conflict.
+    if !repaired_poh_queued_registry_audits_are_durable(config, runtime) {
+        return Err(ControlError::Conflict(
+            "repaired-PoH completion found a registry audit queue without exact durable inactive claims"
+                .to_string(),
+        ));
+    }
+    let busy = !runtime.acquisitions.is_empty()
+        || !runtime.scans.is_empty()
+        || !runtime.legacy_compacts.is_empty()
+        || !runtime.adopted_legacy_compacts.is_empty()
+        || runtime.finalizer.is_some()
+        || !runtime.poh_migrations.is_empty()
+        || !runtime.adopted_poh_migrations.is_empty()
+        || !runtime.registry_reprocesses.is_empty()
+        || !runtime.uncertain_registry_reprocesses.is_empty()
+        || !runtime.adopted_registry_reprocesses.is_empty()
+        || runtime.active_registry_reprocess_audit.is_some()
+        || snapshot.lanes.iter().any(|lane| {
+            !matches!(
+                lane.state.as_str(),
+                "done" | "complete" | "failed" | "stopped" | "idle"
+            )
+        });
+    if busy {
+        return Err(ControlError::Conflict(
+            "repaired-PoH completion requires every active acquisition, archive, PoH, registry, and audit lane to drain; only exact durable inactive audit claims may remain"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_repaired_poh_input_marker_security(
+    state_root: &Path,
+    epoch: u64,
+    marker_state: &str,
+    expected_identity: PohMigrationMarkerFileIdentity,
+) -> Result<(), ControlError> {
+    let path = poh_migration_marker_path(state_root, epoch);
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|error| ControlError::Internal(error.into()))?;
+    let mode = metadata.mode() & 0o777;
+    let mode_is_accepted = match marker_state {
+        // The live failed marker predates the hardened publisher and is mode 0644. It remains
+        // acceptable under the same-euid trust boundary because no group/other write bit is set.
+        "failed" => mode & 0o022 == 0,
+        // Every marker produced by this completion action is mode 0600. Idempotence must never
+        // accept a weaker complete marker, even when its JSON contains the right proof digest.
+        "complete" => mode == 0o600,
+        _ => false,
+    };
+    if !metadata.file_type().is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || !mode_is_accepted
+        || poh_migration_marker_file_identity(&metadata) != expected_identity
+    {
+        return Err(ControlError::Conflict(
+            "repaired-PoH input must be one stable euid-owned regular file; failed allows a non-group/other-writable legacy mode, while complete requires mode 0600"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_repaired_poh_processes_absent(
+    config: &SchedulerConfig,
+    epoch: u64,
+) -> Result<(), ControlError> {
+    match find_poh_target_writer_processes(config, epoch) {
+        PohProcessScan::Observable(pids) if pids.is_empty() => {}
+        PohProcessScan::Observable(pids) => {
+            return Err(ControlError::Conflict(format!(
+                "PoH writer for epoch {epoch} is still observable (pid {})",
+                pids[0]
+            )));
+        }
+        PohProcessScan::Unobservable => {
+            return Err(ControlError::Conflict(
+                "PoH process liveness is unobservable; repaired completion remains blocked"
+                    .to_string(),
+            ));
+        }
+    }
+    match find_registry_reprocess_processes(config, epoch) {
+        Some(pids) if pids.is_empty() => Ok(()),
+        Some(pids) => Err(ControlError::Conflict(format!(
+            "registry writer for epoch {epoch} is still observable (pid {})",
+            pids[0]
+        ))),
+        None => Err(ControlError::Conflict(
+            "registry process liveness is unobservable; repaired completion remains blocked"
+                .to_string(),
+        )),
+    }
+}
+
+async fn reconcile_repaired_poh_job(
+    State(state): State<Arc<AppState>>,
+    AxumPath((kind, id)): AxumPath<(String, String)>,
+) -> Result<Json<ControlResponse>, ControlError> {
+    authorize_control(&state.config)?;
+    if kind != POH_MIGRATION_OWNERSHIP_KIND {
+        return Err(ControlError::BadRequest(
+            "repaired completion supports only poh_signature_count_migration".to_string(),
+        ));
+    }
+    let epoch = id.parse::<u64>().map_err(|_| {
+        ControlError::BadRequest("repaired PoH completion id must be an epoch".to_string())
+    })?;
+    if epoch != crate::archive_verify::EPOCH_998_POH_ORPHAN_REPAIR_EPOCH {
+        return Err(ControlError::BadRequest(
+            "repaired PoH completion is restricted to epoch 998".to_string(),
+        ));
+    }
+
+    // Keep the scheduler mutex and archive-local hardened lock through the exact marker CAS. No
+    // scheduler poll can admit work, and an external repair/migration writer cannot acquire the
+    // archive lock, between proof validation and completion publication.
+    let snapshot = state.snapshot.read().await.clone();
+    let mut runtime = state.runtime.lock().await;
+    ensure_repaired_poh_runtime_quiescent(&state.config, &runtime, &snapshot)?;
+    let (expected_marker, expected_marker_identity) =
+        read_poh_migration_marker_strict_with_identity(&state.config.state_root, epoch)
+            .map_err(ControlError::Internal)?
+            .ok_or_else(|| {
+                ControlError::Conflict(format!(
+                    "epoch {epoch} has no PoH migration marker to reconcile"
+                ))
+            })?;
+    validate_repaired_poh_input_marker_security(
+        &state.config.state_root,
+        epoch,
+        &expected_marker.state,
+        expected_marker_identity,
+    )?;
+    if !poh_migration_marker_claims_epoch(&expected_marker, epoch)
+        || !matches!(expected_marker.state.as_str(), "failed" | "complete")
+        || expected_marker.pid.is_some()
+        || expected_marker.process_start_ticks.is_some()
+        || expected_marker.worker_threads.is_some()
+    {
+        return Err(ControlError::Conflict(format!(
+            "epoch {epoch} PoH marker is not the exact failed claim or a proof-bound complete claim"
+        )));
+    }
+    ensure_repaired_poh_processes_absent(&state.config, epoch)?;
+
+    let archive_dir = state.config.archive_root.join(format!("epoch-{epoch}"));
+    let threads = state.config.poh_migration_threads;
+    let proof = tokio::task::spawn_blocking(move || {
+        crate::archive_verify::validate_epoch_998_poh_orphan_repair_completion(
+            &archive_dir,
+            threads,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ControlError::Internal(anyhow::anyhow!(
+            "epoch {epoch} repaired-PoH completion validator task failed: {error}"
+        ))
+    })?
+    .map_err(|error| {
+        ControlError::Conflict(format!(
+            "epoch {epoch} repaired-PoH completion proof failed closed: {error:#}"
+        ))
+    })?;
+    ensure_repaired_poh_processes_absent(&state.config, epoch)?;
+    ensure_repaired_poh_runtime_quiescent(&state.config, &runtime, &snapshot)?;
+    proof.recheck().map_err(|error| {
+        ControlError::Conflict(format!(
+            "epoch {epoch} repaired-PoH proof changed before marker CAS: {error:#}"
+        ))
+    })?;
+    let proof_binding = proof.marker_binding().to_string();
+
+    let idempotent = if expected_marker.state == "failed" {
+        compare_and_transition_failed_poh_marker_to_repaired_complete(
+            &state.config.state_root,
+            epoch,
+            &expected_marker,
+            expected_marker_identity,
+            &proof_binding,
+        )
+        .map_err(ControlError::Internal)?;
+        false
+    } else {
+        let current =
+            read_poh_migration_marker_strict_with_identity(&state.config.state_root, epoch)
+                .map_err(ControlError::Internal)?
+                .context("repaired-PoH completion marker disappeared during validation")
+                .map_err(ControlError::Internal)?;
+        if current.0 != expected_marker
+            || current.1 != expected_marker_identity
+            || !repaired_poh_complete_marker_matches(&current.0, epoch, &proof_binding)
+        {
+            return Err(ControlError::Conflict(
+                "existing complete PoH marker changed or does not bind the same exact repair proof"
+                    .to_string(),
+            ));
+        }
+        true
+    };
+
+    // The proof guard is still live here. Clear only this job's durable scheduler failure/pause
+    // bookkeeping. Global pause remains set and this action never schedules work.
+    let key = format!("poh_migration:{epoch}");
+    clear_runtime_failure(&state.config, &mut runtime, &key);
+    runtime.paused_jobs.remove(&key);
+    persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
+    append_control_event(
+        &state.config,
+        "reconcile_repaired",
+        &format!("{kind}/{id}/{proof_binding}"),
+    )
+    .map_err(ControlError::Internal)?;
+    drop(proof);
+    drop(runtime);
+
+    let sequence = state.snapshot.read().await.sequence;
+    Ok(Json(ControlResponse {
+        ok: true,
+        action: "reconcile_repaired".to_string(),
+        target: format!("{kind}/{id}"),
+        message: if idempotent {
+            "the exact repaired-PoH proof was already bound to the complete marker; scheduler remains paused"
+                .to_string()
+        } else {
+            "the exact repaired-PoH proof was bound to a complete marker without rewriting poh.wincode; scheduler remains paused"
+                .to_string()
+        },
+        snapshot_sequence: sequence,
+    }))
+}
+
+async fn rebuild_profile_neutral_registry_job(
+    State(state): State<Arc<AppState>>,
+    AxumPath((kind, id)): AxumPath<(String, String)>,
+    Json(request): Json<ProfileNeutralRegistryRebuildRequest>,
+) -> Result<Json<ControlResponse>, ControlError> {
+    authorize_control(&state.config)?;
+    let authority = authorize_profile_neutral_registry_rebuild_request(&kind, &id, &request)?;
+    let epoch = authority.epoch;
+
+    // The global scheduler pause and its mutex prevent local dispatch while this bounded manual
+    // recovery validates all exact bytes and moves the immutable target. The two filesystem locks
+    // and repeated process scans cover external writers. The reader scan is repeated after the
+    // no-clobber move, before the final marker CAS.
+    let mut runtime = state.runtime.lock().await;
+    let outcome = recover_profile_neutral_registry_generation(
+        &state.config,
+        &mut runtime,
+        authority,
+        PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256,
+        || find_registry_reprocess_processes(&state.config, epoch),
+        || match find_poh_target_writer_processes(&state.config, epoch) {
+            PohProcessScan::Observable(pids) => Some(pids),
+            PohProcessScan::Unobservable => None,
+        },
+        find_processes_with_open_registry_generation,
+    )
+    .map_err(|error| {
+        ControlError::Conflict(format!(
+            "profile-neutral registry recovery remains blocked for epoch {epoch}: {error:#}"
+        ))
+    })?;
+    let key = format!("registry_reprocess:{epoch}");
+    clear_runtime_failure(&state.config, &mut runtime, &key);
+    runtime.paused_jobs.remove(&key);
+    let progress = registry_reprocess_progress_path(&state.config.state_root, epoch);
+    match fs::remove_file(&progress) {
+        Ok(()) => {
+            if let Some(parent) = progress.parent() {
+                sync_scheduler_directory(parent).map_err(ControlError::Internal)?;
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ControlError::Internal(anyhow::Error::new(error).context(
+                format!("remove stale registry progress {}", progress.display()),
+            )));
+        }
+    }
+    persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
+    append_control_event(
+        &state.config,
+        "rebuild_profile_neutral",
+        &format!("{kind}/{id}/{}", outcome.recovery_receipt_sha256),
+    )
+    .map_err(ControlError::Internal)?;
+    drop(runtime);
+    reconcile_and_schedule(&state).await;
+    let sequence = state.snapshot.read().await.sequence;
+    Ok(Json(ControlResponse {
+        ok: true,
+        action: "rebuild_profile_neutral".to_string(),
+        target: format!("{kind}/{id}"),
+        message: if outcome.idempotent {
+            format!(
+                "the exact legacy generation was already preserved at {}; clean Post rebuild remains ready; scheduler remains paused",
+                outcome.quarantine.display()
+            )
+        } else {
+            format!(
+                "the exact legacy generation was preserved at {}; old marker was archived at {}; recovery proof is {}; clean Post rebuild is ready; scheduler remains paused",
+                outcome.quarantine.display(),
+                outcome.archived_marker.display(),
+                outcome.recovery_receipt.display()
+            )
+        },
+        snapshot_sequence: sequence,
+    }))
+}
+
 async fn retry_job(
     State(state): State<Arc<AppState>>,
     AxumPath((kind, id)): AxumPath<(String, String)>,
@@ -2263,6 +2965,16 @@ async fn retry_job(
                 "registry reprocess for epoch {epoch} still has live ownership or a pending deep audit"
             )));
         }
+        let _retry_lock = try_exclusive_lock(&registry_reprocess_lock_path(
+            &state.config.state_root,
+            epoch,
+        ))
+        .map_err(ControlError::Internal)?
+        .ok_or_else(|| {
+            ControlError::Conflict(format!(
+                "registry reprocess for epoch {epoch} still holds its exact worker lock"
+            ))
+        })?;
         let mut marker = read_registry_reprocess_marker_strict(&state.config.state_root, epoch)
             .map_err(ControlError::Internal)?
             .ok_or_else(|| {
@@ -2277,8 +2989,8 @@ async fn retry_job(
                 "registry reprocess marker for epoch {epoch} is not an exact failed claim"
             )));
         }
-        match find_registry_reprocess_processes(&state.config, epoch) {
-            Some(pids) if pids.is_empty() => {}
+        let registry_writer_pids = match find_registry_reprocess_processes(&state.config, epoch) {
+            Some(pids) if pids.is_empty() => pids,
             Some(pids) => {
                 return Err(ControlError::Conflict(format!(
                     "registry reprocess process is still running for epoch {epoch} (pid {})",
@@ -2291,6 +3003,70 @@ async fn retry_job(
                         .to_string(),
                 ));
             }
+        };
+        let profile_neutral_incident =
+            profile_neutral_registry_rebuild_incident_candidate(&state.config, epoch, &marker);
+        if profile_neutral_incident {
+            clear_profile_neutral_registry_incident_caches(&mut runtime, epoch);
+            let authority = profile_neutral_registry_rebuild_authority(epoch).ok_or_else(|| {
+                ControlError::Conflict(
+                    "profile-neutral retry has no compiled incident authority".to_string(),
+                )
+            })?;
+            if let Err(error) = validate_profile_neutral_registry_incident_proof(
+                &state.config,
+                authority,
+                &marker,
+                false,
+                profile_neutral_registry_incident_requires_absent_target(&marker),
+            ) {
+                clear_profile_neutral_registry_incident_caches(&mut runtime, epoch);
+                return Err(ControlError::Conflict(format!(
+                    "profile-neutral registry retry proof is invalid for epoch {epoch}: {error:#}"
+                )));
+            }
+        }
+        if stale_poh_registry_recovery_shape(epoch, &marker) {
+            let poh_writer_pids = match find_poh_migration_processes(&state.config, epoch) {
+                PohProcessScan::Observable(pids) => Some(pids),
+                PohProcessScan::Unobservable => None,
+            };
+            let outcome = recover_stale_poh_registry_generation(
+                &state.config,
+                &runtime,
+                epoch,
+                &marker,
+                Some(registry_writer_pids),
+                poh_writer_pids,
+                find_processes_with_open_registry_generation,
+            )
+            .map_err(|error| {
+                ControlError::Conflict(format!(
+                    "stale-PoH registry recovery remains blocked for epoch {epoch}: {error:#}"
+                ))
+            })?;
+            let key = format!("registry_reprocess:{epoch}");
+            clear_runtime_failure(&state.config, &mut runtime, &key);
+            runtime.paused_jobs.remove(&key);
+            reset_registry_reprocess_attempt_cache(&mut runtime, epoch);
+            persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
+            append_control_event(&state.config, "retry", &format!("{kind}/{id}"))
+                .map_err(ControlError::Internal)?;
+            drop(_retry_lock);
+            drop(runtime);
+            reconcile_and_schedule(&state).await;
+            let sequence = state.snapshot.read().await.sequence;
+            return Ok(Json(ControlResponse {
+                ok: true,
+                action: "retry".to_string(),
+                target: format!("{kind}/{id}"),
+                message: format!(
+                    "stale PoH-bound generation preserved at {}; old marker preserved at {}; clean profile-bound retry is ready",
+                    outcome.quarantine.display(),
+                    outcome.archived_marker.display()
+                ),
+                snapshot_sequence: sequence,
+            }));
         }
         if reconcile_existing_registry_reprocess_target(
             &state.config,
@@ -2309,15 +3085,166 @@ async fn retry_job(
                 }
             )));
         }
-        marker.state = "retry_ready".to_string();
-        marker.updated_unix_secs = unix_now();
-        marker.message = None;
-        publish_registry_reprocess_marker(&state.config.state_root, epoch, &marker)
-            .map_err(ControlError::Internal)?;
+        match marker.phase {
+            Some(RegistryReprocessPhase::Core) => {
+                if let Ok(result) =
+                    probe_registry_reprocess_core_handoff(&state.config, epoch, &marker)
+                {
+                    let mut replacement = marker.clone();
+                    replacement.state = "block_access_rebuild_required".to_string();
+                    replacement.phase = Some(RegistryReprocessPhase::Access);
+                    replacement.handoff_sha256 = Some(result.handoff_sha256);
+                    replacement.expected_access_state = None;
+                    replacement.pid = None;
+                    replacement.process_start_ticks = None;
+                    replacement.updated_unix_secs = unix_now();
+                    replacement.message = Some(
+                        "retry accepted the valid durable core handoff; access is pending"
+                            .to_string(),
+                    );
+                    compare_and_publish_registry_reprocess_marker(
+                        &state.config,
+                        epoch,
+                        &marker,
+                        &replacement,
+                    )
+                    .map_err(ControlError::Internal)?;
+                } else {
+                    if !registry_reprocess_marker_has_attempt(&state.config, epoch, &marker) {
+                        return Err(ControlError::Conflict(
+                            "failed core marker has no exact attempt binding".to_string(),
+                        ));
+                    }
+                    let current =
+                        read_registry_reprocess_marker_strict(&state.config.state_root, epoch)
+                            .map_err(ControlError::Internal)?
+                            .ok_or_else(|| {
+                                ControlError::Conflict(
+                                    "failed core marker disappeared before staging cleanup"
+                                        .to_string(),
+                                )
+                            })?;
+                    if current != marker {
+                        return Err(ControlError::Conflict(
+                            "failed core marker changed before staging cleanup".to_string(),
+                        ));
+                    }
+                    match find_registry_reprocess_processes(&state.config, epoch) {
+                        Some(pids) if pids.is_empty() => {}
+                        Some(pids) => {
+                            return Err(ControlError::Conflict(format!(
+                                "registry reprocess process appeared before core staging cleanup for epoch {epoch} (pid {})",
+                                pids[0]
+                            )));
+                        }
+                        None => {
+                            return Err(ControlError::Conflict(
+                                "registry reprocess liveness became unobservable before core staging cleanup"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    discard_failed_registry_core_attempt(&state.config, epoch, &marker).map_err(
+                        |error| {
+                            ControlError::Conflict(format!(
+                                "failed core staging is not safe to discard: {error:#}"
+                            ))
+                        },
+                    )?;
+                    let mut replacement = marker.clone();
+                    replacement.state = "retry_ready".to_string();
+                    replacement.phase = None;
+                    replacement.attempt_id = None;
+                    replacement.staging_dir = None;
+                    replacement.handoff_sha256 = None;
+                    replacement.expected_access_state = None;
+                    replacement.pid = None;
+                    replacement.process_start_ticks = None;
+                    replacement.updated_unix_secs = unix_now();
+                    replacement.message = None;
+                    compare_and_publish_registry_reprocess_marker(
+                        &state.config,
+                        epoch,
+                        &marker,
+                        &replacement,
+                    )
+                    .map_err(ControlError::Internal)?;
+                }
+            }
+            Some(RegistryReprocessPhase::Access) => {
+                let result =
+                    probe_registry_reprocess_access_continuation(&state.config, epoch, &marker)
+                        .map_err(|error| {
+                            ControlError::Conflict(format!(
+                                "failed access attempt has no safe durable continuation: {error:#}"
+                            ))
+                        })?;
+                let mut replacement = marker.clone();
+                replacement.state = "block_access_rebuild_required".to_string();
+                replacement.phase = Some(RegistryReprocessPhase::Access);
+                replacement.handoff_sha256 = Some(result.handoff_sha256);
+                replacement.expected_access_state = None;
+                replacement.pid = None;
+                replacement.process_start_ticks = None;
+                replacement.updated_unix_secs = unix_now();
+                replacement.message = Some("access retry requested".to_string());
+                compare_and_publish_registry_reprocess_marker(
+                    &state.config,
+                    epoch,
+                    &marker,
+                    &replacement,
+                )
+                .map_err(ControlError::Internal)?;
+            }
+            Some(RegistryReprocessPhase::Legacy) => {
+                return Err(ControlError::Conflict(
+                    "legacy phase must not appear in a durable registry marker".to_string(),
+                ));
+            }
+            None if registry_reprocess_marker_is_legacy(&marker) => {
+                marker.state = "retry_ready".to_string();
+                marker.updated_unix_secs = unix_now();
+                marker.message = None;
+                publish_registry_reprocess_marker(&state.config.state_root, epoch, &marker)
+                    .map_err(ControlError::Internal)?;
+            }
+            None => {
+                return Err(ControlError::Conflict(
+                    "failed registry marker has no supported legacy or two-stage phase".to_string(),
+                ));
+            }
+        }
         let key = format!("registry_reprocess:{epoch}");
         clear_runtime_failure(&state.config, &mut runtime, &key);
         runtime.paused_jobs.remove(&key);
         reset_registry_reprocess_attempt_cache(&mut runtime, epoch);
+        if profile_neutral_incident {
+            let marker = read_registry_reprocess_marker_strict(&state.config.state_root, epoch)
+                .map_err(ControlError::Internal)?
+                .ok_or_else(|| {
+                    ControlError::Conflict(
+                        "profile-neutral retry marker disappeared after transition".to_string(),
+                    )
+                })?;
+            let authority = profile_neutral_registry_rebuild_authority(epoch).ok_or_else(|| {
+                ControlError::Conflict(
+                    "profile-neutral retry lost its compiled incident authority".to_string(),
+                )
+            })?;
+            admit_profile_neutral_registry_incident_proof(
+                &state.config,
+                &mut runtime,
+                authority,
+                &marker,
+                marker.state == "retry_ready",
+                profile_neutral_registry_incident_requires_absent_target(&marker),
+            )
+            .map_err(|error| {
+                ControlError::Conflict(format!(
+                    "profile-neutral registry retry transition lost its proof for epoch {epoch}: {error:#}"
+                ))
+            })?;
+        }
         let _ = fs::remove_file(registry_reprocess_progress_path(
             &state.config.state_root,
             epoch,
@@ -2325,6 +3252,7 @@ async fn retry_job(
         persist_control_state(&state.config, &runtime).map_err(ControlError::Internal)?;
         append_control_event(&state.config, "retry", &format!("{kind}/{id}"))
             .map_err(ControlError::Internal)?;
+        drop(_retry_lock);
         drop(runtime);
         reconcile_and_schedule(&state).await;
         let sequence = state.snapshot.read().await.sequence;
@@ -2332,7 +3260,7 @@ async fn retry_job(
             ok: true,
             action: "retry".to_string(),
             target: format!("{kind}/{id}"),
-            message: "registry reprocess failure cleared; matching staging will restart safely from scratch"
+            message: "registry reprocess failure cleared; its exact safe phase is ready to retry"
                 .to_string(),
             snapshot_sequence: sequence,
         }));
@@ -2918,8 +3846,10 @@ fn argv_matches_job(bytes: &[u8], blockzilla_bin: &Path, expected_path: &Path, k
                 && args.get(2).copied() == Some(expected_path)
         }
         REGISTRY_REPROCESS_OWNERSHIP_KIND => {
-            args.get(1).copied() == Some(b"reprocess-archive-v2-registry")
-                && args.get(3).copied() == Some(expected_path)
+            (args.get(1).copied() == Some(b"reprocess-archive-v2-registry")
+                && args.get(3).copied() == Some(expected_path))
+                || (args.get(1).copied() == Some(b"complete-archive-v2-registry-access")
+                    && args.get(4).copied() == Some(expected_path))
         }
         "live_finalizer" => matches!(
             args.get(1).copied(),
@@ -2936,6 +3866,7 @@ fn empty_snapshot(observer_mode: bool) -> PipelineSnapshot {
         schema_version: STATUS_SCHEMA_VERSION,
         sequence: 0,
         now_unix_secs: unix_now(),
+        control_reconciled_unix_secs: unix_now(),
         current_epoch: None,
         observer_mode,
         capabilities: CapabilitySnapshot::default(),
@@ -4078,6 +5009,10 @@ fn reconcile_filesystem(
         .filter_map(poh_migration_artifact)
         .filter(|artifact| artifact.state == ArtifactState::Present)
         .count();
+    summary.poh_migration_epochs_runnable = epochs
+        .iter()
+        .filter(|epoch| poh_migration_epoch_is_runnable(config, runtime, epoch.epoch))
+        .count();
     summary.poh_migration_bytes_per_sec = poh_migration_bytes_per_sec(&epochs, &lanes);
     summary.poh_migration_eta_secs = summary.poh_migration_bytes_per_sec.map(|rate| {
         summary
@@ -4112,6 +5047,12 @@ fn reconcile_filesystem(
                 && registry_reprocess_is_validated_complete(config, runtime, epoch.epoch)
         })
         .count();
+    summary.registry_reprocess_epochs_runnable = epochs
+        .iter()
+        .filter(|epoch| registry_reprocess_runnable_status(config, runtime, epoch).is_some())
+        .count();
+    summary.registry_reprocess_audits_runnable =
+        registry_reprocess_audits_runnable(config, runtime);
     summary.registry_reprocess_admission_blocked_reason =
         runtime.registry_reprocess_admission_blocked_reason.clone();
     let scan_pending = epochs
@@ -4236,6 +5177,7 @@ fn reconcile_filesystem(
         schema_version: STATUS_SCHEMA_VERSION,
         sequence: 0,
         now_unix_secs: now,
+        control_reconciled_unix_secs: now,
         current_epoch,
         observer_mode: !config.execute,
         capabilities: {
@@ -5277,21 +6219,55 @@ fn scan_marker_is_valid(path: &Path) -> bool {
     if lines.next() != Some(SCAN_MARKER_MAGIC) {
         return false;
     }
-    let mut registry_keys = false;
-    let mut references = false;
-    let mut include_access = false;
+    let mut registry_keys = None;
+    let mut references = None;
+    let mut include_access = None;
+    let mut timestamp_artifacts = None;
     for line in lines {
         let Some((name, value)) = line.split_once('=') else {
             return false;
         };
         match name {
-            "registry_keys" => registry_keys = value.parse::<u64>().is_ok(),
-            "references" => references = value.parse::<u64>().is_ok(),
-            "include_access" => include_access = matches!(value, "0" | "1"),
+            "registry_keys" => {
+                let Ok(value) = value.parse::<u64>() else {
+                    return false;
+                };
+                if registry_keys.replace(value).is_some() {
+                    return false;
+                }
+            }
+            "references" => {
+                let Ok(value) = value.parse::<u64>() else {
+                    return false;
+                };
+                if references.replace(value).is_some() {
+                    return false;
+                }
+            }
+            "include_access" => {
+                let value = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return false,
+                };
+                if include_access.replace(value).is_some() {
+                    return false;
+                }
+            }
+            "timestamp_artifacts" => {
+                let value = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return false,
+                };
+                if timestamp_artifacts.replace(value).is_some() {
+                    return false;
+                }
+            }
             _ => return false,
         }
     }
-    registry_keys && references && include_access
+    registry_keys.is_some() && references.is_some() && include_access.is_some()
 }
 
 fn epoch_artifacts(
@@ -6502,6 +7478,56 @@ fn poh_migration_artifact(epoch: &EpochSnapshot) -> Option<&ArtifactSnapshot> {
         .artifacts
         .iter()
         .find(|artifact| artifact.kind == ArtifactKind::PohSignatureCountMigration)
+}
+
+/// Registry publication binds every source sidecar in its receipt. A migration that can still
+/// replace any source `poh.wincode` therefore has to finish before any registry rewrite or deep
+/// audit is admitted. This is deliberately backlog-wide: one maintenance class completes before
+/// the next class starts, instead of allowing a later PoH replacement to invalidate an already
+/// published registry generation again.
+fn registry_reprocess_poh_completion_gate(
+    config: &SchedulerConfig,
+    snapshot: &PipelineSnapshot,
+) -> std::result::Result<(), String> {
+    for epoch in &snapshot.epochs {
+        let Some(artifact) = poh_migration_artifact(epoch) else {
+            continue;
+        };
+        match artifact.state {
+            ArtifactState::NotApplicable => continue,
+            ArtifactState::Present => {
+                let marker = read_poh_migration_marker_strict(&config.state_root, epoch.epoch)
+                    .map_err(|error| {
+                        format!(
+                            "epoch {} PoH migration marker is unreadable: {error:#}",
+                            epoch.epoch
+                        )
+                    })?;
+                match marker {
+                    None => {}
+                    Some(marker)
+                        if poh_migration_marker_claims_epoch(&marker, epoch.epoch)
+                            && marker.state == "complete"
+                            && marker.pid.is_none()
+                            && marker.process_start_ticks.is_none()
+                            && marker.worker_threads.is_none() => {}
+                    Some(marker) => {
+                        return Err(format!(
+                            "epoch {} PoH migration is not durably complete (marker state {})",
+                            epoch.epoch, marker.state
+                        ));
+                    }
+                }
+            }
+            state => {
+                return Err(format!(
+                    "epoch {} PoH migration is not complete (inventory state {state:?})",
+                    epoch.epoch
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Aggregate current PoH migration throughput, in bytes/sec. Each running lane's own
@@ -9512,7 +10538,7 @@ fn lane_from_adopted_registry_reprocess(
     // Adopted progress may not survive a controller restart; identity and RSS remain useful.
     progress.phase = progress
         .phase
-        .or_else(|| Some("registry_reprocess".to_string()));
+        .or_else(|| Some(migration.phase.lane_phase().to_string()));
     progress.state = Some(if paused { "paused" } else { "running" }.to_string());
     progress.pid = Some(migration.pid);
     progress.rss_bytes = rss_bytes;
@@ -9522,7 +10548,7 @@ fn lane_from_adopted_registry_reprocess(
         kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
         epoch: Some(migration.epoch),
         capture_id: None,
-        phase: "registry_reprocess".to_string(),
+        phase: migration.phase.lane_phase().to_string(),
         state: if paused { "paused" } else { "running" }.to_string(),
         auto_paused: false,
         auto_pause_reason: None,
@@ -9613,8 +10639,8 @@ fn lane_from_child(
         ChildKind::PohSignatureCountMigration { .. } => {
             ("poh_signature_count_migration", "poh_migration")
         }
-        ChildKind::RegistryReprocess { .. } => {
-            (REGISTRY_REPROCESS_OWNERSHIP_KIND, "registry_reprocess")
+        ChildKind::RegistryReprocess { phase, .. } => {
+            (REGISTRY_REPROCESS_OWNERSHIP_KIND, phase.lane_phase())
         }
         ChildKind::LiveFinalizer { phase, .. } => ("live_finalizer", phase.as_str()),
     };
@@ -12299,14 +13325,7 @@ async fn top_up_poh_migrations(
             break;
         }
         let failure_key = format!("poh_migration:{}", epoch.epoch);
-        if runtime.poh_migrations.contains_key(&epoch.epoch)
-            || runtime.adopted_poh_migrations.contains_key(&epoch.epoch)
-            || runtime.failures.contains_key(&failure_key)
-            || !matches!(
-                poh_migration_status(config, epoch.epoch),
-                PohMigrationStatus::Ready | PohMigrationStatus::RetryReady
-            )
-        {
+        if !poh_migration_epoch_is_runnable(config, runtime, epoch.epoch) {
             continue;
         }
         match spawn_poh_migration(config, epoch).await {
@@ -12333,10 +13352,178 @@ async fn top_up_poh_migrations(
 enum RegistryReprocessStatus {
     NotCandidate,
     Ready,
+    AccessReady,
     Running,
     Complete,
     Failed,
     Blocked,
+}
+
+fn registry_reprocess_dispatch_capacity(
+    configured: usize,
+    active: usize,
+    access_ready: bool,
+) -> usize {
+    if configured > 0 {
+        configured
+    } else if active == 0 && access_ready {
+        1
+    } else {
+        0
+    }
+}
+
+fn registry_reprocess_status_is_dispatchable(
+    status: RegistryReprocessStatus,
+    configured: usize,
+) -> bool {
+    status == RegistryReprocessStatus::AccessReady
+        || (configured > 0 && status == RegistryReprocessStatus::Ready)
+}
+
+fn registry_reprocess_runnable_status(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: &EpochSnapshot,
+) -> Option<RegistryReprocessStatus> {
+    let status = registry_reprocess_status(config, runtime, epoch);
+    let failure_key = format!("registry_reprocess:{}", epoch.epoch);
+    (!runtime.registry_reprocess_admission_blocked
+        && registry_reprocess_status_is_dispatchable(status, config.registry_reprocess_concurrency)
+        && !runtime.failures.contains_key(&failure_key))
+    .then_some(status)
+}
+
+fn registry_reprocess_phase_cpu_threads(
+    config: &SchedulerConfig,
+    status: RegistryReprocessStatus,
+) -> usize {
+    match status {
+        RegistryReprocessStatus::AccessReady => REGISTRY_REPROCESS_ACCESS_CPU_THREADS,
+        RegistryReprocessStatus::Ready => config.registry_reprocess_threads,
+        _ => 0,
+    }
+}
+
+fn registry_reprocess_access_memory_mib_from_registry_bytes(
+    source_registry_bytes: u64,
+) -> Result<u64> {
+    anyhow::ensure!(
+        source_registry_bytes > 0 && source_registry_bytes % 32 == 0,
+        "source registry size is not an exact non-empty 32-byte key array"
+    );
+    // Source + target registry: <= 2*S + 32. Remap: 32 + S/8. Counts: <=
+    // (S+32)/8. The mapped-target Vec<bool> needs <= (S+32)/32 + 1. This totals
+    // <= 73*S/32 + 70 bytes. The remaining 512 MiB covers index arrays and one
+    // bounded access frame. S is an exact multiple of 32, so divide first to keep
+    // the checked calculation exact for every representable result.
+    let mapped_and_vectors = (source_registry_bytes / 32)
+        .checked_mul(73)
+        .context("access memory bound overflow while scaling source registry")?;
+    let required_bytes = REGISTRY_REPROCESS_ACCESS_FIXED_MEMORY_BYTES
+        .checked_add(mapped_and_vectors)
+        .and_then(|bytes| bytes.checked_add(70))
+        .context("access memory bound overflow while adding fixed working memory")?;
+    required_bytes
+        .checked_add(MIB_BYTES - 1)
+        .map(|bytes| bytes / MIB_BYTES)
+        .context("access memory bound overflow while rounding to MiB")
+}
+
+fn registry_reprocess_source_registry_bytes(epoch: &EpochSnapshot) -> Result<u64> {
+    let mut artifacts = epoch
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == ArtifactKind::Registry);
+    let artifact = artifacts
+        .next()
+        .context("complete inventory has no source registry size")?;
+    anyhow::ensure!(
+        artifacts.next().is_none(),
+        "complete inventory has duplicate source registry artifacts"
+    );
+    anyhow::ensure!(
+        matches!(
+            artifact.state,
+            ArtifactState::Present | ArtifactState::Verified
+        ),
+        "source registry size is not from a present or verified artifact"
+    );
+    anyhow::ensure!(artifact.bytes > 0, "source registry size is zero");
+    Ok(artifact.bytes)
+}
+
+fn registry_reprocess_phase_memory_mib(
+    config: &SchedulerConfig,
+    epoch: &EpochSnapshot,
+    status: RegistryReprocessStatus,
+    access_state: Option<RegistryReprocessAccessContinuationState>,
+) -> Result<u64> {
+    match status {
+        RegistryReprocessStatus::AccessReady
+            if access_state == Some(RegistryReprocessAccessContinuationState::ReceiptReady) =>
+        {
+            Ok(REGISTRY_REPROCESS_RECEIPT_READY_MEMORY_MIB)
+        }
+        RegistryReprocessStatus::AccessReady
+            if access_state
+                == Some(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild) =>
+        {
+            let source_registry_bytes = registry_reprocess_source_registry_bytes(epoch)?;
+            registry_reprocess_access_memory_mib_from_registry_bytes(source_registry_bytes)
+        }
+        RegistryReprocessStatus::AccessReady => {
+            anyhow::bail!("registry access phase has no exact continuation state")
+        }
+        RegistryReprocessStatus::Ready => Ok(config.registry_reprocess_memory_mib),
+        _ => anyhow::bail!("registry phase has no dispatch memory reservation"),
+    }
+}
+
+fn registry_reprocess_active_cpu_threads(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    untrusted_fallback: usize,
+) -> usize {
+    let managed = runtime
+        .registry_reprocesses
+        .values()
+        .fold(0usize, |sum, child| {
+            let threads = match &child.kind {
+                ChildKind::RegistryReprocess {
+                    phase: RegistryReprocessPhase::Access,
+                    ..
+                } => REGISTRY_REPROCESS_ACCESS_CPU_THREADS,
+                ChildKind::RegistryReprocess { .. } => config.registry_reprocess_threads,
+                _ => 0,
+            };
+            sum.saturating_add(threads)
+        });
+    runtime
+        .adopted_registry_reprocesses
+        .values()
+        .fold(managed, |sum, adopted| {
+            let threads = if !adopted.identity_trusted {
+                untrusted_fallback
+            } else if adopted.phase == RegistryReprocessPhase::Access {
+                REGISTRY_REPROCESS_ACCESS_CPU_THREADS
+            } else {
+                adopted.threads.unwrap_or(untrusted_fallback)
+            };
+            sum.saturating_add(threads)
+        })
+}
+
+fn registry_reprocess_memory_admits(
+    machine: &MachineSnapshot,
+    reserve_mib: u64,
+    task_mib: u64,
+) -> bool {
+    machine.memory_total_bytes == 0
+        || reserve_mib
+            .checked_add(task_mib)
+            .and_then(|mib| mib.checked_mul(MIB_BYTES))
+            .is_some_and(|required| machine.memory_available_bytes >= required)
 }
 
 fn registry_reprocess_source_candidate(epoch: &EpochSnapshot) -> bool {
@@ -12349,10 +13536,60 @@ fn registry_reprocess_target(config: &SchedulerConfig, epoch: u64) -> PathBuf {
         .join(format!("epoch-{epoch}"))
 }
 
+fn registry_reprocess_core_hard_link_preflight(
+    config: &SchedulerConfig,
+    epoch: &EpochSnapshot,
+) -> Result<()> {
+    let signatures = epoch.output_path.join(SIGNATURES_FILE);
+    let signatures_metadata = fs::symlink_metadata(&signatures)
+        .with_context(|| format!("inspect source signatures {}", signatures.display()))?;
+    anyhow::ensure!(
+        signatures_metadata.file_type().is_file(),
+        "source signatures must be a regular non-symlink file: {}",
+        signatures.display()
+    );
+    fs::create_dir_all(&config.registry_reprocess_target_root).with_context(|| {
+        format!(
+            "create registry target staging parent {}",
+            config.registry_reprocess_target_root.display()
+        )
+    })?;
+    let target_parent_metadata = fs::metadata(&config.registry_reprocess_target_root)
+        .with_context(|| {
+            format!(
+                "inspect registry target staging parent {}",
+                config.registry_reprocess_target_root.display()
+            )
+        })?;
+    anyhow::ensure!(
+        target_parent_metadata.is_dir(),
+        "registry target staging parent is not a directory: {}",
+        config.registry_reprocess_target_root.display()
+    );
+    anyhow::ensure!(
+        signatures_metadata.dev() == target_parent_metadata.dev(),
+        "source signatures {} (device {}) and registry target staging parent {} (device {}) are on different filesystems; hard-link publication cannot succeed",
+        signatures.display(),
+        signatures_metadata.dev(),
+        config.registry_reprocess_target_root.display(),
+        target_parent_metadata.dev()
+    );
+    Ok(())
+}
+
 fn registry_reprocess_is_validated_complete(
     config: &SchedulerConfig,
     runtime: &RuntimeState,
     epoch: u64,
+) -> bool {
+    registry_reprocess_is_validated_complete_inner(config, runtime, epoch, None)
+}
+
+fn registry_reprocess_is_validated_complete_inner(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
 ) -> bool {
     if runtime.pending_registry_reprocess_audits.contains(&epoch) {
         return false;
@@ -12363,27 +13600,107 @@ fn registry_reprocess_is_validated_complete(
     {
         return false;
     }
-    if runtime.validated_registry_reprocesses.contains(&epoch) {
+    let exact_incident_contract = profile_neutral_registry_incident_contract_applies(
+        config,
+        runtime,
+        epoch,
+        None,
+        authority_override,
+    );
+    if !exact_incident_contract && runtime.validated_registry_reprocesses.contains(&epoch) {
         return true;
     }
-    // Observer mode never mutates/cache-binds durable completion state. It may still report a
-    // bounded, exact durable completion marker, while execute mode will not schedule from it
-    // until reconciliation has probed and cached it.
-    !config.execute
-        && read_registry_reprocess_marker_strict(&config.state_root, epoch).is_ok_and(|marker| {
-            marker.is_some_and(|marker| {
-                registry_reprocess_marker_claims(config, epoch, &marker)
-                    && marker.state == "complete"
-                    && marker.pid.is_none()
-                    && marker.process_start_ticks.is_none()
-            })
-        })
+    let Ok(Some(marker)) = read_registry_reprocess_marker_strict(&config.state_root, epoch) else {
+        return false;
+    };
+    if !registry_reprocess_marker_claims(config, epoch, &marker)
+        || marker.state != "complete"
+        || !registry_reprocess_marker_identity_is_clear(&marker)
+    {
+        return false;
+    }
+    if profile_neutral_registry_incident_contract_applies(
+        config,
+        runtime,
+        epoch,
+        Some(&marker),
+        authority_override,
+    ) {
+        let admitted = profile_neutral_registry_incident_status_admitted(
+            config,
+            runtime,
+            epoch,
+            &marker,
+            false,
+            false,
+            authority_override,
+        );
+        return admitted
+            && (!config.execute || runtime.validated_registry_reprocesses.contains(&epoch));
+    }
+    runtime.validated_registry_reprocesses.contains(&epoch) || !config.execute
+}
+
+fn profile_neutral_registry_incident_status_admitted(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+    require_retry_ready: bool,
+    require_target_absent: bool,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+) -> bool {
+    if !profile_neutral_registry_incident_contract_applies(
+        config,
+        runtime,
+        epoch,
+        Some(marker),
+        authority_override,
+    ) {
+        return true;
+    }
+    if config.execute {
+        return profile_neutral_registry_incident_cache_matches_marker(
+            config, runtime, epoch, marker,
+        );
+    }
+    if let Some((authority, authority_sha256)) = authority_override {
+        return authority.epoch == epoch
+            && validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+                config,
+                authority,
+                authority_sha256,
+                marker,
+                require_retry_ready,
+                require_target_absent,
+            )
+            .is_ok();
+    }
+    profile_neutral_registry_rebuild_authority(epoch).is_some_and(|authority| {
+        validate_profile_neutral_registry_incident_proof(
+            config,
+            authority,
+            marker,
+            require_retry_ready,
+            require_target_absent,
+        )
+        .is_ok()
+    })
 }
 
 fn registry_reprocess_status(
     config: &SchedulerConfig,
     runtime: &RuntimeState,
     epoch: &EpochSnapshot,
+) -> RegistryReprocessStatus {
+    registry_reprocess_status_inner(config, runtime, epoch, None)
+}
+
+fn registry_reprocess_status_inner(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: &EpochSnapshot,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
 ) -> RegistryReprocessStatus {
     if !registry_reprocess_source_candidate(epoch) {
         return RegistryReprocessStatus::NotCandidate;
@@ -12397,19 +13714,84 @@ fn registry_reprocess_status(
     {
         return RegistryReprocessStatus::Blocked;
     }
-    if registry_reprocess_is_validated_complete(config, runtime, epoch.epoch) {
+    if registry_reprocess_is_validated_complete_inner(
+        config,
+        runtime,
+        epoch.epoch,
+        authority_override,
+    ) {
         return RegistryReprocessStatus::Complete;
     }
+    let exact_incident_contract = profile_neutral_registry_incident_contract_applies(
+        config,
+        runtime,
+        epoch.epoch,
+        None,
+        authority_override,
+    );
     match read_registry_reprocess_marker_strict(&config.state_root, epoch.epoch) {
+        Ok(None) if exact_incident_contract => RegistryReprocessStatus::Blocked,
         Ok(None) => RegistryReprocessStatus::Ready,
         Ok(Some(marker)) if !registry_reprocess_marker_claims(config, epoch.epoch, &marker) => {
             RegistryReprocessStatus::Blocked
         }
         Ok(Some(marker)) => match marker.state.as_str() {
-            "retry_ready" if marker.pid.is_none() && marker.process_start_ticks.is_none() => {
+            "retry_ready"
+                if registry_reprocess_marker_identity_is_clear(&marker)
+                    && marker.phase.is_none()
+                    && marker.attempt_id.is_none()
+                    && marker.staging_dir.is_none()
+                    && marker.handoff_sha256.is_none()
+                    && marker.expected_access_state.is_none()
+                    && profile_neutral_registry_incident_status_admitted(
+                        config,
+                        runtime,
+                        epoch.epoch,
+                        &marker,
+                        true,
+                        true,
+                        authority_override,
+                    ) =>
+            {
                 RegistryReprocessStatus::Ready
             }
-            "running" => RegistryReprocessStatus::Running,
+            "block_access_rebuild_required"
+                if registry_reprocess_marker_identity_is_clear(&marker)
+                    && registry_reprocess_marker_has_attempt(config, epoch.epoch, &marker)
+                    && marker.phase == Some(RegistryReprocessPhase::Access)
+                    && marker.handoff_sha256.is_some()
+                    && marker.expected_access_state.is_none()
+                    && profile_neutral_registry_incident_status_admitted(
+                        config,
+                        runtime,
+                        epoch.epoch,
+                        &marker,
+                        false,
+                        true,
+                        authority_override,
+                    ) =>
+            {
+                RegistryReprocessStatus::AccessReady
+            }
+            "running" if registry_reprocess_marker_is_legacy(&marker) => {
+                RegistryReprocessStatus::Running
+            }
+            "core_running"
+                if marker.phase == Some(RegistryReprocessPhase::Core)
+                    && marker.handoff_sha256.is_none()
+                    && marker.expected_access_state.is_none()
+                    && registry_reprocess_marker_has_attempt(config, epoch.epoch, &marker) =>
+            {
+                RegistryReprocessStatus::Running
+            }
+            "access_running"
+                if marker.phase == Some(RegistryReprocessPhase::Access)
+                    && marker.handoff_sha256.is_some()
+                    && marker.expected_access_state.is_some()
+                    && registry_reprocess_marker_has_attempt(config, epoch.epoch, &marker) =>
+            {
+                RegistryReprocessStatus::Running
+            }
             "complete" => RegistryReprocessStatus::Blocked,
             "failed" => RegistryReprocessStatus::Failed,
             _ => RegistryReprocessStatus::Blocked,
@@ -12427,10 +13809,14 @@ fn registry_reprocess_work_pending(
         .registry_reprocess_audit_queue
         .iter()
         .any(registry_reprocess_audit_is_continuation);
+    let access_continuation_pending = snapshot.epochs.iter().any(|epoch| {
+        registry_reprocess_status(config, runtime, epoch) == RegistryReprocessStatus::AccessReady
+    });
     if !runtime.registry_reprocesses.is_empty()
         || !runtime.adopted_registry_reprocesses.is_empty()
         || runtime.active_registry_reprocess_audit.is_some()
         || continuation_pending
+        || access_continuation_pending
         || !runtime.registry_reprocess_audit_claim_failures.is_empty()
         || runtime.registry_reprocess_admission_blocked
     {
@@ -12441,9 +13827,29 @@ fn registry_reprocess_work_pending(
             || snapshot.epochs.iter().any(|epoch| {
                 matches!(
                     registry_reprocess_status(config, runtime, epoch),
-                    RegistryReprocessStatus::Ready | RegistryReprocessStatus::Running
+                    RegistryReprocessStatus::Ready
+                        | RegistryReprocessStatus::AccessReady
+                        | RegistryReprocessStatus::Running
                 )
             }))
+}
+
+fn registry_reprocess_audits_runnable(config: &SchedulerConfig, runtime: &RuntimeState) -> usize {
+    let active = usize::from(runtime.active_registry_reprocess_audit.is_some());
+    if runtime.registry_reprocess_admission_blocked
+        || !runtime.registry_reprocess_audit_claim_failures.is_empty()
+    {
+        return active;
+    }
+    let allow_existing_target = config.registry_reprocess_concurrency > 0;
+    runtime
+        .registry_reprocess_audit_queue
+        .iter()
+        .filter(|request| {
+            allow_existing_target || registry_reprocess_audit_is_continuation(request)
+        })
+        .count()
+        .saturating_add(active)
 }
 
 fn registry_reprocess_capacity_in_use(runtime: &RuntimeState) -> usize {
@@ -12508,6 +13914,608 @@ fn registry_reprocess_projected_bytes(epoch: &EpochSnapshot) -> u64 {
         .max(MIN_FINALIZER_SCRATCH_BYTES)
 }
 
+fn registry_reprocess_access_projected_bytes_from_sizes(
+    source_access_bytes: u64,
+    source_access_index_bytes: u64,
+    independent_sidecar_bytes: impl IntoIterator<Item = u64>,
+) -> Result<u64> {
+    let mut projected = source_access_bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(source_access_index_bytes))
+        .and_then(|bytes| bytes.checked_add(REGISTRY_REPROCESS_ACCESS_OUTPUT_HEADROOM_BYTES))
+        .context("access remaining-output projection overflow")?;
+    for bytes in independent_sidecar_bytes {
+        projected = projected
+            .checked_add(bytes)
+            .context("access independent-sidecar projection overflow")?;
+    }
+    Ok(projected)
+}
+
+fn registry_reprocess_source_file_bytes(path: &Path, required: bool) -> Result<Option<u64>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "access projection input is not a regular non-symlink file: {}",
+                path.display()
+            );
+            Ok(Some(metadata.len()))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !required => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect access projection input {}", path.display())),
+    }
+}
+
+fn registry_reprocess_access_projected_bytes(
+    config: &SchedulerConfig,
+    epoch: &EpochSnapshot,
+) -> Result<u64> {
+    anyhow::ensure!(
+        epoch.output_path == config.archive_root.join(format!("epoch-{}", epoch.epoch)),
+        "access projection source does not match the configured archive"
+    );
+    let source_access =
+        registry_reprocess_source_file_bytes(&epoch.output_path.join(BLOCK_ACCESS_FILE), true)?
+            .context("source block-access size is unavailable")?;
+    let source_access_index = registry_reprocess_source_file_bytes(
+        &epoch.output_path.join(BLOCK_ACCESS_INDEX_FILE),
+        true,
+    )?
+    .context("source block-access index size is unavailable")?;
+    let mut independent = Vec::with_capacity(7);
+    for name in [
+        BLOCKHASH_REGISTRY_FILE,
+        BLOCKHASH_INDEX_V3_FILE,
+        PREVIOUS_BLOCKHASH_TAIL_FILE,
+        VOTE_HASH_REGISTRY_FILE,
+        POH_FILE,
+        SHREDDING_FILE,
+        BLOCK_TIME_GAP_FILE,
+    ] {
+        if let Some(bytes) =
+            registry_reprocess_source_file_bytes(&epoch.output_path.join(name), false)?
+        {
+            independent.push(bytes);
+        }
+    }
+    registry_reprocess_access_projected_bytes_from_sizes(
+        source_access,
+        source_access_index,
+        independent,
+    )
+}
+
+fn registry_reprocess_access_phase_projected_bytes(
+    config: &SchedulerConfig,
+    epoch: &EpochSnapshot,
+    state: RegistryReprocessAccessContinuationState,
+) -> Result<u64> {
+    match state {
+        RegistryReprocessAccessContinuationState::ReceiptReady => {
+            Ok(REGISTRY_REPROCESS_RECEIPT_READY_DISK_HEADROOM_BYTES)
+        }
+        RegistryReprocessAccessContinuationState::CoreOrPartialRebuild => {
+            registry_reprocess_access_projected_bytes(config, epoch)
+        }
+    }
+}
+
+fn registry_reprocess_owned_access_partial_allocated_bytes(staging: &Path) -> Result<u64> {
+    // Keep this credit narrower than the access command's cleanup allowlist. Independent
+    // sidecars can be clones/reflinks whose allocated blocks remain shared after unlink, and
+    // signatures are hard-linked. If this conservative rule blocks near the reserve, the
+    // durable handoff is still valid; an operator can free disk and let admission retry.
+    let mut allocated = 0u64;
+    for name in [
+        BLOCK_ACCESS_FILE,
+        BLOCK_ACCESS_INDEX_FILE,
+        GET_BLOCK_INDEX_FILE,
+    ] {
+        for path in [
+            staging.join(name),
+            staging.join(format!("{name}{REGISTRY_REPROCESS_ACCESS_TEMP_SUFFIX}")),
+        ] {
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("inspect owned access partial {}", path.display())
+                    });
+                }
+            };
+            // Allocated blocks are safe to credit only when removal of this exact private name
+            // will release them. Never credit logical sparse length, symlinks, or shared links.
+            if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+                continue;
+            }
+            let bytes = metadata
+                .blocks()
+                .checked_mul(512)
+                .context("owned access partial allocated-byte count overflow")?;
+            allocated = allocated
+                .checked_add(bytes)
+                .context("owned access partial credit overflow")?;
+        }
+    }
+    Ok(allocated)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegistryReprocessAccessAdmission {
+    state: RegistryReprocessAccessContinuationState,
+    allocated_credit: u64,
+}
+
+fn registry_reprocess_access_admission_after_probe(
+    staging: &Path,
+    probe: Result<RegistryReprocessAccessContinuationState>,
+) -> Result<RegistryReprocessAccessAdmission> {
+    let state = probe?;
+    let allocated_credit = match state {
+        RegistryReprocessAccessContinuationState::ReceiptReady => 0,
+        RegistryReprocessAccessContinuationState::CoreOrPartialRebuild => {
+            registry_reprocess_owned_access_partial_allocated_bytes(staging)?
+        }
+    };
+    Ok(RegistryReprocessAccessAdmission {
+        state,
+        allocated_credit,
+    })
+}
+
+fn registry_reprocess_access_spawn_admission_matches(
+    staging: &Path,
+    expected: RegistryReprocessAccessAdmission,
+    observed_state: RegistryReprocessAccessContinuationState,
+) -> Result<bool> {
+    if observed_state != expected.state {
+        return Ok(false);
+    }
+    let observed_credit = match observed_state {
+        RegistryReprocessAccessContinuationState::ReceiptReady => 0,
+        RegistryReprocessAccessContinuationState::CoreOrPartialRebuild => {
+            registry_reprocess_owned_access_partial_allocated_bytes(staging)?
+        }
+    };
+    Ok(observed_credit == expected.allocated_credit)
+}
+
+fn registry_reprocess_access_admission(
+    config: &SchedulerConfig,
+    epoch: u64,
+) -> Result<RegistryReprocessAccessAdmission> {
+    let marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)?
+        .context("registry access marker disappeared before disk admission")?;
+    anyhow::ensure!(
+        marker.state == "block_access_rebuild_required"
+            && registry_reprocess_marker_identity_is_clear(&marker)
+            && marker.expected_access_state.is_none(),
+        "registry access marker is not an idle durable continuation"
+    );
+    let staging = marker
+        .staging_dir
+        .as_deref()
+        .context("registry access marker has no exact staging path")?;
+    let probe = probe_registry_reprocess_access_continuation_state(config, epoch, &marker)
+        .map(|probe| probe.state);
+    registry_reprocess_access_admission_after_probe(staging, probe)
+}
+
+fn registry_reprocess_disk_admits(available: u64, reserve: u64, projected: u64) -> bool {
+    available != 0
+        && reserve
+            .checked_add(projected)
+            .is_some_and(|required| available >= required)
+}
+
+fn registry_reprocess_staging_path(config: &SchedulerConfig, epoch: u64) -> PathBuf {
+    config
+        .registry_reprocess_target_root
+        .join(format!(".epoch-{epoch}.registry-reprocess.staging"))
+}
+
+fn registry_reprocess_pass2_output_exists(staging: &Path) -> bool {
+    fs::symlink_metadata(&staging).is_ok_and(|metadata| metadata.file_type().is_dir())
+        && fs::symlink_metadata(staging.join(BLOCKS_FILE))
+            .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() > 0)
+}
+
+fn read_registry_reprocess_progress_strict(path: &Path) -> Result<ProgressSnapshot> {
+    let mut file = open_readonly_nonblocking_nofollow(path)
+        .with_context(|| format!("open registry reprocess progress {}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("stat registry reprocess progress {}", path.display()))?;
+    anyhow::ensure!(
+        opened_metadata.file_type().is_file(),
+        "registry reprocess progress {} is not a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        opened_metadata.len() > 0 && opened_metadata.len() <= MAX_REGISTRY_REPROCESS_PROGRESS_BYTES,
+        "registry reprocess progress {} has an invalid size",
+        path.display()
+    );
+    let opened_identity = poh_migration_marker_file_identity(&opened_metadata);
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    (&mut file)
+        .take(MAX_REGISTRY_REPROCESS_PROGRESS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read registry reprocess progress {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 == opened_metadata.len()
+            && bytes.len() as u64 <= MAX_REGISTRY_REPROCESS_PROGRESS_BYTES,
+        "registry reprocess progress {} changed size while reading",
+        path.display()
+    );
+    let final_metadata = file
+        .metadata()
+        .with_context(|| format!("restat registry reprocess progress {}", path.display()))?;
+    anyhow::ensure!(
+        poh_migration_marker_file_identity(&final_metadata) == opened_identity,
+        "registry reprocess progress {} changed while reading",
+        path.display()
+    );
+    let published_metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("restat published registry progress {}", path.display()))?;
+    anyhow::ensure!(
+        published_metadata.file_type().is_file()
+            && poh_migration_marker_file_identity(&published_metadata) == opened_identity,
+        "registry reprocess progress {} was replaced while reading",
+        path.display()
+    );
+    parse_progress_bytes(&bytes)
+        .with_context(|| format!("parse registry reprocess progress {}", path.display()))
+}
+
+fn registry_reprocess_progress_proves_pass2(
+    progress: &ProgressSnapshot,
+    pid: u32,
+    marker_updated_unix_secs: u64,
+    now: u64,
+) -> bool {
+    let fresh_for_this_attempt = progress.updated_unix_secs.is_some_and(|updated| {
+        updated >= marker_updated_unix_secs
+            && updated <= now
+            && now.saturating_sub(updated) <= PROGRESS_STALE_SECS
+    });
+    progress.phase.as_deref() == Some("registry reprocess")
+        && matches!(progress.state.as_deref(), Some("running" | "complete"))
+        && progress.pid == Some(pid)
+        && progress.blocks_total >= 3
+        && progress.blocks_total % 2 == 1
+        && progress.blocks_done > progress.blocks_total / 2
+        && progress.blocks_done <= progress.blocks_total
+        && fresh_for_this_attempt
+}
+
+fn prove_registry_reprocess_worker_in_pass2(
+    config: &SchedulerConfig,
+    epoch: u64,
+    pid: u32,
+    expected_start_ticks: Option<u64>,
+    expected_threads: Option<usize>,
+    expected_phase: RegistryReprocessPhase,
+    expected_attempt_id: Option<&str>,
+    expected_staging_dir: Option<&Path>,
+    progress_path: &Path,
+    now: u64,
+) -> std::result::Result<(), &'static str> {
+    if progress_path != registry_reprocess_progress_path(&config.state_root, epoch) {
+        return Err("progress path is not the configured epoch path");
+    }
+    let marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+        .ok()
+        .flatten()
+        .ok_or("durable running marker is missing or invalid")?;
+    if !registry_reprocess_marker_claims(config, epoch, &marker)
+        || marker.state != expected_phase.running_state()
+        || marker.pid != Some(pid)
+    {
+        return Err("durable running marker does not bind the active process");
+    }
+    let process_start_ticks = marker
+        .process_start_ticks
+        .ok_or("durable running marker has no process start identity")?;
+    if expected_start_ticks.is_some_and(|expected| expected != process_start_ticks) {
+        return Err("runtime and durable process start identities differ");
+    }
+    if expected_threads.is_some_and(|expected| expected != marker.threads) {
+        return Err("runtime and durable worker thread counts differ");
+    }
+    if marker.attempt_id.as_deref() != expected_attempt_id
+        || marker.staging_dir.as_deref() != expected_staging_dir
+    {
+        return Err("runtime and durable attempt bindings differ");
+    }
+    if expected_phase == RegistryReprocessPhase::Core
+        && (!registry_reprocess_marker_has_attempt(config, epoch, &marker)
+            || marker.phase != Some(RegistryReprocessPhase::Core))
+    {
+        return Err("durable marker does not bind an exact core attempt");
+    }
+    if expected_phase == RegistryReprocessPhase::Legacy
+        && !registry_reprocess_marker_is_legacy(&marker)
+    {
+        return Err("durable marker is not a legacy single-stage claim");
+    }
+    if !observe_poh_pid(pid).is_running_with(process_start_ticks) {
+        return Err("active process identity is not observable");
+    }
+    if process_cmdline_matches_registry_reprocess_exact(config, epoch, &marker, pid) != Some(true) {
+        return Err("active process command is not the exact configured rewrite");
+    }
+    let progress = read_registry_reprocess_progress_strict(progress_path)
+        .map_err(|_| "progress file is missing, unsafe, or invalid")?;
+    if !registry_reprocess_progress_proves_pass2(&progress, pid, marker.updated_unix_secs, now) {
+        return Err("fresh progress does not prove pass 2");
+    }
+    let staging = expected_staging_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| registry_reprocess_staging_path(config, epoch));
+    if !registry_reprocess_pass2_output_exists(&staging) {
+        return Err("non-empty pass-2 block output is not present in staging");
+    }
+    if !observe_poh_pid(pid).is_running_with(process_start_ticks) {
+        return Err("active process identity changed during the phase proof");
+    }
+    if read_registry_reprocess_marker_strict(&config.state_root, epoch)
+        .ok()
+        .flatten()
+        .as_ref()
+        != Some(&marker)
+    {
+        return Err("durable running marker changed during the phase proof");
+    }
+    Ok(())
+}
+
+fn registry_reprocess_pass2_blocker(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    now: u64,
+) -> Option<(u64, &'static str)> {
+    for (&epoch, child) in &runtime.registry_reprocesses {
+        let ChildKind::RegistryReprocess {
+            epoch: child_epoch,
+            target,
+            phase,
+            attempt_id,
+            staging_dir,
+            wire_profile,
+            ..
+        } = &child.kind
+        else {
+            return Some((epoch, "managed entry has the wrong child kind"));
+        };
+        if !phase.is_core_capacity() {
+            continue;
+        }
+        if *child_epoch != epoch
+            || target != &registry_reprocess_target(config, epoch)
+            || *wire_profile != config.registry_reprocess_wire_profile
+        {
+            return Some((
+                epoch,
+                "managed entry does not bind the configured epoch target",
+            ));
+        }
+        let Some(pid) = child.pid else {
+            return Some((epoch, "managed entry has no process ID"));
+        };
+        if child.child.id() != Some(pid) {
+            return Some((epoch, "managed child no longer has its recorded process ID"));
+        }
+        if let Err(reason) = prove_registry_reprocess_worker_in_pass2(
+            config,
+            epoch,
+            pid,
+            None,
+            Some(config.registry_reprocess_threads),
+            *phase,
+            (*phase == RegistryReprocessPhase::Core).then_some(attempt_id.as_str()),
+            (*phase == RegistryReprocessPhase::Core).then_some(staging_dir.as_path()),
+            &child.progress_path,
+            now,
+        ) {
+            return Some((epoch, reason));
+        }
+    }
+    for (&epoch, adopted) in &runtime.adopted_registry_reprocesses {
+        if !adopted.phase.is_core_capacity() {
+            continue;
+        }
+        if adopted.handoff_sha256.is_some() {
+            return Some((
+                epoch,
+                "core-phase adopted entry unexpectedly binds a handoff",
+            ));
+        }
+        if adopted.expected_access_state.is_some() {
+            return Some((
+                epoch,
+                "core-phase adopted entry unexpectedly binds an access continuation state",
+            ));
+        }
+        if adopted.epoch != epoch
+            || !adopted.identity_trusted
+            || adopted.wire_profile != config.registry_reprocess_wire_profile
+        {
+            return Some((
+                epoch,
+                "adopted entry does not have a trusted exact identity",
+            ));
+        }
+        let Some(process_start_ticks) = adopted.process_start_ticks else {
+            return Some((epoch, "adopted entry has no process start identity"));
+        };
+        let Some(threads) = adopted.threads else {
+            return Some((epoch, "adopted entry has no bound worker thread count"));
+        };
+        if let Err(reason) = prove_registry_reprocess_worker_in_pass2(
+            config,
+            epoch,
+            adopted.pid,
+            Some(process_start_ticks),
+            Some(threads),
+            adopted.phase,
+            adopted.attempt_id.as_deref(),
+            adopted.staging_dir.as_deref(),
+            &adopted.progress_path,
+            now,
+        ) {
+            return Some((epoch, reason));
+        }
+    }
+    None
+}
+
+fn registry_reprocess_phase_capacity_allows_start(
+    configured_capacity: usize,
+    active: usize,
+    every_active_worker_is_in_pass2: bool,
+) -> bool {
+    active < configured_capacity && (active == 0 || every_active_worker_is_in_pass2)
+}
+
+fn active_registry_reprocess_access_epoch(runtime: &RuntimeState) -> Option<u64> {
+    runtime
+        .registry_reprocesses
+        .iter()
+        .find_map(|(&epoch, child)| {
+            matches!(
+                &child.kind,
+                ChildKind::RegistryReprocess {
+                    phase: RegistryReprocessPhase::Access,
+                    ..
+                }
+            )
+            .then_some(epoch)
+        })
+        .or_else(|| {
+            runtime
+                .adopted_registry_reprocesses
+                .iter()
+                .find_map(|(&epoch, adopted)| {
+                    (adopted.phase == RegistryReprocessPhase::Access).then_some(epoch)
+                })
+        })
+}
+
+fn registry_reprocess_candidate_phase_blocker(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    status: RegistryReprocessStatus,
+    active: usize,
+    now: u64,
+) -> Option<(u64, &'static str)> {
+    if !matches!(
+        status,
+        RegistryReprocessStatus::Ready | RegistryReprocessStatus::AccessReady
+    ) {
+        return None;
+    }
+    if let Some(epoch) = active_registry_reprocess_access_epoch(runtime) {
+        return Some((
+            epoch,
+            if status == RegistryReprocessStatus::AccessReady {
+                "another access phase is already active"
+            } else {
+                "an access phase must finish before a new core can start"
+            },
+        ));
+    }
+    (active > 0)
+        .then(|| registry_reprocess_pass2_blocker(config, runtime, now))
+        .flatten()
+}
+
+fn active_registry_reprocess_disk_reservation(
+    snapshot: &PipelineSnapshot,
+    runtime: &RuntimeState,
+) -> std::result::Result<u64, u64> {
+    let active_epochs = runtime
+        .registry_reprocesses
+        .keys()
+        .chain(runtime.adopted_registry_reprocesses.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    active_epochs.into_iter().try_fold(0u64, |sum, epoch| {
+        snapshot
+            .epochs
+            .iter()
+            .find(|candidate| candidate.epoch == epoch)
+            .map(|candidate| sum.saturating_add(registry_reprocess_projected_bytes(candidate)))
+            .ok_or(epoch)
+    })
+}
+
+fn registry_reprocess_audit_marker_matches_request(
+    config: &SchedulerConfig,
+    request: &RegistryReprocessAuditRequest,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    registry_reprocess_marker_claims(config, request.epoch, marker)
+        && registry_reprocess_marker_identity_is_clear(marker)
+        && matches!(marker.state.as_str(), "auditing" | "final_auditing")
+        && marker.audit_retry_is_safe == registry_reprocess_audit_retry_is_safe(request)
+        && marker.audit_is_continuation == registry_reprocess_audit_is_continuation(request)
+}
+
+fn registry_reprocess_audit_admission(
+    config: &SchedulerConfig,
+    request: &RegistryReprocessAuditRequest,
+) -> Result<RegistryReprocessAuditAdmission> {
+    if let Some(admission) = request.admission.as_ref() {
+        return Ok(admission.clone());
+    }
+    let marker = read_registry_reprocess_marker_strict(&config.state_root, request.epoch)?
+        .context("registry deep audit has no durable marker")?;
+    anyhow::ensure!(
+        registry_reprocess_audit_marker_matches_request(config, request, &marker),
+        "registry deep-audit marker does not match the queued request"
+    );
+    match probe_registry_reprocess_receipt(config, request.epoch) {
+        Ok(receipt) => {
+            if registry_reprocess_marker_has_attempt(config, request.epoch, &marker) {
+                validate_registry_reprocess_receipt_marker_binding(
+                    config,
+                    request.epoch,
+                    &receipt,
+                    &marker,
+                )?;
+            } else {
+                anyhow::ensure!(
+                    marker.state == "auditing" && registry_reprocess_marker_is_legacy(&marker),
+                    "profile-bound manual audit has an invalid legacy marker"
+                );
+            }
+            Ok(RegistryReprocessAuditAdmission {
+                threads: receipt.threads,
+                receipt: Some(receipt),
+                marker,
+            })
+        }
+        Err(probe_error) => {
+            anyhow::ensure!(
+                registry_reprocess_audit_is_continuation(request)
+                    && registry_reprocess_marker_has_attempt(config, request.epoch, &marker)
+                    && marker.phase == Some(RegistryReprocessPhase::Access)
+                    && marker.state == "final_auditing",
+                "bounded registry receipt/profile probe failed and no exact continuation marker can safely admit the audit: {probe_error:#}"
+            );
+            Ok(RegistryReprocessAuditAdmission {
+                threads: marker.threads,
+                receipt: None,
+                marker,
+            })
+        }
+    }
+}
+
 fn admit_registry_reprocess_audit(
     config: &SchedulerConfig,
     snapshot: &PipelineSnapshot,
@@ -12524,12 +14532,19 @@ fn admit_registry_reprocess_audit(
     {
         return;
     }
+    if let Err(reason) = registry_reprocess_poh_completion_gate(config, snapshot) {
+        runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+            "registry deep-audit waits for the PoH migration backlog: {reason}"
+        ));
+        return;
+    }
     let allow_existing_target = config.registry_reprocess_concurrency > 0;
-    let Some(request) = runtime
+    let Some(position) = runtime
         .registry_reprocess_audit_queue
         .iter()
-        .find(|request| allow_existing_target || registry_reprocess_audit_is_continuation(request))
-        .cloned()
+        .position(|request| {
+            allow_existing_target || registry_reprocess_audit_is_continuation(request)
+        })
     else {
         runtime.registry_reprocess_admission_blocked_reason = Some(
             "manual registry deep validation is queued but registry concurrency is disabled"
@@ -12537,6 +14552,7 @@ fn admit_registry_reprocess_audit(
         );
         return;
     };
+    let request = runtime.registry_reprocess_audit_queue[position].clone();
     let continuation = registry_reprocess_audit_is_continuation(&request);
     let capacity_in_use = registry_reprocess_capacity_in_use(runtime);
     let capacity_available = if config.registry_reprocess_concurrency == 0 {
@@ -12565,24 +14581,21 @@ fn admit_registry_reprocess_audit(
     let cpu_budget = usize::try_from(config.legacy_compact_cpu_budget_cores)
         .unwrap_or(usize::MAX)
         .max(1);
-    let managed_threads = runtime
-        .registry_reprocesses
-        .len()
-        .saturating_mul(config.registry_reprocess_threads);
-    let adopted_threads = runtime
-        .adopted_registry_reprocesses
-        .values()
-        .fold(0usize, |sum, adopted| {
-            sum.saturating_add(adopted.threads.unwrap_or(cpu_budget))
-        });
-    // Deep validation builds its Rayon pool from the immutable publication receipt rather than
-    // the controller's current spawn configuration. The bounded receipt probe is cheap; if it
-    // fails, deep validation will fail before constructing that pool, so one thread is sufficient
-    // to admit the bounded error path.
-    let audit_threads = probe_registry_reprocess_receipt(config, request.epoch)
-        .map(|receipt| receipt.threads.clamp(1, 64))
-        .unwrap_or(1);
-    let cpu_threads_in_use = managed_threads.saturating_add(adopted_threads);
+    // Deep validation builds its Rayon pool from the immutable publication receipt. Never charge
+    // a one-thread fallback and then let a profile-neutral or replaced receipt create a larger
+    // pool. A failed receipt probe is dispatchable only for an exact schema-v4 continuation,
+    // whose durable thread/profile/attempt binding becomes the admission ceiling.
+    let admission = match registry_reprocess_audit_admission(config, &request) {
+        Ok(admission) => admission,
+        Err(error) => {
+            runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                "registry deep-audit receipt/profile admission blocked: {error:#}"
+            ));
+            return;
+        }
+    };
+    let audit_threads = admission.threads;
+    let cpu_threads_in_use = registry_reprocess_active_cpu_threads(config, runtime, cpu_budget);
     if cpu_threads_in_use.saturating_add(audit_threads) > cpu_budget {
         runtime.registry_reprocess_admission_blocked_reason = Some(format!(
             "registry deep-audit CPU admission blocked: {cpu_threads_in_use} registry threads active, audit needs {audit_threads}, budget is {cpu_budget}"
@@ -12619,6 +14632,7 @@ fn admit_registry_reprocess_audit(
         ));
         return;
     }
+    runtime.registry_reprocess_audit_queue[position].admission = Some(admission);
     dispatch_registry_reprocess_audit(config, runtime, auditor, allow_existing_target);
 }
 
@@ -12627,6 +14641,15 @@ async fn top_up_registry_reprocesses(
     snapshot: &PipelineSnapshot,
     runtime: &mut RuntimeState,
 ) -> usize {
+    if runtime.scheduler_paused {
+        return 0;
+    }
+    if let Err(reason) = registry_reprocess_poh_completion_gate(config, snapshot) {
+        runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+            "registry reprocess waits for the PoH migration backlog: {reason}"
+        ));
+        return 0;
+    }
     if runtime.active_registry_reprocess_audit.is_some()
         || !runtime.pending_registry_reprocess_audits.is_empty()
     {
@@ -12647,9 +14670,6 @@ async fn top_up_registry_reprocesses(
         return 0;
     }
     runtime.registry_reprocess_admission_blocked_reason = None;
-    if config.registry_reprocess_concurrency == 0 {
-        return 0;
-    }
     let pressure = legacy_pressure_state(config, &snapshot.machine);
     if !matches!(pressure, LegacyPressureState::Resume) {
         runtime.registry_reprocess_admission_blocked_reason =
@@ -12661,83 +14681,230 @@ async fn top_up_registry_reprocesses(
             });
         return 0;
     }
-    let mut active = registry_reprocess_capacity_in_use(runtime);
+    let active = registry_reprocess_capacity_in_use(runtime);
+    let access_ready = snapshot.epochs.iter().any(|epoch| {
+        registry_reprocess_status(config, runtime, epoch) == RegistryReprocessStatus::AccessReady
+    });
+    let dispatch_capacity = registry_reprocess_dispatch_capacity(
+        config.registry_reprocess_concurrency,
+        active,
+        access_ready,
+    );
+    if dispatch_capacity == 0 || active >= dispatch_capacity {
+        return 0;
+    }
     let cpu_budget = usize::try_from(config.legacy_compact_cpu_budget_cores)
         .unwrap_or(usize::MAX)
         .max(1);
-    let mut cpu_threads_in_use = runtime
-        .registry_reprocesses
-        .len()
-        .saturating_mul(config.registry_reprocess_threads);
-    for adopted in runtime.adopted_registry_reprocesses.values() {
-        cpu_threads_in_use =
-            cpu_threads_in_use.saturating_add(adopted.threads.unwrap_or(cpu_budget));
-    }
-    let mib = 1024u64 * 1024;
-    let reservation = config.registry_reprocess_memory_mib.saturating_mul(mib);
-    let reserve = config.memory_reserve_mib.saturating_mul(mib);
-    let mut memory_available = snapshot.machine.memory_available_bytes;
-    let (_, mut disk_available) =
-        closest_filesystem_capacity(&config.registry_reprocess_target_root).unwrap_or_default();
-    let disk_reserve = config.disk_reserve_gib.saturating_mul(1024 * 1024 * 1024);
-    let mut started = 0usize;
-    for epoch in prioritized_epochs(config, &snapshot.epochs) {
-        if active >= config.registry_reprocess_concurrency {
-            break;
-        }
-        let key = format!("registry_reprocess:{}", epoch.epoch);
-        if runtime.failures.contains_key(&key)
-            || registry_reprocess_status(config, runtime, epoch) != RegistryReprocessStatus::Ready
-        {
-            continue;
-        }
-        if cpu_threads_in_use.saturating_add(config.registry_reprocess_threads) > cpu_budget {
+    let cpu_threads_in_use = registry_reprocess_active_cpu_threads(config, runtime, cpu_budget);
+    let memory_available = snapshot.machine.memory_available_bytes;
+    let active_disk_reservation = match active_registry_reprocess_disk_reservation(
+        snapshot, runtime,
+    ) {
+        Ok(reservation) => reservation,
+        Err(epoch) => {
             runtime.registry_reprocess_admission_blocked_reason = Some(format!(
-                "registry reprocess CPU admission blocked: {cpu_threads_in_use} threads active, task needs {}, budget is {cpu_budget}",
-                config.registry_reprocess_threads,
+                "registry reprocess disk admission blocked: active epoch {epoch} is missing from the complete inventory"
+            ));
+            return 0;
+        }
+    };
+    let (_, raw_disk_available) =
+        closest_filesystem_capacity(&config.registry_reprocess_target_root).unwrap_or_default();
+    // Current free space already reflects bytes written by active pass-2 jobs. Reserve their
+    // full projection again because those generations can still grow before publication. This
+    // deliberate over-reservation keeps admission safe without a recursive staging scan.
+    let disk_available = raw_disk_available.saturating_sub(active_disk_reservation);
+    let disk_reserve = config.disk_reserve_gib.saturating_mul(1024 * 1024 * 1024);
+    let prioritized = prioritized_epochs(config, &snapshot.epochs).collect::<Vec<_>>();
+    let mut candidates = prioritized
+        .iter()
+        .copied()
+        .filter_map(|epoch| {
+            let status = registry_reprocess_runnable_status(config, runtime, epoch)?;
+            (status == RegistryReprocessStatus::AccessReady).then_some((epoch, status))
+        })
+        .chain(prioritized.iter().copied().filter_map(|epoch| {
+            let status = registry_reprocess_runnable_status(config, runtime, epoch)?;
+            (status == RegistryReprocessStatus::Ready).then_some((epoch, status))
+        }));
+    let mut started = 0usize;
+    for (epoch, status) in &mut candidates {
+        let key = format!("registry_reprocess:{}", epoch.epoch);
+        let pass2_blocker =
+            registry_reprocess_candidate_phase_blocker(config, runtime, status, active, unix_now());
+        if let Some((blocking_epoch, reason)) = pass2_blocker {
+            let phase = if status == RegistryReprocessStatus::AccessReady {
+                "access"
+            } else {
+                "core"
+            };
+            runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                "registry reprocess {phase} phase admission blocked: epoch {blocking_epoch} is not proven in pass 2 ({reason})"
             ));
             break;
         }
-        if snapshot.machine.memory_total_bytes > 0
-            && memory_available < reserve.saturating_add(reservation)
-        {
+        if status == RegistryReprocessStatus::Ready {
+            if let Err(error) = registry_reprocess_core_hard_link_preflight(config, epoch) {
+                runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                    "registry reprocess core admission blocked for epoch {}: {error:#}",
+                    epoch.epoch
+                ));
+                break;
+            }
+            debug_assert!(registry_reprocess_phase_capacity_allows_start(
+                config.registry_reprocess_concurrency,
+                active,
+                pass2_blocker.is_none(),
+            ));
+        }
+        let access_admission = if status == RegistryReprocessStatus::AccessReady {
+            match registry_reprocess_access_admission(config, epoch.epoch) {
+                Ok(admission) => Some(admission),
+                Err(error) => {
+                    runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                        "registry reprocess access admission blocked for epoch {}: durable continuation probe failed: {error:#}",
+                        epoch.epoch
+                    ));
+                    break;
+                }
+            }
+        } else {
+            None
+        };
+        let task_cpu_threads = registry_reprocess_phase_cpu_threads(config, status);
+        let phase = if status == RegistryReprocessStatus::AccessReady {
+            "access"
+        } else {
+            "core"
+        };
+        let task_memory_mib = match registry_reprocess_phase_memory_mib(
+            config,
+            epoch,
+            status,
+            access_admission.map(|admission| admission.state),
+        ) {
+            Ok(memory_mib) => memory_mib,
+            Err(error) => {
+                runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                    "registry reprocess {phase} memory admission blocked for epoch {}: {error:#}",
+                    epoch.epoch
+                ));
+                break;
+            }
+        };
+        if cpu_threads_in_use.saturating_add(task_cpu_threads) > cpu_budget {
             runtime.registry_reprocess_admission_blocked_reason = Some(format!(
-                "registry reprocess memory admission blocked: available {:.1} MiB, task {} MiB, reserve {} MiB",
+                "registry reprocess {phase} CPU admission blocked: {cpu_threads_in_use} threads active, task needs {task_cpu_threads}, budget is {cpu_budget}",
+            ));
+            break;
+        }
+        if !registry_reprocess_memory_admits(
+            &snapshot.machine,
+            config.memory_reserve_mib,
+            task_memory_mib,
+        ) {
+            runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                "registry reprocess {phase} memory admission blocked: available {:.1} MiB, task {task_memory_mib} MiB, reserve {} MiB",
                 memory_available as f64 / 1024f64.powi(2),
-                config.registry_reprocess_memory_mib,
                 config.memory_reserve_mib,
             ));
             break;
         }
-        let projected = registry_reprocess_projected_bytes(epoch);
-        if disk_available == 0 || disk_available < disk_reserve.saturating_add(projected) {
+        let (projected, allocated_credit) = if status == RegistryReprocessStatus::AccessReady {
+            let admission = access_admission.expect("access candidate has an exact admission");
+            let projected = match registry_reprocess_access_phase_projected_bytes(
+                config,
+                epoch,
+                admission.state,
+            ) {
+                Ok(projected) => projected,
+                Err(error) => {
+                    runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                        "registry reprocess access disk admission blocked for epoch {}: {error:#}",
+                        epoch.epoch
+                    ));
+                    break;
+                }
+            };
+            (projected, admission.allocated_credit)
+        } else {
+            (registry_reprocess_projected_bytes(epoch), 0)
+        };
+        let disk_available_with_credit = match disk_available.checked_add(allocated_credit) {
+            Some(available) => available,
+            None => {
+                runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                    "registry reprocess {phase} disk admission blocked: owned partial credit overflow"
+                ));
+                break;
+            }
+        };
+        if !registry_reprocess_disk_admits(disk_available_with_credit, disk_reserve, projected) {
+            let recovery = if status == RegistryReprocessStatus::AccessReady {
+                "; the durable continuation is still valid; free disk manually if the conservative credit cannot meet the reserve"
+            } else {
+                ""
+            };
             runtime.registry_reprocess_admission_blocked_reason = Some(format!(
-                "registry reprocess disk admission blocked: available {:.1} GiB, projected {:.1} GiB, reserve {} GiB",
-                disk_available as f64 / 1024f64.powi(3),
+                "registry reprocess {phase} disk admission blocked: available {:.1} GiB, active jobs reserve {:.1} GiB, owned access partial credit {:.1} GiB, new job projects {:.1} GiB, operator reserve {} GiB{recovery}",
+                raw_disk_available as f64 / 1024f64.powi(3),
+                active_disk_reservation as f64 / 1024f64.powi(3),
+                allocated_credit as f64 / 1024f64.powi(3),
                 projected as f64 / 1024f64.powi(3),
                 config.disk_reserve_gib,
             ));
             break;
         }
-        match spawn_registry_reprocess(config, epoch).await {
+        let spawn = match status {
+            RegistryReprocessStatus::AccessReady => {
+                spawn_registry_reprocess_access(
+                    config,
+                    epoch.epoch,
+                    access_admission.expect("access candidate has an exact admission"),
+                    runtime
+                        .validated_profile_neutral_registry_rebuild_retries
+                        .get(&epoch.epoch)
+                        .cloned(),
+                )
+                .await
+            }
+            RegistryReprocessStatus::Ready => {
+                spawn_registry_reprocess_core(
+                    config,
+                    epoch,
+                    runtime
+                        .validated_profile_neutral_registry_rebuild_retries
+                        .get(&epoch.epoch)
+                        .cloned(),
+                )
+                .await
+            }
+            _ => unreachable!("candidate list contains only ready registry phases"),
+        };
+        match spawn {
             Ok(Some(child)) => {
                 reset_registry_reprocess_attempt_cache(runtime, epoch.epoch);
                 runtime.registry_reprocesses.insert(epoch.epoch, child);
-                active = active.saturating_add(1);
-                cpu_threads_in_use =
-                    cpu_threads_in_use.saturating_add(config.registry_reprocess_threads);
                 started = started.saturating_add(1);
-                memory_available = memory_available.saturating_sub(reservation);
-                disk_available = disk_available.saturating_sub(projected);
+                // One top-up starts only one child. A pending access continuation always wins;
+                // another core needs a later poll and exact pass-2 proof for every active core.
+                break;
             }
             Ok(None) => {
                 runtime.registry_reprocess_admission_blocked_reason = Some(format!(
-                    "registry reprocess epoch {} lock is held by another owner",
+                    "registry reprocess epoch {} lock is held or its exact admission state changed; retrying on the next poll",
                     epoch.epoch
                 ));
                 break;
             }
             Err(error) => {
+                if runtime
+                    .validated_profile_neutral_registry_rebuild_retries
+                    .contains_key(&epoch.epoch)
+                {
+                    clear_profile_neutral_registry_incident_caches(runtime, epoch.epoch);
+                }
                 let message = format!("{key} spawn failed: {error:#}");
                 set_runtime_failure(config, runtime, key, message.clone());
                 record_error(config, runtime, "registry_reprocess", message);
@@ -12771,6 +14938,14 @@ async fn schedule_work(
     // keep those classes excluded until the registry lane drains. This conservative first
     // deployment can be relaxed only after production pressure data exists.
     if registry_reprocess_work_pending(config, snapshot, runtime) {
+        if let Err(reason) = registry_reprocess_poh_completion_gate(config, snapshot) {
+            runtime.registry_reprocess_admission_blocked_reason = Some(format!(
+                "registry maintenance waits for the PoH migration backlog: {reason}"
+            ));
+            // Registry priority must not starve the work that can satisfy its own gate.
+            top_up_poh_migrations(config, snapshot, runtime).await;
+            return Ok(());
+        }
         if registry_reprocess_conflicting_work_active(snapshot, runtime) {
             runtime.registry_reprocess_admission_blocked_reason = Some(
                 "waiting for scans, compacts, finalizers, acquisitions, and PoH migrations to drain"
@@ -13553,11 +15728,3956 @@ fn registry_reprocess_lock_path(state_root: &Path, epoch: u64) -> PathBuf {
         .join(format!("epoch-{epoch}.lock"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StalePohRegistryRecoveryOutcome {
+    quarantine: PathBuf,
+    archived_marker: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileNeutralRegistryRebuildFileIdentity {
+    size: u64,
+    device: u64,
+    inode: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+impl ProfileNeutralRegistryRebuildFileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            size: metadata.len(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileNeutralRegistrySourceAttestation {
+    schema_version: u32,
+    kind: String,
+    audit_algorithm: String,
+    audited_profiles: [ArchiveV2WireProfile; 2],
+    cluster_id: String,
+    epoch: u64,
+    archive: PathBuf,
+    registry_order: String,
+    generation_kind: String,
+    content_generation_sha256: String,
+    archive_files: BTreeMap<String, ProfileNeutralRegistryRebuildFileIdentity>,
+    wire_profile: ArchiveV2WireProfile,
+    evidence: String,
+    attested_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileNeutralRegistryRebuildReceipt {
+    schema_version: u32,
+    kind: String,
+    incident_id: String,
+    authority_sha256: String,
+    epoch: u64,
+    wire_profile: ArchiveV2WireProfile,
+    legacy_receipt_version: u32,
+    legacy_receipt_path: PathBuf,
+    legacy_receipt_sha256: String,
+    legacy_receipt_identity: ProfileNeutralRegistryRebuildFileIdentity,
+    legacy_generation_device: u64,
+    legacy_generation_inode: u64,
+    legacy_target_file_identities: BTreeMap<String, ProfileNeutralRegistryRebuildFileIdentity>,
+    recovery_threads: usize,
+    source_generation_sha256: String,
+    target_generation_sha256: String,
+    source_attestation_path: PathBuf,
+    source_attestation_sha256: String,
+    source_attestation_identity: ProfileNeutralRegistryRebuildFileIdentity,
+    original_marker_path: PathBuf,
+    original_marker_sha256: String,
+    quarantine: PathBuf,
+    archived_marker: PathBuf,
+    archived_marker_identity: ProfileNeutralRegistryRebuildFileIdentity,
+    created_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileNeutralRegistryRebuildEvidence {
+    receipt: crate::archive_v2::registry_reprocess::RegistryReprocessReceipt,
+    receipt_identity: ProfileNeutralRegistryRebuildFileIdentity,
+    attestation_path: PathBuf,
+    attestation_sha256: String,
+    attestation_identity: ProfileNeutralRegistryRebuildFileIdentity,
+    source_file_identities: BTreeMap<String, ProfileNeutralRegistryRebuildFileIdentity>,
+    target_file_identities: BTreeMap<String, ProfileNeutralRegistryRebuildFileIdentity>,
+    generation_device: u64,
+    generation_inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileNeutralRegistryRebuildOutcome {
+    quarantine: PathBuf,
+    archived_marker: PathBuf,
+    recovery_receipt: PathBuf,
+    recovery_receipt_sha256: String,
+    idempotent: bool,
+}
+
+fn profile_neutral_registry_rebuild_authority(
+    epoch: u64,
+) -> Option<&'static ProfileNeutralRegistryRebuildAuthority> {
+    PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES
+        .iter()
+        .find(|authority| authority.epoch == epoch)
+}
+
+fn update_sha256_len_prefixed(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn profile_neutral_registry_rebuild_authority_sha256() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_DOMAIN);
+    update_sha256_len_prefixed(&mut hasher, PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID);
+    update_sha256_len_prefixed(
+        &mut hasher,
+        &ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1.to_string(),
+    );
+    hasher.update((PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES.len() as u64).to_le_bytes());
+    for authority in &PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES {
+        hasher.update(authority.epoch.to_le_bytes());
+        hasher.update(authority.receipt_version.to_le_bytes());
+        update_sha256_len_prefixed(&mut hasher, authority.receipt_sha256);
+        update_sha256_len_prefixed(&mut hasher, authority.source_generation_sha256);
+        update_sha256_len_prefixed(&mut hasher, authority.target_generation_sha256);
+    }
+    hex_sha256(hasher.finalize())
+}
+
+fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
+    let bytes = bytes.as_ref();
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn sha256_bytes_hex(bytes: &[u8]) -> String {
+    hex_sha256(Sha256::digest(bytes))
+}
+
+fn profile_neutral_registry_rebuild_root(state_root: &Path) -> PathBuf {
+    state_root.join("registry_reprocess_profile_neutral_rebuild")
+}
+
+fn profile_neutral_registry_rebuild_receipt_path(
+    state_root: &Path,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+) -> PathBuf {
+    profile_neutral_registry_rebuild_root(state_root)
+        .join("receipts")
+        .join(format!(
+            "epoch-{}.{}.json",
+            authority.epoch, authority.target_generation_sha256
+        ))
+}
+
+fn profile_neutral_registry_rebuild_archived_marker_path(
+    state_root: &Path,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+) -> PathBuf {
+    profile_neutral_registry_rebuild_root(state_root)
+        .join("markers")
+        .join(format!(
+            "epoch-{}.{}.json",
+            authority.epoch, authority.target_generation_sha256
+        ))
+}
+
+fn profile_neutral_registry_rebuild_quarantine_path(
+    target: &Path,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+) -> Result<PathBuf> {
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("profile-neutral registry target name is not valid UTF-8")?;
+    Ok(target.with_file_name(format!(
+        ".{name}.registry-reprocess.profile-neutral-post-v1.{}.quarantine",
+        authority.target_generation_sha256
+    )))
+}
+
+fn profile_neutral_registry_source_attestation_path(
+    state_root: &Path,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+) -> PathBuf {
+    state_root
+        .join("firewatch-index")
+        .join("wire-profile-attestations")
+        .join(format!(
+            "epoch-{}-{}.json",
+            authority.epoch, authority.source_generation_sha256
+        ))
+}
+
+fn read_profile_neutral_bounded_file(
+    path: &Path,
+    max_bytes: u64,
+    require_private_owner: bool,
+) -> Result<(Vec<u8>, ProfileNeutralRegistryRebuildFileIdentity)> {
+    let before = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect bounded recovery input {}", path.display()))?;
+    anyhow::ensure!(
+        before.file_type().is_file()
+            && before.len() <= max_bytes
+            && (!require_private_owner
+                || (before.uid() == unsafe { libc::geteuid() }
+                    && before.nlink() == 1
+                    && before.permissions().mode() & 0o022 == 0)),
+        "bounded recovery input is not one safe regular file: {}",
+        path.display()
+    );
+    let mut file = open_readonly_nonblocking_nofollow(path)
+        .with_context(|| format!("open bounded recovery input {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect opened recovery input {}", path.display()))?;
+    anyhow::ensure!(
+        ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&opened)
+            == ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&before),
+        "bounded recovery input changed before open: {}",
+        path.display()
+    );
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    (&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read bounded recovery input {}", path.display()))?;
+    let after = file
+        .metadata()
+        .with_context(|| format!("reinspect recovery input {}", path.display()))?;
+    let published = fs::symlink_metadata(path)
+        .with_context(|| format!("reinspect published recovery input {}", path.display()))?;
+    let identity = ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&opened);
+    anyhow::ensure!(
+        bytes.len() as u64 == opened.len()
+            && bytes.len() as u64 <= max_bytes
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&after) == identity
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&published) == identity,
+        "bounded recovery input changed while reading: {}",
+        path.display()
+    );
+    Ok((bytes, identity))
+}
+
+fn hash_profile_neutral_regular_file(
+    path: &Path,
+) -> Result<(String, ProfileNeutralRegistryRebuildFileIdentity)> {
+    let before = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect recovery artifact {}", path.display()))?;
+    anyhow::ensure!(
+        before.file_type().is_file(),
+        "recovery artifact is not a regular file: {}",
+        path.display()
+    );
+    let mut file = open_readonly_nonblocking_nofollow(path)
+        .with_context(|| format!("open recovery artifact {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect opened recovery artifact {}", path.display()))?;
+    let identity = ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&opened);
+    anyhow::ensure!(
+        ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&before) == identity,
+        "recovery artifact changed before open: {}",
+        path.display()
+    );
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("hash recovery artifact {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        bytes = bytes
+            .checked_add(read as u64)
+            .context("recovery artifact byte count overflow")?;
+    }
+    let after = file
+        .metadata()
+        .with_context(|| format!("reinspect recovery artifact {}", path.display()))?;
+    let published = fs::symlink_metadata(path)
+        .with_context(|| format!("reinspect published recovery artifact {}", path.display()))?;
+    anyhow::ensure!(
+        bytes == identity.size
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&after) == identity
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&published) == identity,
+        "recovery artifact changed while hashing: {}",
+        path.display()
+    );
+    Ok((hex_sha256(hasher.finalize()), identity))
+}
+
+fn parse_profile_neutral_attestation_count(
+    fields: &BTreeMap<&str, &str>,
+    name: &str,
+) -> Result<u64> {
+    fields
+        .get(name)
+        .with_context(|| format!("source Post attestation evidence omits {name}"))?
+        .parse::<u64>()
+        .with_context(|| format!("source Post attestation evidence has invalid {name}"))
+}
+
+fn validate_profile_neutral_attestation_evidence(evidence: &str) -> Result<()> {
+    let mut parts = evidence.split(';');
+    anyhow::ensure!(
+        parts.next() == Some("full-generation-borrowed-dual-sdk-audit-v3"),
+        "source Post attestation evidence has the wrong audit release"
+    );
+    let mut fields = BTreeMap::new();
+    for part in parts {
+        let (name, value) = part
+            .split_once('=')
+            .context("source Post attestation evidence field has no value")?;
+        anyhow::ensure!(
+            !name.is_empty() && !value.is_empty() && fields.insert(name, value).is_none(),
+            "source Post attestation evidence has an empty or duplicate field"
+        );
+    }
+    let required = BTreeSet::from([
+        "generation_kind",
+        "blocks",
+        "messages",
+        "raw_transaction_fallbacks",
+        "selected_profile_failures",
+        "alternate_profile_failures",
+        "both_semantically_equivalent",
+        "both_semantically_divergent",
+        "decision_basis",
+        "pinned_inputs_unchanged",
+        "exact_input_before_after_equal",
+    ]);
+    anyhow::ensure!(
+        fields.keys().copied().collect::<BTreeSet<_>>() == required,
+        "source Post attestation evidence field set is invalid"
+    );
+    anyhow::ensure!(
+        fields.get("generation_kind").copied()
+            == Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_GENERATION_KIND)
+            && fields.get("pinned_inputs_unchanged").copied() == Some("true")
+            && fields.get("exact_input_before_after_equal").copied() == Some("true"),
+        "source Post attestation evidence has the wrong generation or input-stability proof"
+    );
+    let blocks = parse_profile_neutral_attestation_count(&fields, "blocks")?;
+    let messages = parse_profile_neutral_attestation_count(&fields, "messages")?;
+    let raw = parse_profile_neutral_attestation_count(&fields, "raw_transaction_fallbacks")?;
+    let selected = parse_profile_neutral_attestation_count(&fields, "selected_profile_failures")?;
+    let alternate = parse_profile_neutral_attestation_count(&fields, "alternate_profile_failures")?;
+    let equivalent =
+        parse_profile_neutral_attestation_count(&fields, "both_semantically_equivalent")?;
+    let divergent =
+        parse_profile_neutral_attestation_count(&fields, "both_semantically_divergent")?;
+    let classified = alternate
+        .checked_add(equivalent)
+        .and_then(|value| value.checked_add(divergent))
+        .context("source Post attestation classified-message count overflow")?;
+    anyhow::ensure!(
+        blocks > 0 && messages > 0 && raw == 0 && selected == 0 && classified == messages,
+        "source Post attestation evidence has invalid full-generation counts"
+    );
+    match fields.get("decision_basis").copied() {
+        Some("unique_full_generation_decode") => anyhow::ensure!(
+            alternate > 0,
+            "unique Post attestation has no alternate-profile rejection"
+        ),
+        Some("all_semantically_equivalent") => anyhow::ensure!(
+            alternate == 0 && divergent == 0,
+            "equivalent Post attestation has a rejected or divergent alternate profile"
+        ),
+        _ => anyhow::bail!(
+            "profile-neutral source attestation has no safe full-generation decision basis"
+        ),
+    }
+    Ok(())
+}
+
+fn profile_neutral_is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn profile_neutral_registry_rebuild_original_marker_claims(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    marker.schema_version == SCHEMA_VERSION
+        && marker.state == "auditing"
+        && marker.message.as_deref() == Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_MARKER_MESSAGE)
+        && registry_reprocess_marker_claims(config, authority.epoch, marker)
+        && registry_reprocess_marker_is_legacy(marker)
+        && registry_reprocess_marker_identity_is_clear(marker)
+        && !marker.audit_retry_is_safe
+        && !marker.audit_is_continuation
+}
+
+fn validate_profile_neutral_registry_source_attestation(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    receipt: &crate::archive_v2::registry_reprocess::RegistryReprocessReceipt,
+) -> Result<(
+    PathBuf,
+    String,
+    ProfileNeutralRegistryRebuildFileIdentity,
+    BTreeMap<String, ProfileNeutralRegistryRebuildFileIdentity>,
+)> {
+    let root = config
+        .state_root
+        .join("firewatch-index")
+        .join("wire-profile-attestations");
+    let root_metadata = fs::symlink_metadata(&root)
+        .with_context(|| format!("inspect source Post attestation root {}", root.display()))?;
+    anyhow::ensure!(
+        root_metadata.file_type().is_dir()
+            && root_metadata.uid() == unsafe { libc::geteuid() }
+            && root_metadata.permissions().mode() & 0o022 == 0
+            && fs::canonicalize(&root)? == root,
+        "source Post attestation root is not one canonical euid-owned protected directory"
+    );
+    let path = profile_neutral_registry_source_attestation_path(&config.state_root, authority);
+    let (bytes, identity) = read_profile_neutral_bounded_file(
+        &path,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_BYTES,
+        true,
+    )?;
+    let sha256 = sha256_bytes_hex(&bytes);
+    let attestation: ProfileNeutralRegistrySourceAttestation = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse source Post attestation {}", path.display()))?;
+    anyhow::ensure!(
+        attestation.schema_version == 2
+            && attestation.kind == PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_KIND
+            && attestation.audit_algorithm
+                == PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_ALGORITHM
+            && attestation.audited_profiles
+                == [
+                    ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+                    ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+                ]
+            && attestation.cluster_id == "mainnet-beta"
+            && attestation.epoch == authority.epoch
+            && attestation.archive == PathBuf::from(&receipt.source_dir)
+            && attestation.registry_order == "first_seen"
+            && attestation.generation_kind
+                == PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_GENERATION_KIND
+            && attestation.content_generation_sha256 == authority.source_generation_sha256
+            && attestation.wire_profile == ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+            && attestation.attested_unix_secs > 0
+            && profile_neutral_is_sha256(&attestation.content_generation_sha256)
+            && !attestation.archive_files.is_empty()
+            && attestation.archive_files.iter().all(|(name, identity)| {
+                !name.is_empty()
+                    && Path::new(name).components().count() == 1
+                    && name != "."
+                    && name != ".."
+                    && (identity.size > 0 || name == SIGNATURES_FILE)
+                    && identity.device > 0
+                    && identity.inode > 0
+                    && (0..1_000_000_000).contains(&identity.modified_nanoseconds)
+                    && (0..1_000_000_000).contains(&identity.changed_nanoseconds)
+            })
+            && !attestation.evidence.is_empty()
+            && attestation.evidence.len() <= 1_024
+            && !attestation.evidence.chars().any(char::is_control),
+        "source Post attestation identity or profile differs from the closed recovery authority"
+    );
+    validate_profile_neutral_attestation_evidence(&attestation.evidence)?;
+    anyhow::ensure!(
+        attestation.archive_files.len() == receipt.source_files.len()
+            && attestation
+                .archive_files
+                .keys()
+                .eq(receipt.source_files.keys()),
+        "source Post attestation file set differs from the legacy receipt"
+    );
+    let source = Path::new(&receipt.source_dir);
+    anyhow::ensure!(
+        source.is_absolute() && fs::canonicalize(source)? == source,
+        "legacy receipt source is not one canonical directory"
+    );
+    for (name, expected) in &attestation.archive_files {
+        let binding = receipt
+            .source_files
+            .get(name)
+            .context("source Post attestation file is absent from the receipt")?;
+        let metadata = fs::symlink_metadata(source.join(name))
+            .with_context(|| format!("inspect attested source artifact {name}"))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file()
+                && expected.size == binding.bytes
+                && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&metadata) == *expected,
+            "attested source artifact identity changed for {name}"
+        );
+    }
+    let (after_bytes, after_identity) = read_profile_neutral_bounded_file(
+        &path,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_BYTES,
+        true,
+    )?;
+    anyhow::ensure!(
+        after_identity == identity && sha256_bytes_hex(&after_bytes) == sha256,
+        "source Post attestation changed during recovery admission"
+    );
+    Ok((path, sha256, identity, attestation.archive_files))
+}
+
+fn ensure_profile_neutral_source_files_unchanged(
+    source: &Path,
+    expected: &BTreeMap<String, ProfileNeutralRegistryRebuildFileIdentity>,
+) -> Result<()> {
+    for (name, identity) in expected {
+        let metadata = fs::symlink_metadata(source.join(name))
+            .with_context(|| format!("reinspect attested source artifact {name}"))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file()
+                && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&metadata) == *identity,
+            "attested source artifact changed during recovery: {name}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_profile_neutral_registry_generation(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    original_marker: &RegistryReprocessMarker,
+    generation: &Path,
+) -> Result<ProfileNeutralRegistryRebuildEvidence> {
+    use crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE;
+
+    anyhow::ensure!(
+        profile_neutral_registry_rebuild_original_marker_claims(config, authority, original_marker),
+        "registry marker is not the exact legacy profile-neutral audit claim"
+    );
+    let generation_before = fs::symlink_metadata(generation).with_context(|| {
+        format!(
+            "inspect profile-neutral registry generation {}",
+            generation.display()
+        )
+    })?;
+    anyhow::ensure!(
+        generation_before.file_type().is_dir() && fs::canonicalize(generation)? == generation,
+        "profile-neutral registry generation is not one canonical real directory"
+    );
+    let receipt_path = generation.join(REGISTRY_REPROCESS_RECEIPT_FILE);
+    let (receipt_bytes, receipt_identity) = read_profile_neutral_bounded_file(
+        &receipt_path,
+        MAX_STALE_POH_REGISTRY_RECEIPT_BYTES,
+        false,
+    )?;
+    let receipt_sha256 = sha256_bytes_hex(&receipt_bytes);
+    anyhow::ensure!(
+        receipt_sha256 == authority.receipt_sha256,
+        "legacy registry receipt SHA-256 differs from the closed recovery authority"
+    );
+    let receipt: crate::archive_v2::registry_reprocess::RegistryReprocessReceipt =
+        serde_json::from_slice(&receipt_bytes).with_context(|| {
+            format!(
+                "parse profile-neutral registry receipt {}",
+                receipt_path.display()
+            )
+        })?;
+    let expected_algorithm = match authority.receipt_version {
+        1 => "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v1",
+        2 => "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v2",
+        _ => anyhow::bail!("closed recovery authority has an unsupported receipt version"),
+    };
+    anyhow::ensure!(
+        receipt.version == authority.receipt_version
+            && receipt.algorithm == expected_algorithm
+            && receipt.epoch == authority.epoch
+            && receipt.source_dir == original_marker.source.to_string_lossy()
+            && receipt.target_dir == original_marker.target.to_string_lossy()
+            && receipt.source_generation_sha256 == authority.source_generation_sha256
+            && receipt.target_generation_sha256 == authority.target_generation_sha256
+            && receipt.source_generation_sha256
+                == scheduler_registry_generation_digest(&receipt.source_files)
+            && receipt.target_generation_sha256
+                == scheduler_registry_generation_digest(&receipt.target_files)
+            && receipt.wire_profile.is_none()
+            && receipt.attempt_id.is_none()
+            && receipt.handoff_sha256.is_none()
+            && receipt.assembly_mode.is_none()
+            && receipt.signature_provenance.is_none()
+            && receipt.access_boundary_repair.is_none(),
+        "legacy registry receipt identity, generation, or profile-neutral shape is invalid"
+    );
+    let (attestation_path, attestation_sha256, attestation_identity, source_file_identities) =
+        validate_profile_neutral_registry_source_attestation(config, authority, &receipt)?;
+
+    let expected_entries = receipt
+        .target_files
+        .keys()
+        .cloned()
+        .chain(std::iter::once(REGISTRY_REPROCESS_RECEIPT_FILE.to_string()))
+        .collect::<BTreeSet<_>>();
+    let mut actual_entries = BTreeSet::new();
+    for entry in fs::read_dir(generation).with_context(|| {
+        format!(
+            "enumerate profile-neutral registry generation {}",
+            generation.display()
+        )
+    })? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            anyhow::anyhow!("profile-neutral registry generation has a non-UTF-8 entry")
+        })?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "profile-neutral registry generation has a non-regular entry: {}",
+            entry.path().display()
+        );
+        actual_entries.insert(name);
+    }
+    anyhow::ensure!(
+        actual_entries == expected_entries,
+        "profile-neutral registry generation entries differ from its exact receipt"
+    );
+    let mut target_file_identities = BTreeMap::new();
+    for (name, binding) in &receipt.target_files {
+        let (sha256, identity) = hash_profile_neutral_regular_file(&generation.join(name))?;
+        anyhow::ensure!(
+            identity.size == binding.bytes && sha256 == binding.sha256,
+            "profile-neutral target artifact binding mismatch for {name}"
+        );
+        target_file_identities.insert(name.clone(), identity);
+    }
+    ensure_profile_neutral_source_files_unchanged(
+        Path::new(&receipt.source_dir),
+        &source_file_identities,
+    )?;
+    let (after_receipt, after_receipt_identity) = read_profile_neutral_bounded_file(
+        &receipt_path,
+        MAX_STALE_POH_REGISTRY_RECEIPT_BYTES,
+        false,
+    )?;
+    let generation_after = fs::symlink_metadata(generation)?;
+    anyhow::ensure!(
+        after_receipt_identity == receipt_identity
+            && sha256_bytes_hex(&after_receipt) == authority.receipt_sha256
+            && generation_after.file_type().is_dir()
+            && generation_after.dev() == generation_before.dev()
+            && generation_after.ino() == generation_before.ino(),
+        "profile-neutral registry generation changed during exact validation"
+    );
+    Ok(ProfileNeutralRegistryRebuildEvidence {
+        receipt,
+        receipt_identity,
+        attestation_path,
+        attestation_sha256,
+        attestation_identity,
+        source_file_identities,
+        target_file_identities,
+        generation_device: generation_before.dev(),
+        generation_inode: generation_before.ino(),
+    })
+}
+
+fn profile_neutral_registry_rebuild_claim_message(recovery_sha256: &str) -> String {
+    format!(
+        "profile-neutral registry rebuild claimed; incident={PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID}; recovery_receipt_sha256={recovery_sha256}"
+    )
+}
+
+fn profile_neutral_registry_rebuild_retry_message(recovery_sha256: &str) -> String {
+    format!(
+        "profile-neutral registry generation preserved for clean Post rebuild; incident={PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID}; recovery_receipt_sha256={recovery_sha256}"
+    )
+}
+
+fn profile_neutral_registry_rebuild_marker(
+    original: &RegistryReprocessMarker,
+    recovery_threads: usize,
+    recovery_sha256: &str,
+    recovery_identity: &ProfileNeutralRegistryRebuildFileIdentity,
+    state: &str,
+    message: String,
+) -> RegistryReprocessMarker {
+    RegistryReprocessMarker {
+        schema_version: REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION,
+        kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
+        epoch: original.epoch,
+        state: state.to_string(),
+        created_unix_secs: original.created_unix_secs,
+        updated_unix_secs: unix_now(),
+        message: Some(message),
+        source: original.source.clone(),
+        target: original.target.clone(),
+        threads: recovery_threads,
+        wire_profile: Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+        phase: None,
+        attempt_id: None,
+        staging_dir: None,
+        handoff_sha256: None,
+        expected_access_state: None,
+        recovery_incident_id: Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID.to_string()),
+        recovery_receipt_sha256: Some(recovery_sha256.to_string()),
+        recovery_receipt_identity: Some(recovery_identity.clone()),
+        pid: None,
+        process_start_ticks: None,
+        audit_retry_is_safe: false,
+        audit_is_continuation: false,
+    }
+}
+
+fn profile_neutral_registry_rebuild_claim_marker_claims(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+    recovery_sha256: &str,
+    recovery_threads: usize,
+) -> bool {
+    marker.schema_version == REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+        && marker.state == PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE
+        && marker.message
+            == Some(profile_neutral_registry_rebuild_claim_message(
+                recovery_sha256,
+            ))
+        && registry_reprocess_marker_claims(config, authority.epoch, marker)
+        && registry_reprocess_marker_identity_is_clear(marker)
+        && marker.threads == recovery_threads
+        && (1..=256).contains(&marker.threads)
+        && marker.wire_profile == Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1)
+        && marker.phase.is_none()
+        && marker.attempt_id.is_none()
+        && marker.staging_dir.is_none()
+        && marker.handoff_sha256.is_none()
+        && marker.expected_access_state.is_none()
+        && marker.recovery_incident_id.as_deref()
+            == Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID)
+        && marker.recovery_receipt_sha256.as_deref() == Some(recovery_sha256)
+        && marker.recovery_receipt_identity.is_some()
+        && !marker.audit_retry_is_safe
+        && !marker.audit_is_continuation
+}
+
+fn profile_neutral_registry_rebuild_retry_marker_claims(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+    recovery_sha256: &str,
+    recovery_threads: usize,
+) -> bool {
+    profile_neutral_registry_rebuild_retry_marker_shape(config, authority, marker, recovery_sha256)
+        && marker.message
+            == Some(profile_neutral_registry_rebuild_retry_message(
+                recovery_sha256,
+            ))
+        && marker.threads == recovery_threads
+}
+
+fn ensure_profile_neutral_rebuild_state_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .context("profile-neutral rebuild state has no parent")?;
+            let parent_metadata = fs::symlink_metadata(parent).with_context(|| {
+                format!(
+                    "inspect profile-neutral rebuild state parent {}",
+                    parent.display()
+                )
+            })?;
+            anyhow::ensure!(
+                parent_metadata.file_type().is_dir()
+                    && parent_metadata.uid() == unsafe { libc::geteuid() }
+                    && parent_metadata.permissions().mode() & 0o022 == 0,
+                "profile-neutral rebuild state parent is not one protected euid-owned directory"
+            );
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(path)
+                .with_context(|| {
+                    format!("create profile-neutral rebuild state {}", path.display())
+                })?;
+            sync_scheduler_directory(parent)?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect profile-neutral rebuild state {}", path.display())
+            });
+        }
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.file_type().is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0,
+        "profile-neutral rebuild state is not one private euid-owned directory"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn rename_profile_neutral_file_no_replace(source: &Path, target: &Path) -> Result<bool> {
+    let source_c = CString::new(source.as_os_str().as_bytes())
+        .context("profile-neutral publication source path contains NUL")?;
+    let target_c = CString::new(target.as_os_str().as_bytes())
+        .context("profile-neutral publication target path contains NUL")?;
+    // SAFETY: both C strings remain live and NUL-terminated for this call.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD as libc::c_long,
+            source_c.as_ptr(),
+            libc::AT_FDCWD as libc::c_long,
+            target_c.as_ptr(),
+            libc::RENAME_NOREPLACE as libc::c_long,
+        )
+    };
+    if result == 0 {
+        Ok(true)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EEXIST) {
+            Ok(false)
+        } else {
+            Err(error).with_context(|| {
+                format!(
+                    "publish profile-neutral file {} -> {} without replacement",
+                    source.display(),
+                    target.display()
+                )
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_profile_neutral_file_no_replace(source: &Path, target: &Path) -> Result<bool> {
+    let source_c = CString::new(source.as_os_str().as_bytes())
+        .context("profile-neutral publication source path contains NUL")?;
+    let target_c = CString::new(target.as_os_str().as_bytes())
+        .context("profile-neutral publication target path contains NUL")?;
+    // SAFETY: both C strings remain live and NUL-terminated for this call.
+    let result =
+        unsafe { libc::renamex_np(source_c.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(true)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EEXIST) {
+            Ok(false)
+        } else {
+            Err(error).with_context(|| {
+                format!(
+                    "publish profile-neutral file {} -> {} without replacement",
+                    source.display(),
+                    target.display()
+                )
+            })
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_profile_neutral_file_no_replace(source: &Path, target: &Path) -> Result<bool> {
+    let _ = (source, target);
+    anyhow::bail!("atomic no-replace profile-neutral publication is unsupported on this system")
+}
+
+fn publish_profile_neutral_rebuild_bytes_no_clobber(
+    path: &Path,
+    bytes: &[u8],
+    max_bytes: u64,
+    temp_label: &str,
+) -> Result<(String, ProfileNeutralRegistryRebuildFileIdentity)> {
+    publish_profile_neutral_rebuild_bytes_no_clobber_with_hook(
+        path,
+        bytes,
+        max_bytes,
+        temp_label,
+        |_| Ok(()),
+    )
+}
+
+fn publish_profile_neutral_rebuild_bytes_no_clobber_with_hook<F>(
+    path: &Path,
+    bytes: &[u8],
+    max_bytes: u64,
+    temp_label: &str,
+    after_publish: F,
+) -> Result<(String, ProfileNeutralRegistryRebuildFileIdentity)>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let parent = path
+        .parent()
+        .context("profile-neutral rebuild artifact has no parent")?;
+    let root = parent
+        .parent()
+        .context("profile-neutral rebuild artifact parent has no incident root")?;
+    ensure_profile_neutral_rebuild_state_directory(root)?;
+    ensure_profile_neutral_rebuild_state_directory(parent)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "profile-neutral rebuild artifact exceeds its size bound"
+    );
+    let mut opened = None;
+    for attempt in 0..16u32 {
+        let temp = parent.join(format!(
+            ".{temp_label}.{}.{}.{}.tmp",
+            std::process::id(),
+            unix_now(),
+            attempt
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+        {
+            Ok(file) => {
+                opened = Some((temp, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("create profile-neutral rebuild temp {}", temp.display())
+                });
+            }
+        }
+    }
+    let (temp, mut file) = opened
+        .context("could not allocate a unique profile-neutral rebuild temp after 16 attempts")?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    match rename_profile_neutral_file_no_replace(&temp, path) {
+        Ok(true) => {
+            sync_scheduler_directory(parent)?;
+            // The no-replace rename consumes the temporary name atomically. There is no
+            // two-link cleanup window that can make a valid published proof unreadable after a
+            // crash.
+            after_publish(path)?;
+        }
+        Ok(false) => {
+            fs::remove_file(&temp).with_context(|| {
+                format!(
+                    "remove unused profile-neutral rebuild temp {}",
+                    temp.display()
+                )
+            })?;
+            sync_scheduler_directory(parent)?;
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+    }
+    let (published, identity) = read_profile_neutral_bounded_file(path, max_bytes, true)?;
+    anyhow::ensure!(
+        published == bytes,
+        "published profile-neutral rebuild artifact differs from the exact bytes"
+    );
+    Ok((sha256_bytes_hex(&published), identity))
+}
+
+fn publish_profile_neutral_rebuild_receipt_no_clobber(
+    path: &Path,
+    receipt: &ProfileNeutralRegistryRebuildReceipt,
+) -> Result<(String, ProfileNeutralRegistryRebuildFileIdentity)> {
+    let bytes = serde_json::to_vec_pretty(receipt)?;
+    publish_profile_neutral_rebuild_bytes_no_clobber(
+        path,
+        &bytes,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_BYTES,
+        &format!("epoch-{}-receipt", receipt.epoch),
+    )
+}
+
+fn read_profile_neutral_registry_marker_file(
+    path: &Path,
+) -> Result<(
+    RegistryReprocessMarker,
+    Vec<u8>,
+    ProfileNeutralRegistryRebuildFileIdentity,
+)> {
+    let (bytes, identity) =
+        read_profile_neutral_bounded_file(path, MAX_REGISTRY_REPROCESS_MARKER_BYTES, true)?;
+    let marker = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse profile-neutral registry marker {}", path.display()))?;
+    Ok((marker, bytes, identity))
+}
+
+fn load_or_archive_profile_neutral_original_marker(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    expected_original: Option<(&RegistryReprocessMarker, &[u8])>,
+) -> Result<(
+    RegistryReprocessMarker,
+    String,
+    ProfileNeutralRegistryRebuildFileIdentity,
+)> {
+    let archived =
+        profile_neutral_registry_rebuild_archived_marker_path(&config.state_root, authority);
+    if let Some((expected_marker, expected_bytes)) = expected_original {
+        let (sha256, identity) = publish_profile_neutral_rebuild_bytes_no_clobber(
+            &archived,
+            expected_bytes,
+            MAX_REGISTRY_REPROCESS_MARKER_BYTES,
+            &format!("epoch-{}-marker", authority.epoch),
+        )?;
+        let (published_marker, published_bytes, published_identity) =
+            read_profile_neutral_registry_marker_file(&archived)?;
+        anyhow::ensure!(
+            published_marker == *expected_marker
+                && published_bytes == expected_bytes
+                && published_identity == identity
+                && sha256 == sha256_bytes_hex(expected_bytes),
+            "archived profile-neutral marker differs from the exact original claim"
+        );
+        return Ok((published_marker, sha256, identity));
+    }
+    let (marker, bytes, identity) = read_profile_neutral_registry_marker_file(&archived)?;
+    Ok((marker, sha256_bytes_hex(&bytes), identity))
+}
+
+fn compare_and_publish_profile_neutral_registry_marker(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    expected_identity: &ProfileNeutralRegistryRebuildFileIdentity,
+    replacement: &RegistryReprocessMarker,
+) -> Result<ProfileNeutralRegistryRebuildFileIdentity> {
+    compare_and_publish_profile_neutral_registry_marker_with_hook(
+        config,
+        epoch,
+        expected,
+        expected_identity,
+        replacement,
+        |_| Ok(()),
+    )
+}
+
+fn compare_and_publish_profile_neutral_registry_marker_with_hook<F>(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    expected_identity: &ProfileNeutralRegistryRebuildFileIdentity,
+    replacement: &RegistryReprocessMarker,
+    after_temp_sync: F,
+) -> Result<ProfileNeutralRegistryRebuildFileIdentity>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let path = registry_reprocess_marker_path(&config.state_root, epoch);
+    let parent = path
+        .parent()
+        .context("profile-neutral registry marker has no parent")?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    anyhow::ensure!(
+        parent_metadata.file_type().is_dir()
+            && parent_metadata.uid() == unsafe { libc::geteuid() }
+            && parent_metadata.permissions().mode() & 0o022 == 0,
+        "profile-neutral registry marker parent is not one protected euid-owned directory"
+    );
+    let recovery_root = profile_neutral_registry_rebuild_root(&config.state_root);
+    let temp_parent = recovery_root.join("marker-temps");
+    ensure_profile_neutral_rebuild_state_directory(&recovery_root)?;
+    ensure_profile_neutral_rebuild_state_directory(&temp_parent)?;
+    let temp_parent_metadata = fs::symlink_metadata(&temp_parent)?;
+    anyhow::ensure!(
+        parent_metadata.dev() == temp_parent_metadata.dev(),
+        "profile-neutral marker temp directory is not on the marker filesystem"
+    );
+    let (current, current_bytes, current_identity) =
+        read_profile_neutral_registry_marker_file(&path)?;
+    anyhow::ensure!(
+        current == *expected && current_identity == *expected_identity,
+        "profile-neutral registry marker value or file identity changed before state transition"
+    );
+    let replacement_bytes = serde_json::to_vec_pretty(replacement)?;
+    anyhow::ensure!(
+        replacement_bytes.len() as u64 <= MAX_REGISTRY_REPROCESS_MARKER_BYTES,
+        "profile-neutral registry replacement marker exceeds its size bound"
+    );
+    let mut opened = None;
+    for attempt in 0..16u32 {
+        let temp = temp_parent.join(format!(
+            "epoch-{epoch}.profile-neutral.{}.{}.{}.tmp",
+            std::process::id(),
+            unix_now(),
+            attempt
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+        {
+            Ok(file) => {
+                opened = Some((temp, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("create profile-neutral marker temp {}", temp.display())
+                });
+            }
+        }
+    }
+    let (temp, mut file) = opened
+        .context("could not allocate a unique profile-neutral marker temp after 16 attempts")?;
+    file.write_all(&replacement_bytes)?;
+    file.sync_all()?;
+    drop(file);
+    sync_scheduler_directory(&temp_parent)?;
+    // A crash or injected error here can leave only a private incident temp. The strict
+    // registry_reprocess marker root still contains only epoch marker names.
+    after_temp_sync(&temp)?;
+    let (rechecked, rechecked_bytes, rechecked_identity) =
+        read_profile_neutral_registry_marker_file(&path)?;
+    if rechecked != *expected
+        || rechecked_bytes != current_bytes
+        || rechecked_identity != *expected_identity
+    {
+        let _ = fs::remove_file(&temp);
+        anyhow::bail!(
+            "profile-neutral registry marker changed after replacement preparation and before CAS"
+        );
+    }
+    if let Err(error) = fs::rename(&temp, &path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error).with_context(|| {
+            format!(
+                "publish profile-neutral registry marker {} -> {}",
+                temp.display(),
+                path.display()
+            )
+        });
+    }
+    sync_scheduler_directory(&temp_parent)?;
+    sync_scheduler_directory(parent)?;
+    let (published, published_bytes, published_identity) =
+        read_profile_neutral_registry_marker_file(&path)?;
+    anyhow::ensure!(
+        published == *replacement && published_bytes == replacement_bytes,
+        "published profile-neutral registry marker differs from its exact replacement"
+    );
+    Ok(published_identity)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expected_profile_neutral_registry_rebuild_receipt(
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    evidence: &ProfileNeutralRegistryRebuildEvidence,
+    original_marker_path: &Path,
+    original_marker_sha256: &str,
+    quarantine: &Path,
+    archived_marker: &Path,
+    archived_marker_identity: &ProfileNeutralRegistryRebuildFileIdentity,
+    recovery_threads: usize,
+    created_unix_secs: u64,
+) -> ProfileNeutralRegistryRebuildReceipt {
+    ProfileNeutralRegistryRebuildReceipt {
+        schema_version: PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_SCHEMA_VERSION,
+        kind: PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_KIND.to_string(),
+        incident_id: PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID.to_string(),
+        authority_sha256: authority_sha256.to_string(),
+        epoch: authority.epoch,
+        wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+        legacy_receipt_version: authority.receipt_version,
+        legacy_receipt_path: PathBuf::from(&evidence.receipt.target_dir)
+            .join(crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE),
+        legacy_receipt_sha256: authority.receipt_sha256.to_string(),
+        legacy_receipt_identity: evidence.receipt_identity.clone(),
+        legacy_generation_device: evidence.generation_device,
+        legacy_generation_inode: evidence.generation_inode,
+        legacy_target_file_identities: evidence.target_file_identities.clone(),
+        recovery_threads,
+        source_generation_sha256: authority.source_generation_sha256.to_string(),
+        target_generation_sha256: authority.target_generation_sha256.to_string(),
+        source_attestation_path: evidence.attestation_path.clone(),
+        source_attestation_sha256: evidence.attestation_sha256.clone(),
+        source_attestation_identity: evidence.attestation_identity.clone(),
+        original_marker_path: original_marker_path.to_path_buf(),
+        original_marker_sha256: original_marker_sha256.to_string(),
+        quarantine: quarantine.to_path_buf(),
+        archived_marker: archived_marker.to_path_buf(),
+        archived_marker_identity: archived_marker_identity.clone(),
+        created_unix_secs,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_or_publish_profile_neutral_registry_rebuild_receipt(
+    path: &Path,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    evidence: &ProfileNeutralRegistryRebuildEvidence,
+    original_marker_path: &Path,
+    original_marker_sha256: &str,
+    quarantine: &Path,
+    archived_marker: &Path,
+    archived_marker_identity: &ProfileNeutralRegistryRebuildFileIdentity,
+    new_recovery_threads: usize,
+) -> Result<(
+    ProfileNeutralRegistryRebuildReceipt,
+    String,
+    ProfileNeutralRegistryRebuildFileIdentity,
+)> {
+    anyhow::ensure!(
+        (1..=256).contains(&new_recovery_threads),
+        "new profile-neutral recovery thread count is outside 1..=256"
+    );
+    let exists = path
+        .try_exists()
+        .with_context(|| format!("inspect profile-neutral rebuild receipt {}", path.display()))?;
+    let receipt = if exists {
+        let (bytes, _) = read_profile_neutral_bounded_file(
+            path,
+            MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_BYTES,
+            true,
+        )?;
+        let receipt: ProfileNeutralRegistryRebuildReceipt = serde_json::from_slice(&bytes)
+            .with_context(|| {
+                format!(
+                    "parse existing profile-neutral rebuild receipt {}",
+                    path.display()
+                )
+            })?;
+        anyhow::ensure!(
+            receipt.created_unix_secs > 0
+                && (1..=256).contains(&receipt.recovery_threads)
+                && receipt
+                    == expected_profile_neutral_registry_rebuild_receipt(
+                        authority,
+                        authority_sha256,
+                        evidence,
+                        original_marker_path,
+                        original_marker_sha256,
+                        quarantine,
+                        archived_marker,
+                        archived_marker_identity,
+                        receipt.recovery_threads,
+                        receipt.created_unix_secs,
+                    ),
+            "existing profile-neutral rebuild receipt differs from the exact recovery proof"
+        );
+        receipt
+    } else {
+        expected_profile_neutral_registry_rebuild_receipt(
+            authority,
+            authority_sha256,
+            evidence,
+            original_marker_path,
+            original_marker_sha256,
+            quarantine,
+            archived_marker,
+            archived_marker_identity,
+            new_recovery_threads,
+            unix_now(),
+        )
+    };
+    let (sha256, identity) = publish_profile_neutral_rebuild_receipt_no_clobber(path, &receipt)?;
+    Ok((receipt, sha256, identity))
+}
+
+fn ensure_profile_neutral_rebuild_evidence_unchanged(
+    evidence: &ProfileNeutralRegistryRebuildEvidence,
+    generation: &Path,
+) -> Result<()> {
+    let generation_metadata = fs::symlink_metadata(generation).with_context(|| {
+        format!(
+            "reinspect profile-neutral registry generation {}",
+            generation.display()
+        )
+    })?;
+    anyhow::ensure!(
+        generation_metadata.file_type().is_dir()
+            && generation_metadata.dev() == evidence.generation_device
+            && generation_metadata.ino() == evidence.generation_inode
+            && fs::canonicalize(generation)? == generation,
+        "profile-neutral registry generation directory changed during recovery"
+    );
+    ensure_profile_neutral_source_files_unchanged(
+        Path::new(&evidence.receipt.source_dir),
+        &evidence.source_file_identities,
+    )?;
+    for (name, identity) in &evidence.target_file_identities {
+        let metadata = fs::symlink_metadata(generation.join(name))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file()
+                && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&metadata) == *identity,
+            "profile-neutral target artifact changed during recovery: {name}"
+        );
+    }
+    let receipt_path =
+        generation.join(crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE);
+    let (_, receipt_identity) = read_profile_neutral_bounded_file(
+        &receipt_path,
+        MAX_STALE_POH_REGISTRY_RECEIPT_BYTES,
+        false,
+    )?;
+    anyhow::ensure!(
+        receipt_identity == evidence.receipt_identity,
+        "legacy registry receipt identity changed during recovery"
+    );
+    let (attestation_bytes, attestation_identity) = read_profile_neutral_bounded_file(
+        &evidence.attestation_path,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_BYTES,
+        true,
+    )?;
+    anyhow::ensure!(
+        attestation_identity == evidence.attestation_identity
+            && sha256_bytes_hex(&attestation_bytes) == evidence.attestation_sha256,
+        "source Post attestation changed during recovery"
+    );
+    Ok(())
+}
+
+fn profile_neutral_path_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect recovery path {}", path.display()))
+        }
+    }
+}
+
+fn ensure_profile_neutral_protected_child_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .context("protected scheduler directory has no parent")?;
+            let parent_metadata = fs::symlink_metadata(parent)?;
+            anyhow::ensure!(
+                parent_metadata.file_type().is_dir()
+                    && parent_metadata.uid() == unsafe { libc::geteuid() }
+                    && parent_metadata.permissions().mode() & 0o022 == 0,
+                "protected scheduler directory parent is not euid-owned and protected"
+            );
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(path)
+                .with_context(|| {
+                    format!("create protected scheduler directory {}", path.display())
+                })?;
+            sync_scheduler_directory(parent)?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect protected scheduler directory {}", path.display())
+            });
+        }
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.file_type().is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o022 == 0,
+        "scheduler directory is not one protected euid-owned real directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn try_exclusive_profile_neutral_registry_lock(
+    config: &SchedulerConfig,
+    epoch: u64,
+) -> Result<Option<File>> {
+    let path = registry_reprocess_lock_path(&config.state_root, epoch);
+    let parent = path
+        .parent()
+        .context("profile-neutral registry lock has no parent")?;
+    ensure_profile_neutral_protected_child_directory(parent)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .with_context(|| format!("open profile-neutral registry lock {}", path.display()))?;
+    let opened = file.metadata()?;
+    let published = fs::symlink_metadata(&path)?;
+    let opened_identity = ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&opened);
+    anyhow::ensure!(
+        opened.file_type().is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && opened.nlink() == 1
+            && opened.permissions().mode() & 0o022 == 0
+            && published.file_type().is_file()
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&published)
+                == opened_identity,
+        "profile-neutral registry lock is not one stable protected euid-owned file"
+    );
+    // SAFETY: `file` owns this live descriptor through the complete recovery transaction.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        Ok(Some(file))
+    } else {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK)
+            || error.raw_os_error() == Some(libc::EAGAIN)
+        {
+            Ok(None)
+        } else {
+            Err(error)
+                .with_context(|| format!("lock profile-neutral registry guard {}", path.display()))
+        }
+    }
+}
+
+fn ensure_profile_neutral_registry_lock_unchanged(
+    config: &SchedulerConfig,
+    epoch: u64,
+    lock: &File,
+) -> Result<()> {
+    let path = registry_reprocess_lock_path(&config.state_root, epoch);
+    let opened = lock.metadata()?;
+    let published = fs::symlink_metadata(&path)?;
+    anyhow::ensure!(
+        opened.file_type().is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && opened.nlink() == 1
+            && opened.permissions().mode() & 0o022 == 0
+            && published.file_type().is_file()
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&opened)
+                == ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&published),
+        "profile-neutral registry lock path changed during recovery"
+    );
+    Ok(())
+}
+
+fn profile_neutral_controller_lock_path(config: &SchedulerConfig) -> PathBuf {
+    config
+        .state_root
+        .join("firewatch-index")
+        .join("controller.lock")
+}
+
+struct ProfileNeutralControllerLock {
+    root: File,
+    file: File,
+}
+
+fn try_exclusive_profile_neutral_controller_lock(
+    config: &SchedulerConfig,
+) -> Result<Option<ProfileNeutralControllerLock>> {
+    let path = profile_neutral_controller_lock_path(config);
+    let root = path
+        .parent()
+        .context("profile-neutral controller lock has no parent")?;
+    let root_before = fs::symlink_metadata(root)
+        .with_context(|| format!("inspect Firewatch controller root {}", root.display()))?;
+    anyhow::ensure!(
+        root_before.file_type().is_dir()
+            && root_before.uid() == unsafe { libc::geteuid() }
+            && root_before.permissions().mode() & 0o022 == 0
+            && fs::canonicalize(root)? == root,
+        "Firewatch controller root is not one canonical protected euid-owned directory"
+    );
+    let root_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(root)
+        .with_context(|| format!("open Firewatch controller root {}", root.display()))?;
+    let opened_root = root_file.metadata()?;
+    anyhow::ensure!(
+        opened_root.file_type().is_dir()
+            && opened_root.dev() == root_before.dev()
+            && opened_root.ino() == root_before.ino(),
+        "Firewatch controller root changed while opening its lock"
+    );
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .with_context(|| format!("open Firewatch controller lock {}", path.display()))?;
+    let opened = file.metadata()?;
+    let published = fs::symlink_metadata(&path)?;
+    let root_after = fs::symlink_metadata(root)?;
+    let opened_identity = ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&opened);
+    anyhow::ensure!(
+        opened.file_type().is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && opened.nlink() == 1
+            && opened.len() == 0
+            && opened.permissions().mode() & 0o777 == 0o600
+            && published.file_type().is_file()
+            && published.uid() == unsafe { libc::geteuid() }
+            && published.nlink() == 1
+            && published.len() == 0
+            && published.permissions().mode() & 0o777 == 0o600
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&published)
+                == opened_identity
+            && root_after.file_type().is_dir()
+            && root_after.dev() == root_before.dev()
+            && root_after.ino() == root_before.ino()
+            && root_after.uid() == unsafe { libc::geteuid() }
+            && root_after.permissions().mode() & 0o022 == 0
+            && fs::canonicalize(root)? == root,
+        "Firewatch controller lock is not one stable private euid-owned file"
+    );
+    // The controller and every reviewed direct audit take this exact flock. Holding it from
+    // before full validation through final proof publication excludes both launch paths.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        let lock = ProfileNeutralControllerLock {
+            root: root_file,
+            file,
+        };
+        ensure_profile_neutral_controller_lock_unchanged(config, &lock)?;
+        Ok(Some(lock))
+    } else {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK)
+            || error.raw_os_error() == Some(libc::EAGAIN)
+        {
+            Ok(None)
+        } else {
+            Err(error)
+                .with_context(|| format!("lock Firewatch controller guard {}", path.display()))
+        }
+    }
+}
+
+fn ensure_profile_neutral_controller_lock_unchanged(
+    config: &SchedulerConfig,
+    lock: &ProfileNeutralControllerLock,
+) -> Result<()> {
+    let path = profile_neutral_controller_lock_path(config);
+    let root = path
+        .parent()
+        .context("profile-neutral controller lock has no parent")?;
+    let opened = lock.file.metadata()?;
+    let opened_root = lock.root.metadata()?;
+    let published = fs::symlink_metadata(&path)?;
+    let root_metadata = fs::symlink_metadata(root)?;
+    anyhow::ensure!(
+        opened.file_type().is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && opened.nlink() == 1
+            && opened.len() == 0
+            && opened.permissions().mode() & 0o777 == 0o600
+            && published.file_type().is_file()
+            && published.uid() == unsafe { libc::geteuid() }
+            && published.nlink() == 1
+            && published.len() == 0
+            && published.permissions().mode() & 0o777 == 0o600
+            && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&opened)
+                == ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&published)
+            && root_metadata.file_type().is_dir()
+            && root_metadata.uid() == unsafe { libc::geteuid() }
+            && root_metadata.permissions().mode() & 0o022 == 0
+            && opened_root.file_type().is_dir()
+            && opened_root.dev() == root_metadata.dev()
+            && opened_root.ino() == root_metadata.ino()
+            && fs::canonicalize(root)? == root,
+        "Firewatch controller lock path changed during recovery"
+    );
+    Ok(())
+}
+
+fn ensure_profile_neutral_runtime_quiescent(runtime: &RuntimeState, epoch: u64) -> Result<()> {
+    anyhow::ensure!(
+        runtime.scheduler_paused,
+        "scheduler must remain globally paused during profile-neutral registry recovery"
+    );
+    anyhow::ensure!(
+        !runtime.acquisitions.contains_key(&epoch)
+            && !runtime.scans.contains_key(&epoch)
+            && !runtime.legacy_compacts.contains_key(&epoch)
+            && !runtime.adopted_legacy_compacts.contains_key(&epoch)
+            && !runtime.poh_migrations.contains_key(&epoch)
+            && !runtime.adopted_poh_migrations.contains_key(&epoch)
+            && !runtime.registry_reprocesses.contains_key(&epoch)
+            && !runtime.adopted_registry_reprocesses.contains_key(&epoch)
+            && !runtime.uncertain_registry_reprocesses.contains(&epoch)
+            && !runtime
+                .finalizer
+                .as_ref()
+                .is_some_and(|child| matches!(child.kind, ChildKind::HistoricalFinalizer { epoch: active } if active == epoch))
+            && !runtime
+                .registry_reprocess_audit_claim_failures
+                .contains(&epoch)
+            && runtime.active_registry_reprocess_audit.is_none()
+            && !runtime.poh_migration_admission_blocked,
+        "profile-neutral registry recovery requires no source, target, PoH, or audit runtime owner"
+    );
+    let queued = runtime
+        .registry_reprocess_audit_queue
+        .iter()
+        .filter(|request| request.epoch == epoch)
+        .collect::<Vec<_>>();
+    let pending = runtime.pending_registry_reprocess_audits.contains(&epoch);
+    anyhow::ensure!(
+        queued.len() <= 1
+            && pending == (queued.len() == 1)
+            && queued.first().is_none_or(|request| {
+                request.admission.is_none()
+                    && matches!(
+                        request.purpose,
+                        RegistryReprocessAuditPurpose::ExistingTarget { .. }
+                    )
+            })
+            && runtime.examined_registry_reprocess_targets.contains(&epoch) == pending
+            && (!pending || !runtime.validated_registry_reprocesses.contains(&epoch)),
+        "profile-neutral registry recovery found a non-durable or active audit queue claim"
+    );
+    Ok(())
+}
+
+fn remove_profile_neutral_registry_audit_claim(
+    runtime: &mut RuntimeState,
+    epoch: u64,
+) -> Result<()> {
+    ensure_profile_neutral_runtime_quiescent(runtime, epoch)?;
+    runtime.pending_registry_reprocess_audits.remove(&epoch);
+    runtime
+        .registry_reprocess_audit_queue
+        .retain(|request| request.epoch != epoch);
+    reset_registry_reprocess_attempt_cache(runtime, epoch);
+    Ok(())
+}
+
+fn ensure_profile_neutral_process_scan_empty(label: &str, scan: Option<Vec<u32>>) -> Result<()> {
+    let pids = scan.with_context(|| format!("{label} process table is unobservable"))?;
+    anyhow::ensure!(
+        pids.is_empty(),
+        "{label} is still live (pid {})",
+        pids.first().copied().unwrap_or_default()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_profile_neutral_registry_generation<FW, FP, FR>(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    mut registry_writer_scan: FW,
+    mut poh_writer_scan: FP,
+    mut reader_scan: FR,
+) -> Result<ProfileNeutralRegistryRebuildOutcome>
+where
+    FW: FnMut() -> Option<Vec<u32>>,
+    FP: FnMut() -> Option<Vec<u32>>,
+    FR: FnMut(&Path) -> Option<Vec<u32>>,
+{
+    anyhow::ensure!(
+        config.registry_reprocess_wire_profile
+            == Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+        "profile-neutral registry recovery requires the explicit Post wire profile"
+    );
+    anyhow::ensure!(
+        profile_neutral_is_sha256(authority_sha256)
+            && profile_neutral_is_sha256(authority.receipt_sha256)
+            && profile_neutral_is_sha256(authority.source_generation_sha256)
+            && profile_neutral_is_sha256(authority.target_generation_sha256)
+            && matches!(authority.receipt_version, 1 | 2),
+        "profile-neutral registry recovery authority is malformed"
+    );
+    runtime
+        .profile_neutral_registry_incident_history
+        .insert(authority.epoch);
+    ensure_profile_neutral_runtime_quiescent(runtime, authority.epoch)?;
+    let controller_lock = try_exclusive_profile_neutral_controller_lock(config)?
+        .context("Firewatch controller or direct audit lock is still held")?;
+    let registry_lock = try_exclusive_profile_neutral_registry_lock(config, authority.epoch)?
+        .context("profile-neutral registry worker lock is still held")?;
+    ensure_profile_neutral_process_scan_empty("registry writer", registry_writer_scan())?;
+    ensure_profile_neutral_process_scan_empty("source PoH writer", poh_writer_scan())?;
+
+    let marker_path = registry_reprocess_marker_path(&config.state_root, authority.epoch);
+    let (current_marker, current_bytes, current_identity) =
+        read_profile_neutral_registry_marker_file(&marker_path)?;
+    let current_is_original =
+        profile_neutral_registry_rebuild_original_marker_claims(config, authority, &current_marker);
+    anyhow::ensure!(
+        current_is_original
+            || (registry_reprocess_marker_claims(config, authority.epoch, &current_marker)
+                && registry_reprocess_marker_identity_is_clear(&current_marker)
+                && matches!(
+                    current_marker.state.as_str(),
+                    PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE | "retry_ready"
+                )),
+        "registry marker is not an original, recovery-claim, or final retry marker"
+    );
+
+    let archived_marker_path =
+        profile_neutral_registry_rebuild_archived_marker_path(&config.state_root, authority);
+    let (original_marker, mut original_marker_sha256, mut archived_marker_identity) =
+        if current_is_original {
+            (
+                current_marker.clone(),
+                sha256_bytes_hex(&current_bytes),
+                None,
+            )
+        } else {
+            let (marker, sha256, identity) =
+                load_or_archive_profile_neutral_original_marker(config, authority, None)?;
+            (marker, sha256, Some(identity))
+        };
+    anyhow::ensure!(
+        profile_neutral_registry_rebuild_original_marker_claims(
+            config,
+            authority,
+            &original_marker,
+        ),
+        "archived registry marker is not the exact original profile-neutral audit claim"
+    );
+    let quarantine =
+        profile_neutral_registry_rebuild_quarantine_path(&original_marker.target, authority)?;
+    let target_exists = profile_neutral_path_exists(&original_marker.target)?;
+    let quarantine_exists = profile_neutral_path_exists(&quarantine)?;
+    anyhow::ensure!(
+        target_exists ^ quarantine_exists,
+        "profile-neutral recovery requires exactly one original or quarantined generation"
+    );
+    anyhow::ensure!(
+        !current_is_original || (target_exists && !quarantine_exists),
+        "an original profile-neutral marker requires its exact published target"
+    );
+    anyhow::ensure!(
+        current_marker.state != "retry_ready" || (!target_exists && quarantine_exists),
+        "a final profile-neutral retry marker requires only the preserved quarantine"
+    );
+    let generation = if target_exists {
+        original_marker.target.clone()
+    } else {
+        quarantine.clone()
+    };
+    let poh_lock = try_exclusive_poh_migration_archive_lock(&original_marker.source)?
+        .context("source PoH migration lock is still held")?;
+    let evidence = validate_profile_neutral_registry_generation(
+        config,
+        authority,
+        &original_marker,
+        &generation,
+    )?;
+    ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &generation)?;
+    ensure_profile_neutral_controller_lock_unchanged(config, &controller_lock)?;
+    ensure_profile_neutral_registry_lock_unchanged(config, authority.epoch, &registry_lock)?;
+    ensure_poh_migration_archive_lock_unchanged(&original_marker.source, &poh_lock)?;
+
+    if current_is_original {
+        let (rechecked, rechecked_bytes, rechecked_identity) =
+            read_profile_neutral_registry_marker_file(&marker_path)?;
+        anyhow::ensure!(
+            rechecked == current_marker
+                && rechecked_bytes == current_bytes
+                && rechecked_identity == current_identity,
+            "original profile-neutral marker changed during full recovery validation"
+        );
+        let (archived, sha256, identity) = load_or_archive_profile_neutral_original_marker(
+            config,
+            authority,
+            Some((&current_marker, &current_bytes)),
+        )?;
+        anyhow::ensure!(
+            archived == original_marker && sha256 == original_marker_sha256,
+            "profile-neutral marker archive does not bind the validated original claim"
+        );
+        original_marker_sha256 = sha256;
+        archived_marker_identity = Some(identity);
+    }
+    let archived_marker_identity = archived_marker_identity
+        .context("profile-neutral recovery has no marker archive identity")?;
+    let recovery_receipt_path =
+        profile_neutral_registry_rebuild_receipt_path(&config.state_root, authority);
+    let (recovery_receipt, recovery_receipt_sha256, recovery_receipt_identity) =
+        load_or_publish_profile_neutral_registry_rebuild_receipt(
+            &recovery_receipt_path,
+            authority,
+            authority_sha256,
+            &evidence,
+            &marker_path,
+            &original_marker_sha256,
+            &quarantine,
+            &archived_marker_path,
+            &archived_marker_identity,
+            config.registry_reprocess_threads,
+        )?;
+    ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &generation)?;
+    ensure_profile_neutral_process_scan_empty("registry writer", registry_writer_scan())?;
+    ensure_profile_neutral_process_scan_empty("source PoH writer", poh_writer_scan())?;
+    ensure_profile_neutral_controller_lock_unchanged(config, &controller_lock)?;
+    ensure_profile_neutral_registry_lock_unchanged(config, authority.epoch, &registry_lock)?;
+    ensure_poh_migration_archive_lock_unchanged(&original_marker.source, &poh_lock)?;
+
+    let (mut active_marker, _, mut active_marker_identity) =
+        read_profile_neutral_registry_marker_file(&marker_path)?;
+    if current_is_original {
+        anyhow::ensure!(
+            active_marker == current_marker && active_marker_identity == current_identity,
+            "original profile-neutral marker changed before durable recovery claim"
+        );
+        let claim = profile_neutral_registry_rebuild_marker(
+            &original_marker,
+            recovery_receipt.recovery_threads,
+            &recovery_receipt_sha256,
+            &recovery_receipt_identity,
+            PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE,
+            profile_neutral_registry_rebuild_claim_message(&recovery_receipt_sha256),
+        );
+        active_marker_identity = compare_and_publish_profile_neutral_registry_marker(
+            config,
+            authority.epoch,
+            &active_marker,
+            &active_marker_identity,
+            &claim,
+        )?;
+        active_marker = claim;
+    }
+    if profile_neutral_registry_rebuild_retry_marker_claims(
+        config,
+        authority,
+        &active_marker,
+        &recovery_receipt_sha256,
+        recovery_receipt.recovery_threads,
+    ) {
+        anyhow::ensure!(
+            !profile_neutral_path_exists(&original_marker.target)?
+                && profile_neutral_path_exists(&quarantine)?,
+            "final profile-neutral recovery marker has no exact preserved quarantine"
+        );
+        ensure_profile_neutral_process_scan_empty(
+            "preserved registry generation reader",
+            reader_scan(&quarantine),
+        )?;
+        ensure_profile_neutral_controller_lock_unchanged(config, &controller_lock)?;
+        ensure_profile_neutral_registry_lock_unchanged(config, authority.epoch, &registry_lock)?;
+        ensure_poh_migration_archive_lock_unchanged(&original_marker.source, &poh_lock)?;
+        ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &quarantine)?;
+        remove_profile_neutral_registry_audit_claim(runtime, authority.epoch)?;
+        let final_proof = admit_profile_neutral_registry_final_retry_with_authority_sha256(
+            config,
+            runtime,
+            authority,
+            authority_sha256,
+            &active_marker,
+        )?;
+        anyhow::ensure!(
+            final_proof.receipt_sha256 == recovery_receipt_sha256,
+            "idempotent profile-neutral final proof changed from the active recovery receipt"
+        );
+        return Ok(ProfileNeutralRegistryRebuildOutcome {
+            quarantine,
+            archived_marker: archived_marker_path,
+            recovery_receipt: recovery_receipt_path,
+            recovery_receipt_sha256,
+            idempotent: true,
+        });
+    }
+    anyhow::ensure!(
+        profile_neutral_registry_rebuild_claim_marker_claims(
+            config,
+            authority,
+            &active_marker,
+            &recovery_receipt_sha256,
+            recovery_receipt.recovery_threads,
+        ),
+        "profile-neutral recovery marker does not bind its exact durable receipt"
+    );
+    remove_profile_neutral_registry_audit_claim(runtime, authority.epoch)?;
+    ensure_profile_neutral_process_scan_empty(
+        "registry generation reader",
+        reader_scan(&generation),
+    )?;
+    ensure_profile_neutral_controller_lock_unchanged(config, &controller_lock)?;
+    ensure_profile_neutral_registry_lock_unchanged(config, authority.epoch, &registry_lock)?;
+    ensure_poh_migration_archive_lock_unchanged(&original_marker.source, &poh_lock)?;
+    ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &generation)?;
+    ensure_profile_neutral_process_scan_empty("registry writer", registry_writer_scan())?;
+    ensure_profile_neutral_process_scan_empty("source PoH writer", poh_writer_scan())?;
+    ensure_profile_neutral_controller_lock_unchanged(config, &controller_lock)?;
+    ensure_profile_neutral_registry_lock_unchanged(config, authority.epoch, &registry_lock)?;
+    ensure_poh_migration_archive_lock_unchanged(&original_marker.source, &poh_lock)?;
+    ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &generation)?;
+    // This complete two-pass census is deliberately the final operation before the atomic move.
+    // The three held launch/writer locks prevent reviewed workers from entering after it.
+    ensure_profile_neutral_process_scan_empty(
+        "registry generation reader",
+        reader_scan(&generation),
+    )?;
+    if target_exists {
+        rename_registry_generation_no_replace(&original_marker.target, &quarantine)?;
+        sync_scheduler_directory(
+            original_marker
+                .target
+                .parent()
+                .context("profile-neutral registry target has no parent")?,
+        )?;
+    }
+    ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &quarantine)?;
+    ensure_profile_neutral_process_scan_empty(
+        "preserved registry generation reader",
+        reader_scan(&quarantine),
+    )?;
+    ensure_profile_neutral_controller_lock_unchanged(config, &controller_lock)?;
+    ensure_profile_neutral_registry_lock_unchanged(config, authority.epoch, &registry_lock)?;
+    ensure_poh_migration_archive_lock_unchanged(&original_marker.source, &poh_lock)?;
+    ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &quarantine)?;
+    ensure_profile_neutral_process_scan_empty("registry writer", registry_writer_scan())?;
+    ensure_profile_neutral_process_scan_empty("source PoH writer", poh_writer_scan())?;
+    ensure_profile_neutral_controller_lock_unchanged(config, &controller_lock)?;
+    ensure_profile_neutral_registry_lock_unchanged(config, authority.epoch, &registry_lock)?;
+    ensure_poh_migration_archive_lock_unchanged(&original_marker.source, &poh_lock)?;
+    ensure_profile_neutral_rebuild_evidence_unchanged(&evidence, &quarantine)?;
+    ensure_profile_neutral_process_scan_empty(
+        "preserved registry generation reader",
+        reader_scan(&quarantine),
+    )?;
+    let (rechecked_claim, _, rechecked_claim_identity) =
+        read_profile_neutral_registry_marker_file(&marker_path)?;
+    anyhow::ensure!(
+        rechecked_claim == active_marker && rechecked_claim_identity == active_marker_identity,
+        "profile-neutral recovery claim changed before final marker CAS"
+    );
+    let retry = profile_neutral_registry_rebuild_marker(
+        &original_marker,
+        recovery_receipt.recovery_threads,
+        &recovery_receipt_sha256,
+        &recovery_receipt_identity,
+        "retry_ready",
+        profile_neutral_registry_rebuild_retry_message(&recovery_receipt_sha256),
+    );
+    compare_and_publish_profile_neutral_registry_marker(
+        config,
+        authority.epoch,
+        &active_marker,
+        &active_marker_identity,
+        &retry,
+    )?;
+    let final_proof = admit_profile_neutral_registry_final_retry_with_authority_sha256(
+        config,
+        runtime,
+        authority,
+        authority_sha256,
+        &retry,
+    )?;
+    anyhow::ensure!(
+        final_proof.receipt_sha256 == recovery_receipt_sha256,
+        "published profile-neutral final proof changed from the recovery receipt"
+    );
+    Ok(ProfileNeutralRegistryRebuildOutcome {
+        quarantine,
+        archived_marker: archived_marker_path,
+        recovery_receipt: recovery_receipt_path,
+        recovery_receipt_sha256,
+        idempotent: false,
+    })
+}
+
+fn profile_neutral_registry_rebuild_claim_is_durable(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+) -> Result<()> {
+    anyhow::ensure!(
+        profile_neutral_registry_rebuild_authority_sha256()
+            == PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256,
+        "compiled profile-neutral recovery authority digest is invalid"
+    );
+    profile_neutral_registry_rebuild_claim_is_durable_with_authority_sha256(
+        config,
+        authority,
+        PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256,
+        marker,
+    )
+}
+
+fn profile_neutral_registry_rebuild_claim_is_durable_with_authority_sha256(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    marker: &RegistryReprocessMarker,
+) -> Result<()> {
+    anyhow::ensure!(
+        config.registry_reprocess_wire_profile
+            == Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+        "profile-neutral recovery claim requires the configured Post wire profile"
+    );
+    let receipt_path = profile_neutral_registry_rebuild_receipt_path(&config.state_root, authority);
+    let (receipt_bytes, receipt_identity) = read_profile_neutral_bounded_file(
+        &receipt_path,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_BYTES,
+        true,
+    )?;
+    let receipt_sha256 = sha256_bytes_hex(&receipt_bytes);
+    let receipt: ProfileNeutralRegistryRebuildReceipt = serde_json::from_slice(&receipt_bytes)
+        .with_context(|| {
+            format!(
+                "parse durable profile-neutral recovery receipt {}",
+                receipt_path.display()
+            )
+        })?;
+    let archived_marker_path =
+        profile_neutral_registry_rebuild_archived_marker_path(&config.state_root, authority);
+    let (original_marker, original_marker_bytes, archived_marker_identity) =
+        read_profile_neutral_registry_marker_file(&archived_marker_path)?;
+    let quarantine =
+        profile_neutral_registry_rebuild_quarantine_path(&original_marker.target, authority)?;
+    anyhow::ensure!(
+        profile_neutral_registry_rebuild_original_marker_claims(
+            config,
+            authority,
+            &original_marker,
+        ) && receipt.schema_version == PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_SCHEMA_VERSION
+            && receipt.kind == PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_KIND
+            && receipt.incident_id == PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID
+            && receipt.authority_sha256 == authority_sha256
+            && receipt.epoch == authority.epoch
+            && receipt.wire_profile == ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+            && receipt.legacy_receipt_version == authority.receipt_version
+            && receipt.legacy_receipt_path
+                == original_marker
+                    .target
+                    .join(crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE,)
+            && receipt.legacy_receipt_sha256 == authority.receipt_sha256
+            && receipt.legacy_receipt_identity.size > 0
+            && receipt.legacy_generation_device > 0
+            && receipt.legacy_generation_inode > 0
+            && !receipt.legacy_target_file_identities.is_empty()
+            && (1..=256).contains(&receipt.recovery_threads)
+            && receipt.source_generation_sha256 == authority.source_generation_sha256
+            && receipt.target_generation_sha256 == authority.target_generation_sha256
+            && receipt.source_attestation_path
+                == profile_neutral_registry_source_attestation_path(&config.state_root, authority)
+            && profile_neutral_is_sha256(&receipt.source_attestation_sha256)
+            && receipt.source_attestation_identity.size > 0
+            && receipt.original_marker_path
+                == registry_reprocess_marker_path(&config.state_root, authority.epoch)
+            && receipt.original_marker_sha256 == sha256_bytes_hex(&original_marker_bytes)
+            && receipt.quarantine == quarantine
+            && receipt.archived_marker == archived_marker_path
+            && receipt.archived_marker_identity == archived_marker_identity
+            && receipt.created_unix_secs > 0
+            && marker.recovery_receipt_identity.as_ref() == Some(&receipt_identity)
+            && profile_neutral_registry_rebuild_claim_marker_claims(
+                config,
+                authority,
+                marker,
+                &receipt_sha256,
+                receipt.recovery_threads,
+            ),
+        "profile-neutral recovery claim is not bound to its exact durable authority and receipt"
+    );
+    Ok(())
+}
+
+fn profile_neutral_registry_rebuild_marker_has_lineage(marker: &RegistryReprocessMarker) -> bool {
+    marker.recovery_incident_id.is_some()
+        || marker.recovery_receipt_sha256.is_some()
+        || marker.recovery_receipt_identity.is_some()
+}
+
+fn registry_reprocess_marker_recovery_lineage_shape_claims(
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    if marker.recovery_incident_id.is_none()
+        && marker.recovery_receipt_sha256.is_none()
+        && marker.recovery_receipt_identity.is_none()
+    {
+        return true;
+    }
+    profile_neutral_registry_rebuild_authority(epoch).is_some()
+        && marker.recovery_incident_id.as_deref()
+            == Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID)
+        && marker
+            .recovery_receipt_sha256
+            .as_deref()
+            .is_some_and(profile_neutral_is_sha256)
+        && marker.recovery_receipt_identity.is_some()
+        && marker.wire_profile == Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1)
+}
+
+fn profile_neutral_registry_rebuild_marker_lineage_claims(
+    marker: &RegistryReprocessMarker,
+    recovery_sha256: &str,
+) -> bool {
+    marker.recovery_incident_id.as_deref() == Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID)
+        && marker.recovery_receipt_sha256.as_deref() == Some(recovery_sha256)
+}
+
+fn profile_neutral_registry_rebuild_artifacts_present(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+) -> Result<bool> {
+    let quarantine = profile_neutral_registry_rebuild_quarantine_path(
+        &registry_reprocess_target(config, authority.epoch),
+        authority,
+    )?;
+    for path in [
+        profile_neutral_registry_rebuild_receipt_path(&config.state_root, authority),
+        profile_neutral_registry_rebuild_archived_marker_path(&config.state_root, authority),
+        quarantine,
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect profile-neutral incident artifact {}",
+                        path.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn profile_neutral_registry_rebuild_incident_candidate(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    profile_neutral_registry_rebuild_authority(epoch).is_some_and(|authority| {
+        profile_neutral_registry_rebuild_incident_candidate_with_authority(
+            config, authority, marker,
+        )
+    })
+}
+
+fn profile_neutral_registry_rebuild_incident_candidate_with_authority(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    profile_neutral_registry_rebuild_marker_has_lineage(marker)
+        || marker.message.as_deref().is_some_and(|message| {
+            message.contains(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID)
+                || message.starts_with(
+                    "profile-neutral registry generation preserved for clean Post rebuild",
+                )
+        })
+        || profile_neutral_registry_rebuild_artifacts_present(config, authority).unwrap_or(true)
+}
+
+fn profile_neutral_registry_incident_contract_applies(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+    marker: Option<&RegistryReprocessMarker>,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+) -> bool {
+    if authority_override.is_some_and(|(authority, _)| authority.epoch == epoch) {
+        return true;
+    }
+    if runtime
+        .profile_neutral_registry_incident_history
+        .contains(&epoch)
+        || runtime
+            .validated_profile_neutral_registry_rebuild_retries
+            .contains_key(&epoch)
+    {
+        return true;
+    }
+    match marker {
+        Some(marker) => {
+            profile_neutral_registry_rebuild_incident_candidate(config, epoch, marker)
+                || (profile_neutral_registry_rebuild_authority(epoch).is_some()
+                    && !(registry_reprocess_marker_is_legacy(marker) && marker.state == "auditing"))
+        }
+        None => profile_neutral_registry_rebuild_authority(epoch).is_some(),
+    }
+}
+
+fn profile_neutral_registry_durable_incident_history_present(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+) -> bool {
+    if runtime
+        .profile_neutral_registry_incident_history
+        .contains(&epoch)
+        || runtime
+            .validated_profile_neutral_registry_rebuild_retries
+            .contains_key(&epoch)
+    {
+        return true;
+    }
+    let authority = authority_override
+        .filter(|(authority, _)| authority.epoch == epoch)
+        .map(|(authority, _)| authority)
+        .or_else(|| profile_neutral_registry_rebuild_authority(epoch));
+    authority.is_some_and(|authority| {
+        profile_neutral_registry_rebuild_artifacts_present(config, authority).unwrap_or(true)
+    })
+}
+
+fn profile_neutral_registry_rebuild_retry_marker_shape(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+    recovery_sha256: &str,
+) -> bool {
+    marker.schema_version == REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+        && marker.state == "retry_ready"
+        && registry_reprocess_marker_claims(config, authority.epoch, marker)
+        && registry_reprocess_marker_identity_is_clear(marker)
+        && marker.wire_profile == Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1)
+        && marker.phase.is_none()
+        && marker.attempt_id.is_none()
+        && marker.staging_dir.is_none()
+        && marker.handoff_sha256.is_none()
+        && marker.expected_access_state.is_none()
+        && profile_neutral_registry_rebuild_marker_lineage_claims(marker, recovery_sha256)
+        && !marker.audit_retry_is_safe
+        && !marker.audit_is_continuation
+}
+
+fn profile_neutral_registry_incident_requires_absent_target(
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    marker.state == "retry_ready"
+        || marker.phase == Some(RegistryReprocessPhase::Core)
+        || (marker.state == "block_access_rebuild_required"
+            && marker.phase == Some(RegistryReprocessPhase::Access))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileNeutralRegistryIncidentProofBinding {
+    epoch: u64,
+    recovery_receipt_path: PathBuf,
+    recovery_receipt_sha256: String,
+    recovery_receipt_identity: ProfileNeutralRegistryRebuildFileIdentity,
+    marker_sha256: String,
+    marker_identity: ProfileNeutralRegistryRebuildFileIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileNeutralRegistryFinalRetryProof {
+    receipt: ProfileNeutralRegistryRebuildReceipt,
+    receipt_sha256: String,
+    marker_binding: ProfileNeutralRegistryIncidentProofBinding,
+}
+
+fn validate_profile_neutral_registry_final_retry_with_authority_sha256(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    marker: &RegistryReprocessMarker,
+) -> Result<ProfileNeutralRegistryFinalRetryProof> {
+    validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+        config,
+        authority,
+        authority_sha256,
+        marker,
+        true,
+        true,
+    )
+}
+
+fn validate_profile_neutral_registry_incident_proof(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+    require_retry_ready: bool,
+    require_target_absent: bool,
+) -> Result<ProfileNeutralRegistryFinalRetryProof> {
+    anyhow::ensure!(
+        profile_neutral_registry_rebuild_authority_sha256()
+            == PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256,
+        "compiled profile-neutral recovery authority digest is invalid"
+    );
+    validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+        config,
+        authority,
+        PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256,
+        marker,
+        require_retry_ready,
+        require_target_absent,
+    )
+}
+
+fn validate_profile_neutral_registry_completion_proof(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+) -> Result<ProfileNeutralRegistryFinalRetryProof> {
+    if let Some((authority, authority_sha256)) = authority_override {
+        anyhow::ensure!(
+            authority.epoch == epoch,
+            "profile-neutral completion authority has the wrong epoch"
+        );
+        validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+            config,
+            authority,
+            authority_sha256,
+            marker,
+            false,
+            false,
+        )
+    } else {
+        let authority = profile_neutral_registry_rebuild_authority(epoch)
+            .context("profile-neutral completion has no compiled authority")?;
+        validate_profile_neutral_registry_incident_proof(config, authority, marker, false, false)
+    }
+}
+
+fn validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    marker: &RegistryReprocessMarker,
+    require_retry_ready: bool,
+    require_target_absent: bool,
+) -> Result<ProfileNeutralRegistryFinalRetryProof> {
+    use crate::archive_v2::registry_reprocess::{
+        REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt,
+    };
+
+    anyhow::ensure!(
+        config.registry_reprocess_wire_profile
+            == Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+        "profile-neutral final retry requires the configured Post wire profile"
+    );
+    anyhow::ensure!(
+        profile_neutral_is_sha256(authority_sha256)
+            && profile_neutral_is_sha256(authority.receipt_sha256)
+            && profile_neutral_is_sha256(authority.source_generation_sha256)
+            && profile_neutral_is_sha256(authority.target_generation_sha256)
+            && matches!(authority.receipt_version, 1 | 2),
+        "profile-neutral final retry authority is malformed"
+    );
+    let marker_path = registry_reprocess_marker_path(&config.state_root, authority.epoch);
+    let (published_marker, published_marker_bytes, published_marker_identity) =
+        read_profile_neutral_registry_marker_file(&marker_path)?;
+    anyhow::ensure!(
+        published_marker == *marker,
+        "profile-neutral final retry marker changed before proof validation"
+    );
+    let receipt_path = profile_neutral_registry_rebuild_receipt_path(&config.state_root, authority);
+    let (receipt_bytes, receipt_identity) = read_profile_neutral_bounded_file(
+        &receipt_path,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_BYTES,
+        true,
+    )?;
+    let receipt_sha256 = sha256_bytes_hex(&receipt_bytes);
+    let receipt: ProfileNeutralRegistryRebuildReceipt = serde_json::from_slice(&receipt_bytes)
+        .with_context(|| {
+            format!(
+                "parse final profile-neutral recovery receipt {}",
+                receipt_path.display()
+            )
+        })?;
+    let archived_marker_path =
+        profile_neutral_registry_rebuild_archived_marker_path(&config.state_root, authority);
+    let (original_marker, original_marker_bytes, archived_marker_identity) =
+        read_profile_neutral_registry_marker_file(&archived_marker_path)?;
+    let quarantine =
+        profile_neutral_registry_rebuild_quarantine_path(&original_marker.target, authority)?;
+    anyhow::ensure!(
+        profile_neutral_registry_rebuild_original_marker_claims(
+            config,
+            authority,
+            &original_marker,
+        ) && receipt.schema_version == PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_SCHEMA_VERSION
+            && receipt.kind == PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_KIND
+            && receipt.incident_id == PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID
+            && receipt.authority_sha256 == authority_sha256
+            && receipt.epoch == authority.epoch
+            && receipt.wire_profile == ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+            && receipt.legacy_receipt_version == authority.receipt_version
+            && receipt.legacy_receipt_path
+                == original_marker.target.join(REGISTRY_REPROCESS_RECEIPT_FILE)
+            && receipt.legacy_receipt_sha256 == authority.receipt_sha256
+            && receipt.legacy_receipt_identity.size > 0
+            && receipt.legacy_generation_device > 0
+            && receipt.legacy_generation_inode > 0
+            && !receipt.legacy_target_file_identities.is_empty()
+            && (1..=256).contains(&receipt.recovery_threads)
+            && receipt.source_generation_sha256 == authority.source_generation_sha256
+            && receipt.target_generation_sha256 == authority.target_generation_sha256
+            && receipt.source_attestation_path
+                == profile_neutral_registry_source_attestation_path(&config.state_root, authority)
+            && profile_neutral_is_sha256(&receipt.source_attestation_sha256)
+            && receipt.source_attestation_identity.size > 0
+            && receipt.original_marker_path == marker_path
+            && receipt.original_marker_sha256 == sha256_bytes_hex(&original_marker_bytes)
+            && receipt.quarantine == quarantine
+            && receipt.archived_marker == archived_marker_path
+            && receipt.archived_marker_identity == archived_marker_identity
+            && receipt.created_unix_secs > 0
+            && marker.schema_version == REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+            && registry_reprocess_marker_claims(config, authority.epoch, marker)
+            && marker.wire_profile == Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1)
+            && profile_neutral_registry_rebuild_marker_lineage_claims(marker, &receipt_sha256,)
+            && marker.recovery_receipt_identity.as_ref() == Some(&receipt_identity)
+            && (!require_retry_ready
+                || profile_neutral_registry_rebuild_retry_marker_shape(
+                    config,
+                    authority,
+                    marker,
+                    &receipt_sha256,
+                )),
+        "profile-neutral final retry is not bound to its exact incident receipt and marker archive"
+    );
+    if require_target_absent {
+        anyhow::ensure!(
+            !profile_neutral_path_exists(&original_marker.target)?,
+            "profile-neutral incident target is present before a core retry"
+        );
+    }
+    let generation_metadata = fs::symlink_metadata(&quarantine).with_context(|| {
+        format!(
+            "inspect preserved profile-neutral generation {}",
+            quarantine.display()
+        )
+    })?;
+    anyhow::ensure!(
+        generation_metadata.file_type().is_dir()
+            && generation_metadata.uid() == unsafe { libc::geteuid() }
+            && generation_metadata.permissions().mode() & 0o022 == 0
+            && generation_metadata.dev() == receipt.legacy_generation_device
+            && generation_metadata.ino() == receipt.legacy_generation_inode
+            && fs::canonicalize(&quarantine)? == quarantine,
+        "preserved profile-neutral generation directory identity changed"
+    );
+    let legacy_receipt_path = quarantine.join(REGISTRY_REPROCESS_RECEIPT_FILE);
+    let (legacy_receipt_bytes, legacy_receipt_identity) = read_profile_neutral_bounded_file(
+        &legacy_receipt_path,
+        MAX_STALE_POH_REGISTRY_RECEIPT_BYTES,
+        false,
+    )?;
+    anyhow::ensure!(
+        legacy_receipt_identity == receipt.legacy_receipt_identity
+            && sha256_bytes_hex(&legacy_receipt_bytes) == authority.receipt_sha256,
+        "preserved legacy registry receipt identity or content changed"
+    );
+    let legacy_receipt: RegistryReprocessReceipt = serde_json::from_slice(&legacy_receipt_bytes)
+        .with_context(|| {
+            format!(
+                "parse preserved legacy registry receipt {}",
+                legacy_receipt_path.display()
+            )
+        })?;
+    let expected_algorithm = match authority.receipt_version {
+        1 => "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v1",
+        2 => "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v2",
+        _ => anyhow::bail!("closed recovery authority has an unsupported receipt version"),
+    };
+    anyhow::ensure!(
+        legacy_receipt.version == authority.receipt_version
+            && legacy_receipt.algorithm == expected_algorithm
+            && legacy_receipt.epoch == authority.epoch
+            && legacy_receipt.source_dir == original_marker.source.to_string_lossy()
+            && legacy_receipt.target_dir == original_marker.target.to_string_lossy()
+            && legacy_receipt.source_generation_sha256 == authority.source_generation_sha256
+            && legacy_receipt.target_generation_sha256 == authority.target_generation_sha256
+            && legacy_receipt.source_generation_sha256
+                == scheduler_registry_generation_digest(&legacy_receipt.source_files)
+            && legacy_receipt.target_generation_sha256
+                == scheduler_registry_generation_digest(&legacy_receipt.target_files)
+            && legacy_receipt.wire_profile.is_none()
+            && legacy_receipt.attempt_id.is_none()
+            && legacy_receipt.handoff_sha256.is_none()
+            && legacy_receipt.assembly_mode.is_none()
+            && legacy_receipt.signature_provenance.is_none()
+            && legacy_receipt.access_boundary_repair.is_none(),
+        "preserved legacy registry receipt changed from the closed profile-neutral contract"
+    );
+    anyhow::ensure!(
+        receipt.legacy_target_file_identities.len() == legacy_receipt.target_files.len()
+            && receipt
+                .legacy_target_file_identities
+                .keys()
+                .eq(legacy_receipt.target_files.keys()),
+        "recorded preserved target file set differs from the legacy receipt"
+    );
+    let expected_entries = receipt
+        .legacy_target_file_identities
+        .keys()
+        .cloned()
+        .chain(std::iter::once(REGISTRY_REPROCESS_RECEIPT_FILE.to_string()))
+        .collect::<BTreeSet<_>>();
+    let mut actual_entries = BTreeSet::new();
+    for entry in fs::read_dir(&quarantine).with_context(|| {
+        format!(
+            "enumerate preserved profile-neutral generation {}",
+            quarantine.display()
+        )
+    })? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            anyhow::anyhow!("preserved profile-neutral generation has a non-UTF-8 entry")
+        })?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "preserved profile-neutral generation has a non-regular entry: {}",
+            entry.path().display()
+        );
+        actual_entries.insert(name);
+    }
+    anyhow::ensure!(
+        actual_entries == expected_entries,
+        "preserved profile-neutral generation entry set changed"
+    );
+    for (name, identity) in &receipt.legacy_target_file_identities {
+        let metadata = fs::symlink_metadata(quarantine.join(name))?;
+        let binding = legacy_receipt
+            .target_files
+            .get(name)
+            .context("recorded preserved target is absent from the legacy receipt")?;
+        anyhow::ensure!(
+            metadata.file_type().is_file()
+                && identity.size == binding.bytes
+                && ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&metadata) == *identity,
+            "preserved profile-neutral target file identity changed for {name}"
+        );
+    }
+    let (attestation_path, attestation_sha256, attestation_identity, _) =
+        validate_profile_neutral_registry_source_attestation(config, authority, &legacy_receipt)?;
+    anyhow::ensure!(
+        attestation_path == receipt.source_attestation_path
+            && attestation_sha256 == receipt.source_attestation_sha256
+            && attestation_identity == receipt.source_attestation_identity,
+        "source Post attestation changed from the recovery receipt"
+    );
+    let (rechecked_receipt_bytes, rechecked_receipt_identity) = read_profile_neutral_bounded_file(
+        &receipt_path,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_BYTES,
+        true,
+    )?;
+    let (rechecked_marker, rechecked_marker_bytes, rechecked_marker_identity) =
+        read_profile_neutral_registry_marker_file(&marker_path)?;
+    anyhow::ensure!(
+        rechecked_receipt_identity == receipt_identity
+            && rechecked_receipt_bytes == receipt_bytes
+            && rechecked_marker == *marker
+            && rechecked_marker_bytes == published_marker_bytes
+            && rechecked_marker_identity == published_marker_identity,
+        "profile-neutral final retry proof changed during validation"
+    );
+    Ok(ProfileNeutralRegistryFinalRetryProof {
+        receipt,
+        receipt_sha256: receipt_sha256.clone(),
+        marker_binding: ProfileNeutralRegistryIncidentProofBinding {
+            epoch: authority.epoch,
+            recovery_receipt_path: receipt_path,
+            recovery_receipt_sha256: receipt_sha256,
+            recovery_receipt_identity: rechecked_receipt_identity,
+            marker_sha256: sha256_bytes_hex(&rechecked_marker_bytes),
+            marker_identity: rechecked_marker_identity,
+        },
+    })
+}
+
+fn admit_profile_neutral_registry_final_retry_with_authority_sha256(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    marker: &RegistryReprocessMarker,
+) -> Result<ProfileNeutralRegistryFinalRetryProof> {
+    let proof = validate_profile_neutral_registry_final_retry_with_authority_sha256(
+        config,
+        authority,
+        authority_sha256,
+        marker,
+    )?;
+    cache_profile_neutral_registry_final_retry(runtime, &proof);
+    clear_runtime_failure(
+        config,
+        runtime,
+        &format!("registry_reprocess:{}", authority.epoch),
+    );
+    Ok(proof)
+}
+
+fn admit_profile_neutral_registry_incident_proof(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    marker: &RegistryReprocessMarker,
+    require_retry_ready: bool,
+    require_target_absent: bool,
+) -> Result<ProfileNeutralRegistryFinalRetryProof> {
+    let proof = validate_profile_neutral_registry_incident_proof(
+        config,
+        authority,
+        marker,
+        require_retry_ready,
+        require_target_absent,
+    )?;
+    cache_profile_neutral_registry_final_retry(runtime, &proof);
+    clear_runtime_failure(
+        config,
+        runtime,
+        &format!("registry_reprocess:{}", authority.epoch),
+    );
+    Ok(proof)
+}
+
+#[cfg(test)]
+fn admit_profile_neutral_registry_incident_proof_with_authority_sha256(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    marker: &RegistryReprocessMarker,
+    require_retry_ready: bool,
+    require_target_absent: bool,
+) -> Result<ProfileNeutralRegistryFinalRetryProof> {
+    let proof = validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+        config,
+        authority,
+        authority_sha256,
+        marker,
+        require_retry_ready,
+        require_target_absent,
+    )?;
+    cache_profile_neutral_registry_final_retry(runtime, &proof);
+    clear_runtime_failure(
+        config,
+        runtime,
+        &format!("registry_reprocess:{}", authority.epoch),
+    );
+    Ok(proof)
+}
+
+fn cache_profile_neutral_registry_final_retry(
+    runtime: &mut RuntimeState,
+    proof: &ProfileNeutralRegistryFinalRetryProof,
+) {
+    let epoch = proof.marker_binding.epoch;
+    runtime.pending_registry_reprocess_audits.remove(&epoch);
+    runtime
+        .registry_reprocess_audit_queue
+        .retain(|request| request.epoch != epoch);
+    runtime.validated_registry_reprocesses.remove(&epoch);
+    runtime.examined_registry_reprocess_targets.remove(&epoch);
+    runtime
+        .registry_reprocess_audit_claim_failures
+        .remove(&epoch);
+    cache_profile_neutral_registry_incident_binding(runtime, proof);
+}
+
+fn cache_profile_neutral_registry_incident_binding(
+    runtime: &mut RuntimeState,
+    proof: &ProfileNeutralRegistryFinalRetryProof,
+) {
+    let epoch = proof.marker_binding.epoch;
+    runtime
+        .profile_neutral_registry_incident_history
+        .insert(epoch);
+    runtime
+        .validated_profile_neutral_registry_rebuild_retries
+        .insert(epoch, proof.marker_binding.clone());
+}
+
+fn clear_profile_neutral_registry_incident_caches(runtime: &mut RuntimeState, epoch: u64) {
+    runtime
+        .validated_profile_neutral_registry_rebuild_retries
+        .remove(&epoch);
+    runtime.validated_registry_reprocesses.remove(&epoch);
+}
+
+fn recache_profile_neutral_registry_incident_proof(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+    require_retry_ready: bool,
+    require_target_absent: bool,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+) -> Result<()> {
+    clear_profile_neutral_registry_incident_caches(runtime, epoch);
+    let proof = if let Some((authority, authority_sha256)) = authority_override {
+        anyhow::ensure!(
+            authority.epoch == epoch,
+            "profile-neutral reconciliation authority has the wrong epoch"
+        );
+        validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+            config,
+            authority,
+            authority_sha256,
+            marker,
+            require_retry_ready,
+            require_target_absent,
+        )
+    } else {
+        let authority = profile_neutral_registry_rebuild_authority(epoch)
+            .context("profile-neutral incident marker has no compiled authority")?;
+        validate_profile_neutral_registry_incident_proof(
+            config,
+            authority,
+            marker,
+            require_retry_ready,
+            require_target_absent,
+        )
+    }?;
+    cache_profile_neutral_registry_incident_binding(runtime, &proof);
+    Ok(())
+}
+
+fn profile_neutral_registry_incident_cache_matches_marker(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    let Some(binding) = runtime
+        .validated_profile_neutral_registry_rebuild_retries
+        .get(&epoch)
+    else {
+        return false;
+    };
+    profile_neutral_registry_incident_binding_matches_marker(config, epoch, marker, binding)
+}
+
+fn profile_neutral_registry_incident_binding_matches_marker(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+    binding: &ProfileNeutralRegistryIncidentProofBinding,
+) -> bool {
+    if binding.epoch != epoch
+        || marker.recovery_receipt_sha256.as_deref()
+            != Some(binding.recovery_receipt_sha256.as_str())
+        || marker.recovery_receipt_identity.as_ref() != Some(&binding.recovery_receipt_identity)
+    {
+        return false;
+    }
+    let receipt_matches = read_profile_neutral_bounded_file(
+        &binding.recovery_receipt_path,
+        MAX_PROFILE_NEUTRAL_REGISTRY_REBUILD_RECEIPT_BYTES,
+        true,
+    )
+    .is_ok_and(|(bytes, identity)| {
+        identity == binding.recovery_receipt_identity
+            && sha256_bytes_hex(&bytes) == binding.recovery_receipt_sha256
+    });
+    receipt_matches
+        && read_profile_neutral_registry_marker_file(&registry_reprocess_marker_path(
+            &config.state_root,
+            epoch,
+        ))
+        .is_ok_and(|(published, bytes, identity)| {
+            published == *marker
+                && sha256_bytes_hex(&bytes) == binding.marker_sha256
+                && identity == binding.marker_identity
+        })
+}
+
+fn stale_poh_registry_recovery_epoch(epoch: u64) -> bool {
+    STALE_POH_REGISTRY_RECOVERY_EPOCHS.contains(&epoch)
+}
+
+fn stale_poh_registry_recovery_shape(epoch: u64, marker: &RegistryReprocessMarker) -> bool {
+    stale_poh_registry_recovery_epoch(epoch)
+        && marker.schema_version == 3
+        && marker.state == "failed"
+        && marker.phase == Some(RegistryReprocessPhase::Access)
+}
+
+fn stale_poh_registry_recovery_marker_claims(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    let (Some(attempt_id), Some(staging_dir), Some(handoff_sha256)) = (
+        marker.attempt_id.as_deref(),
+        marker.staging_dir.as_deref(),
+        marker.handoff_sha256.as_deref(),
+    ) else {
+        return false;
+    };
+    stale_poh_registry_recovery_shape(epoch, marker)
+        && registry_reprocess_marker_claims(config, epoch, marker)
+        && marker.message.as_deref() == Some(STALE_POH_REGISTRY_RECOVERY_MESSAGE)
+        && marker.expected_access_state.is_none()
+        && marker.wire_profile.is_none()
+        && registry_reprocess_marker_identity_is_clear(marker)
+        && !marker.audit_retry_is_safe
+        && !marker.audit_is_continuation
+        && registry_reprocess_attempt_id_is_valid(attempt_id)
+        && registry_reprocess_handoff_sha_is_valid(handoff_sha256)
+        && staging_dir == registry_reprocess_attempt_staging_path(config, epoch, attempt_id)
+}
+
+fn scheduler_registry_generation_digest(
+    files: &BTreeMap<String, crate::archive_v2::registry_reprocess::FileBinding>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"blockzilla.registry-reprocess.generation.v1");
+    hasher.update((files.len() as u64).to_le_bytes());
+    for (name, binding) in files {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(binding.bytes.to_le_bytes());
+        hasher.update(binding.sha256.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn read_stale_poh_registry_receipt(
+    generation: &Path,
+) -> Result<crate::archive_v2::registry_reprocess::RegistryReprocessReceipt> {
+    use crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE;
+
+    let path = generation.join(REGISTRY_REPROCESS_RECEIPT_FILE);
+    let mut file = open_readonly_nonblocking_nofollow(&path)
+        .with_context(|| format!("open stale-PoH registry receipt {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect stale-PoH registry receipt {}", path.display()))?;
+    anyhow::ensure!(
+        opened.file_type().is_file() && opened.len() <= MAX_STALE_POH_REGISTRY_RECEIPT_BYTES,
+        "stale-PoH registry receipt is not a bounded regular file: {}",
+        path.display()
+    );
+    let identity = poh_migration_marker_file_identity(&opened);
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    (&mut file)
+        .take(MAX_STALE_POH_REGISTRY_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read stale-PoH registry receipt {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_STALE_POH_REGISTRY_RECEIPT_BYTES
+            && file.metadata().is_ok_and(|metadata| {
+                poh_migration_marker_file_identity(&metadata) == identity
+            })
+            && fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                metadata.file_type().is_file()
+                    && poh_migration_marker_file_identity(&metadata) == identity
+            }),
+        "stale-PoH registry receipt changed while reading: {}",
+        path.display()
+    );
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse stale-PoH registry receipt {}", path.display()))
+}
+
+fn read_registry_reprocess_marker_at_strict(path: &Path) -> Result<RegistryReprocessMarker> {
+    let mut file = open_readonly_nonblocking_nofollow(path)
+        .with_context(|| format!("open archived registry marker {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect archived registry marker {}", path.display()))?;
+    anyhow::ensure!(
+        opened.file_type().is_file() && opened.len() <= MAX_REGISTRY_REPROCESS_MARKER_BYTES,
+        "archived registry marker is not a bounded regular file: {}",
+        path.display()
+    );
+    let identity = poh_migration_marker_file_identity(&opened);
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    (&mut file)
+        .take(MAX_REGISTRY_REPROCESS_MARKER_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read archived registry marker {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_REGISTRY_REPROCESS_MARKER_BYTES
+            && file.metadata().is_ok_and(|metadata| {
+                poh_migration_marker_file_identity(&metadata) == identity
+            })
+            && fs::symlink_metadata(path).is_ok_and(|metadata| {
+                metadata.file_type().is_file()
+                    && poh_migration_marker_file_identity(&metadata) == identity
+            }),
+        "archived registry marker changed while reading: {}",
+        path.display()
+    );
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse archived registry marker {}", path.display()))
+}
+
+fn sync_scheduler_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("open directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync directory {}", path.display()))
+}
+
+fn poh_migration_archive_lock_path(source: &Path) -> PathBuf {
+    source.join(POH_MIGRATION_LOCK_FILE)
+}
+
+/// Take the same archive-local writer lock as the PoH migration and manual PoH repair commands.
+/// This helper is intentionally stricter than the scheduler's generic lock helper: an archive
+/// path is incident authority, so symlinks, special files, and an inode replacement all fail
+/// closed.
+fn try_exclusive_poh_migration_archive_lock(source: &Path) -> Result<Option<File>> {
+    let source_before = fs::symlink_metadata(source)
+        .with_context(|| format!("inspect source archive directory {}", source.display()))?;
+    anyhow::ensure!(
+        source_before.file_type().is_dir(),
+        "source archive is not a real directory: {}",
+        source.display()
+    );
+    let path = poh_migration_archive_lock_path(source);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .with_context(|| format!("open source PoH migration lock {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect source PoH migration lock {}", path.display()))?;
+    anyhow::ensure!(
+        opened.file_type().is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && opened.nlink() == 1
+            && opened.permissions().mode() & 0o022 == 0,
+        "source PoH migration lock is not a private single-link regular file: {}",
+        path.display()
+    );
+    let source_after = fs::symlink_metadata(source).with_context(|| {
+        format!(
+            "reinspect source archive directory after opening lock {}",
+            source.display()
+        )
+    })?;
+    anyhow::ensure!(
+        source_after.file_type().is_dir()
+            && source_after.dev() == source_before.dev()
+            && source_after.ino() == source_before.ino(),
+        "source archive directory changed while opening its PoH migration lock: {}",
+        source.display()
+    );
+    let opened_identity = poh_migration_marker_file_identity(&opened);
+    let published = fs::symlink_metadata(&path).with_context(|| {
+        format!(
+            "inspect published source PoH migration lock {}",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        published.file_type().is_file()
+            && published.uid() == unsafe { libc::geteuid() }
+            && poh_migration_marker_file_identity(&published) == opened_identity,
+        "source PoH migration lock path changed while opening: {}",
+        path.display()
+    );
+    // SAFETY: `file` owns this live descriptor. The caller keeps it alive through the source
+    // validation, target quarantine, old-marker archive, and final marker CAS.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(Some(file));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) || error.raw_os_error() == Some(libc::EAGAIN)
+    {
+        Ok(None)
+    } else {
+        Err(error).with_context(|| format!("lock source PoH migration guard {}", path.display()))
+    }
+}
+
+fn ensure_poh_migration_archive_lock_unchanged(source: &Path, lock: &File) -> Result<()> {
+    let path = poh_migration_archive_lock_path(source);
+    let opened = lock
+        .metadata()
+        .with_context(|| format!("restat source PoH migration lock {}", path.display()))?;
+    let published = fs::symlink_metadata(&path).with_context(|| {
+        format!(
+            "restat published source PoH migration lock {}",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        opened.file_type().is_file()
+            && published.file_type().is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && published.uid() == unsafe { libc::geteuid() }
+            && opened.nlink() == 1
+            && published.nlink() == 1
+            && opened.permissions().mode() & 0o022 == 0
+            && published.permissions().mode() & 0o022 == 0
+            && poh_migration_marker_file_identity(&opened)
+                == poh_migration_marker_file_identity(&published),
+        "source PoH migration lock path changed while recovery held its lock: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn stale_poh_source_file_identity(path: &Path) -> Result<PohMigrationMarkerFileIdentity> {
+    let file = open_readonly_nonblocking_nofollow(path)
+        .with_context(|| format!("open current source PoH {}", path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect current source PoH {}", path.display()))?;
+    let published = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect published current source PoH {}", path.display()))?;
+    let identity = poh_migration_marker_file_identity(&opened);
+    anyhow::ensure!(
+        opened.file_type().is_file()
+            && published.file_type().is_file()
+            && poh_migration_marker_file_identity(&published) == identity,
+        "current source PoH path changed while opening: {}",
+        path.display()
+    );
+    Ok(identity)
+}
+
+#[cfg(target_os = "linux")]
+fn rename_registry_generation_no_replace(source: &Path, target: &Path) -> Result<()> {
+    let source_c = CString::new(source.as_os_str().as_bytes())
+        .context("registry generation source path contains NUL")?;
+    let target_c = CString::new(target.as_os_str().as_bytes())
+        .context("registry generation quarantine path contains NUL")?;
+    // SAFETY: the strings remain live and NUL-terminated for this call. Both paths have the
+    // same parent, and RENAME_NOREPLACE makes the directory move atomic and no-clobber.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD as libc::c_long,
+            source_c.as_ptr(),
+            libc::AT_FDCWD as libc::c_long,
+            target_c.as_ptr(),
+            libc::RENAME_NOREPLACE as libc::c_long,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "move stale registry generation {} to {} without replacement",
+                source.display(),
+                target.display()
+            )
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_registry_generation_no_replace(source: &Path, target: &Path) -> Result<()> {
+    let source_c = CString::new(source.as_os_str().as_bytes())
+        .context("registry generation source path contains NUL")?;
+    let target_c = CString::new(target.as_os_str().as_bytes())
+        .context("registry generation quarantine path contains NUL")?;
+    // SAFETY: the strings remain live and NUL-terminated for this call. RENAME_EXCL supplies
+    // atomic no-replace semantics for the same-parent directory move.
+    let result =
+        unsafe { libc::renamex_np(source_c.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "move stale registry generation {} to {} without replacement",
+                source.display(),
+                target.display()
+            )
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_registry_generation_no_replace(source: &Path, target: &Path) -> Result<()> {
+    let _ = (source, target);
+    anyhow::bail!("atomic no-replace registry quarantine is unsupported on this system")
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn path_is_within(path: &Path, directory: &Path) -> bool {
+    path == directory || path.starts_with(directory)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RegistryReaderProcessIdentity {
+    state: char,
+    process_start_ticks: u64,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RegistryReaderProcessCredentials {
+    real_uid: u32,
+    effective_uid: u32,
+    saved_uid: u32,
+    filesystem_uid: u32,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RegistryReaderProcessCgroup {
+    unified_path: String,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryReaderProcessPass {
+    same_euid_processes: BTreeSet<(
+        u32,
+        RegistryReaderProcessIdentity,
+        RegistryReaderProcessCredentials,
+        RegistryReaderProcessCgroup,
+    )>,
+    readers: BTreeSet<u32>,
+}
+
+/// Small process-filesystem boundary used by the destructive registry recovery reader census.
+/// The production implementation reads procfs. The trait keeps the race and permission policy
+/// deterministic enough to exercise with hostile synthetic observations.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+trait RegistryReaderProcfs {
+    fn process_ids(&self) -> io::Result<Vec<u32>>;
+    fn stat(&self, pid: u32) -> io::Result<String>;
+    fn status(&self, pid: u32) -> io::Result<String>;
+    fn cgroup(&self, pid: u32) -> io::Result<String>;
+    fn link(&self, pid: u32, name: &str) -> io::Result<PathBuf>;
+    fn descriptor_targets(&self, pid: u32) -> io::Result<Vec<PathBuf>>;
+    fn maps(&self, pid: u32) -> io::Result<String>;
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_registry_reader_process_identity(stat: &str) -> Option<RegistryReaderProcessIdentity> {
+    parse_process_stat_identity(stat).map(|(state, process_start_ticks)| {
+        RegistryReaderProcessIdentity {
+            state,
+            process_start_ticks,
+        }
+    })
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_registry_reader_process_credentials(
+    status: &str,
+) -> Option<RegistryReaderProcessCredentials> {
+    let mut credentials = None;
+    for line in status.lines() {
+        let Some(fields) = line.strip_prefix("Uid:") else {
+            continue;
+        };
+        if credentials.is_some() {
+            return None;
+        }
+        let values = fields
+            .split_whitespace()
+            .map(str::parse::<u32>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .ok()?;
+        let [real_uid, effective_uid, saved_uid, filesystem_uid] = values.as_slice() else {
+            return None;
+        };
+        credentials = Some(RegistryReaderProcessCredentials {
+            real_uid: *real_uid,
+            effective_uid: *effective_uid,
+            saved_uid: *saved_uid,
+            filesystem_uid: *filesystem_uid,
+        });
+    }
+    credentials
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_registry_reader_process_cgroup(record: &str) -> Option<RegistryReaderProcessCgroup> {
+    if record.is_empty()
+        || record.len() as u64 > MAX_REGISTRY_READER_CGROUP_BYTES
+        || record.bytes().any(|byte| byte == 0)
+        || !record.ends_with('\n')
+    {
+        return None;
+    }
+    let line = record.strip_suffix('\n')?;
+    if line.is_empty()
+        || line
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r'))
+    {
+        return None;
+    }
+    let mut fields = line.splitn(3, ':');
+    let hierarchy = fields.next()?;
+    let controllers = fields.next()?;
+    let path = fields.next()?;
+    if hierarchy != "0"
+        || !controllers.is_empty()
+        || !path.starts_with('/')
+        || path.contains("//")
+        || path.ends_with("/.")
+        || path.contains("/./")
+        || path.ends_with("/..")
+        || path.contains("/../")
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(RegistryReaderProcessCgroup {
+        unified_path: path.to_string(),
+    })
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn registry_reader_process_is_unrelated_user_manager(
+    cgroup: &RegistryReaderProcessCgroup,
+    scheduler_euid: u32,
+) -> bool {
+    // This is the closed systemd user-manager bootstrap scope. The deployment contract requires
+    // Blockzilla, direct auditors, archive gateways, and all other managed archive consumers to
+    // run in app, session, or service cgroups, never in this init scope. Service, session, app,
+    // background, and unknown scopes remain fully scanned.
+    cgroup.unified_path
+        == format!(
+            "/user.slice/user-{scheduler_euid}.slice/user@{scheduler_euid}.service/init.scope"
+        )
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn registry_reader_surface_permission_denied(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn read_registry_reader_process_cgroup(path: &Path) -> io::Result<String> {
+    let mut bytes = Vec::with_capacity((MAX_REGISTRY_READER_CGROUP_BYTES + 1) as usize);
+    File::open(path)?
+        .take(MAX_REGISTRY_READER_CGROUP_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_REGISTRY_READER_CGROUP_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process cgroup record exceeds the safety bound",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process cgroup record is not valid UTF-8",
+        )
+    })
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn registry_reader_process_is_running(identity: RegistryReaderProcessIdentity) -> bool {
+    !matches!(identity.state, 'Z' | 'X' | 'x')
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn registry_reader_process_identity_is_stable(
+    before: RegistryReaderProcessIdentity,
+    after: RegistryReaderProcessIdentity,
+) -> bool {
+    before.process_start_ticks == after.process_start_ticks
+        && registry_reader_process_is_running(before) == registry_reader_process_is_running(after)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn normalized_registry_reader_process_identity(
+    mut identity: RegistryReaderProcessIdentity,
+) -> RegistryReaderProcessIdentity {
+    // R, S, D, I, T, and other live scheduler states can change between adjacent stat reads.
+    // Start ticks bind the process. Preserve only the live/non-running boundary in pass topology.
+    identity.state = if registry_reader_process_is_running(identity) {
+        'R'
+    } else {
+        'Z'
+    };
+    identity
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn registry_reader_maps_target(line: &str) -> Option<&Path> {
+    // Linux procfs maps records have five fixed fields before the optional pathname. Archive
+    // generation paths contain no whitespace. A later `(deleted)` suffix therefore cannot hide
+    // the exact first pathname token, and bracketed pseudo-paths cannot match an absolute archive.
+    let path = line.split_whitespace().nth(5)?;
+    (!path.is_empty()).then(|| Path::new(path))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn scan_registry_generation_process_pass<P: RegistryReaderProcfs>(
+    procfs: &P,
+    scheduler_euid: u32,
+    generation: &Path,
+) -> Option<RegistryReaderProcessPass> {
+    let mut process_ids = procfs.process_ids().ok()?;
+    process_ids.sort_unstable();
+    if process_ids.windows(2).any(|window| window[0] == window[1]) {
+        return None;
+    }
+
+    let mut same_euid_processes = BTreeSet::new();
+    let mut readers = BTreeSet::new();
+    for pid in process_ids {
+        let identity_before = parse_registry_reader_process_identity(&procfs.stat(pid).ok()?)?;
+        let credentials_before =
+            parse_registry_reader_process_credentials(&procfs.status(pid).ok()?)?;
+        let identity_after_credentials =
+            parse_registry_reader_process_identity(&procfs.stat(pid).ok()?)?;
+        if !registry_reader_process_identity_is_stable(identity_before, identity_after_credentials)
+        {
+            return None;
+        }
+
+        // The incident contract requires every managed archive consumer to share the scheduler's
+        // effective UID. A foreign process can be excluded only after procfs supplied a complete
+        // four-UID credential record bound to the same stable kernel process identity before and
+        // after the observation. This avoids requiring ptrace access to unrelated root services.
+        let shares_scheduler_uid = [
+            credentials_before.real_uid,
+            credentials_before.effective_uid,
+            credentials_before.saved_uid,
+            credentials_before.filesystem_uid,
+        ]
+        .contains(&scheduler_euid);
+        if !shares_scheduler_uid {
+            let credentials_after =
+                parse_registry_reader_process_credentials(&procfs.status(pid).ok()?)?;
+            let identity_after = parse_registry_reader_process_identity(&procfs.stat(pid).ok()?)?;
+            if credentials_after != credentials_before
+                || !registry_reader_process_identity_is_stable(identity_before, identity_after)
+            {
+                return None;
+            }
+            continue;
+        }
+
+        let cgroup_before = parse_registry_reader_process_cgroup(&procfs.cgroup(pid).ok()?)?;
+        let identity_after_cgroup =
+            parse_registry_reader_process_identity(&procfs.stat(pid).ok()?)?;
+        if !registry_reader_process_identity_is_stable(identity_before, identity_after_cgroup) {
+            return None;
+        }
+        same_euid_processes.insert((
+            pid,
+            normalized_registry_reader_process_identity(identity_before),
+            credentials_before,
+            cgroup_before.clone(),
+        ));
+        let exact_scheduler_credentials = credentials_before.real_uid == scheduler_euid
+            && credentials_before.effective_uid == scheduler_euid
+            && credentials_before.saved_uid == scheduler_euid
+            && credentials_before.filesystem_uid == scheduler_euid;
+        let private_surface_exclusion_allowed = exact_scheduler_credentials
+            && registry_reader_process_is_unrelated_user_manager(&cgroup_before, scheduler_euid);
+        let mut private_surface_denied = false;
+        if registry_reader_process_is_running(identity_before) {
+            for link_name in ["cwd", "root"] {
+                match procfs.link(pid, link_name) {
+                    Ok(path) if path_is_within(&path, generation) => {
+                        readers.insert(pid);
+                    }
+                    Ok(_) => {}
+                    Err(error) if registry_reader_surface_permission_denied(&error) => {
+                        private_surface_denied = true;
+                    }
+                    Err(_) => return None,
+                }
+            }
+            match procfs.descriptor_targets(pid) {
+                Ok(paths) => {
+                    for path in paths {
+                        if path_is_within(&path, generation) {
+                            readers.insert(pid);
+                        }
+                    }
+                }
+                Err(error) if registry_reader_surface_permission_denied(&error) => {
+                    private_surface_denied = true;
+                }
+                Err(_) => return None,
+            }
+            match procfs.maps(pid) {
+                Ok(maps)
+                    if maps.lines().any(|line| {
+                        registry_reader_maps_target(line)
+                            .is_some_and(|path| path_is_within(path, generation))
+                    }) =>
+                {
+                    readers.insert(pid);
+                }
+                Ok(_) => {}
+                Err(error) if registry_reader_surface_permission_denied(&error) => {
+                    private_surface_denied = true;
+                }
+                Err(_) => return None,
+            }
+        }
+        if private_surface_denied && !private_surface_exclusion_allowed {
+            return None;
+        }
+
+        let cgroup_after = parse_registry_reader_process_cgroup(&procfs.cgroup(pid).ok()?)?;
+        let credentials_after =
+            parse_registry_reader_process_credentials(&procfs.status(pid).ok()?)?;
+        let identity_after = parse_registry_reader_process_identity(&procfs.stat(pid).ok()?)?;
+        if cgroup_after != cgroup_before
+            || credentials_after != credentials_before
+            || !registry_reader_process_identity_is_stable(identity_before, identity_after)
+        {
+            return None;
+        }
+    }
+    Some(RegistryReaderProcessPass {
+        same_euid_processes,
+        readers,
+    })
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn scan_registry_generation_processes<P: RegistryReaderProcfs>(
+    procfs: &P,
+    scheduler_euid: u32,
+    generation: &Path,
+) -> Option<Vec<u32>> {
+    let first = scan_registry_generation_process_pass(procfs, scheduler_euid, generation)?;
+    let second = scan_registry_generation_process_pass(procfs, scheduler_euid, generation)?;
+    if first != second {
+        return None;
+    }
+    Some(first.readers.into_iter().collect())
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxRegistryReaderProcfs;
+
+#[cfg(target_os = "linux")]
+impl RegistryReaderProcfs for LinuxRegistryReaderProcfs {
+    fn process_ids(&self) -> io::Result<Vec<u32>> {
+        let mut pids = Vec::new();
+        for entry in fs::read_dir("/proc")? {
+            let entry = entry?;
+            if let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            {
+                pids.push(pid);
+            }
+        }
+        Ok(pids)
+    }
+
+    fn stat(&self, pid: u32) -> io::Result<String> {
+        fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("stat"))
+    }
+
+    fn status(&self, pid: u32) -> io::Result<String> {
+        fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("status"))
+    }
+
+    fn cgroup(&self, pid: u32) -> io::Result<String> {
+        read_registry_reader_process_cgroup(
+            &Path::new("/proc").join(pid.to_string()).join("cgroup"),
+        )
+    }
+
+    fn link(&self, pid: u32, name: &str) -> io::Result<PathBuf> {
+        fs::read_link(Path::new("/proc").join(pid.to_string()).join(name))
+    }
+
+    fn descriptor_targets(&self, pid: u32) -> io::Result<Vec<PathBuf>> {
+        let mut targets = Vec::new();
+        for entry in fs::read_dir(Path::new("/proc").join(pid.to_string()).join("fd"))? {
+            let entry = entry?;
+            match fs::read_link(entry.path()) {
+                Ok(path) => targets.push(path),
+                // An individual descriptor can close while its stable owning process remains.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(targets)
+    }
+
+    fn maps(&self, pid: u32) -> io::Result<String> {
+        fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("maps"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn find_processes_with_open_registry_generation(generation: &Path) -> Option<Vec<u32>> {
+    if !poh_process_table_observable() {
+        return None;
+    }
+    scan_registry_generation_processes(
+        &LinuxRegistryReaderProcfs,
+        unsafe { libc::geteuid() },
+        generation,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn find_processes_with_open_registry_generation(_generation: &Path) -> Option<Vec<u32>> {
+    None
+}
+
+fn validate_stale_poh_registry_generation(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+    generation: &Path,
+) -> Result<(
+    crate::archive_v2::registry_reprocess::RegistryReprocessReceipt,
+    PathBuf,
+    PathBuf,
+    PohMigrationMarkerFileIdentity,
+)> {
+    use crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE;
+
+    anyhow::ensure!(
+        stale_poh_registry_recovery_epoch(epoch),
+        "epoch {epoch} is outside the closed stale-PoH registry recovery set"
+    );
+    anyhow::ensure!(
+        stale_poh_registry_recovery_marker_claims(config, epoch, marker),
+        "registry marker is not the exact schema-v3 stale-PoH failure claim"
+    );
+    let attempt_id = marker
+        .attempt_id
+        .as_deref()
+        .context("stale-PoH registry marker has no attempt ID")?;
+    let handoff_sha256 = marker
+        .handoff_sha256
+        .as_deref()
+        .context("stale-PoH registry marker has no handoff digest")?;
+    let generation_metadata = fs::symlink_metadata(generation)
+        .with_context(|| format!("inspect stale registry generation {}", generation.display()))?;
+    anyhow::ensure!(
+        generation_metadata.file_type().is_dir(),
+        "stale registry generation is not a regular directory: {}",
+        generation.display()
+    );
+    let receipt = read_stale_poh_registry_receipt(generation)?;
+    anyhow::ensure!(
+        receipt.version == 3 && receipt.algorithm == STALE_POH_REGISTRY_RECEIPT_ALGORITHM,
+        "registry receipt has the wrong version or algorithm"
+    );
+    anyhow::ensure!(
+        receipt.epoch == epoch
+            && receipt.threads == marker.threads
+            && receipt.source_dir == marker.source.to_string_lossy()
+            && receipt.target_dir == marker.target.to_string_lossy(),
+        "registry receipt has the wrong epoch, thread, source, or target identity: receipt=({},{},{},{}) marker=({},{},{},{})",
+        receipt.epoch,
+        receipt.threads,
+        receipt.source_dir,
+        receipt.target_dir,
+        epoch,
+        marker.threads,
+        marker.source.display(),
+        marker.target.display()
+    );
+    anyhow::ensure!(
+        receipt.attempt_id.as_deref() == Some(attempt_id)
+            && receipt.handoff_sha256.as_deref() == Some(handoff_sha256)
+            && receipt.wire_profile.is_none(),
+        "registry receipt has the wrong old attempt, handoff, or profile identity"
+    );
+    anyhow::ensure!(
+        receipt.source_generation_sha256
+            == scheduler_registry_generation_digest(&receipt.source_files)
+            && receipt.target_generation_sha256
+                == scheduler_registry_generation_digest(&receipt.target_files),
+        "registry receipt generation digest does not match its file bindings"
+    );
+    let old_source_poh = receipt
+        .source_files
+        .get(POH_FILE)
+        .context("registry receipt has no source PoH binding")?;
+    let old_target_poh = receipt
+        .target_files
+        .get(POH_FILE)
+        .context("registry receipt has no target PoH binding")?;
+    anyhow::ensure!(
+        old_source_poh == old_target_poh,
+        "old registry receipt did not copy the exact source PoH generation"
+    );
+    let expected_entries = receipt
+        .target_files
+        .keys()
+        .cloned()
+        .chain(std::iter::once(REGISTRY_REPROCESS_RECEIPT_FILE.to_string()))
+        .collect::<BTreeSet<_>>();
+    let mut actual_entries = BTreeSet::new();
+    for entry in fs::read_dir(generation).with_context(|| {
+        format!(
+            "enumerate stale registry generation {}",
+            generation.display()
+        )
+    })? {
+        let entry = entry.with_context(|| {
+            format!(
+                "read stale registry generation entry in {}",
+                generation.display()
+            )
+        })?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("stale registry generation has a non-UTF-8 entry"))?;
+        let metadata = fs::symlink_metadata(entry.path()).with_context(|| {
+            format!("inspect stale registry artifact {}", entry.path().display())
+        })?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "stale registry generation has a non-regular entry: {}",
+            entry.path().display()
+        );
+        actual_entries.insert(name);
+    }
+    anyhow::ensure!(
+        actual_entries == expected_entries,
+        "stale registry generation entries do not match its receipt"
+    );
+    for (name, binding) in &receipt.target_files {
+        let path = generation.join(name);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect stale registry artifact {}", path.display()))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file()
+                && metadata.len() == binding.bytes
+                && sha256_file_hex(&path)? == binding.sha256,
+            "stale registry artifact binding mismatch for {name}"
+        );
+    }
+    for (name, binding) in &receipt.source_files {
+        if name == POH_FILE {
+            continue;
+        }
+        let path = marker.source.join(name);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect current registry source {}", path.display()))?;
+        anyhow::ensure!(
+            metadata.file_type().is_file()
+                && metadata.len() == binding.bytes
+                && sha256_file_hex(&path)? == binding.sha256,
+            "current registry source binding changed outside PoH: {name}"
+        );
+    }
+    let current_poh = marker.source.join(POH_FILE);
+    let current_poh_identity = stale_poh_source_file_identity(&current_poh)?;
+    anyhow::ensure!(
+        current_poh_identity.bytes > old_source_poh.bytes
+            && poh_sidecar_uses_current_schema(&current_poh)?
+            && crate::archive_verify::poh_migration_epoch_verified(&marker.source)?,
+        "source PoH is not the completed newer migration generation"
+    );
+    let poh_marker = read_poh_migration_marker_strict(&config.state_root, epoch)?
+        .context("source PoH has no durable migration completion marker")?;
+    anyhow::ensure!(
+        poh_migration_marker_claims_epoch(&poh_marker, epoch)
+            && poh_marker.state == "complete"
+            && poh_marker.pid.is_none()
+            && poh_marker.process_start_ticks.is_none()
+            && poh_marker.worker_threads.is_none(),
+        "source PoH migration is not durably complete and identity-clear"
+    );
+    crate::archive_verify::verify_archive_v2_poh(&marker.source, marker.threads, None)
+        .context("current source PoH failed full generation-aware verification")?;
+    anyhow::ensure!(
+        stale_poh_source_file_identity(&current_poh)? == current_poh_identity,
+        "current source PoH changed during full generation-aware verification"
+    );
+    let target_name = marker
+        .target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("registry target name is not valid UTF-8")?;
+    let quarantine = marker.target.with_file_name(format!(
+        ".{target_name}.registry-reprocess.stale-poh.{attempt_id}.{}.quarantine",
+        receipt.target_generation_sha256
+    ));
+    let archived_marker = config
+        .state_root
+        .join("registry_reprocess_stale_poh")
+        .join(format!(
+            "epoch-{epoch}.{attempt_id}.{}.json",
+            receipt.target_generation_sha256
+        ));
+    Ok((receipt, quarantine, archived_marker, current_poh_identity))
+}
+
+fn recover_stale_poh_registry_generation<F>(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+    writer_pids: Option<Vec<u32>>,
+    poh_writer_pids: Option<Vec<u32>>,
+    reader_scan: F,
+) -> Result<StalePohRegistryRecoveryOutcome>
+where
+    F: FnOnce(&Path) -> Option<Vec<u32>>,
+{
+    anyhow::ensure!(
+        config.registry_reprocess_wire_profile.is_some(),
+        "stale-PoH registry recovery requires an explicit configured wire profile"
+    );
+    anyhow::ensure!(
+        !runtime.registry_reprocesses.contains_key(&epoch)
+            && !runtime.adopted_registry_reprocesses.contains_key(&epoch)
+            && !runtime.uncertain_registry_reprocesses.contains(&epoch)
+            && !runtime.pending_registry_reprocess_audits.contains(&epoch)
+            && !runtime
+                .registry_reprocess_audit_claim_failures
+                .contains(&epoch)
+            && runtime.active_registry_reprocess_audit.is_none()
+            && !runtime
+                .registry_reprocess_audit_queue
+                .iter()
+                .any(|request| request.epoch == epoch)
+            && !runtime.poh_migrations.contains_key(&epoch)
+            && !runtime.adopted_poh_migrations.contains_key(&epoch)
+            && !runtime.poh_migration_admission_blocked,
+        "stale-PoH registry recovery requires no registry or source-PoH runtime ownership"
+    );
+    let writer_pids = writer_pids.context("registry writer process table is unobservable")?;
+    anyhow::ensure!(
+        writer_pids.is_empty(),
+        "registry writer process is still live for epoch {epoch}: pid {}",
+        writer_pids.first().copied().unwrap_or_default()
+    );
+    let poh_writer_pids =
+        poh_writer_pids.context("source PoH writer process table is unobservable")?;
+    anyhow::ensure!(
+        poh_writer_pids.is_empty(),
+        "source PoH writer process is still live for epoch {epoch}: pid {}",
+        poh_writer_pids.first().copied().unwrap_or_default()
+    );
+    let poh_migration_lock = try_exclusive_poh_migration_archive_lock(&marker.source)?
+        .context("source PoH migration lock is still held")?;
+
+    let target_exists = marker
+        .target
+        .try_exists()
+        .with_context(|| format!("inspect stale registry target {}", marker.target.display()))?;
+    // First validate the published path so the receipt can derive the deterministic quarantine.
+    // On restart, find the single attempt-bound quarantine from the old marker and validate it
+    // before completing the remaining durable steps.
+    let (receipt, quarantine, archived_marker, generation, current_poh_identity) = if target_exists
+    {
+        let (receipt, quarantine, archived_marker, current_poh_identity) =
+            validate_stale_poh_registry_generation(config, epoch, marker, &marker.target)?;
+        anyhow::ensure!(
+            !quarantine.try_exists().with_context(|| {
+                format!("inspect stale registry quarantine {}", quarantine.display())
+            })?,
+            "stale registry quarantine already exists while the published target is still present"
+        );
+        anyhow::ensure!(
+            !archived_marker.try_exists().with_context(|| {
+                format!(
+                    "inspect stale registry marker archive {}",
+                    archived_marker.display()
+                )
+            })?,
+            "stale registry marker archive already exists before target quarantine"
+        );
+        (
+            receipt,
+            quarantine,
+            archived_marker,
+            marker.target.clone(),
+            current_poh_identity,
+        )
+    } else {
+        let attempt_id = marker
+            .attempt_id
+            .as_deref()
+            .context("stale-PoH registry marker has no attempt ID")?;
+        let target_name = marker
+            .target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("registry target name is not valid UTF-8")?;
+        let prefix = format!(".{target_name}.registry-reprocess.stale-poh.{attempt_id}.");
+        let suffix = ".quarantine";
+        let parent = marker
+            .target
+            .parent()
+            .context("registry target has no parent")?;
+        let quarantines = fs::read_dir(parent)
+            .with_context(|| format!("enumerate registry target parent {}", parent.display()))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(suffix))
+            })
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            quarantines.len() == 1,
+            "restart recovery requires exactly one attempt-bound stale registry quarantine"
+        );
+        let generation = quarantines[0].clone();
+        let (receipt, quarantine, archived_marker, current_poh_identity) =
+            validate_stale_poh_registry_generation(config, epoch, marker, &generation)?;
+        anyhow::ensure!(
+            generation == quarantine,
+            "stale registry quarantine name does not match its receipt identity"
+        );
+        (
+            receipt,
+            quarantine,
+            archived_marker,
+            generation,
+            current_poh_identity,
+        )
+    };
+    let reader_pids = reader_scan(&generation)
+        .context("open-reader process scan is unobservable for the stale registry generation")?;
+    anyhow::ensure!(
+        reader_pids.is_empty(),
+        "stale registry generation still has an open reader: pid {}",
+        reader_pids.first().copied().unwrap_or_default()
+    );
+    ensure_poh_migration_archive_lock_unchanged(&marker.source, &poh_migration_lock)?;
+    anyhow::ensure!(
+        stale_poh_source_file_identity(&marker.source.join(POH_FILE))? == current_poh_identity,
+        "current source PoH changed after validation and before target quarantine"
+    );
+    let current = read_registry_reprocess_marker_strict(&config.state_root, epoch)?
+        .context("stale-PoH registry marker disappeared before quarantine")?;
+    anyhow::ensure!(
+        &current == marker,
+        "stale-PoH registry marker changed before quarantine"
+    );
+    if target_exists {
+        rename_registry_generation_no_replace(&marker.target, &quarantine)?;
+        sync_scheduler_directory(
+            marker
+                .target
+                .parent()
+                .context("registry target has no parent")?,
+        )?;
+    }
+
+    let archive_parent = archived_marker
+        .parent()
+        .context("stale registry marker archive has no parent")?;
+    fs::create_dir_all(archive_parent).with_context(|| {
+        format!(
+            "create stale registry marker archive {}",
+            archive_parent.display()
+        )
+    })?;
+    sync_scheduler_directory(
+        archive_parent
+            .parent()
+            .context("stale registry marker archive parent has no state root")?,
+    )?;
+    sync_scheduler_directory(archive_parent)?;
+    if archived_marker.try_exists().with_context(|| {
+        format!(
+            "inspect stale registry marker archive {}",
+            archived_marker.display()
+        )
+    })? {
+        anyhow::ensure!(
+            read_registry_reprocess_marker_at_strict(&archived_marker)? == *marker,
+            "existing stale registry marker archive does not match the old failure claim"
+        );
+    } else {
+        fs::hard_link(
+            registry_reprocess_marker_path(&config.state_root, epoch),
+            &archived_marker,
+        )
+        .with_context(|| {
+            format!(
+                "archive old registry marker without replacement as {}",
+                archived_marker.display()
+            )
+        })?;
+        anyhow::ensure!(
+            read_registry_reprocess_marker_at_strict(&archived_marker)? == *marker,
+            "new stale registry marker archive does not match the old failure claim"
+        );
+        sync_scheduler_directory(archive_parent)?;
+    }
+
+    let wire_profile = config
+        .registry_reprocess_wire_profile
+        .context("stale-PoH registry recovery lost its configured wire profile")?;
+    let now = unix_now();
+    let retry_ready = RegistryReprocessMarker {
+        schema_version: REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION,
+        kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
+        epoch,
+        state: "retry_ready".to_string(),
+        created_unix_secs: now,
+        updated_unix_secs: now,
+        message: Some(format!(
+            "fresh retry authorized after quarantining stale PoH-bound generation {}",
+            receipt.target_generation_sha256
+        )),
+        source: marker.source.clone(),
+        target: marker.target.clone(),
+        threads: config.registry_reprocess_threads,
+        wire_profile: Some(wire_profile),
+        phase: None,
+        attempt_id: None,
+        staging_dir: None,
+        handoff_sha256: None,
+        expected_access_state: None,
+        recovery_incident_id: None,
+        recovery_receipt_sha256: None,
+        recovery_receipt_identity: None,
+        pid: None,
+        process_start_ticks: None,
+        audit_retry_is_safe: false,
+        audit_is_continuation: false,
+    };
+    ensure_poh_migration_archive_lock_unchanged(&marker.source, &poh_migration_lock)?;
+    anyhow::ensure!(
+        stale_poh_source_file_identity(&marker.source.join(POH_FILE))? == current_poh_identity,
+        "current source PoH changed after validation and before registry marker transition"
+    );
+    compare_and_publish_registry_reprocess_marker(config, epoch, marker, &retry_ready)?;
+    Ok(StalePohRegistryRecoveryOutcome {
+        quarantine,
+        archived_marker,
+    })
+}
+
 fn registry_reprocess_args(
     config: &SchedulerConfig,
     source: &Path,
     target: &Path,
     epoch: u64,
+    wire_profile: ArchiveV2WireProfile,
 ) -> Vec<std::ffi::OsString> {
     vec![
         "reprocess-archive-v2-registry".into(),
@@ -13571,7 +19691,179 @@ fn registry_reprocess_args(
         config.registry_reprocess_sort_memory_mib.to_string().into(),
         "--level".into(),
         config.level.to_string().into(),
+        "--wire-profile".into(),
+        wire_profile.to_string().into(),
     ]
+}
+
+fn registry_reprocess_legacy_args(
+    config: &SchedulerConfig,
+    source: &Path,
+    target: &Path,
+    epoch: u64,
+) -> Option<Vec<std::ffi::OsString>> {
+    Some(registry_reprocess_args(
+        config,
+        source,
+        target,
+        epoch,
+        config.registry_reprocess_wire_profile?,
+    ))
+}
+
+fn registry_reprocess_core_args(
+    config: &SchedulerConfig,
+    source: &Path,
+    target: &Path,
+    epoch: u64,
+    attempt_id: &str,
+    staging_dir: &Path,
+    wire_profile: ArchiveV2WireProfile,
+    wire_profile_authority_receipt: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = registry_reprocess_args(config, source, target, epoch, wire_profile);
+    args.extend([
+        "--attempt-id".into(),
+        attempt_id.into(),
+        "--staging-dir".into(),
+        staging_dir.as_os_str().to_owned(),
+    ]);
+    if let Some(receipt) = wire_profile_authority_receipt {
+        args.extend([
+            "--wire-profile-authority-receipt".into(),
+            receipt.as_os_str().to_owned(),
+        ]);
+    }
+    args
+}
+
+fn registry_reprocess_access_args(
+    source: &Path,
+    staging_dir: &Path,
+    target: &Path,
+    epoch: u64,
+    attempt_id: &str,
+    handoff_sha256: &str,
+    expected_state: RegistryReprocessExpectedAccessState,
+    wire_profile: ArchiveV2WireProfile,
+    wire_profile_authority_receipt: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        "complete-archive-v2-registry-access".into(),
+        source.as_os_str().to_owned(),
+        staging_dir.as_os_str().to_owned(),
+        target.as_os_str().to_owned(),
+        "--epoch".into(),
+        epoch.to_string().into(),
+        "--attempt-id".into(),
+        attempt_id.into(),
+        "--handoff-sha256".into(),
+        handoff_sha256.into(),
+        "--expected-continuation-state".into(),
+        expected_state.cli_value().into(),
+        "--wire-profile".into(),
+        wire_profile.to_string().into(),
+    ];
+    if let Some(receipt) = wire_profile_authority_receipt {
+        args.extend([
+            "--wire-profile-authority-receipt".into(),
+            receipt.as_os_str().to_owned(),
+        ]);
+    }
+    args
+}
+
+fn registry_reprocess_attempt_id_is_valid(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn registry_reprocess_handoff_sha_is_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn registry_reprocess_attempt_staging_path(
+    config: &SchedulerConfig,
+    epoch: u64,
+    attempt_id: &str,
+) -> PathBuf {
+    let target = registry_reprocess_target(config, epoch);
+    let target_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("invalid-target");
+    target.with_file_name(format!(
+        ".{target_name}.registry-reprocess.{attempt_id}.staging"
+    ))
+}
+
+fn new_registry_reprocess_attempt(
+    config: &SchedulerConfig,
+    epoch: u64,
+) -> Result<(String, PathBuf)> {
+    fs::create_dir_all(&config.registry_reprocess_target_root).with_context(|| {
+        format!(
+            "create registry reprocess target root {}",
+            config.registry_reprocess_target_root.display()
+        )
+    })?;
+    for _ in 0..16 {
+        let mut random = [0u8; 16];
+        File::open("/dev/urandom")
+            .context("open operating-system random source")?
+            .read_exact(&mut random)
+            .context("read registry reprocess attempt identity")?;
+        let attempt_id = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let staging_dir = registry_reprocess_attempt_staging_path(config, epoch, &attempt_id);
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&staging_dir) {
+            Ok(()) => {
+                if let Err(error) =
+                    fs::set_permissions(&staging_dir, fs::Permissions::from_mode(0o700))
+                {
+                    let _ = fs::remove_dir(&staging_dir);
+                    return Err(error).with_context(|| {
+                        format!("set registry staging mode on {}", staging_dir.display())
+                    });
+                }
+                let metadata = fs::symlink_metadata(&staging_dir).with_context(|| {
+                    format!("inspect new registry staging {}", staging_dir.display())
+                })?;
+                anyhow::ensure!(
+                    metadata.file_type().is_dir()
+                        && metadata.permissions().mode() & 0o777 == 0o700
+                        && metadata.uid() == unsafe { libc::geteuid() as u32 },
+                    "new registry staging is not a scheduler-owned mode-0700 directory: {}",
+                    staging_dir.display()
+                );
+                File::open(
+                    staging_dir
+                        .parent()
+                        .context("new registry staging has no parent")?,
+                )
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| {
+                    format!(
+                        "sync new registry staging parent for {}",
+                        staging_dir.display()
+                    )
+                })?;
+                return Ok((attempt_id, staging_dir));
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create registry staging {}", staging_dir.display()));
+            }
+        }
+    }
+    anyhow::bail!("could not allocate a unique registry reprocess attempt after 16 tries")
 }
 
 fn read_registry_reprocess_marker_strict(
@@ -13673,12 +19965,69 @@ fn registry_reprocess_marker_claims(
     epoch: u64,
     marker: &RegistryReprocessMarker,
 ) -> bool {
-    marker.schema_version == SCHEMA_VERSION
+    (1..=REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION).contains(&marker.schema_version)
         && marker.kind == REGISTRY_REPROCESS_OWNERSHIP_KIND
         && marker.epoch == epoch
         && marker.source == config.archive_root.join(format!("epoch-{epoch}"))
         && marker.target == registry_reprocess_target(config, epoch)
         && (1..=256).contains(&marker.threads)
+}
+
+fn registry_reprocess_marker_has_attempt(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> bool {
+    let (Some(phase), Some(attempt_id), Some(staging_dir), Some(wire_profile)) = (
+        marker.phase,
+        marker.attempt_id.as_deref(),
+        marker.staging_dir.as_deref(),
+        marker.wire_profile,
+    ) else {
+        return false;
+    };
+    marker.schema_version == REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+        && phase != RegistryReprocessPhase::Legacy
+        && registry_reprocess_attempt_id_is_valid(attempt_id)
+        && staging_dir == registry_reprocess_attempt_staging_path(config, epoch, attempt_id)
+        && config.registry_reprocess_wire_profile == Some(wire_profile)
+        && registry_reprocess_marker_recovery_lineage_shape_claims(epoch, marker)
+        && marker
+            .handoff_sha256
+            .as_deref()
+            .is_none_or(registry_reprocess_handoff_sha_is_valid)
+}
+
+fn registry_reprocess_marker_is_legacy(marker: &RegistryReprocessMarker) -> bool {
+    marker.schema_version <= SCHEMA_VERSION
+        && marker.phase.is_none()
+        && marker.attempt_id.is_none()
+        && marker.staging_dir.is_none()
+        && marker.handoff_sha256.is_none()
+        && marker.expected_access_state.is_none()
+        && marker.wire_profile.is_none()
+        && marker.recovery_incident_id.is_none()
+        && marker.recovery_receipt_sha256.is_none()
+        && marker.recovery_receipt_identity.is_none()
+}
+
+fn registry_reprocess_marker_identity_is_clear(marker: &RegistryReprocessMarker) -> bool {
+    marker.pid.is_none() && marker.process_start_ticks.is_none()
+}
+
+fn compare_and_publish_registry_reprocess_marker(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    replacement: &RegistryReprocessMarker,
+) -> Result<()> {
+    let current = read_registry_reprocess_marker_strict(&config.state_root, epoch)?
+        .context("registry reprocess marker disappeared before state transition")?;
+    anyhow::ensure!(
+        &current == expected,
+        "registry reprocess marker changed before state transition"
+    );
+    publish_registry_reprocess_marker(&config.state_root, epoch, replacement)
 }
 
 fn write_registry_reprocess_marker(
@@ -13691,7 +20040,10 @@ fn write_registry_reprocess_marker(
         .ok()
         .flatten();
     let marker = RegistryReprocessMarker {
-        schema_version: SCHEMA_VERSION,
+        schema_version: existing
+            .as_ref()
+            .map(|marker| marker.schema_version)
+            .unwrap_or(SCHEMA_VERSION),
         kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
         epoch,
         state: state.to_string(),
@@ -13703,7 +20055,95 @@ fn write_registry_reprocess_marker(
         message,
         source: config.archive_root.join(format!("epoch-{epoch}")),
         target: registry_reprocess_target(config, epoch),
+        threads: existing
+            .as_ref()
+            .map(|marker| marker.threads)
+            .unwrap_or(config.registry_reprocess_threads),
+        wire_profile: existing.as_ref().and_then(|marker| marker.wire_profile),
+        phase: existing.as_ref().and_then(|marker| marker.phase),
+        attempt_id: existing
+            .as_ref()
+            .and_then(|marker| marker.attempt_id.clone()),
+        staging_dir: existing
+            .as_ref()
+            .and_then(|marker| marker.staging_dir.clone()),
+        handoff_sha256: existing
+            .as_ref()
+            .and_then(|marker| marker.handoff_sha256.clone()),
+        expected_access_state: existing
+            .as_ref()
+            .and_then(|marker| marker.expected_access_state),
+        recovery_incident_id: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_incident_id.clone()),
+        recovery_receipt_sha256: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_receipt_sha256.clone()),
+        recovery_receipt_identity: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_receipt_identity.clone()),
+        pid: None,
+        process_start_ticks: None,
+        audit_retry_is_safe: false,
+        audit_is_continuation: false,
+    };
+    publish_registry_reprocess_marker(&config.state_root, epoch, &marker)
+}
+
+fn write_registry_reprocess_core_marker(
+    config: &SchedulerConfig,
+    epoch: u64,
+    attempt_id: String,
+    staging_dir: PathBuf,
+) -> Result<()> {
+    let wire_profile = config
+        .registry_reprocess_wire_profile
+        .context("enabled registry reprocessing requires one wire profile")?;
+    let existing = read_registry_reprocess_marker_strict(&config.state_root, epoch)?;
+    if let Some(existing) = existing.as_ref() {
+        anyhow::ensure!(
+            registry_reprocess_marker_claims(config, epoch, existing)
+                && existing.state == "retry_ready"
+                && registry_reprocess_marker_identity_is_clear(existing)
+                && existing.attempt_id.is_none()
+                && existing.staging_dir.is_none()
+                && existing.handoff_sha256.is_none()
+                && existing.expected_access_state.is_none()
+                && registry_reprocess_marker_recovery_lineage_shape_claims(epoch, existing),
+            "registry reprocess marker is not a clean retry-ready claim"
+        );
+    }
+    let marker = RegistryReprocessMarker {
+        schema_version: REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION,
+        kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
+        epoch,
+        state: "core_running".to_string(),
+        created_unix_secs: existing
+            .as_ref()
+            .map(|marker| marker.created_unix_secs)
+            .unwrap_or_else(unix_now),
+        updated_unix_secs: unix_now(),
+        message: Some(
+            "rewriting first-seen registry IDs into an attempt-bound core generation".to_string(),
+        ),
+        source: config.archive_root.join(format!("epoch-{epoch}")),
+        target: registry_reprocess_target(config, epoch),
         threads: config.registry_reprocess_threads,
+        wire_profile: Some(wire_profile),
+        phase: Some(RegistryReprocessPhase::Core),
+        attempt_id: Some(attempt_id),
+        staging_dir: Some(staging_dir),
+        handoff_sha256: None,
+        expected_access_state: None,
+        recovery_incident_id: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_incident_id.clone()),
+        recovery_receipt_sha256: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_receipt_sha256.clone()),
+        recovery_receipt_identity: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_receipt_identity.clone()),
         pid: None,
         process_start_ticks: None,
         audit_retry_is_safe: false,
@@ -13755,11 +20195,22 @@ fn write_registry_reprocess_audit_marker(
             }
         ),
     };
+    let new_attempt = existing
+        .as_ref()
+        .is_some_and(|marker| registry_reprocess_marker_has_attempt(config, epoch, marker));
     let marker = RegistryReprocessMarker {
-        schema_version: SCHEMA_VERSION,
+        schema_version: if new_attempt {
+            REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+        } else {
+            SCHEMA_VERSION
+        },
         kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
         epoch,
-        state: "auditing".to_string(),
+        state: if new_attempt {
+            "final_auditing".to_string()
+        } else {
+            "auditing".to_string()
+        },
         created_unix_secs: existing
             .as_ref()
             .map(|marker| marker.created_unix_secs)
@@ -13772,6 +20223,31 @@ fn write_registry_reprocess_audit_marker(
             .as_ref()
             .map(|marker| marker.threads)
             .unwrap_or(config.registry_reprocess_threads),
+        wire_profile: new_attempt
+            .then(|| existing.as_ref().and_then(|marker| marker.wire_profile))
+            .flatten(),
+        phase: existing.as_ref().and_then(|marker| marker.phase),
+        attempt_id: existing
+            .as_ref()
+            .and_then(|marker| marker.attempt_id.clone()),
+        staging_dir: existing
+            .as_ref()
+            .and_then(|marker| marker.staging_dir.clone()),
+        handoff_sha256: existing
+            .as_ref()
+            .and_then(|marker| marker.handoff_sha256.clone()),
+        expected_access_state: existing
+            .as_ref()
+            .and_then(|marker| marker.expected_access_state),
+        recovery_incident_id: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_incident_id.clone()),
+        recovery_receipt_sha256: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_receipt_sha256.clone()),
+        recovery_receipt_identity: existing
+            .as_ref()
+            .and_then(|marker| marker.recovery_receipt_identity.clone()),
         pid: None,
         process_start_ticks: None,
         audit_retry_is_safe: registry_reprocess_audit_retry_is_safe(request),
@@ -13788,8 +20264,15 @@ fn set_registry_reprocess_marker_identity(
 ) -> Result<()> {
     let mut marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)?
         .context("registry reprocess marker disappeared before identity publication")?;
+    let expected_state = marker
+        .phase
+        .map(RegistryReprocessPhase::running_state)
+        .unwrap_or("running");
     anyhow::ensure!(
-        registry_reprocess_marker_claims(config, epoch, &marker) && marker.state == "running",
+        registry_reprocess_marker_claims(config, epoch, &marker)
+            && marker.state == expected_state
+            && (registry_reprocess_marker_is_legacy(&marker)
+                || registry_reprocess_marker_has_attempt(config, epoch, &marker)),
         "registry reprocess marker changed before identity publication"
     );
     marker.pid = Some(pid);
@@ -13798,17 +20281,63 @@ fn set_registry_reprocess_marker_identity(
     publish_registry_reprocess_marker(&config.state_root, epoch, &marker)
 }
 
-fn validate_registry_reprocess_output(config: &SchedulerConfig, epoch: u64) -> Result<()> {
+fn validate_registry_reprocess_output(
+    config: &SchedulerConfig,
+    request: &RegistryReprocessAuditRequest,
+) -> Result<()> {
+    let epoch = request.epoch;
+    let admission = request
+        .admission
+        .as_ref()
+        .context("registry deep audit has no bounded admission proof")?;
+    let admitted = probe_registry_reprocess_receipt(config, epoch)?;
+    if let Some(expected) = admission.receipt.as_ref() {
+        anyhow::ensure!(
+            &admitted == expected,
+            "registry reprocess receipt changed after audit admission"
+        );
+    } else {
+        validate_registry_reprocess_receipt_marker_binding(
+            config,
+            epoch,
+            &admitted,
+            &admission.marker,
+        )?;
+    }
+    anyhow::ensure!(
+        admitted.threads == admission.threads,
+        "registry reprocess receipt thread count changed after audit admission"
+    );
     let source = config.archive_root.join(format!("epoch-{epoch}"));
     let target = registry_reprocess_target(config, epoch);
-    crate::archive_v2::registry_reprocess::validate_published_reprocess(&source, &target, epoch)
-        .map(|_| ())
+    let validated = crate::archive_v2::registry_reprocess::validate_published_reprocess(
+        &source, &target, epoch,
+    )?;
+    anyhow::ensure!(
+        validated == admitted,
+        "deep-validated registry receipt differs from the admitted receipt"
+    );
+    let after = probe_registry_reprocess_receipt(config, epoch)?;
+    anyhow::ensure!(
+        after == admitted,
+        "registry reprocess receipt changed during deep validation"
+    );
+    let current_marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)?
+        .context("registry deep-audit marker disappeared during validation")?;
+    anyhow::ensure!(
+        current_marker == admission.marker,
+        "registry deep-audit marker changed during validation"
+    );
+    Ok(())
 }
 
 fn probe_registry_reprocess_receipt(
     config: &SchedulerConfig,
     epoch: u64,
 ) -> Result<crate::archive_v2::registry_reprocess::RegistryReprocessReceipt> {
+    let configured_profile = config
+        .registry_reprocess_wire_profile
+        .context("registry reprocess admission requires one explicit wire profile")?;
     let expected_source = fs::canonicalize(config.archive_root.join(format!("epoch-{epoch}")))
         .with_context(|| format!("canonicalize configured source epoch {epoch}"))?;
     let receipt = crate::archive_v2::registry_reprocess::probe_published_reprocess(
@@ -13821,16 +20350,603 @@ fn probe_registry_reprocess_receipt(
         receipt.source_dir,
         expected_source.display()
     );
+    anyhow::ensure!(
+        receipt.wire_profile == Some(configured_profile),
+        "registry reprocess receipt wire profile does not match scheduler admission"
+    );
     Ok(receipt)
+}
+
+fn validate_registry_reprocess_receipt_marker_binding(
+    config: &SchedulerConfig,
+    epoch: u64,
+    receipt: &crate::archive_v2::registry_reprocess::RegistryReprocessReceipt,
+    marker: &RegistryReprocessMarker,
+) -> Result<()> {
+    anyhow::ensure!(
+        registry_reprocess_marker_claims(config, epoch, marker)
+            && registry_reprocess_marker_has_attempt(config, epoch, marker)
+            && marker.phase == Some(RegistryReprocessPhase::Access)
+            && marker.state == "final_auditing"
+            && registry_reprocess_marker_identity_is_clear(marker),
+        "registry deep-audit fallback marker is not an exact final-auditing claim"
+    );
+    anyhow::ensure!(
+        receipt.threads == marker.threads
+            && receipt.wire_profile == marker.wire_profile
+            && receipt.attempt_id.as_deref() == marker.attempt_id.as_deref()
+            && receipt.handoff_sha256.as_deref() == marker.handoff_sha256.as_deref(),
+        "registry receipt does not match the exact fallback marker"
+    );
+    Ok(())
 }
 
 fn probe_registry_reprocess_output(config: &SchedulerConfig, epoch: u64) -> Result<()> {
     probe_registry_reprocess_receipt(config, epoch).map(|_| ())
 }
 
-async fn spawn_registry_reprocess(
+fn probe_registry_reprocess_attempt_output(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> Result<()> {
+    anyhow::ensure!(
+        registry_reprocess_marker_has_attempt(config, epoch, marker),
+        "final registry probe has no exact attempt marker"
+    );
+    let receipt = probe_registry_reprocess_receipt(config, epoch)?;
+    anyhow::ensure!(
+        receipt.attempt_id.as_deref() == marker.attempt_id.as_deref(),
+        "published registry receipt attempt does not match the scheduler marker"
+    );
+    anyhow::ensure!(
+        receipt.handoff_sha256.as_deref() == marker.handoff_sha256.as_deref(),
+        "published registry receipt handoff does not match the scheduler marker"
+    );
+    anyhow::ensure!(
+        receipt.wire_profile == marker.wire_profile,
+        "published registry receipt wire profile does not match the scheduler marker"
+    );
+    Ok(())
+}
+
+fn probe_registry_reprocess_core_handoff(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> Result<crate::archive_v2::registry_reprocess::RegistryReprocessCoreResult> {
+    anyhow::ensure!(
+        registry_reprocess_marker_claims(config, epoch, marker)
+            && registry_reprocess_marker_has_attempt(config, epoch, marker),
+        "registry reprocess marker has no exact current attempt binding"
+    );
+    let attempt_id = marker
+        .attempt_id
+        .as_deref()
+        .context("registry reprocess attempt ID is missing")?;
+    let staging_dir = marker
+        .staging_dir
+        .as_deref()
+        .context("registry reprocess staging path is missing")?;
+    let wire_profile = marker
+        .wire_profile
+        .context("registry reprocess wire profile is missing")?;
+    let result = crate::archive_v2::registry_reprocess::probe_registry_reprocess_core_handoff(
+        staging_dir,
+        &marker.source,
+        &marker.target,
+        epoch,
+        attempt_id,
+        wire_profile,
+    )?;
+    if let Some(expected) = marker.handoff_sha256.as_deref() {
+        anyhow::ensure!(
+            result.handoff_sha256 == expected,
+            "registry handoff SHA changed after durable scheduler binding"
+        );
+    }
+    anyhow::ensure!(
+        result.wire_profile == wire_profile,
+        "registry core continuation returned a different wire profile"
+    );
+    Ok(result)
+}
+
+fn probe_registry_reprocess_access_continuation(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> Result<crate::archive_v2::registry_reprocess::RegistryReprocessCoreResult> {
+    Ok(probe_registry_reprocess_access_continuation_state(config, epoch, marker)?.core_result)
+}
+
+fn probe_registry_reprocess_access_continuation_state(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> Result<RegistryReprocessAccessContinuationProbe> {
+    anyhow::ensure!(
+        registry_reprocess_marker_claims(config, epoch, marker)
+            && registry_reprocess_marker_has_attempt(config, epoch, marker)
+            && marker.phase == Some(RegistryReprocessPhase::Access),
+        "registry access marker has no exact current attempt binding"
+    );
+    let attempt_id = marker
+        .attempt_id
+        .as_deref()
+        .context("registry access attempt ID is missing")?;
+    let staging_dir = marker
+        .staging_dir
+        .as_deref()
+        .context("registry access staging path is missing")?;
+    let handoff_sha256 = marker
+        .handoff_sha256
+        .as_deref()
+        .context("registry access handoff SHA is missing")?;
+    let wire_profile = marker
+        .wire_profile
+        .context("registry access wire profile is missing")?;
+    let result =
+        crate::archive_v2::registry_reprocess::probe_registry_reprocess_access_continuation_state(
+            staging_dir,
+            &marker.source,
+            &marker.target,
+            epoch,
+            attempt_id,
+            handoff_sha256,
+            wire_profile,
+        )?;
+    anyhow::ensure!(
+        result.core_result.handoff_sha256 == handoff_sha256
+            && result.core_result.wire_profile == wire_profile,
+        "registry access continuation returned a different handoff or wire profile"
+    );
+    Ok(result)
+}
+
+fn transition_registry_core_to_access_required(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    reason: String,
+) -> Result<String> {
+    anyhow::ensure!(
+        expected.state == "core_running"
+            && expected.phase == Some(RegistryReprocessPhase::Core)
+            && expected.handoff_sha256.is_none()
+            && expected.expected_access_state.is_none()
+            && registry_reprocess_marker_has_attempt(config, epoch, expected),
+        "core completion transition does not own an exact core attempt"
+    );
+    let result = probe_registry_reprocess_core_handoff(config, epoch, expected)?;
+    let mut replacement = expected.clone();
+    replacement.state = "block_access_rebuild_required".to_string();
+    replacement.phase = Some(RegistryReprocessPhase::Access);
+    replacement.handoff_sha256 = Some(result.handoff_sha256.clone());
+    replacement.expected_access_state = None;
+    replacement.pid = None;
+    replacement.process_start_ticks = None;
+    replacement.message = Some(reason);
+    replacement.updated_unix_secs = unix_now();
+    compare_and_publish_registry_reprocess_marker(config, epoch, expected, &replacement)?;
+    Ok(result.handoff_sha256)
+}
+
+fn transition_registry_access_to_final_auditing(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    reason: String,
+) -> Result<RegistryReprocessMarker> {
+    anyhow::ensure!(
+        expected.state == "access_running"
+            && expected.phase == Some(RegistryReprocessPhase::Access)
+            && expected.handoff_sha256.is_some()
+            && expected.expected_access_state.is_some()
+            && registry_reprocess_marker_has_attempt(config, epoch, expected),
+        "access completion transition does not own an exact access attempt"
+    );
+    let mut replacement = expected.clone();
+    replacement.state = "final_auditing".to_string();
+    replacement.expected_access_state = None;
+    replacement.pid = None;
+    replacement.process_start_ticks = None;
+    replacement.message = Some(reason);
+    replacement.updated_unix_secs = unix_now();
+    compare_and_publish_registry_reprocess_marker(config, epoch, expected, &replacement)?;
+    Ok(replacement)
+}
+
+fn transition_registry_access_to_pending(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    reason: String,
+) -> Result<()> {
+    anyhow::ensure!(
+        expected.state == "access_running"
+            && expected.phase == Some(RegistryReprocessPhase::Access)
+            && expected.handoff_sha256.is_some()
+            && expected.expected_access_state.is_some()
+            && registry_reprocess_marker_has_attempt(config, epoch, expected),
+        "access retry transition does not own an exact access attempt"
+    );
+    probe_registry_reprocess_access_continuation(config, epoch, expected)?;
+    let mut replacement = expected.clone();
+    replacement.state = "block_access_rebuild_required".to_string();
+    replacement.expected_access_state = None;
+    replacement.pid = None;
+    replacement.process_start_ticks = None;
+    replacement.message = Some(reason);
+    replacement.updated_unix_secs = unix_now();
+    compare_and_publish_registry_reprocess_marker(config, epoch, expected, &replacement)
+}
+
+fn transition_registry_reprocess_failed(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    message: String,
+) -> Result<()> {
+    let mut replacement = expected.clone();
+    replacement.schema_version = if registry_reprocess_marker_has_attempt(config, epoch, expected) {
+        REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+    } else {
+        expected.schema_version
+    };
+    replacement.state = "failed".to_string();
+    replacement.pid = None;
+    replacement.process_start_ticks = None;
+    replacement.message = Some(message);
+    replacement.updated_unix_secs = unix_now();
+    compare_and_publish_registry_reprocess_marker(config, epoch, expected, &replacement)
+}
+
+fn transition_registry_reprocess_complete(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+) -> Result<()> {
+    anyhow::ensure!(
+        expected.state == "final_auditing",
+        "registry completion requires the durable final-auditing state"
+    );
+    let mut replacement = expected.clone();
+    replacement.state = "complete".to_string();
+    replacement.pid = None;
+    replacement.process_start_ticks = None;
+    replacement.message = None;
+    replacement.updated_unix_secs = unix_now();
+    compare_and_publish_registry_reprocess_marker(config, epoch, expected, &replacement)
+}
+
+fn ensure_profile_neutral_registry_pre_cas_proof_unchanged(
+    initial: &ProfileNeutralRegistryFinalRetryProof,
+    rechecked: &ProfileNeutralRegistryFinalRetryProof,
+) -> Result<()> {
+    anyhow::ensure!(
+        initial.marker_binding == rechecked.marker_binding,
+        "profile-neutral receipt or marker identity changed before completion CAS"
+    );
+    Ok(())
+}
+
+fn ensure_profile_neutral_registry_receipt_binding_unchanged(
+    initial: &ProfileNeutralRegistryFinalRetryProof,
+    rechecked: &ProfileNeutralRegistryFinalRetryProof,
+) -> Result<()> {
+    anyhow::ensure!(
+        initial.marker_binding.recovery_receipt_path
+            == rechecked.marker_binding.recovery_receipt_path
+            && initial.marker_binding.recovery_receipt_sha256
+                == rechecked.marker_binding.recovery_receipt_sha256
+            && initial.marker_binding.recovery_receipt_identity
+                == rechecked.marker_binding.recovery_receipt_identity,
+        "profile-neutral recovery receipt identity or content changed across completion CAS"
+    );
+    Ok(())
+}
+
+fn complete_registry_reprocess_after_bounded_probe(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    epoch_lock: Option<&File>,
+) -> Result<()> {
+    complete_registry_reprocess_after_bounded_probe_with_hook(
+        config,
+        runtime,
+        epoch,
+        expected,
+        epoch_lock,
+        || Ok(()),
+    )
+}
+
+fn complete_registry_reprocess_after_bounded_probe_with_hook<F>(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    epoch_lock: Option<&File>,
+    before_complete_cas: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    complete_registry_reprocess_after_bounded_probe_inner(
+        config,
+        runtime,
+        epoch,
+        expected,
+        epoch_lock,
+        None,
+        before_complete_cas,
+    )
+}
+
+#[cfg(test)]
+fn complete_registry_reprocess_after_bounded_probe_with_authority_sha256_and_hook<F>(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    expected: &RegistryReprocessMarker,
+    epoch_lock: Option<&File>,
+    before_complete_cas: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    complete_registry_reprocess_after_bounded_probe_inner(
+        config,
+        runtime,
+        authority.epoch,
+        expected,
+        epoch_lock,
+        Some((authority, authority_sha256)),
+        before_complete_cas,
+    )
+}
+
+fn complete_registry_reprocess_after_bounded_probe_inner<F>(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    expected: &RegistryReprocessMarker,
+    epoch_lock: Option<&File>,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+    before_complete_cas: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let incident = profile_neutral_registry_incident_contract_applies(
+        config,
+        runtime,
+        epoch,
+        Some(expected),
+        authority_override,
+    );
+    let result = (|| {
+        if incident {
+            let epoch_lock = epoch_lock.context(
+                "profile-neutral bounded completion does not hold the epoch writer lock",
+            )?;
+            ensure_profile_neutral_registry_lock_unchanged(config, epoch, epoch_lock)?;
+            let initial_proof = validate_profile_neutral_registry_completion_proof(
+                config,
+                epoch,
+                expected,
+                authority_override,
+            )
+            .context("profile-neutral proof failed before bounded completion race window")?;
+            before_complete_cas()?;
+            ensure_profile_neutral_registry_lock_unchanged(config, epoch, epoch_lock)?;
+            let pre_completion_proof = validate_profile_neutral_registry_completion_proof(
+                config,
+                epoch,
+                expected,
+                authority_override,
+            )
+            .context("profile-neutral proof failed immediately before bounded completion CAS")?;
+            ensure_profile_neutral_registry_pre_cas_proof_unchanged(
+                &initial_proof,
+                &pre_completion_proof,
+            )?;
+            let mut complete = expected.clone();
+            complete.state = "complete".to_string();
+            complete.pid = None;
+            complete.process_start_ticks = None;
+            complete.message = None;
+            complete.updated_unix_secs = unix_now();
+            compare_and_publish_profile_neutral_registry_marker(
+                config,
+                epoch,
+                expected,
+                &initial_proof.marker_binding.marker_identity,
+                &complete,
+            )?;
+            let final_proof = validate_profile_neutral_registry_completion_proof(
+                config,
+                epoch,
+                &complete,
+                authority_override,
+            )
+            .context("profile-neutral proof failed after bounded completion CAS")?;
+            ensure_profile_neutral_registry_receipt_binding_unchanged(
+                &pre_completion_proof,
+                &final_proof,
+            )?;
+            cache_profile_neutral_registry_incident_binding(runtime, &final_proof);
+        } else {
+            before_complete_cas()?;
+            transition_registry_reprocess_complete(config, epoch, expected)?;
+        }
+        runtime.validated_registry_reprocesses.insert(epoch);
+        Ok(())
+    })();
+    if result.is_err() && incident {
+        clear_profile_neutral_registry_incident_caches(runtime, epoch);
+    }
+    result
+}
+
+fn registry_reprocess_marker_matches_child(
+    config: &SchedulerConfig,
+    marker: &RegistryReprocessMarker,
+    child: &ManagedChild,
+) -> bool {
+    let ChildKind::RegistryReprocess {
+        epoch,
+        phase,
+        attempt_id,
+        staging_dir,
+        handoff_sha256,
+        expected_access_state,
+        wire_profile,
+        ..
+    } = &child.kind
+    else {
+        return false;
+    };
+    registry_reprocess_marker_claims(config, *epoch, marker)
+        && registry_reprocess_marker_has_attempt(config, *epoch, marker)
+        && marker.state == phase.running_state()
+        && marker.phase == Some(*phase)
+        && marker.expected_access_state == *expected_access_state
+        && marker.attempt_id.as_deref() == Some(attempt_id.as_str())
+        && marker.staging_dir.as_deref() == Some(staging_dir.as_path())
+        && marker.handoff_sha256 == *handoff_sha256
+        && marker.wire_profile == *wire_profile
+        && marker.pid == child.pid
+        && marker.process_start_ticks.is_some()
+}
+
+fn discard_failed_registry_core_attempt(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> Result<()> {
+    anyhow::ensure!(
+        marker.state == "failed"
+            && marker.phase == Some(RegistryReprocessPhase::Core)
+            && registry_reprocess_marker_identity_is_clear(marker)
+            && marker.handoff_sha256.is_none()
+            && marker.expected_access_state.is_none()
+            && registry_reprocess_marker_has_attempt(config, epoch, marker),
+        "failed core marker is not an exact discardable attempt"
+    );
+    let staging = marker
+        .staging_dir
+        .as_deref()
+        .context("failed core staging path is missing")?;
+    let metadata = match fs::symlink_metadata(staging) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect failed core staging {}", staging.display()));
+        }
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_dir()
+            && metadata.permissions().mode() & 0o777 == 0o700
+            && metadata.uid() == unsafe { libc::geteuid() as u32 },
+        "failed core staging is not a scheduler-owned mode-0700 directory"
+    );
+    let mut entries = fs::read_dir(staging)
+        .with_context(|| format!("read failed core staging {}", staging.display()))?;
+    if entries.next().is_none() {
+        fs::remove_dir(staging)
+            .with_context(|| format!("remove empty failed core staging {}", staging.display()))?;
+        File::open(staging.parent().context("registry staging has no parent")?)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("sync registry staging parent for {}", staging.display()))?;
+        return Ok(());
+    }
+    crate::archive_v2::registry_reprocess::discard_registry_reprocess_core_partial(
+        staging,
+        &marker.source,
+        &marker.target,
+        epoch,
+        marker
+            .attempt_id
+            .as_deref()
+            .expect("attempt binding checked"),
+    )
+}
+
+fn validate_profile_neutral_core_retry_admission(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: Option<&RegistryReprocessMarker>,
+    admitted: Option<&ProfileNeutralRegistryIncidentProofBinding>,
+) -> Result<()> {
+    let candidate = profile_neutral_registry_rebuild_authority(epoch).is_some()
+        || admitted.is_some()
+        || marker.is_some_and(|marker| {
+            profile_neutral_registry_rebuild_incident_candidate(config, epoch, marker)
+        });
+    anyhow::ensure!(
+        candidate == admitted.is_some(),
+        "profile-neutral final retry admission changed before the epoch lock was acquired"
+    );
+    if candidate {
+        let marker = marker.context("profile-neutral final retry marker disappeared")?;
+        anyhow::ensure!(
+            profile_neutral_registry_incident_binding_matches_marker(
+                config,
+                epoch,
+                marker,
+                admitted.context("profile-neutral final retry cache binding disappeared")?,
+            ),
+            "profile-neutral final retry marker differs from the cached proof binding"
+        );
+        let authority = profile_neutral_registry_rebuild_authority(epoch)
+            .context("profile-neutral final retry has no compiled authority")?;
+        validate_profile_neutral_registry_incident_proof(config, authority, marker, true, true)
+            .context("profile-neutral final retry proof failed under the epoch lock")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_profile_neutral_core_retry_admission_with_authority_sha256(
+    config: &SchedulerConfig,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    marker: Option<&RegistryReprocessMarker>,
+    admitted: bool,
+) -> Result<()> {
+    let candidate = admitted
+        || marker.is_some_and(|marker| {
+            profile_neutral_registry_rebuild_incident_candidate_with_authority(
+                config, authority, marker,
+            )
+        });
+    anyhow::ensure!(
+        candidate == admitted,
+        "profile-neutral test retry admission changed before the epoch lock"
+    );
+    if candidate {
+        validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+            config,
+            authority,
+            authority_sha256,
+            marker.context("profile-neutral test retry marker disappeared")?,
+            true,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+async fn spawn_registry_reprocess_core(
     config: &SchedulerConfig,
     epoch: &EpochSnapshot,
+    profile_neutral_final_retry_admitted: Option<ProfileNeutralRegistryIncidentProofBinding>,
 ) -> Result<Option<ManagedChild>> {
     anyhow::ensure!(
         poh_process_table_observable(),
@@ -13853,32 +20969,63 @@ async fn spawn_registry_reprocess(
     else {
         return Ok(None);
     };
-    fs::create_dir_all(&config.registry_reprocess_target_root).with_context(|| {
-        format!(
-            "create registry reprocess target root {}",
-            config.registry_reprocess_target_root.display()
-        )
-    })?;
-    write_registry_reprocess_marker(
+    let marker_after_lock = read_registry_reprocess_marker_strict(&config.state_root, epoch.epoch)?;
+    validate_profile_neutral_core_retry_admission(
         config,
         epoch.epoch,
-        "running",
-        Some("rewriting first-seen registry IDs into a usage-sorted generation".to_string()),
+        marker_after_lock.as_ref(),
+        profile_neutral_final_retry_admitted.as_ref(),
     )?;
+    anyhow::ensure!(
+        epoch.output_path == config.archive_root.join(format!("epoch-{}", epoch.epoch)),
+        "registry source inventory path changed before core admission"
+    );
+    registry_reprocess_core_hard_link_preflight(config, epoch)?;
+    let wire_profile = config
+        .registry_reprocess_wire_profile
+        .context("enabled registry reprocessing requires one wire profile")?;
+    let (attempt_id, staging_dir) = new_registry_reprocess_attempt(config, epoch.epoch)?;
+    if let Err(error) = write_registry_reprocess_core_marker(
+        config,
+        epoch.epoch,
+        attempt_id.clone(),
+        staging_dir.clone(),
+    ) {
+        // The marker never bound this new empty directory, so no worker can own it.
+        let _ = fs::remove_dir(&staging_dir);
+        return Err(error);
+    }
     let source = epoch.output_path.clone();
     let target = registry_reprocess_target(config, epoch.epoch);
     let progress_path = registry_reprocess_progress_path(&config.state_root, epoch.epoch);
     let log_path = config
         .state_root
         .join("logs")
-        .join(format!("epoch-{}-registry-reprocess.log", epoch.epoch));
-    let args = registry_reprocess_args(config, &source, &target, epoch.epoch);
+        .join(format!("epoch-{}-registry-reprocess-core.log", epoch.epoch));
+    let args = registry_reprocess_core_args(
+        config,
+        &source,
+        &target,
+        epoch.epoch,
+        &attempt_id,
+        &staging_dir,
+        wire_profile,
+        profile_neutral_final_retry_admitted
+            .as_ref()
+            .map(|proof| proof.recovery_receipt_path.as_path()),
+    );
     let result = spawn_child(
         config,
         args,
         ChildKind::RegistryReprocess {
             epoch: epoch.epoch,
             target,
+            phase: RegistryReprocessPhase::Core,
+            attempt_id,
+            staging_dir,
+            handoff_sha256: None,
+            expected_access_state: None,
+            wire_profile: Some(wire_profile),
         },
         progress_path,
         log_path,
@@ -13891,6 +21038,146 @@ async fn spawn_registry_reprocess(
             epoch.epoch,
             "failed",
             Some(format!("registry reprocess spawn failed: {error:#}")),
+        );
+    }
+    result.map(Some)
+}
+
+async fn spawn_registry_reprocess_access(
+    config: &SchedulerConfig,
+    epoch: u64,
+    expected_admission: RegistryReprocessAccessAdmission,
+    profile_neutral_incident_admitted: Option<ProfileNeutralRegistryIncidentProofBinding>,
+) -> Result<Option<ManagedChild>> {
+    anyhow::ensure!(
+        poh_process_table_observable(),
+        "registry access spawn requires an observable Linux /proc process table"
+    );
+    anyhow::ensure!(
+        find_registry_reprocess_processes(config, epoch).is_some_and(|pids| pids.is_empty()),
+        "registry reprocess process ownership for epoch {epoch} is live or unobservable"
+    );
+    let Some(lock) = try_exclusive_lock(&registry_reprocess_lock_path(&config.state_root, epoch))?
+    else {
+        return Ok(None);
+    };
+    let marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)?
+        .context("registry access-ready marker disappeared before spawn")?;
+    let incident_candidate = profile_neutral_registry_rebuild_authority(epoch).is_some()
+        || profile_neutral_incident_admitted.is_some()
+        || profile_neutral_registry_rebuild_incident_candidate(config, epoch, &marker);
+    anyhow::ensure!(
+        incident_candidate == profile_neutral_incident_admitted.is_some(),
+        "profile-neutral access admission changed before the epoch lock was acquired"
+    );
+    if incident_candidate {
+        anyhow::ensure!(
+            profile_neutral_registry_incident_binding_matches_marker(
+                config,
+                epoch,
+                &marker,
+                profile_neutral_incident_admitted
+                    .as_ref()
+                    .context("profile-neutral access cache binding disappeared")?,
+            ),
+            "profile-neutral access marker differs from the cached proof binding"
+        );
+        let authority = profile_neutral_registry_rebuild_authority(epoch)
+            .context("profile-neutral access retry has no compiled authority")?;
+        validate_profile_neutral_registry_incident_proof(config, authority, &marker, false, true)
+            .context("profile-neutral access proof failed under the epoch lock")?;
+    }
+    anyhow::ensure!(
+        registry_reprocess_marker_claims(config, epoch, &marker)
+            && registry_reprocess_marker_has_attempt(config, epoch, &marker)
+            && marker.state == "block_access_rebuild_required"
+            && marker.phase == Some(RegistryReprocessPhase::Access)
+            && marker.expected_access_state.is_none()
+            && registry_reprocess_marker_identity_is_clear(&marker),
+        "registry access marker is not an exact pending continuation"
+    );
+    let probe = probe_registry_reprocess_access_continuation_state(config, epoch, &marker)?;
+    let wire_profile = marker
+        .wire_profile
+        .context("registry access marker omits its wire profile")?;
+    let attempt_id = marker
+        .attempt_id
+        .clone()
+        .context("registry access attempt ID is missing")?;
+    let staging_dir = marker
+        .staging_dir
+        .clone()
+        .context("registry access staging path is missing")?;
+    if !registry_reprocess_access_spawn_admission_matches(
+        &staging_dir,
+        expected_admission,
+        probe.state,
+    )? {
+        // The marker remains AccessReady. Drop the lock and recompute the exact state and
+        // resources on the next poll; a state race is not a durable worker failure.
+        return Ok(None);
+    }
+    let handoff_sha256 = probe.core_result.handoff_sha256;
+    let expected_access_state = RegistryReprocessExpectedAccessState::from(probe.state);
+    let mut running = marker.clone();
+    running.state = "access_running".to_string();
+    running.phase = Some(RegistryReprocessPhase::Access);
+    running.handoff_sha256 = Some(handoff_sha256.clone());
+    running.expected_access_state = Some(expected_access_state);
+    running.pid = None;
+    running.process_start_ticks = None;
+    running.updated_unix_secs = unix_now();
+    running.message = Some(match expected_access_state {
+        RegistryReprocessExpectedAccessState::ReceiptReady => {
+            "publishing the validated receipt-ready registry generation".to_string()
+        }
+        RegistryReprocessExpectedAccessState::CoreOrPartialRebuild => {
+            "building block access from the durable core handoff".to_string()
+        }
+    });
+    compare_and_publish_registry_reprocess_marker(config, epoch, &marker, &running)?;
+    let progress_path = registry_reprocess_progress_path(&config.state_root, epoch);
+    let log_path = config
+        .state_root
+        .join("logs")
+        .join(format!("epoch-{epoch}-registry-access.log"));
+    let args = registry_reprocess_access_args(
+        &running.source,
+        &staging_dir,
+        &running.target,
+        epoch,
+        &attempt_id,
+        &handoff_sha256,
+        expected_access_state,
+        wire_profile,
+        profile_neutral_incident_admitted
+            .as_ref()
+            .map(|proof| proof.recovery_receipt_path.as_path()),
+    );
+    let result = spawn_child(
+        config,
+        args,
+        ChildKind::RegistryReprocess {
+            epoch,
+            target: running.target.clone(),
+            phase: RegistryReprocessPhase::Access,
+            attempt_id,
+            staging_dir,
+            handoff_sha256: Some(handoff_sha256),
+            expected_access_state: Some(expected_access_state),
+            wire_profile: Some(wire_profile),
+        },
+        progress_path,
+        log_path,
+        Some(lock),
+    )
+    .await;
+    if let Err(error) = &result {
+        let _ = write_registry_reprocess_marker(
+            config,
+            epoch,
+            "failed",
+            Some(format!("registry access spawn failed: {error:#}")),
         );
     }
     result.map(Some)
@@ -13931,6 +21218,27 @@ struct PohMigrationMarkerFileIdentity {
     changed_nanos: i64,
 }
 
+struct DurablePohCompletionMarkerTemp {
+    path: PathBuf,
+    published: bool,
+}
+
+impl Drop for DurablePohCompletionMarkerTemp {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "failed to remove incomplete repaired-PoH completion marker temp {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
 fn poh_migration_marker_file_identity(metadata: &fs::Metadata) -> PohMigrationMarkerFileIdentity {
     PohMigrationMarkerFileIdentity {
         device: metadata.dev(),
@@ -13955,6 +21263,14 @@ fn read_poh_migration_marker_strict(
     state_root: &Path,
     epoch: u64,
 ) -> Result<Option<PohMigrationMarker>> {
+    read_poh_migration_marker_strict_with_identity(state_root, epoch)
+        .map(|marker| marker.map(|(marker, _)| marker))
+}
+
+fn read_poh_migration_marker_strict_with_identity(
+    state_root: &Path,
+    epoch: u64,
+) -> Result<Option<(PohMigrationMarker, PohMigrationMarkerFileIdentity)>> {
     let path = poh_migration_marker_path(state_root, epoch);
     let mut file = match open_readonly_nonblocking_nofollow(&path) {
         Ok(file) => file,
@@ -14005,9 +21321,9 @@ fn read_poh_migration_marker_strict(
         "PoH migration marker {} was replaced while being read",
         path.display()
     );
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse PoH migration marker {}", path.display()))
-        .map(Some)
+    let marker = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse PoH migration marker {}", path.display()))?;
+    Ok(Some((marker, opened_identity)))
 }
 
 fn publish_poh_migration_marker(
@@ -14118,12 +21434,163 @@ fn compare_and_transition_failed_poh_marker_to_retry_ready(
     publish_poh_migration_marker(state_root, epoch, &retry_ready)
 }
 
+fn repaired_poh_completion_marker_message(proof_binding: &str) -> Result<String> {
+    let digest = proof_binding
+        .strip_prefix("poh_orphan_repair_completion_v1:")
+        .context("repaired PoH completion proof has the wrong domain")?;
+    anyhow::ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "repaired PoH completion proof digest is not lowercase SHA-256"
+    );
+    Ok(proof_binding.to_string())
+}
+
+fn repaired_poh_complete_marker_matches(
+    marker: &PohMigrationMarker,
+    epoch: u64,
+    proof_binding: &str,
+) -> bool {
+    poh_migration_marker_claims_epoch(marker, epoch)
+        && marker.state == "complete"
+        && marker.message.as_deref() == Some(proof_binding)
+        && marker.pid.is_none()
+        && marker.process_start_ticks.is_none()
+        && marker.worker_threads.is_none()
+}
+
+fn compare_and_transition_failed_poh_marker_to_repaired_complete(
+    state_root: &Path,
+    epoch: u64,
+    expected: &PohMigrationMarker,
+    expected_identity: PohMigrationMarkerFileIdentity,
+    proof_binding: &str,
+) -> Result<PohMigrationMarker> {
+    anyhow::ensure!(
+        epoch == crate::archive_verify::EPOCH_998_POH_ORPHAN_REPAIR_EPOCH,
+        "manual repaired-PoH completion is restricted to epoch 998"
+    );
+    anyhow::ensure!(
+        poh_migration_marker_claims_epoch(expected, epoch)
+            && expected.state == "failed"
+            && expected.pid.is_none()
+            && expected.process_start_ticks.is_none()
+            && expected.worker_threads.is_none(),
+        "repaired-PoH completion requires the exact failed schema-2 marker with clear process identity"
+    );
+    let proof_binding = repaired_poh_completion_marker_message(proof_binding)?;
+    let replacement = PohMigrationMarker {
+        schema_version: SCHEMA_VERSION,
+        kind: POH_MIGRATION_OWNERSHIP_KIND.to_string(),
+        id: epoch.to_string(),
+        state: "complete".to_string(),
+        created_unix_secs: expected.created_unix_secs,
+        updated_unix_secs: unix_now(),
+        message: Some(proof_binding),
+        pid: None,
+        process_start_ticks: None,
+        worker_threads: None,
+    };
+    let path = poh_migration_marker_path(state_root, epoch);
+    let parent = path
+        .parent()
+        .context("PoH migration marker has no parent")?;
+    let temp_path = path.with_file_name(format!(
+        ".epoch-{epoch}.json.repaired-completion.{}.tmp",
+        std::process::id()
+    ));
+    let mut temp = DurablePohCompletionMarkerTemp {
+        path: temp_path.clone(),
+        published: false,
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&temp_path)
+        .with_context(|| {
+            format!(
+                "create repaired-PoH completion marker temp {}",
+                temp_path.display()
+            )
+        })?;
+    let mut bytes = serde_json::to_vec_pretty(&replacement)?;
+    bytes.push(b'\n');
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_POH_MIGRATION_MARKER_BYTES,
+        "repaired-PoH completion marker exceeds its size bound"
+    );
+    file.write_all(&bytes)
+        .context("write repaired-PoH completion marker temp")?;
+    file.flush()
+        .context("flush repaired-PoH completion marker temp")?;
+    file.sync_all()
+        .context("sync repaired-PoH completion marker temp")?;
+    drop(file);
+
+    let current = read_poh_migration_marker_strict_with_identity(state_root, epoch)?
+        .context("PoH migration marker disappeared before repaired completion CAS")?;
+    anyhow::ensure!(
+        current.0 == *expected && current.1 == expected_identity,
+        "PoH migration marker value or file identity changed before repaired completion CAS"
+    );
+    fs::rename(&temp_path, &path).with_context(|| {
+        format!(
+            "publish repaired-PoH completion marker {} -> {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    temp.published = true;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("sync PoH migration marker directory {}", parent.display()))?;
+    let published = read_poh_migration_marker_strict_with_identity(state_root, epoch)?
+        .context("repaired-PoH completion marker disappeared after publication")?;
+    anyhow::ensure!(
+        published.0 == replacement,
+        "published repaired-PoH completion marker differs from the exact replacement"
+    );
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect repaired-PoH completion marker {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o777 == 0o600,
+        "published repaired-PoH completion marker is not one euid-owned mode-0600 regular file"
+    );
+    Ok(replacement)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PohMigrationStatus {
     NotEligible,
     Ready,
     AlreadyMigrated,
     RetryReady,
+}
+
+fn poh_migration_epoch_is_runnable(
+    config: &SchedulerConfig,
+    runtime: &RuntimeState,
+    epoch: u64,
+) -> bool {
+    let failure_key = format!("poh_migration:{epoch}");
+    (config.poh_migration_concurrency > 0
+        || config.poh_migration_capacity_max > 0
+        || runtime.poh_migration_capacity > 0)
+        && !runtime.poh_migration_admission_blocked
+        && !runtime.poh_migrations.contains_key(&epoch)
+        && !runtime.adopted_poh_migrations.contains_key(&epoch)
+        && !runtime.failures.contains_key(&failure_key)
+        && matches!(
+            poh_migration_status(config, epoch),
+            PohMigrationStatus::Ready | PohMigrationStatus::RetryReady
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14170,6 +21637,21 @@ fn poh_migration_argv_any_binary(
         .split(|byte| *byte == 0)
         .collect::<Vec<_>>();
     poh_migration_argv_args(&args, archive_dir)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn poh_target_writer_argv_any_binary(bytes: &[u8], archive_dir: &Path) -> bool {
+    if poh_migration_argv_any_binary(bytes, archive_dir).is_some() {
+        return true;
+    }
+    if bytes.last() != Some(&0) {
+        return false;
+    }
+    let args = bytes[..bytes.len().saturating_sub(1)]
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>();
+    args.get(1).copied() == Some(b"repair-poh-orphan-tail")
+        && args.get(2).copied() == Some(archive_dir.as_os_str().as_bytes())
 }
 
 fn poh_migration_argv_args(args: &[&[u8]], archive_dir: &Path) -> Option<PohMigrationProcessArgv> {
@@ -14339,6 +21821,52 @@ fn find_poh_migration_processes(config: &SchedulerConfig, epoch: u64) -> PohProc
 
 #[cfg(not(target_os = "linux"))]
 fn find_poh_migration_processes(_config: &SchedulerConfig, _epoch: u64) -> PohProcessScan {
+    PohProcessScan::Unobservable
+}
+
+#[cfg(target_os = "linux")]
+fn find_poh_target_writer_processes(config: &SchedulerConfig, epoch: u64) -> PohProcessScan {
+    if !poh_process_table_observable() {
+        return PohProcessScan::Unobservable;
+    }
+    let output = config.archive_root.join(format!("epoch-{epoch}"));
+    let entries = match fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(_) => return PohProcessScan::Unobservable,
+    };
+    let mut pids = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return PohProcessScan::Unobservable,
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let bytes = match fs::read(entry.path().join("cmdline")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match observe_poh_pid(pid) {
+                PohPidObservation::Absent | PohPidObservation::NotRunning => continue,
+                PohPidObservation::Running { .. } | PohPidObservation::Unobservable => {
+                    return PohProcessScan::Unobservable;
+                }
+            },
+            Err(_) => return PohProcessScan::Unobservable,
+        };
+        if poh_target_writer_argv_any_binary(&bytes, &output) {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    PohProcessScan::Observable(pids)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn find_poh_target_writer_processes(_config: &SchedulerConfig, _epoch: u64) -> PohProcessScan {
     PohProcessScan::Unobservable
 }
 
@@ -14855,21 +22383,73 @@ fn reconcile_poh_migration_markers(config: &SchedulerConfig, runtime: &mut Runti
     }
 }
 
-fn registry_reprocess_expected_argv(config: &SchedulerConfig, epoch: u64) -> Vec<Vec<u8>> {
-    let source = config.archive_root.join(format!("epoch-{epoch}"));
-    let target = registry_reprocess_target(config, epoch);
+fn registry_reprocess_expected_argv(
+    config: &SchedulerConfig,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+) -> Option<Vec<Vec<u8>>> {
+    if !registry_reprocess_marker_claims(config, epoch, marker) {
+        return None;
+    }
+    let authority_receipt = if profile_neutral_registry_rebuild_marker_has_lineage(marker) {
+        Some(profile_neutral_registry_rebuild_receipt_path(
+            &config.state_root,
+            profile_neutral_registry_rebuild_authority(epoch)?,
+        ))
+    } else {
+        None
+    };
+    let args = match marker.phase {
+        None if registry_reprocess_marker_is_legacy(marker) && marker.state == "running" => {
+            registry_reprocess_legacy_args(config, &marker.source, &marker.target, epoch)?
+        }
+        Some(RegistryReprocessPhase::Core)
+            if marker.state == "core_running"
+                && marker.handoff_sha256.is_none()
+                && marker.expected_access_state.is_none()
+                && registry_reprocess_marker_has_attempt(config, epoch, marker) =>
+        {
+            registry_reprocess_core_args(
+                config,
+                &marker.source,
+                &marker.target,
+                epoch,
+                marker.attempt_id.as_deref()?,
+                marker.staging_dir.as_deref()?,
+                marker.wire_profile?,
+                authority_receipt.as_deref(),
+            )
+        }
+        Some(RegistryReprocessPhase::Access)
+            if marker.state == "access_running"
+                && registry_reprocess_marker_has_attempt(config, epoch, marker) =>
+        {
+            registry_reprocess_access_args(
+                &marker.source,
+                marker.staging_dir.as_deref()?,
+                &marker.target,
+                epoch,
+                marker.attempt_id.as_deref()?,
+                marker.handoff_sha256.as_deref()?,
+                marker.expected_access_state?,
+                marker.wire_profile?,
+                authority_receipt.as_deref(),
+            )
+        }
+        _ => return None,
+    };
     let mut expected = vec![config.blockzilla_bin.as_os_str().as_bytes().to_vec()];
     expected.extend(
-        registry_reprocess_args(config, &source, &target, epoch)
-            .into_iter()
+        args.into_iter()
             .map(|arg| arg.as_os_str().as_bytes().to_vec()),
     );
-    expected
+    Some(expected)
 }
 
 fn registry_reprocess_argv_matches_exact(
     config: &SchedulerConfig,
     epoch: u64,
+    marker: &RegistryReprocessMarker,
     bytes: &[u8],
 ) -> bool {
     if bytes.last() != Some(&0) {
@@ -14879,8 +22459,8 @@ fn registry_reprocess_argv_matches_exact(
         .split(|byte| *byte == 0)
         .map(<[u8]>::to_vec)
         .collect::<Vec<_>>();
-    let expected = registry_reprocess_expected_argv(config, epoch);
-    actual == expected
+    registry_reprocess_expected_argv(config, epoch, marker)
+        .is_some_and(|expected| actual == expected)
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -14939,11 +22519,12 @@ fn registry_reprocess_argv_is_potential_writer(
     let args = bytes[..bytes.len().saturating_sub(1)]
         .split(|byte| *byte == 0)
         .collect::<Vec<_>>();
-    if args.get(1).copied() != Some(b"reprocess-archive-v2-registry") {
+    if !matches!(
+        args.get(1).copied(),
+        Some(b"reprocess-archive-v2-registry" | b"complete-archive-v2-registry-access")
+    ) {
         return false;
     }
-
-    let mut positionals = Vec::with_capacity(2);
     let mut parsed_epoch = None;
     let mut index = 2usize;
     while index < args.len() {
@@ -14965,45 +22546,31 @@ fn registry_reprocess_argv_is_potential_writer(
             index += 1;
             continue;
         }
-        if matches!(arg, b"--threads" | b"--sort-memory-mib" | b"--level") {
-            if args.get(index + 1).is_none() {
-                return false;
-            }
-            index += 2;
-            continue;
-        }
-        if arg.starts_with(b"--threads=")
-            || arg.starts_with(b"--sort-memory-mib=")
-            || arg.starts_with(b"--level=")
-        {
-            index += 1;
-            continue;
-        }
-        if arg.starts_with(b"--") {
-            // Unknown options cannot safely be classified because their following value may be
-            // positional-looking. Fail closed at spawn through the marker/lock if this is a
-            // scheduler child, but do not confuse an unrelated command with this target here.
-            return false;
-        }
-        positionals.push(arg);
         index += 1;
     }
-    if parsed_epoch != Some(epoch) || positionals.len() != 2 {
+    if parsed_epoch != Some(epoch) {
         return false;
     }
-    process_argv_path_matches(
-        positionals[0],
-        &config.archive_root.join(format!("epoch-{epoch}")),
-    ) && process_argv_path_matches(positionals[1], &registry_reprocess_target(config, epoch))
+    let source = config.archive_root.join(format!("epoch-{epoch}"));
+    let target = registry_reprocess_target(config, epoch);
+    args[2..]
+        .iter()
+        .any(|arg| process_argv_path_matches(arg, &source))
+        && args[2..]
+            .iter()
+            .any(|arg| process_argv_path_matches(arg, &target))
 }
 
 fn process_cmdline_matches_registry_reprocess_exact(
     config: &SchedulerConfig,
     epoch: u64,
+    marker: &RegistryReprocessMarker,
     pid: u32,
 ) -> Option<bool> {
     let bytes = fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")).ok()?;
-    Some(registry_reprocess_argv_matches_exact(config, epoch, &bytes))
+    Some(registry_reprocess_argv_matches_exact(
+        config, epoch, marker, &bytes,
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -15062,15 +22629,36 @@ fn inspect_running_registry_reprocess(
     epoch: u64,
     marker: &RegistryReprocessMarker,
 ) -> RegistryReprocessLiveness {
-    if !registry_reprocess_marker_claims(config, epoch, marker) || marker.state != "running" {
+    if !registry_reprocess_marker_claims(config, epoch, marker) {
         return RegistryReprocessLiveness::Unobservable;
     }
+    let phase = match (marker.phase, marker.state.as_str()) {
+        (None, "running") if registry_reprocess_marker_is_legacy(marker) => {
+            RegistryReprocessPhase::Legacy
+        }
+        (Some(RegistryReprocessPhase::Core), "core_running")
+            if marker.handoff_sha256.is_none()
+                && marker.expected_access_state.is_none()
+                && registry_reprocess_marker_has_attempt(config, epoch, marker) =>
+        {
+            RegistryReprocessPhase::Core
+        }
+        (Some(RegistryReprocessPhase::Access), "access_running")
+            if registry_reprocess_marker_has_attempt(config, epoch, marker)
+                && marker.handoff_sha256.is_some()
+                && marker.expected_access_state.is_some() =>
+        {
+            RegistryReprocessPhase::Access
+        }
+        _ => return RegistryReprocessLiveness::Unobservable,
+    };
     if let (Some(pid), Some(expected_start_ticks)) = (marker.pid, marker.process_start_ticks) {
         match observe_poh_pid(pid) {
             PohPidObservation::Running {
                 process_start_ticks,
             } if process_start_ticks == expected_start_ticks => {
-                let exact = process_cmdline_matches_registry_reprocess_exact(config, epoch, pid);
+                let exact =
+                    process_cmdline_matches_registry_reprocess_exact(config, epoch, marker, pid);
                 if exact == Some(true) {
                     let stable = observe_poh_pid(pid).is_running_with(expected_start_ticks)
                         && read_registry_reprocess_marker_strict(&config.state_root, epoch)
@@ -15086,6 +22674,12 @@ fn inspect_running_registry_reprocess(
                                 epoch,
                             ),
                             identity_trusted: true,
+                            phase,
+                            attempt_id: marker.attempt_id.clone(),
+                            staging_dir: marker.staging_dir.clone(),
+                            handoff_sha256: marker.handoff_sha256.clone(),
+                            expected_access_state: marker.expected_access_state,
+                            wire_profile: marker.wire_profile,
                         });
                     }
                 }
@@ -15096,6 +22690,12 @@ fn inspect_running_registry_reprocess(
                     threads: None,
                     progress_path: registry_reprocess_progress_path(&config.state_root, epoch),
                     identity_trusted: false,
+                    phase,
+                    attempt_id: marker.attempt_id.clone(),
+                    staging_dir: marker.staging_dir.clone(),
+                    handoff_sha256: marker.handoff_sha256.clone(),
+                    expected_access_state: marker.expected_access_state,
+                    wire_profile: marker.wire_profile,
                 });
             }
             PohPidObservation::Unobservable => return RegistryReprocessLiveness::Unobservable,
@@ -15113,6 +22713,12 @@ fn inspect_running_registry_reprocess(
                     threads: None,
                     progress_path: registry_reprocess_progress_path(&config.state_root, epoch),
                     identity_trusted: false,
+                    phase,
+                    attempt_id: marker.attempt_id.clone(),
+                    staging_dir: marker.staging_dir.clone(),
+                    handoff_sha256: marker.handoff_sha256.clone(),
+                    expected_access_state: marker.expected_access_state,
+                    wire_profile: marker.wire_profile,
                 });
             }
             PohPidObservation::Unobservable => return RegistryReprocessLiveness::Unobservable,
@@ -15134,6 +22740,12 @@ fn inspect_running_registry_reprocess(
             threads: None,
             progress_path: registry_reprocess_progress_path(&config.state_root, epoch),
             identity_trusted: false,
+            phase,
+            attempt_id: marker.attempt_id.clone(),
+            staging_dir: marker.staging_dir.clone(),
+            handoff_sha256: marker.handoff_sha256.clone(),
+            expected_access_state: marker.expected_access_state,
+            wire_profile: marker.wire_profile,
         }),
         None => RegistryReprocessLiveness::Unobservable,
     }
@@ -15224,6 +22836,9 @@ fn reset_registry_reprocess_attempt_cache(runtime: &mut RuntimeState, epoch: u64
     runtime
         .registry_reprocess_audit_claim_failures
         .remove(&epoch);
+    runtime
+        .validated_profile_neutral_registry_rebuild_retries
+        .remove(&epoch);
 }
 
 fn registry_reprocess_audit_failure_message(
@@ -15253,6 +22868,231 @@ fn registry_reprocess_audit_failure_message(
     }
 }
 
+fn publish_registry_reprocess_audit_success(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    request: &RegistryReprocessAuditRequest,
+) -> Result<()> {
+    publish_registry_reprocess_audit_success_with_hook(config, runtime, request, || Ok(()))
+}
+
+fn publish_registry_reprocess_audit_success_with_hook<F>(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    request: &RegistryReprocessAuditRequest,
+    before_complete_cas: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    publish_registry_reprocess_audit_success_inner(
+        config,
+        runtime,
+        request,
+        None,
+        before_complete_cas,
+    )
+}
+
+#[cfg(test)]
+fn publish_registry_reprocess_audit_success_with_authority_sha256_and_hook<F>(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    request: &RegistryReprocessAuditRequest,
+    authority: &ProfileNeutralRegistryRebuildAuthority,
+    authority_sha256: &str,
+    before_complete_cas: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    publish_registry_reprocess_audit_success_inner(
+        config,
+        runtime,
+        request,
+        Some((authority, authority_sha256)),
+        before_complete_cas,
+    )
+}
+
+fn publish_registry_reprocess_audit_success_inner<F>(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    request: &RegistryReprocessAuditRequest,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+    before_complete_cas: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let epoch = request.epoch;
+    let current_marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)?;
+    let incident = profile_neutral_registry_incident_contract_applies(
+        config,
+        runtime,
+        epoch,
+        current_marker.as_ref(),
+        authority_override,
+    );
+    if !incident && current_marker.is_none() && request.admission.is_none() {
+        before_complete_cas()?;
+        write_registry_reprocess_marker(config, epoch, "complete", None)?;
+        runtime.validated_registry_reprocesses.insert(epoch);
+        return Ok(());
+    }
+    let current_marker =
+        current_marker.context("registry deep-audit marker disappeared before completion")?;
+    let result = (|| {
+        let _incident_lock = if incident {
+            Some(
+                try_exclusive_profile_neutral_registry_lock(config, epoch)?
+                    .context("profile-neutral deep-audit completion epoch lock is held")?,
+            )
+        } else {
+            None
+        };
+        let expected = if let Some(admission) = request.admission.as_ref() {
+            anyhow::ensure!(
+                current_marker == admission.marker,
+                "registry deep-audit marker changed before completion"
+            );
+            &admission.marker
+        } else {
+            &current_marker
+        };
+        let mut replacement = expected.clone();
+        if let Some(admission) = request.admission.as_ref() {
+            let final_receipt = probe_registry_reprocess_receipt(config, epoch)?;
+            if let Some(admitted_receipt) = admission.receipt.as_ref() {
+                anyhow::ensure!(
+                    &final_receipt == admitted_receipt,
+                    "registry receipt changed after deep-audit completion"
+                );
+            } else {
+                validate_registry_reprocess_receipt_marker_binding(
+                    config,
+                    epoch,
+                    &final_receipt,
+                    &admission.marker,
+                )?;
+            }
+            anyhow::ensure!(
+                final_receipt.threads == admission.threads,
+                "registry receipt thread count changed after deep-audit completion"
+            );
+            if let Some(receipt) = admission.receipt.as_ref() {
+                let wire_profile = receipt
+                    .wire_profile
+                    .context("admitted registry receipt has no wire profile")?;
+                let attempt_id = receipt
+                    .attempt_id
+                    .as_deref()
+                    .context("admitted profile-bound receipt has no attempt ID")?;
+                let handoff_sha256 = receipt
+                    .handoff_sha256
+                    .as_deref()
+                    .context("admitted profile-bound receipt has no handoff digest")?;
+                anyhow::ensure!(
+                    registry_reprocess_attempt_id_is_valid(attempt_id)
+                        && registry_reprocess_handoff_sha_is_valid(handoff_sha256),
+                    "admitted profile-bound receipt has invalid attempt provenance"
+                );
+                replacement.schema_version = REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION;
+                replacement.threads = receipt.threads;
+                replacement.wire_profile = Some(wire_profile);
+                replacement.phase = Some(RegistryReprocessPhase::Access);
+                replacement.attempt_id = Some(attempt_id.to_string());
+                replacement.staging_dir = Some(registry_reprocess_attempt_staging_path(
+                    config, epoch, attempt_id,
+                ));
+                replacement.handoff_sha256 = Some(handoff_sha256.to_string());
+                replacement.expected_access_state = None;
+            } else {
+                anyhow::ensure!(
+                    registry_reprocess_marker_has_attempt(config, epoch, &admission.marker),
+                    "receipt-less audit success has no exact profile-bound marker"
+                );
+                replacement.schema_version = REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION;
+            }
+        }
+        replacement.state = "complete".to_string();
+        replacement.pid = None;
+        replacement.process_start_ticks = None;
+        replacement.audit_retry_is_safe = false;
+        replacement.audit_is_continuation = false;
+        replacement.message = None;
+        replacement.updated_unix_secs = unix_now();
+        let initial_proof = if incident {
+            ensure_profile_neutral_registry_lock_unchanged(
+                config,
+                epoch,
+                _incident_lock
+                    .as_ref()
+                    .context("profile-neutral deep-audit completion lost its epoch lock")?,
+            )?;
+            Some(
+                validate_profile_neutral_registry_completion_proof(
+                    config,
+                    epoch,
+                    expected,
+                    authority_override,
+                )
+                .context("profile-neutral proof failed before deep-audit completion race window")?,
+            )
+        } else {
+            None
+        };
+        before_complete_cas()?;
+        if let Some(initial_proof) = initial_proof {
+            ensure_profile_neutral_registry_lock_unchanged(
+                config,
+                epoch,
+                _incident_lock
+                    .as_ref()
+                    .context("profile-neutral deep-audit completion lost its epoch lock")?,
+            )?;
+            let pre_completion_proof = validate_profile_neutral_registry_completion_proof(
+                config,
+                epoch,
+                expected,
+                authority_override,
+            )
+            .context("profile-neutral proof failed immediately before deep-audit completion CAS")?;
+            ensure_profile_neutral_registry_pre_cas_proof_unchanged(
+                &initial_proof,
+                &pre_completion_proof,
+            )?;
+            compare_and_publish_profile_neutral_registry_marker(
+                config,
+                epoch,
+                expected,
+                &initial_proof.marker_binding.marker_identity,
+                &replacement,
+            )?;
+            let final_proof = validate_profile_neutral_registry_completion_proof(
+                config,
+                epoch,
+                &replacement,
+                authority_override,
+            )
+            .context("profile-neutral proof failed after deep-audit completion CAS")?;
+            ensure_profile_neutral_registry_receipt_binding_unchanged(
+                &pre_completion_proof,
+                &final_proof,
+            )?;
+            cache_profile_neutral_registry_incident_binding(runtime, &final_proof);
+        } else {
+            compare_and_publish_registry_reprocess_marker(config, epoch, expected, &replacement)?;
+        }
+        runtime.validated_registry_reprocesses.insert(epoch);
+        Ok(())
+    })();
+    if result.is_err() && incident {
+        clear_profile_neutral_registry_incident_caches(runtime, epoch);
+    }
+    result
+}
+
 fn commit_registry_reprocess_audit(
     config: &SchedulerConfig,
     runtime: &mut RuntimeState,
@@ -15266,8 +23106,9 @@ fn commit_registry_reprocess_audit(
     let key = format!("registry_reprocess:{epoch}");
     match result {
         Ok(()) => {
-            if let Err(error) = write_registry_reprocess_marker(config, epoch, "complete", None) {
-                runtime.validated_registry_reprocesses.remove(&epoch);
+            if let Err(error) = publish_registry_reprocess_audit_success(config, runtime, &request)
+            {
+                clear_profile_neutral_registry_incident_caches(runtime, epoch);
                 let message = format!(
                     "{key} passed background deep validation but completion marker publication failed; manual inspection required: {error:#}"
                 );
@@ -15275,7 +23116,6 @@ fn commit_registry_reprocess_audit(
                 record_error(config, runtime, "registry_reprocess_audit", message);
                 return;
             }
-            runtime.validated_registry_reprocesses.insert(epoch);
             clear_runtime_failure(config, runtime, &key);
             runtime.paused_jobs.remove(&key);
         }
@@ -15288,7 +23128,7 @@ fn commit_registry_reprocess_audit(
                 }
             ) && registry_reprocess_target_exists(config, epoch).is_ok_and(|exists| !exists) =>
         {
-            runtime.validated_registry_reprocesses.remove(&epoch);
+            clear_profile_neutral_registry_incident_caches(runtime, epoch);
             clear_runtime_failure(config, runtime, &key);
             let reason = match &request.purpose {
                 RegistryReprocessAuditPurpose::Ended { reason, .. } => *reason,
@@ -15311,7 +23151,7 @@ fn commit_registry_reprocess_audit(
             }
         }
         Err(error) => {
-            runtime.validated_registry_reprocesses.remove(&epoch);
+            clear_profile_neutral_registry_incident_caches(runtime, epoch);
             let message = bounded_registry_reprocess_audit_result(
                 &registry_reprocess_audit_failure_message(&request, &error),
             );
@@ -15429,6 +23269,7 @@ fn reconcile_ended_registry_reprocess(
                     retry_is_safe,
                     reason,
                 },
+                admission: None,
             },
         );
         return;
@@ -15530,12 +23371,142 @@ fn reconcile_existing_registry_reprocess_target(
         RegistryReprocessAuditRequest {
             epoch,
             purpose: RegistryReprocessAuditPurpose::ExistingTarget { reason },
+            admission: None,
         },
     );
     true
 }
 
+fn reconcile_ended_registry_attempt(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    epoch: u64,
+    marker: &RegistryReprocessMarker,
+    legacy_retry_is_safe: bool,
+    legacy_probe_is_sufficient: bool,
+    reason: &'static str,
+) {
+    if registry_reprocess_marker_is_legacy(marker) {
+        reconcile_ended_registry_reprocess(
+            config,
+            runtime,
+            epoch,
+            legacy_retry_is_safe,
+            if legacy_probe_is_sufficient {
+                RegistryReprocessValidation::BoundedProbe
+            } else {
+                RegistryReprocessValidation::Deep
+            },
+            reason,
+        );
+        return;
+    }
+    let key = format!("registry_reprocess:{epoch}");
+    let target_exists = match registry_reprocess_target_exists(config, epoch) {
+        Ok(exists) => exists,
+        Err(error) => {
+            let message = format!("{reason}; target presence is ambiguous: {error:#}");
+            let _ = transition_registry_reprocess_failed(config, epoch, marker, message.clone());
+            set_runtime_failure(config, runtime, key, message.clone());
+            block_registry_reprocess_admission(runtime, message.clone());
+            record_error(config, runtime, "registry_reprocess_reconcile", message);
+            return;
+        }
+    };
+    match (marker.phase, marker.state.as_str(), target_exists) {
+        (Some(RegistryReprocessPhase::Core), "core_running", false) => {
+            match transition_registry_core_to_access_required(
+                config,
+                epoch,
+                marker,
+                format!("{reason}; durable core handoff accepted"),
+            ) {
+                Ok(_) => clear_runtime_failure(config, runtime, &key),
+                Err(error) => {
+                    let message = format!("{reason}; core handoff is not valid: {error:#}");
+                    let _ = transition_registry_reprocess_failed(
+                        config,
+                        epoch,
+                        marker,
+                        message.clone(),
+                    );
+                    set_runtime_failure(config, runtime, key, message.clone());
+                    record_error(config, runtime, "registry_reprocess_reconcile", message);
+                }
+            }
+        }
+        (Some(RegistryReprocessPhase::Access), "access_running", false) => {
+            match transition_registry_access_to_pending(
+                config,
+                epoch,
+                marker,
+                format!("{reason}; durable core handoff retained for access restart"),
+            ) {
+                Ok(()) => clear_runtime_failure(config, runtime, &key),
+                Err(error) => {
+                    let message = format!("{reason}; access continuation is not safe: {error:#}");
+                    let _ = transition_registry_reprocess_failed(
+                        config,
+                        epoch,
+                        marker,
+                        message.clone(),
+                    );
+                    set_runtime_failure(config, runtime, key, message.clone());
+                    record_error(config, runtime, "registry_reprocess_reconcile", message);
+                }
+            }
+        }
+        (Some(RegistryReprocessPhase::Access), "access_running", true) => {
+            match transition_registry_access_to_final_auditing(
+                config,
+                epoch,
+                marker,
+                format!("{reason}; immutable target requires recovery audit"),
+            ) {
+                Ok(_) => require_registry_reprocess_audit(
+                    config,
+                    runtime,
+                    RegistryReprocessAuditRequest {
+                        epoch,
+                        purpose: RegistryReprocessAuditPurpose::Ended {
+                            retry_is_safe: false,
+                            reason: "restart recovery after access target publication",
+                        },
+                        admission: None,
+                    },
+                ),
+                Err(error) => {
+                    let message = format!("{reason}; could not claim recovery audit: {error:#}");
+                    set_runtime_failure(config, runtime, key, message.clone());
+                    block_registry_reprocess_admission(runtime, message.clone());
+                    record_error(config, runtime, "registry_reprocess_reconcile", message);
+                }
+            }
+        }
+        (Some(RegistryReprocessPhase::Core), "core_running", true) => {
+            reconcile_existing_registry_reprocess_target(
+                config,
+                runtime,
+                epoch,
+                "core worker ended but an immutable target exists",
+            );
+        }
+        _ => block_registry_reprocess_admission(
+            runtime,
+            format!("registry_reprocess:{epoch} ended with an inconsistent phase marker"),
+        ),
+    }
+}
+
 fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut RuntimeState) {
+    reconcile_registry_reprocess_markers_inner(config, runtime, None)
+}
+
+fn reconcile_registry_reprocess_markers_inner(
+    config: &SchedulerConfig,
+    runtime: &mut RuntimeState,
+    authority_override: Option<(&ProfileNeutralRegistryRebuildAuthority, &str)>,
+) {
     if let Some(epoch) = runtime
         .registry_reprocess_audit_claim_failures
         .iter()
@@ -15557,6 +23528,84 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
         runtime.registry_reprocess_admission_blocked_reason = None;
     }
 
+    let mut invalid_cached_incidents = BTreeSet::new();
+    let cached_incidents = runtime
+        .validated_profile_neutral_registry_rebuild_retries
+        .iter()
+        .map(|(epoch, binding)| (*epoch, binding.clone()))
+        .collect::<Vec<_>>();
+    for (epoch, binding) in cached_incidents {
+        runtime
+            .profile_neutral_registry_incident_history
+            .insert(epoch);
+        let cache_matches = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .is_ok_and(|marker| {
+                marker.is_some_and(|marker| {
+                    profile_neutral_registry_incident_binding_matches_marker(
+                        config, epoch, &marker, &binding,
+                    )
+                })
+            });
+        if !cache_matches {
+            clear_profile_neutral_registry_incident_caches(runtime, epoch);
+            invalid_cached_incidents.insert(epoch);
+            block_registry_reprocess_admission(
+                runtime,
+                format!(
+                    "registry_reprocess:{epoch} cached profile-neutral receipt or marker identity changed"
+                ),
+            );
+        }
+    }
+
+    let mut durable_incident_epochs = runtime
+        .profile_neutral_registry_incident_history
+        .iter()
+        .copied()
+        .chain(
+            runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .keys()
+                .copied(),
+        )
+        .collect::<BTreeSet<_>>();
+    for authority in &PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES {
+        if profile_neutral_registry_rebuild_artifacts_present(config, authority).unwrap_or(true) {
+            durable_incident_epochs.insert(authority.epoch);
+        }
+    }
+    if let Some((authority, _)) = authority_override
+        && profile_neutral_registry_rebuild_artifacts_present(config, authority).unwrap_or(true)
+    {
+        durable_incident_epochs.insert(authority.epoch);
+    }
+    for epoch in durable_incident_epochs {
+        runtime
+            .profile_neutral_registry_incident_history
+            .insert(epoch);
+        match read_registry_reprocess_marker_strict(&config.state_root, epoch) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!(
+                        "registry_reprocess:{epoch} durable profile-neutral incident marker is missing"
+                    ),
+                );
+            }
+            Err(error) => {
+                clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!(
+                        "registry_reprocess:{epoch} durable profile-neutral incident marker is unreadable: {error:#}"
+                    ),
+                );
+            }
+        }
+    }
+
     let adopted_epochs = runtime
         .adopted_registry_reprocesses
         .keys()
@@ -15566,54 +23615,60 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
         if runtime.pending_registry_reprocess_audits.contains(&epoch) {
             continue;
         }
-        let Some(adopted) = runtime.adopted_registry_reprocesses.get(&epoch).cloned() else {
+        let Some(was_identity_trusted) = runtime
+            .adopted_registry_reprocesses
+            .get(&epoch)
+            .map(|adopted| adopted.identity_trusted)
+        else {
             continue;
         };
-        let liveness = if adopted.identity_trusted {
-            match (adopted.process_start_ticks, observe_poh_pid(adopted.pid)) {
-                (
-                    Some(expected),
-                    PohPidObservation::Running {
-                        process_start_ticks,
-                    },
-                ) if process_start_ticks == expected
-                    && process_cmdline_matches_registry_reprocess_exact(
-                        config,
-                        epoch,
-                        adopted.pid,
-                    ) == Some(true) =>
-                {
-                    RegistryReprocessLiveness::Running(adopted.clone())
-                }
-                (_, PohPidObservation::Unobservable) => RegistryReprocessLiveness::Unobservable,
-                _ => match find_registry_reprocess_processes(config, epoch) {
-                    Some(pids) if pids.is_empty() => RegistryReprocessLiveness::Ended {
-                        retry_is_safe: true,
-                        probe_is_sufficient: true,
-                    },
-                    Some(pids) => RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
-                        pid: pids[0],
-                        identity_trusted: false,
-                        process_start_ticks: None,
-                        threads: None,
-                        ..adopted.clone()
-                    }),
-                    None => RegistryReprocessLiveness::Unobservable,
-                },
+        let marker = match read_registry_reprocess_marker_strict(&config.state_root, epoch) {
+            Ok(Some(marker)) => marker,
+            Ok(None) => {
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!("registry_reprocess:{epoch} adopted marker disappeared"),
+                );
+                continue;
             }
-        } else {
-            match find_registry_reprocess_processes(config, epoch) {
-                Some(pids) if pids.is_empty() => RegistryReprocessLiveness::Ended {
-                    retry_is_safe: false,
-                    probe_is_sufficient: false,
-                },
-                Some(pids) => RegistryReprocessLiveness::Running(AdoptedRegistryReprocess {
-                    pid: pids[0],
-                    ..adopted.clone()
-                }),
-                None => RegistryReprocessLiveness::Unobservable,
+            Err(error) => {
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!("registry_reprocess:{epoch} adopted marker is unreadable: {error:#}"),
+                );
+                continue;
             }
         };
+        if profile_neutral_registry_incident_contract_applies(
+            config,
+            runtime,
+            epoch,
+            Some(&marker),
+            authority_override,
+        ) {
+            runtime
+                .profile_neutral_registry_incident_history
+                .insert(epoch);
+            if let Err(error) = recache_profile_neutral_registry_incident_proof(
+                config,
+                runtime,
+                epoch,
+                &marker,
+                false,
+                profile_neutral_registry_incident_requires_absent_target(&marker),
+                authority_override,
+            ) {
+                clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!(
+                        "registry_reprocess:{epoch} adopted profile-neutral proof is invalid: {error:#}"
+                    ),
+                );
+                continue;
+            }
+        }
+        let liveness = inspect_running_registry_reprocess(config, epoch, &marker);
         match liveness {
             RegistryReprocessLiveness::Running(updated) => {
                 if !updated.identity_trusted {
@@ -15631,16 +23686,13 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
                 probe_is_sufficient,
             } => {
                 runtime.adopted_registry_reprocesses.remove(&epoch);
-                reconcile_ended_registry_reprocess(
+                reconcile_ended_registry_attempt(
                     config,
                     runtime,
                     epoch,
-                    retry_is_safe,
-                    if probe_is_sufficient {
-                        RegistryReprocessValidation::BoundedProbe
-                    } else {
-                        RegistryReprocessValidation::Deep
-                    },
+                    &marker,
+                    retry_is_safe && was_identity_trusted,
+                    probe_is_sufficient && was_identity_trusted,
                     "adopted registry reprocess ended",
                 );
             }
@@ -15695,10 +23747,40 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
             {
                 continue;
             }
+            if invalid_cached_incidents.contains(&epoch) {
+                continue;
+            }
+            let incident_contract = profile_neutral_registry_incident_contract_applies(
+                config,
+                runtime,
+                epoch,
+                None,
+                authority_override,
+            );
             let marker = match read_registry_reprocess_marker_strict(&config.state_root, epoch) {
                 Ok(Some(marker)) => marker,
-                Ok(None) => continue,
+                Ok(None) => {
+                    if incident_contract {
+                        runtime
+                            .profile_neutral_registry_incident_history
+                            .insert(epoch);
+                        clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                        block_registry_reprocess_admission(
+                            runtime,
+                            format!(
+                                "registry_reprocess:{epoch} incident marker disappeared during reconciliation"
+                            ),
+                        );
+                    }
+                    continue;
+                }
                 Err(error) => {
+                    if incident_contract {
+                        runtime
+                            .profile_neutral_registry_incident_history
+                            .insert(epoch);
+                        clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                    }
                     block_registry_reprocess_admission(
                         runtime,
                         format!("registry_reprocess:{epoch} marker is unreadable: {error:#}"),
@@ -15713,8 +23795,70 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
                 );
                 continue;
             }
+            let had_profile_neutral_cache = runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .remove(&epoch)
+                .is_some();
+            let profile_neutral_incident = profile_neutral_registry_incident_contract_applies(
+                config,
+                runtime,
+                epoch,
+                Some(&marker),
+                authority_override,
+            );
+            if profile_neutral_incident || had_profile_neutral_cache {
+                runtime
+                    .profile_neutral_registry_incident_history
+                    .insert(epoch);
+                runtime.validated_registry_reprocesses.remove(&epoch);
+            }
+            if profile_neutral_incident
+                && marker.state != PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE
+            {
+                if let Err(error) = recache_profile_neutral_registry_incident_proof(
+                    config,
+                    runtime,
+                    epoch,
+                    &marker,
+                    marker.state == "retry_ready",
+                    profile_neutral_registry_incident_requires_absent_target(&marker),
+                    authority_override,
+                ) {
+                    clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                    block_registry_reprocess_admission(
+                        runtime,
+                        format!(
+                            "registry_reprocess:{epoch} profile-neutral incident proof is invalid: {error:#}"
+                        ),
+                    );
+                    continue;
+                }
+            }
             match marker.state.as_str() {
-                "auditing" if marker.pid.is_none() && marker.process_start_ticks.is_none() => {
+                "retry_ready" if profile_neutral_incident => {}
+                PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE
+                    if profile_neutral_registry_rebuild_authority(epoch).is_some_and(
+                        |authority| {
+                            profile_neutral_registry_rebuild_claim_is_durable(
+                                config, authority, &marker,
+                            )
+                            .is_ok()
+                        },
+                    ) =>
+                {
+                    // This state is a durable stop point between preservation steps. It is not
+                    // runnable and must not be converted back into a legacy audit claim. Only the
+                    // exact incident endpoint can resume it while the scheduler stays paused.
+                    runtime.pending_registry_reprocess_audits.remove(&epoch);
+                    runtime
+                        .registry_reprocess_audit_queue
+                        .retain(|request| request.epoch != epoch);
+                    reset_registry_reprocess_attempt_cache(runtime, epoch);
+                }
+                "auditing"
+                    if registry_reprocess_marker_is_legacy(&marker)
+                        && registry_reprocess_marker_identity_is_clear(&marker) =>
+                {
                     let purpose = if marker.audit_is_continuation {
                         RegistryReprocessAuditPurpose::Ended {
                             retry_is_safe: marker.audit_retry_is_safe,
@@ -15727,23 +23871,133 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
                     };
                     enqueue_claimed_registry_reprocess_audit(
                         runtime,
-                        RegistryReprocessAuditRequest { epoch, purpose },
+                        RegistryReprocessAuditRequest {
+                            epoch,
+                            purpose,
+                            admission: None,
+                        },
                     );
                 }
-                "complete" if marker.pid.is_none() && marker.process_start_ticks.is_none() => {
-                    if !runtime.validated_registry_reprocesses.contains(&epoch) {
-                        reconcile_ended_registry_reprocess(
-                            config,
-                            runtime,
+                "final_auditing"
+                    if registry_reprocess_marker_identity_is_clear(&marker)
+                        && registry_reprocess_marker_has_attempt(config, epoch, &marker)
+                        && marker.phase == Some(RegistryReprocessPhase::Access)
+                        && marker.handoff_sha256.is_some() =>
+                {
+                    enqueue_claimed_registry_reprocess_audit(
+                        runtime,
+                        RegistryReprocessAuditRequest {
                             epoch,
-                            false,
-                            RegistryReprocessValidation::BoundedProbe,
-                            "startup validation of completed registry generation",
-                        );
+                            purpose: RegistryReprocessAuditPurpose::Ended {
+                                retry_is_safe: false,
+                                reason: "restart reconciliation of durable final-auditing claim",
+                            },
+                            admission: None,
+                        },
+                    );
+                }
+                "complete" if registry_reprocess_marker_identity_is_clear(&marker) => {
+                    if !runtime.validated_registry_reprocesses.contains(&epoch) {
+                        if registry_reprocess_marker_has_attempt(config, epoch, &marker) {
+                            match probe_registry_reprocess_attempt_output(config, epoch, &marker) {
+                                Ok(()) => {
+                                    runtime.validated_registry_reprocesses.insert(epoch);
+                                    clear_runtime_failure(
+                                        config,
+                                        runtime,
+                                        &format!("registry_reprocess:{epoch}"),
+                                    );
+                                }
+                                Err(_) => {
+                                    require_registry_reprocess_audit(
+                                        config,
+                                        runtime,
+                                        RegistryReprocessAuditRequest {
+                                            epoch,
+                                            purpose:
+                                                RegistryReprocessAuditPurpose::ExistingTarget {
+                                                    reason: "restart probe of completed two-stage generation failed",
+                                                },
+                                            admission: None,
+                                        },
+                                    );
+                                }
+                            }
+                        } else if registry_reprocess_marker_is_legacy(&marker) {
+                            reconcile_ended_registry_reprocess(
+                                config,
+                                runtime,
+                                epoch,
+                                false,
+                                RegistryReprocessValidation::BoundedProbe,
+                                "startup validation of completed registry generation",
+                            );
+                        } else {
+                            block_registry_reprocess_admission(
+                                runtime,
+                                format!(
+                                    "registry_reprocess:{epoch} complete marker has no valid legacy or current binding"
+                                ),
+                            );
+                        }
                     }
                 }
-                "failed" | "retry_ready"
-                    if marker.pid.is_none() && marker.process_start_ticks.is_none() =>
+                "block_access_rebuild_required"
+                    if registry_reprocess_marker_identity_is_clear(&marker)
+                        && registry_reprocess_marker_has_attempt(config, epoch, &marker)
+                        && marker.phase == Some(RegistryReprocessPhase::Access)
+                        && marker.handoff_sha256.is_some()
+                        && marker.expected_access_state.is_none() =>
+                {
+                    match probe_registry_reprocess_access_continuation(config, epoch, &marker) {
+                        Ok(_) => clear_runtime_failure(
+                            config,
+                            runtime,
+                            &format!("registry_reprocess:{epoch}"),
+                        ),
+                        Err(error) => {
+                            let message = format!(
+                                "registry_reprocess:{epoch} pending access continuation is invalid: {error:#}"
+                            );
+                            let _ = transition_registry_reprocess_failed(
+                                config,
+                                epoch,
+                                &marker,
+                                message.clone(),
+                            );
+                            set_runtime_failure(
+                                config,
+                                runtime,
+                                format!("registry_reprocess:{epoch}"),
+                                message.clone(),
+                            );
+                            record_error(config, runtime, "registry_reprocess_reconcile", message);
+                        }
+                    }
+                }
+                "failed" if stale_poh_registry_recovery_marker_claims(config, epoch, &marker) => {
+                    // Preserve the exact operator-authorized incident claim. Converting it back
+                    // to an `auditing` marker on startup would destroy the only state accepted by
+                    // the no-clobber recovery endpoint before it could quarantine the stale
+                    // generation. It remains non-runnable until an explicit retry request holds
+                    // both the runtime mutex and the per-epoch worker lock.
+                    runtime.validated_registry_reprocesses.remove(&epoch);
+                    runtime.examined_registry_reprocess_targets.remove(&epoch);
+                }
+                "failed" if registry_reprocess_marker_identity_is_clear(&marker) => {
+                    reconcile_existing_registry_reprocess_target(
+                        config,
+                        runtime,
+                        epoch,
+                        "retry reconciliation found an already-published registry generation",
+                    );
+                }
+                "retry_ready"
+                    if registry_reprocess_marker_identity_is_clear(&marker)
+                        && marker.phase.is_none()
+                        && marker.attempt_id.is_none()
+                        && marker.staging_dir.is_none()
+                        && marker.handoff_sha256.is_none() =>
                 {
                     reconcile_existing_registry_reprocess_target(
                         config,
@@ -15752,42 +24006,41 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
                         "retry reconciliation found an already-published registry generation",
                     );
                 }
-                "running" => match inspect_running_registry_reprocess(config, epoch, &marker) {
-                    RegistryReprocessLiveness::Running(adopted) => {
-                        if !adopted.identity_trusted {
-                            block_registry_reprocess_admission(
+                "running" | "core_running" | "access_running" => {
+                    match inspect_running_registry_reprocess(config, epoch, &marker) {
+                        RegistryReprocessLiveness::Running(adopted) => {
+                            if !adopted.identity_trusted {
+                                block_registry_reprocess_admission(
+                                    runtime,
+                                    format!(
+                                        "registry_reprocess:{epoch} has a live but untrusted process identity"
+                                    ),
+                                );
+                            }
+                            runtime.adopted_registry_reprocesses.insert(epoch, adopted);
+                        }
+                        RegistryReprocessLiveness::Ended {
+                            retry_is_safe,
+                            probe_is_sufficient,
+                        } => {
+                            reconcile_ended_registry_attempt(
+                                config,
                                 runtime,
-                                format!(
-                                    "registry_reprocess:{epoch} has a live but untrusted process identity"
-                                ),
+                                epoch,
+                                &marker,
+                                retry_is_safe,
+                                probe_is_sufficient,
+                                "running registry marker has no surviving process",
                             );
                         }
-                        runtime.adopted_registry_reprocesses.insert(epoch, adopted);
+                        RegistryReprocessLiveness::Unobservable => {
+                            block_registry_reprocess_admission(
+                                runtime,
+                                format!("registry_reprocess:{epoch} liveness is unobservable"),
+                            );
+                        }
                     }
-                    RegistryReprocessLiveness::Ended {
-                        retry_is_safe,
-                        probe_is_sufficient,
-                    } => {
-                        reconcile_ended_registry_reprocess(
-                            config,
-                            runtime,
-                            epoch,
-                            retry_is_safe,
-                            if probe_is_sufficient {
-                                RegistryReprocessValidation::BoundedProbe
-                            } else {
-                                RegistryReprocessValidation::Deep
-                            },
-                            "running registry marker has no surviving process",
-                        );
-                    }
-                    RegistryReprocessLiveness::Unobservable => {
-                        block_registry_reprocess_admission(
-                            runtime,
-                            format!("registry_reprocess:{epoch} liveness is unobservable"),
-                        );
-                    }
-                },
+                }
                 _ => block_registry_reprocess_admission(
                     runtime,
                     format!("registry_reprocess:{epoch} marker state/identity is inconsistent"),
@@ -15806,11 +24059,53 @@ fn reconcile_registry_reprocess_markers(config: &SchedulerConfig, runtime: &mut 
             let Some(epoch) = parse_registry_reprocess_target_epoch(&path) else {
                 continue;
             };
-            if read_registry_reprocess_marker_strict(&config.state_root, epoch)
-                .ok()
-                .flatten()
-                .is_none()
+            let marker_missing =
+                match read_registry_reprocess_marker_strict(&config.state_root, epoch) {
+                    Ok(Some(_)) => false,
+                    Ok(None) => true,
+                    Err(error) => {
+                        if profile_neutral_registry_durable_incident_history_present(
+                            config,
+                            runtime,
+                            epoch,
+                            authority_override,
+                        ) || profile_neutral_registry_rebuild_authority(epoch).is_some()
+                        {
+                            runtime
+                                .profile_neutral_registry_incident_history
+                                .insert(epoch);
+                            clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                        }
+                        block_registry_reprocess_admission(
+                            runtime,
+                            format!(
+                                "registry_reprocess:{epoch} target marker is unreadable: {error:#}"
+                            ),
+                        );
+                        continue;
+                    }
+                };
+            if !marker_missing {
+                continue;
+            }
+            if profile_neutral_registry_durable_incident_history_present(
+                config,
+                runtime,
+                epoch,
+                authority_override,
+            ) || profile_neutral_registry_rebuild_authority(epoch).is_some()
             {
+                runtime
+                    .profile_neutral_registry_incident_history
+                    .insert(epoch);
+                clear_profile_neutral_registry_incident_caches(runtime, epoch);
+                block_registry_reprocess_admission(
+                    runtime,
+                    format!(
+                        "registry_reprocess:{epoch} incident target cannot be adopted without its exact marker"
+                    ),
+                );
+            } else {
                 reconcile_existing_registry_reprocess_target(
                     config,
                     runtime,
@@ -16227,7 +24522,16 @@ async fn spawn_command_child(
                 "establish recoverable ownership for poh_migration:{epoch}"
             )));
         }
-    } else if let ChildKind::RegistryReprocess { epoch, .. } = &kind {
+    } else if let ChildKind::RegistryReprocess {
+        epoch,
+        phase,
+        attempt_id,
+        staging_dir,
+        handoff_sha256,
+        wire_profile,
+        ..
+    } = &kind
+    {
         let publication = (|| -> Result<()> {
             let pid = pid.context("spawned registry reprocess has no pid")?;
             let (state, process_start_ticks) = process_stat_identity(pid)
@@ -16241,7 +24545,12 @@ async fn spawn_command_child(
                 .context("registry reprocess marker disappeared after spawn")?;
             anyhow::ensure!(
                 registry_reprocess_marker_claims(config, *epoch, &marker)
-                    && marker.state == "running"
+                    && marker.state == phase.running_state()
+                    && marker.phase == Some(*phase)
+                    && marker.attempt_id.as_deref() == Some(attempt_id.as_str())
+                    && marker.staging_dir.as_deref() == Some(staging_dir.as_path())
+                    && marker.handoff_sha256 == *handoff_sha256
+                    && marker.wire_profile == *wire_profile
                     && marker.pid == Some(pid)
                     && marker.process_start_ticks == Some(process_start_ticks),
                 "registry reprocess marker identity publication did not preserve its exact binding"
@@ -16797,21 +25106,161 @@ fn handle_registry_reprocess_child_exit(
     child: ManagedChild,
     success: bool,
 ) {
-    let ChildKind::RegistryReprocess { epoch, .. } = child.kind else {
+    let ChildKind::RegistryReprocess { epoch, phase, .. } = &child.kind else {
         unreachable!("registry exit handler received a non-registry child")
     };
+    let epoch = *epoch;
+    let phase = *phase;
     let ownership_was_uncertain = runtime.uncertain_registry_reprocesses.remove(&epoch);
-    match registry_reprocess_exit_validation(success, ownership_was_uncertain) {
-        RegistryReprocessValidation::BoundedProbe => finish_registry_reprocess_exit(
+    if phase == RegistryReprocessPhase::Legacy {
+        match registry_reprocess_exit_validation(success, ownership_was_uncertain) {
+            RegistryReprocessValidation::BoundedProbe => finish_registry_reprocess_exit(
+                config,
+                runtime,
+                epoch,
+                &child.log_path,
+                success,
+                probe_registry_reprocess_output(config, epoch).is_ok(),
+            ),
+            RegistryReprocessValidation::Deep => {
+                require_registry_reprocess_audit(
+                    config,
+                    runtime,
+                    RegistryReprocessAuditRequest {
+                        epoch,
+                        purpose: RegistryReprocessAuditPurpose::ChildExit {
+                            process_success: success,
+                            log_path: child.log_path,
+                        },
+                        admission: None,
+                    },
+                );
+            }
+        }
+        return;
+    }
+    let key = format!("registry_reprocess:{epoch}");
+    let marker = match read_registry_reprocess_marker_strict(&config.state_root, epoch) {
+        Ok(Some(marker)) if registry_reprocess_marker_matches_child(config, &marker, &child) => {
+            marker
+        }
+        Ok(_) => {
+            let message = format!(
+                "{key} exited but its durable phase/attempt/process marker changed; refusing completion"
+            );
+            set_runtime_failure(config, runtime, key, message.clone());
+            block_registry_reprocess_admission(runtime, message.clone());
+            record_error(config, runtime, "child_exit", message);
+            return;
+        }
+        Err(error) => {
+            let message = format!(
+                "{key} exited but its durable marker is unreadable; refusing completion: {error:#}"
+            );
+            set_runtime_failure(config, runtime, key, message.clone());
+            block_registry_reprocess_admission(runtime, message.clone());
+            record_error(config, runtime, "child_exit", message);
+            return;
+        }
+    };
+    if phase == RegistryReprocessPhase::Core {
+        match transition_registry_core_to_access_required(
             config,
-            runtime,
             epoch,
-            &child.log_path,
-            success,
-            probe_registry_reprocess_output(config, epoch).is_ok(),
-        ),
-        RegistryReprocessValidation::Deep => {
-            require_registry_reprocess_audit(
+            &marker,
+            format!(
+                "durable core handoff accepted after worker exited {}",
+                if success {
+                    "successfully"
+                } else {
+                    "with failure"
+                }
+            ),
+        ) {
+            Ok(_) => {
+                clear_runtime_failure(config, runtime, &key);
+                reset_registry_reprocess_attempt_cache(runtime, epoch);
+            }
+            Err(error) => {
+                let message = format!(
+                    "{key} core worker exited {} without a valid durable handoff; log={}: {error:#}",
+                    if success {
+                        "successfully"
+                    } else {
+                        "with failure"
+                    },
+                    child.log_path.display()
+                );
+                let _ =
+                    transition_registry_reprocess_failed(config, epoch, &marker, message.clone());
+                set_runtime_failure(config, runtime, key, message.clone());
+                record_error(config, runtime, "child_exit", message);
+            }
+        }
+        return;
+    }
+
+    let target_exists = registry_reprocess_target_exists(config, epoch);
+    if success && !ownership_was_uncertain {
+        let final_marker = match transition_registry_access_to_final_auditing(
+            config,
+            epoch,
+            &marker,
+            "access worker exited successfully; running bounded final receipt probe".to_string(),
+        ) {
+            Ok(marker) => marker,
+            Err(error) => {
+                let message = format!("{key} could not claim final auditing: {error:#}");
+                set_runtime_failure(config, runtime, key, message.clone());
+                block_registry_reprocess_admission(runtime, message.clone());
+                record_error(config, runtime, "child_exit", message);
+                return;
+            }
+        };
+        match probe_registry_reprocess_attempt_output(config, epoch, &final_marker) {
+            Ok(()) => match complete_registry_reprocess_after_bounded_probe(
+                config,
+                runtime,
+                epoch,
+                &final_marker,
+                child._exclusive_lock.as_ref(),
+            ) {
+                Ok(()) => {
+                    clear_runtime_failure(config, runtime, &key);
+                }
+                Err(error) => {
+                    let message =
+                        format!("{key} final receipt passed but complete marker failed: {error:#}");
+                    set_runtime_failure(config, runtime, key, message.clone());
+                    record_error(config, runtime, "child_exit", message);
+                }
+            },
+            Err(error) => {
+                let message = format!(
+                    "{key} access worker exited successfully but its bounded final receipt probe failed; log={}: {error:#}",
+                    child.log_path.display()
+                );
+                let _ = transition_registry_reprocess_failed(
+                    config,
+                    epoch,
+                    &final_marker,
+                    message.clone(),
+                );
+                set_runtime_failure(config, runtime, key, message.clone());
+                record_error(config, runtime, "child_exit", message);
+            }
+        }
+        return;
+    }
+
+    match target_exists {
+        Ok(true) => match transition_registry_access_to_final_auditing(
+            config,
+            epoch,
+            &marker,
+            "access worker exit was uncertain after immutable target publication".to_string(),
+        ) {
+            Ok(_) => require_registry_reprocess_audit(
                 config,
                 runtime,
                 RegistryReprocessAuditRequest {
@@ -16820,8 +25269,58 @@ fn handle_registry_reprocess_child_exit(
                         process_success: success,
                         log_path: child.log_path,
                     },
+                    admission: None,
                 },
+            ),
+            Err(error) => {
+                let message = format!("{key} could not claim recovery audit: {error:#}");
+                set_runtime_failure(config, runtime, key, message.clone());
+                block_registry_reprocess_admission(runtime, message.clone());
+                record_error(config, runtime, "child_exit", message);
+            }
+        },
+        Ok(false) if ownership_was_uncertain => {
+            match transition_registry_access_to_pending(
+                config,
+                epoch,
+                &marker,
+                "uncertain access worker ended before publication; durable handoff retained"
+                    .to_string(),
+            ) {
+                Ok(()) => clear_runtime_failure(config, runtime, &key),
+                Err(error) => {
+                    let message = format!(
+                        "{key} uncertain access exit has no safe continuation; log={}: {error:#}",
+                        child.log_path.display()
+                    );
+                    let _ = transition_registry_reprocess_failed(
+                        config,
+                        epoch,
+                        &marker,
+                        message.clone(),
+                    );
+                    set_runtime_failure(config, runtime, key, message.clone());
+                    record_error(config, runtime, "child_exit", message);
+                }
+            }
+        }
+        Ok(false) => {
+            let message = format!(
+                "{key} access worker exited with failure and target was not published; log={}",
+                child.log_path.display()
             );
+            let _ = transition_registry_reprocess_failed(config, epoch, &marker, message.clone());
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "child_exit", message);
+        }
+        Err(error) => {
+            let message = format!(
+                "{key} access worker exited with failure and target presence is ambiguous; log={}: {error:#}",
+                child.log_path.display()
+            );
+            let _ = transition_registry_reprocess_failed(config, epoch, &marker, message.clone());
+            set_runtime_failure(config, runtime, key, message.clone());
+            record_error(config, runtime, "child_exit", message);
         }
     }
 }
@@ -19373,6 +27872,9 @@ mod tests {
             registry_reprocess_memory_mib: 2048,
             registry_reprocess_sort_memory_mib: 256,
             registry_reprocess_target_root: root.join("archives").join(".usage-sorted-generations"),
+            registry_reprocess_wire_profile: Some(
+                ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            ),
         }
     }
 
@@ -19387,12 +27889,183 @@ mod tests {
         ))
     }
 
+    #[derive(Clone)]
+    enum FakeRegistryReaderIo<T> {
+        Value(T),
+        Error(io::ErrorKind),
+        RawError(i32),
+    }
+
+    impl<T: Clone> FakeRegistryReaderIo<T> {
+        fn result(&self) -> io::Result<T> {
+            match self {
+                Self::Value(value) => Ok(value.clone()),
+                Self::Error(kind) => Err(io::Error::from(*kind)),
+                Self::RawError(code) => Err(io::Error::from_raw_os_error(*code)),
+            }
+        }
+    }
+
+    struct FakeRegistryReaderSequence<T> {
+        observations: std::cell::RefCell<VecDeque<FakeRegistryReaderIo<T>>>,
+    }
+
+    impl<T: Clone> FakeRegistryReaderSequence<T> {
+        fn stable(value: T) -> Self {
+            Self::new(vec![FakeRegistryReaderIo::Value(value)])
+        }
+
+        fn error(kind: io::ErrorKind) -> Self {
+            Self::new(vec![FakeRegistryReaderIo::Error(kind)])
+        }
+
+        fn raw_error(code: i32) -> Self {
+            Self::new(vec![FakeRegistryReaderIo::RawError(code)])
+        }
+
+        fn new(observations: Vec<FakeRegistryReaderIo<T>>) -> Self {
+            Self {
+                observations: std::cell::RefCell::new(observations.into()),
+            }
+        }
+
+        fn next(&self) -> io::Result<T> {
+            let mut observations = self.observations.borrow_mut();
+            let observation = if observations.len() > 1 {
+                observations.pop_front()
+            } else {
+                observations.front().cloned()
+            };
+            observation
+                .unwrap_or(FakeRegistryReaderIo::Error(io::ErrorKind::UnexpectedEof))
+                .result()
+        }
+    }
+
+    struct FakeRegistryReaderProcess {
+        stat: FakeRegistryReaderSequence<String>,
+        status: FakeRegistryReaderSequence<String>,
+        cgroup: FakeRegistryReaderSequence<String>,
+        cwd: FakeRegistryReaderSequence<PathBuf>,
+        root: FakeRegistryReaderSequence<PathBuf>,
+        descriptors: FakeRegistryReaderSequence<Vec<PathBuf>>,
+        maps: FakeRegistryReaderSequence<String>,
+    }
+
+    impl FakeRegistryReaderProcess {
+        fn stable(pid: u32, start_ticks: u64, uids: [u32; 4]) -> Self {
+            Self {
+                stat: FakeRegistryReaderSequence::stable(fake_registry_reader_stat(
+                    pid,
+                    'S',
+                    start_ticks,
+                )),
+                status: FakeRegistryReaderSequence::stable(fake_registry_reader_status(uids)),
+                cgroup: FakeRegistryReaderSequence::stable(
+                    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/blockzilla-archive-secure.service\n"
+                        .to_string(),
+                ),
+                cwd: FakeRegistryReaderSequence::stable(PathBuf::from("/srv")),
+                root: FakeRegistryReaderSequence::stable(PathBuf::from("/")),
+                descriptors: FakeRegistryReaderSequence::stable(Vec::new()),
+                maps: FakeRegistryReaderSequence::stable(String::new()),
+            }
+        }
+    }
+
+    struct FakeRegistryReaderProcfs {
+        pids: FakeRegistryReaderSequence<Vec<u32>>,
+        processes: BTreeMap<u32, FakeRegistryReaderProcess>,
+    }
+
+    impl FakeRegistryReaderProcfs {
+        fn stable(processes: BTreeMap<u32, FakeRegistryReaderProcess>) -> Self {
+            Self {
+                pids: FakeRegistryReaderSequence::stable(processes.keys().copied().collect()),
+                processes,
+            }
+        }
+
+        fn process(&self, pid: u32) -> io::Result<&FakeRegistryReaderProcess> {
+            self.processes
+                .get(&pid)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+
+    impl RegistryReaderProcfs for FakeRegistryReaderProcfs {
+        fn process_ids(&self) -> io::Result<Vec<u32>> {
+            self.pids.next()
+        }
+
+        fn stat(&self, pid: u32) -> io::Result<String> {
+            self.process(pid)?.stat.next()
+        }
+
+        fn status(&self, pid: u32) -> io::Result<String> {
+            self.process(pid)?.status.next()
+        }
+
+        fn cgroup(&self, pid: u32) -> io::Result<String> {
+            self.process(pid)?.cgroup.next()
+        }
+
+        fn link(&self, pid: u32, name: &str) -> io::Result<PathBuf> {
+            match name {
+                "cwd" => self.process(pid)?.cwd.next(),
+                "root" => self.process(pid)?.root.next(),
+                _ => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            }
+        }
+
+        fn descriptor_targets(&self, pid: u32) -> io::Result<Vec<PathBuf>> {
+            self.process(pid)?.descriptors.next()
+        }
+
+        fn maps(&self, pid: u32) -> io::Result<String> {
+            self.process(pid)?.maps.next()
+        }
+    }
+
+    fn fake_registry_reader_stat(pid: u32, state: char, start_ticks: u64) -> String {
+        let mut fields = vec![state.to_string()];
+        fields.extend(std::iter::repeat_n("0".to_string(), 18));
+        fields.push(start_ticks.to_string());
+        format!("{pid} (fake process) {}", fields.join(" "))
+    }
+
+    fn fake_registry_reader_status(uids: [u32; 4]) -> String {
+        format!(
+            "Name:\tfake\nUid:\t{}\t{}\t{}\t{}\nGid:\t1\t1\t1\t1\n",
+            uids[0], uids[1], uids[2], uids[3]
+        )
+    }
+
+    fn fake_registry_reader_init_cgroup(uid: u32) -> String {
+        format!("0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope\n")
+    }
+
+    fn fake_registry_reader_managed_cgroup(uid: u32) -> String {
+        format!(
+            "0::/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/blockzilla-archive-secure.service\n"
+        )
+    }
+
     fn test_hex_digest(bytes: impl AsRef<[u8]>) -> String {
         bytes
             .as_ref()
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
+    }
+
+    fn argv_bytes(args: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for arg in args {
+            bytes.extend_from_slice(arg);
+            bytes.push(0);
+        }
+        bytes
     }
 
     fn test_registry_generation_digest(
@@ -19430,6 +28103,13 @@ mod tests {
         ];
         if first_seen_source {
             names.push(FIRST_SEEN_MANIFEST_FILE);
+            names.extend([BLOCK_ACCESS_FILE, BLOCK_ACCESS_INDEX_FILE]);
+        } else {
+            names.extend([
+                BLOCK_ACCESS_FILE,
+                BLOCK_ACCESS_INDEX_FILE,
+                GET_BLOCK_INDEX_FILE,
+            ]);
         }
         names
             .into_iter()
@@ -19451,26 +28131,40 @@ mod tests {
         source: &Path,
     ) -> (PathBuf, PathBuf) {
         use crate::archive_v2::registry_reprocess::{
-            REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt, SemanticBinding,
+            REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt, RewriteStats,
         };
+        use blockzilla_read_sdk::{wire_profile_marker, wire_profile_marker_bytes};
 
         let target = registry_reprocess_target(config, epoch);
         fs::create_dir_all(source).unwrap();
         fs::create_dir_all(&target).unwrap();
         let source = fs::canonicalize(source).unwrap();
         let target = fs::canonicalize(target).unwrap();
-        let source_files = write_probe_only_registry_files(&source, true);
-        let target_files = write_probe_only_registry_files(&target, false);
-        let semantics = SemanticBinding {
-            blocks: 0,
-            transactions: 0,
-            pubkey_references: 0,
-            reference_sha256: "00".repeat(32),
-            normalized_structure_sha256: "00".repeat(32),
-        };
+        let mut source_files = write_probe_only_registry_files(&source, true);
+        let mut target_files = write_probe_only_registry_files(&target, false);
+        fs::remove_file(target.join(SIGNATURES_FILE)).unwrap();
+        fs::hard_link(source.join(SIGNATURES_FILE), target.join(SIGNATURES_FILE)).unwrap();
+        let wire_profile = config
+            .registry_reprocess_wire_profile
+            .expect("probe fixture requires one explicit wire profile");
+        let profile_marker = wire_profile_marker(wire_profile);
+        let profile_marker_bytes = wire_profile_marker_bytes(wire_profile);
+        for (directory, files) in [
+            (source.as_path(), &mut source_files),
+            (target.as_path(), &mut target_files),
+        ] {
+            fs::write(directory.join(&profile_marker.name), profile_marker_bytes).unwrap();
+            files.insert(
+                profile_marker.name.clone(),
+                crate::archive_v2::registry_reprocess::FileBinding {
+                    bytes: profile_marker.size,
+                    sha256: profile_marker.sha256.clone(),
+                },
+            );
+        }
         let receipt = RegistryReprocessReceipt {
-            version: 1,
-            algorithm: "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v1".to_string(),
+            version: 3,
+            algorithm: "compact_v2_first_seen_v1_to_usage_sorted_staged_access_v3".to_string(),
             epoch,
             threads: config.registry_reprocess_threads,
             sort_memory_mib: config.registry_reprocess_sort_memory_mib as usize,
@@ -19485,14 +28179,26 @@ mod tests {
             source_registry_keys: 1,
             target_registry_keys: 1,
             eligible_references: 0,
-            source_semantics: semantics.clone(),
-            target_semantics: semantics,
+            source_semantics: None,
+            target_semantics: None,
+            rewrite_stats: Some(RewriteStats {
+                blocks: 1,
+                transactions: 0,
+                pubkey_references: 0,
+            }),
+            attempt_id: Some("ab".repeat(16)),
+            handoff_sha256: Some("cd".repeat(32)),
+            assembly_mode: Some("source_access_wire_remap_v1".to_string()),
+            signature_provenance: Some("source_access_duplicate_v1".to_string()),
+            access_boundary_repair: None,
+            wire_profile: Some(wire_profile),
         };
         fs::write(
             target.join(REGISTRY_REPROCESS_RECEIPT_FILE),
             serde_json::to_vec_pretty(&receipt).unwrap(),
         )
         .unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
         (source, target)
     }
 
@@ -19505,6 +28211,2336 @@ mod tests {
             epoch,
             &config.archive_root.join(format!("epoch-{epoch}")),
         )
+    }
+
+    fn write_probe_only_legacy_registry_receipt(
+        config: &SchedulerConfig,
+        epoch: u64,
+    ) -> (PathBuf, PathBuf) {
+        use crate::archive_v2::registry_reprocess::{
+            REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt, SemanticBinding,
+        };
+        use blockzilla_read_sdk::wire_profile_marker;
+
+        let (source, target) = write_probe_only_registry_receipt(config, epoch);
+        let receipt_path = target.join(REGISTRY_REPROCESS_RECEIPT_FILE);
+        let mut receipt: RegistryReprocessReceipt =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        let marker = wire_profile_marker(
+            config
+                .registry_reprocess_wire_profile
+                .expect("legacy fixture starts from a profile-bound publication"),
+        );
+        receipt.source_files.remove(&marker.name);
+        receipt.target_files.remove(&marker.name);
+        fs::remove_file(source.join(&marker.name)).unwrap();
+        fs::remove_file(target.join(&marker.name)).unwrap();
+        receipt.version = 1;
+        receipt.algorithm =
+            "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v1".to_string();
+        let semantics = SemanticBinding {
+            blocks: 0,
+            transactions: 0,
+            pubkey_references: 0,
+            reference_sha256: "00".repeat(32),
+            normalized_structure_sha256: "00".repeat(32),
+        };
+        receipt.source_semantics = Some(semantics.clone());
+        receipt.target_semantics = Some(semantics);
+        receipt.rewrite_stats = None;
+        receipt.attempt_id = None;
+        receipt.handoff_sha256 = None;
+        receipt.assembly_mode = None;
+        receipt.signature_provenance = None;
+        receipt.wire_profile = None;
+        receipt.source_generation_sha256 = test_registry_generation_digest(&receipt.source_files);
+        receipt.target_generation_sha256 = test_registry_generation_digest(&receipt.target_files);
+        fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        (source, target)
+    }
+
+    const TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256: &str =
+        "abababababababababababababababababababababababababababababababab";
+
+    fn leak_test_string(value: String) -> &'static str {
+        Box::leak(value.into_boxed_str())
+    }
+
+    fn write_profile_neutral_recovery_fixture(
+        label: &str,
+        epoch: u64,
+    ) -> (
+        PathBuf,
+        SchedulerConfig,
+        ProfileNeutralRegistryRebuildAuthority,
+        RegistryReprocessMarker,
+    ) {
+        write_profile_neutral_recovery_fixture_version(label, epoch, 1)
+    }
+
+    fn write_profile_neutral_recovery_fixture_version(
+        label: &str,
+        epoch: u64,
+        receipt_version: u32,
+    ) -> (
+        PathBuf,
+        SchedulerConfig,
+        ProfileNeutralRegistryRebuildAuthority,
+        RegistryReprocessMarker,
+    ) {
+        use crate::archive_v2::registry_reprocess::{
+            REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt,
+        };
+
+        let requested_root = temp_root(label);
+        fs::create_dir_all(&requested_root).unwrap();
+        let root = fs::canonicalize(&requested_root).unwrap();
+        let config = test_config(&root);
+        let (source, target) = write_probe_only_legacy_registry_receipt(&config, epoch);
+        let receipt_path = target.join(REGISTRY_REPROCESS_RECEIPT_FILE);
+        if receipt_version == 2 {
+            let mut receipt: RegistryReprocessReceipt =
+                serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+            receipt.version = 2;
+            receipt.algorithm =
+                "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v2".to_string();
+            fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        } else {
+            assert_eq!(receipt_version, 1);
+        }
+        let receipt_bytes = fs::read(&receipt_path).unwrap();
+        let receipt: RegistryReprocessReceipt = serde_json::from_slice(&receipt_bytes).unwrap();
+        let authority = ProfileNeutralRegistryRebuildAuthority {
+            epoch,
+            receipt_version: receipt.version,
+            receipt_sha256: leak_test_string(sha256_bytes_hex(&receipt_bytes)),
+            source_generation_sha256: leak_test_string(receipt.source_generation_sha256.clone()),
+            target_generation_sha256: leak_test_string(receipt.target_generation_sha256.clone()),
+        };
+        let archive_files = receipt
+            .source_files
+            .keys()
+            .map(|name| {
+                let metadata = fs::symlink_metadata(source.join(name)).unwrap();
+                (
+                    name.clone(),
+                    ProfileNeutralRegistryRebuildFileIdentity::from_metadata(&metadata),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let attestation = ProfileNeutralRegistrySourceAttestation {
+            schema_version: 2,
+            kind: PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_KIND.to_string(),
+            audit_algorithm: PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_ALGORITHM.to_string(),
+            audited_profiles: [
+                ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+                ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            ],
+            cluster_id: "mainnet-beta".to_string(),
+            epoch,
+            archive: source,
+            registry_order: "first_seen".to_string(),
+            generation_kind: PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_GENERATION_KIND
+                .to_string(),
+            content_generation_sha256: authority.source_generation_sha256.to_string(),
+            archive_files,
+            wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            evidence: format!(
+                "full-generation-borrowed-dual-sdk-audit-v3;generation_kind={PROFILE_NEUTRAL_REGISTRY_REBUILD_ATTESTATION_GENERATION_KIND};blocks=1;messages=2;raw_transaction_fallbacks=0;selected_profile_failures=0;alternate_profile_failures=0;both_semantically_equivalent=2;both_semantically_divergent=0;decision_basis=all_semantically_equivalent;pinned_inputs_unchanged=true;exact_input_before_after_equal=true"
+            ),
+            attested_unix_secs: 1,
+        };
+        let attestation_root = config
+            .state_root
+            .join("firewatch-index")
+            .join("wire-profile-attestations");
+        fs::create_dir_all(&attestation_root).unwrap();
+        fs::set_permissions(&attestation_root, fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(profile_neutral_controller_lock_path(&config))
+            .unwrap();
+        fs::write(
+            profile_neutral_registry_source_attestation_path(&config.state_root, &authority),
+            serde_json::to_vec_pretty(&attestation).unwrap(),
+        )
+        .unwrap();
+        write_registry_reprocess_marker(
+            &config,
+            epoch,
+            "auditing",
+            Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_MARKER_MESSAGE.to_string()),
+        )
+        .unwrap();
+        let marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert!(profile_neutral_registry_rebuild_original_marker_claims(
+            &config, &authority, &marker
+        ));
+        (root, config, authority, marker)
+    }
+
+    fn queued_profile_neutral_runtime(epoch: u64) -> RuntimeState {
+        let mut runtime = RuntimeState {
+            scheduler_paused: true,
+            ..RuntimeState::default()
+        };
+        runtime.pending_registry_reprocess_audits.insert(epoch);
+        runtime.examined_registry_reprocess_targets.insert(epoch);
+        runtime
+            .registry_reprocess_audit_queue
+            .push_back(RegistryReprocessAuditRequest {
+                epoch,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "profile-neutral test audit",
+                },
+                admission: None,
+            });
+        runtime
+    }
+
+    fn profile_neutral_test_epoch(root: &Path, epoch: u64) -> EpochSnapshot {
+        let mut snapshot = test_epoch(root, epoch, HistoricalState::Complete);
+        snapshot.registry_order = RegistryOrder::FirstSeen;
+        snapshot
+    }
+
+    fn advance_profile_neutral_fixture_to_later_core_retry(
+        label: &str,
+    ) -> (
+        PathBuf,
+        SchedulerConfig,
+        ProfileNeutralRegistryRebuildAuthority,
+        ProfileNeutralRegistryRebuildOutcome,
+        RegistryReprocessMarker,
+    ) {
+        let epoch = 305;
+        let (root, config, authority, _) = write_profile_neutral_recovery_fixture(label, epoch);
+        let mut runtime = queued_profile_neutral_runtime(epoch);
+        let outcome = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        let initial_retry = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        validate_profile_neutral_core_retry_admission_with_authority_sha256(
+            &config,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            Some(&initial_retry),
+            true,
+        )
+        .unwrap();
+        let (attempt_id, staging_dir) = new_registry_reprocess_attempt(&config, epoch).unwrap();
+        write_registry_reprocess_core_marker(&config, epoch, attempt_id, staging_dir).unwrap();
+        let core = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            core.recovery_incident_id.as_deref(),
+            Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID)
+        );
+        assert_eq!(
+            core.recovery_receipt_sha256.as_deref(),
+            Some(outcome.recovery_receipt_sha256.as_str())
+        );
+        transition_registry_reprocess_failed(
+            &config,
+            epoch,
+            &core,
+            "injected core failure".to_string(),
+        )
+        .unwrap();
+        let failed = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        validate_profile_neutral_registry_incident_proof_with_authority_sha256(
+            &config,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &failed,
+            false,
+            true,
+        )
+        .unwrap();
+        discard_failed_registry_core_attempt(&config, epoch, &failed).unwrap();
+        let mut retry = failed.clone();
+        retry.state = "retry_ready".to_string();
+        retry.phase = None;
+        retry.attempt_id = None;
+        retry.staging_dir = None;
+        retry.handoff_sha256 = None;
+        retry.expected_access_state = None;
+        retry.pid = None;
+        retry.process_start_ticks = None;
+        retry.updated_unix_secs = unix_now();
+        retry.message = None;
+        compare_and_publish_registry_reprocess_marker(&config, epoch, &failed, &retry).unwrap();
+        validate_profile_neutral_registry_final_retry_with_authority_sha256(
+            &config,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &retry,
+        )
+        .unwrap();
+        (root, config, authority, outcome, retry)
+    }
+
+    fn complete_profile_neutral_fixture(
+        label: &str,
+    ) -> (
+        PathBuf,
+        SchedulerConfig,
+        ProfileNeutralRegistryRebuildAuthority,
+        ProfileNeutralRegistryRebuildOutcome,
+        RuntimeState,
+        RegistryReprocessMarker,
+    ) {
+        let epoch = 305;
+        let (root, mut config, authority, _) = write_profile_neutral_recovery_fixture(label, epoch);
+        config.execute = true;
+        let mut recovery_runtime = queued_profile_neutral_runtime(epoch);
+        let outcome = recover_profile_neutral_registry_generation(
+            &config,
+            &mut recovery_runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        let (attempt_id, staging_dir) = new_registry_reprocess_attempt(&config, epoch).unwrap();
+        write_registry_reprocess_core_marker(&config, epoch, attempt_id, staging_dir).unwrap();
+        let core = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        let mut final_auditing = core.clone();
+        final_auditing.state = "final_auditing".to_string();
+        final_auditing.phase = Some(RegistryReprocessPhase::Access);
+        final_auditing.handoff_sha256 = Some("cd".repeat(32));
+        final_auditing.expected_access_state = None;
+        final_auditing.pid = None;
+        final_auditing.process_start_ticks = None;
+        final_auditing.message = Some("test bounded result is ready".to_string());
+        final_auditing.updated_unix_secs = unix_now();
+        compare_and_publish_registry_reprocess_marker(&config, epoch, &core, &final_auditing)
+            .unwrap();
+        let lock = try_exclusive_profile_neutral_registry_lock(&config, epoch)
+            .unwrap()
+            .unwrap();
+        let mut runtime = RuntimeState::default();
+        complete_registry_reprocess_after_bounded_probe_with_authority_sha256_and_hook(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &final_auditing,
+            Some(&lock),
+            || Ok(()),
+        )
+        .unwrap();
+        drop(lock);
+        let complete = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(complete.state, "complete");
+        assert!(runtime.validated_registry_reprocesses.contains(&epoch));
+        assert!(
+            runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .contains_key(&epoch)
+        );
+        (root, config, authority, outcome, runtime, complete)
+    }
+
+    fn profile_neutral_fixture_at_status(
+        label: &str,
+        status: RegistryReprocessStatus,
+    ) -> (
+        PathBuf,
+        SchedulerConfig,
+        ProfileNeutralRegistryRebuildAuthority,
+        ProfileNeutralRegistryRebuildOutcome,
+        RuntimeState,
+        RegistryReprocessMarker,
+    ) {
+        if status == RegistryReprocessStatus::Complete {
+            return complete_profile_neutral_fixture(label);
+        }
+        let epoch = 305;
+        let (root, mut config, authority, _) = write_profile_neutral_recovery_fixture(label, epoch);
+        config.execute = true;
+        let mut runtime = queued_profile_neutral_runtime(epoch);
+        let outcome = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        let mut marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        if status == RegistryReprocessStatus::AccessReady {
+            let (attempt_id, staging_dir) = new_registry_reprocess_attempt(&config, epoch).unwrap();
+            write_registry_reprocess_core_marker(&config, epoch, attempt_id, staging_dir).unwrap();
+            let core = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap();
+            marker = core.clone();
+            marker.state = "block_access_rebuild_required".to_string();
+            marker.phase = Some(RegistryReprocessPhase::Access);
+            marker.handoff_sha256 = Some("cd".repeat(32));
+            marker.expected_access_state = None;
+            marker.pid = None;
+            marker.process_start_ticks = None;
+            marker.message = Some("test access continuation is ready".to_string());
+            marker.updated_unix_secs = unix_now();
+            compare_and_publish_registry_reprocess_marker(&config, epoch, &core, &marker).unwrap();
+            admit_profile_neutral_registry_incident_proof_with_authority_sha256(
+                &config,
+                &mut runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                &marker,
+                false,
+                true,
+            )
+            .unwrap();
+        } else {
+            assert_eq!(status, RegistryReprocessStatus::Ready);
+        }
+        assert_eq!(
+            registry_reprocess_status_inner(
+                &config,
+                &runtime,
+                &profile_neutral_test_epoch(&root, epoch),
+                Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+            ),
+            status
+        );
+        (root, config, authority, outcome, runtime, marker)
+    }
+
+    fn replace_file_with_same_bytes_new_inode(path: &Path) {
+        let before = fs::symlink_metadata(path).unwrap();
+        let bytes = fs::read(path).unwrap();
+        let replacement = path.with_extension(format!(
+            "same-bytes-replacement-{}",
+            before.ino().saturating_add(1)
+        ));
+        fs::write(&replacement, bytes).unwrap();
+        fs::rename(&replacement, path).unwrap();
+        let after = fs::symlink_metadata(path).unwrap();
+        assert_ne!(before.ino(), after.ino());
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_authority_is_the_exact_pinned_live_cohort() {
+        assert_eq!(
+            PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES
+                .iter()
+                .map(|authority| authority.epoch)
+                .collect::<Vec<_>>(),
+            vec![305, 404, 405, 501, 502, 503, 504, 505, 864, 997, 1000]
+        );
+        assert_eq!(
+            PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES
+                .iter()
+                .map(|authority| authority.receipt_version)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2]
+        );
+        assert!(
+            PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITIES
+                .iter()
+                .all(
+                    |authority| profile_neutral_is_sha256(authority.receipt_sha256)
+                        && profile_neutral_is_sha256(authority.source_generation_sha256)
+                        && profile_neutral_is_sha256(authority.target_generation_sha256)
+                )
+        );
+        assert_eq!(
+            profile_neutral_registry_rebuild_authority_sha256(),
+            PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256
+        );
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_api_accepts_only_the_exact_closed_request() {
+        let exact = ProfileNeutralRegistryRebuildRequest {
+            incident_id: PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID.to_string(),
+            authority_sha256: PROFILE_NEUTRAL_REGISTRY_REBUILD_AUTHORITY_SHA256.to_string(),
+        };
+        assert_eq!(
+            authorize_profile_neutral_registry_rebuild_request(
+                REGISTRY_REPROCESS_OWNERSHIP_KIND,
+                "305",
+                &exact,
+            )
+            .unwrap()
+            .epoch,
+            305
+        );
+        assert!(
+            authorize_profile_neutral_registry_rebuild_request("other", "305", &exact).is_err()
+        );
+        assert!(
+            authorize_profile_neutral_registry_rebuild_request(
+                REGISTRY_REPROCESS_OWNERSHIP_KIND,
+                "306",
+                &exact,
+            )
+            .is_err()
+        );
+        let mut wrong = exact.clone();
+        wrong.incident_id = "other-incident".to_string();
+        assert!(
+            authorize_profile_neutral_registry_rebuild_request(
+                REGISTRY_REPROCESS_OWNERSHIP_KIND,
+                "305",
+                &wrong,
+            )
+            .is_err()
+        );
+        wrong = exact;
+        wrong.authority_sha256 = "00".repeat(32);
+        assert!(
+            authorize_profile_neutral_registry_rebuild_request(
+                REGISTRY_REPROCESS_OWNERSHIP_KIND,
+                "305",
+                &wrong,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_preserves_exact_generation_and_is_idempotent() {
+        let epoch = 305;
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture("profile-neutral-success", epoch);
+        let mut runtime = queued_profile_neutral_runtime(epoch);
+        let outcome = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        assert!(!outcome.idempotent);
+        assert!(!original_marker.target.exists());
+        assert!(outcome.quarantine.is_dir());
+        assert!(outcome.archived_marker.is_file());
+        assert!(outcome.recovery_receipt.is_file());
+        assert_eq!(
+            read_registry_reprocess_marker_at_strict(&outcome.archived_marker).unwrap(),
+            original_marker
+        );
+        let final_marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert!(profile_neutral_registry_rebuild_retry_marker_claims(
+            &config,
+            &authority,
+            &final_marker,
+            &outcome.recovery_receipt_sha256,
+            config.registry_reprocess_threads,
+        ));
+        assert!(!runtime.pending_registry_reprocess_audits.contains(&epoch));
+        assert!(
+            runtime
+                .registry_reprocess_audit_queue
+                .iter()
+                .all(|request| request.epoch != epoch)
+        );
+        for path in [&outcome.archived_marker, &outcome.recovery_receipt] {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            assert_eq!(metadata.nlink(), 1);
+            assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        }
+
+        let repeated = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        assert!(repeated.idempotent);
+        assert_eq!(repeated.quarantine, outcome.quarantine);
+        assert_eq!(
+            repeated.recovery_receipt_sha256,
+            outcome.recovery_receipt_sha256
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_accepts_the_exact_legacy_v2_receipt_contract() {
+        let epoch = 404;
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture_version("profile-neutral-v2-success", epoch, 2);
+        assert_eq!(authority.receipt_version, 2);
+        let mut runtime = RuntimeState {
+            scheduler_paused: true,
+            ..RuntimeState::default()
+        };
+        let outcome = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        assert!(!original_marker.target.exists());
+        assert!(outcome.quarantine.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_resumes_claim_before_and_after_quarantine() {
+        for (label, move_before_resume) in [
+            ("profile-neutral-resume-target", false),
+            ("profile-neutral-resume-quarantine", true),
+        ] {
+            let epoch = 305;
+            let (root, config, authority, original_marker) =
+                write_profile_neutral_recovery_fixture(label, epoch);
+            let mut runtime = queued_profile_neutral_runtime(epoch);
+            let error = recover_profile_neutral_registry_generation(
+                &config,
+                &mut runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                || Some(Vec::new()),
+                || Some(Vec::new()),
+                |_| Some(vec![71]),
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("reader"));
+            let claim = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.state, PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE);
+            profile_neutral_registry_rebuild_claim_is_durable_with_authority_sha256(
+                &config,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                &claim,
+            )
+            .unwrap();
+            let quarantine = profile_neutral_registry_rebuild_quarantine_path(
+                &original_marker.target,
+                &authority,
+            )
+            .unwrap();
+            if move_before_resume {
+                rename_registry_generation_no_replace(&original_marker.target, &quarantine)
+                    .unwrap();
+                sync_scheduler_directory(original_marker.target.parent().unwrap()).unwrap();
+            }
+            let outcome = recover_profile_neutral_registry_generation(
+                &config,
+                &mut runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                || Some(Vec::new()),
+                || Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .unwrap();
+            assert!(!outcome.idempotent);
+            assert!(!original_marker.target.exists());
+            assert!(quarantine.is_dir());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_final_reader_census_stops_before_quarantine() {
+        let epoch = 305;
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture("profile-neutral-reader-race", epoch);
+        let mut runtime = queued_profile_neutral_runtime(epoch);
+        let reader_calls = std::cell::Cell::new(0usize);
+        let registry_writer_calls = std::cell::Cell::new(0usize);
+        let poh_writer_calls = std::cell::Cell::new(0usize);
+        let error = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || {
+                registry_writer_calls.set(registry_writer_calls.get() + 1);
+                Some(Vec::new())
+            },
+            || {
+                poh_writer_calls.set(poh_writer_calls.get() + 1);
+                Some(Vec::new())
+            },
+            |_| {
+                let call = reader_calls.get();
+                reader_calls.set(call + 1);
+                if call == 1 {
+                    assert!(registry_writer_calls.get() >= 3);
+                    assert!(poh_writer_calls.get() >= 3);
+                }
+                Some(if call == 0 { Vec::new() } else { vec![81] })
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("reader"));
+        let quarantine =
+            profile_neutral_registry_rebuild_quarantine_path(&original_marker.target, &authority)
+                .unwrap();
+        assert!(original_marker.target.is_dir());
+        assert!(!quarantine.exists());
+        let claim = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.state, PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE);
+        recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_attestation_gate_fails_closed() {
+        for case in ["missing", "pre", "ambiguous", "source_changed"] {
+            let epoch = 305;
+            let (root, config, authority, original_marker) = write_profile_neutral_recovery_fixture(
+                &format!("profile-neutral-attestation-{case}"),
+                epoch,
+            );
+            let attestation_path =
+                profile_neutral_registry_source_attestation_path(&config.state_root, &authority);
+            match case {
+                "missing" => fs::remove_file(&attestation_path).unwrap(),
+                "pre" | "ambiguous" => {
+                    let mut attestation: ProfileNeutralRegistrySourceAttestation =
+                        serde_json::from_slice(&fs::read(&attestation_path).unwrap()).unwrap();
+                    if case == "pre" {
+                        attestation.wire_profile =
+                            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1;
+                    } else {
+                        attestation.evidence = attestation
+                            .evidence
+                            .replace(
+                                "both_semantically_equivalent=2",
+                                "both_semantically_equivalent=1",
+                            )
+                            .replace(
+                                "both_semantically_divergent=0",
+                                "both_semantically_divergent=1",
+                            );
+                    }
+                    fs::write(
+                        &attestation_path,
+                        serde_json::to_vec_pretty(&attestation).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "source_changed" => {
+                    let path = original_marker.source.join(META_FILE);
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes[0] ^= 1;
+                    fs::write(path, bytes).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut runtime = RuntimeState {
+                scheduler_paused: true,
+                ..RuntimeState::default()
+            };
+            assert!(
+                recover_profile_neutral_registry_generation(
+                    &config,
+                    &mut runtime,
+                    &authority,
+                    TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                    || Some(Vec::new()),
+                    || Some(Vec::new()),
+                    |_| Some(Vec::new()),
+                )
+                .is_err(),
+                "unsafe attestation case {case} was accepted"
+            );
+            assert!(original_marker.target.is_dir());
+            assert_eq!(
+                read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                    .unwrap()
+                    .unwrap(),
+                original_marker
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_rejects_receipt_target_and_quarantine_changes() {
+        use crate::archive_v2::registry_reprocess::{
+            REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt,
+        };
+
+        for case in ["receipt", "extra_target", "occupied_quarantine"] {
+            let epoch = 305;
+            let (root, config, authority, original_marker) = write_profile_neutral_recovery_fixture(
+                &format!("profile-neutral-generation-{case}"),
+                epoch,
+            );
+            match case {
+                "receipt" => {
+                    let path = original_marker.target.join(REGISTRY_REPROCESS_RECEIPT_FILE);
+                    let mut receipt: RegistryReprocessReceipt =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    receipt.algorithm =
+                        "compact_v2_first_seen_v1_to_usage_sorted_historical_car_v2".to_string();
+                    fs::write(path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+                }
+                "extra_target" => {
+                    fs::write(original_marker.target.join("unexpected.bin"), b"unexpected")
+                        .unwrap();
+                }
+                "occupied_quarantine" => {
+                    let quarantine = profile_neutral_registry_rebuild_quarantine_path(
+                        &original_marker.target,
+                        &authority,
+                    )
+                    .unwrap();
+                    fs::create_dir(&quarantine).unwrap();
+                    fs::write(quarantine.join("do-not-clobber"), b"sentinel").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut runtime = RuntimeState {
+                scheduler_paused: true,
+                ..RuntimeState::default()
+            };
+            assert!(
+                recover_profile_neutral_registry_generation(
+                    &config,
+                    &mut runtime,
+                    &authority,
+                    TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                    || Some(Vec::new()),
+                    || Some(Vec::new()),
+                    |_| Some(Vec::new()),
+                )
+                .is_err(),
+                "changed generation case {case} was accepted"
+            );
+            assert!(original_marker.target.is_dir());
+            if case == "occupied_quarantine" {
+                let quarantine = profile_neutral_registry_rebuild_quarantine_path(
+                    &original_marker.target,
+                    &authority,
+                )
+                .unwrap();
+                assert_eq!(
+                    fs::read(quarantine.join("do-not-clobber")).unwrap(),
+                    b"sentinel"
+                );
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_does_not_replace_a_foreign_marker_archive_or_receipt() {
+        let epoch = 305;
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture("profile-neutral-no-clobber-archive", epoch);
+        let archived =
+            profile_neutral_registry_rebuild_archived_marker_path(&config.state_root, &authority);
+        ensure_profile_neutral_rebuild_state_directory(
+            archived.parent().unwrap().parent().unwrap(),
+        )
+        .unwrap();
+        ensure_profile_neutral_rebuild_state_directory(archived.parent().unwrap()).unwrap();
+        fs::write(&archived, b"foreign-marker-archive").unwrap();
+        fs::set_permissions(&archived, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut runtime = RuntimeState {
+            scheduler_paused: true,
+            ..RuntimeState::default()
+        };
+        assert!(
+            recover_profile_neutral_registry_generation(
+                &config,
+                &mut runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                || Some(Vec::new()),
+                || Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&archived).unwrap(), b"foreign-marker-archive");
+        assert!(original_marker.target.is_dir());
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture("profile-neutral-no-clobber-receipt", epoch);
+        let mut runtime = queued_profile_neutral_runtime(epoch);
+        recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(vec![91]),
+        )
+        .unwrap_err();
+        let recovery_path =
+            profile_neutral_registry_rebuild_receipt_path(&config.state_root, &authority);
+        let mut receipt: ProfileNeutralRegistryRebuildReceipt =
+            serde_json::from_slice(&fs::read(&recovery_path).unwrap()).unwrap();
+        receipt.authority_sha256 = "cd".repeat(32);
+        let foreign = serde_json::to_vec_pretty(&receipt).unwrap();
+        fs::write(&recovery_path, &foreign).unwrap();
+        assert!(
+            recover_profile_neutral_registry_generation(
+                &config,
+                &mut runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                || Some(Vec::new()),
+                || Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&recovery_path).unwrap(), foreign);
+        assert!(original_marker.target.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_rejects_runtime_process_and_lock_ownership() {
+        for case in [
+            "not_paused",
+            "queue_mismatch",
+            "registry_writer",
+            "poh_unobservable",
+        ] {
+            let epoch = 305;
+            let (root, config, authority, original_marker) = write_profile_neutral_recovery_fixture(
+                &format!("profile-neutral-owner-{case}"),
+                epoch,
+            );
+            let mut runtime = RuntimeState {
+                scheduler_paused: case != "not_paused",
+                ..RuntimeState::default()
+            };
+            if case == "queue_mismatch" {
+                runtime.pending_registry_reprocess_audits.insert(epoch);
+            }
+            let result = recover_profile_neutral_registry_generation(
+                &config,
+                &mut runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                || {
+                    Some(if case == "registry_writer" {
+                        vec![101]
+                    } else {
+                        Vec::new()
+                    })
+                },
+                || {
+                    if case == "poh_unobservable" {
+                        None
+                    } else {
+                        Some(Vec::new())
+                    }
+                },
+                |_| Some(Vec::new()),
+            );
+            assert!(result.is_err(), "unsafe runtime case {case} was accepted");
+            assert!(original_marker.target.is_dir());
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        let epoch = 305;
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture("profile-neutral-held-lock", epoch);
+        let _held = try_exclusive_profile_neutral_registry_lock(&config, epoch)
+            .unwrap()
+            .unwrap();
+        let mut runtime = RuntimeState {
+            scheduler_paused: true,
+            ..RuntimeState::default()
+        };
+        assert!(
+            recover_profile_neutral_registry_generation(
+                &config,
+                &mut runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                || Some(Vec::new()),
+                || Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .is_err()
+        );
+        assert!(original_marker.target.is_dir());
+        fs::remove_dir_all(root).unwrap();
+
+        let epoch = 305;
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture("profile-neutral-held-controller-lock", epoch);
+        let _held = try_exclusive_profile_neutral_controller_lock(&config)
+            .unwrap()
+            .unwrap();
+        let mut runtime = RuntimeState {
+            scheduler_paused: true,
+            ..RuntimeState::default()
+        };
+        let error = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("controller"));
+        assert!(original_marker.target.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_controller_lock_requires_exact_private_published_identity() {
+        for case in [
+            "missing",
+            "mode",
+            "nonempty",
+            "hardlink",
+            "symlink",
+            "root-mode",
+        ] {
+            let epoch = 305;
+            let (root, config, _, _) = write_profile_neutral_recovery_fixture(
+                &format!("profile-neutral-controller-lock-{case}"),
+                epoch,
+            );
+            let path = profile_neutral_controller_lock_path(&config);
+            match case {
+                "missing" => fs::remove_file(&path).unwrap(),
+                "mode" => fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap(),
+                "nonempty" => fs::write(&path, b"not-empty").unwrap(),
+                "hardlink" => fs::hard_link(&path, path.with_extension("second-link")).unwrap(),
+                "symlink" => {
+                    fs::remove_file(&path).unwrap();
+                    let target = path.with_extension("target");
+                    fs::write(&target, b"").unwrap();
+                    std::os::unix::fs::symlink(&target, &path).unwrap();
+                }
+                "root-mode" => {
+                    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o720))
+                        .unwrap()
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                try_exclusive_profile_neutral_controller_lock(&config).is_err(),
+                "unsafe controller lock case {case} was accepted"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_controller_guard_detects_lock_and_root_replacement() {
+        let epoch = 305;
+        let (root, config, _, _) =
+            write_profile_neutral_recovery_fixture("profile-neutral-controller-lock-change", epoch);
+        let lock = try_exclusive_profile_neutral_controller_lock(&config)
+            .unwrap()
+            .unwrap();
+        let path = profile_neutral_controller_lock_path(&config);
+        fs::remove_file(&path).unwrap();
+        OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        assert!(ensure_profile_neutral_controller_lock_unchanged(&config, &lock).is_err());
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, config, _, _) =
+            write_profile_neutral_recovery_fixture("profile-neutral-controller-root-change", epoch);
+        let lock = try_exclusive_profile_neutral_controller_lock(&config)
+            .unwrap()
+            .unwrap();
+        let controller_root = config.state_root.join("firewatch-index");
+        let moved = config.state_root.join("firewatch-index.old");
+        fs::rename(&controller_root, &moved).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&controller_root)
+            .unwrap();
+        OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(profile_neutral_controller_lock_path(&config))
+            .unwrap();
+        assert!(ensure_profile_neutral_controller_lock_unchanged(&config, &lock).is_err());
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_rebuild_marker_race_never_overwrites_the_foreign_claim() {
+        let epoch = 305;
+        let (root, config, authority, original_marker) =
+            write_profile_neutral_recovery_fixture("profile-neutral-marker-race", epoch);
+        let mut runtime = queued_profile_neutral_runtime(epoch);
+        let reader_calls = std::cell::Cell::new(0usize);
+        let error = recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| {
+                if reader_calls.replace(reader_calls.get() + 1) == 0 {
+                    let mut foreign =
+                        read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                            .unwrap()
+                            .unwrap();
+                    foreign.message = Some("foreign claim".to_string());
+                    publish_registry_reprocess_marker(&config.state_root, epoch, &foreign).unwrap();
+                }
+                Some(Vec::new())
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("claim changed"));
+        let current = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.message.as_deref(), Some("foreign claim"));
+        let quarantine =
+            profile_neutral_registry_rebuild_quarantine_path(&original_marker.target, &authority)
+                .unwrap();
+        assert!(!original_marker.target.exists());
+        assert!(quarantine.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_final_retry_requires_the_complete_cached_proof() {
+        let epoch = 305;
+        let (root, mut config, authority, _) =
+            write_profile_neutral_recovery_fixture("profile-neutral-final-proof", epoch);
+        config.execute = true;
+        let mut recovery_runtime = queued_profile_neutral_runtime(epoch);
+        let outcome = recover_profile_neutral_registry_generation(
+            &config,
+            &mut recovery_runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        let marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        let mut startup_runtime = RuntimeState::default();
+        let snapshot = profile_neutral_test_epoch(&root, epoch);
+        assert_eq!(
+            registry_reprocess_status(&config, &startup_runtime, &snapshot),
+            RegistryReprocessStatus::Blocked,
+            "the final incident marker is not runnable before exact startup proof admission"
+        );
+        let proof = admit_profile_neutral_registry_final_retry_with_authority_sha256(
+            &config,
+            &mut startup_runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &marker,
+        )
+        .unwrap();
+        assert_eq!(proof.receipt_sha256, outcome.recovery_receipt_sha256);
+        assert_eq!(
+            proof.receipt.recovery_threads,
+            config.registry_reprocess_threads
+        );
+        assert_eq!(
+            proof.receipt.legacy_target_file_identities.len(),
+            proof
+                .receipt
+                .legacy_target_file_identities
+                .keys()
+                .collect::<BTreeSet<_>>()
+                .len()
+        );
+        assert!(
+            startup_runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .contains_key(&epoch)
+        );
+        assert_eq!(
+            registry_reprocess_status(&config, &startup_runtime, &snapshot),
+            RegistryReprocessStatus::Ready
+        );
+
+        let mut pre_config = config.clone();
+        pre_config.registry_reprocess_wire_profile =
+            Some(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1);
+        assert!(
+            validate_profile_neutral_registry_final_retry_with_authority_sha256(
+                &pre_config,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                &marker,
+            )
+            .is_err(),
+            "a current Pre configuration must not consume the promised Post retry"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_final_retry_rejects_each_changed_durable_binding() {
+        use crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE;
+
+        for case in [
+            "recovery_receipt",
+            "archived_marker",
+            "quarantine_identity",
+            "target_present",
+            "source_attestation",
+            "marker_profile",
+        ] {
+            let epoch = 305;
+            let (root, config, authority, original_marker) = write_profile_neutral_recovery_fixture(
+                &format!("profile-neutral-final-proof-{case}"),
+                epoch,
+            );
+            let mut recovery_runtime = queued_profile_neutral_runtime(epoch);
+            let outcome = recover_profile_neutral_registry_generation(
+                &config,
+                &mut recovery_runtime,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                || Some(Vec::new()),
+                || Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .unwrap();
+            match case {
+                "recovery_receipt" => {
+                    let mut receipt: ProfileNeutralRegistryRebuildReceipt =
+                        serde_json::from_slice(&fs::read(&outcome.recovery_receipt).unwrap())
+                            .unwrap();
+                    receipt.created_unix_secs += 1;
+                    fs::write(
+                        &outcome.recovery_receipt,
+                        serde_json::to_vec_pretty(&receipt).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "archived_marker" => {
+                    let mut archived =
+                        read_registry_reprocess_marker_at_strict(&outcome.archived_marker).unwrap();
+                    archived.message = Some("changed archived marker".to_string());
+                    fs::write(
+                        &outcome.archived_marker,
+                        serde_json::to_vec_pretty(&archived).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "quarantine_identity" => {
+                    let path = outcome.quarantine.join(META_FILE);
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes[0] ^= 1;
+                    fs::write(path, bytes).unwrap();
+                }
+                "target_present" => fs::create_dir(&original_marker.target).unwrap(),
+                "source_attestation" => {
+                    let path = profile_neutral_registry_source_attestation_path(
+                        &config.state_root,
+                        &authority,
+                    );
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.push(b' ');
+                    fs::write(path, bytes).unwrap();
+                }
+                "marker_profile" => {
+                    let mut marker =
+                        read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                            .unwrap()
+                            .unwrap();
+                    marker.wire_profile =
+                        Some(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1);
+                    publish_registry_reprocess_marker(&config.state_root, epoch, &marker).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap();
+            assert!(profile_neutral_registry_rebuild_incident_candidate(
+                &config, epoch, &marker
+            ));
+            let mut startup_runtime = RuntimeState::default();
+            assert!(
+                admit_profile_neutral_registry_final_retry_with_authority_sha256(
+                    &config,
+                    &mut startup_runtime,
+                    &authority,
+                    TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                    &marker,
+                )
+                .is_err(),
+                "changed final proof binding {case} was admitted"
+            );
+            assert!(
+                !startup_runtime
+                    .validated_profile_neutral_registry_rebuild_retries
+                    .contains_key(&epoch)
+            );
+            assert_eq!(
+                registry_reprocess_status(
+                    &config,
+                    &startup_runtime,
+                    &profile_neutral_test_epoch(&root, epoch),
+                ),
+                RegistryReprocessStatus::Blocked,
+                "changed final proof binding {case} became runnable"
+            );
+            assert!(
+                outcome
+                    .quarantine
+                    .join(REGISTRY_REPROCESS_RECEIPT_FILE)
+                    .exists()
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_claim_resume_uses_recorded_threads_then_new_attempt_uses_current_threads() {
+        let epoch = 305;
+        let (root, config, authority, _) =
+            write_profile_neutral_recovery_fixture("profile-neutral-thread-resume", epoch);
+        assert_eq!(config.registry_reprocess_threads, 4);
+        let mut runtime = queued_profile_neutral_runtime(epoch);
+        recover_profile_neutral_registry_generation(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(vec![111]),
+        )
+        .unwrap_err();
+        let claim = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.threads, 4);
+
+        let mut restarted_config = config.clone();
+        restarted_config.registry_reprocess_threads = 7;
+        profile_neutral_registry_rebuild_claim_is_durable_with_authority_sha256(
+            &restarted_config,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &claim,
+        )
+        .unwrap();
+        let outcome = recover_profile_neutral_registry_generation(
+            &restarted_config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || Some(Vec::new()),
+            || Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        let final_marker =
+            read_registry_reprocess_marker_strict(&restarted_config.state_root, epoch)
+                .unwrap()
+                .unwrap();
+        assert_eq!(final_marker.threads, 4);
+        let receipt: ProfileNeutralRegistryRebuildReceipt =
+            serde_json::from_slice(&fs::read(&outcome.recovery_receipt).unwrap()).unwrap();
+        assert_eq!(receipt.recovery_threads, 4);
+        validate_profile_neutral_registry_final_retry_with_authority_sha256(
+            &restarted_config,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &final_marker,
+        )
+        .unwrap();
+
+        let (attempt_id, staging_dir) =
+            new_registry_reprocess_attempt(&restarted_config, epoch).unwrap();
+        write_registry_reprocess_core_marker(&restarted_config, epoch, attempt_id, staging_dir)
+            .unwrap();
+        let core_marker =
+            read_registry_reprocess_marker_strict(&restarted_config.state_root, epoch)
+                .unwrap()
+                .unwrap();
+        assert_eq!(core_marker.threads, 7);
+        assert_eq!(
+            core_marker.wire_profile,
+            Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_no_replace_publication_has_no_two_link_crash_state() {
+        let (root, config, _, _) =
+            write_profile_neutral_recovery_fixture("profile-neutral-publish-crash", 305);
+        let parent = profile_neutral_registry_rebuild_root(&config.state_root).join("receipts");
+        let path = parent.join("atomic-test.json");
+        let bytes = b"exact recovery proof bytes";
+        let error = publish_profile_neutral_rebuild_bytes_no_clobber_with_hook(
+            &path,
+            bytes,
+            1024,
+            "atomic-test",
+            |_| anyhow::bail!("injected crash after final publication"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected crash"));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::symlink_metadata(&path).unwrap().nlink(), 1);
+        let names = fs::read_dir(&parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![path.file_name().unwrap().to_os_string()]);
+        let (_, identity) =
+            publish_profile_neutral_rebuild_bytes_no_clobber(&path, bytes, 1024, "atomic-test")
+                .unwrap();
+        assert_eq!(
+            identity,
+            ProfileNeutralRegistryRebuildFileIdentity::from_metadata(
+                &fs::symlink_metadata(&path).unwrap()
+            )
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_marker_cas_crash_leaves_only_a_private_temp() {
+        let epoch = 305;
+        let (root, config, _, original) =
+            write_profile_neutral_recovery_fixture("profile-neutral-marker-temp-crash", epoch);
+        let marker_path = registry_reprocess_marker_path(&config.state_root, epoch);
+        let (_, _, original_identity) =
+            read_profile_neutral_registry_marker_file(&marker_path).unwrap();
+        let replacement = profile_neutral_registry_rebuild_marker(
+            &original,
+            config.registry_reprocess_threads,
+            &"ab".repeat(32),
+            &original_identity,
+            PROFILE_NEUTRAL_REGISTRY_REBUILD_CLAIM_STATE,
+            profile_neutral_registry_rebuild_claim_message(&"ab".repeat(32)),
+        );
+        let leaked = std::cell::RefCell::new(None::<PathBuf>);
+        let error = compare_and_publish_profile_neutral_registry_marker_with_hook(
+            &config,
+            epoch,
+            &original,
+            &original_identity,
+            &replacement,
+            |temp| {
+                leaked.replace(Some(temp.to_path_buf()));
+                anyhow::bail!("injected crash before marker CAS")
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected crash"));
+        let leaked = leaked.into_inner().unwrap();
+        assert!(leaked.is_file());
+        assert!(leaked.starts_with(
+            profile_neutral_registry_rebuild_root(&config.state_root).join("marker-temps")
+        ));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        let registry_entries = fs::read_dir(config.state_root.join("registry_reprocess"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            registry_entries,
+            vec![marker_path.file_name().unwrap().to_os_string()]
+        );
+        let mut startup_runtime = RuntimeState::default();
+        reconcile_registry_reprocess_markers(&config, &mut startup_runtime);
+        assert!(
+            !startup_runtime.registry_reprocess_admission_blocked,
+            "a private incident temp must not poison strict marker-root enumeration"
+        );
+        compare_and_publish_profile_neutral_registry_marker(
+            &config,
+            epoch,
+            &original,
+            &original_identity,
+            &replacement,
+        )
+        .unwrap();
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap(),
+            replacement
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_lineage_survives_core_failure_restart_and_next_spawn() {
+        let epoch = 305;
+        let (root, mut config, authority, outcome, mut retry) =
+            advance_profile_neutral_fixture_to_later_core_retry("profile-neutral-later-core-retry");
+        config.execute = true;
+        assert!(retry.message.is_none());
+        assert_eq!(
+            retry.recovery_receipt_sha256.as_deref(),
+            Some(outcome.recovery_receipt_sha256.as_str())
+        );
+        assert!(profile_neutral_registry_rebuild_incident_candidate(
+            &config, epoch, &retry
+        ));
+        let snapshot = profile_neutral_test_epoch(&root, epoch);
+        let mut restarted = RuntimeState::default();
+        assert_eq!(
+            registry_reprocess_status(&config, &restarted, &snapshot),
+            RegistryReprocessStatus::Blocked,
+            "an empty restart cache must block the later incident retry"
+        );
+        admit_profile_neutral_registry_incident_proof_with_authority_sha256(
+            &config,
+            &mut restarted,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &retry,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            registry_reprocess_status(&config, &restarted, &snapshot),
+            RegistryReprocessStatus::Ready
+        );
+
+        retry.message = Some("message changed after a restart".to_string());
+        publish_registry_reprocess_marker(&config.state_root, epoch, &retry).unwrap();
+        let mut message_restart = RuntimeState::default();
+        assert!(profile_neutral_registry_rebuild_incident_candidate(
+            &config, epoch, &retry
+        ));
+        assert_eq!(
+            registry_reprocess_status(&config, &message_restart, &snapshot),
+            RegistryReprocessStatus::Blocked,
+            "a mutated message must not downgrade the marker to a generic retry"
+        );
+        admit_profile_neutral_registry_incident_proof_with_authority_sha256(
+            &config,
+            &mut message_restart,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &retry,
+            true,
+            true,
+        )
+        .unwrap();
+
+        let mut pre_config = config.clone();
+        pre_config.registry_reprocess_wire_profile =
+            Some(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1);
+        assert!(
+            validate_profile_neutral_core_retry_admission_with_authority_sha256(
+                &pre_config,
+                &authority,
+                TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                Some(&retry),
+                true,
+            )
+            .is_err(),
+            "the later incident retry must not spawn under Pre"
+        );
+        validate_profile_neutral_core_retry_admission_with_authority_sha256(
+            &config,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            Some(&retry),
+            true,
+        )
+        .unwrap();
+        let (attempt_id, staging_dir) = new_registry_reprocess_attempt(&config, epoch).unwrap();
+        write_registry_reprocess_core_marker(&config, epoch, attempt_id, staging_dir).unwrap();
+        let next_core = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next_core.phase, Some(RegistryReprocessPhase::Core));
+        assert_eq!(next_core.recovery_incident_id, retry.recovery_incident_id);
+        assert_eq!(
+            next_core.recovery_receipt_sha256,
+            retry.recovery_receipt_sha256
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_later_retry_rejects_tampered_proof_and_lineage() {
+        for case in [
+            "receipt",
+            "attestation",
+            "quarantine",
+            "missing_lineage",
+            "mutated_lineage",
+        ] {
+            let epoch = 305;
+            let (root, config, authority, outcome, mut retry) =
+                advance_profile_neutral_fixture_to_later_core_retry(&format!(
+                    "profile-neutral-later-retry-{case}"
+                ));
+            match case {
+                "receipt" => {
+                    let mut receipt: ProfileNeutralRegistryRebuildReceipt =
+                        serde_json::from_slice(&fs::read(&outcome.recovery_receipt).unwrap())
+                            .unwrap();
+                    receipt.created_unix_secs += 1;
+                    fs::write(
+                        &outcome.recovery_receipt,
+                        serde_json::to_vec_pretty(&receipt).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "attestation" => {
+                    let path = profile_neutral_registry_source_attestation_path(
+                        &config.state_root,
+                        &authority,
+                    );
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.push(b' ');
+                    fs::write(path, bytes).unwrap();
+                }
+                "quarantine" => {
+                    let path = outcome.quarantine.join(META_FILE);
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes[0] ^= 1;
+                    fs::write(path, bytes).unwrap();
+                }
+                "missing_lineage" => {
+                    retry.recovery_incident_id =
+                        Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID.to_string());
+                    retry.recovery_receipt_sha256 = None;
+                    retry.message = None;
+                    publish_registry_reprocess_marker(&config.state_root, epoch, &retry).unwrap();
+                }
+                "mutated_lineage" => {
+                    retry.recovery_receipt_sha256 = Some("cd".repeat(32));
+                    retry.message = Some("ordinary retry text".to_string());
+                    publish_registry_reprocess_marker(&config.state_root, epoch, &retry).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let marker = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap();
+            assert!(
+                profile_neutral_registry_rebuild_incident_candidate_with_authority(
+                    &config, &authority, &marker,
+                ),
+                "durable incident artifacts must classify {case} even without a trusted message"
+            );
+            let mut restarted = RuntimeState::default();
+            assert!(
+                admit_profile_neutral_registry_incident_proof_with_authority_sha256(
+                    &config,
+                    &mut restarted,
+                    &authority,
+                    TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+                    &marker,
+                    true,
+                    true,
+                )
+                .is_err(),
+                "tampered later-retry binding {case} was admitted"
+            );
+            assert_eq!(
+                registry_reprocess_status(
+                    &config,
+                    &restarted,
+                    &profile_neutral_test_epoch(&root, epoch),
+                ),
+                RegistryReprocessStatus::Blocked
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_complete_reconciliation_clears_each_tampered_proof_cache() {
+        for case in ["receipt", "attestation", "lineage"] {
+            let epoch = 305;
+            let (root, config, authority, outcome, mut runtime, mut complete) =
+                complete_profile_neutral_fixture(&format!(
+                    "profile-neutral-complete-tamper-{case}"
+                ));
+            let snapshot = profile_neutral_test_epoch(&root, epoch);
+            assert_eq!(
+                registry_reprocess_status_inner(
+                    &config,
+                    &runtime,
+                    &snapshot,
+                    Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                ),
+                RegistryReprocessStatus::Complete
+            );
+            assert!(registry_reprocess_is_validated_complete_inner(
+                &config,
+                &runtime,
+                epoch,
+                Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+            ));
+            match case {
+                "receipt" => {
+                    let mut bytes = fs::read(&outcome.recovery_receipt).unwrap();
+                    bytes.push(b' ');
+                    fs::write(&outcome.recovery_receipt, bytes).unwrap();
+                }
+                "attestation" => {
+                    let path = profile_neutral_registry_source_attestation_path(
+                        &config.state_root,
+                        &authority,
+                    );
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.push(b' ');
+                    fs::write(path, bytes).unwrap();
+                }
+                "lineage" => {
+                    complete.recovery_receipt_sha256 = Some("ef".repeat(32));
+                    publish_registry_reprocess_marker(&config.state_root, epoch, &complete)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let changed = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap();
+            assert!(
+                profile_neutral_registry_rebuild_incident_candidate_with_authority(
+                    &config, &authority, &changed,
+                )
+            );
+            reconcile_registry_reprocess_markers_inner(
+                &config,
+                &mut runtime,
+                Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+            );
+            assert!(runtime.registry_reprocess_admission_blocked);
+            assert!(!runtime.validated_registry_reprocesses.contains(&epoch));
+            assert!(
+                !runtime
+                    .validated_profile_neutral_registry_rebuild_retries
+                    .contains_key(&epoch)
+            );
+            assert_eq!(
+                registry_reprocess_status_inner(
+                    &config,
+                    &runtime,
+                    &snapshot,
+                    Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                ),
+                RegistryReprocessStatus::Blocked
+            );
+            assert!(!registry_reprocess_is_validated_complete_inner(
+                &config,
+                &runtime,
+                epoch,
+                Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+            ));
+
+            let mut observer_config = config.clone();
+            observer_config.execute = false;
+            let observer = RuntimeState::default();
+            assert_eq!(
+                registry_reprocess_status_inner(
+                    &observer_config,
+                    &observer,
+                    &snapshot,
+                    Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                ),
+                RegistryReprocessStatus::Blocked,
+                "observer accepted tampered complete proof {case}"
+            );
+            assert!(!registry_reprocess_is_validated_complete_inner(
+                &observer_config,
+                &observer,
+                epoch,
+                Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+            ));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_receipt_identity_gates_ready_access_complete_and_observer_status() {
+        for status in [
+            RegistryReprocessStatus::Ready,
+            RegistryReprocessStatus::AccessReady,
+            RegistryReprocessStatus::Complete,
+        ] {
+            for mutation in ["in_place", "same_bytes_new_inode"] {
+                let epoch = 305;
+                let label = format!("profile-neutral-receipt-identity-{status:?}-{mutation}");
+                let (root, config, authority, outcome, mut runtime, marker) =
+                    profile_neutral_fixture_at_status(&label, status);
+                let snapshot = profile_neutral_test_epoch(&root, epoch);
+                let original_identity = ProfileNeutralRegistryRebuildFileIdentity::from_metadata(
+                    &fs::symlink_metadata(&outcome.recovery_receipt).unwrap(),
+                );
+                let binding = runtime
+                    .validated_profile_neutral_registry_rebuild_retries
+                    .get(&epoch)
+                    .unwrap();
+                assert_eq!(binding.recovery_receipt_identity, original_identity);
+                assert_eq!(
+                    marker.recovery_receipt_identity.as_ref(),
+                    Some(&original_identity)
+                );
+                match mutation {
+                    "in_place" => {
+                        let mut bytes = fs::read(&outcome.recovery_receipt).unwrap();
+                        bytes.push(b' ');
+                        fs::write(&outcome.recovery_receipt, bytes).unwrap();
+                    }
+                    "same_bytes_new_inode" => {
+                        replace_file_with_same_bytes_new_inode(&outcome.recovery_receipt)
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    registry_reprocess_status_inner(
+                        &config,
+                        &runtime,
+                        &snapshot,
+                        Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                    ),
+                    RegistryReprocessStatus::Blocked,
+                    "execute status {status:?} accepted {mutation} receipt replacement"
+                );
+                let mut observer_config = config.clone();
+                observer_config.execute = false;
+                assert_eq!(
+                    registry_reprocess_status_inner(
+                        &observer_config,
+                        &RuntimeState::default(),
+                        &snapshot,
+                        Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                    ),
+                    RegistryReprocessStatus::Blocked,
+                    "observer status {status:?} accepted {mutation} receipt replacement"
+                );
+                reconcile_registry_reprocess_markers_inner(
+                    &config,
+                    &mut runtime,
+                    Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                );
+                assert!(runtime.registry_reprocess_admission_blocked);
+                assert!(!runtime.validated_registry_reprocesses.contains(&epoch));
+                assert!(
+                    !runtime
+                        .validated_profile_neutral_registry_rebuild_retries
+                        .contains_key(&epoch)
+                );
+                assert!(
+                    runtime
+                        .profile_neutral_registry_incident_history
+                        .contains(&epoch)
+                );
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_neutral_missing_or_malformed_marker_never_falls_back_to_core() {
+        for marker_fault in ["missing", "malformed"] {
+            let epoch = 305;
+            let label = format!("profile-neutral-marker-{marker_fault}-restart");
+            let (root, mut config, authority, _, _, _) =
+                profile_neutral_fixture_at_status(&label, RegistryReprocessStatus::Ready);
+            config.registry_reprocess_concurrency = 1;
+            let marker_path = registry_reprocess_marker_path(&config.state_root, epoch);
+            match marker_fault {
+                "missing" => fs::remove_file(&marker_path).unwrap(),
+                "malformed" => fs::write(&marker_path, b"{").unwrap(),
+                _ => unreachable!(),
+            }
+            let candidate = profile_neutral_test_epoch(&root, epoch);
+            let mut snapshot = empty_snapshot(false);
+            snapshot.inventory.complete = true;
+            snapshot.epochs.push(candidate.clone());
+            snapshot.machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+            let mut restarted = RuntimeState::default();
+            for attempt in 0..2 {
+                reconcile_registry_reprocess_markers_inner(
+                    &config,
+                    &mut restarted,
+                    Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                );
+                assert!(
+                    restarted.registry_reprocess_admission_blocked,
+                    "restart attempt {attempt} accepted a {marker_fault} incident marker"
+                );
+                assert_eq!(
+                    registry_reprocess_status_inner(
+                        &config,
+                        &restarted,
+                        &candidate,
+                        Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                    ),
+                    RegistryReprocessStatus::Blocked
+                );
+                assert_eq!(
+                    top_up_registry_reprocesses(&config, &snapshot, &mut restarted).await,
+                    0
+                );
+                assert!(restarted.registry_reprocesses.is_empty());
+                assert!(
+                    restarted
+                        .profile_neutral_registry_incident_history
+                        .contains(&epoch)
+                );
+                assert!(
+                    !restarted
+                        .validated_profile_neutral_registry_rebuild_retries
+                        .contains_key(&epoch)
+                        && !restarted.validated_registry_reprocesses.contains(&epoch)
+                );
+            }
+            match marker_fault {
+                "missing" => assert!(!marker_path.exists()),
+                "malformed" => assert_eq!(fs::read(&marker_path).unwrap(), b"{"),
+                _ => unreachable!(),
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_neutral_cached_ready_and_complete_stay_blocked_after_marker_deletion() {
+        for status in [
+            RegistryReprocessStatus::Ready,
+            RegistryReprocessStatus::Complete,
+        ] {
+            let epoch = 305;
+            let label = format!("profile-neutral-cached-{status:?}-marker-deleted");
+            let (root, config, authority, _, mut runtime, _) =
+                profile_neutral_fixture_at_status(&label, status);
+            let marker_path = registry_reprocess_marker_path(&config.state_root, epoch);
+            fs::remove_file(&marker_path).unwrap();
+            let candidate = profile_neutral_test_epoch(&root, epoch);
+            for attempt in 0..2 {
+                reconcile_registry_reprocess_markers_inner(
+                    &config,
+                    &mut runtime,
+                    Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                );
+                assert_eq!(
+                    registry_reprocess_status_inner(
+                        &config,
+                        &runtime,
+                        &candidate,
+                        Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                    ),
+                    RegistryReprocessStatus::Blocked,
+                    "attempt {attempt} accepted cached {status:?} after marker deletion"
+                );
+                assert!(runtime.registry_reprocess_admission_blocked);
+                assert!(
+                    !runtime
+                        .validated_profile_neutral_registry_rebuild_retries
+                        .contains_key(&epoch)
+                        && !runtime.validated_registry_reprocesses.contains(&epoch)
+                );
+                assert!(
+                    runtime
+                        .profile_neutral_registry_incident_history
+                        .contains(&epoch)
+                );
+            }
+            assert!(!marker_path.exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_neutral_cached_history_survives_lineage_and_artifact_removal() {
+        let epoch = 305;
+        let (root, mut config, authority, outcome, mut runtime, mut marker) =
+            profile_neutral_fixture_at_status(
+                "profile-neutral-history-after-artifact-removal",
+                RegistryReprocessStatus::Ready,
+            );
+        config.registry_reprocess_concurrency = 1;
+        assert!(
+            runtime
+                .profile_neutral_registry_incident_history
+                .contains(&epoch)
+        );
+        fs::remove_file(&outcome.recovery_receipt).unwrap();
+        fs::remove_file(&outcome.archived_marker).unwrap();
+        fs::remove_dir_all(&outcome.quarantine).unwrap();
+        marker.recovery_incident_id = None;
+        marker.recovery_receipt_sha256 = None;
+        marker.recovery_receipt_identity = None;
+        marker.message = None;
+        publish_registry_reprocess_marker(&config.state_root, epoch, &marker).unwrap();
+        let candidate = profile_neutral_test_epoch(&root, epoch);
+        let mut snapshot = empty_snapshot(false);
+        snapshot.inventory.complete = true;
+        snapshot.epochs.push(candidate.clone());
+        snapshot.machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+        for attempt in 0..2 {
+            reconcile_registry_reprocess_markers_inner(
+                &config,
+                &mut runtime,
+                Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+            );
+            assert!(runtime.registry_reprocess_admission_blocked);
+            assert_eq!(
+                registry_reprocess_status_inner(
+                    &config,
+                    &runtime,
+                    &candidate,
+                    Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+                ),
+                RegistryReprocessStatus::Blocked,
+                "attempt {attempt} downgraded erased incident lineage to a generic retry"
+            );
+            assert_eq!(
+                top_up_registry_reprocesses(&config, &snapshot, &mut runtime).await,
+                0
+            );
+            assert!(runtime.registry_reprocesses.is_empty());
+            assert!(
+                !runtime
+                    .validated_profile_neutral_registry_rebuild_retries
+                    .contains_key(&epoch)
+                    && !runtime.validated_registry_reprocesses.contains(&epoch)
+            );
+        }
+        let unchanged = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state, "retry_ready");
+        assert!(unchanged.recovery_incident_id.is_none());
+        let mut restarted = RuntimeState::default();
+        reconcile_registry_reprocess_markers(&config, &mut restarted);
+        assert!(restarted.registry_reprocess_admission_blocked);
+        assert_eq!(
+            registry_reprocess_status(&config, &restarted, &candidate),
+            RegistryReprocessStatus::Blocked,
+            "closed-cohort history was lost after restart and artifact removal"
+        );
+        assert_eq!(
+            top_up_registry_reprocesses(&config, &snapshot, &mut restarted).await,
+            0
+        );
+        assert!(restarted.registry_reprocesses.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_marker_a_cache_cannot_authorize_marker_b() {
+        let epoch = 305;
+        let (root, config, authority, _, mut runtime, mut marker_b) =
+            complete_profile_neutral_fixture("profile-neutral-marker-cache-a-b");
+        let snapshot = profile_neutral_test_epoch(&root, epoch);
+        let binding_a = runtime
+            .validated_profile_neutral_registry_rebuild_retries
+            .get(&epoch)
+            .unwrap()
+            .clone();
+        marker_b.message = Some("same proof, different marker file".to_string());
+        marker_b.updated_unix_secs = marker_b.updated_unix_secs.saturating_add(1);
+        publish_registry_reprocess_marker(&config.state_root, epoch, &marker_b).unwrap();
+        assert!(runtime.validated_registry_reprocesses.contains(&epoch));
+        assert!(!profile_neutral_registry_incident_binding_matches_marker(
+            &config, epoch, &marker_b, &binding_a,
+        ));
+        assert_eq!(
+            registry_reprocess_status_inner(
+                &config,
+                &runtime,
+                &snapshot,
+                Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+            ),
+            RegistryReprocessStatus::Blocked,
+            "marker A cache authorized marker B"
+        );
+        reconcile_registry_reprocess_markers_inner(
+            &config,
+            &mut runtime,
+            Some((&authority, TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256)),
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&epoch));
+        assert!(
+            !runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .contains_key(&epoch)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_fast_completion_race_refuses_the_complete_cas() {
+        let epoch = 305;
+        let (root, config, authority, _, mut runtime, complete) =
+            complete_profile_neutral_fixture("profile-neutral-fast-complete-race");
+        let mut final_auditing = complete.clone();
+        final_auditing.state = "final_auditing".to_string();
+        final_auditing.message = Some("new bounded result".to_string());
+        final_auditing.updated_unix_secs = final_auditing.updated_unix_secs.saturating_add(1);
+        publish_registry_reprocess_marker(&config.state_root, epoch, &final_auditing).unwrap();
+        let lock = try_exclusive_profile_neutral_registry_lock(&config, epoch)
+            .unwrap()
+            .unwrap();
+        let attestation =
+            profile_neutral_registry_source_attestation_path(&config.state_root, &authority);
+        let error = complete_registry_reprocess_after_bounded_probe_with_authority_sha256_and_hook(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &final_auditing,
+            Some(&lock),
+            || {
+                let mut bytes = fs::read(&attestation)?;
+                bytes.push(b' ');
+                fs::write(&attestation, bytes)?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("proof failed"));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap()
+                .state,
+            "final_auditing"
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&epoch));
+        assert!(
+            !runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .contains_key(&epoch)
+        );
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_fast_completion_rejects_same_content_marker_inode_swap() {
+        let epoch = 305;
+        let (root, config, authority, _, mut runtime, complete) =
+            complete_profile_neutral_fixture("profile-neutral-fast-marker-inode-race");
+        let mut final_auditing = complete.clone();
+        final_auditing.state = "final_auditing".to_string();
+        final_auditing.message = Some("new bounded result".to_string());
+        final_auditing.updated_unix_secs = final_auditing.updated_unix_secs.saturating_add(1);
+        publish_registry_reprocess_marker(&config.state_root, epoch, &final_auditing).unwrap();
+        let marker_path = registry_reprocess_marker_path(&config.state_root, epoch);
+        let before_inode = fs::symlink_metadata(&marker_path).unwrap().ino();
+        let lock = try_exclusive_profile_neutral_registry_lock(&config, epoch)
+            .unwrap()
+            .unwrap();
+        let error = complete_registry_reprocess_after_bounded_probe_with_authority_sha256_and_hook(
+            &config,
+            &mut runtime,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            &final_auditing,
+            Some(&lock),
+            || {
+                replace_file_with_same_bytes_new_inode(&marker_path);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("identity changed before completion CAS"));
+        assert_ne!(
+            before_inode,
+            fs::symlink_metadata(&marker_path).unwrap().ino()
+        );
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap()
+                .state,
+            "final_auditing"
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&epoch));
+        assert!(
+            !runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .contains_key(&epoch)
+        );
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_deep_audit_race_refuses_the_complete_cas() {
+        let epoch = 305;
+        let (root, config, authority, outcome, mut runtime, complete) =
+            complete_profile_neutral_fixture("profile-neutral-deep-complete-race");
+        let mut final_auditing = complete.clone();
+        final_auditing.state = "final_auditing".to_string();
+        final_auditing.message = Some("deep result is ready".to_string());
+        final_auditing.updated_unix_secs = final_auditing.updated_unix_secs.saturating_add(1);
+        publish_registry_reprocess_marker(&config.state_root, epoch, &final_auditing).unwrap();
+        let request = RegistryReprocessAuditRequest {
+            epoch,
+            purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                reason: "test exact deep result",
+            },
+            admission: None,
+        };
+        let error = publish_registry_reprocess_audit_success_with_authority_sha256_and_hook(
+            &config,
+            &mut runtime,
+            &request,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || {
+                let mut bytes = fs::read(&outcome.recovery_receipt)?;
+                bytes.push(b' ');
+                fs::write(&outcome.recovery_receipt, bytes)?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("proof failed"));
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap()
+                .state,
+            "final_auditing"
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&epoch));
+        assert!(
+            !runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .contains_key(&epoch)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_neutral_deep_completion_rejects_same_content_marker_inode_swap() {
+        let epoch = 305;
+        let (root, config, authority, _, mut runtime, complete) =
+            complete_profile_neutral_fixture("profile-neutral-deep-marker-inode-race");
+        let mut final_auditing = complete.clone();
+        final_auditing.state = "final_auditing".to_string();
+        final_auditing.message = Some("deep result is ready".to_string());
+        final_auditing.updated_unix_secs = final_auditing.updated_unix_secs.saturating_add(1);
+        publish_registry_reprocess_marker(&config.state_root, epoch, &final_auditing).unwrap();
+        let marker_path = registry_reprocess_marker_path(&config.state_root, epoch);
+        let before_inode = fs::symlink_metadata(&marker_path).unwrap().ino();
+        let request = RegistryReprocessAuditRequest {
+            epoch,
+            purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                reason: "test exact deep result",
+            },
+            admission: None,
+        };
+        let error = publish_registry_reprocess_audit_success_with_authority_sha256_and_hook(
+            &config,
+            &mut runtime,
+            &request,
+            &authority,
+            TEST_PROFILE_NEUTRAL_AUTHORITY_SHA256,
+            || {
+                replace_file_with_same_bytes_new_inode(&marker_path);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("identity changed before completion CAS"));
+        assert_ne!(
+            before_inode,
+            fs::symlink_metadata(&marker_path).unwrap().ino()
+        );
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap()
+                .state,
+            "final_auditing"
+        );
+        assert!(!runtime.validated_registry_reprocesses.contains(&epoch));
+        assert!(
+            !runtime
+                .validated_profile_neutral_registry_rebuild_retries
+                .contains_key(&epoch)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn registry_audit_test_snapshot(
@@ -19520,6 +30556,738 @@ mod tests {
         snapshot.epochs.push(candidate);
         snapshot.machine = legacy_scheduler_machine(config, 8 * 1024, 512);
         snapshot
+    }
+
+    fn legacy_registry_child_kind(
+        config: &SchedulerConfig,
+        epoch: u64,
+        target: PathBuf,
+    ) -> ChildKind {
+        ChildKind::RegistryReprocess {
+            epoch,
+            target,
+            phase: RegistryReprocessPhase::Legacy,
+            attempt_id: String::new(),
+            staging_dir: registry_reprocess_staging_path(config, epoch),
+            handoff_sha256: None,
+            expected_access_state: None,
+            wire_profile: None,
+        }
+    }
+
+    fn test_adopted_registry_reprocess(
+        config: &SchedulerConfig,
+        epoch: u64,
+        pid: u32,
+        threads: Option<usize>,
+        identity_trusted: bool,
+    ) -> AdoptedRegistryReprocess {
+        AdoptedRegistryReprocess {
+            epoch,
+            pid,
+            process_start_ticks: Some(1),
+            threads,
+            progress_path: registry_reprocess_progress_path(&config.state_root, epoch),
+            identity_trusted,
+            phase: RegistryReprocessPhase::Legacy,
+            attempt_id: None,
+            staging_dir: None,
+            handoff_sha256: None,
+            expected_access_state: None,
+            wire_profile: None,
+        }
+    }
+
+    fn test_registry_attempt_marker(
+        config: &SchedulerConfig,
+        epoch: u64,
+        state: &str,
+        phase: RegistryReprocessPhase,
+        handoff_sha256: Option<String>,
+    ) -> RegistryReprocessMarker {
+        let attempt_id = "ab".repeat(16);
+        RegistryReprocessMarker {
+            schema_version: REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION,
+            kind: REGISTRY_REPROCESS_OWNERSHIP_KIND.to_string(),
+            epoch,
+            state: state.to_string(),
+            created_unix_secs: 1,
+            updated_unix_secs: 2,
+            message: None,
+            source: config.archive_root.join(format!("epoch-{epoch}")),
+            target: registry_reprocess_target(config, epoch),
+            threads: config.registry_reprocess_threads,
+            wire_profile: config.registry_reprocess_wire_profile,
+            phase: Some(phase),
+            attempt_id: Some(attempt_id.clone()),
+            staging_dir: Some(registry_reprocess_attempt_staging_path(
+                config,
+                epoch,
+                &attempt_id,
+            )),
+            handoff_sha256,
+            expected_access_state: (phase == RegistryReprocessPhase::Access
+                && state == "access_running")
+                .then_some(RegistryReprocessExpectedAccessState::CoreOrPartialRebuild),
+            recovery_incident_id: None,
+            recovery_receipt_sha256: None,
+            recovery_receipt_identity: None,
+            pid: None,
+            process_start_ticks: None,
+            audit_retry_is_safe: false,
+            audit_is_continuation: false,
+        }
+    }
+
+    fn test_file_binding(path: &Path) -> crate::archive_v2::registry_reprocess::FileBinding {
+        crate::archive_v2::registry_reprocess::FileBinding {
+            bytes: fs::metadata(path).unwrap().len(),
+            sha256: sha256_file_hex(path).unwrap(),
+        }
+    }
+
+    fn write_stale_poh_registry_recovery_fixture(
+        config: &SchedulerConfig,
+        epoch: u64,
+    ) -> (RegistryReprocessMarker, PathBuf, PathBuf) {
+        use crate::archive_v2::registry_reprocess::{
+            REGISTRY_REPROCESS_RECEIPT_FILE, RegistryReprocessReceipt,
+        };
+        use blockzilla_format::{
+            ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
+            ArchiveV2HotTxRow, CompactPohEntry, WincodeArchiveV2PohRecord,
+            WincodeLeb128FramedWriter, write_archive_v2_hot_block_index,
+        };
+        use blockzilla_read_sdk::wire_profile_marker;
+
+        let (source, target) = write_probe_only_registry_receipt(config, epoch);
+        let receipt_path = target.join(REGISTRY_REPROCESS_RECEIPT_FILE);
+        let mut receipt: RegistryReprocessReceipt =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        let profile_marker = wire_profile_marker(
+            config
+                .registry_reprocess_wire_profile
+                .expect("stale-PoH fixture starts with a configured profile"),
+        );
+        receipt.source_files.remove(&profile_marker.name);
+        receipt.target_files.remove(&profile_marker.name);
+        fs::remove_file(source.join(&profile_marker.name)).unwrap();
+        fs::remove_file(target.join(&profile_marker.name)).unwrap();
+
+        let old_source_poh = receipt.source_files.get(POH_FILE).unwrap().clone();
+        assert_eq!(receipt.target_files.get(POH_FILE), Some(&old_source_poh));
+
+        // Build one small but complete generation. Recovery now runs the same hash-chain,
+        // signature-boundary, blockhash, and predecessor validation as the production verifier.
+        let predecessor_hash = [7u8; 32];
+        let signature = [3u8; 64];
+        let expected_hash = crate::archive_verify::recompute_entry_hash_standalone(
+            &crate::archive_verify::EntryJob {
+                start_hash: predecessor_hash,
+                num_hashes: 1,
+                transaction_count: 1,
+                signatures: &signature,
+            },
+        );
+        let block = ArchiveV2HotBlockBlob {
+            header: ArchiveV2HotBlockHeader {
+                slot: 100,
+                parent_slot: 99,
+                blockhash_id: 0,
+                previous_blockhash_id: 0,
+                block_time: None,
+                block_height: None,
+                rewards: None,
+            },
+            tx_count: 1,
+            tx_rows: vec![ArchiveV2HotTxRow {
+                tx_index: 0,
+                flags: 0,
+                message_offset: 0,
+                message_len: 0,
+                metadata_offset: 0,
+                metadata_len: 0,
+                signature_count: 1,
+                reserved: [0; 3],
+            }],
+            message_bytes: Vec::new(),
+            metadata_bytes: Vec::new(),
+        };
+        let encoded = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let compressed = zstd::bulk::compress(&encoded, 1).unwrap();
+        fs::write(source.join(BLOCKS_FILE), &compressed).unwrap();
+        fs::write(source.join(SIGNATURES_FILE), signature).unwrap();
+        fs::write(source.join(BLOCKHASH_REGISTRY_FILE), expected_hash).unwrap();
+        fs::write(target.join(BLOCKHASH_REGISTRY_FILE), expected_hash).unwrap();
+        let mut predecessor_tail = predecessor_hash.to_vec();
+        predecessor_tail.extend_from_slice(&99u64.to_le_bytes());
+        fs::write(source.join(PREVIOUS_BLOCKHASH_TAIL_FILE), &predecessor_tail).unwrap();
+        fs::write(target.join(PREVIOUS_BLOCKHASH_TAIL_FILE), &predecessor_tail).unwrap();
+        let rows = vec![ArchiveV2HotBlockIndexRow {
+            block_id: 0,
+            slot: 100,
+            compressed_offset: 0,
+            compressed_len: compressed.len() as u32,
+            uncompressed_len: encoded.len() as u32,
+            tx_count: 1,
+            first_tx_ordinal: 0,
+            first_signature_ordinal: 0,
+            signature_count: 1,
+        }];
+        write_archive_v2_hot_block_index(
+            &source.join(BLOCK_INDEX_FILE),
+            compressed.len() as u64,
+            1,
+            0,
+            &rows,
+        )
+        .unwrap();
+        for name in [
+            BLOCKS_FILE,
+            BLOCK_INDEX_FILE,
+            SIGNATURES_FILE,
+            BLOCKHASH_REGISTRY_FILE,
+            PREVIOUS_BLOCKHASH_TAIL_FILE,
+        ] {
+            receipt
+                .source_files
+                .insert(name.to_string(), test_file_binding(&source.join(name)));
+        }
+        for name in [
+            SIGNATURES_FILE,
+            BLOCKHASH_REGISTRY_FILE,
+            PREVIOUS_BLOCKHASH_TAIL_FILE,
+        ] {
+            receipt
+                .target_files
+                .insert(name.to_string(), test_file_binding(&target.join(name)));
+        }
+
+        // Keep the old receipt bound to the original short PoH bytes, which remain in the target,
+        // then replace only the source with a larger current-schema sidecar.
+        let mut writer =
+            WincodeLeb128FramedWriter::new(File::create(source.join(POH_FILE)).unwrap());
+        writer
+            .write(&WincodeArchiveV2PohRecord {
+                block_id: 0,
+                slot: 100,
+                entries: vec![CompactPohEntry {
+                    num_hashes: 1,
+                    hash: expected_hash,
+                    tx_count: 1,
+                    signature_count: 1,
+                }],
+            })
+            .unwrap();
+        drop(writer);
+        assert!(fs::metadata(source.join(POH_FILE)).unwrap().len() > old_source_poh.bytes);
+
+        receipt.wire_profile = None;
+        receipt.source_dir = config
+            .archive_root
+            .join(format!("epoch-{epoch}"))
+            .to_string_lossy()
+            .into_owned();
+        receipt.target_dir = registry_reprocess_target(config, epoch)
+            .to_string_lossy()
+            .into_owned();
+        receipt.source_generation_sha256 = test_registry_generation_digest(&receipt.source_files);
+        receipt.target_generation_sha256 = test_registry_generation_digest(&receipt.target_files);
+        fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        write_poh_migration_marker(&config.state_root, epoch, "complete", None).unwrap();
+
+        let mut marker = test_registry_attempt_marker(
+            config,
+            epoch,
+            "failed",
+            RegistryReprocessPhase::Access,
+            Some("cd".repeat(32)),
+        );
+        marker.schema_version = 3;
+        marker.wire_profile = None;
+        marker.expected_access_state = None;
+        marker.message = Some(STALE_POH_REGISTRY_RECOVERY_MESSAGE.to_string());
+        publish_registry_reprocess_marker(&config.state_root, epoch, &marker).unwrap();
+
+        let attempt_id = marker.attempt_id.as_deref().unwrap();
+        let target_name = marker.target.file_name().unwrap().to_str().unwrap();
+        let quarantine = marker.target.with_file_name(format!(
+            ".{target_name}.registry-reprocess.stale-poh.{attempt_id}.{}.quarantine",
+            receipt.target_generation_sha256
+        ));
+        let archived_marker = config
+            .state_root
+            .join("registry_reprocess_stale_poh")
+            .join(format!(
+                "epoch-{epoch}.{attempt_id}.{}.json",
+                receipt.target_generation_sha256
+            ));
+        (marker, quarantine, archived_marker)
+    }
+
+    #[test]
+    fn stale_poh_registry_recovery_preserves_old_generation_and_publishes_clean_retry() {
+        let root = temp_root("registry-stale-poh-recovery-success");
+        let config = test_config(&root);
+        let epoch = 1001;
+        let (marker, expected_quarantine, expected_archive) =
+            write_stale_poh_registry_recovery_fixture(&config, epoch);
+
+        let outcome = recover_stale_poh_registry_generation(
+            &config,
+            &RuntimeState::default(),
+            epoch,
+            &marker,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(outcome.quarantine, expected_quarantine);
+        assert_eq!(outcome.archived_marker, expected_archive);
+        assert!(!marker.target.exists());
+        assert!(expected_quarantine.is_dir());
+        assert_eq!(
+            read_registry_reprocess_marker_at_strict(&expected_archive).unwrap(),
+            marker
+        );
+        let retry = read_registry_reprocess_marker_strict(&config.state_root, epoch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retry.schema_version,
+            REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+        );
+        assert_eq!(retry.state, "retry_ready");
+        assert_eq!(retry.wire_profile, config.registry_reprocess_wire_profile);
+        assert!(registry_reprocess_marker_identity_is_clear(&retry));
+        assert!(retry.phase.is_none());
+        assert!(retry.attempt_id.is_none());
+        assert!(retry.staging_dir.is_none());
+        assert!(retry.handoff_sha256.is_none());
+        assert!(retry.expected_access_state.is_none());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stale_poh_registry_recovery_rejects_wrong_error_epoch_process_reader_and_profile() {
+        let cases = [
+            (1001, "wrong_error"),
+            (1007, "wrong_epoch"),
+            (1002, "writer"),
+            (1003, "reader"),
+            (1004, "no_profile"),
+            (1005, "poh_writer"),
+        ];
+        for (epoch, case) in cases {
+            let root = temp_root(&format!("registry-stale-poh-reject-{case}"));
+            let mut config = test_config(&root);
+            let (mut marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+            if case == "wrong_error" {
+                marker.message = Some("some other failure".to_string());
+                publish_registry_reprocess_marker(&config.state_root, epoch, &marker).unwrap();
+            }
+            if case == "no_profile" {
+                config.registry_reprocess_wire_profile = None;
+            }
+            let writers = if case == "writer" {
+                Some(vec![41])
+            } else {
+                Some(Vec::new())
+            };
+            let result = recover_stale_poh_registry_generation(
+                &config,
+                &RuntimeState::default(),
+                epoch,
+                &marker,
+                writers,
+                if case == "poh_writer" {
+                    Some(vec![43])
+                } else {
+                    Some(Vec::new())
+                },
+                |_| {
+                    if case == "reader" {
+                        Some(vec![42])
+                    } else {
+                        Some(Vec::new())
+                    }
+                },
+            );
+            assert!(result.is_err(), "{case} must be rejected");
+            assert!(marker.target.is_dir(), "{case} must not move the target");
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    #[test]
+    fn stale_poh_registry_recovery_rejects_marker_mismatch_and_no_clobber_paths() {
+        let root = temp_root("registry-stale-poh-marker-mismatch");
+        let config = test_config(&root);
+        let epoch = 1005;
+        let (mut marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        marker.handoff_sha256 = Some("ef".repeat(32));
+        publish_registry_reprocess_marker(&config.state_root, epoch, &marker).unwrap();
+        assert!(
+            recover_stale_poh_registry_generation(
+                &config,
+                &RuntimeState::default(),
+                epoch,
+                &marker,
+                Some(Vec::new()),
+                Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .is_err()
+        );
+        assert!(marker.target.is_dir());
+        fs::remove_dir_all(&root).ok();
+
+        let root = temp_root("registry-stale-poh-no-clobber");
+        let config = test_config(&root);
+        let epoch = 1006;
+        let (marker, quarantine, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        fs::create_dir(&quarantine).unwrap();
+        assert!(
+            recover_stale_poh_registry_generation(
+                &config,
+                &RuntimeState::default(),
+                epoch,
+                &marker,
+                Some(Vec::new()),
+                Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .is_err()
+        );
+        assert!(marker.target.is_dir());
+        assert!(quarantine.is_dir());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stale_poh_registry_recovery_rejects_source_poh_runtime_lock_and_identity_race() {
+        let root = temp_root("registry-stale-poh-runtime-owner");
+        let config = test_config(&root);
+        let epoch = 1004;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        let mut runtime = RuntimeState::default();
+        runtime.adopted_poh_migrations.insert(
+            epoch,
+            AdoptedPohMigration {
+                epoch,
+                pid: 51,
+                identity_trusted: true,
+                process_start_ticks: Some(1),
+                worker_threads: Some(1),
+            },
+        );
+        let error = recover_stale_poh_registry_generation(
+            &config,
+            &runtime,
+            epoch,
+            &marker,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("source-PoH runtime ownership"));
+        assert!(marker.target.is_dir());
+        fs::remove_dir_all(&root).ok();
+
+        let root = temp_root("registry-stale-poh-source-lock");
+        let config = test_config(&root);
+        let epoch = 1005;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        let _held_lock = try_exclusive_poh_migration_archive_lock(&marker.source)
+            .unwrap()
+            .unwrap();
+        let error = recover_stale_poh_registry_generation(
+            &config,
+            &RuntimeState::default(),
+            epoch,
+            &marker,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("source PoH migration lock is still held"));
+        assert!(marker.target.is_dir());
+        drop(_held_lock);
+        fs::remove_dir_all(&root).ok();
+
+        let root = temp_root("registry-stale-poh-source-identity-race");
+        let config = test_config(&root);
+        let epoch = 1006;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        let source_poh = marker.source.join(POH_FILE);
+        let error = recover_stale_poh_registry_generation(
+            &config,
+            &RuntimeState::default(),
+            epoch,
+            &marker,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            move |_| {
+                let mut bytes = fs::read(&source_poh).unwrap();
+                bytes.push(0);
+                fs::write(&source_poh, bytes).unwrap();
+                Some(Vec::new())
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("changed after validation"));
+        assert!(marker.target.is_dir());
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap(),
+            marker
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stale_poh_registry_recovery_rejects_same_size_hash_tamper_and_invalid_poh() {
+        let root = temp_root("registry-stale-poh-target-hash");
+        let config = test_config(&root);
+        let epoch = 1008;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        let target_file = marker.target.join(META_FILE);
+        let bytes = fs::read(&target_file).unwrap();
+        fs::write(&target_file, vec![b'x'; bytes.len()]).unwrap();
+        assert!(
+            recover_stale_poh_registry_generation(
+                &config,
+                &RuntimeState::default(),
+                epoch,
+                &marker,
+                Some(Vec::new()),
+                Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .is_err()
+        );
+        assert!(marker.target.is_dir());
+        fs::remove_dir_all(&root).ok();
+
+        let root = temp_root("registry-stale-poh-source-hash");
+        let config = test_config(&root);
+        let epoch = 1001;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        let source_file = marker.source.join(META_FILE);
+        let bytes = fs::read(&source_file).unwrap();
+        fs::write(&source_file, vec![b'y'; bytes.len()]).unwrap();
+        assert!(
+            recover_stale_poh_registry_generation(
+                &config,
+                &RuntimeState::default(),
+                epoch,
+                &marker,
+                Some(Vec::new()),
+                Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .is_err()
+        );
+        assert!(marker.target.is_dir());
+        fs::remove_dir_all(&root).ok();
+
+        let root = temp_root("registry-stale-poh-invalid-current-poh");
+        let config = test_config(&root);
+        let epoch = 1002;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        {
+            use blockzilla_format::{
+                CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter,
+            };
+            let mut writer =
+                WincodeLeb128FramedWriter::new(File::create(marker.source.join(POH_FILE)).unwrap());
+            writer
+                .write(&WincodeArchiveV2PohRecord {
+                    block_id: 0,
+                    slot: 100,
+                    entries: (0..32)
+                        .map(|index| CompactPohEntry {
+                            num_hashes: index,
+                            hash: [index as u8; 32],
+                            tx_count: 0,
+                            // The hot index expects one. The first-frame schema probe still
+                            // succeeds, but the full migration verifier must reject this sum.
+                            signature_count: u32::from(index < 2),
+                        })
+                        .collect(),
+                })
+                .unwrap();
+        }
+        let error = recover_stale_poh_registry_generation(
+            &config,
+            &RuntimeState::default(),
+            epoch,
+            &marker,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("source PoH is not the completed newer migration"));
+        assert!(marker.target.is_dir());
+        fs::remove_dir_all(&root).ok();
+
+        let root = temp_root("registry-stale-poh-invalid-hash-chain");
+        let config = test_config(&root);
+        let epoch = 1003;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        {
+            use blockzilla_format::{
+                CompactPohEntry, WincodeArchiveV2PohRecord, WincodeLeb128FramedWriter,
+            };
+            let mut writer =
+                WincodeLeb128FramedWriter::new(File::create(marker.source.join(POH_FILE)).unwrap());
+            writer
+                .write(&WincodeArchiveV2PohRecord {
+                    block_id: 0,
+                    slot: 100,
+                    entries: vec![CompactPohEntry {
+                        num_hashes: 1,
+                        hash: [9; 32],
+                        tx_count: 1,
+                        signature_count: 1,
+                    }],
+                })
+                .unwrap();
+        }
+        assert!(crate::archive_verify::poh_migration_epoch_verified(&marker.source).unwrap());
+        let error = recover_stale_poh_registry_generation(
+            &config,
+            &RuntimeState::default(),
+            epoch,
+            &marker,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            |_| Some(Vec::new()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("current source PoH failed full generation-aware verification")
+        );
+        assert!(marker.target.is_dir());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stale_poh_registry_recovery_resumes_after_each_durable_crash_point() {
+        for (epoch, archive_before_restart) in [(1002, false), (1003, true)] {
+            let root = temp_root(&format!(
+                "registry-stale-poh-crash-{}",
+                if archive_before_restart {
+                    "archive"
+                } else {
+                    "rename"
+                }
+            ));
+            let config = test_config(&root);
+            let (marker, quarantine, archived_marker) =
+                write_stale_poh_registry_recovery_fixture(&config, epoch);
+            rename_registry_generation_no_replace(&marker.target, &quarantine).unwrap();
+            sync_scheduler_directory(marker.target.parent().unwrap()).unwrap();
+            if archive_before_restart {
+                fs::create_dir_all(archived_marker.parent().unwrap()).unwrap();
+                fs::hard_link(
+                    registry_reprocess_marker_path(&config.state_root, epoch),
+                    &archived_marker,
+                )
+                .unwrap();
+                sync_scheduler_directory(archived_marker.parent().unwrap()).unwrap();
+            }
+
+            let outcome = recover_stale_poh_registry_generation(
+                &config,
+                &RuntimeState::default(),
+                epoch,
+                &marker,
+                Some(Vec::new()),
+                Some(Vec::new()),
+                |_| Some(Vec::new()),
+            )
+            .unwrap();
+            assert_eq!(outcome.quarantine, quarantine);
+            assert_eq!(outcome.archived_marker, archived_marker);
+            assert!(quarantine.is_dir());
+            assert_eq!(
+                read_registry_reprocess_marker_at_strict(&archived_marker).unwrap(),
+                marker
+            );
+            assert_eq!(
+                read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "retry_ready"
+            );
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    #[test]
+    fn startup_reconciliation_preserves_exact_stale_poh_recovery_marker() {
+        let root = temp_root("registry-stale-poh-startup-preserves-marker");
+        let config = test_config(&root);
+        let epoch = 1004;
+        let (marker, _, _) = write_stale_poh_registry_recovery_fixture(&config, epoch);
+        let mut runtime = RuntimeState::default();
+
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+
+        assert_eq!(
+            read_registry_reprocess_marker_strict(&config.state_root, epoch)
+                .unwrap()
+                .unwrap(),
+            marker
+        );
+        assert!(!runtime.pending_registry_reprocess_audits.contains(&epoch));
+        assert!(runtime.registry_reprocess_audit_queue.is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn registry_admission_waits_for_pending_or_failed_poh_migration() {
+        let root = temp_root("registry-waits-for-poh-backlog");
+        let mut config = test_config(&root);
+        config.registry_reprocess_concurrency = 1;
+        let mut snapshot = registry_audit_test_snapshot(&config, &root, 700);
+        snapshot.epochs[0].artifacts.push(ArtifactSnapshot {
+            kind: ArtifactKind::PohSignatureCountMigration,
+            state: ArtifactState::Pending,
+            requirement: ArtifactRequirement::Optional,
+            required_now: false,
+            bytes: 1,
+            modified_unix_secs: None,
+            message: None,
+        });
+        let mut runtime = RuntimeState::default();
+        assert_eq!(
+            top_up_registry_reprocesses(&config, &snapshot, &mut runtime).await,
+            0
+        );
+        assert!(
+            runtime
+                .registry_reprocess_admission_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("PoH migration backlog"))
+        );
+
+        snapshot.epochs[0].artifacts[0].state = ArtifactState::Present;
+        write_poh_migration_marker(&config.state_root, 700, "failed", None).unwrap();
+        assert!(registry_reprocess_poh_completion_gate(&config, &snapshot).is_err());
+        write_poh_migration_marker(&config.state_root, 700, "complete", None).unwrap();
+        assert!(registry_reprocess_poh_completion_gate(&config, &snapshot).is_ok());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -19546,7 +31314,7 @@ mod tests {
     #[test]
     fn registry_reprocess_eligibility_is_exact_and_disabled_by_default() {
         let root = temp_root("registry-reprocess-eligibility");
-        let config = test_config(&root);
+        let mut config = test_config(&root);
         let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
         epoch.registry_order = RegistryOrder::FirstSeen;
         assert!(registry_reprocess_source_candidate(&epoch));
@@ -19560,6 +31328,34 @@ mod tests {
             !registry_reprocess_work_pending(&config, &snapshot, &RuntimeState::default()),
             "zero concurrency is an opt-in boundary, not unbounded capacity"
         );
+        assert_eq!(
+            registry_reprocess_runnable_status(&config, &RuntimeState::default(), &epoch),
+            None,
+            "disabled core work is not runnable"
+        );
+
+        config.registry_reprocess_concurrency = 1;
+        let mut failed_runtime = RuntimeState::default();
+        assert_eq!(
+            registry_reprocess_runnable_status(&config, &failed_runtime, &epoch),
+            Some(RegistryReprocessStatus::Ready)
+        );
+        failed_runtime.registry_reprocess_admission_blocked = true;
+        assert_eq!(
+            registry_reprocess_runnable_status(&config, &failed_runtime, &epoch),
+            None,
+            "an unresolved global ownership block is not runnable"
+        );
+        failed_runtime.registry_reprocess_admission_blocked = false;
+        failed_runtime.failures.insert(
+            "registry_reprocess:700".to_string(),
+            "explicit retry is required".to_string(),
+        );
+        assert_eq!(
+            registry_reprocess_runnable_status(&config, &failed_runtime, &epoch),
+            None,
+            "a runtime failure claim excludes the epoch until explicit retry"
+        );
 
         epoch.registry_order = RegistryOrder::UsageSorted;
         assert!(!registry_reprocess_source_candidate(&epoch));
@@ -19569,14 +31365,110 @@ mod tests {
     }
 
     #[test]
+    fn registry_audit_runnable_signal_matches_manual_capacity_and_continuations() {
+        let root = temp_root("registry-audit-runnable-signal");
+        let mut config = test_config(&root);
+        let mut runtime = RuntimeState::default();
+        runtime
+            .registry_reprocess_audit_queue
+            .push_back(RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget { reason: "manual" },
+                admission: None,
+            });
+        assert_eq!(registry_reprocess_audits_runnable(&config, &runtime), 0);
+
+        config.registry_reprocess_concurrency = 1;
+        assert_eq!(registry_reprocess_audits_runnable(&config, &runtime), 1);
+
+        config.registry_reprocess_concurrency = 0;
+        runtime.registry_reprocess_audit_queue.clear();
+        runtime
+            .registry_reprocess_audit_queue
+            .push_back(RegistryReprocessAuditRequest {
+                epoch: 701,
+                purpose: RegistryReprocessAuditPurpose::Ended {
+                    retry_is_safe: true,
+                    reason: "continuation",
+                },
+                admission: None,
+            });
+        assert_eq!(registry_reprocess_audits_runnable(&config, &runtime), 1);
+
+        runtime.active_registry_reprocess_audit =
+            runtime.registry_reprocess_audit_queue.pop_front();
+        runtime.registry_reprocess_admission_blocked = true;
+        assert_eq!(
+            registry_reprocess_audits_runnable(&config, &runtime),
+            1,
+            "an active audit stays visible under an unrelated admission block"
+        );
+    }
+
+    #[test]
+    fn registry_core_hard_link_preflight_is_metadata_only_and_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("registry-signature-hard-link-preflight");
+        let config = test_config(&root);
+        let epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        fs::create_dir_all(&epoch.output_path).unwrap();
+        let signatures = epoch.output_path.join(SIGNATURES_FILE);
+        fs::write(&signatures, b"opaque-signature-sidecar").unwrap();
+        registry_reprocess_core_hard_link_preflight(&config, &epoch).unwrap();
+
+        fs::remove_file(&signatures).unwrap();
+        let outside = root.join("outside-signatures");
+        fs::write(&outside, b"not-an-owned-source-sidecar").unwrap();
+        symlink(&outside, &signatures).unwrap();
+        let error = registry_reprocess_core_hard_link_preflight(&config, &epoch).unwrap_err();
+        assert!(error.to_string().contains("regular non-symlink"));
+    }
+
+    #[tokio::test]
+    async fn registry_core_preflight_blocks_before_attempt_or_child_creation() {
+        let root = temp_root("registry-signature-preflight-admission");
+        let mut config = test_config(&root);
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 8;
+        config.disk_reserve_gib = 0;
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        fs::create_dir_all(&epoch.output_path).unwrap();
+        let mut snapshot = empty_snapshot(false);
+        snapshot.inventory.complete = true;
+        snapshot.machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+        snapshot.epochs.push(epoch);
+        let mut runtime = RuntimeState::default();
+
+        assert_eq!(
+            top_up_registry_reprocesses(&config, &snapshot, &mut runtime).await,
+            0
+        );
+        assert!(runtime.registry_reprocesses.is_empty());
+        assert!(
+            runtime
+                .registry_reprocess_admission_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("source signatures"))
+        );
+        assert!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .is_none(),
+            "a failed preflight must not create an attempt marker"
+        );
+    }
+
+    #[test]
     fn registry_reprocess_argv_and_paths_are_deterministic() {
         let root = temp_root("registry-reprocess-argv");
         let config = test_config(&root);
         let source = config.archive_root.join("epoch-700");
         let target = registry_reprocess_target(&config, 700);
         assert_eq!(
-            registry_reprocess_args(&config, &source, &target, 700),
-            vec![
+            registry_reprocess_legacy_args(&config, &source, &target, 700),
+            Some(vec![
                 std::ffi::OsString::from("reprocess-archive-v2-registry"),
                 source.into_os_string(),
                 target.clone().into_os_string(),
@@ -19588,7 +31480,9 @@ mod tests {
                 std::ffi::OsString::from("256"),
                 std::ffi::OsString::from("--level"),
                 std::ffi::OsString::from("1"),
-            ]
+                std::ffi::OsString::from("--wire-profile"),
+                std::ffi::OsString::from("post-unknown-instruction-fallbacks-v1"),
+            ])
         );
         assert_eq!(
             target,
@@ -19630,8 +31524,12 @@ mod tests {
         assert!(registry_reprocess_argv_is_potential_writer(
             &config, 700, &bytes
         ));
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let marker = read_registry_reprocess_marker_strict(&config.state_root, 700)
+            .unwrap()
+            .unwrap();
         assert!(
-            !registry_reprocess_argv_matches_exact(&config, 700, &bytes),
+            !registry_reprocess_argv_matches_exact(&config, 700, &marker, &bytes),
             "different binary/resources/order must never qualify for trusted adoption"
         );
 
@@ -19643,6 +31541,473 @@ mod tests {
         assert!(!registry_reprocess_argv_is_potential_writer(
             &config, 700, &bytes
         ));
+    }
+
+    #[test]
+    fn two_stage_registry_argv_is_exactly_bound_to_phase_and_attempt() {
+        let root = temp_root("registry-two-stage-argv");
+        let config = test_config(&root);
+        let core = test_registry_attempt_marker(
+            &config,
+            700,
+            "core_running",
+            RegistryReprocessPhase::Core,
+            None,
+        );
+        let core_expected = registry_reprocess_expected_argv(&config, 700, &core).unwrap();
+        let core_bytes = argv_bytes(&core_expected);
+        assert!(registry_reprocess_argv_matches_exact(
+            &config,
+            700,
+            &core,
+            &core_bytes
+        ));
+        assert!(registry_reprocess_argv_is_potential_writer(
+            &config,
+            700,
+            &core_bytes
+        ));
+
+        let handoff = "cd".repeat(32);
+        let access = test_registry_attempt_marker(
+            &config,
+            700,
+            "access_running",
+            RegistryReprocessPhase::Access,
+            Some(handoff),
+        );
+        let access_expected = registry_reprocess_expected_argv(&config, 700, &access).unwrap();
+        let access_bytes = argv_bytes(&access_expected);
+        assert!(registry_reprocess_argv_matches_exact(
+            &config,
+            700,
+            &access,
+            &access_bytes
+        ));
+        assert!(registry_reprocess_argv_is_potential_writer(
+            &config,
+            700,
+            &access_bytes
+        ));
+        assert!(
+            access_expected.windows(2).any(|args| {
+                args[0] == b"--expected-continuation-state" && args[1] == b"core-or-partial-rebuild"
+            }),
+            "the access argv must bind the resource-charged continuation branch"
+        );
+        assert!(!registry_reprocess_argv_matches_exact(
+            &config,
+            700,
+            &core,
+            &access_bytes
+        ));
+
+        let mut wrong_attempt = access.clone();
+        wrong_attempt.attempt_id = Some("ef".repeat(16));
+        assert!(registry_reprocess_expected_argv(&config, 700, &wrong_attempt).is_none());
+
+        let mut wrong_state = access.clone();
+        wrong_state.expected_access_state =
+            Some(RegistryReprocessExpectedAccessState::ReceiptReady);
+        assert!(!registry_reprocess_argv_matches_exact(
+            &config,
+            700,
+            &wrong_state,
+            &access_bytes,
+        ));
+        wrong_state.expected_access_state = None;
+        assert!(registry_reprocess_expected_argv(&config, 700, &wrong_state).is_none());
+    }
+
+    #[test]
+    fn profile_neutral_registry_argv_binds_the_exact_authority_receipt() {
+        let root = temp_root("registry-profile-authority-argv");
+        let config = test_config(&root);
+        let epoch = 305;
+        let authority = profile_neutral_registry_rebuild_authority(epoch).unwrap();
+        let receipt_path =
+            profile_neutral_registry_rebuild_receipt_path(&config.state_root, authority);
+        let add_lineage = |marker: &mut RegistryReprocessMarker| {
+            marker.recovery_incident_id =
+                Some(PROFILE_NEUTRAL_REGISTRY_REBUILD_INCIDENT_ID.to_owned());
+            marker.recovery_receipt_sha256 = Some("11".repeat(32));
+            marker.recovery_receipt_identity = Some(ProfileNeutralRegistryRebuildFileIdentity {
+                size: 1,
+                device: 1,
+                inode: 1,
+                modified_seconds: 1,
+                modified_nanoseconds: 1,
+                changed_seconds: 1,
+                changed_nanoseconds: 1,
+            });
+        };
+
+        let mut core = test_registry_attempt_marker(
+            &config,
+            epoch,
+            "core_running",
+            RegistryReprocessPhase::Core,
+            None,
+        );
+        add_lineage(&mut core);
+        let core_args = registry_reprocess_expected_argv(&config, epoch, &core).unwrap();
+        assert!(core_args.windows(2).any(|args| {
+            args[0] == b"--wire-profile-authority-receipt"
+                && args[1] == receipt_path.as_os_str().as_bytes()
+        }));
+
+        let mut access = test_registry_attempt_marker(
+            &config,
+            epoch,
+            "access_running",
+            RegistryReprocessPhase::Access,
+            Some("22".repeat(32)),
+        );
+        add_lineage(&mut access);
+        let access_args = registry_reprocess_expected_argv(&config, epoch, &access).unwrap();
+        assert!(access_args.windows(2).any(|args| {
+            args[0] == b"--wire-profile-authority-receipt"
+                && args[1] == receipt_path.as_os_str().as_bytes()
+        }));
+    }
+
+    #[test]
+    fn profile_neutral_schema_three_marker_is_not_adoptable() {
+        let root = temp_root("registry-schema-three-no-profile");
+        let config = test_config(&root);
+        let mut marker = test_registry_attempt_marker(
+            &config,
+            700,
+            "core_running",
+            RegistryReprocessPhase::Core,
+            None,
+        );
+        marker.schema_version = 3;
+        marker.wire_profile = None;
+
+        assert!(registry_reprocess_marker_claims(&config, 700, &marker));
+        assert!(!registry_reprocess_marker_has_attempt(
+            &config, 700, &marker
+        ));
+        assert!(registry_reprocess_expected_argv(&config, 700, &marker).is_none());
+        assert!(matches!(
+            inspect_running_registry_reprocess(&config, 700, &marker),
+            RegistryReprocessLiveness::Unobservable
+        ));
+    }
+
+    #[test]
+    fn profile_neutral_config_makes_legacy_argv_identity_untrusted_without_panicking() {
+        let root = temp_root("registry-no-profile-no-panic");
+        let mut config = test_config(&root);
+        config.registry_reprocess_wire_profile = None;
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
+        let marker = read_registry_reprocess_marker_strict(&config.state_root, 700)
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            registry_reprocess_legacy_args(&config, &marker.source, &marker.target, 700).is_none()
+        );
+        assert!(registry_reprocess_expected_argv(&config, 700, &marker).is_none());
+        assert!(!registry_reprocess_argv_matches_exact(
+            &config,
+            700,
+            &marker,
+            b"/usr/bin/blockzilla\0",
+        ));
+    }
+
+    #[test]
+    fn configured_wire_profile_mismatch_invalidates_attempt_and_argv_identity() {
+        let root = temp_root("registry-profile-mismatch");
+        let config = test_config(&root);
+        let marker = test_registry_attempt_marker(
+            &config,
+            700,
+            "core_running",
+            RegistryReprocessPhase::Core,
+            None,
+        );
+        let expected = registry_reprocess_expected_argv(&config, 700, &marker).unwrap();
+        assert!(expected.windows(2).any(|args| {
+            args[0] == b"--wire-profile" && args[1] == b"post-unknown-instruction-fallbacks-v1"
+        }));
+        let bytes = argv_bytes(&expected);
+
+        let mut mismatched = config.clone();
+        mismatched.registry_reprocess_wire_profile =
+            Some(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1);
+        assert!(!registry_reprocess_marker_has_attempt(
+            &mismatched,
+            700,
+            &marker,
+        ));
+        assert!(registry_reprocess_expected_argv(&mismatched, 700, &marker).is_none());
+        assert!(!registry_reprocess_argv_matches_exact(
+            &mismatched,
+            700,
+            &marker,
+            &bytes,
+        ));
+    }
+
+    #[test]
+    fn deep_audit_rejects_receipt_under_a_different_configured_profile() {
+        let root = temp_root("registry-deep-audit-profile-mismatch");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_probe_only_registry_receipt(&config, 700);
+        let mut runtime = RuntimeState::default();
+        let request = RegistryReprocessAuditRequest {
+            epoch: 700,
+            purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                reason: "manual target",
+            },
+            admission: None,
+        };
+        require_registry_reprocess_audit(&config, &mut runtime, request);
+        let mut request = runtime
+            .registry_reprocess_audit_queue
+            .front()
+            .unwrap()
+            .clone();
+        request.admission = Some(registry_reprocess_audit_admission(&config, &request).unwrap());
+
+        let mut wrong_profile = config.clone();
+        wrong_profile.registry_reprocess_wire_profile =
+            Some(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1);
+        let error = validate_registry_reprocess_output(&wrong_profile, &request).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("wire profile does not match scheduler admission"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn access_ready_gets_one_continuation_slot_at_zero_core_concurrency() {
+        let root = temp_root("registry-access-ready-zero");
+        let config = test_config(&root);
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        let marker = test_registry_attempt_marker(
+            &config,
+            700,
+            "block_access_rebuild_required",
+            RegistryReprocessPhase::Access,
+            Some("cd".repeat(32)),
+        );
+        publish_registry_reprocess_marker(&config.state_root, 700, &marker).unwrap();
+        let mut snapshot = empty_snapshot(false);
+        snapshot.inventory.complete = true;
+        snapshot.epochs.push(epoch.clone());
+        assert_eq!(
+            registry_reprocess_status(&config, &RuntimeState::default(), &epoch),
+            RegistryReprocessStatus::AccessReady
+        );
+        assert!(registry_reprocess_work_pending(
+            &config,
+            &snapshot,
+            &RuntimeState::default()
+        ));
+        assert_eq!(registry_reprocess_dispatch_capacity(0, 0, true), 1);
+        assert_eq!(registry_reprocess_dispatch_capacity(0, 1, true), 0);
+        assert!(registry_reprocess_status_is_dispatchable(
+            RegistryReprocessStatus::AccessReady,
+            0
+        ));
+
+        let mut runtime = RuntimeState::default();
+        let mut complete = marker;
+        complete.state = "complete".to_string();
+        complete.updated_unix_secs += 1;
+        publish_registry_reprocess_marker(&config.state_root, 700, &complete).unwrap();
+        runtime.validated_registry_reprocesses.insert(700);
+        assert!(!registry_reprocess_work_pending(
+            &config, &snapshot, &runtime
+        ));
+    }
+
+    #[tokio::test]
+    async fn zero_registry_concurrency_never_dispatches_a_new_core() {
+        let root = temp_root("registry-zero-core-capacity");
+        let config = test_config(&root);
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        let mut snapshot = empty_snapshot(false);
+        snapshot.inventory.complete = true;
+        snapshot.machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+        snapshot.epochs.push(epoch.clone());
+        let mut runtime = RuntimeState::default();
+
+        assert_eq!(
+            registry_reprocess_status(&config, &runtime, &epoch),
+            RegistryReprocessStatus::Ready
+        );
+        assert_eq!(registry_reprocess_dispatch_capacity(0, 0, false), 0);
+        assert!(!registry_reprocess_status_is_dispatchable(
+            RegistryReprocessStatus::Ready,
+            0
+        ));
+        assert_eq!(
+            top_up_registry_reprocesses(&config, &snapshot, &mut runtime).await,
+            0
+        );
+        assert!(runtime.registry_reprocesses.is_empty());
+        assert!(
+            read_registry_reprocess_marker_strict(&config.state_root, 700)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn access_pending_does_not_preflight_source_schema_or_get_block_index() {
+        let root = temp_root("registry-access-source-compatibility");
+        let config = test_config(&root);
+        let source = config.archive_root.join("epoch-700");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join(BLOCK_ACCESS_FILE), b"opaque-legacy-access").unwrap();
+        fs::write(source.join(BLOCK_ACCESS_INDEX_FILE), b"opaque-legacy-index").unwrap();
+        assert!(
+            !source.join(GET_BLOCK_INDEX_FILE).exists(),
+            "source get-block is optional for access continuation admission"
+        );
+
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.registry_order = RegistryOrder::FirstSeen;
+        epoch.artifacts = [ArtifactKind::BlockAccess, ArtifactKind::BlockAccessIndex]
+            .into_iter()
+            .map(|kind| ArtifactSnapshot {
+                kind,
+                state: ArtifactState::Present,
+                requirement: ArtifactRequirement::FinalOutput,
+                required_now: true,
+                bytes: 1,
+                modified_unix_secs: None,
+                message: None,
+            })
+            .collect();
+        let marker = test_registry_attempt_marker(
+            &config,
+            700,
+            "block_access_rebuild_required",
+            RegistryReprocessPhase::Access,
+            Some("cd".repeat(32)),
+        );
+        publish_registry_reprocess_marker(&config.state_root, 700, &marker).unwrap();
+
+        let mut snapshot = empty_snapshot(false);
+        snapshot.epochs.push(epoch.clone());
+        assert_eq!(
+            registry_reprocess_status(&config, &RuntimeState::default(), &epoch),
+            RegistryReprocessStatus::AccessReady
+        );
+        assert!(registry_reprocess_work_pending(
+            &config,
+            &snapshot,
+            &RuntimeState::default()
+        ));
+    }
+
+    #[test]
+    fn legacy_registry_marker_schemas_one_and_two_remain_explicitly_supported() {
+        let root = temp_root("registry-legacy-marker-schemas");
+        let config = test_config(&root);
+        for schema_version in [1, 2] {
+            let mut marker = test_registry_attempt_marker(
+                &config,
+                700,
+                "failed",
+                RegistryReprocessPhase::Core,
+                None,
+            );
+            marker.schema_version = schema_version;
+            marker.phase = None;
+            marker.attempt_id = None;
+            marker.staging_dir = None;
+            marker.handoff_sha256 = None;
+            marker.wire_profile = None;
+            assert!(registry_reprocess_marker_claims(&config, 700, &marker));
+            assert!(registry_reprocess_marker_is_legacy(&marker));
+        }
+    }
+
+    #[test]
+    fn registry_attempt_staging_is_unpredictable_private_and_same_parent() {
+        let root = temp_root("registry-private-attempt");
+        let config = test_config(&root);
+        let (first_id, first) = new_registry_reprocess_attempt(&config, 700).unwrap();
+        let (second_id, second) = new_registry_reprocess_attempt(&config, 700).unwrap();
+        assert_ne!(first_id, second_id);
+        assert_ne!(first, second);
+        assert_eq!(
+            first.parent(),
+            registry_reprocess_target(&config, 700).parent()
+        );
+        assert_eq!(
+            first,
+            registry_reprocess_attempt_staging_path(&config, 700, &first_id)
+        );
+        let metadata = fs::symlink_metadata(first).unwrap();
+        assert!(metadata.file_type().is_dir());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn failed_core_retry_can_remove_only_its_exact_empty_private_attempt() {
+        let root = temp_root("registry-empty-core-retry");
+        let config = test_config(&root);
+        let (attempt_id, staging_dir) = new_registry_reprocess_attempt(&config, 700).unwrap();
+        let mut marker = test_registry_attempt_marker(
+            &config,
+            700,
+            "failed",
+            RegistryReprocessPhase::Core,
+            None,
+        );
+        marker.attempt_id = Some(attempt_id);
+        marker.staging_dir = Some(staging_dir.clone());
+        discard_failed_registry_core_attempt(&config, 700, &marker).unwrap();
+        assert!(!staging_dir.exists());
+
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        marker.staging_dir = Some(outside.clone());
+        assert!(discard_failed_registry_core_attempt(&config, 700, &marker).is_err());
+        assert!(outside.is_dir());
+    }
+
+    #[test]
+    fn final_auditing_marker_restarts_only_as_a_deep_audit() {
+        let root = temp_root("registry-final-auditing-restart");
+        let mut config = test_config(&root);
+        config.execute = true;
+        let marker = test_registry_attempt_marker(
+            &config,
+            700,
+            "final_auditing",
+            RegistryReprocessPhase::Access,
+            Some("cd".repeat(32)),
+        );
+        publish_registry_reprocess_marker(&config.state_root, 700, &marker).unwrap();
+        let mut runtime = RuntimeState::default();
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+        assert!(runtime.pending_registry_reprocess_audits.contains(&700));
+        assert!(runtime.registry_reprocesses.is_empty());
+        assert!(runtime.adopted_registry_reprocesses.is_empty());
+        assert_eq!(
+            runtime.registry_reprocess_audit_queue.front(),
+            Some(&RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::Ended {
+                    retry_is_safe: false,
+                    reason: "restart reconciliation of durable final-auditing claim",
+                },
+                admission: None,
+            })
+        );
     }
 
     #[test]
@@ -19927,16 +32292,19 @@ mod tests {
             purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                 reason: "first manual target",
             },
+            admission: None,
         };
         enqueue_claimed_registry_reprocess_audit(&mut runtime, first.clone());
         enqueue_claimed_registry_reprocess_audit(&mut runtime, first);
-        enqueue_claimed_registry_reprocess_audit(
+        require_registry_reprocess_audit(
+            &config,
             &mut runtime,
             RegistryReprocessAuditRequest {
                 epoch: 701,
                 purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                     reason: "second manual target",
                 },
+                admission: None,
             },
         );
         dispatch_registry_reprocess_audit(&config, &mut runtime, &auditor, true);
@@ -20002,6 +32370,7 @@ mod tests {
             purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                 reason: "manually discovered registry generation",
             },
+            admission: None,
         };
         enqueue_claimed_registry_reprocess_audit(&mut runtime, request.clone());
         enqueue_claimed_registry_reprocess_audit(&mut runtime, request.clone());
@@ -20052,6 +32421,721 @@ mod tests {
         assert_eq!(registry_reprocess_projected_bytes(&epoch), 14 * gib);
     }
 
+    #[test]
+    fn access_disk_projection_counts_only_remaining_outputs_and_fails_closed() {
+        let root = temp_root("registry-access-disk-projection");
+        let config = test_config(&root);
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        fs::create_dir_all(&epoch.output_path).unwrap();
+
+        let source_access_bytes = 101u64;
+        let source_access_index_bytes = 23u64;
+        fs::write(
+            epoch.output_path.join(BLOCK_ACCESS_FILE),
+            vec![0; source_access_bytes as usize],
+        )
+        .unwrap();
+        fs::write(
+            epoch.output_path.join(BLOCK_ACCESS_INDEX_FILE),
+            vec![0; source_access_index_bytes as usize],
+        )
+        .unwrap();
+        let independent = [
+            (BLOCKHASH_REGISTRY_FILE, 11u64),
+            (BLOCKHASH_INDEX_V3_FILE, 12),
+            (PREVIOUS_BLOCKHASH_TAIL_FILE, 13),
+            (VOTE_HASH_REGISTRY_FILE, 14),
+            (POH_FILE, 15),
+            (SHREDDING_FILE, 16),
+            (BLOCK_TIME_GAP_FILE, 17),
+        ];
+        for (name, bytes) in independent {
+            fs::write(epoch.output_path.join(name), vec![0; bytes as usize]).unwrap();
+        }
+
+        let expected = source_access_bytes * 2
+            + source_access_index_bytes
+            + independent.iter().map(|(_, bytes)| bytes).sum::<u64>()
+            + REGISTRY_REPROCESS_ACCESS_OUTPUT_HEADROOM_BYTES;
+        assert_eq!(
+            registry_reprocess_access_projected_bytes(&config, &epoch).unwrap(),
+            expected
+        );
+
+        let gib = 1024u64 * 1024 * 1024;
+        epoch.artifacts = vec![
+            ArtifactSnapshot {
+                kind: ArtifactKind::Registry,
+                state: ArtifactState::Present,
+                requirement: ArtifactRequirement::FinalOutput,
+                required_now: true,
+                bytes: 4 * gib,
+                modified_unix_secs: None,
+                message: None,
+            },
+            ArtifactSnapshot {
+                kind: ArtifactKind::Blocks,
+                state: ArtifactState::Present,
+                requirement: ArtifactRequirement::FinalOutput,
+                required_now: true,
+                bytes: gib,
+                modified_unix_secs: None,
+                message: None,
+            },
+        ];
+        let reserve = gib;
+        let available = reserve + expected;
+        assert!(registry_reprocess_disk_admits(available, reserve, expected));
+        assert!(
+            !registry_reprocess_disk_admits(
+                available,
+                reserve,
+                registry_reprocess_projected_bytes(&epoch)
+            ),
+            "access must admit when only the old full-core projection would block"
+        );
+        assert!(
+            !registry_reprocess_disk_admits(available - 1, reserve, expected),
+            "one byte less than the remaining-output bound must block access"
+        );
+        assert!(
+            registry_reprocess_access_projected_bytes_from_sizes(u64::MAX, 0, []).is_err(),
+            "a projection overflow must block access admission"
+        );
+        assert!(
+            !registry_reprocess_disk_admits(u64::MAX, u64::MAX, 1),
+            "an overflowed disk reserve calculation must fail closed"
+        );
+    }
+
+    #[test]
+    fn access_disk_credit_admits_when_free_space_is_short_only_by_owned_partial_blocks() {
+        let root = temp_root("registry-access-disk-partial-credit");
+        let staging = root.join("private-staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(
+            staging.join(format!(
+                "{BLOCK_ACCESS_FILE}{REGISTRY_REPROCESS_ACCESS_TEMP_SUFFIX}"
+            )),
+            vec![0x5a; 16 * 1024],
+        )
+        .unwrap();
+        let credit = registry_reprocess_access_admission_after_probe(
+            &staging,
+            Ok(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild),
+        )
+        .unwrap()
+        .allocated_credit;
+        assert!(credit > 0, "the written partial must own allocated blocks");
+
+        let reserve = MIB_BYTES;
+        let projected = registry_reprocess_access_projected_bytes_from_sizes(101, 23, []).unwrap();
+        let available_before_cleanup = reserve
+            .checked_add(projected)
+            .unwrap()
+            .checked_sub(credit)
+            .unwrap();
+        assert!(!registry_reprocess_disk_admits(
+            available_before_cleanup,
+            reserve,
+            projected
+        ));
+        assert!(registry_reprocess_disk_admits(
+            available_before_cleanup.checked_add(credit).unwrap(),
+            reserve,
+            projected
+        ));
+    }
+
+    #[test]
+    fn access_disk_credit_requires_a_valid_probe_and_never_credits_hard_links() {
+        let root = temp_root("registry-access-disk-credit-safety");
+        let unknown_staging = root.join("unknown-staging");
+        fs::create_dir_all(&unknown_staging).unwrap();
+        fs::write(
+            unknown_staging.join(format!(
+                "{BLOCK_ACCESS_FILE}{REGISTRY_REPROCESS_ACCESS_TEMP_SUFFIX}"
+            )),
+            vec![0x5a; 4096],
+        )
+        .unwrap();
+        fs::write(unknown_staging.join("unknown-entry"), b"not-owned").unwrap();
+        assert!(
+            registry_reprocess_access_admission_after_probe(
+                &unknown_staging,
+                Err(anyhow::anyhow!(
+                    "exact continuation probe rejected an unknown entry"
+                )),
+            )
+            .is_err(),
+            "a failed exact continuation probe must prevent all disk credit"
+        );
+
+        assert_eq!(
+            registry_reprocess_access_admission_after_probe(
+                &unknown_staging,
+                Ok(RegistryReprocessAccessContinuationState::ReceiptReady),
+            )
+            .unwrap()
+            .allocated_credit,
+            0,
+            "receipt-bound publication must never credit staged output blocks"
+        );
+
+        let hard_link_staging = root.join("hard-link-staging");
+        fs::create_dir_all(&hard_link_staging).unwrap();
+        let partial = hard_link_staging.join(BLOCK_ACCESS_FILE);
+        fs::write(&partial, vec![0x5a; 4096]).unwrap();
+        fs::hard_link(&partial, root.join("shared-access-blocks")).unwrap();
+        fs::write(hard_link_staging.join(POH_FILE), vec![0x5a; 64 * 1024]).unwrap();
+        fs::write(
+            hard_link_staging.join(SIGNATURES_FILE),
+            vec![0x5a; 64 * 1024],
+        )
+        .unwrap();
+        assert_eq!(
+            registry_reprocess_access_admission_after_probe(
+                &hard_link_staging,
+                Ok(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild),
+            )
+            .unwrap()
+            .allocated_credit,
+            0,
+            "hard links, signatures, and clone-capable independent sidecars get no credit"
+        );
+    }
+
+    #[test]
+    fn access_spawn_recheck_rejects_state_or_credit_change_after_admission() {
+        let root = temp_root("registry-access-spawn-state-race");
+        let staging = root.join("private-staging");
+        fs::create_dir_all(&staging).unwrap();
+        let receipt_admission = RegistryReprocessAccessAdmission {
+            state: RegistryReprocessAccessContinuationState::ReceiptReady,
+            allocated_credit: 0,
+        };
+        assert!(
+            registry_reprocess_access_spawn_admission_matches(
+                &staging,
+                receipt_admission,
+                RegistryReprocessAccessContinuationState::ReceiptReady,
+            )
+            .unwrap()
+        );
+        assert!(
+            !registry_reprocess_access_spawn_admission_matches(
+                &staging,
+                receipt_admission,
+                RegistryReprocessAccessContinuationState::CoreOrPartialRebuild,
+            )
+            .unwrap(),
+            "a receipt-to-rebuild state change must defer the spawn"
+        );
+
+        fs::write(
+            staging.join(format!(
+                "{GET_BLOCK_INDEX_FILE}{REGISTRY_REPROCESS_ACCESS_TEMP_SUFFIX}"
+            )),
+            vec![0x5a; 4096],
+        )
+        .unwrap();
+        let core_admission = registry_reprocess_access_admission_after_probe(
+            &staging,
+            Ok(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild),
+        )
+        .unwrap();
+        assert!(
+            registry_reprocess_access_spawn_admission_matches(
+                &staging,
+                core_admission,
+                RegistryReprocessAccessContinuationState::CoreOrPartialRebuild,
+            )
+            .unwrap()
+        );
+        let changed_credit = RegistryReprocessAccessAdmission {
+            allocated_credit: core_admission.allocated_credit.saturating_add(512),
+            ..core_admission
+        };
+        assert!(
+            !registry_reprocess_access_spawn_admission_matches(
+                &staging,
+                changed_credit,
+                RegistryReprocessAccessContinuationState::CoreOrPartialRebuild,
+            )
+            .unwrap(),
+            "an allocated-block change must defer the spawn"
+        );
+    }
+
+    #[test]
+    fn active_registry_disk_projection_is_retained_across_top_up_polls() {
+        let root = temp_root("registry-active-disk-reservation");
+        let config = test_config(&root);
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.artifacts = vec![ArtifactSnapshot {
+            kind: ArtifactKind::Blocks,
+            state: ArtifactState::Present,
+            requirement: ArtifactRequirement::FinalOutput,
+            required_now: true,
+            bytes: 2 * 1024 * 1024 * 1024,
+            modified_unix_secs: None,
+            message: None,
+        }];
+        let mut snapshot = empty_snapshot(false);
+        snapshot.epochs.push(epoch.clone());
+        let mut runtime = RuntimeState::default();
+        runtime.adopted_registry_reprocesses.insert(
+            700,
+            test_adopted_registry_reprocess(
+                &config,
+                700,
+                42,
+                Some(config.registry_reprocess_threads),
+                true,
+            ),
+        );
+        assert_eq!(
+            active_registry_reprocess_disk_reservation(&snapshot, &runtime),
+            Ok(registry_reprocess_projected_bytes(&epoch))
+        );
+        snapshot.epochs.clear();
+        assert_eq!(
+            active_registry_reprocess_disk_reservation(&snapshot, &runtime),
+            Err(700),
+            "missing active inventory must fail closed"
+        );
+    }
+
+    #[test]
+    fn registry_pass2_progress_requires_the_exact_fresh_midpoint_transition() {
+        let now = 10_000;
+        let marker_updated = 9_900;
+        let pid = 42;
+        let mut progress = ProgressSnapshot {
+            phase: Some("registry reprocess".to_string()),
+            state: Some("running".to_string()),
+            pid: Some(pid),
+            blocks_done: 100,
+            blocks_total: 201,
+            updated_unix_secs: Some(now),
+            ..ProgressSnapshot::default()
+        };
+        assert!(
+            !registry_reprocess_progress_proves_pass2(&progress, pid, marker_updated, now),
+            "the completed pass-1 count is not pass 2"
+        );
+
+        progress.blocks_done = 101;
+        assert!(registry_reprocess_progress_proves_pass2(
+            &progress,
+            pid,
+            marker_updated,
+            now
+        ));
+
+        progress.blocks_total = 200;
+        assert!(!registry_reprocess_progress_proves_pass2(
+            &progress,
+            pid,
+            marker_updated,
+            now
+        ));
+        progress.blocks_total = 201;
+        progress.pid = Some(pid + 1);
+        assert!(!registry_reprocess_progress_proves_pass2(
+            &progress,
+            pid,
+            marker_updated,
+            now
+        ));
+        progress.pid = Some(pid);
+        progress.updated_unix_secs = Some(marker_updated - 1);
+        assert!(!registry_reprocess_progress_proves_pass2(
+            &progress,
+            pid,
+            marker_updated,
+            now
+        ));
+        progress.updated_unix_secs = Some(now - PROGRESS_STALE_SECS - 1);
+        assert!(!registry_reprocess_progress_proves_pass2(
+            &progress, pid, 0, now
+        ));
+        progress.updated_unix_secs = Some(now + 1);
+        assert!(!registry_reprocess_progress_proves_pass2(
+            &progress,
+            pid,
+            marker_updated,
+            now
+        ));
+    }
+
+    #[test]
+    fn registry_phase_capacity_never_admits_two_pass1_peaks() {
+        assert!(registry_reprocess_phase_capacity_allows_start(2, 0, false));
+        assert!(
+            !registry_reprocess_phase_capacity_allows_start(2, 1, false),
+            "an unproven pass-1/sort worker must keep the second slot closed"
+        );
+        assert!(registry_reprocess_phase_capacity_allows_start(2, 1, true));
+        assert!(
+            !registry_reprocess_phase_capacity_allows_start(2, 2, true),
+            "configured capacity remains a hard limit"
+        );
+        assert!(
+            !registry_reprocess_phase_capacity_allows_start(1, 1, true),
+            "single-worker configuration remains unchanged"
+        );
+    }
+
+    #[test]
+    fn access_ready_waits_for_core_pass2_and_never_overlaps_access() {
+        let root = temp_root("registry-access-waits-for-core-pass2");
+        let config = test_config(&root);
+        let mut runtime = RuntimeState::default();
+        runtime.adopted_registry_reprocesses.insert(
+            700,
+            test_adopted_registry_reprocess(
+                &config,
+                700,
+                42,
+                Some(config.registry_reprocess_threads),
+                false,
+            ),
+        );
+        assert!(
+            registry_reprocess_candidate_phase_blocker(
+                &config,
+                &runtime,
+                RegistryReprocessStatus::AccessReady,
+                1,
+                10_000,
+            )
+            .is_some(),
+            "an access continuation must not overlap an unproven core peak"
+        );
+
+        let active = runtime.adopted_registry_reprocesses.get_mut(&700).unwrap();
+        active.phase = RegistryReprocessPhase::Access;
+        active.identity_trusted = true;
+        assert!(
+            registry_reprocess_candidate_phase_blocker(
+                &config,
+                &runtime,
+                RegistryReprocessStatus::AccessReady,
+                1,
+                10_000,
+            )
+            .is_some(),
+            "a second access phase must not overlap the active access phase"
+        );
+        assert!(
+            registry_reprocess_candidate_phase_blocker(
+                &config,
+                &runtime,
+                RegistryReprocessStatus::Ready,
+                1,
+                10_000,
+            )
+            .is_some(),
+            "a new core/pass-1 phase must not start while access is active"
+        );
+    }
+
+    #[test]
+    fn access_phase_consumes_capacity_and_closes_new_phase_admission() {
+        let root = temp_root("registry-access-capacity");
+        let config = test_config(&root);
+        let mut access = test_adopted_registry_reprocess(
+            &config,
+            700,
+            42,
+            Some(config.registry_reprocess_threads),
+            true,
+        );
+        access.phase = RegistryReprocessPhase::Access;
+        access.attempt_id = Some("ab".repeat(16));
+        access.staging_dir = Some(registry_reprocess_attempt_staging_path(
+            &config,
+            700,
+            access.attempt_id.as_deref().unwrap(),
+        ));
+        access.handoff_sha256 = Some("cd".repeat(32));
+        access.expected_access_state =
+            Some(RegistryReprocessExpectedAccessState::CoreOrPartialRebuild);
+        let mut runtime = RuntimeState::default();
+        runtime.adopted_registry_reprocesses.insert(700, access);
+        assert_eq!(registry_reprocess_capacity_in_use(&runtime), 1);
+        assert_eq!(
+            registry_reprocess_active_cpu_threads(&config, &runtime, usize::MAX),
+            REGISTRY_REPROCESS_ACCESS_CPU_THREADS
+        );
+        runtime
+            .adopted_registry_reprocesses
+            .get_mut(&700)
+            .unwrap()
+            .identity_trusted = false;
+        assert_eq!(
+            registry_reprocess_active_cpu_threads(&config, &runtime, 99),
+            99,
+            "an untrusted survivor must consume the fail-closed CPU fallback"
+        );
+        assert_eq!(
+            registry_reprocess_pass2_blocker(&config, &runtime, 10_000),
+            None
+        );
+        assert!(
+            registry_reprocess_candidate_phase_blocker(
+                &config,
+                &runtime,
+                RegistryReprocessStatus::AccessReady,
+                1,
+                10_000,
+            )
+            .is_some()
+        );
+        assert!(
+            registry_reprocess_candidate_phase_blocker(
+                &config,
+                &runtime,
+                RegistryReprocessStatus::Ready,
+                1,
+                10_000,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn access_phase_uses_bounded_resources_when_core_would_be_blocked() {
+        let root = temp_root("registry-access-phase-resources");
+        let mut config = test_config(&root);
+        config.registry_reprocess_threads = 6;
+        config.registry_reprocess_memory_mib = 4_000;
+        config.memory_reserve_mib = 512;
+        let mut epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        epoch.artifacts.push(ArtifactSnapshot {
+            kind: ArtifactKind::Registry,
+            state: ArtifactState::Present,
+            requirement: ArtifactRequirement::FinalOutput,
+            required_now: true,
+            bytes: 1_024 * MIB_BYTES,
+            modified_unix_secs: None,
+            message: None,
+        });
+        let access_memory_mib = registry_reprocess_phase_memory_mib(
+            &config,
+            &epoch,
+            RegistryReprocessStatus::AccessReady,
+            Some(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild),
+        )
+        .unwrap();
+        assert_eq!(access_memory_mib, 2_849);
+        let mut machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+        machine.memory_available_bytes = config
+            .memory_reserve_mib
+            .saturating_add(access_memory_mib)
+            .saturating_mul(MIB_BYTES);
+
+        assert_eq!(
+            registry_reprocess_phase_cpu_threads(&config, RegistryReprocessStatus::AccessReady),
+            1
+        );
+        assert_eq!(
+            registry_reprocess_phase_cpu_threads(&config, RegistryReprocessStatus::Ready),
+            6
+        );
+        assert_eq!(
+            registry_reprocess_phase_memory_mib(
+                &config,
+                &epoch,
+                RegistryReprocessStatus::AccessReady,
+                Some(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild),
+            )
+            .unwrap(),
+            access_memory_mib
+        );
+        assert!(registry_reprocess_memory_admits(
+            &machine,
+            config.memory_reserve_mib,
+            access_memory_mib
+        ));
+        assert!(!registry_reprocess_memory_admits(
+            &machine,
+            config.memory_reserve_mib,
+            registry_reprocess_phase_memory_mib(
+                &config,
+                &epoch,
+                RegistryReprocessStatus::Ready,
+                None,
+            )
+            .unwrap()
+        ));
+    }
+
+    #[test]
+    fn receipt_ready_access_uses_only_publication_memory_and_disk_headroom() {
+        let root = temp_root("registry-receipt-ready-resources");
+        let mut config = test_config(&root);
+        config.registry_reprocess_memory_mib = 4_000;
+        config.memory_reserve_mib = 512;
+        let epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        let receipt_memory = registry_reprocess_phase_memory_mib(
+            &config,
+            &epoch,
+            RegistryReprocessStatus::AccessReady,
+            Some(RegistryReprocessAccessContinuationState::ReceiptReady),
+        )
+        .unwrap();
+        assert_eq!(receipt_memory, REGISTRY_REPROCESS_RECEIPT_READY_MEMORY_MIB);
+        assert_eq!(
+            registry_reprocess_phase_cpu_threads(&config, RegistryReprocessStatus::AccessReady),
+            1
+        );
+        let mut machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+        machine.memory_available_bytes = (config.memory_reserve_mib + receipt_memory) * MIB_BYTES;
+        assert!(registry_reprocess_memory_admits(
+            &machine,
+            config.memory_reserve_mib,
+            receipt_memory
+        ));
+        assert!(
+            registry_reprocess_phase_memory_mib(
+                &config,
+                &epoch,
+                RegistryReprocessStatus::AccessReady,
+                Some(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild),
+            )
+            .is_err(),
+            "partial rebuild still needs an exact source-registry inventory size"
+        );
+
+        let projected = registry_reprocess_access_phase_projected_bytes(
+            &config,
+            &epoch,
+            RegistryReprocessAccessContinuationState::ReceiptReady,
+        )
+        .unwrap();
+        assert_eq!(
+            projected,
+            REGISTRY_REPROCESS_RECEIPT_READY_DISK_HEADROOM_BYTES
+        );
+        let reserve = MIB_BYTES;
+        assert!(registry_reprocess_disk_admits(
+            reserve + projected,
+            reserve,
+            projected
+        ));
+        assert!(
+            registry_reprocess_access_phase_projected_bytes(
+                &config,
+                &epoch,
+                RegistryReprocessAccessContinuationState::CoreOrPartialRebuild,
+            )
+            .is_err(),
+            "partial rebuild still needs the source access inputs"
+        );
+    }
+
+    #[test]
+    fn access_memory_bound_rounds_up_and_blocks_unobservable_or_overflowed_sizes() {
+        assert_eq!(
+            registry_reprocess_access_memory_mib_from_registry_bytes(32).unwrap(),
+            513
+        );
+        assert_eq!(
+            registry_reprocess_access_memory_mib_from_registry_bytes(1_024 * MIB_BYTES).unwrap(),
+            2_849
+        );
+        assert!(
+            registry_reprocess_access_memory_mib_from_registry_bytes(u64::MAX - 31).is_err(),
+            "a scaled source size overflow must block admission"
+        );
+
+        let root = temp_root("registry-access-memory-unobservable");
+        let config = test_config(&root);
+        let epoch = test_epoch(&root, 700, HistoricalState::Complete);
+        assert!(
+            registry_reprocess_phase_memory_mib(
+                &config,
+                &epoch,
+                RegistryReprocessStatus::AccessReady,
+                Some(RegistryReprocessAccessContinuationState::CoreOrPartialRebuild),
+            )
+            .is_err(),
+            "an inventory without an exact registry size must block access admission"
+        );
+
+        let mut machine = legacy_scheduler_machine(&config, 8 * 1024, 512);
+        machine.memory_available_bytes = u64::MAX;
+        assert!(
+            !registry_reprocess_memory_admits(&machine, u64::MAX, 1),
+            "an overflowed reserve calculation must fail closed"
+        );
+    }
+
+    #[test]
+    fn registry_pass2_artifact_must_be_a_nonempty_regular_staging_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("registry-pass2-artifact");
+        let config = test_config(&root);
+        let staging = registry_reprocess_staging_path(&config, 700);
+        fs::create_dir_all(&staging).unwrap();
+        let blocks = staging.join(BLOCKS_FILE);
+        fs::write(&blocks, []).unwrap();
+        assert!(!registry_reprocess_pass2_output_exists(&staging));
+        fs::write(&blocks, b"rewritten-block").unwrap();
+        assert!(registry_reprocess_pass2_output_exists(&staging));
+
+        fs::remove_file(&blocks).unwrap();
+        let outside = root.join("outside-blocks");
+        fs::write(&outside, b"not-owned-staging-output").unwrap();
+        symlink(&outside, &blocks).unwrap();
+        assert!(
+            !registry_reprocess_pass2_output_exists(&staging),
+            "a symlink must not prove pass-2 output ownership"
+        );
+    }
+
+    #[test]
+    fn registry_pass2_progress_reader_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("registry-pass2-progress-symlink");
+        let config = test_config(&root);
+        let progress = registry_reprocess_progress_path(&config.state_root, 700);
+        fs::create_dir_all(progress.parent().unwrap()).unwrap();
+        let outside = root.join("outside-progress.json");
+        fs::write(
+            &outside,
+            br#"{"pid":42,"phase":"registry reprocess","state":"running","blocks_done":101,"blocks_total_estimate":201,"updated_unix_secs":10000}"#,
+        )
+        .unwrap();
+        symlink(&outside, &progress).unwrap();
+        assert!(read_registry_reprocess_progress_strict(&progress).is_err());
+    }
+
+    #[test]
+    fn untrusted_adopted_registry_worker_cannot_open_the_second_slot() {
+        let root = temp_root("registry-pass2-untrusted-adoption");
+        let config = test_config(&root);
+        let mut runtime = RuntimeState::default();
+        runtime.adopted_registry_reprocesses.insert(
+            700,
+            test_adopted_registry_reprocess(
+                &config,
+                700,
+                42,
+                Some(config.registry_reprocess_threads),
+                false,
+            ),
+        );
+        assert_eq!(
+            registry_reprocess_pass2_blocker(&config, &runtime, 10_000),
+            Some((700, "adopted entry does not have a trusted exact identity"))
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn live_running_registry_marker_with_wrong_argv_fails_closed_on_restart() {
@@ -20082,7 +33166,7 @@ mod tests {
         write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
         let target = registry_reprocess_target(&config, 700);
         let child = make_finished_child(
-            ChildKind::RegistryReprocess { epoch: 700, target },
+            legacy_registry_child_kind(&config, 700, target),
             registry_reprocess_progress_path(&config.state_root, 700),
             config
                 .state_root
@@ -20118,7 +33202,7 @@ mod tests {
         );
         write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
         let child = make_finished_child(
-            ChildKind::RegistryReprocess { epoch: 700, target },
+            legacy_registry_child_kind(&config, 700, target),
             registry_reprocess_progress_path(&config.state_root, 700),
             config
                 .state_root
@@ -20146,7 +33230,7 @@ mod tests {
         let (_source, target) = write_probe_only_registry_receipt(&config, 700);
         write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
         let child = make_finished_child(
-            ChildKind::RegistryReprocess { epoch: 700, target },
+            legacy_registry_child_kind(&config, 700, target),
             registry_reprocess_progress_path(&config.state_root, 700),
             config
                 .state_root
@@ -20184,7 +33268,7 @@ mod tests {
         write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
         set_registry_reprocess_marker_identity(&config, 700, u32::MAX, 1).unwrap();
         let child = make_finished_child(
-            ChildKind::RegistryReprocess { epoch: 700, target },
+            legacy_registry_child_kind(&config, 700, target),
             registry_reprocess_progress_path(&config.state_root, 700),
             config
                 .state_root
@@ -20261,7 +33345,7 @@ mod tests {
         let (_source, target) = write_probe_only_registry_receipt(&config, 700);
         write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
         let child = make_finished_child(
-            ChildKind::RegistryReprocess { epoch: 700, target },
+            legacy_registry_child_kind(&config, 700, target),
             registry_reprocess_progress_path(&config.state_root, 700),
             config
                 .state_root
@@ -20336,7 +33420,7 @@ mod tests {
         let (_source, target) = write_probe_only_registry_receipt(&config, 700);
         write_registry_reprocess_marker(&config, 700, "running", None).unwrap();
         let child = make_finished_child(
-            ChildKind::RegistryReprocess { epoch: 700, target },
+            legacy_registry_child_kind(&config, 700, target),
             registry_reprocess_progress_path(&config.state_root, 700),
             config
                 .state_root
@@ -20391,6 +33475,7 @@ mod tests {
                 purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                     reason: "manual target requires validation",
                 },
+                admission: None,
             },
         );
         assert!(
@@ -20492,13 +33577,15 @@ mod tests {
         };
         let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
         let mut runtime = RuntimeState::default();
-        enqueue_claimed_registry_reprocess_audit(
+        require_registry_reprocess_audit(
+            &config,
             &mut runtime,
             RegistryReprocessAuditRequest {
                 epoch: 700,
                 purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                     reason: "manual target",
                 },
+                admission: None,
             },
         );
         let mut snapshot = registry_audit_test_snapshot(&config, &root, 700);
@@ -20539,13 +33626,15 @@ mod tests {
         };
         let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
         let mut runtime = RuntimeState::default();
-        enqueue_claimed_registry_reprocess_audit(
+        require_registry_reprocess_audit(
+            &config,
             &mut runtime,
             RegistryReprocessAuditRequest {
                 epoch: 700,
                 purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                     reason: "manual target",
                 },
+                admission: None,
             },
         );
         let snapshot = registry_audit_test_snapshot(&config, &root, 700);
@@ -20558,6 +33647,135 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("audit needs 64"))
         );
+    }
+
+    #[test]
+    fn audit_admission_never_dispatches_a_profile_neutral_high_thread_receipt() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let root = temp_root("registry-audit-profile-neutral-threads");
+        let mut receipt_config = test_config(&root);
+        receipt_config.registry_reprocess_threads = 64;
+        write_probe_only_legacy_registry_receipt(&receipt_config, 700);
+        let mut config = receipt_config.clone();
+        config.registry_reprocess_threads = 4;
+        config.registry_reprocess_concurrency = 1;
+        config.legacy_compact_cpu_budget_cores = 128;
+        config.disk_reserve_gib = 0;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let validator: RegistryReprocessValidator = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(())
+            })
+        };
+        let auditor = RegistryReprocessAuditor::with_validator(config.clone(), validator);
+        let mut runtime = RuntimeState::default();
+        require_registry_reprocess_audit(
+            &config,
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+                admission: None,
+            },
+        );
+        let snapshot = registry_audit_test_snapshot(&config, &root, 700);
+        admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
+
+        assert!(runtime.active_registry_reprocess_audit.is_none());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(
+            runtime
+                .registry_reprocess_admission_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("receipt/profile admission blocked"))
+        );
+    }
+
+    #[test]
+    fn manual_v3_audit_success_publishes_profile_bound_schema_four_marker() {
+        let root = temp_root("registry-manual-v3-audit-marker");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_probe_only_registry_receipt(&config, 700);
+        let mut runtime = RuntimeState::default();
+        require_registry_reprocess_audit(
+            &config,
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+                admission: None,
+            },
+        );
+        let mut request = runtime.registry_reprocess_audit_queue.pop_front().unwrap();
+        request.admission = Some(registry_reprocess_audit_admission(&config, &request).unwrap());
+        runtime.active_registry_reprocess_audit = Some(request.clone());
+        commit_registry_reprocess_audit(&config, &mut runtime, request, Ok(()));
+
+        let marker = read_registry_reprocess_marker_strict(&config.state_root, 700)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            marker.schema_version,
+            REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION
+        );
+        assert_eq!(marker.state, "complete");
+        assert_eq!(marker.wire_profile, config.registry_reprocess_wire_profile);
+        assert_eq!(marker.phase, Some(RegistryReprocessPhase::Access));
+        assert_eq!(marker.attempt_id.as_deref(), Some(&"ab".repeat(16)[..]));
+        assert_eq!(marker.handoff_sha256.as_deref(), Some(&"cd".repeat(32)[..]));
+        assert_eq!(
+            marker.staging_dir,
+            Some(registry_reprocess_attempt_staging_path(
+                &config,
+                700,
+                &"ab".repeat(16),
+            ))
+        );
+    }
+
+    #[test]
+    fn receipt_change_after_audit_completion_cannot_publish_complete() {
+        let root = temp_root("registry-audit-commit-race");
+        let config = test_config(&root);
+        fs::create_dir_all(&config.state_root).unwrap();
+        write_probe_only_registry_receipt(&config, 700);
+        let mut runtime = RuntimeState::default();
+        require_registry_reprocess_audit(
+            &config,
+            &mut runtime,
+            RegistryReprocessAuditRequest {
+                epoch: 700,
+                purpose: RegistryReprocessAuditPurpose::ExistingTarget {
+                    reason: "manual target",
+                },
+                admission: None,
+            },
+        );
+        let mut request = runtime.registry_reprocess_audit_queue.pop_front().unwrap();
+        request.admission = Some(registry_reprocess_audit_admission(&config, &request).unwrap());
+        let receipt_path = registry_reprocess_target(&config, 700)
+            .join(crate::archive_v2::registry_reprocess::REGISTRY_REPROCESS_RECEIPT_FILE);
+        let mut receipt: crate::archive_v2::registry_reprocess::RegistryReprocessReceipt =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        receipt.threads += 1;
+        fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        runtime.active_registry_reprocess_audit = Some(request.clone());
+        commit_registry_reprocess_audit(&config, &mut runtime, request, Ok(()));
+
+        let marker = read_registry_reprocess_marker_strict(&config.state_root, 700)
+            .unwrap()
+            .unwrap();
+        assert_ne!(marker.state, "complete");
+        assert!(!runtime.validated_registry_reprocesses.contains(&700));
+        assert!(runtime.failures.contains_key("registry_reprocess:700"));
     }
 
     #[test]
@@ -20581,13 +33799,15 @@ mod tests {
         let auditor =
             RegistryReprocessAuditor::with_validator(config.clone(), Arc::new(|_, _| Ok(())));
         let mut runtime = RuntimeState::default();
-        enqueue_claimed_registry_reprocess_audit(
+        require_registry_reprocess_audit(
+            &config,
             &mut runtime,
             RegistryReprocessAuditRequest {
                 epoch: 700,
                 purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                     reason: "manual target",
                 },
+                admission: None,
             },
         );
         let snapshot = registry_audit_test_snapshot(&config, &root, 700);
@@ -20624,13 +33844,11 @@ mod tests {
                 purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                     reason: "manual target",
                 },
+                admission: None,
             },
         );
         let active = make_finished_child(
-            ChildKind::RegistryReprocess {
-                epoch: 701,
-                target: registry_reprocess_target(&config, 701),
-            },
+            legacy_registry_child_kind(&config, 701, registry_reprocess_target(&config, 701)),
             registry_reprocess_progress_path(&config.state_root, 701),
             config.state_root.join("logs/epoch-701.log"),
         )
@@ -20658,14 +33876,7 @@ mod tests {
         let mut runtime = RuntimeState::default();
         runtime.adopted_registry_reprocesses.insert(
             699,
-            AdoptedRegistryReprocess {
-                epoch: 699,
-                pid: u32::MAX,
-                process_start_ticks: Some(1),
-                threads: Some(4),
-                progress_path: registry_reprocess_progress_path(&config.state_root, 699),
-                identity_trusted: true,
-            },
+            test_adopted_registry_reprocess(&config, 699, u32::MAX, Some(4), true),
         );
         assert!(registry_reprocess_work_pending(
             &config, &snapshot, &runtime
@@ -20696,6 +33907,7 @@ mod tests {
                 purpose: RegistryReprocessAuditPurpose::ExistingTarget {
                     reason: "manual target",
                 },
+                admission: None,
             },
         );
         admit_registry_reprocess_audit(&config, &snapshot, &mut runtime, &auditor);
@@ -21051,11 +34263,561 @@ mod tests {
             "proc /proc proc rw,hidepid=1 0 0\n"
         ));
         assert!(!proc_mount_allows_full_process_visibility(
+            "proc /proc proc rw,hidepid=2 0 0\n"
+        ));
+        assert!(!proc_mount_allows_full_process_visibility(
             "proc /proc proc rw,hidepid=invisible 0 0\n"
         ));
         assert!(!proc_mount_allows_full_process_visibility(
             "tmpfs /proc tmpfs rw 0 0\n"
         ));
+    }
+
+    #[test]
+    fn registry_reader_credentials_require_one_exact_four_uid_record() {
+        assert_eq!(
+            parse_registry_reader_process_credentials("Uid:\t1000\t1000\t1000\t1000\n"),
+            Some(RegistryReaderProcessCredentials {
+                real_uid: 1000,
+                effective_uid: 1000,
+                saved_uid: 1000,
+                filesystem_uid: 1000,
+            })
+        );
+        for malformed in [
+            "Name:\tfake\n",
+            "Uid:\t1000\t1000\t1000\n",
+            "Uid:\t1000\t1000\t1000\t1000\t1000\n",
+            "Uid:\t1000\troot\t1000\t1000\n",
+            "Uid:\t1000\t1000\t1000\t1000\nUid:\t0\t0\t0\t0\n",
+        ] {
+            assert_eq!(
+                parse_registry_reader_process_credentials(malformed),
+                None,
+                "malformed ownership must not establish a foreign-process exclusion: {malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_cgroup_requires_one_exact_unified_record() {
+        let exact = fake_registry_reader_init_cgroup(1000);
+        let parsed = parse_registry_reader_process_cgroup(&exact).unwrap();
+        assert!(registry_reader_process_is_unrelated_user_manager(
+            &parsed, 1000
+        ));
+        for malformed in [
+            exact.trim_end().to_string(),
+            format!("{exact}0::/second\n"),
+            "1:name=systemd:/user.slice/init.scope\n".to_string(),
+            "0:cpu:/user.slice/init.scope\n".to_string(),
+            "0::relative/init.scope\n".to_string(),
+            "0::/user.slice/../init.scope\n".to_string(),
+            "0::/user.slice//init.scope\n".to_string(),
+        ] {
+            assert_eq!(
+                parse_registry_reader_process_cgroup(&malformed),
+                None,
+                "malformed cgroup record must block: {malformed:?}"
+            );
+        }
+        for near_match in [
+            "0::/user.slice/user-1000.slice/user@1000.service/init.scope/child\n",
+            "0::/user.slice/user-1001.slice/user@1001.service/init.scope\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/init.scope\n",
+        ] {
+            let parsed = parse_registry_reader_process_cgroup(near_match).unwrap();
+            assert!(!registry_reader_process_is_unrelated_user_manager(
+                &parsed, 1000
+            ));
+        }
+    }
+
+    #[test]
+    fn registry_reader_cgroup_read_is_bounded_before_allocation() {
+        let root = temp_root("registry-reader-cgroup-bound");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("cgroup");
+        fs::write(
+            &path,
+            vec![b'x'; (MAX_REGISTRY_READER_CGROUP_BYTES + 1) as usize],
+        )
+        .unwrap();
+        assert_eq!(
+            read_registry_reader_process_cgroup(&path)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn registry_reader_scan_allows_exact_stable_sd_pam_private_surfaces() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for denied_code in [libc::EACCES, libc::EPERM] {
+            let mut process = FakeRegistryReaderProcess::stable(52, 712, [1000; 4]);
+            process.cgroup =
+                FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+            process.cwd = FakeRegistryReaderSequence::raw_error(denied_code);
+            process.root = FakeRegistryReaderSequence::raw_error(denied_code);
+            process.descriptors = FakeRegistryReaderSequence::raw_error(denied_code);
+            process.maps = FakeRegistryReaderSequence::raw_error(denied_code);
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(52, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                Some(Vec::new()),
+                "the exact stable init.scope contract accepts raw denial code {denied_code}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_allows_each_exact_private_denied_surface() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for surface in ["cwd", "root", "fd", "maps"] {
+            let mut process = FakeRegistryReaderProcess::stable(61, 721, [1000; 4]);
+            process.cgroup =
+                FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+            match surface {
+                "cwd" => process.cwd = FakeRegistryReaderSequence::raw_error(libc::EACCES),
+                "root" => process.root = FakeRegistryReaderSequence::raw_error(libc::EACCES),
+                "fd" => process.descriptors = FakeRegistryReaderSequence::raw_error(libc::EACCES),
+                "maps" => process.maps = FakeRegistryReaderSequence::raw_error(libc::EACCES),
+                _ => unreachable!(),
+            }
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(61, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                Some(Vec::new()),
+                "the exact stable init scope accepts EACCES on {surface}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_checks_accessible_private_surfaces_before_exclusion() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        let held = generation.join("archive-v2-blocks.zstd");
+        for holder_surface in ["cwd", "root", "fd", "maps"] {
+            let mut process = FakeRegistryReaderProcess::stable(53, 713, [1000; 4]);
+            process.cgroup =
+                FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+            match holder_surface {
+                "cwd" => {
+                    process.cwd = FakeRegistryReaderSequence::stable(generation.to_path_buf());
+                    process.root = FakeRegistryReaderSequence::raw_error(libc::EACCES);
+                }
+                "root" => {
+                    process.root = FakeRegistryReaderSequence::stable(generation.to_path_buf());
+                    process.descriptors = FakeRegistryReaderSequence::raw_error(libc::EPERM);
+                }
+                "fd" => {
+                    process.descriptors = FakeRegistryReaderSequence::stable(vec![held.clone()]);
+                    process.maps = FakeRegistryReaderSequence::raw_error(libc::EACCES);
+                }
+                "maps" => {
+                    process.maps = FakeRegistryReaderSequence::stable(format!(
+                        "00000000-00001000 r--p 00000000 00:00 0 {}\n",
+                        held.display()
+                    ));
+                    process.cwd = FakeRegistryReaderSequence::raw_error(libc::EPERM);
+                }
+                _ => unreachable!(),
+            }
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(53, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                Some(vec![53]),
+                "an accessible {holder_surface} target holder wins over another denied surface"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_private_exclusion_requires_all_four_exact_uids() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for different_slot in 0..4 {
+            let mut uids = [1000; 4];
+            uids[different_slot] = 0;
+            let mut process = FakeRegistryReaderProcess::stable(54, 714, uids);
+            process.cgroup =
+                FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+            process.cwd = FakeRegistryReaderSequence::raw_error(libc::EACCES);
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(54, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                None,
+                "a mismatch in UID slot {different_slot} must disable private exclusion"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_private_exclusion_accepts_only_eacces_or_eperm() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::InvalidData] {
+            let mut process = FakeRegistryReaderProcess::stable(55, 715, [1000; 4]);
+            process.cgroup =
+                FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+            process.cwd = FakeRegistryReaderSequence::error(kind);
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(55, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                None,
+                "private surface error {kind:?} must block"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_managed_cgroup_denial_blocks_and_holder_is_detected() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        let mut denied = FakeRegistryReaderProcess::stable(56, 716, [1000; 4]);
+        denied.cgroup =
+            FakeRegistryReaderSequence::stable(fake_registry_reader_managed_cgroup(1000));
+        denied.cwd = FakeRegistryReaderSequence::raw_error(libc::EACCES);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(56, denied)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None,
+            "a managed Blockzilla cgroup never receives the private exclusion"
+        );
+
+        let mut holder = FakeRegistryReaderProcess::stable(57, 717, [1000; 4]);
+        holder.cgroup =
+            FakeRegistryReaderSequence::stable(fake_registry_reader_managed_cgroup(1000));
+        holder.descriptors =
+            FakeRegistryReaderSequence::stable(vec![generation.join("archive-v2-blocks.zstd")]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(57, holder)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            Some(vec![57]),
+            "a managed target holder must remain visible"
+        );
+    }
+
+    #[test]
+    fn registry_reader_scan_app_session_and_service_cgroups_are_fully_scanned() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for cgroup in [
+            fake_registry_reader_managed_cgroup(1000),
+            "0::/user.slice/user-1000.slice/session-7.scope\n".to_string(),
+            "0::/system.slice/blockzilla-archive.service\n".to_string(),
+        ] {
+            let parsed = parse_registry_reader_process_cgroup(&cgroup).unwrap();
+            assert!(!registry_reader_process_is_unrelated_user_manager(
+                &parsed, 1000
+            ));
+            let mut process = FakeRegistryReaderProcess::stable(62, 722, [1000; 4]);
+            process.cgroup = FakeRegistryReaderSequence::stable(cgroup.clone());
+            process.cwd = FakeRegistryReaderSequence::raw_error(libc::EACCES);
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(62, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                None,
+                "app, session, and service roles cannot receive the init-scope exclusion: {cgroup:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_blocks_uid_and_start_flips_within_and_between_passes() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        let exact_status = fake_registry_reader_status([1000; 4]);
+        let changed_status = fake_registry_reader_status([0, 1000, 1000, 1000]);
+
+        let mut uid_within = FakeRegistryReaderProcess::stable(63, 723, [1000; 4]);
+        uid_within.cgroup =
+            FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+        uid_within.cwd = FakeRegistryReaderSequence::raw_error(libc::EACCES);
+        uid_within.status = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(exact_status.clone()),
+            FakeRegistryReaderIo::Value(changed_status.clone()),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(63, uid_within)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None
+        );
+
+        let mut uid_between = FakeRegistryReaderProcess::stable(64, 724, [1000; 4]);
+        uid_between.cgroup =
+            FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+        uid_between.status = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(exact_status.clone()),
+            FakeRegistryReaderIo::Value(exact_status),
+            FakeRegistryReaderIo::Value(changed_status.clone()),
+            FakeRegistryReaderIo::Value(changed_status),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(64, uid_between)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None
+        );
+
+        let mut start_within = FakeRegistryReaderProcess::stable(65, 725, [1000; 4]);
+        start_within.cgroup =
+            FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+        start_within.cwd = FakeRegistryReaderSequence::raw_error(libc::EACCES);
+        start_within.stat = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(fake_registry_reader_stat(65, 'S', 725)),
+            FakeRegistryReaderIo::Value(fake_registry_reader_stat(65, 'S', 726)),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(65, start_within)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None
+        );
+
+        let mut start_between = FakeRegistryReaderProcess::stable(66, 727, [1000; 4]);
+        start_between.cgroup =
+            FakeRegistryReaderSequence::stable(fake_registry_reader_init_cgroup(1000));
+        start_between.stat = FakeRegistryReaderSequence::new(
+            std::iter::repeat_n(727, 4)
+                .chain(std::iter::repeat_n(728, 4))
+                .map(|ticks| FakeRegistryReaderIo::Value(fake_registry_reader_stat(66, 'S', ticks)))
+                .collect(),
+        );
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(66, start_between)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None
+        );
+    }
+
+    #[test]
+    fn registry_reader_scan_blocks_cgroup_flip_malformed_unreadable_and_pass_race() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        let init = fake_registry_reader_init_cgroup(1000);
+        let managed = fake_registry_reader_managed_cgroup(1000);
+
+        let mut flip = FakeRegistryReaderProcess::stable(58, 718, [1000; 4]);
+        flip.cgroup = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(init.clone()),
+            FakeRegistryReaderIo::Value(managed.clone()),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(58, flip)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None
+        );
+
+        for cgroup in [
+            FakeRegistryReaderIo::Value("0::/broken-without-newline".to_string()),
+            FakeRegistryReaderIo::Value("0::/one\n0::/two\n".to_string()),
+            FakeRegistryReaderIo::Error(io::ErrorKind::PermissionDenied),
+        ] {
+            let mut process = FakeRegistryReaderProcess::stable(59, 719, [1000; 4]);
+            process.cgroup = FakeRegistryReaderSequence::new(vec![cgroup]);
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(59, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                None
+            );
+        }
+
+        let mut pass_race = FakeRegistryReaderProcess::stable(60, 720, [1000; 4]);
+        pass_race.cgroup = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(init.clone()),
+            FakeRegistryReaderIo::Value(init),
+            FakeRegistryReaderIo::Value(managed.clone()),
+            FakeRegistryReaderIo::Value(managed),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(60, pass_race)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None,
+            "excluded cgroup role remains part of two-pass topology"
+        );
+    }
+
+    #[test]
+    fn registry_reader_scan_blocks_each_unreadable_same_euid_surface() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for surface in ["cwd", "root", "fd", "maps"] {
+            let mut process = FakeRegistryReaderProcess::stable(41, 700, [1000; 4]);
+            match surface {
+                "cwd" => {
+                    process.cwd = FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied)
+                }
+                "root" => {
+                    process.root =
+                        FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied)
+                }
+                "fd" => {
+                    process.descriptors =
+                        FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied)
+                }
+                "maps" => {
+                    process.maps =
+                        FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied)
+                }
+                _ => unreachable!(),
+            }
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(41, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                None,
+                "an unreadable same-EUID {surface} must block the destructive recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_inspects_processes_that_share_any_scheduler_uid_slot() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for shared_slot in 0..4 {
+            let mut uids = [0; 4];
+            uids[shared_slot] = 1000;
+            let mut process = FakeRegistryReaderProcess::stable(49, 709, uids);
+            process.cwd = FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied);
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(49, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                None,
+                "UID slot {shared_slot} shares scheduler authority and must be inspected"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_excludes_stable_foreign_euid_without_reading_private_surfaces() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        let mut process = FakeRegistryReaderProcess::stable(42, 701, [0; 4]);
+        process.cwd = FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied);
+        process.root = FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied);
+        process.descriptors = FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied);
+        process.maps = FakeRegistryReaderSequence::error(io::ErrorKind::PermissionDenied);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(42, process)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            Some(Vec::new()),
+            "a stable, complete foreign-EUID proof excludes an unrelated private process"
+        );
+    }
+
+    #[test]
+    fn registry_reader_scan_detects_same_euid_target_holders_on_every_surface() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        let held = generation.join("archive-v2-blocks.zstd");
+        for surface in ["cwd", "root", "fd", "maps"] {
+            let mut process = FakeRegistryReaderProcess::stable(43, 702, [1000; 4]);
+            match surface {
+                "cwd" => process.cwd = FakeRegistryReaderSequence::stable(generation.into()),
+                "root" => process.root = FakeRegistryReaderSequence::stable(generation.into()),
+                "fd" => {
+                    process.descriptors = FakeRegistryReaderSequence::stable(vec![held.clone()])
+                }
+                "maps" => {
+                    process.maps = FakeRegistryReaderSequence::stable(format!(
+                        "00000000-00001000 r--p 00000000 00:00 0 {}\n",
+                        held.display()
+                    ))
+                }
+                _ => unreachable!(),
+            }
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(43, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                Some(vec![43]),
+                "a same-EUID holder through {surface} must remain visible"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_blocks_malformed_or_unobservable_ownership() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        for status in [
+            FakeRegistryReaderIo::Value("Name:\tfake\n".to_string()),
+            FakeRegistryReaderIo::Value("Uid:\t0\t0\t0\n".to_string()),
+            FakeRegistryReaderIo::Error(io::ErrorKind::PermissionDenied),
+            FakeRegistryReaderIo::Error(io::ErrorKind::NotFound),
+        ] {
+            let mut process = FakeRegistryReaderProcess::stable(44, 703, [0; 4]);
+            process.status = FakeRegistryReaderSequence::new(vec![status]);
+            let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(44, process)]));
+            assert_eq!(
+                scan_registry_generation_processes(&procfs, 1000, generation),
+                None,
+                "unproved process ownership must block recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_reader_scan_blocks_pid_credential_and_table_races() {
+        let generation = Path::new("/archive/epoch-305-generation");
+
+        let mut pid_race = FakeRegistryReaderProcess::stable(45, 704, [0; 4]);
+        pid_race.stat = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(fake_registry_reader_stat(45, 'S', 704)),
+            FakeRegistryReaderIo::Value(fake_registry_reader_stat(45, 'S', 705)),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(45, pid_race)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None,
+            "PID reuse or a changed start-tick identity must block"
+        );
+
+        let mut credential_race = FakeRegistryReaderProcess::stable(46, 706, [0; 4]);
+        credential_race.status = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(fake_registry_reader_status([0; 4])),
+            FakeRegistryReaderIo::Value(fake_registry_reader_status([0, 1000, 0, 0])),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(46, credential_race)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None,
+            "a credential transition must not create a foreign-process exclusion"
+        );
+
+        let first = FakeRegistryReaderProcess::stable(47, 707, [1000; 4]);
+        let second = FakeRegistryReaderProcess::stable(48, 708, [1000; 4]);
+        let procfs = FakeRegistryReaderProcfs {
+            pids: FakeRegistryReaderSequence::new(vec![
+                FakeRegistryReaderIo::Value(vec![47]),
+                FakeRegistryReaderIo::Value(vec![47, 48]),
+            ]),
+            processes: BTreeMap::from([(47, first), (48, second)]),
+        };
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None,
+            "the two same-EUID process-table passes must have identical topology"
+        );
+    }
+
+    #[test]
+    fn registry_reader_scan_allows_live_state_churn_but_blocks_exit_transition() {
+        let generation = Path::new("/archive/epoch-305-generation");
+        let mut live = FakeRegistryReaderProcess::stable(50, 710, [1000; 4]);
+        live.stat = FakeRegistryReaderSequence::new(
+            ['S', 'R', 'D', 'I', 'S', 'R']
+                .into_iter()
+                .map(|state| FakeRegistryReaderIo::Value(fake_registry_reader_stat(50, state, 710)))
+                .collect(),
+        );
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(50, live)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            Some(Vec::new()),
+            "ordinary live scheduler-state changes do not change process identity"
+        );
+
+        let mut exiting = FakeRegistryReaderProcess::stable(51, 711, [1000; 4]);
+        exiting.stat = FakeRegistryReaderSequence::new(vec![
+            FakeRegistryReaderIo::Value(fake_registry_reader_stat(51, 'S', 711)),
+            FakeRegistryReaderIo::Value(fake_registry_reader_stat(51, 'Z', 711)),
+        ]);
+        let procfs = FakeRegistryReaderProcfs::stable(BTreeMap::from([(51, exiting)]));
+        assert_eq!(
+            scan_registry_generation_processes(&procfs, 1000, generation),
+            None,
+            "a live-to-zombie transition during the census must retry fail closed"
+        );
     }
 
     #[test]
@@ -21326,6 +35088,237 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    #[test]
+    fn repaired_poh_completion_marker_is_durable_proof_bound_and_cas_safe() {
+        let root = temp_root("poh-repaired-completion-marker");
+        let epoch = crate::archive_verify::EPOCH_998_POH_ORPHAN_REPAIR_EPOCH;
+        write_poh_migration_marker(&root, epoch, "failed", Some("old failure".to_string()))
+            .unwrap();
+        let path = poh_migration_marker_path(&root, epoch);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let (failed, failed_identity) =
+            read_poh_migration_marker_strict_with_identity(&root, epoch)
+                .unwrap()
+                .unwrap();
+        let proof = format!("poh_orphan_repair_completion_v1:{}", "ab".repeat(32));
+        let complete = compare_and_transition_failed_poh_marker_to_repaired_complete(
+            &root,
+            epoch,
+            &failed,
+            failed_identity,
+            &proof,
+        )
+        .unwrap();
+        assert!(repaired_poh_complete_marker_matches(
+            &complete, epoch, &proof
+        ));
+        let (published, published_identity) =
+            read_poh_migration_marker_strict_with_identity(&root, epoch)
+                .unwrap()
+                .unwrap();
+        assert_eq!(published, complete);
+        assert_eq!(fs::symlink_metadata(&path).unwrap().mode() & 0o777, 0o600);
+
+        // An idempotent exact-proof probe does not publish or touch the marker.
+        assert!(repaired_poh_complete_marker_matches(
+            &published, epoch, &proof
+        ));
+        assert!(!repaired_poh_complete_marker_matches(
+            &published,
+            epoch,
+            &format!("poh_orphan_repair_completion_v1:{}", "cd".repeat(32))
+        ));
+        assert_eq!(
+            read_poh_migration_marker_strict_with_identity(&root, epoch)
+                .unwrap()
+                .unwrap()
+                .1,
+            published_identity
+        );
+
+        write_poh_migration_marker(&root, epoch, "failed", Some("new failure".to_string()))
+            .unwrap();
+        assert!(
+            compare_and_transition_failed_poh_marker_to_repaired_complete(
+                &root,
+                epoch,
+                &failed,
+                failed_identity,
+                &proof,
+            )
+            .is_err(),
+            "a stale marker value and file identity must fail the repaired completion CAS"
+        );
+        assert_eq!(
+            read_poh_migration_marker(&root, epoch).unwrap().state,
+            "failed"
+        );
+
+        let (same_failed, old_same_identity) =
+            read_poh_migration_marker_strict_with_identity(&root, epoch)
+                .unwrap()
+                .unwrap();
+        publish_poh_migration_marker(&root, epoch, &same_failed).unwrap();
+        assert!(
+            compare_and_transition_failed_poh_marker_to_repaired_complete(
+                &root,
+                epoch,
+                &same_failed,
+                old_same_identity,
+                &proof,
+            )
+            .is_err(),
+            "an equal marker value published as a new file object must fail the CAS"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn repaired_poh_completion_marker_security_accepts_only_the_split_legacy_modes() {
+        let root = temp_root("poh-repaired-completion-marker-security");
+        let epoch = crate::archive_verify::EPOCH_998_POH_ORPHAN_REPAIR_EPOCH;
+        write_poh_migration_marker(&root, epoch, "failed", None).unwrap();
+        let path = poh_migration_marker_path(&root, epoch);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let (_, identity) = read_poh_migration_marker_strict_with_identity(&root, epoch)
+            .unwrap()
+            .unwrap();
+        assert!(
+            validate_repaired_poh_input_marker_security(&root, epoch, "failed", identity).is_ok()
+        );
+        assert!(
+            validate_repaired_poh_input_marker_security(&root, epoch, "complete", identity)
+                .is_err()
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let (_, identity) = read_poh_migration_marker_strict_with_identity(&root, epoch)
+            .unwrap()
+            .unwrap();
+        assert!(
+            validate_repaired_poh_input_marker_security(&root, epoch, "complete", identity).is_ok()
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
+        let (_, identity) = read_poh_migration_marker_strict_with_identity(&root, epoch)
+            .unwrap()
+            .unwrap();
+        assert!(
+            validate_repaired_poh_input_marker_security(&root, epoch, "failed", identity).is_err()
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn repaired_poh_completion_runtime_and_process_contracts_fail_closed() {
+        let root = temp_root("poh-repaired-completion-runtime");
+        let config = test_config(&root);
+        let mut runtime = RuntimeState {
+            scheduler_paused: true,
+            ..RuntimeState::default()
+        };
+        let snapshot = empty_snapshot(false);
+        assert!(ensure_repaired_poh_runtime_quiescent(&config, &runtime, &snapshot).is_ok());
+        runtime.pending_registry_reprocess_audits.insert(998);
+        assert!(ensure_repaired_poh_runtime_quiescent(&config, &runtime, &snapshot).is_err());
+        runtime.pending_registry_reprocess_audits.clear();
+        let mut active_snapshot = snapshot.clone();
+        active_snapshot
+            .lanes
+            .push(queue_lane(998, "running", 0, 1, None));
+        assert!(
+            ensure_repaired_poh_runtime_quiescent(&config, &runtime, &active_snapshot).is_err(),
+            "a nonterminal runtime lane must still block repaired-PoH completion"
+        );
+        runtime.scheduler_paused = false;
+        assert!(ensure_repaired_poh_runtime_quiescent(&config, &runtime, &snapshot).is_err());
+
+        let archive = Path::new("/archives/epoch-998");
+        let repair = argv_bytes(&[
+            b"/opt/blockzilla".to_vec(),
+            b"repair-poh-orphan-tail".to_vec(),
+            archive.as_os_str().as_bytes().to_vec(),
+            b"--epoch".to_vec(),
+            b"998".to_vec(),
+        ]);
+        let migration = argv_bytes(&[
+            b"/another/blockzilla".to_vec(),
+            b"migrate-poh-signature-counts".to_vec(),
+            archive.as_os_str().as_bytes().to_vec(),
+            b"--threads".to_vec(),
+            b"4".to_vec(),
+        ]);
+        let verifier = argv_bytes(&[
+            b"/opt/blockzilla".to_vec(),
+            b"verify-archive-v2-poh".to_vec(),
+            archive.as_os_str().as_bytes().to_vec(),
+        ]);
+        assert!(poh_target_writer_argv_any_binary(&repair, archive));
+        assert!(poh_target_writer_argv_any_binary(&migration, archive));
+        assert!(!poh_target_writer_argv_any_binary(&verifier, archive));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn repaired_poh_completion_allows_only_durable_inactive_registry_audit_queue() {
+        let root = temp_root("poh-repaired-completion-durable-audits");
+        let config = test_config(&root);
+        let mut runtime = RuntimeState {
+            scheduler_paused: true,
+            ..RuntimeState::default()
+        };
+        let snapshot = empty_snapshot(false);
+        let audit_epochs = [305, 404, 405, 501, 502, 503, 504, 505, 864, 997, 1000];
+        for epoch in audit_epochs {
+            write_registry_reprocess_marker(
+                &config,
+                epoch,
+                "auditing",
+                Some("retry reconciliation found an already-published registry generation".into()),
+            )
+            .unwrap();
+        }
+        reconcile_registry_reprocess_markers(&config, &mut runtime);
+        assert_eq!(runtime.pending_registry_reprocess_audits.len(), 11);
+        assert_eq!(runtime.registry_reprocess_audit_queue.len(), 11);
+        assert!(
+            ensure_repaired_poh_runtime_quiescent(&config, &runtime, &snapshot).is_ok(),
+            "exact durable queued audits own no active reader or worker while globally paused"
+        );
+
+        let first_epoch = runtime
+            .registry_reprocess_audit_queue
+            .front()
+            .unwrap()
+            .epoch;
+        let exact_marker = read_registry_reprocess_marker_strict(&config.state_root, first_epoch)
+            .unwrap()
+            .unwrap();
+        let mut malformed_marker = exact_marker.clone();
+        malformed_marker.schema_version = REGISTRY_REPROCESS_MARKER_SCHEMA_VERSION;
+        publish_registry_reprocess_marker(&config.state_root, first_epoch, &malformed_marker)
+            .unwrap();
+        assert!(
+            ensure_repaired_poh_runtime_quiescent(&config, &runtime, &snapshot).is_err(),
+            "a non-legacy auditing marker is not an exact restart-recoverable claim"
+        );
+        malformed_marker.state = "final_auditing".to_string();
+        publish_registry_reprocess_marker(&config.state_root, first_epoch, &malformed_marker)
+            .unwrap();
+        assert!(
+            ensure_repaired_poh_runtime_quiescent(&config, &runtime, &snapshot).is_err(),
+            "a final-auditing marker without an exact access attempt must fail closed"
+        );
+        publish_registry_reprocess_marker(&config.state_root, first_epoch, &exact_marker).unwrap();
+
+        let active = runtime.registry_reprocess_audit_queue.pop_front().unwrap();
+        runtime.active_registry_reprocess_audit = Some(active);
+        assert!(
+            ensure_repaired_poh_runtime_quiescent(&config, &runtime, &snapshot).is_err(),
+            "an active deep audit must still block repaired-PoH completion"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn unavailable_process_table_keeps_running_marker_and_reserves_budget() {
@@ -21501,7 +35494,7 @@ mod tests {
         };
 
         let root = temp_root("poh-migration-status-ready");
-        let config = test_config(&root);
+        let mut config = test_config(&root);
         let output = config.archive_root.join("epoch-700");
         write_legacy_registry_sidecars(&output, false);
         write_legacy_reader_core(&output);
@@ -21542,6 +35535,22 @@ mod tests {
         assert_eq!(
             poh_migration_status(&config, 700),
             PohMigrationStatus::Ready
+        );
+        assert!(
+            !poh_migration_epoch_is_runnable(&config, &RuntimeState::default(), 700),
+            "disabled migration work is not runnable"
+        );
+        config.poh_migration_concurrency = 1;
+        assert!(poh_migration_epoch_is_runnable(
+            &config,
+            &RuntimeState::default(),
+            700
+        ));
+        let mut blocked_runtime = RuntimeState::default();
+        blocked_runtime.poh_migration_admission_blocked = true;
+        assert!(
+            !poh_migration_epoch_is_runnable(&config, &blocked_runtime, 700),
+            "an unresolved global ownership block is not runnable"
         );
 
         fs::remove_dir_all(&root).ok();
@@ -21807,11 +35816,16 @@ mod tests {
         let mut snapshot = empty_snapshot(false);
         snapshot.epochs = vec![test_epoch(&root, 700, HistoricalState::Complete)];
         let mut runtime = RuntimeState::default();
+        assert!(poh_migration_epoch_is_runnable(&config, &runtime, 700));
         set_runtime_failure(
             &config,
             &mut runtime,
             "poh_migration:700".to_string(),
             "prior attempt failed".to_string(),
+        );
+        assert!(
+            !poh_migration_epoch_is_runnable(&config, &runtime, 700),
+            "a runtime failure claim excludes the epoch until explicit retry"
         );
 
         assert_eq!(
@@ -23773,6 +37787,7 @@ mod tests {
     async fn monitor_publication_is_ordered_without_taking_runtime_lock() {
         let root = temp_root("monitor-publication-lock");
         let mut snapshot = empty_snapshot(true);
+        snapshot.control_reconciled_unix_secs = 90;
         let baseline = ProgressSnapshot {
             phase: Some("scan".to_string()),
             state: Some("running".to_string()),
@@ -23840,6 +37855,9 @@ mod tests {
         drop(publication);
         assert!(task.await.unwrap());
         assert_eq!(receiver.recv().await.unwrap().sequence, 1);
+        let published = state.snapshot.read().await;
+        assert!(published.now_unix_secs >= 100);
+        assert_eq!(published.control_reconciled_unix_secs, 90);
     }
 
     #[test]
@@ -24713,6 +38731,37 @@ mod tests {
         oversized.resize(MAX_FIRST_SEEN_MANIFEST_BYTES as usize + 1, b'x');
         fs::write(&manifest, oversized).unwrap();
         assert!(!first_seen_manifest_declares_first_seen(&manifest));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scan_marker_parser_accepts_optional_timestamp_artifacts_and_rejects_ambiguity() {
+        let root = temp_root("scan-marker-compatibility");
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join(SCAN_MARKER);
+        let required =
+            format!("{SCAN_MARKER_MAGIC}\nregistry_keys=1\nreferences=2\ninclude_access=1\n");
+
+        fs::write(&marker, &required).unwrap();
+        assert!(scan_marker_is_valid(&marker));
+
+        for value in ["0", "1"] {
+            fs::write(&marker, format!("{required}timestamp_artifacts={value}\n")).unwrap();
+            assert!(scan_marker_is_valid(&marker));
+        }
+
+        for invalid in [
+            format!("{required}timestamp_artifacts=2\n"),
+            format!("{required}timestamp_artifacts=1\ntimestamp_artifacts=1\n"),
+            format!("{required}registry_keys=1\n"),
+            format!("{required}references=2\n"),
+            format!("{required}include_access=1\n"),
+            format!("{required}unknown=1\n"),
+        ] {
+            fs::write(&marker, invalid).unwrap();
+            assert!(!scan_marker_is_valid(&marker));
+        }
 
         fs::remove_dir_all(root).unwrap();
     }

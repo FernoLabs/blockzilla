@@ -608,6 +608,7 @@ dependencies = [
  "bincode",
  "blockzilla-format",
  "blockzilla-log-parser",
+ "blockzilla-read-sdk",
  "bs58",
  "clap 4.6.5",
  "data-encoding",
@@ -663,6 +664,8 @@ dependencies = [
  "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
+ "wincode 0.5.5",
+ "zstd",
 ]
 
 [[package]]
@@ -683,7 +686,9 @@ dependencies = [
  "blockzilla-read-sdk",
  "bs58",
  "clap 4.6.5",
+ "libc",
  "pprof",
+ "reqwest 0.13.4",
  "rustix",
  "serde",
  "serde_json",
@@ -694,6 +699,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wincode 0.5.5",
+ "zstd",
 ]
 
 [[package]]
@@ -706,11 +712,13 @@ dependencies = [
  "five8",
  "gxhash",
  "heapless 0.9.3",
+ "memmap2",
  "of-car-reader",
  "ph",
  "postcard",
  "prost",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "solana-pubkey 4.3.0",
  "wincode 0.5.5",
@@ -784,6 +792,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "smallvec",
+ "solana-pubkey 4.3.0",
  "tempfile",
  "thiserror 2.0.19",
  "url",

@@ -10,7 +10,8 @@ use crate::calendar;
 use crate::calendar_view::calendar_page;
 use crate::components::{
     archive_progress, bottom_panels, compaction_history, dashboard_frame, dashboard_shell,
-    epoch_list, epoch_table, live_capture_banner, poh_migration_lane_list, poh_migration_progress,
+    epoch_list, epoch_table, firewatch_project, live_capture_banner, poh_migration_lane_list,
+    poh_migration_progress, registry_reprocess_lane_list, registry_reprocess_progress,
     service_unavailable, system_dashboard, top_stats,
 };
 use crate::state::{DashboardState, snapshot};
@@ -93,6 +94,9 @@ pub(crate) async fn render_dashboard_frame(
                 archive_progress(state: state)
                 poh_migration_progress(state: state)
                 poh_migration_lane_list(state: state)
+                registry_reprocess_progress(state: state)
+                registry_reprocess_lane_list(state: state)
+                firewatch_project(state: state)
                 live_capture_banner(state: state)
                 epoch_list(state: state)
                 bottom_panels(state: state)
@@ -194,7 +198,7 @@ async fn calendar_route() -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::EpochTask;
+    use crate::state::{EpochTask, FirewatchIndexEntry};
 
     #[tokio::test]
     async fn offline_first_page_keeps_the_stable_streaming_shell() {
@@ -271,6 +275,111 @@ mod tests {
         assert!(html.contains("Scheduler telemetry stale"));
         assert!(html.contains("Stale task numbers have been removed"));
         assert!(html.contains("Updated "));
+    }
+
+    #[tokio::test]
+    async fn overview_renders_registry_progress_and_active_worker() {
+        let state = DashboardState {
+            live: true,
+            registry_reprocess_epochs_done: 2,
+            registry_reprocess_epochs_total: 23,
+            registry_reprocess_capacity_configured: 3,
+            registry_reprocess_running: 1,
+            registry_reprocess_lanes: vec![EpochTask {
+                epoch: 1000,
+                label: "running".into(),
+                phase: "registry reprocess".into(),
+                pct: 52,
+                blocks: 456_240,
+                eta_secs: 0,
+                hidden_from_overview: false,
+            }],
+            ..Default::default()
+        };
+
+        let html = render_dashboard_frame(DashboardPage::Overview, &state)
+            .await
+            .unwrap()
+            .render(&Cx::default());
+
+        assert!(html.contains("Registry order conversion"));
+        assert!(html.contains("2 done \u{b7} 21 remaining"));
+        assert!(html.contains("1 active \u{b7} capacity 3"));
+        assert!(html.contains("id=\"registry-epoch-1000\""));
+        assert!(html.contains("456,240"));
+        assert!(html.contains("width: 52%"));
+    }
+
+    #[tokio::test]
+    async fn overview_renders_firewatch_project_evidence_and_next_item() {
+        let state = DashboardState {
+            live: true,
+            firewatch_enabled: true,
+            firewatch_capacity_configured: 1,
+            firewatch_running: 1,
+            firewatch_epochs_total: 3,
+            firewatch_epochs_accepted: 1,
+            firewatch_epochs_queued: 1,
+            firewatch_archive_epochs_total: Some(736),
+            firewatch_epochs_eligible: Some(729),
+            firewatch_epochs_blocked_migration: Some(7),
+            firewatch_epochs_blocked_wire_profile: Some(0),
+            firewatch_queue_eta_secs: Some(86_400),
+            firewatch_next_epoch: Some(900),
+            firewatch_admission_blocked_reason: Some("Waiting for archive storage headroom".into()),
+            firewatch_indexes: vec![FirewatchIndexEntry {
+                epoch: 301,
+                state: "accepted".into(),
+                phase: "parity".into(),
+                pct: 100,
+                blocks: 398_090,
+                eta_secs: None,
+                wallet_count: Some(2_045_290),
+                relation_count: Some(6_018_402),
+                parity_status: Some("equal".into()),
+                rss_bytes: Some(900 * 1024 * 1024),
+                read_mib_per_sec: Some(82.5),
+                write_mib_per_sec: Some(3.25),
+            }],
+            ..Default::default()
+        };
+
+        let html = render_dashboard_frame(DashboardPage::Overview, &state)
+            .await
+            .unwrap()
+            .render(&Cx::default());
+
+        assert!(html.contains("Firewatch indexes"));
+        assert!(html.contains(
+            "1 accepted \u{b7} 1 active \u{b7} 1 queued \u{b7} 0 failed \u{b7} 0 awaiting profile audit"
+        ));
+        assert!(html.contains(
+            "736 archive-complete \u{b7} 729 indexable \u{b7} 7 blocked by registry migration \u{b7} 0 awaiting profile audit"
+        ));
+        assert!(html.contains("Next queued"));
+        assert!(html.contains("Epoch 900"));
+        assert!(html.contains("Runnable-work ETA"));
+        assert!(html.contains("Failed epochs and profile-audit work are excluded."));
+        assert!(html.contains("1d 0h"));
+        assert!(html.contains("All 1 reported epochs"));
+        assert!(html.contains("id=\"firewatch-epoch-301\""));
+        assert!(html.contains("2,045,290 wallets \u{b7} 6,018,402 relations"));
+        assert!(html.contains("Waiting for archive storage headroom"));
+        assert!(html.contains("82.5/3.2 MiB/s R/W"));
+    }
+
+    #[tokio::test]
+    async fn overview_hides_firewatch_until_scheduler_reports_the_project() {
+        let state = DashboardState {
+            live: true,
+            ..Default::default()
+        };
+        let html = render_dashboard_frame(DashboardPage::Overview, &state)
+            .await
+            .unwrap()
+            .render(&Cx::default());
+
+        assert!(!html.contains("id=\"firewatch-project\""));
     }
 
     #[tokio::test]

@@ -654,6 +654,7 @@ generate_manifest() {
         --epoch 0 \
         --generation-id "$generation_id" \
         --slots-per-epoch "$slots_per_epoch" \
+        --wire-profile pre-unknown-instruction-fallbacks-v1 \
         --file blockhash_registry.bin
     )
   else
@@ -666,6 +667,7 @@ generate_manifest() {
         --epoch 1 \
         --generation-id "$generation_id" \
         --slots-per-epoch "$slots_per_epoch" \
+        --wire-profile pre-unknown-instruction-fallbacks-v1 \
         --file blockhash_registry.bin \
         --file prev_blockhash_tail.bin
     )

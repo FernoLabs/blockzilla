@@ -258,6 +258,21 @@ impl PinnedLocalRangeSource {
         &self.root
     }
 
+    /// Return a cloned descriptor for one object from this source's pinned
+    /// generation view.
+    ///
+    /// The returned descriptor refers to the same file identity used by range
+    /// reads, even if the pathname is replaced after the generation opens.
+    pub fn open_file(&self, object: &str) -> SourceResult<File> {
+        let pinned = self
+            .pinned_file(object)?
+            .ok_or_else(|| SourceError::NotFound(object.to_owned()))?;
+        pinned.file.try_clone().map_err(|source| SourceError::Io {
+            object: object.to_owned(),
+            source,
+        })
+    }
+
     fn path(&self, object: &str) -> SourceResult<PathBuf> {
         validate_object_name(object).map_err(|_| SourceError::InvalidName(object.to_owned()))?;
         Ok(self.root.join(object))
@@ -332,27 +347,64 @@ impl PinnedLocalRangeSource {
     }
 
     /// Verify that every object opened so far still has its captured file
-    /// identity, size, and modification/change timestamps.
+    /// identity, size, and modification/change timestamps, and that its path
+    /// still names that same file.
     pub fn verify_unchanged(&self) -> SourceResult<()> {
-        let files: Vec<(String, PinnedFile)> = self
+        let files: Vec<(String, Option<PinnedFile>)> = self
             .files
             .lock()
             .map_err(|_| {
                 SourceError::Protocol("pinned local source file cache is poisoned".to_owned())
             })?
             .iter()
-            .filter_map(|(object, file)| file.as_ref().map(|file| (object.clone(), file.clone())))
+            .map(|(object, file)| (object.clone(), file.clone()))
             .collect();
 
-        for (object, file) in files {
-            let metadata = file.file.metadata().map_err(|source| SourceError::Io {
-                object: object.clone(),
-                source,
-            })?;
-            if !metadata.is_file() || UnixFileIdentity::from_metadata(&metadata) != file.identity {
-                return Err(SourceError::Protocol(format!(
-                    "object {object} changed after it was opened"
-                )));
+        for (object, pinned) in files {
+            let path = self.path(&object)?;
+            let current = match rustix::fs::open(
+                &path,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            ) {
+                Ok(file) => Some(File::from(file)),
+                Err(error) if error == rustix::io::Errno::NOENT => None,
+                Err(error) => {
+                    return Err(SourceError::Io {
+                        object: object.clone(),
+                        source: io::Error::from(error),
+                    });
+                }
+            };
+
+            match (pinned, current) {
+                (None, None) => {}
+                (None, Some(_)) | (Some(_), None) => {
+                    return Err(SourceError::Protocol(format!(
+                        "object {object} changed after it was opened"
+                    )));
+                }
+                (Some(pinned), Some(current)) => {
+                    let pinned_metadata =
+                        pinned.file.metadata().map_err(|source| SourceError::Io {
+                            object: object.clone(),
+                            source,
+                        })?;
+                    let current_metadata =
+                        current.metadata().map_err(|source| SourceError::Io {
+                            object: object.clone(),
+                            source,
+                        })?;
+                    if !pinned_metadata.is_file()
+                        || !current_metadata.is_file()
+                        || UnixFileIdentity::from_metadata(&pinned_metadata) != pinned.identity
+                        || UnixFileIdentity::from_metadata(&current_metadata) != pinned.identity
+                    {
+                        return Err(SourceError::Protocol(format!(
+                            "object {object} changed after it was opened"
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -598,6 +650,11 @@ mod tests {
 
         assert_eq!(source.size("object.bin").unwrap(), Some(8));
         assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+        let mut retained = source.open_file("object.bin").unwrap();
+        let mut retained_bytes = Vec::new();
+        retained.read_to_end(&mut retained_bytes).unwrap();
+        assert_eq!(retained_bytes, b"original");
+        assert!(source.verify_unchanged().is_err());
     }
 
     #[test]

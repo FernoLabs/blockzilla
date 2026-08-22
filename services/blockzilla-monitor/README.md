@@ -20,6 +20,26 @@ cargo run -p blockzilla-monitor -- --upstream http://127.0.0.1:8787
 `BLOCKZILLA_MONITOR_UPSTREAM`. `HOST`/`PORT` control this app's own bind
 address (default `127.0.0.1:3000`).
 
+`--firewatch-status-file <path>` (or
+`BLOCKZILLA_MONITOR_FIREWATCH_STATUS_FILE`) overlays schema-1 status from the
+local Firewatch controller on each accepted scheduler publication. It changes
+only the Firewatch summary and `firewatch_index` rows. The file is limited to
+4 MiB and must be a stable regular file, not a symlink. A missing, stale, or
+malformed configured file leaves the main monitor live but shows Firewatch as
+blocked and removes untrusted Firewatch rows. Without this option, raw
+scheduler Firewatch values are preserved.
+
+The current controller can report `epochs_blocked_wire_profile` and rows in
+the `profile_audit_required` / `wire_profile_audit` state. When this field is
+present, the monitor requires the eligible, registry-blocked, and
+profile-audit counts to equal the full archive scope. Older schema-1 status
+files can omit this additive field and keep the prior coverage rules.
+
+The Firewatch summary shows accepted, active, queued, failed, and
+profile-audit counts for all reported rows. The table is a bounded priority
+sample. Its runnable-work ETA includes only active and queued work. Failed
+epochs and profile-audit work are not part of that ETA.
+
 `--tier public|full` (default `public`) controls how much of a real
 snapshot reaches the page: `public` drops the process table entirely and
 scrubs free-text fields (error messages, lane/workflow identifiers) for

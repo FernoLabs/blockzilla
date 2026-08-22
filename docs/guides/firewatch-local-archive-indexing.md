@@ -43,8 +43,10 @@ smaller committed generations.
 Use TLS and bearer authentication outside local development. Never put the
 bearer token in source, documentation, URLs, logs, or command output.
 After publishing the manifest, expose the generation through a frozen snapshot
-or read-only bind mount. The gateway checks identities and sizes at startup; it
-does not continuously re-hash files or make a writable directory immutable.
+or an immutable read-only snapshot path. At startup, the gateway hashes every
+manifest object and scans every typed message with the selected wire profile.
+It also checks an object's file identity before it serves a request. It does
+not continuously hash an open stream or make a writable directory immutable.
 
 ## Generation contract
 
@@ -75,6 +77,7 @@ The required files are:
 - `archive-v2-blocks.index`
 - `archive-v2-meta.wincode`
 - `registry.bin`
+- `registry.mphf`
 
 `signatures.bin` is optional for a generic reader but **required for
 FireWatch**. FireWatch must reject the generation during preflight when it is
@@ -82,7 +85,9 @@ absent; a slot number or transaction index is not a substitute for a Solana
 transaction signature.
 
 The manifest is published last, after the offline generator validates the
-archive's index/metadata/signature structure and hashes every allowlisted file.
+archive's index/metadata/signature structure, proves the exact
+`registry.bin`/`registry.mphf` row mapping, and hashes every allowlisted file.
+The mapping proof rejects duplicate registry keys.
 Individual zstd frames are decoded and structurally checked by the reader
 during the epoch pass. Consumers pin `generation_digest`, not just the epoch
 number. See the gateway README for the canonical digest preimage and

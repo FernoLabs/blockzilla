@@ -30,6 +30,20 @@ rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/FernoLabs/blockzilla"
 
+# macOS otherwise keeps unpacked object files and full debug data for every
+# changed crate hash. This workspace is large enough for those stale dev/test
+# artifacts to consume tens of GiB in a few days. Debug assertions remain on;
+# use the release-debug profile when full symbols are required.
+[profile.dev]
+debug = 0
+split-debuginfo = "off"
+incremental = false
+
+[profile.test]
+debug = 0
+split-debuginfo = "off"
+incremental = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"

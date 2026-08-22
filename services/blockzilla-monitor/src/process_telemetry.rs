@@ -868,7 +868,10 @@ fn has_blockzilla_command_marker(sample: &ProcessSample) -> bool {
         "blockzilla-live-producer",
         "blockzilla-monitor",
         "blockzilla-replay-poc",
+        "blockzilla-firebase-indexer",
+        "firewatch-index-controller",
         "hivezilla",
+        "index-parity",
     ];
     if process_executable_name(sample).is_some_and(|name| RUST_EXECUTABLES.contains(&name)) {
         return true;
@@ -1469,6 +1472,19 @@ mod tests {
         );
         let samples = BTreeMap::from([(monitor.pid, monitor.clone())]);
         assert!(is_blockzilla_owned(&samples, &monitor));
+    }
+
+    #[test]
+    fn firewatch_processes_are_not_reported_as_competing_host_io() {
+        for executable in [
+            "firewatch-index-controller",
+            "blockzilla-firebase-indexer",
+            "index-parity",
+        ] {
+            let process = sample(44, &[&format!("/volume1/blockzilla/bin/{executable}")]);
+            let samples = BTreeMap::from([(process.pid, process.clone())]);
+            assert!(is_blockzilla_owned(&samples, &process), "{executable}");
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use blockzilla_firebase_indexer::{build, format::IndexBuilder};
+use blockzilla_read_sdk::ArchiveV2WireProfile;
 use clap::Parser;
 
 static ALLOCATION_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -99,6 +100,8 @@ struct Args {
     cluster_id: String,
     #[arg(long, requires = "trust_local", default_value = "index-bench")]
     generation_id: String,
+    #[arg(long, requires = "trust_local")]
+    wire_profile: Option<ArchiveV2WireProfile>,
     #[arg(long, requires = "trust_local", default_value_t = 432_000)]
     slots_per_epoch: u64,
     /// Override the registry size IndexBuilder is sized for, to measure the
@@ -115,11 +118,18 @@ fn main() -> Result<()> {
         bail!("--iterations must be greater than zero");
     }
 
-    let trust_local = args.trust_local.then(|| build::TrustLocal {
-        cluster_id: args.cluster_id.clone(),
-        generation_id: args.generation_id.clone(),
-        slots_per_epoch: args.slots_per_epoch,
-    });
+    let trust_local = if args.trust_local {
+        Some(build::TrustLocal {
+            cluster_id: args.cluster_id.clone(),
+            generation_id: args.generation_id.clone(),
+            slots_per_epoch: args.slots_per_epoch,
+            wire_profile: args
+                .wire_profile
+                .context("--wire-profile is required with --trust-local")?,
+        })
+    } else {
+        None
+    };
     let archive = build::open_archive(&args.archive, args.epoch, trust_local)
         .with_context(|| format!("open {}", args.archive.display()))?;
     let total_blocks = archive.index().rows.len();

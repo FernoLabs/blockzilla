@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{Error, Result};
+use crate::{ArchiveV2WireProfile, Error, Result};
 
 pub const GENERATION_MANIFEST_FILE: &str = "archive-v2-generation.json";
 pub const GENERATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -14,6 +14,7 @@ pub const BLOCK_INDEX_FILE: &str = blockzilla_format::ARCHIVE_V2_BLOCK_INDEX_FIL
 pub const META_FILE: &str = blockzilla_format::ARCHIVE_V2_META_FILE;
 pub const GENESIS_BIN_FILE: &str = blockzilla_format::ARCHIVE_V2_GENESIS_BIN_FILE;
 pub const REGISTRY_FILE: &str = blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_FILE;
+pub const REGISTRY_INDEX_FILE: &str = blockzilla_format::ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE;
 pub const SIGNATURES_FILE: &str = blockzilla_format::ARCHIVE_V2_SIGNATURES_FILE;
 
 pub const REQUIRED_GENERATION_FILES: [&str; 4] =
@@ -175,6 +176,9 @@ pub struct TrustedGenerationIdentity {
     pub epoch: u64,
     pub generation_id: String,
     pub slots_per_epoch: u64,
+    /// Explicit whole-generation hot-message grammar. Trusted-local mode has
+    /// no authenticated manifest binding from which to derive this value.
+    pub wire_profile: ArchiveV2WireProfile,
 }
 
 /// Build a self-consistent [`GenerationManifest`] from real file sizes but

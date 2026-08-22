@@ -33,8 +33,8 @@
 //! - `shard-<N>/wallets.idx`: fixed-size records sorted by wallet registry
 //!   id, each holding an (offset, count) slice into `shard-<N>/programs.rel`.
 //!   Binary-searchable with positioned reads without loading the whole file.
-//! - `shard-<N>/programs.rel`: concatenated program-registry-id lists, one
-//!   contiguous slice per wallet.
+//! - `shard-<N>/programs.rel`: concatenated fixed-size program-usage records,
+//!   one contiguous slice per wallet.
 
 use std::{
     fs::{self, File},
@@ -46,7 +46,6 @@ use std::{
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use smallvec::SmallVec;
 use thiserror::Error;
 
 const WALLETS_FILE: &str = "wallets.idx";
@@ -57,25 +56,282 @@ const MANIFEST_FILE: &str = "manifest.json";
 const WALLETS_MAGIC: [u8; 4] = *b"FBIW";
 const RELATIONS_MAGIC: [u8; 4] = *b"FBIR";
 const PROGRAM_MAP_MAGIC: [u8; 4] = *b"FBIP";
-pub const FORMAT_VERSION: u32 = 3;
-pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
-pub const SEMANTICS_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 4;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 4;
+pub const SEMANTICS_VERSION: u32 = 2;
 
 const WALLETS_HEADER_LEN: usize = 4 + 4 + 8; // magic + version + count(u64)
 const RELATIONS_HEADER_LEN: usize = 4 + 4 + 8; // magic + version + count(u64)
 const WALLET_RECORD_LEN: usize = 4 + 8 + 4; // wallet_id(u32) + programs_offset(u64) + programs_count(u32)
+pub const PROGRAM_USAGE_RECORD_LEN: usize = 4 * 5 + 8 * 4;
 const PROGRAM_MAP_HEADER_LEN: usize = 4 + 4 + 8;
 const PROGRAM_MAP_RECORD_LEN: usize = 4 + 32;
 const REGISTRY_INDEX_MIN_LEN: u64 = 8 + 2 + 2 + 8;
 const SHARD_READER_BUFFER_SIZE: usize = 8 << 20;
 const MAX_INDEX_MANIFEST_BYTES: u64 = 4 << 20;
 
-/// Most wallets interact with only a handful of distinct programs; this
-/// keeps their relation list inline (no heap allocation) for the common
-/// case. Wallets with more spill to the heap transparently.
-const INLINE_PROGRAMS_PER_WALLET: usize = 8;
+/// A standard vector keeps every untouched slot in the dense chunk array at
+/// three machine words. Embedding even one aligned `ProgramUsage` in each slot
+/// would make the fixed per-wallet cost much larger for sparse chunks.
+type ProgramUsages = Vec<ProgramUsage>;
 
-type ProgramIds = SmallVec<[u32; INLINE_PROGRAMS_PER_WALLET]>;
+/// Sentinel stored in both block-time fields when no transaction contributing
+/// to a wallet/program relation has an available block time.
+pub const PROGRAM_USAGE_MISSING_BLOCK_TIME: i64 = i64::MIN;
+
+/// Exact aggregate for one wallet/program relation within one epoch.
+///
+/// Instruction counts include every top-level or inner instruction occurrence.
+/// `transaction_count` counts distinct successful transactions that reached the
+/// program at least once. Block-time extrema include only transactions whose
+/// block header supplied a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProgramUsage {
+    pub program_id: u32,
+    pub direct_instruction_count: u32,
+    pub inner_instruction_count: u32,
+    pub transaction_count: u32,
+    pub first_seen_slot: u64,
+    pub last_seen_slot: u64,
+    pub min_block_time: i64,
+    pub max_block_time: i64,
+    pub timed_transaction_count: u32,
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramUsageError {
+    #[error("program id must be nonzero")]
+    InvalidProgramId,
+    #[error("at least one direct or inner instruction must be present")]
+    EmptyInstructionCounts,
+    #[error("transaction count must be nonzero")]
+    EmptyTransactionCount,
+    #[error(
+        "transaction count {transaction_count} exceeds total instruction count {instruction_count}"
+    )]
+    TransactionCountExceedsInstructions {
+        transaction_count: u32,
+        instruction_count: u64,
+    },
+    #[error(
+        "timed transaction count {timed_transaction_count} exceeds transaction count {transaction_count}"
+    )]
+    TimedTransactionCountExceedsTransactions {
+        timed_transaction_count: u32,
+        transaction_count: u32,
+    },
+    #[error("first seen slot {first_seen_slot} is after last seen slot {last_seen_slot}")]
+    InvalidSlotRange {
+        first_seen_slot: u64,
+        last_seen_slot: u64,
+    },
+    #[error("missing block-time sentinel is inconsistent with timed transaction count")]
+    InconsistentMissingBlockTime,
+    #[error("minimum block time {min_block_time} is after maximum block time {max_block_time}")]
+    InvalidBlockTimeRange {
+        min_block_time: i64,
+        max_block_time: i64,
+    },
+    #[error("cannot merge program {left_program_id} with program {right_program_id}")]
+    ProgramMismatch {
+        left_program_id: u32,
+        right_program_id: u32,
+    },
+    #[error("{field} overflow while merging program usage")]
+    CountOverflow { field: &'static str },
+}
+
+impl ProgramUsage {
+    #[inline]
+    pub fn program_id(&self) -> u32 {
+        self.program_id
+    }
+
+    /// Construct the contribution from one distinct successful transaction.
+    pub fn new_transaction(
+        program_id: u32,
+        direct_instruction_count: u32,
+        inner_instruction_count: u32,
+        slot: u64,
+        block_time: Option<i64>,
+    ) -> Result<Self, ProgramUsageError> {
+        let (min_block_time, max_block_time, timed_transaction_count) = match block_time {
+            Some(block_time) => (block_time, block_time, 1),
+            None => (
+                PROGRAM_USAGE_MISSING_BLOCK_TIME,
+                PROGRAM_USAGE_MISSING_BLOCK_TIME,
+                0,
+            ),
+        };
+        let usage = Self {
+            program_id,
+            direct_instruction_count,
+            inner_instruction_count,
+            transaction_count: 1,
+            first_seen_slot: slot,
+            last_seen_slot: slot,
+            min_block_time,
+            max_block_time,
+            timed_transaction_count,
+        };
+        usage.validate()?;
+        Ok(usage)
+    }
+
+    pub fn validate(&self) -> Result<(), ProgramUsageError> {
+        if self.program_id == 0 {
+            return Err(ProgramUsageError::InvalidProgramId);
+        }
+        let instruction_count =
+            u64::from(self.direct_instruction_count) + u64::from(self.inner_instruction_count);
+        if instruction_count == 0 {
+            return Err(ProgramUsageError::EmptyInstructionCounts);
+        }
+        if self.transaction_count == 0 {
+            return Err(ProgramUsageError::EmptyTransactionCount);
+        }
+        if u64::from(self.transaction_count) > instruction_count {
+            return Err(ProgramUsageError::TransactionCountExceedsInstructions {
+                transaction_count: self.transaction_count,
+                instruction_count,
+            });
+        }
+        if self.timed_transaction_count > self.transaction_count {
+            return Err(
+                ProgramUsageError::TimedTransactionCountExceedsTransactions {
+                    timed_transaction_count: self.timed_transaction_count,
+                    transaction_count: self.transaction_count,
+                },
+            );
+        }
+        if self.first_seen_slot > self.last_seen_slot {
+            return Err(ProgramUsageError::InvalidSlotRange {
+                first_seen_slot: self.first_seen_slot,
+                last_seen_slot: self.last_seen_slot,
+            });
+        }
+        if self.timed_transaction_count == 0 {
+            if self.min_block_time != PROGRAM_USAGE_MISSING_BLOCK_TIME
+                || self.max_block_time != PROGRAM_USAGE_MISSING_BLOCK_TIME
+            {
+                return Err(ProgramUsageError::InconsistentMissingBlockTime);
+            }
+        } else {
+            if self.min_block_time == PROGRAM_USAGE_MISSING_BLOCK_TIME
+                || self.max_block_time == PROGRAM_USAGE_MISSING_BLOCK_TIME
+            {
+                return Err(ProgramUsageError::InconsistentMissingBlockTime);
+            }
+            if self.min_block_time > self.max_block_time {
+                return Err(ProgramUsageError::InvalidBlockTimeRange {
+                    min_block_time: self.min_block_time,
+                    max_block_time: self.max_block_time,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge two disjoint scan aggregates for the same wallet/program pair.
+    /// The operation is commutative and independent of worker completion order.
+    pub fn checked_merge(self, other: Self) -> Result<Self, ProgramUsageError> {
+        self.validate()?;
+        other.validate()?;
+        if self.program_id != other.program_id {
+            return Err(ProgramUsageError::ProgramMismatch {
+                left_program_id: self.program_id,
+                right_program_id: other.program_id,
+            });
+        }
+        let add = |left: u32, right: u32, field: &'static str| {
+            left.checked_add(right)
+                .ok_or(ProgramUsageError::CountOverflow { field })
+        };
+        let timed_transaction_count = add(
+            self.timed_transaction_count,
+            other.timed_transaction_count,
+            "timed_transaction_count",
+        )?;
+        let (min_block_time, max_block_time) = match (
+            self.timed_transaction_count != 0,
+            other.timed_transaction_count != 0,
+        ) {
+            (false, false) => (
+                PROGRAM_USAGE_MISSING_BLOCK_TIME,
+                PROGRAM_USAGE_MISSING_BLOCK_TIME,
+            ),
+            (true, false) => (self.min_block_time, self.max_block_time),
+            (false, true) => (other.min_block_time, other.max_block_time),
+            (true, true) => (
+                self.min_block_time.min(other.min_block_time),
+                self.max_block_time.max(other.max_block_time),
+            ),
+        };
+        let merged = Self {
+            program_id: self.program_id,
+            direct_instruction_count: add(
+                self.direct_instruction_count,
+                other.direct_instruction_count,
+                "direct_instruction_count",
+            )?,
+            inner_instruction_count: add(
+                self.inner_instruction_count,
+                other.inner_instruction_count,
+                "inner_instruction_count",
+            )?,
+            transaction_count: add(
+                self.transaction_count,
+                other.transaction_count,
+                "transaction_count",
+            )?,
+            first_seen_slot: self.first_seen_slot.min(other.first_seen_slot),
+            last_seen_slot: self.last_seen_slot.max(other.last_seen_slot),
+            min_block_time,
+            max_block_time,
+            timed_transaction_count,
+        };
+        merged.validate()?;
+        Ok(merged)
+    }
+
+    /// Average spacing across available block-time observations, using the
+    /// merge-order-independent extrema and observation count.
+    pub fn average_timed_transaction_gap_seconds(&self) -> Option<f64> {
+        if self.validate().is_err() || self.timed_transaction_count < 2 {
+            return None;
+        }
+        let elapsed = i128::from(self.max_block_time) - i128::from(self.min_block_time);
+        Some(elapsed as f64 / f64::from(self.timed_transaction_count - 1))
+    }
+
+    fn to_le_bytes(self) -> [u8; PROGRAM_USAGE_RECORD_LEN] {
+        let mut bytes = [0u8; PROGRAM_USAGE_RECORD_LEN];
+        bytes[0..4].copy_from_slice(&self.program_id.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.direct_instruction_count.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.inner_instruction_count.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.transaction_count.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.first_seen_slot.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.last_seen_slot.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.min_block_time.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.max_block_time.to_le_bytes());
+        bytes[48..52].copy_from_slice(&self.timed_transaction_count.to_le_bytes());
+        bytes
+    }
+
+    fn from_le_bytes(bytes: [u8; PROGRAM_USAGE_RECORD_LEN]) -> Self {
+        Self {
+            program_id: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            direct_instruction_count: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            inner_instruction_count: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            transaction_count: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            first_seen_slot: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            last_seen_slot: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+            min_block_time: i64::from_le_bytes(bytes[32..40].try_into().unwrap()),
+            max_block_time: i64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+            timed_transaction_count: u32::from_le_bytes(bytes[48..52].try_into().unwrap()),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -117,9 +373,15 @@ pub enum FormatError {
         len: u64,
     },
     #[error(
-        "programs.rel slice for wallet record {index} is not a sorted, unique list of nonzero ids"
+        "programs.rel slice for wallet record {index} is not a sorted, unique list of valid program usages"
     )]
     InvalidProgramList { index: usize },
+    #[error("invalid programs.rel usage at wallet record {index}: {source}")]
+    InvalidProgramUsage {
+        index: usize,
+        #[source]
+        source: ProgramUsageError,
+    },
     #[error(
         "wallet record {index} contains id {wallet_id}, outside expected shard range {first_wallet_id}..={last_wallet_id}"
     )]
@@ -177,7 +439,7 @@ pub enum WalletScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgramScope {
-    ReachedDirectAndCpi,
+    ReachedDirectAndInnerUsageStats,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,10 +469,11 @@ impl IndexSemantics {
         Self {
             version: SEMANTICS_VERSION,
             wallet_scope: WalletScope::AllTransactionSigners,
-            program_scope: ProgramScope::ReachedDirectAndCpi,
+            program_scope: ProgramScope::ReachedDirectAndInnerUsageStats,
             failed_transactions: FailedTransactionPolicy::ExcludeAll,
             // The compact-vote-instruction flag is not an exact whole-transaction vote
-            // classifier, so V1 includes votes rather than silently guessing.
+            // classifier, so the current semantics include votes rather than
+            // silently guessing.
             vote_transactions: VoteTransactionPolicy::Include,
         }
     }
@@ -268,6 +531,8 @@ pub struct IndexManifest {
     pub archive_root: String,
     pub generation_id: String,
     pub generation_digest: String,
+    /// Exact Archive V2 hot-message grammar used to decode this generation.
+    pub archive_wire_profile: blockzilla_read_sdk::ArchiveV2WireProfile,
     /// Content binding for the exact `registry.bin` used by this build.
     pub registry: IndexFileBinding,
     pub registry_file_identity: RegistryFileIdentity,
@@ -293,7 +558,7 @@ pub struct IndexManifest {
     pub program_count: u64,
     pub transactions_scanned: u64,
     pub blocks_scanned: u64,
-    /// Failed transactions are intentionally outside V1's semantic relation,
+    /// Failed transactions are intentionally outside the semantic relation,
     /// not omissions: no program from them is indexed.
     pub failed_transactions_excluded: u64,
     pub built_unix_time: u64,
@@ -301,6 +566,36 @@ pub struct IndexManifest {
 }
 
 impl IndexManifest {
+    /// Verify every immutable data file in one published index generation.
+    pub fn verify_generation(index_dir: &Path) -> Result<Self, FormatError> {
+        let manifest = Self::read(index_dir)?;
+        let program_map = ProgramMapReader::open_verified(
+            index_dir,
+            &manifest.program_map,
+            manifest.program_count,
+        )?;
+        program_map.verify_unchanged()?;
+        let mut wallets = 0u64;
+        for binding in &manifest.shards {
+            let shard = index_dir.join(format!("shard-{}", binding.shard));
+            let reader = IndexReader::open_verified(&shard, binding)?;
+            wallets = wallets.checked_add(reader.wallet_count()).ok_or_else(|| {
+                FormatError::IntegerOverflow {
+                    file: "wallets.idx",
+                    path: index_dir.display().to_string(),
+                }
+            })?;
+            reader.verify_unchanged()?;
+        }
+        if wallets != manifest.wallet_count {
+            return Err(FormatError::ContentBindingMismatch {
+                file: "wallets.idx",
+                path: index_dir.display().to_string(),
+            });
+        }
+        Ok(manifest)
+    }
+
     pub fn write(&self, out_dir: &Path) -> Result<(), FormatError> {
         fs::create_dir_all(out_dir).map_err(|source| FormatError::Io {
             path: out_dir.display().to_string(),
@@ -436,7 +731,7 @@ impl IndexManifest {
         }
         if !self.complete || self.omissions != OmissionCounts::default() {
             return Err(invalid(
-                "strict V1 indexes must be complete and contain no omissions".into(),
+                "strict indexes must be complete and contain no omissions".into(),
             ));
         }
         if self.cluster_id.is_empty()
@@ -554,10 +849,13 @@ fn shard_index(wallet_id: u32, chunk_width: u32) -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordOutcome {
     Recorded,
-    /// `program` was 0 (the raw-pubkey sentinel) or beyond the registry's
+    /// `usage.program_id` was 0 (the raw-pubkey sentinel) or beyond the registry's
     /// declared size — a malformed/corrupt archive, since a well-formed one
     /// only ever emits ids it declared in `registry.bin`.
     InvalidProgram,
+    /// The usage aggregate violates the format's count, slot, or block-time
+    /// invariants, or merging it with an existing aggregate overflowed.
+    InvalidUsage(ProgramUsageError),
     /// `account` is outside this builder's chunk. Not an error — expected
     /// and routine in chunked/multi-pass builds; the account belongs to a
     /// different pass.
@@ -584,9 +882,9 @@ pub struct IndexBuilder {
     /// ids are never chunked, since any program in the registry can be
     /// referenced by an account in this chunk).
     max_program_id: u32,
-    /// Slot `i` holds sorted, unique program ids
+    /// Slot `i` holds usage aggregates sorted and unique by program id
     /// recorded for registry id `chunk_start + i`.
-    wallet_programs: Vec<ProgramIds>,
+    wallet_programs: Vec<ProgramUsages>,
     distinct_wallets: u32,
 }
 
@@ -599,18 +897,21 @@ impl IndexBuilder {
         Self {
             chunk_start,
             max_program_id,
-            wallet_programs: vec![ProgramIds::new(); chunk_width as usize],
+            wallet_programs: vec![ProgramUsages::new(); chunk_width as usize],
             distinct_wallets: 0,
         }
     }
 
-    /// Record that signer registry id `account` reached registry id `program`
-    /// in a successful transaction. Slots remain sorted and unique so repeated
-    /// vote/bot traffic cannot grow memory with duplicate relations.
+    /// Add a usage aggregate for signer registry id `account`. Slots remain
+    /// sorted and unique by program id. A repeated relation is checked and
+    /// merged instead of creating a second on-disk entry.
     #[inline]
-    pub fn record(&mut self, account: u32, program: u32) -> RecordOutcome {
-        if program == 0 || program > self.max_program_id {
+    pub fn record(&mut self, account: u32, usage: ProgramUsage) -> RecordOutcome {
+        if usage.program_id == 0 || usage.program_id > self.max_program_id {
             return RecordOutcome::InvalidProgram;
+        }
+        if let Err(error) = usage.validate() {
+            return RecordOutcome::InvalidUsage(error);
         }
         let Some(relative) = account.checked_sub(self.chunk_start) else {
             return RecordOutcome::OutOfChunk;
@@ -618,15 +919,17 @@ impl IndexBuilder {
         let Some(slot) = self.wallet_programs.get_mut(relative as usize) else {
             return RecordOutcome::OutOfChunk;
         };
-        if slot.is_empty() {
-            self.distinct_wallets += 1;
-        }
-        if slot.last() == Some(&program) {
-            return RecordOutcome::Recorded;
-        }
-        match slot.binary_search(&program) {
-            Ok(_) => {}
-            Err(index) => slot.insert(index, program),
+        match slot.binary_search_by_key(&usage.program_id, ProgramUsage::program_id) {
+            Ok(index) => match slot[index].checked_merge(usage) {
+                Ok(merged) => slot[index] = merged,
+                Err(error) => return RecordOutcome::InvalidUsage(error),
+            },
+            Err(index) => {
+                if slot.is_empty() {
+                    self.distinct_wallets += 1;
+                }
+                slot.insert(index, usage);
+            }
         }
         RecordOutcome::Recorded
     }
@@ -641,9 +944,9 @@ impl IndexBuilder {
     /// single builder for one chunk. Both builders must cover the exact same
     /// chunk (same `chunk_start`/width/`max_program_id`); panics otherwise,
     /// since merging mismatched chunks would silently corrupt wallet ids.
-    /// Both inputs are sorted unique sets; overlapping slots are merged with a
-    /// sorted union so the insert-time invariant survives parallel scans.
-    pub fn merge(&mut self, mut other: IndexBuilder) {
+    /// Both inputs are sorted and unique by program id. Matching aggregates
+    /// use checked count sums and extrema for slots and available block times.
+    pub fn merge(&mut self, mut other: IndexBuilder) -> Result<(), ProgramUsageError> {
         assert_eq!(
             self.chunk_start, other.chunk_start,
             "merged builders must cover the same chunk"
@@ -670,10 +973,10 @@ impl IndexBuilder {
                 std::mem::swap(mine, theirs);
                 continue;
             }
-            let mut merged = ProgramIds::with_capacity(mine.len() + theirs.len());
+            let mut merged = ProgramUsages::with_capacity(mine.len() + theirs.len());
             let (mut left, mut right) = (0usize, 0usize);
             while left < mine.len() && right < theirs.len() {
-                match mine[left].cmp(&theirs[right]) {
+                match mine[left].program_id.cmp(&theirs[right].program_id) {
                     std::cmp::Ordering::Less => {
                         merged.push(mine[left]);
                         left += 1;
@@ -683,7 +986,7 @@ impl IndexBuilder {
                         right += 1;
                     }
                     std::cmp::Ordering::Equal => {
-                        merged.push(mine[left]);
+                        merged.push(mine[left].checked_merge(theirs[right])?);
                         left += 1;
                         right += 1;
                     }
@@ -693,6 +996,7 @@ impl IndexBuilder {
             merged.extend_from_slice(&theirs[right..]);
             *mine = merged;
         }
+        Ok(())
     }
 
     /// Distinct program registry ids referenced across all wallets *in this
@@ -703,9 +1007,9 @@ impl IndexBuilder {
     pub fn distinct_program_count(&self) -> usize {
         let mut seen = Bitset::new(self.max_program_id as usize + 1);
         let mut count = 0usize;
-        for programs in &self.wallet_programs {
-            for &id in programs {
-                if seen.insert(id as usize) {
+        for usages in &self.wallet_programs {
+            for usage in usages {
+                if seen.insert(usage.program_id as usize) {
                     count += 1;
                 }
             }
@@ -756,9 +1060,9 @@ impl ProgramTracker {
     }
 
     pub fn observe(&mut self, builder: &IndexBuilder) {
-        for programs in &builder.wallet_programs {
-            for &id in programs {
-                self.observe_id(id);
+        for usages in &builder.wallet_programs {
+            for usage in usages {
+                self.observe_id(usage.program_id);
             }
         }
     }
@@ -821,14 +1125,18 @@ fn write_wallets_and_relations(
     wallets_path: &Path,
     relations_path: &Path,
     chunk_start: u32,
-    wallet_programs: &mut [ProgramIds],
+    wallet_programs: &mut [ProgramUsages],
 ) -> Result<u64, FormatError> {
     let mut writer = ShardWriter::create_files(wallets_path, relations_path)?;
-    for (relative_index, programs) in wallet_programs.iter_mut().enumerate() {
-        if programs.is_empty() {
+    for (relative_index, usages) in wallet_programs.iter_mut().enumerate() {
+        if usages.is_empty() {
             continue;
         }
-        debug_assert!(programs.windows(2).all(|pair| pair[0] < pair[1]));
+        debug_assert!(
+            usages
+                .windows(2)
+                .all(|pair| pair[0].program_id < pair[1].program_id)
+        );
         let relative_id =
             u32::try_from(relative_index).map_err(|_| FormatError::IntegerOverflow {
                 file: "wallets.idx",
@@ -841,7 +1149,7 @@ fn write_wallets_and_relations(
                     file: "wallets.idx",
                     path: wallets_path.display().to_string(),
                 })?;
-        writer.push_sorted(wallet_id, programs)?;
+        writer.push_sorted(wallet_id, usages)?;
     }
     writer.finish()
 }
@@ -901,8 +1209,13 @@ impl ShardWriter {
         })
     }
 
-    /// Append one non-empty, strictly sorted/unique program list.
-    pub fn push_sorted(&mut self, wallet_id: u32, programs: &[u32]) -> Result<(), FormatError> {
+    /// Append one non-empty list of valid usage records, strictly sorted and
+    /// unique by program id.
+    pub fn push_sorted(
+        &mut self,
+        wallet_id: u32,
+        usages: &[ProgramUsage],
+    ) -> Result<(), FormatError> {
         let invalid = |message: String| FormatError::InvalidWriterInput {
             path: self.wallets_path.display().to_string(),
             message,
@@ -913,15 +1226,29 @@ impl ShardWriter {
                 self.last_wallet_id
             )));
         }
-        if programs.is_empty()
-            || programs[0] == 0
-            || programs.windows(2).any(|pair| pair[0] >= pair[1])
+        if usages.is_empty()
+            || usages
+                .windows(2)
+                .any(|pair| pair[0].program_id >= pair[1].program_id)
         {
             return Err(invalid(format!(
                 "wallet id {wallet_id} has an empty, zero, duplicate, or unsorted program list"
             )));
         }
-        let count = u32::try_from(programs.len()).map_err(|_| FormatError::IntegerOverflow {
+        let wallet_index =
+            usize::try_from(self.wallet_count).map_err(|_| FormatError::IntegerOverflow {
+                file: "wallets.idx",
+                path: self.wallets_path.display().to_string(),
+            })?;
+        for usage in usages {
+            usage
+                .validate()
+                .map_err(|source| FormatError::InvalidProgramUsage {
+                    index: wallet_index,
+                    source,
+                })?;
+        }
+        let count = u32::try_from(usages.len()).map_err(|_| FormatError::IntegerOverflow {
             file: "programs.rel",
             path: self.relations_path.display().to_string(),
         })?;
@@ -951,9 +1278,9 @@ impl ShardWriter {
                 path: self.wallets_path.display().to_string(),
                 source,
             })?;
-        for id in programs {
+        for usage in usages {
             self.relations_writer
-                .write_all(&id.to_le_bytes())
+                .write_all(&usage.to_le_bytes())
                 .map_err(|source| FormatError::Io {
                     path: self.relations_path.display().to_string(),
                     source,
@@ -1329,7 +1656,7 @@ impl IndexReader {
                 path: relations_path.display().to_string(),
             })?;
         let expected = relation_count_usize
-            .checked_mul(4)
+            .checked_mul(PROGRAM_USAGE_RECORD_LEN)
             .and_then(|body| RELATIONS_HEADER_LEN.checked_add(body))
             .ok_or_else(|| FormatError::IntegerOverflow {
                 file: "programs.rel",
@@ -1390,12 +1717,12 @@ impl IndexReader {
         Ok(())
     }
 
-    /// Look up the program registry ids reached by successful transactions
-    /// signed by `wallet` (direct or inner/CPI), in this epoch. Empty if
-    /// not found. `wallet` must be in this shard (see
+    /// Look up the per-program usage aggregates from successful transactions
+    /// signed by `wallet`, including direct and inner/CPI instructions. Empty
+    /// if not found. `wallet` must be in this shard (see
     /// `IndexManifest::shard_dir_name`) — a wallet from a different shard
     /// always returns empty, since it can't be present here.
-    pub fn query(&self, wallet: u32) -> Result<Vec<u32>, FormatError> {
+    pub fn query(&self, wallet: u32) -> Result<Vec<ProgramUsage>, FormatError> {
         let Some((index, record)) = self.binary_search(wallet)? else {
             return Ok(Vec::new());
         };
@@ -1409,7 +1736,7 @@ impl IndexReader {
         index: usize,
         offset: u64,
         count: u32,
-    ) -> Result<Vec<u32>, FormatError> {
+    ) -> Result<Vec<ProgramUsage>, FormatError> {
         let end = offset.checked_add(u64::from(count)).ok_or({
             FormatError::RelationRangeOutOfBounds {
                 index,
@@ -1430,13 +1757,13 @@ impl IndexReader {
 
         let byte_count = usize::try_from(count)
             .ok()
-            .and_then(|count| count.checked_mul(4))
+            .and_then(|count| count.checked_mul(PROGRAM_USAGE_RECORD_LEN))
             .ok_or_else(|| FormatError::IntegerOverflow {
                 file: "programs.rel",
                 path: self.relations_path.display().to_string(),
             })?;
         let byte_offset = offset
-            .checked_mul(4)
+            .checked_mul(PROGRAM_USAGE_RECORD_LEN as u64)
             .and_then(|offset| offset.checked_add(RELATIONS_HEADER_LEN as u64))
             .ok_or_else(|| FormatError::IntegerOverflow {
                 file: "programs.rel",
@@ -1458,10 +1785,17 @@ impl IndexReader {
             })?;
 
         let mut result = Vec::with_capacity(count as usize);
-        for encoded in bytes.chunks_exact(4) {
-            result.push(u32::from_le_bytes(encoded.try_into().unwrap()));
+        for encoded in bytes.chunks_exact(PROGRAM_USAGE_RECORD_LEN) {
+            let usage = ProgramUsage::from_le_bytes(encoded.try_into().unwrap());
+            usage
+                .validate()
+                .map_err(|source| FormatError::InvalidProgramUsage { index, source })?;
+            result.push(usage);
         }
-        if result.first() == Some(&0) || result.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if result
+            .windows(2)
+            .any(|pair| pair[0].program_id >= pair[1].program_id)
+        {
             return Err(FormatError::InvalidProgramList { index });
         }
         Ok(result)
@@ -1523,10 +1857,10 @@ impl IndexReader {
             if count == 0 {
                 return Err(FormatError::InvalidProgramList { index });
             }
-            let programs = self.read_program_list(index, offset, count)?;
-            if programs
+            let usages = self.read_program_list(index, offset, count)?;
+            if usages
                 .last()
-                .is_some_and(|program| *program > registry_entries)
+                .is_some_and(|usage| usage.program_id > registry_entries)
             {
                 return Err(FormatError::InvalidProgramList { index });
             }
@@ -1810,6 +2144,14 @@ fn read_header(
 mod tests {
     use super::*;
 
+    fn usage(program_id: u32) -> ProgramUsage {
+        ProgramUsage::new_transaction(program_id, 1, 0, 100, Some(1_000)).unwrap()
+    }
+
+    fn program_ids(usages: &[ProgramUsage]) -> Vec<u32> {
+        usages.iter().map(ProgramUsage::program_id).collect()
+    }
+
     fn test_manifest(registry_entries: u32, chunk_width: u32) -> IndexManifest {
         let shard_count = registry_entries.div_ceil(chunk_width);
         IndexManifest {
@@ -1824,6 +2166,8 @@ mod tests {
             archive_root: "/archive".into(),
             generation_id: "gen".into(),
             generation_digest: "1".repeat(64),
+            archive_wire_profile:
+                blockzilla_read_sdk::ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             registry: IndexFileBinding {
                 size: u64::from(registry_entries) * 32,
                 sha256: "2".repeat(64),
@@ -1881,6 +2225,141 @@ mod tests {
     }
 
     #[test]
+    fn program_usage_record_is_fixed_52_byte_little_endian() {
+        let usage = ProgramUsage {
+            program_id: 0x0102_0304,
+            direct_instruction_count: 5,
+            inner_instruction_count: 7,
+            transaction_count: 3,
+            first_seen_slot: 9,
+            last_seen_slot: 10,
+            min_block_time: -11,
+            max_block_time: 12,
+            timed_transaction_count: 2,
+        };
+        usage.validate().unwrap();
+
+        let bytes = usage.to_le_bytes();
+        assert_eq!(PROGRAM_USAGE_RECORD_LEN, 52);
+        assert_eq!(&bytes[0..4], &usage.program_id.to_le_bytes());
+        assert_eq!(&bytes[4..8], &usage.direct_instruction_count.to_le_bytes());
+        assert_eq!(&bytes[8..12], &usage.inner_instruction_count.to_le_bytes());
+        assert_eq!(&bytes[12..16], &usage.transaction_count.to_le_bytes());
+        assert_eq!(&bytes[16..24], &usage.first_seen_slot.to_le_bytes());
+        assert_eq!(&bytes[24..32], &usage.last_seen_slot.to_le_bytes());
+        assert_eq!(&bytes[32..40], &usage.min_block_time.to_le_bytes());
+        assert_eq!(&bytes[40..48], &usage.max_block_time.to_le_bytes());
+        assert_eq!(&bytes[48..52], &usage.timed_transaction_count.to_le_bytes());
+        assert_eq!(ProgramUsage::from_le_bytes(bytes), usage);
+    }
+
+    #[test]
+    fn dense_builder_empty_slot_is_three_machine_words() {
+        assert_eq!(
+            std::mem::size_of::<ProgramUsages>(),
+            3 * std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn program_usage_validates_counts_slots_and_missing_time_sentinel() {
+        assert_eq!(
+            ProgramUsage::new_transaction(0, 1, 0, 1, None),
+            Err(ProgramUsageError::InvalidProgramId)
+        );
+        assert_eq!(
+            ProgramUsage::new_transaction(1, 0, 0, 1, None),
+            Err(ProgramUsageError::EmptyInstructionCounts)
+        );
+
+        let missing_time = ProgramUsage::new_transaction(1, 1, 0, 10, None).unwrap();
+        assert_eq!(missing_time.timed_transaction_count, 0);
+        assert_eq!(
+            (missing_time.min_block_time, missing_time.max_block_time),
+            (
+                PROGRAM_USAGE_MISSING_BLOCK_TIME,
+                PROGRAM_USAGE_MISSING_BLOCK_TIME
+            )
+        );
+        assert_eq!(missing_time.average_timed_transaction_gap_seconds(), None);
+
+        let mut invalid = missing_time;
+        invalid.transaction_count = 2;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProgramUsageError::TransactionCountExceedsInstructions { .. })
+        ));
+
+        let mut invalid = missing_time;
+        invalid.timed_transaction_count = 2;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProgramUsageError::TimedTransactionCountExceedsTransactions { .. })
+        ));
+
+        let mut invalid = missing_time;
+        invalid.first_seen_slot = 11;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProgramUsageError::InvalidSlotRange { .. })
+        ));
+
+        let mut invalid = missing_time;
+        invalid.min_block_time = 0;
+        assert_eq!(
+            invalid.validate(),
+            Err(ProgramUsageError::InconsistentMissingBlockTime)
+        );
+
+        let mut invalid = ProgramUsage::new_transaction(1, 1, 0, 10, Some(20)).unwrap();
+        invalid.max_block_time = 19;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProgramUsageError::InvalidBlockTimeRange { .. })
+        ));
+    }
+
+    #[test]
+    fn program_usage_merge_is_order_independent_and_uses_time_extrema() {
+        let first = ProgramUsage::new_transaction(7, 2, 0, 20, Some(110)).unwrap();
+        let untimed = ProgramUsage::new_transaction(7, 0, 3, 10, None).unwrap();
+        let last = ProgramUsage::new_transaction(7, 1, 1, 30, Some(90)).unwrap();
+
+        let forward = first
+            .checked_merge(untimed)
+            .unwrap()
+            .checked_merge(last)
+            .unwrap();
+        let reverse = last
+            .checked_merge(first)
+            .unwrap()
+            .checked_merge(untimed)
+            .unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.direct_instruction_count, 3);
+        assert_eq!(forward.inner_instruction_count, 4);
+        assert_eq!(forward.transaction_count, 3);
+        assert_eq!((forward.first_seen_slot, forward.last_seen_slot), (10, 30));
+        assert_eq!((forward.min_block_time, forward.max_block_time), (90, 110));
+        assert_eq!(forward.timed_transaction_count, 2);
+        assert_eq!(forward.average_timed_transaction_gap_seconds(), Some(20.0));
+    }
+
+    #[test]
+    fn program_usage_merge_reports_count_overflow() {
+        let left = ProgramUsage {
+            direct_instruction_count: u32::MAX,
+            ..usage(8)
+        };
+        assert_eq!(
+            left.checked_merge(usage(8)),
+            Err(ProgramUsageError::CountOverflow {
+                field: "direct_instruction_count"
+            })
+        );
+    }
+
+    #[test]
     fn round_trips_empty_shard() {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = IndexBuilder::new(1, 1000, 1000);
@@ -1889,19 +2368,19 @@ mod tests {
         assert_eq!(wallet_count, 0);
         let reader = IndexReader::open(&shard_dir).unwrap();
         assert_eq!(reader.wallet_count(), 0);
-        assert_eq!(reader.query(1).unwrap(), Vec::<u32>::new());
+        assert_eq!(reader.query(1).unwrap(), Vec::<ProgramUsage>::new());
     }
 
     #[test]
     fn round_trips_populated_shard() {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = IndexBuilder::new(1, 1000, 1000);
-        assert_eq!(builder.record(1, 100), RecordOutcome::Recorded);
-        assert_eq!(builder.record(1, 101), RecordOutcome::Recorded);
-        assert_eq!(builder.record(2, 100), RecordOutcome::Recorded);
-        assert_eq!(builder.record(3, 102), RecordOutcome::Recorded);
-        // Duplicate record should not create a duplicate relation entry.
-        assert_eq!(builder.record(1, 100), RecordOutcome::Recorded);
+        assert_eq!(builder.record(1, usage(100)), RecordOutcome::Recorded);
+        assert_eq!(builder.record(1, usage(101)), RecordOutcome::Recorded);
+        assert_eq!(builder.record(2, usage(100)), RecordOutcome::Recorded);
+        assert_eq!(builder.record(3, usage(102)), RecordOutcome::Recorded);
+        // A repeated relation merges its aggregate into one relation entry.
+        assert_eq!(builder.record(1, usage(100)), RecordOutcome::Recorded);
 
         assert_eq!(builder.wallet_count(), 3);
         assert_eq!(builder.distinct_program_count(), 3);
@@ -1913,13 +2392,14 @@ mod tests {
         let reader = IndexReader::open(&shard_dir).unwrap();
         assert_eq!(reader.wallet_count(), 3);
 
-        let mut wallet1_programs = reader.query(1).unwrap();
-        wallet1_programs.sort_unstable();
-        assert_eq!(wallet1_programs, vec![100, 101]);
+        let wallet1 = reader.query(1).unwrap();
+        assert_eq!(program_ids(&wallet1), vec![100, 101]);
+        assert_eq!(wallet1[0].direct_instruction_count, 2);
+        assert_eq!(wallet1[0].transaction_count, 2);
 
-        assert_eq!(reader.query(2).unwrap(), vec![100]);
-        assert_eq!(reader.query(3).unwrap(), vec![102]);
-        assert_eq!(reader.query(4).unwrap(), Vec::<u32>::new());
+        assert_eq!(reader.query(2).unwrap(), vec![usage(100)]);
+        assert_eq!(reader.query(3).unwrap(), vec![usage(102)]);
+        assert_eq!(reader.query(4).unwrap(), Vec::<ProgramUsage>::new());
     }
 
     #[test]
@@ -1931,15 +2411,20 @@ mod tests {
         let mut builder = IndexBuilder::new(1, 12, 1000);
         for (wallet, programs) in [(1, &[4, 9][..]), (3, &[2, 7, 20][..]), (12, &[999][..])] {
             for &program in programs {
-                assert_eq!(builder.record(wallet, program), RecordOutcome::Recorded);
+                assert_eq!(
+                    builder.record(wallet, usage(program)),
+                    RecordOutcome::Recorded
+                );
             }
         }
         assert_eq!(builder.write(&builder_dir).unwrap(), 3);
 
         let mut writer = ShardWriter::create(&streaming_dir).unwrap();
-        writer.push_sorted(1, &[4, 9]).unwrap();
-        writer.push_sorted(3, &[2, 7, 20]).unwrap();
-        writer.push_sorted(12, &[999]).unwrap();
+        writer.push_sorted(1, &[usage(4), usage(9)]).unwrap();
+        writer
+            .push_sorted(3, &[usage(2), usage(7), usage(20)])
+            .unwrap();
+        writer.push_sorted(12, &[usage(999)]).unwrap();
         assert_eq!(writer.finish().unwrap(), 3);
 
         assert_eq!(
@@ -1957,20 +2442,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut writer = ShardWriter::create(dir.path()).unwrap();
         assert!(matches!(
-            writer.push_sorted(0, &[1]),
+            writer.push_sorted(0, &[usage(1)]),
             Err(FormatError::InvalidWriterInput { .. })
         ));
         assert!(matches!(
             writer.push_sorted(1, &[]),
             Err(FormatError::InvalidWriterInput { .. })
         ));
+        let mut invalid_usage = usage(2);
+        invalid_usage.transaction_count = 0;
         assert!(matches!(
-            writer.push_sorted(1, &[2, 2]),
+            writer.push_sorted(1, &[invalid_usage]),
+            Err(FormatError::InvalidProgramUsage {
+                source: ProgramUsageError::EmptyTransactionCount,
+                ..
+            })
+        ));
+        assert!(matches!(
+            writer.push_sorted(1, &[usage(2), usage(2)]),
             Err(FormatError::InvalidWriterInput { .. })
         ));
-        writer.push_sorted(1, &[2, 3]).unwrap();
+        writer.push_sorted(1, &[usage(2), usage(3)]).unwrap();
         assert!(matches!(
-            writer.push_sorted(1, &[4]),
+            writer.push_sorted(1, &[usage(4)]),
             Err(FormatError::InvalidWriterInput { .. })
         ));
     }
@@ -1980,9 +2474,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = IndexBuilder::new(1, 1000, 1000);
         for wallet in 1u32..=255 {
-            builder.record(wallet, 200);
+            builder.record(wallet, usage(200));
             if wallet % 3 == 0 {
-                builder.record(wallet, 201);
+                builder.record(wallet, usage(201));
             }
         }
         let shard_dir = dir.path().join("shard-0");
@@ -1990,8 +2484,7 @@ mod tests {
 
         let reader = IndexReader::open(&shard_dir).unwrap();
         for wallet in 1u32..=255 {
-            let mut programs = reader.query(wallet).unwrap();
-            programs.sort_unstable();
+            let programs = program_ids(&reader.query(wallet).unwrap());
             let expected = if wallet % 3 == 0 {
                 vec![200, 201]
             } else {
@@ -2002,32 +2495,40 @@ mod tests {
     }
 
     #[test]
-    fn wallet_with_more_than_inline_capacity_programs_still_dedupes() {
+    fn wallet_with_many_programs_still_merges_by_program_id() {
         let dir = tempfile::tempdir().unwrap();
         let mut builder = IndexBuilder::new(1, 1000, 1000);
-        // Exceed INLINE_PROGRAMS_PER_WALLET to force a heap spill, and
-        // record each program twice to prove dedup still runs post-spill.
-        for program in 1u32..=(INLINE_PROGRAMS_PER_WALLET as u32 * 3) {
-            builder.record(7, program);
-            builder.record(7, program);
+        const PROGRAMS: u32 = 24;
+        for program in 1u32..=PROGRAMS {
+            builder.record(7, usage(program));
+            builder.record(7, usage(program));
         }
         let shard_dir = dir.path().join("shard-0");
         builder.write(&shard_dir).unwrap();
 
         let reader = IndexReader::open(&shard_dir).unwrap();
-        let mut programs = reader.query(7).unwrap();
-        programs.sort_unstable();
-        let expected: Vec<u32> = (1..=(INLINE_PROGRAMS_PER_WALLET as u32 * 3)).collect();
+        let usages = reader.query(7).unwrap();
+        let programs = program_ids(&usages);
+        let expected: Vec<u32> = (1..=PROGRAMS).collect();
         assert_eq!(programs, expected);
+        assert!(
+            usages
+                .iter()
+                .all(|usage| usage.transaction_count == 2 && usage.direct_instruction_count == 2)
+        );
     }
 
     #[test]
     fn record_dedupes_immediately_and_keeps_slots_sorted() {
         let mut builder = IndexBuilder::new(1, 2, 100);
         for program in [9, 3, 9, 5, 3, 1] {
-            assert_eq!(builder.record(1, program), RecordOutcome::Recorded);
+            assert_eq!(builder.record(1, usage(program)), RecordOutcome::Recorded);
         }
-        assert_eq!(builder.wallet_programs[0].as_slice(), &[1, 3, 5, 9]);
+        assert_eq!(
+            program_ids(builder.wallet_programs[0].as_slice()),
+            vec![1, 3, 5, 9]
+        );
+        assert_eq!(builder.wallet_programs[0][1].transaction_count, 2);
     }
 
     #[test]
@@ -2040,16 +2541,16 @@ mod tests {
         // transactions in both ranges) and must end up with the union of
         // programs, deduped.
         let mut a = IndexBuilder::new(1, 1000, 1000);
-        a.record(1, 100);
-        a.record(2, 100);
-        a.record(2, 101);
+        a.record(1, usage(100));
+        a.record(2, usage(100));
+        a.record(2, usage(101));
 
         let mut b = IndexBuilder::new(1, 1000, 1000);
-        b.record(2, 101); // duplicate of a's record for wallet 2
-        b.record(2, 102);
-        b.record(3, 200);
+        b.record(2, usage(101)); // another aggregate for wallet 2/program 101
+        b.record(2, usage(102));
+        b.record(3, usage(200));
 
-        a.merge(b);
+        a.merge(b).unwrap();
 
         assert_eq!(a.wallet_count(), 3);
         assert_eq!(a.distinct_program_count(), 4);
@@ -2058,31 +2559,31 @@ mod tests {
         a.write(&shard_dir).unwrap();
         let reader = IndexReader::open(&shard_dir).unwrap();
 
-        assert_eq!(reader.query(1).unwrap(), vec![100]);
-        let mut wallet2 = reader.query(2).unwrap();
-        wallet2.sort_unstable();
-        assert_eq!(wallet2, vec![100, 101, 102]);
-        assert_eq!(reader.query(3).unwrap(), vec![200]);
+        assert_eq!(program_ids(&reader.query(1).unwrap()), vec![100]);
+        let wallet2 = reader.query(2).unwrap();
+        assert_eq!(program_ids(&wallet2), vec![100, 101, 102]);
+        assert_eq!(wallet2[1].transaction_count, 2);
+        assert_eq!(reader.query(3).unwrap(), vec![usage(200)]);
 
         // Cross-check against a single builder fed the same records
         // directly (as an unsplit scan would) — merge must be
         // indistinguishable from never having split the work at all.
         let mut single = IndexBuilder::new(1, 1000, 1000);
-        single.record(1, 100);
-        single.record(2, 100);
-        single.record(2, 101);
-        single.record(2, 101);
-        single.record(2, 102);
-        single.record(3, 200);
+        single.record(1, usage(100));
+        single.record(2, usage(100));
+        single.record(2, usage(101));
+        single.record(2, usage(101));
+        single.record(2, usage(102));
+        single.record(3, usage(200));
         let single_dir = dir.path().join("shard-0-single");
         single.write(&single_dir).unwrap();
         let single_reader = IndexReader::open(&single_dir).unwrap();
         for wallet in [1u32, 2, 3] {
-            let mut merged_programs = reader.query(wallet).unwrap();
-            merged_programs.sort_unstable();
-            let mut single_programs = single_reader.query(wallet).unwrap();
-            single_programs.sort_unstable();
-            assert_eq!(merged_programs, single_programs, "wallet {wallet}");
+            assert_eq!(
+                reader.query(wallet).unwrap(),
+                single_reader.query(wallet).unwrap(),
+                "wallet {wallet}"
+            );
         }
     }
 
@@ -2090,22 +2591,24 @@ mod tests {
     fn record_rejects_invalid_program_and_out_of_chunk_account_without_panicking() {
         let mut builder = IndexBuilder::new(1, 10, 10);
         assert_eq!(
-            builder.record(5, 11),
+            builder.record(5, usage(11)),
             RecordOutcome::InvalidProgram,
             "program id past registry_entries"
         );
+        let mut zero_program = usage(1);
+        zero_program.program_id = 0;
         assert_eq!(
-            builder.record(5, 0),
+            builder.record(5, zero_program),
             RecordOutcome::InvalidProgram,
             "program id 0 is the raw-pubkey sentinel, never valid"
         );
         assert_eq!(
-            builder.record(11, 5),
+            builder.record(11, usage(5)),
             RecordOutcome::OutOfChunk,
             "account id past this chunk's end"
         );
         assert_eq!(
-            builder.record(10, 10),
+            builder.record(10, usage(10)),
             RecordOutcome::Recorded,
             "ids at the exact bound are valid"
         );
@@ -2121,8 +2624,8 @@ mod tests {
         let mut chunk0 = IndexBuilder::new(1, 5, 100);
         let mut chunk1 = IndexBuilder::new(6, 5, 100);
         for account in 1u32..=10 {
-            let outcome0 = chunk0.record(account, 99);
-            let outcome1 = chunk1.record(account, 99);
+            let outcome0 = chunk0.record(account, usage(99));
+            let outcome1 = chunk1.record(account, usage(99));
             if account <= 5 {
                 assert_eq!(outcome0, RecordOutcome::Recorded);
                 assert_eq!(outcome1, RecordOutcome::OutOfChunk);
@@ -2143,14 +2646,14 @@ mod tests {
         let reader1 = IndexReader::open(&shard1_dir).unwrap();
         for account in 1u32..=5 {
             assert_eq!(
-                reader0.query(account).unwrap(),
+                program_ids(&reader0.query(account).unwrap()),
                 vec![99],
                 "account {account} in shard 0"
             );
         }
         for account in 6u32..=10 {
             assert_eq!(
-                reader1.query(account).unwrap(),
+                program_ids(&reader1.query(account).unwrap()),
                 vec![99],
                 "account {account} in shard 1"
             );
@@ -2236,7 +2739,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shard = dir.path().join("shard-0");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
+        builder.record(1, usage(2));
         builder.write(&shard).unwrap();
         let path = shard.join(RELATIONS_FILE);
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -2251,11 +2754,34 @@ mod tests {
     }
 
     #[test]
+    fn query_rejects_an_invalid_program_usage_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let shard = dir.path().join("shard-0");
+        let mut builder = IndexBuilder::new(1, 1, 10);
+        builder.record(1, usage(2));
+        builder.write(&shard).unwrap();
+
+        let relations = shard.join(RELATIONS_FILE);
+        let file = fs::OpenOptions::new().write(true).open(relations).unwrap();
+        file.write_all_at(&0u32.to_le_bytes(), (RELATIONS_HEADER_LEN + 12) as u64)
+            .unwrap();
+
+        let reader = IndexReader::open(&shard).unwrap();
+        assert!(matches!(
+            reader.query(1),
+            Err(FormatError::InvalidProgramUsage {
+                source: ProgramUsageError::EmptyTransactionCount,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn query_validates_ranges_against_declared_relation_count() {
         let dir = tempfile::tempdir().unwrap();
         let shard = dir.path().join("shard-0");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
+        builder.record(1, usage(2));
         builder.write(&shard).unwrap();
 
         let wallets = shard.join(WALLETS_FILE);
@@ -2277,7 +2803,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shard = dir.path().join("shard-0");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
+        builder.record(1, usage(2));
         builder.write(&shard).unwrap();
 
         let wallets = shard.join(WALLETS_FILE);
@@ -2301,8 +2827,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shard = dir.path().join("shard-0");
         let mut builder = IndexBuilder::new(1, 2, 10);
-        builder.record(1, 3);
-        builder.record(2, 4);
+        builder.record(1, usage(3));
+        builder.record(2, usage(4));
         builder.write(&shard).unwrap();
 
         let wallets = shard.join(WALLETS_FILE);
@@ -2323,7 +2849,7 @@ mod tests {
 
         let out_of_registry = dir.path().join("out-of-registry");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
+        builder.record(1, usage(2));
         builder.write(&out_of_registry).unwrap();
         let relations = out_of_registry.join(RELATIONS_FILE);
         let file = fs::OpenOptions::new().write(true).open(relations).unwrap();
@@ -2336,14 +2862,14 @@ mod tests {
 
         let duplicate = dir.path().join("duplicate");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
-        builder.record(1, 3);
+        builder.record(1, usage(2));
+        builder.record(1, usage(3));
         builder.write(&duplicate).unwrap();
         let relations = duplicate.join(RELATIONS_FILE);
         let file = fs::OpenOptions::new().write(true).open(relations).unwrap();
         file.write_all_at(
             &2u32.to_le_bytes(),
-            (RELATIONS_HEADER_LEN + std::mem::size_of::<u32>()) as u64,
+            (RELATIONS_HEADER_LEN + PROGRAM_USAGE_RECORD_LEN) as u64,
         )
         .unwrap();
         assert!(matches!(
@@ -2357,7 +2883,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shard = dir.path().join("shard-0");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
+        builder.record(1, usage(2));
         builder.write(&shard).unwrap();
         let reader = IndexReader::open(&shard).unwrap();
 
@@ -2366,7 +2892,7 @@ mod tests {
         fs::rename(&relations, &old_relations).unwrap();
         fs::write(&relations, b"replacement").unwrap();
 
-        assert_eq!(reader.query(1).unwrap(), vec![2]);
+        assert_eq!(reader.query(1).unwrap(), vec![usage(2)]);
         assert!(matches!(
             reader.verify_unchanged(),
             Err(FormatError::ContentBindingMismatch {
@@ -2381,7 +2907,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shard = dir.path().join("shard-0");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
+        builder.record(1, usage(2));
         builder.write(&shard).unwrap();
         let reader = IndexReader::open(&shard).unwrap();
 
@@ -2407,7 +2933,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shard = dir.path().join("shard-0");
         let mut builder = IndexBuilder::new(1, 1, 10);
-        builder.record(1, 2);
+        builder.record(1, usage(2));
         builder.write(&shard).unwrap();
         let binding = bind_shard(0, &shard, 1, 10).unwrap();
 

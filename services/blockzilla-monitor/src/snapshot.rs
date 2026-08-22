@@ -118,6 +118,47 @@ pub struct PipelineSummary {
     pub poh_migration_eta_secs: Option<f64>,
     pub poh_migration_capacity_configured: u32,
     pub poh_migration_running: u32,
+    /// First-seen registry generations that must be rewritten to historical
+    /// usage-sorted order. These fields were added to schema v3 after the
+    /// monitor shipped, so defaults keep the monitor compatible with an
+    /// older schema-v3 scheduler during a rolling deployment.
+    #[serde(default)]
+    pub registry_reprocess_capacity_configured: u32,
+    #[serde(default)]
+    pub registry_reprocess_running: u32,
+    #[serde(default)]
+    pub registry_reprocess_epochs_total: u32,
+    #[serde(default)]
+    pub registry_reprocess_epochs_done: u32,
+    #[serde(default)]
+    pub registry_reprocess_admission_blocked_reason: Option<String>,
+    /// Scheduler-owned Firewatch signer-to-program index project. Defaults
+    /// preserve compatibility with an older schema-v3 scheduler during a
+    /// rolling deployment.
+    #[serde(default)]
+    pub firewatch_index_capacity_configured: u32,
+    #[serde(default)]
+    pub firewatch_index_running: u32,
+    #[serde(default)]
+    pub firewatch_index_epochs_total: u32,
+    #[serde(default)]
+    pub firewatch_index_epochs_accepted: u32,
+    #[serde(default)]
+    pub firewatch_index_epochs_queued: u32,
+    /// Additive schema-1 controller coverage fields. `None` means the
+    /// connected controller predates all-archive coverage reporting.
+    #[serde(default)]
+    pub firewatch_index_archive_epochs_total: Option<u32>,
+    #[serde(default)]
+    pub firewatch_index_epochs_eligible: Option<u32>,
+    #[serde(default)]
+    pub firewatch_index_epochs_blocked_migration: Option<u32>,
+    #[serde(default)]
+    pub firewatch_index_epochs_blocked_wire_profile: Option<u32>,
+    #[serde(default)]
+    pub firewatch_index_queue_eta_secs: Option<f64>,
+    #[serde(default)]
+    pub firewatch_index_admission_blocked_reason: Option<String>,
 }
 
 impl PipelineSummary {
@@ -156,6 +197,18 @@ pub struct ProgressSnapshot {
     pub progress_pct: Option<f32>,
     /// Fractional seconds, same reasoning as `PipelineSummary::eta_secs`.
     pub eta_secs: Option<f64>,
+    #[serde(default)]
+    pub input_mib_per_sec: Option<f64>,
+    #[serde(default)]
+    pub source_read_mib_per_sec: Option<f64>,
+    #[serde(default)]
+    pub disk_read_mib_per_sec: Option<f64>,
+    #[serde(default)]
+    pub disk_write_mib_per_sec: Option<f64>,
+    #[serde(default)]
+    pub rss_bytes: Option<u64>,
+    #[serde(default)]
+    pub peak_rss_bytes: Option<u64>,
     pub updated_unix_secs: Option<u64>,
 }
 
@@ -187,13 +240,33 @@ pub struct LaneStatus {
     pub auto_paused: bool,
     pub auto_pause_reason: Option<String>,
     pub progress: ProgressSnapshot,
+    #[serde(default)]
+    pub rss_bytes: Option<u64>,
+    /// Counts and parity become available after the index manifest/parity
+    /// receipt is read. They remain absent during early build phases.
+    #[serde(default)]
+    pub wallet_count: Option<u64>,
+    #[serde(default)]
+    pub relation_count: Option<u64>,
+    #[serde(default)]
+    pub parity_status: Option<String>,
 }
 
 impl LaneStatus {
     pub fn is_active(&self) -> bool {
         !matches!(
             normalize(&self.state).as_str(),
-            "idle" | "done" | "complete" | "completed" | "failed" | "stopped" | "cancelled"
+            "idle"
+                | "queued"
+                | "done"
+                | "complete"
+                | "completed"
+                | "accepted"
+                | "failed"
+                | "blocked"
+                | "profile_audit_required"
+                | "stopped"
+                | "cancelled"
         )
     }
 
@@ -543,6 +616,10 @@ fn validate_summary(summary: &PipelineSummary) -> Result<()> {
     ensure_optional_nonnegative("summary queue ETA", summary.queue_eta_secs)?;
     ensure_optional_nonnegative("PoH migration rate", summary.poh_migration_bytes_per_sec)?;
     ensure_optional_nonnegative("PoH migration ETA", summary.poh_migration_eta_secs)?;
+    ensure_optional_nonnegative(
+        "Firewatch queue ETA",
+        summary.firewatch_index_queue_eta_secs,
+    )?;
     ensure_optional_text("queue ETA reason", summary.queue_eta_reason.as_deref())?;
     ensure_optional_text(
         "admission blocked reason",
@@ -555,6 +632,16 @@ fn validate_summary(summary: &PipelineSummary) -> Result<()> {
     ensure_optional_text(
         "finalizer admission blocked reason",
         summary.finalizer_admission_blocked_reason.as_deref(),
+    )?;
+    ensure_optional_text(
+        "registry reprocess admission blocked reason",
+        summary
+            .registry_reprocess_admission_blocked_reason
+            .as_deref(),
+    )?;
+    ensure_optional_text(
+        "Firewatch index admission blocked reason",
+        summary.firewatch_index_admission_blocked_reason.as_deref(),
     )?;
     ensure_optional_text(
         "legacy compact last action",
@@ -589,6 +676,94 @@ fn validate_summary(summary: &PipelineSummary) -> Result<()> {
         summary.poh_migration_epochs_done <= summary.poh_migration_epochs_total,
         "PoH migrated epochs exceed total epochs"
     );
+    ensure!(
+        summary.registry_reprocess_epochs_done <= summary.registry_reprocess_epochs_total,
+        "registry reprocess completed epochs exceed total epochs"
+    );
+    ensure!(
+        summary.registry_reprocess_running <= summary.registry_reprocess_capacity_configured,
+        "registry reprocess running workers exceed configured capacity"
+    );
+    ensure!(
+        summary.firewatch_index_epochs_accepted <= summary.firewatch_index_epochs_total,
+        "Firewatch accepted epochs exceed total epochs"
+    );
+    ensure!(
+        summary.firewatch_index_epochs_queued <= summary.firewatch_index_epochs_total,
+        "Firewatch queued epochs exceed total epochs"
+    );
+    ensure!(
+        summary.firewatch_index_running <= summary.firewatch_index_capacity_configured,
+        "Firewatch running workers exceed configured capacity"
+    );
+    if let Some(eligible) = summary.firewatch_index_epochs_eligible {
+        ensure!(
+            summary.firewatch_index_epochs_accepted <= eligible,
+            "Firewatch accepted epochs exceed eligible epochs"
+        );
+        ensure!(
+            summary.firewatch_index_running <= eligible,
+            "Firewatch running epochs exceed eligible epochs"
+        );
+        ensure!(
+            summary.firewatch_index_epochs_queued <= eligible,
+            "Firewatch queued epochs exceed eligible epochs"
+        );
+    }
+    if summary
+        .firewatch_index_epochs_blocked_wire_profile
+        .is_some()
+    {
+        ensure!(
+            summary.firewatch_index_archive_epochs_total.is_some()
+                && summary.firewatch_index_epochs_eligible.is_some()
+                && summary.firewatch_index_epochs_blocked_migration.is_some(),
+            "Firewatch wire-profile coverage is incomplete"
+        );
+    }
+    if let Some(archive_total) = summary.firewatch_index_archive_epochs_total {
+        if let Some(eligible) = summary.firewatch_index_epochs_eligible {
+            ensure!(
+                eligible <= archive_total,
+                "Firewatch eligible epochs exceed archive scope"
+            );
+        }
+        if let Some(blocked) = summary.firewatch_index_epochs_blocked_migration {
+            ensure!(
+                blocked <= archive_total,
+                "Firewatch migration-blocked epochs exceed archive scope"
+            );
+        }
+        if let Some(blocked) = summary.firewatch_index_epochs_blocked_wire_profile {
+            ensure!(
+                blocked <= archive_total,
+                "Firewatch wire-profile-blocked epochs exceed archive scope"
+            );
+        }
+        if let (Some(eligible), Some(blocked_migration), Some(blocked_wire_profile)) = (
+            summary.firewatch_index_epochs_eligible,
+            summary.firewatch_index_epochs_blocked_migration,
+            summary.firewatch_index_epochs_blocked_wire_profile,
+        ) {
+            ensure!(
+                u64::from(eligible)
+                    + u64::from(blocked_migration)
+                    + u64::from(blocked_wire_profile)
+                    == u64::from(archive_total),
+                "Firewatch coverage classes do not equal archive scope"
+            );
+        } else if let (Some(eligible), Some(blocked)) = (
+            summary.firewatch_index_epochs_eligible,
+            summary.firewatch_index_epochs_blocked_migration,
+        ) {
+            // Preserve schema-v3 snapshots from controllers that predate
+            // wire-profile coverage. Their unclassified remainder is valid.
+            ensure!(
+                u64::from(eligible) + u64::from(blocked) <= u64::from(archive_total),
+                "Firewatch eligible and migration-blocked epochs exceed archive scope"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -684,6 +859,7 @@ fn validate_lanes(lanes: &[LaneStatus]) -> Result<()> {
         ensure_identifier("lane state", &lane.state)?;
         ensure_text_len("lane phase", &lane.phase, MAX_IDENTIFIER_BYTES)?;
         ensure_optional_text("lane pause reason", lane.auto_pause_reason.as_deref())?;
+        ensure_optional_text("lane parity status", lane.parity_status.as_deref())?;
         validate_progress(&lane.progress)?;
     }
     Ok(())
@@ -781,6 +957,10 @@ fn validate_progress(progress: &ProgressSnapshot) -> Result<()> {
         ensure_percent("row progress", percent as f64)?;
     }
     ensure_optional_nonnegative("row ETA", progress.eta_secs)?;
+    ensure_optional_nonnegative("row input rate", progress.input_mib_per_sec)?;
+    ensure_optional_nonnegative("row source read rate", progress.source_read_mib_per_sec)?;
+    ensure_optional_nonnegative("row disk read rate", progress.disk_read_mib_per_sec)?;
+    ensure_optional_nonnegative("row disk write rate", progress.disk_write_mib_per_sec)?;
     Ok(())
 }
 
@@ -1030,6 +1210,120 @@ mod tests {
         let mut oversized = valid_snapshot();
         oversized.epochs = vec![EpochStatus::default(); MAX_EPOCHS + 1];
         assert!(oversized.validate().is_err());
+
+        let mut invalid_registry = valid_snapshot();
+        invalid_registry.summary.registry_reprocess_epochs_total = 2;
+        invalid_registry.summary.registry_reprocess_epochs_done = 3;
+        assert!(invalid_registry.validate().is_err());
+
+        let mut excess_registry_workers = valid_snapshot();
+        excess_registry_workers
+            .summary
+            .registry_reprocess_capacity_configured = 1;
+        excess_registry_workers.summary.registry_reprocess_running = 2;
+        assert!(excess_registry_workers.validate().is_err());
+
+        let mut invalid_firewatch = valid_snapshot();
+        invalid_firewatch.summary.firewatch_index_epochs_total = 1;
+        invalid_firewatch.summary.firewatch_index_epochs_accepted = 2;
+        assert!(invalid_firewatch.validate().is_err());
+
+        let mut excess_firewatch_workers = valid_snapshot();
+        excess_firewatch_workers
+            .summary
+            .firewatch_index_capacity_configured = 1;
+        excess_firewatch_workers.summary.firewatch_index_running = 2;
+        assert!(excess_firewatch_workers.validate().is_err());
+
+        let mut invalid_firewatch_coverage = valid_snapshot();
+        invalid_firewatch_coverage
+            .summary
+            .firewatch_index_archive_epochs_total = Some(736);
+        invalid_firewatch_coverage
+            .summary
+            .firewatch_index_epochs_eligible = Some(730);
+        invalid_firewatch_coverage
+            .summary
+            .firewatch_index_epochs_blocked_migration = Some(7);
+        assert!(invalid_firewatch_coverage.validate().is_err());
+
+        let mut complete_firewatch_coverage = valid_snapshot();
+        complete_firewatch_coverage
+            .summary
+            .firewatch_index_archive_epochs_total = Some(10);
+        complete_firewatch_coverage
+            .summary
+            .firewatch_index_epochs_total = 3;
+        complete_firewatch_coverage
+            .summary
+            .firewatch_index_epochs_eligible = Some(2);
+        complete_firewatch_coverage
+            .summary
+            .firewatch_index_epochs_blocked_migration = Some(7);
+        complete_firewatch_coverage
+            .summary
+            .firewatch_index_epochs_blocked_wire_profile = Some(1);
+        complete_firewatch_coverage.validate().unwrap();
+        complete_firewatch_coverage
+            .summary
+            .firewatch_index_epochs_blocked_wire_profile = Some(2);
+        assert!(complete_firewatch_coverage.validate().is_err());
+
+        let mut invalid_firewatch_eta = valid_snapshot();
+        invalid_firewatch_eta.summary.firewatch_index_queue_eta_secs = Some(-1.0);
+        assert!(invalid_firewatch_eta.validate().is_err());
+    }
+
+    #[test]
+    fn older_schema_v3_payload_defaults_firewatch_fields() {
+        let mut value = serde_json::to_value(valid_snapshot()).unwrap();
+        let summary = value["summary"].as_object_mut().unwrap();
+        for key in [
+            "firewatch_index_capacity_configured",
+            "firewatch_index_running",
+            "firewatch_index_epochs_total",
+            "firewatch_index_epochs_accepted",
+            "firewatch_index_epochs_queued",
+            "firewatch_index_archive_epochs_total",
+            "firewatch_index_epochs_eligible",
+            "firewatch_index_epochs_blocked_migration",
+            "firewatch_index_epochs_blocked_wire_profile",
+            "firewatch_index_queue_eta_secs",
+            "firewatch_index_admission_blocked_reason",
+        ] {
+            summary.remove(key);
+        }
+
+        let decoded: PipelineSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.summary.firewatch_index_epochs_total, 0);
+        assert_eq!(decoded.summary.firewatch_index_epochs_accepted, 0);
+        assert!(
+            decoded
+                .summary
+                .firewatch_index_archive_epochs_total
+                .is_none()
+        );
+        assert!(decoded.summary.firewatch_index_epochs_eligible.is_none());
+        assert!(
+            decoded
+                .summary
+                .firewatch_index_epochs_blocked_migration
+                .is_none()
+        );
+        assert!(
+            decoded
+                .summary
+                .firewatch_index_epochs_blocked_wire_profile
+                .is_none()
+        );
+        assert!(decoded.summary.firewatch_index_queue_eta_secs.is_none());
+        assert!(
+            decoded
+                .summary
+                .firewatch_index_admission_blocked_reason
+                .is_none()
+        );
+        decoded.validate().unwrap();
     }
 
     #[test]

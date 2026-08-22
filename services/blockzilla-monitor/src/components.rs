@@ -28,8 +28,9 @@ use topcoat::{
 };
 
 use crate::state::{
-    CompactionHistoryEntry, DashboardState, EpochTask, ErrorEntry, MachineSnapshot, ProcessEntry,
-    SchedulerReasoning, format_bytes, format_thousands,
+    CompactionHistoryEntry, DashboardState, EpochTask, ErrorEntry, FirewatchIndexEntry,
+    MachineSnapshot, ProcessEntry, SchedulerReasoning, format_bytes, format_thousands,
+    registry_task_eta_label,
 };
 
 const CARD: &str = "rounded-lg border border-zinc-800/70 bg-white/[0.02]";
@@ -352,6 +353,264 @@ pub async fn poh_migration_lane_list(state: &DashboardState) -> Result<View> {
 }
 
 #[component]
+pub async fn registry_reprocess_progress(state: &DashboardState) -> Result<View> {
+    let pct = state.registry_reprocess_pct();
+    let card = CARD;
+    view! {
+        <div class=(format!("flex flex-col gap-1 px-6 py-4 {card}"))>
+            <div class="flex items-center gap-6">
+                <div class="flex items-baseline gap-2 whitespace-nowrap">
+                    <span class=(EYEBROW)>"Registry order conversion"</span>
+                    <span
+                        id="registry-reprocess-count"
+                        data-text="$registry_reprocess_epoch_label"
+                        class="font-medium tabular-nums text-zinc-100"
+                    >
+                        (state.registry_reprocess_epoch_label())
+                    </span>
+                </div>
+                <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800">
+                    <div
+                        id="registry-reprocess-bar"
+                        data-attr:style="`width: ${$registry_reprocess_pct}%`"
+                        class="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out"
+                        style=(format!("width: {pct:.1}%"))
+                    ></div>
+                </div>
+                <div
+                    id="registry-reprocess-pct"
+                    data-text="`${$registry_reprocess_pct}%`"
+                    class="whitespace-nowrap font-semibold tabular-nums text-emerald-400"
+                >
+                    (format!("{pct:.1}%"))
+                </div>
+            </div>
+            <div
+                id="registry-reprocess-workers"
+                data-text="$registry_reprocess_worker_label"
+                class="text-xs text-zinc-600"
+            >
+                (state.registry_reprocess_worker_label())
+            </div>
+        </div>
+    }
+}
+
+#[component]
+pub async fn registry_reprocess_lane_list(state: &DashboardState) -> Result<View> {
+    let card = CARD;
+    view! {
+        <div id="registry-reprocess-lane-list" class="flex flex-col gap-2">
+            <span class=(EYEBROW)>"Registry conversion workers"</span>
+            <div class=(format!("divide-y divide-zinc-800/70 {card}"))>
+                if state.registry_reprocess_lanes.is_empty() {
+                    <div class="px-6 py-4 text-sm text-zinc-500">
+                        "No registry conversion worker is running now."
+                    </div>
+                } else {
+                    for task in &state.registry_reprocess_lanes {
+                        registry_reprocess_row(task: task)
+                    }
+                }
+            </div>
+        </div>
+    }
+}
+
+/// Firewatch signer-to-program index project. The scheduler owns every value:
+/// this view does not infer parity from build completion or estimate resource
+/// use when a worker has not reported it.
+#[component]
+pub async fn firewatch_project(state: &DashboardState) -> Result<View> {
+    let card = CARD;
+    let overview_indexes = state.overview_firewatch_indexes();
+    view! {
+        if state.firewatch_enabled {
+            <section id="firewatch-project" class=(format!("overflow-hidden {card}"))>
+                <div
+                    class="flex items-center justify-between border-b border-zinc-800/70 px-6 py-4"
+                >
+                    <div>
+                        <h2 class="text-sm font-semibold text-zinc-100">
+                            "Firewatch indexes"
+                        </h2>
+                        <p
+                            id="firewatch-summary"
+                            data-text="$firewatch_summary_label"
+                            class="mt-0.5 text-xs tabular-nums text-zinc-500"
+                        >
+                            (state.firewatch_summary_label())
+                        </p>
+                        <p
+                            id="firewatch-coverage"
+                            data-text="$firewatch_coverage_label"
+                            class="mt-1 text-xs tabular-nums text-zinc-400"
+                        >
+                            (state.firewatch_coverage_label())
+                        </p>
+                        <p class="mt-1 text-xs text-zinc-500">
+                            "Runnable-work ETA includes active and queued work only. Failed epochs and profile-audit work are excluded."
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-6 text-right text-sm">
+                        <div>
+                            <div class=(EYEBROW)>"Next queued"</div>
+                            <div
+                                id="firewatch-next"
+                                data-text="$firewatch_next_label"
+                                class="mt-0.5 font-medium tabular-nums text-zinc-200"
+                            >
+                                (state.firewatch_next_label())
+                            </div>
+                        </div>
+                        <div>
+                            <div class=(EYEBROW)>"Runnable-work ETA"</div>
+                            <div
+                                id="firewatch-queue-eta"
+                                data-text="$firewatch_queue_eta_label"
+                                class="mt-0.5 font-medium tabular-nums text-zinc-200"
+                            >
+                                (state.firewatch_queue_eta_label())
+                            </div>
+                        </div>
+                        <div>
+                            <div class=(EYEBROW)>"Capacity"</div>
+                            <div
+                                id="firewatch-capacity"
+                                data-text="$firewatch_capacity_label"
+                                class="mt-0.5 font-medium tabular-nums text-zinc-200"
+                            >
+                                (state.firewatch_capacity_label())
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <p
+                    id="firewatch-admission-reason"
+                    data-text="$firewatch_admission_blocked_reason"
+                    data-show="$firewatch_admission_blocked_reason"
+                    class=(if state.firewatch_admission_blocked_reason.is_some() {
+                        "border-b border-amber-700/60 bg-amber-500/10 px-6 py-3 text-sm text-amber-400"
+                    } else {
+                        "hidden border-b border-amber-700/60 bg-amber-500/10 px-6 py-3 text-sm text-amber-400"
+                    })
+                >
+                    (state.firewatch_admission_blocked_reason.clone().unwrap_or_default())
+                </p>
+                <div class="border-b border-zinc-800/70 px-4 py-2 text-xs text-zinc-500">
+                    <span id="firewatch-rows-label" data-text="$firewatch_rows_label">
+                        (state.firewatch_rows_label())
+                    </span>
+                </div>
+                <div class="overflow-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead>
+                            <tr class="border-b border-zinc-800/70">
+                                <th class=(format!("px-4 py-3 font-normal {EYEBROW}"))>
+                                    "Epoch"
+                                </th>
+                                <th class=(format!("px-4 py-3 font-normal {EYEBROW}"))>
+                                    "Status"
+                                </th>
+                                <th class=(format!("px-4 py-3 font-normal {EYEBROW}"))>
+                                    "Build progress"
+                                </th>
+                                <th class=(format!("px-4 py-3 font-normal {EYEBROW}"))>
+                                    "Index counts"
+                                </th>
+                                <th class=(format!("px-4 py-3 font-normal {EYEBROW}"))>
+                                    "Parity"
+                                </th>
+                                <th class=(format!("px-4 py-3 font-normal {EYEBROW}"))>
+                                    "Resources"
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            if overview_indexes.is_empty() {
+                                <tr>
+                                    <td colspan="6" class="px-4 py-5 text-zinc-500">
+                                        "No per-epoch Firewatch status reported yet."
+                                    </td>
+                                </tr>
+                            } else {
+                                for index in overview_indexes {
+                                    firewatch_index_row(index: index)
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+    }
+}
+
+#[component]
+async fn firewatch_index_row(index: &FirewatchIndexEntry) -> Result<View> {
+    let id = format!("firewatch-epoch-{}", index.epoch);
+    let sig = format!("firewatch_epoch_{}", index.epoch);
+    let dot = state_dot_class(&index.state);
+    view! {
+        <tr id=(id) class="border-b border-zinc-800/70 transition-colors hover:bg-white/[0.02]">
+            <td class="px-4 py-3 font-medium tabular-nums text-zinc-100">
+                (index.epoch)
+            </td>
+            <td class="px-4 py-3 text-zinc-300">
+                <div class="flex items-center gap-2">
+                    <span class=(format!("h-1.5 w-1.5 shrink-0 rounded-full {dot}"))></span>
+                    <span
+                        data-text=(format!("${sig}_state"))
+                        class="capitalize text-zinc-100"
+                    >
+                        (index.state.clone())
+                    </span>
+                </div>
+                <div
+                    data-text=(format!("${sig}_phase"))
+                    class="mt-0.5 pl-3.5 text-xs text-zinc-500"
+                >
+                    (index.phase.clone())
+                </div>
+            </td>
+            <td class="px-4 py-3">
+                <div class="h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                    <div
+                        data-attr:style=(format!("`width: ${{${sig}_pct}}%`"))
+                        class="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out"
+                        style=(format!("width: {}%", index.pct))
+                    ></div>
+                </div>
+                <div
+                    data-text=(format!("${sig}_progress"))
+                    class="mt-1 whitespace-nowrap text-xs tabular-nums text-zinc-500"
+                >
+                    (index.progress_label())
+                </div>
+            </td>
+            <td
+                data-text=(format!("${sig}_counts"))
+                class="px-4 py-3 whitespace-nowrap tabular-nums text-zinc-300"
+            >
+                (index.counts_label())
+            </td>
+            <td
+                data-text=(format!("${sig}_parity"))
+                class="px-4 py-3 whitespace-nowrap capitalize text-zinc-300"
+            >
+                (index.parity_label())
+            </td>
+            <td
+                data-text=(format!("${sig}_resources"))
+                class="px-4 py-3 whitespace-nowrap tabular-nums text-zinc-300"
+            >
+                (index.resources_label())
+            </td>
+        </tr>
+    }
+}
+
+#[component]
 pub async fn live_capture_banner(state: &DashboardState) -> Result<View> {
     view! {
         <div
@@ -564,6 +823,77 @@ async fn epoch_row(task: &EpochTask) -> Result<View> {
 }
 
 #[component]
+async fn registry_reprocess_row(task: &EpochTask) -> Result<View> {
+    let id = format!("registry-epoch-{}", task.epoch);
+    let bar_id = format!("{id}-bar");
+    let blocks_id = format!("{id}-blocks");
+    let eta_id = format!("{id}-eta");
+    let label_id = format!("{id}-label");
+    let phase_id = format!("{id}-phase");
+    let sig = format!("registry_epoch_{}", task.epoch);
+    let dot = state_dot_class(&task.label);
+
+    view! {
+        <div
+            id=(id)
+            class="flex items-center gap-6 px-6 py-4 transition-colors hover:bg-white/[0.02]"
+        >
+            <div class="w-24 font-medium text-zinc-300 tabular-nums">
+                (format!("Epoch {}", task.epoch))
+            </div>
+            <div class="flex w-40 flex-col justify-center gap-0.5">
+                <div class="flex items-center gap-2 capitalize text-zinc-100">
+                    <span class=(format!("h-1.5 w-1.5 shrink-0 rounded-full {dot}"))></span>
+                    <span id=(label_id) data-text=(format!("${sig}_label"))>
+                        (task.label.clone())
+                    </span>
+                </div>
+                <div
+                    id=(phase_id)
+                    data-text=(format!("${sig}_phase"))
+                    data-show=(format!("${sig}_phase"))
+                    class=(if task.phase.is_empty() {
+                        "hidden truncate pl-3.5 text-xs text-zinc-500"
+                    } else {
+                        "truncate pl-3.5 text-xs text-zinc-500"
+                    })
+                >
+                    (task.phase.clone())
+                </div>
+            </div>
+            <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800">
+                <div
+                    id=(bar_id)
+                    data-attr:style=(format!("`width: ${{${sig}_pct}}%`"))
+                    class="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out"
+                    style=(format!("width: {}%", task.pct))
+                ></div>
+            </div>
+            <div class="w-32 text-right">
+                <div class=(EYEBROW)>"Blocks"</div>
+                <div
+                    id=(blocks_id)
+                    data-text=(format!("${sig}_blocks"))
+                    class="font-medium tabular-nums text-zinc-100"
+                >
+                    (format_thousands(task.blocks))
+                </div>
+            </div>
+            <div class="w-28 text-right">
+                <div class=(EYEBROW)>"Task ETA"</div>
+                <div
+                    id=(eta_id)
+                    data-text=(format!("${sig}_eta"))
+                    class="font-semibold tabular-nums text-cyan-400"
+                >
+                    (registry_task_eta_label(task))
+                </div>
+            </div>
+        </div>
+    }
+}
+
+#[component]
 async fn epoch_table_row(task: &EpochTask) -> Result<View> {
     let dot = state_dot_class(&task.label);
     view! {
@@ -596,11 +926,12 @@ async fn epoch_table_row(task: &EpochTask) -> Result<View> {
 fn state_dot_class(label: &str) -> &'static str {
     let normalized = crate::snapshot::normalize(label);
     match normalized.as_str() {
-        "complete" | "completed" => "bg-emerald-400",
+        "accepted" | "complete" | "completed" | "verified" => "bg-emerald-400",
         "scanning" | "finalizing" | "active" | "running" | "capturing" | "packaging" => {
             "bg-cyan-400"
         }
         "queued" | "scan_ready" | "ready" | "ready_to_package" => "bg-zinc-500",
+        "profile_audit_required" => "bg-amber-400",
         "failed" | "blocked" | "repair_required" => "bg-rose-400",
         _ => "bg-amber-400",
     }
@@ -633,6 +964,7 @@ pub async fn bottom_panels(state: &DashboardState) -> Result<View> {
             &state.reasoning.admission_blocked_reason,
             &state.reasoning.legacy_compact_admission_blocked_reason,
             &state.reasoning.finalizer_admission_blocked_reason,
+            &state.reasoning.registry_reprocess_admission_blocked_reason,
         ]
         .iter()
         .filter(|reason| reason.is_some())
@@ -724,6 +1056,14 @@ async fn scheduler_reasoning(reasoning: &SchedulerReasoning) -> Result<View> {
                     .finalizer_admission_blocked_reason {
                     reasoning_row(
                         label: "Finalizer admission blocked",
+                        text: reason,
+                        tone: "amber"
+                    )
+                }
+                if let Some(reason) = &reasoning
+                    .registry_reprocess_admission_blocked_reason {
+                    reasoning_row(
+                        label: "Registry conversion admission blocked",
                         text: reason,
                         tone: "amber"
                     )

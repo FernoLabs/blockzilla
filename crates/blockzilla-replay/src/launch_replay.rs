@@ -1668,6 +1668,7 @@ fn replay_exhausted_generation(replay: &LaunchReplay, context: &CompactGeneratio
         && replay.compact_checkpoint.is_some_and(|recorded| {
             recorded.generation_digest == context.binding.generation_digest
                 && recorded.registry_sha256 == context.binding.registry_sha256
+                && recorded.wire_profile == Some(context.binding.wire_profile)
                 && recorded.cursor.generation_block_count == context.block_count
                 && recorded.cursor.next_row == context.block_count
                 && recorded.cursor.next_slot.is_none()
@@ -1748,6 +1749,7 @@ fn validate_completed_generation_transition(
         .ok_or_else(|| incompatible("previous Compact generation has no frozen row cursor"))?;
     if recorded.generation_digest != previous.binding.generation_digest
         || recorded.registry_sha256 != previous.binding.registry_sha256
+        || recorded.wire_profile != Some(previous.binding.wire_profile)
         || recorded.cursor.generation_block_count != previous.block_count
         || recorded.cursor.next_row != previous.block_count
         || recorded.cursor.next_slot.is_some()
@@ -2220,6 +2222,9 @@ impl LaunchReplay {
                 .expect("a restored cursor always has a descriptor");
             if descriptor.generation_digest != context.binding.generation_digest
                 || descriptor.registry_sha256 != context.binding.registry_sha256
+                || descriptor
+                    .wire_profile
+                    .is_some_and(|profile| profile != context.binding.wire_profile)
             {
                 return Err(LaunchReplayError::ResumeGenerationMismatch {
                     generation_id: context.generation_id.clone(),
@@ -2270,6 +2275,12 @@ impl LaunchReplay {
             }
             let same_generation = same_digest && same_registry;
             if same_generation {
+                if previous.wire_profile != Some(context.binding.wire_profile) {
+                    return Err(LaunchReplayError::IncompatibleGeneration {
+                        generation_id: context.generation_id.clone(),
+                        message: "Archive V2 wire profile disagrees with active replay".to_owned(),
+                    });
+                }
                 if row_number != previous.cursor.next_row {
                     return Err(LaunchReplayError::CompactRowOrderMismatch {
                         expected: previous.cursor.next_row,
@@ -2308,6 +2319,7 @@ impl LaunchReplay {
         let recorded = RecordedCompactCheckpoint {
             generation_digest: context.binding.generation_digest,
             registry_sha256: context.binding.registry_sha256,
+            wire_profile: Some(context.binding.wire_profile),
             cursor: CompactCheckpointCursor {
                 last_slot: slot.slot,
                 next_row,
@@ -4488,7 +4500,7 @@ mod tests {
         WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams,
         WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams,
     };
-    use blockzilla_read_sdk::GenerationBinding;
+    use blockzilla_read_sdk::{ArchiveV2WireProfile, GenerationBinding};
     use serde::Serialize;
 
     use super::*;
@@ -6543,6 +6555,7 @@ mod tests {
             binding: GenerationBinding {
                 generation_digest: [4; 32],
                 registry_sha256: [5; 32],
+                wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             },
             genesis: Some(exact_genesis()),
         };
@@ -6570,6 +6583,7 @@ mod tests {
             binding: GenerationBinding {
                 generation_digest: [4; 32],
                 registry_sha256: [5; 32],
+                wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             },
             genesis: Some(exact_genesis()),
         };
@@ -6613,6 +6627,7 @@ mod tests {
             binding: GenerationBinding {
                 generation_digest: [4; 32],
                 registry_sha256: [5; 32],
+                wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             },
             genesis: Some(exact_genesis()),
         };
@@ -6665,6 +6680,7 @@ mod tests {
             binding: GenerationBinding {
                 generation_digest: [8; 32],
                 registry_sha256: [9; 32],
+                wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             },
             genesis: Some(genesis.clone()),
         };

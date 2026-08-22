@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use blockzilla_archive_gateway::{
     GatewayConfig, GenerateManifestOptions, build_router, generate_manifest, load_catalog,
 };
+use blockzilla_read_sdk::ArchiveV2WireProfile;
 use clap::{Args, Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
@@ -93,6 +94,13 @@ struct GenerateManifestArgs {
     #[arg(long, default_value_t = 432_000)]
     slots_per_epoch: u64,
 
+    /// Archive V2 message wire grammar used to write this generation.
+    ///
+    /// Use post-unknown-instruction-fallbacks-v1 or
+    /// pre-unknown-instruction-fallbacks-v1.
+    #[arg(long)]
+    wire_profile: ArchiveV2WireProfile,
+
     /// Additional safe basename to hash and allowlist. Core files are automatic.
     #[arg(long = "file")]
     additional_files: Vec<String>,
@@ -117,6 +125,7 @@ async fn main() -> Result<()> {
                 epoch: args.epoch,
                 generation_id: args.generation_id,
                 slots_per_epoch: args.slots_per_epoch,
+                wire_profile: args.wire_profile,
                 additional_files: args.additional_files,
                 output: args.output,
             })?;

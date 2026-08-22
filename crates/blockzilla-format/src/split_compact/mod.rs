@@ -38,7 +38,9 @@ pub struct OwnedCompactAddressTableLookup {
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum OwnedCompactRecentBlockhash {
+    #[wincode(tag = 0)]
     Id(i32),
+    #[wincode(tag = 1)]
     Nonce([u8; 32]),
 }
 
@@ -61,7 +63,9 @@ pub struct OwnedCompactV0Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
 pub enum OwnedCompactMessage {
+    #[wincode(tag = 0)]
     Legacy(OwnedCompactLegacyMessage),
+    #[wincode(tag = 1)]
     V0(OwnedCompactV0Message),
 }
 

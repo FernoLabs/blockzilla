@@ -24,6 +24,8 @@ jobs:
         run: rustup component add rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check Archive V2 wire boundary
+        run: bash scripts/check-archive-v2-wire-boundary.sh
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
       - name: Check opt-in Blockzilla contributor binaries

@@ -23,5 +23,5 @@ time = { version = "0.3.44", features = ["formatting"] }
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wincode = "0.5.4"
+wincode = "=0.5.5"
 zstd = "0.13.3"

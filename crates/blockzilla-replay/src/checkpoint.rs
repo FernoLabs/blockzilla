@@ -20,6 +20,7 @@ use blockzilla_format::{
     WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
     WincodeArchiveV2GenesisRentParams,
 };
+use blockzilla_read_sdk::ArchiveV2WireProfile;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -44,10 +45,13 @@ use crate::{
 
 const CHECKPOINT_MAGIC: [u8; 8] = *b"BZLRCP01";
 const LEGACY_CHECKPOINT_VERSION: u16 = 1;
-const CHECKPOINT_VERSION: u16 = 2;
+const PRE_WIRE_PROFILE_CHECKPOINT_VERSION: u16 = 2;
+const CHECKPOINT_VERSION: u16 = 3;
 const CHECKPOINT_FLAGS: u16 = 0;
 const HEADER_LEN: usize = 8 + 2 + 2 + 8;
 const CHECKSUM_LEN: usize = 32;
+#[cfg(test)]
+const CHECKPOINT_DESCRIPTOR_LEN: usize = 3 * 32 + 1;
 const CHECKSUM_DOMAIN: &[u8] = b"blockzilla/launch-frozen-checkpoint/v1\0";
 // This is a state-transition compatibility revision, not a marketing label.
 // Bump it whenever a runtime change can alter replayed account bytes, counters,
@@ -126,6 +130,9 @@ pub(crate) struct LaunchCheckpointDescriptor {
     pub(crate) runtime_profile_sha256: [u8; 32],
     pub(crate) generation_digest: [u8; 32],
     pub(crate) registry_sha256: [u8; 32],
+    /// `None` exists only while a version-1/2 checkpoint waits for its exact
+    /// source generation to be reopened. Version 3 always writes `Some`.
+    pub(crate) wire_profile: Option<ArchiveV2WireProfile>,
 }
 
 /// Exact restart position in one descriptor-bound Compact generation.
@@ -147,6 +154,9 @@ pub(crate) struct CompactCheckpointCursor {
 pub(crate) struct RecordedCompactCheckpoint {
     pub(crate) generation_digest: [u8; 32],
     pub(crate) registry_sha256: [u8; 32],
+    /// Old checkpoint formats remain unbound only until the next exact source
+    /// validation. Fresh replay and version-3 checkpoints always use `Some`.
+    pub(crate) wire_profile: Option<ArchiveV2WireProfile>,
     pub(crate) cursor: CompactCheckpointCursor,
 }
 
@@ -167,6 +177,8 @@ pub(crate) enum LaunchCheckpointError {
     RetainedInstructionMutations,
     #[error("checkpoint capture requires a successfully replayed Compact index row")]
     MissingCompactCursor,
+    #[error("checkpoint capture requires an explicit Archive V2 wire profile")]
+    MissingWireProfile,
     #[error("checkpoint cursor last slot is {found}, frozen Bank is {expected}")]
     CursorLastSlotMismatch { expected: u64, found: u64 },
     #[error("invalid checkpoint cursor: {0}")]
@@ -225,10 +237,14 @@ impl LaunchReplay {
         let recorded = self
             .compact_checkpoint
             .ok_or(LaunchCheckpointError::MissingCompactCursor)?;
+        let wire_profile = recorded
+            .wire_profile
+            .ok_or(LaunchCheckpointError::MissingWireProfile)?;
         let descriptor = LaunchCheckpointDescriptor {
             runtime_profile_sha256: runtime_profile_sha256(),
             generation_digest: recorded.generation_digest,
             registry_sha256: recorded.registry_sha256,
+            wire_profile: Some(wire_profile),
         };
         let cursor = recorded.cursor;
         validate_live_replay(self, cursor)?;
@@ -250,40 +266,40 @@ impl LaunchReplay {
     ) -> Result<(Self, FrozenCheckpointMetadata), LaunchCheckpointError> {
         let (version, payload) = validated_payload(bytes)?;
         let mut decoder = Decoder::new(payload);
-        let descriptor = decode_descriptor(&mut decoder)?;
-        let migrating_previous_v2 = version == CHECKPOINT_VERSION
+        let descriptor = decode_descriptor_for_version(&mut decoder, version)?;
+        let migrating_previous_v2 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v2_sha256();
-        let migrating_previous_v3 = version == CHECKPOINT_VERSION
+        let migrating_previous_v3 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v3_sha256();
-        let migrating_previous_v4 = version == CHECKPOINT_VERSION
+        let migrating_previous_v4 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v4_sha256();
-        let migrating_previous_v5 = version == CHECKPOINT_VERSION
+        let migrating_previous_v5 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v5_sha256();
-        let migrating_previous_v6 = version == CHECKPOINT_VERSION
+        let migrating_previous_v6 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v6_sha256();
-        let migrating_previous_v7 = version == CHECKPOINT_VERSION
+        let migrating_previous_v7 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v7_sha256();
-        let migrating_previous_v8 = version == CHECKPOINT_VERSION
+        let migrating_previous_v8 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v8_sha256();
-        let migrating_previous_v9 = version == CHECKPOINT_VERSION
+        let migrating_previous_v9 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v9_sha256();
-        let migrating_previous_v10 = version == CHECKPOINT_VERSION
+        let migrating_previous_v10 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v10_sha256();
-        let migrating_previous_v11 = version == CHECKPOINT_VERSION
+        let migrating_previous_v11 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v11_sha256();
-        let migrating_previous_v12 = version == CHECKPOINT_VERSION
+        let migrating_previous_v12 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v12_sha256();
-        let migrating_previous_v13 = version == CHECKPOINT_VERSION
+        let migrating_previous_v13 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v13_sha256();
-        let migrating_previous_v14 = version == CHECKPOINT_VERSION
+        let migrating_previous_v14 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v14_sha256();
-        let migrating_previous_v15 = version == CHECKPOINT_VERSION
+        let migrating_previous_v15 = version == PRE_WIRE_PROFILE_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == previous_runtime_profile_v15_sha256();
         let migrating_legacy_v1 = version == LEGACY_CHECKPOINT_VERSION
             && descriptor.runtime_profile_sha256 == legacy_runtime_profile_v1_sha256();
         let accepted_runtime_profile = match version {
             LEGACY_CHECKPOINT_VERSION => migrating_legacy_v1,
-            CHECKPOINT_VERSION => {
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION => {
                 descriptor.runtime_profile_sha256 == runtime_profile_sha256()
                     || migrating_previous_v2
                     || migrating_previous_v3
@@ -299,6 +315,10 @@ impl LaunchReplay {
                     || migrating_previous_v13
                     || migrating_previous_v14
                     || migrating_previous_v15
+            }
+            CHECKPOINT_VERSION => {
+                descriptor.wire_profile.is_some()
+                    && descriptor.runtime_profile_sha256 == runtime_profile_sha256()
             }
             _ => unreachable!("validated_payload rejects unsupported versions"),
         };
@@ -426,6 +446,7 @@ impl LaunchReplay {
         replay.compact_checkpoint = Some(RecordedCompactCheckpoint {
             generation_digest: descriptor.generation_digest,
             registry_sha256: descriptor.registry_sha256,
+            wire_profile: descriptor.wire_profile,
             cursor,
         });
         replay.pending_resume_descriptor = Some(descriptor);
@@ -463,8 +484,15 @@ impl LaunchReplay {
                 "source generation is not sealed",
             ));
         }
+        // Versions 1 and 2 did not serialize a profile. They can be bound only
+        // here, after reopening the exact digest and registry. The SDK then
+        // selects the immutable profile from the manifest marker or its pinned
+        // blocks/index/provenance catalog. Version 3 checks the explicit value.
         if descriptor.generation_digest != context.binding.generation_digest
             || descriptor.registry_sha256 != context.binding.registry_sha256
+            || descriptor
+                .wire_profile
+                .is_some_and(|profile| profile != context.binding.wire_profile)
         {
             return Err(LaunchCheckpointError::InvalidCompletedGeneration(
                 "source generation binding differs from the checkpoint descriptor",
@@ -508,6 +536,7 @@ impl LaunchReplay {
             != Some(RecordedCompactCheckpoint {
                 generation_digest: descriptor.generation_digest,
                 registry_sha256: descriptor.registry_sha256,
+                wire_profile: descriptor.wire_profile,
                 cursor,
             })
         {
@@ -515,6 +544,12 @@ impl LaunchReplay {
                 "restored internal generation record is inconsistent",
             ));
         }
+        self.compact_checkpoint = Some(RecordedCompactCheckpoint {
+            generation_digest: descriptor.generation_digest,
+            registry_sha256: descriptor.registry_sha256,
+            wire_profile: Some(context.binding.wire_profile),
+            cursor,
+        });
         self.pending_resume_descriptor = None;
         self.pending_resume_cursor = None;
         Ok(())
@@ -627,15 +662,50 @@ fn encode_descriptor(encoder: &mut Encoder, value: LaunchCheckpointDescriptor) {
     encoder.bytes(&value.runtime_profile_sha256);
     encoder.bytes(&value.generation_digest);
     encoder.bytes(&value.registry_sha256);
+    encoder.u8(
+        match value
+            .wire_profile
+            .expect("version-3 checkpoint descriptors always bind a wire profile")
+        {
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => 0,
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => 1,
+        },
+    );
 }
 
+#[cfg(test)]
 fn decode_descriptor(
     decoder: &mut Decoder<'_>,
 ) -> Result<LaunchCheckpointDescriptor, LaunchCheckpointError> {
+    decode_descriptor_for_version(decoder, CHECKPOINT_VERSION)
+}
+
+fn decode_descriptor_for_version(
+    decoder: &mut Decoder<'_>,
+    version: u16,
+) -> Result<LaunchCheckpointDescriptor, LaunchCheckpointError> {
+    let runtime_profile_sha256 = decoder.array()?;
+    let generation_digest = decoder.array()?;
+    let registry_sha256 = decoder.array()?;
+    let wire_profile = if version == CHECKPOINT_VERSION {
+        Some(match decoder.u8()? {
+            0 => ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            1 => ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+            _ => {
+                return Err(LaunchCheckpointError::InvalidField {
+                    field: "Archive V2 wire profile",
+                    reason: "unknown profile tag",
+                });
+            }
+        })
+    } else {
+        None
+    };
     Ok(LaunchCheckpointDescriptor {
-        runtime_profile_sha256: decoder.array()?,
-        generation_digest: decoder.array()?,
-        registry_sha256: decoder.array()?,
+        runtime_profile_sha256,
+        generation_digest,
+        registry_sha256,
+        wire_profile,
     })
 }
 
@@ -1556,7 +1626,10 @@ fn validated_payload(bytes: &[u8]) -> Result<(u16, &[u8]), LaunchCheckpointError
         return Err(LaunchCheckpointError::InvalidMagic);
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-    if version != LEGACY_CHECKPOINT_VERSION && version != CHECKPOINT_VERSION {
+    if version != LEGACY_CHECKPOINT_VERSION
+        && version != PRE_WIRE_PROFILE_CHECKPOINT_VERSION
+        && version != CHECKPOINT_VERSION
+    {
         return Err(LaunchCheckpointError::UnsupportedVersion { found: version });
     }
     let flags = u16::from_le_bytes(bytes[10..12].try_into().unwrap());
@@ -1823,7 +1896,7 @@ mod tests {
         CompactGenerationContext, CompactSlotProbe, LaunchInstructionMutation, LaunchReplayError,
         LaunchReplayOutcome,
     };
-    use blockzilla_read_sdk::GenerationBinding;
+    use blockzilla_read_sdk::{ArchiveV2WireProfile, GenerationBinding};
 
     fn launch_genesis() -> CompactGenesisProbe {
         CompactGenesisProbe {
@@ -1936,6 +2009,7 @@ mod tests {
             binding: GenerationBinding {
                 generation_digest: [seed; 32],
                 registry_sha256: [seed.wrapping_add(1); 32],
+                wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             },
             genesis: Some(launch_genesis()),
         }
@@ -1957,6 +2031,25 @@ mod tests {
         replay
             .process_compact_row(context, row_number, next_slot, slot, &mut |_| {})
             .unwrap();
+    }
+
+    fn bind_pre_profile_checkpoint(
+        mut replay: LaunchReplay,
+        context: &CompactGenerationContext,
+    ) -> LaunchReplay {
+        assert_eq!(
+            replay.compact_checkpoint.unwrap().wire_profile,
+            None,
+            "only version-1/2 checkpoint fixtures use this migration helper",
+        );
+        replay
+            .attach_completed_checkpoint_generation(context)
+            .unwrap();
+        assert_eq!(
+            replay.compact_checkpoint.unwrap().wire_profile,
+            Some(context.binding.wire_profile),
+        );
+        replay
     }
 
     fn reference_checkpoint(payload: &[u8]) -> Vec<u8> {
@@ -2034,11 +2127,21 @@ mod tests {
         bytes[payload_end..].copy_from_slice(&checksum);
     }
 
-    fn convert_v2_to_v1(mut bytes: Vec<u8>, runtime_profile_sha256: [u8; 32]) -> Vec<u8> {
+    fn convert_v3_to_v2(mut bytes: Vec<u8>) -> Vec<u8> {
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
             CHECKPOINT_VERSION
         );
+        bytes.remove(HEADER_LEN + 3 * 32);
+        bytes[8..10].copy_from_slice(&PRE_WIRE_PROFILE_CHECKPOINT_VERSION.to_le_bytes());
+        let payload_len = u64::try_from(bytes.len() - HEADER_LEN - CHECKSUM_LEN).unwrap();
+        bytes[12..20].copy_from_slice(&payload_len.to_le_bytes());
+        reseal(&mut bytes);
+        bytes
+    }
+
+    fn convert_v2_to_v1(bytes: Vec<u8>, runtime_profile_sha256: [u8; 32]) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         let payload_end = bytes.len() - CHECKSUM_LEN;
         let counter_start = payload_end - std::mem::size_of::<u64>();
         bytes.truncate(counter_start);
@@ -2055,140 +2158,154 @@ mod tests {
         convert_v2_to_v1(bytes, legacy_runtime_profile_v1_sha256())
     }
 
-    fn convert_v2_to_previous_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v2_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_pda_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_pda_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v3_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_outcome_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_outcome_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v4_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_vote_signature_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_vote_signature_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v5_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_stake_authorize_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_stake_authorize_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v6_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_balance_projection_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_balance_projection_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v7_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_system_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_system_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v8_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_prefunded_create_recovery_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_prefunded_create_recovery_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v9_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_vote_commission_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_vote_commission_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v10_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_loader_balance_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_loader_balance_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v11_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_vote_switch_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_vote_switch_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v12_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_stake_merge_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_stake_merge_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v13_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_transient_balance_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_transient_balance_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v14_sha256());
         reseal(&mut bytes);
         bytes
     }
 
-    fn convert_v2_to_previous_immutable_cpi_runtime(mut bytes: Vec<u8>) -> Vec<u8> {
+    fn convert_v2_to_previous_immutable_cpi_runtime(bytes: Vec<u8>) -> Vec<u8> {
+        let mut bytes = convert_v3_to_v2(bytes);
         assert_eq!(
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
-            CHECKPOINT_VERSION
+            PRE_WIRE_PROFILE_CHECKPOINT_VERSION
         );
         bytes[HEADER_LEN..HEADER_LEN + 32].copy_from_slice(&previous_runtime_profile_v15_sha256());
         reseal(&mut bytes);
@@ -2234,11 +2351,7 @@ mod tests {
             &slot(0, BPF_ACTIVATION_SLOT, 0, [3; 32], [2; 32]),
         );
 
-        let terminal_epoch = terminal_slot / MAINNET_SLOTS_PER_EPOCH;
-        let mut terminal_generation = context(1, terminal_slot, 103);
-        terminal_generation.epoch = terminal_epoch;
-        terminal_generation.slots_per_epoch = MAINNET_SLOTS_PER_EPOCH;
-        terminal_generation.genesis = None;
+        let terminal_generation = mainnet_terminal_generation(terminal_slot);
         process_compact(
             &mut replay,
             &terminal_generation,
@@ -2247,6 +2360,15 @@ mod tests {
             &slot(0, terminal_slot, BPF_ACTIVATION_SLOT, [4; 32], [3; 32]),
         );
         replay.encode_frozen_checkpoint().unwrap()
+    }
+
+    fn mainnet_terminal_generation(terminal_slot: u64) -> CompactGenerationContext {
+        const MAINNET_SLOTS_PER_EPOCH: u64 = 432_000;
+        let mut generation = context(1, terminal_slot, 103);
+        generation.epoch = terminal_slot / MAINNET_SLOTS_PER_EPOCH;
+        generation.slots_per_epoch = MAINNET_SLOTS_PER_EPOCH;
+        generation.genesis = None;
+        generation
     }
 
     fn process_empty_through_epoch(replay: &mut LaunchReplay, final_epoch: u64) {
@@ -2337,6 +2459,10 @@ mod tests {
         assert_eq!(metadata.cursor, split_cursor);
         assert_eq!(metadata.descriptor.generation_digest, [4; 32]);
         assert_eq!(
+            metadata.descriptor.wire_profile,
+            Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+        );
+        assert_eq!(
             restored.bank_sysvars.recent_blockhash_order, split.bank_sysvars.recent_blockhash_order,
             "checkpoint decode must reconstruct the unencoded newest-first cache",
         );
@@ -2356,7 +2482,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_appends_and_roundtrips_the_bpf_loader_mutation_counter() {
+    fn v3_appends_profile_and_roundtrips_the_bpf_loader_mutation_counter() {
         let genesis_hash = launch_genesis().genesis_hash;
         let generation = context(1, 0, 4);
         let mut replay = replay();
@@ -2375,6 +2501,7 @@ mod tests {
             u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
             CHECKPOINT_VERSION
         );
+        assert_eq!(bytes[HEADER_LEN + 3 * 32], 0);
         let payload_end = bytes.len() - CHECKSUM_LEN;
         assert_eq!(
             u64::from_le_bytes(bytes[payload_end - 8..payload_end].try_into().unwrap()),
@@ -2383,10 +2510,47 @@ mod tests {
         let (restored, metadata) = LaunchReplay::restore_frozen_checkpoint(&bytes, false).unwrap();
         assert_eq!(restored.outcome.bpf_loader_mutations, 7);
         assert_eq!(
+            metadata.descriptor.wire_profile,
+            Some(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1),
+        );
+        assert_eq!(
             metadata.descriptor.runtime_profile_sha256,
             runtime_profile_sha256()
         );
         assert!(restored.bpf_program_cache.is_empty());
+    }
+
+    #[test]
+    fn v3_wire_profile_tags_are_stable() {
+        let genesis_hash = launch_genesis().genesis_hash;
+        for (profile, tag, seed) in [
+            (
+                ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+                0,
+                40,
+            ),
+            (
+                ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+                1,
+                41,
+            ),
+        ] {
+            let mut generation = context(1, 0, seed);
+            generation.binding.wire_profile = profile;
+            let mut replay = replay();
+            process_compact(
+                &mut replay,
+                &generation,
+                0,
+                None,
+                &slot(0, 0, 0, [2; 32], genesis_hash),
+            );
+
+            let bytes = replay.encode_frozen_checkpoint().unwrap();
+            assert_eq!(bytes[HEADER_LEN + 3 * 32], tag);
+            let (_, metadata) = LaunchReplay::restore_frozen_checkpoint(&bytes, false).unwrap();
+            assert_eq!(metadata.descriptor.wire_profile, Some(profile));
+        }
     }
 
     #[test]
@@ -2536,6 +2700,8 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v13_sha256()
         );
+        let restored =
+            bind_pre_profile_checkpoint(restored, &mainnet_terminal_generation(EPOCH_65_LAST_SLOT));
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -2560,7 +2726,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_pre_activation_v1_checkpoint_migrates_and_reencodes_as_v2() {
+    fn exhausted_pre_activation_v1_checkpoint_migrates_and_reencodes_as_v3() {
         assert_eq!(
             legacy_runtime_profile_v1_sha256(),
             [
@@ -2590,6 +2756,7 @@ mod tests {
             legacy_runtime_profile_v1_sha256()
         );
 
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             u16::from_le_bytes(migrated[8..10].try_into().unwrap()),
@@ -2622,10 +2789,16 @@ mod tests {
 
         let (restored, metadata) =
             LaunchReplay::restore_frozen_checkpoint(&previous, false).unwrap();
+        assert_eq!(metadata.descriptor.wire_profile, None);
+        assert_eq!(
+            restored.encode_frozen_checkpoint(),
+            Err(LaunchCheckpointError::MissingWireProfile),
+        );
         assert_eq!(
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v2_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -2681,6 +2854,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v3_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -2736,6 +2910,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v4_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -2792,6 +2967,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v5_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -2892,6 +3068,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v6_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -2949,6 +3126,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v7_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -3005,6 +3183,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v8_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -3061,6 +3240,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v9_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -3118,6 +3298,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v10_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -3175,6 +3356,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v11_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -3231,6 +3413,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v12_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -3286,6 +3469,7 @@ mod tests {
             metadata.descriptor.runtime_profile_sha256,
             previous_runtime_profile_v13_sha256()
         );
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert_eq!(
             &migrated[HEADER_LEN..HEADER_LEN + 32],
@@ -3414,6 +3598,7 @@ mod tests {
             restored.outcome.account_state.canonical_hash()
         );
 
+        let restored = bind_pre_profile_checkpoint(restored, &generation);
         let migrated = restored.encode_frozen_checkpoint().unwrap();
         assert!(migrated.len() < previous.len());
         assert_eq!(
@@ -3697,6 +3882,37 @@ mod tests {
     }
 
     #[test]
+    fn completed_generation_attachment_rejects_a_different_wire_profile_for_same_bytes() {
+        let genesis_hash = launch_genesis().genesis_hash;
+        let source = context(1, 0, 4);
+        let mut replay = replay();
+        process_compact(
+            &mut replay,
+            &source,
+            0,
+            None,
+            &slot(0, 0, 0, [2; 32], genesis_hash),
+        );
+        let mut bytes = replay.encode_frozen_checkpoint().unwrap();
+        assert_eq!(bytes[HEADER_LEN + 3 * 32], 0);
+        bytes[HEADER_LEN + 3 * 32] = 1;
+        reseal(&mut bytes);
+
+        let (mut restored, metadata) =
+            LaunchReplay::restore_frozen_checkpoint(&bytes, false).unwrap();
+        assert_eq!(
+            metadata.descriptor.wire_profile,
+            Some(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1),
+        );
+        assert!(matches!(
+            restored.attach_completed_checkpoint_generation(&source),
+            Err(LaunchCheckpointError::InvalidCompletedGeneration(message))
+                if message.contains("binding differs")
+        ));
+        assert!(restored.pending_resume_cursor.is_some());
+    }
+
+    #[test]
     fn capture_rejects_unfrozen_phase_and_non_compact_execution() {
         let unfrozen = replay();
         assert_eq!(
@@ -3771,9 +3987,9 @@ mod tests {
             &slot(0, 0, 0, [2; 32], genesis_hash),
         );
         let mut bytes = replay.encode_frozen_checkpoint().unwrap();
-        // Payload begins with 96 descriptor bytes and 25 cursor bytes for a
+        // Payload begins with a 97-byte descriptor and 25 cursor bytes for a
         // `None` next slot. The following byte is the Vote program id.
-        let vote_program_offset = HEADER_LEN + 96 + 8 + 8 + 8 + 1;
+        let vote_program_offset = HEADER_LEN + CHECKPOINT_DESCRIPTOR_LEN + 8 + 8 + 8 + 1;
         bytes[vote_program_offset] ^= 1;
         reseal(&mut bytes);
         assert!(matches!(
@@ -3800,7 +4016,7 @@ mod tests {
         let bytes = replay.encode_frozen_checkpoint().unwrap();
 
         // descriptor + `None` cursor + four program ids + replay timing.
-        let stake_count_offset = HEADER_LEN + 96 + 25 + 4 * 32 + 8 + 16 + 8;
+        let stake_count_offset = HEADER_LEN + CHECKPOINT_DESCRIPTOR_LEN + 25 + 4 * 32 + 8 + 16 + 8;
         let mut tiny = bytes[..stake_count_offset + 8].to_vec();
         tiny[stake_count_offset..stake_count_offset + 8]
             .copy_from_slice(&(MAX_STAKE_HISTORY_ENTRIES + 1).to_le_bytes());

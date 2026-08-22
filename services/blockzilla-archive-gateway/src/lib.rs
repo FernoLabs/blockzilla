@@ -17,12 +17,15 @@ use axum::{
 };
 use blockzilla_read_sdk::manifest::{
     GENERATION_MANIFEST_FILE, GENERATION_MANIFEST_SCHEMA_VERSION, GENESIS_BIN_FILE, GenerationFile,
-    GenerationManifest, REGISTRY_FILE, REQUIRED_GENERATION_FILES, SIGNATURES_FILE,
-    compute_generation_digest,
+    GenerationManifest, REGISTRY_FILE, REGISTRY_INDEX_FILE, REQUIRED_GENERATION_FILES,
+    SIGNATURES_FILE, compute_generation_digest,
 };
 use blockzilla_read_sdk::{
-    HashVerification, OpenOptions as ReaderOpenOptions, RangeSource, SourceError, SourceResult,
-    validate_generation_structure,
+    ARCHIVE_V2_PUBLICATION_LOCK_FILE, ArchiveReader, ArchiveV2WireProfile, HashVerification,
+    OpenOptions as ReaderOpenOptions, PinnedLocalRangeSource, RangeSource, SourceError,
+    SourceResult, UnprovenWireProfileDecision, acquire_archive_v2_publication_lock,
+    audit_full_generation_wire_profile, validate_manifest_bound_pinned_local_registry_index,
+    wire_profile_marker, wire_profile_marker_bytes,
 };
 use bytes::Bytes;
 use serde::Serialize;
@@ -48,6 +51,7 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 const MAX_SLOTS_PER_EPOCH: u64 = 1_000_000;
+const MAX_PROFILE_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Catalog {
@@ -129,6 +133,7 @@ pub struct GenerateManifestOptions {
     pub epoch: u64,
     pub generation_id: String,
     pub slots_per_epoch: u64,
+    pub wire_profile: ArchiveV2WireProfile,
     pub additional_files: Vec<String>,
     pub output: Option<PathBuf>,
 }
@@ -161,9 +166,9 @@ struct ErrorResponse {
 
 /// Load and structurally validate every explicitly configured generation.
 ///
-/// File hashes are deliberately not recomputed here. Hashing belongs to the
-/// offline publication command; startup only validates the manifest digest,
-/// file identities/sizes, and cheap structural completion markers.
+/// Startup hashes every manifest object, checks the canonical marker bytes,
+/// and runs the bounded full-generation message-profile audit. The configured
+/// path must still be an immutable snapshot for the server lifetime.
 pub fn load_catalog(archive_dirs: &[PathBuf]) -> Result<Catalog> {
     ensure!(
         !archive_dirs.is_empty(),
@@ -215,10 +220,17 @@ fn load_generation(configured_root: &Path) -> Result<ArchiveGeneration> {
             .required_file(required)
             .map_err(|error| anyhow!(error))?;
     }
+    manifest
+        .required_file(REGISTRY_INDEX_FILE)
+        .map_err(|error| anyhow!(error))?;
     ensure!(
         manifest.file(GENERATION_MANIFEST_FILE).is_none(),
         "manifest must not publish itself"
     );
+    let wire_profile =
+        ArchiveV2WireProfile::for_published_manifest(&manifest).map_err(|error| anyhow!(error))?;
+    let profile_marker = wire_profile_marker(wire_profile);
+    let expected_marker_bytes = wire_profile_marker_bytes(wire_profile);
 
     let mut files = BTreeMap::new();
     for entry in &manifest.files {
@@ -235,6 +247,15 @@ fn load_generation(configured_root: &Path) -> Result<ArchiveGeneration> {
             metadata.len(),
             entry.size
         );
+        if entry.name == profile_marker.name {
+            let (actual, _) = read_regular_file_bounded(&path, entry.size)
+                .with_context(|| format!("read wire-profile marker {}", entry.name))?;
+            ensure!(
+                actual == expected_marker_bytes,
+                "wire-profile marker {} does not contain its canonical bytes",
+                entry.name
+            );
+        }
         files.insert(
             entry.name.clone(),
             PublishedFile {
@@ -246,6 +267,14 @@ fn load_generation(configured_root: &Path) -> Result<ArchiveGeneration> {
 
     validate_required_archive(&root, &manifest, &files)
         .with_context(|| format!("validate Archive V2 generation epoch {}", manifest.epoch))?;
+    for (name, published) in &files {
+        let file = open_regular_nofollow(&root.join(name))
+            .with_context(|| format!("reopen validated file {name}"))?;
+        ensure!(
+            FileIdentity::from_metadata(&file.metadata()?) == published.identity,
+            "published file {name} changed during startup validation"
+        );
+    }
 
     Ok(ArchiveGeneration {
         root,
@@ -266,6 +295,10 @@ fn validate_required_archive(
             "required file {required} was not opened"
         );
     }
+    ensure!(
+        files.contains_key(REGISTRY_INDEX_FILE),
+        "required canonical registry index {REGISTRY_INDEX_FILE} was not opened"
+    );
     let registry_size = manifest
         .required_file(REGISTRY_FILE)
         .map_err(|e| anyhow!(e))?
@@ -279,72 +312,85 @@ fn validate_required_archive(
 }
 
 fn validate_archive_structure(root: &Path, manifest: &GenerationManifest) -> Result<()> {
-    let source = NoFollowRangeSource {
-        root: root.to_owned(),
+    let source = PinnedLocalRangeSource::new(root);
+    let options = ReaderOpenOptions {
+        hash_verification: HashVerification::AllFiles,
+        ..ReaderOpenOptions::default()
+    };
+    let reader = ArchiveReader::open_candidate(source.clone(), manifest.clone(), options)
+        .map_err(|error| anyhow!(error))?;
+    validate_manifest_bound_pinned_local_registry_index(&source, manifest)
+        .map_err(|error| anyhow!(error))?;
+    ensure!(
+        !reader.index().rows.is_empty(),
+        "hot-block index has no rows"
+    );
+    require_canonical_unproven_profile(&reader)?;
+    source.verify_unchanged().map_err(|error| anyhow!(error))?;
+    Ok(())
+}
+
+fn validate_archive_structure_with_staged_marker(
+    files: PinnedLocalRangeSource,
+    manifest: &GenerationManifest,
+    marker_name: &str,
+    marker_bytes: &'static [u8],
+) -> Result<()> {
+    validate_manifest_bound_pinned_local_registry_index(&files, manifest)
+        .map_err(|error| anyhow!(error))?;
+    let source = StagedMarkerRangeSource {
+        files,
+        marker_name,
+        marker_bytes,
     };
     let options = ReaderOpenOptions {
         hash_verification: HashVerification::SizesOnly,
         ..ReaderOpenOptions::default()
     };
-    let validated = validate_generation_structure(&source, manifest, &options)
+    let reader = ArchiveReader::open_candidate(source, manifest.clone(), options)
         .map_err(|error| anyhow!(error))?;
     ensure!(
-        !validated.index.rows.is_empty(),
+        !reader.index().rows.is_empty(),
         "hot-block index has no rows"
     );
+    require_canonical_unproven_profile(&reader)
+}
+
+fn require_canonical_unproven_profile<S: RangeSource>(reader: &ArchiveReader<S>) -> Result<()> {
+    let decision = audit_full_generation_wire_profile(reader, MAX_PROFILE_MESSAGE_BYTES)
+        .map_err(|error| anyhow!(error))?
+        .require_unproven_authority()
+        .map_err(|error| anyhow!(error))?;
+    if decision == UnprovenWireProfileDecision::AllSemanticallyEquivalent {
+        ensure!(
+            reader.wire_profile() == ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            "an all-equivalent generation must use the canonical post-fallback wire profile"
+        );
+    }
     Ok(())
 }
 
-#[derive(Clone)]
-struct NoFollowRangeSource {
-    root: PathBuf,
+/// During offline validation, expose the SDK-owned marker bytes from memory.
+/// The durable marker is published only after every archive check succeeds.
+struct StagedMarkerRangeSource<'a, S> {
+    files: S,
+    marker_name: &'a str,
+    marker_bytes: &'static [u8],
 }
 
-impl NoFollowRangeSource {
-    fn path(&self, object: &str) -> SourceResult<PathBuf> {
-        if !is_safe_object_name(object) {
-            return Err(SourceError::InvalidName(object.to_owned()));
-        }
-        Ok(self.root.join(object))
-    }
-
-    fn open(&self, object: &str) -> SourceResult<File> {
-        let path = self.path(object)?;
-        open_regular_nofollow_io(&path).map_err(|source| SourceError::Io {
-            object: object.to_owned(),
-            source,
-        })
-    }
-}
-
-impl RangeSource for NoFollowRangeSource {
+impl<S: RangeSource> RangeSource for StagedMarkerRangeSource<'_, S> {
     fn size(&self, object: &str) -> SourceResult<Option<u64>> {
-        let file = match self.open(object) {
-            Ok(file) => file,
-            Err(SourceError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        file.metadata()
-            .map(|metadata| Some(metadata.len()))
-            .map_err(|source| SourceError::Io {
-                object: object.to_owned(),
-                source,
-            })
+        if object == self.marker_name {
+            return Ok(Some(self.marker_bytes.len() as u64));
+        }
+        self.files.size(object)
     }
 
     fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
-        let mut file = self.open(object)?;
-        let size = file
-            .metadata()
-            .map_err(|source| SourceError::Io {
-                object: object.to_owned(),
-                source,
-            })?
-            .len();
+        if object != self.marker_name {
+            return self.files.read_range(object, offset, length);
+        }
+        let size = self.marker_bytes.len() as u64;
         let length_u64 = u64::try_from(length).map_err(|_| SourceError::OutOfBounds {
             object: object.to_owned(),
             offset,
@@ -353,26 +399,21 @@ impl RangeSource for NoFollowRangeSource {
         })?;
         let end = offset
             .checked_add(length_u64)
-            .filter(|end| *end <= size)
             .ok_or_else(|| SourceError::OutOfBounds {
                 object: object.to_owned(),
                 offset,
                 length,
                 size,
             })?;
-        debug_assert!(end <= size);
-        file.seek(StdSeekFrom::Start(offset))
-            .map_err(|source| SourceError::Io {
+        if end > size {
+            return Err(SourceError::OutOfBounds {
                 object: object.to_owned(),
-                source,
-            })?;
-        let mut bytes = vec![0u8; length];
-        file.read_exact(&mut bytes)
-            .map_err(|source| SourceError::Io {
-                object: object.to_owned(),
-                source,
-            })?;
-        Ok(bytes)
+                offset,
+                length,
+                size,
+            });
+        }
+        Ok(self.marker_bytes[offset as usize..end as usize].to_vec())
     }
 }
 
@@ -792,7 +833,12 @@ pub fn generate_manifest(options: GenerateManifestOptions) -> Result<PathBuf> {
         output.display()
     );
 
+    let profile_marker = wire_profile_marker(options.wire_profile);
+    let marker_bytes = wire_profile_marker_bytes(options.wire_profile);
+    let pinned_source = PinnedLocalRangeSource::new(&root);
+
     let mut names = BTreeSet::from(REQUIRED_GENERATION_FILES.map(str::to_owned));
+    names.insert(REGISTRY_INDEX_FILE.to_owned());
     let signatures_path = root.join(SIGNATURES_FILE);
     if signatures_path.try_exists()? {
         names.insert(SIGNATURES_FILE.to_owned());
@@ -806,8 +852,19 @@ pub fn generate_manifest(options: GenerateManifestOptions) -> Result<PathBuf> {
             is_safe_object_name(&name),
             "additional file must be one safe non-control path component: {name:?}"
         );
+        ensure!(
+            !is_wire_profile_marker_name(&name),
+            "Archive V2 wire-profile marker names are reserved; select the profile with --wire-profile instead: {name:?}"
+        );
+        ensure!(
+            name != ARCHIVE_V2_PUBLICATION_LOCK_FILE,
+            "manifest publication lock name is reserved: {name:?}"
+        );
         names.insert(name);
     }
+    reject_conflicting_wire_profile_marker(&root, options.wire_profile)?;
+    validate_selected_wire_profile_marker_if_present(&root, options.wire_profile)?;
+    names.insert(profile_marker.name.clone());
     ensure!(
         !names.contains(GENERATION_MANIFEST_FILE),
         "manifest cannot publish itself"
@@ -816,9 +873,16 @@ pub fn generate_manifest(options: GenerateManifestOptions) -> Result<PathBuf> {
     let mut files = Vec::with_capacity(names.len());
     let mut hashed_identities = BTreeMap::new();
     for name in names {
-        let path = root.join(&name);
-        let file =
-            open_regular_nofollow(&path).with_context(|| format!("open manifest input {name}"))?;
+        if name == profile_marker.name {
+            // The marker binding is SDK-owned and validated from memory below.
+            // Do not publish it until all archive inputs pass validation.
+            files.push(profile_marker.clone());
+            continue;
+        }
+        let file = pinned_source
+            .open_file(&name)
+            .map_err(|error| anyhow!(error))
+            .with_context(|| format!("open manifest input {name}"))?;
         let metadata = file.metadata()?;
         let identity = FileIdentity::from_metadata(&metadata);
         let sha256 = hash_file(file).with_context(|| format!("hash {name}"))?;
@@ -843,28 +907,200 @@ pub fn generate_manifest(options: GenerateManifestOptions) -> Result<PathBuf> {
     manifest.generation_digest =
         compute_generation_digest(&manifest).map_err(|error| anyhow!(error))?;
     manifest.validate().map_err(|error| anyhow!(error))?;
-    validate_archive_structure(&root, &manifest)?;
+    validate_archive_structure_with_staged_marker(
+        pinned_source.clone(),
+        &manifest,
+        &profile_marker.name,
+        marker_bytes,
+    )?;
 
-    // The manifest is the publication boundary. Reopen every input after all
-    // validation and reject any replacement, resize, or mtime change that
-    // happened after its bytes were hashed.
-    for (name, expected) in &hashed_identities {
-        let file = open_regular_nofollow(&root.join(name))
-            .with_context(|| format!("reopen hashed input {name}"))?;
+    // Serialize before the publication lock. No durable profile decision has
+    // been created yet.
+    let mut bytes = serde_json::to_vec_pretty(&manifest)?;
+    bytes.push(b'\n');
+
+    // Serialize marker selection and manifest publication across concurrent
+    // producers. The lock file is not a published generation object.
+    let publish_lock =
+        acquire_archive_v2_publication_lock(&root).map_err(|error| anyhow!(error))?;
+
+    pinned_source
+        .verify_unchanged()
+        .map_err(|error| anyhow!(error))
+        .context("archive inputs changed during manifest validation")?;
+
+    // The manifest is the publication boundary. Under the publication lock,
+    // hash every pinned input again and then reopen its path. This proves that
+    // the bytes and identity still match the candidate manifest immediately
+    // before its control files become visible.
+    for entry in &manifest.files {
+        if entry.name == profile_marker.name {
+            continue;
+        }
+        let pinned = pinned_source
+            .open_file(&entry.name)
+            .map_err(|error| anyhow!(error))
+            .with_context(|| format!("reopen pinned manifest input {}", entry.name))?;
+        let actual_sha256 = hash_file(pinned).with_context(|| format!("rehash {}", entry.name))?;
+        ensure!(
+            actual_sha256 == entry.sha256,
+            "manifest input {} changed after validation",
+            entry.name
+        );
+        let expected = hashed_identities
+            .get(&entry.name)
+            .context("hashed input identity is missing")?;
+        let file = open_regular_nofollow(&root.join(&entry.name))
+            .with_context(|| format!("reopen hashed input {}", entry.name))?;
         let actual = FileIdentity::from_metadata(&file.metadata()?);
         ensure!(
             &actual == expected,
-            "manifest input {name} changed after it was hashed"
+            "manifest input {} changed after it was hashed",
+            entry.name
         );
     }
-
-    let mut bytes = serde_json::to_vec_pretty(&manifest)?;
-    bytes.push(b'\n');
-    publish_manifest_noclobber(&output, &bytes)?;
+    publish_lock.recheck().map_err(|error| anyhow!(error))?;
+    publish_wire_profile_marker(&root, options.wire_profile)?;
+    publish_lock.recheck().map_err(|error| anyhow!(error))?;
+    ensure!(
+        publish_immutable_object_noclobber(&output, &bytes)?,
+        "refusing to overwrite {}",
+        output.display()
+    );
     Ok(output)
 }
 
+fn is_wire_profile_marker_name(name: &str) -> bool {
+    [
+        ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+        ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+    ]
+    .into_iter()
+    .any(|profile| wire_profile_marker(profile).name == name)
+}
+
+fn reject_conflicting_wire_profile_marker(
+    root: &Path,
+    selected_profile: ArchiveV2WireProfile,
+) -> Result<()> {
+    for profile in [
+        ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+        ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+    ] {
+        if profile == selected_profile {
+            continue;
+        }
+        let marker = wire_profile_marker(profile);
+        let path = root.join(&marker.name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => bail!(
+                "conflicting Archive V2 wire-profile marker {} exists; selected {}",
+                marker.name,
+                selected_profile
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("stat wire-profile marker {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_selected_wire_profile_marker_if_present(
+    root: &Path,
+    profile: ArchiveV2WireProfile,
+) -> Result<Option<FileIdentity>> {
+    let marker = wire_profile_marker(profile);
+    let bytes = wire_profile_marker_bytes(profile);
+    let path = root.join(&marker.name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("stat wire-profile marker {}", path.display()));
+        }
+    }
+    let (actual, identity) = read_regular_file_bounded(&path, marker.size)
+        .with_context(|| format!("read wire-profile marker {}", marker.name))?;
+    ensure!(
+        actual == bytes && identity.len == marker.size,
+        "refusing to replace conflicting Archive V2 wire-profile marker {}",
+        marker.name
+    );
+    let reopened = FileIdentity::from_metadata(&open_regular_nofollow(&path)?.metadata()?);
+    ensure!(
+        reopened == identity,
+        "Archive V2 wire-profile marker {} changed while it was checked",
+        marker.name
+    );
+    Ok(Some(identity))
+}
+
+fn publish_wire_profile_marker(root: &Path, profile: ArchiveV2WireProfile) -> Result<()> {
+    let marker = wire_profile_marker(profile);
+    let marker_bytes = wire_profile_marker_bytes(profile);
+    let marker_path = root.join(&marker.name);
+
+    reject_conflicting_wire_profile_marker(root, profile)?;
+    if !publish_immutable_object_noclobber(&marker_path, marker_bytes)? {
+        // Accept a same-profile race only when the winner published the exact
+        // SDK object. An opposite marker is checked again below.
+        validate_selected_wire_profile_marker_if_present(root, profile)?
+            .context("selected wire-profile marker disappeared after publication race")?;
+    }
+    reject_conflicting_wire_profile_marker(root, profile)?;
+    validate_selected_wire_profile_marker_if_present(root, profile)?
+        .context("selected wire-profile marker is absent after publication")?;
+    Ok(())
+}
+
+/// Atomically publish `bytes` without replacing `output`.
+///
+/// Returns `true` when this call created `output` and `false` when another
+/// publisher won the race. The caller must validate an existing object before
+/// it accepts the `false` result.
+fn publish_immutable_object_noclobber(output: &Path, bytes: &[u8]) -> Result<bool> {
+    let parent = output.parent().context("immutable object has no parent")?;
+    let basename = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("immutable object basename is not UTF-8")?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = parent.join(format!(
+        ".{basename}.tmp.{}.{}",
+        std::process::id(),
+        timestamp
+    ));
+    let result = (|| -> Result<bool> {
+        let mut file = FsOpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .with_context(|| format!("create {}", temp.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        match std::fs::hard_link(&temp, output) {
+            Ok(()) => {
+                File::open(parent)?.sync_all()?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("publish {} without replacing it", output.display())),
+        }
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result
+}
+
 fn hash_file(mut file: File) -> Result<String> {
+    file.seek(StdSeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 8 << 20];
     loop {
@@ -875,34 +1111,6 @@ fn hash_file(mut file: File) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-fn publish_manifest_noclobber(output: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = output.parent().context("manifest output has no parent")?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp = parent.join(format!(
-        ".{GENERATION_MANIFEST_FILE}.tmp.{}.{}",
-        std::process::id(),
-        timestamp
-    ));
-    let result = (|| -> Result<()> {
-        let mut file = FsOpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .with_context(|| format!("create {}", temp.display()))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::hard_link(&temp, output)
-            .with_context(|| format!("publish {} without replacing it", output.display()))?;
-        File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    let _ = std::fs::remove_file(&temp);
-    result
 }
 
 fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<(Vec<u8>, FileIdentity)> {
@@ -960,9 +1168,13 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use blockzilla_format::{
-        ArchiveV2HotMetaRecord, WINCODE_ARCHIVE_V2_FLAG_LEB128,
+        ArchiveV2HotBlockBlob, ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow,
+        ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
+        ArchiveV2HotMessagePayload, ArchiveV2HotMetaRecord, ArchiveV2HotTxRow,
+        ArchiveV2HotV0Message, ArchiveV2SystemInstructionData, CompactMessageHeader, CompactPubkey,
+        KeyIndex, OwnedCompactRecentBlockhash, WINCODE_ARCHIVE_V2_FLAG_LEB128,
         WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WincodeArchiveV2Footer, WincodeArchiveV2Header,
-        WincodeLeb128FramedWriter,
+        WincodeLeb128FramedWriter, wincode_leb128_config, write_archive_v2_hot_block_index,
     };
     use blockzilla_read_sdk::manifest::{BLOCK_INDEX_FILE, BLOCKS_FILE, META_FILE};
     use http_body_util::BodyExt;
@@ -973,8 +1185,6 @@ mod tests {
     const EPOCH: u64 = 1;
     const SLOTS_PER_EPOCH: u64 = 10;
     const SLOT: u64 = 10;
-    const BLOCK_BYTES: &[u8] = b"frame-data";
-
     fn write_archive_files(
         root: &Path,
         index_flags: u32,
@@ -982,29 +1192,117 @@ mod tests {
         footer_transactions: u64,
         signature_bytes: usize,
     ) {
-        fs::write(root.join(BLOCKS_FILE), BLOCK_BYTES).unwrap();
-        fs::write(root.join(REGISTRY_FILE), [7u8; 32]).unwrap();
-        fs::write(root.join(SIGNATURES_FILE), vec![9u8; signature_bytes]).unwrap();
+        write_archive_files_with_instruction(
+            root,
+            index_flags,
+            first_signature_ordinal,
+            footer_transactions,
+            signature_bytes,
+            None,
+        );
+    }
 
-        let mut index = Vec::new();
-        index.extend_from_slice(b"BZV2HIX1");
-        index.extend_from_slice(&1u16.to_le_bytes());
-        index.extend_from_slice(&0u16.to_le_bytes());
-        index.extend_from_slice(&1u64.to_le_bytes());
-        index.extend_from_slice(&(BLOCK_BYTES.len() as u64).to_le_bytes());
-        index.extend_from_slice(&3i32.to_le_bytes());
-        index.extend_from_slice(&index_flags.to_le_bytes());
-        index.extend_from_slice(&0u32.to_le_bytes());
-        index.extend_from_slice(&SLOT.to_le_bytes());
-        index.extend_from_slice(&0u64.to_le_bytes());
-        index.extend_from_slice(&(BLOCK_BYTES.len() as u32).to_le_bytes());
-        index.extend_from_slice(&100u32.to_le_bytes());
-        index.extend_from_slice(&1u32.to_le_bytes());
-        index.extend_from_slice(&0u64.to_le_bytes());
-        index.extend_from_slice(&first_signature_ordinal.to_le_bytes());
-        index.extend_from_slice(&1u32.to_le_bytes());
-        assert_eq!(index.len(), 36 + 52);
-        fs::write(root.join(BLOCK_INDEX_FILE), index).unwrap();
+    fn write_archive_files_with_instruction(
+        root: &Path,
+        index_flags: u32,
+        first_signature_ordinal: u64,
+        footer_transactions: u64,
+        signature_bytes: usize,
+        instruction_data: Option<ArchiveV2HotInstructionData>,
+    ) {
+        let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: instruction_data
+                .map(|data| {
+                    vec![ArchiveV2HotInstruction {
+                        program_id_index: 1,
+                        accounts: Vec::new(),
+                        data,
+                    }]
+                })
+                .unwrap_or_default(),
+        });
+        write_archive_files_with_message(
+            root,
+            index_flags,
+            first_signature_ordinal,
+            footer_transactions,
+            signature_bytes,
+            message,
+            0,
+            1,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_archive_files_with_message(
+        root: &Path,
+        index_flags: u32,
+        first_signature_ordinal: u64,
+        footer_transactions: u64,
+        signature_bytes: usize,
+        message: ArchiveV2HotMessagePayload,
+        row_flags: u32,
+        row_signature_count: u8,
+    ) {
+        let message = wincode::config::serialize(&message, wincode_leb128_config()).unwrap();
+        let block = ArchiveV2HotBlockBlob {
+            header: ArchiveV2HotBlockHeader {
+                slot: SLOT,
+                parent_slot: SLOT - 1,
+                blockhash_id: 1,
+                previous_blockhash_id: 0,
+                block_time: Some(1_700_000_000),
+                block_height: Some(1),
+                rewards: None,
+            },
+            tx_count: 1,
+            tx_rows: vec![ArchiveV2HotTxRow {
+                tx_index: 0,
+                flags: row_flags,
+                message_offset: 0,
+                message_len: message.len() as u32,
+                metadata_offset: 0,
+                metadata_len: 0,
+                signature_count: row_signature_count,
+                reserved: [0; 3],
+            }],
+            message_bytes: message,
+            metadata_bytes: Vec::new(),
+        };
+        let uncompressed = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let compressed = zstd::bulk::compress(&uncompressed, 3).unwrap();
+        fs::write(root.join(BLOCKS_FILE), &compressed).unwrap();
+        let registry_keys = [[7u8; 32], [0u8; 32]];
+        fs::write(root.join(REGISTRY_FILE), registry_keys.concat()).unwrap();
+        KeyIndex::build(registry_keys.to_vec())
+            .write(&root.join(REGISTRY_INDEX_FILE))
+            .unwrap();
+        fs::write(root.join(SIGNATURES_FILE), vec![9u8; signature_bytes]).unwrap();
+        write_archive_v2_hot_block_index(
+            &root.join(BLOCK_INDEX_FILE),
+            compressed.len() as u64,
+            3,
+            index_flags,
+            &[ArchiveV2HotBlockIndexRow {
+                block_id: 0,
+                slot: SLOT,
+                compressed_offset: 0,
+                compressed_len: compressed.len() as u32,
+                uncompressed_len: uncompressed.len() as u32,
+                tx_count: 1,
+                first_tx_ordinal: 0,
+                first_signature_ordinal,
+                signature_count: u32::from(row_signature_count),
+            }],
+        )
+        .unwrap();
 
         let meta_file = File::create(root.join(META_FILE)).unwrap();
         let mut meta = WincodeLeb128FramedWriter::new(meta_file);
@@ -1029,8 +1327,18 @@ mod tests {
             epoch: EPOCH,
             generation_id: "epoch-1-test".to_owned(),
             slots_per_epoch: SLOTS_PER_EPOCH,
+            wire_profile: ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
             additional_files: Vec::new(),
             output: None,
+        }
+    }
+
+    fn assert_no_wire_profile_marker(root: &Path) {
+        for profile in [
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+        ] {
+            assert!(!root.join(wire_profile_marker(profile).name).exists());
         }
     }
 
@@ -1094,6 +1402,25 @@ mod tests {
         for name in REQUIRED_GENERATION_FILES {
             assert!(manifest.file(name).is_some(), "{name}");
         }
+        assert!(manifest.file(REGISTRY_INDEX_FILE).is_some());
+        let marker = wire_profile_marker(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1);
+        assert_eq!(manifest.file(&marker.name), Some(&marker));
+        assert_eq!(
+            fs::read(directory.path().join(&marker.name)).unwrap(),
+            wire_profile_marker_bytes(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1)
+        );
+        assert_eq!(
+            ArchiveV2WireProfile::for_published_manifest(&manifest).unwrap(),
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+        );
+        let published_digest = manifest.generation_digest.clone();
+        let mut without_marker = manifest.clone();
+        without_marker.files.retain(|file| file.name != marker.name);
+        without_marker.generation_digest = "0".repeat(64);
+        assert_ne!(
+            compute_generation_digest(&without_marker).unwrap(),
+            published_digest
+        );
         assert_eq!(manifest.file(SIGNATURES_FILE).unwrap().size, 64);
         assert_eq!(
             load_catalog(&[directory.path().to_owned()]).unwrap().len(),
@@ -1108,22 +1435,308 @@ mod tests {
     }
 
     #[test]
+    fn generator_rejects_noncanonical_pre_profile_for_all_equivalent_generation() {
+        let directory = tempdir().unwrap();
+        write_archive_files(directory.path(), 0, 0, 1, 64);
+        let mut generate = options(directory.path());
+        generate.wire_profile = ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1;
+        let error = generate_manifest(generate).unwrap_err().to_string();
+        assert!(error.contains("canonical post-fallback"), "{error}");
+        assert_no_wire_profile_marker(directory.path());
+        assert!(!directory.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn generator_rejects_duplicate_registry_keys() {
+        let directory = tempdir().unwrap();
+        write_archive_files(directory.path(), 0, 0, 1, 64);
+        let indexed_keys = [[71u8; 32], [72u8; 32]];
+        let duplicate_registry = [indexed_keys[0], indexed_keys[0]];
+        fs::write(
+            directory.path().join(REGISTRY_FILE),
+            duplicate_registry.concat(),
+        )
+        .unwrap();
+        KeyIndex::build(indexed_keys.to_vec())
+            .write(&directory.path().join(REGISTRY_INDEX_FILE))
+            .unwrap();
+
+        let error = generate_manifest(options(directory.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate key"), "{error}");
+        assert_no_wire_profile_marker(directory.path());
+        assert!(!directory.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn generator_requires_the_canonical_registry_index() {
+        let directory = tempdir().unwrap();
+        write_archive_files(directory.path(), 0, 0, 1, 64);
+        fs::remove_file(directory.path().join(REGISTRY_INDEX_FILE)).unwrap();
+
+        let error = generate_manifest(options(directory.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(REGISTRY_INDEX_FILE), "{error}");
+        assert_no_wire_profile_marker(directory.path());
+        assert!(!directory.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn loader_rejects_manifest_bound_duplicate_registry_keys() {
+        let directory = tempdir().unwrap();
+        write_archive_files(directory.path(), 0, 0, 1, 64);
+        let indexed_keys = [[81u8; 32], [82u8; 32]];
+        fs::write(directory.path().join(REGISTRY_FILE), indexed_keys.concat()).unwrap();
+        KeyIndex::build(indexed_keys.to_vec())
+            .write(&directory.path().join(REGISTRY_INDEX_FILE))
+            .unwrap();
+        generate_manifest(options(directory.path())).unwrap();
+
+        let duplicate_registry = [indexed_keys[0], indexed_keys[0]];
+        let registry_bytes = duplicate_registry.concat();
+        fs::write(directory.path().join(REGISTRY_FILE), &registry_bytes).unwrap();
+        let manifest_path = directory.path().join(GENERATION_MANIFEST_FILE);
+        let mut manifest = GenerationManifest::parse(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest
+            .files
+            .iter_mut()
+            .find(|file| file.name == REGISTRY_FILE)
+            .unwrap()
+            .sha256 = hex::encode(Sha256::digest(&registry_bytes));
+        manifest.generation_digest = compute_generation_digest(&manifest).unwrap();
+        let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        manifest_bytes.push(b'\n');
+        fs::write(&manifest_path, manifest_bytes).unwrap();
+
+        let error = load_catalog(&[directory.path().to_owned()])
+            .err()
+            .expect("duplicate registry must be rejected");
+        let error = format!("{error:#}");
+        assert!(error.contains("duplicate key"), "{error}");
+    }
+
+    #[test]
+    fn loader_rejects_same_size_corrupt_wire_profile_marker() {
+        let directory = valid_fixture();
+        let marker = wire_profile_marker(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1);
+        let path = directory.path().join(marker.name);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        fs::write(path, bytes).unwrap();
+
+        let error = load_catalog(&[directory.path().to_owned()])
+            .err()
+            .expect("corrupt marker must be rejected")
+            .to_string();
+        assert!(error.contains("canonical bytes"), "{error}");
+    }
+
+    #[test]
+    fn loader_rejects_same_size_payload_change() {
+        let directory = valid_fixture();
+        let path = directory.path().join(BLOCKS_FILE);
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.last_mut().unwrap();
+        *last ^= 1;
+        fs::write(path, bytes).unwrap();
+
+        assert!(load_catalog(&[directory.path().to_owned()]).is_err());
+    }
+
+    #[test]
+    fn generator_uses_program_id_semantics_to_resolve_dual_parse() {
+        let directory = tempdir().unwrap();
+        write_archive_files_with_instruction(
+            directory.path(),
+            0,
+            0,
+            1,
+            64,
+            Some(ArchiveV2HotInstructionData::UnknownSystem(Vec::new())),
+        );
+        generate_manifest(options(directory.path())).unwrap();
+        let manifest = GenerationManifest::parse(
+            &fs::read(directory.path().join(GENERATION_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            ArchiveV2WireProfile::for_published_manifest(&manifest).unwrap(),
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+        );
+    }
+
+    #[test]
+    fn generator_rejects_a_selected_profile_that_cannot_decode() {
+        let directory = tempdir().unwrap();
+        write_archive_files_with_instruction(
+            directory.path(),
+            0,
+            0,
+            1,
+            64,
+            Some(ArchiveV2HotInstructionData::System(
+                ArchiveV2SystemInstructionData::Transfer { lamports: 4 },
+            )),
+        );
+        let mut generate = options(directory.path());
+        generate.wire_profile = ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1;
+        let error = generate_manifest(generate).unwrap_err().to_string();
+        assert!(
+            error.contains("selected Archive V2 wire profile"),
+            "{error}"
+        );
+        assert_no_wire_profile_marker(directory.path());
+        assert!(!directory.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn generator_rejects_message_version_that_disagrees_with_row() {
+        let directory = tempdir().unwrap();
+        let message = ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![CompactPubkey::Id(1)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: Vec::new(),
+            address_table_lookups: Vec::new(),
+        });
+        write_archive_files_with_message(directory.path(), 0, 0, 1, 64, message, 0, 1);
+
+        let error = generate_manifest(options(directory.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("message version disagrees"), "{error}");
+        assert_no_wire_profile_marker(directory.path());
+        assert!(!directory.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn generator_rejects_signature_count_that_disagrees_with_message() {
+        let directory = tempdir().unwrap();
+        let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![CompactPubkey::Id(1)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: Vec::new(),
+        });
+        write_archive_files_with_message(directory.path(), 0, 0, 1, 128, message, 0, 2);
+
+        let error = generate_manifest(options(directory.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires 1 signatures"), "{error}");
+        assert_no_wire_profile_marker(directory.path());
+        assert!(!directory.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn generator_does_not_replace_a_conflicting_selected_marker() {
+        let directory = tempdir().unwrap();
+        write_archive_files(directory.path(), 0, 0, 1, 64);
+        let marker = wire_profile_marker(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1);
+        let conflicting_bytes = b"operator-owned-conflict";
+        fs::write(directory.path().join(&marker.name), conflicting_bytes).unwrap();
+
+        let error = generate_manifest(options(directory.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing to replace conflicting"), "{error}");
+        assert_eq!(
+            fs::read(directory.path().join(&marker.name)).unwrap(),
+            conflicting_bytes
+        );
+        assert!(!directory.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn generator_rejects_an_opposite_or_caller_supplied_profile_marker() {
+        let opposite = tempdir().unwrap();
+        write_archive_files(opposite.path(), 0, 0, 1, 64);
+        let pre_marker =
+            wire_profile_marker(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1);
+        fs::write(
+            opposite.path().join(&pre_marker.name),
+            wire_profile_marker_bytes(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1),
+        )
+        .unwrap();
+        let error = generate_manifest(options(opposite.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("conflicting Archive V2 wire-profile marker"),
+            "{error}"
+        );
+        assert!(!opposite.path().join(GENERATION_MANIFEST_FILE).exists());
+
+        let supplied = tempdir().unwrap();
+        write_archive_files(supplied.path(), 0, 0, 1, 64);
+        let mut generate = options(supplied.path());
+        generate.additional_files = vec![pre_marker.name];
+        let error = generate_manifest(generate).unwrap_err().to_string();
+        assert!(error.contains("marker names are reserved"), "{error}");
+        assert!(!supplied.path().join(GENERATION_MANIFEST_FILE).exists());
+    }
+
+    #[test]
     fn generator_rejects_corrupt_index_and_footer_totals() {
         let bad_flags = tempdir().unwrap();
         write_archive_files(bad_flags.path(), 1, 0, 1, 64);
         assert!(generate_manifest(options(bad_flags.path())).is_err());
+        assert_no_wire_profile_marker(bad_flags.path());
 
         let bad_ordinal = tempdir().unwrap();
         write_archive_files(bad_ordinal.path(), 0, 1, 1, 64);
         assert!(generate_manifest(options(bad_ordinal.path())).is_err());
+        assert_no_wire_profile_marker(bad_ordinal.path());
 
         let bad_footer = tempdir().unwrap();
         write_archive_files(bad_footer.path(), 0, 0, 2, 64);
         assert!(generate_manifest(options(bad_footer.path())).is_err());
+        assert_no_wire_profile_marker(bad_footer.path());
 
         let bad_signatures = tempdir().unwrap();
         write_archive_files(bad_signatures.path(), 0, 0, 1, 128);
         assert!(generate_manifest(options(bad_signatures.path())).is_err());
+        assert_no_wire_profile_marker(bad_signatures.path());
+    }
+
+    #[test]
+    fn concurrent_opposite_profile_producers_publish_only_one_profile() {
+        let directory = tempdir().unwrap();
+        write_archive_files(directory.path(), 0, 0, 1, 64);
+        let root = directory.path().to_owned();
+        let mut pre = options(&root);
+        pre.wire_profile = ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1;
+        let post = options(&root);
+        let pre_thread = std::thread::spawn(move || generate_manifest(pre));
+        let post_thread = std::thread::spawn(move || generate_manifest(post));
+        let pre_result = pre_thread.join().unwrap();
+        let post_result = post_thread.join().unwrap();
+        assert_ne!(pre_result.is_ok(), post_result.is_ok());
+
+        let pre_marker = root
+            .join(wire_profile_marker(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1).name);
+        let post_marker = root.join(
+            wire_profile_marker(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1).name,
+        );
+        assert_ne!(pre_marker.exists(), post_marker.exists());
+        let manifest =
+            GenerationManifest::parse(&fs::read(root.join(GENERATION_MANIFEST_FILE)).unwrap())
+                .unwrap();
+        let selected = ArchiveV2WireProfile::for_published_manifest(&manifest).unwrap();
+        assert_eq!(
+            selected == ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+            pre_marker.exists()
+        );
     }
 
     #[test]
@@ -1172,17 +1785,10 @@ mod tests {
         assert!(load_catalog(&[directory.path().to_owned()]).is_err());
     }
 
-    #[test]
-    fn startup_does_not_rehash_archive_payloads() {
-        let directory = valid_fixture();
-        fs::write(directory.path().join(BLOCKS_FILE), b"other-data").unwrap();
-        assert_eq!(BLOCK_BYTES.len(), b"other-data".len());
-        assert!(load_catalog(&[directory.path().to_owned()]).is_ok());
-    }
-
     #[tokio::test]
     async fn bearer_auth_range_head_and_private_cache_contract() {
         let directory = valid_fixture();
+        let block_bytes = fs::read(directory.path().join(BLOCKS_FILE)).unwrap();
         fs::write(directory.path().join("not-published"), b"no").unwrap();
         let app = app(directory.path(), Some("secret"), 64);
 
@@ -1253,7 +1859,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(range.headers()[CONTENT_RANGE], "bytes 2-5/10");
+        assert_eq!(
+            range.headers()[CONTENT_RANGE],
+            format!("bytes 2-5/{}", block_bytes.len())
+        );
         assert_eq!(
             range.headers()[CACHE_CONTROL],
             "private, max-age=31536000, immutable"
@@ -1261,7 +1870,7 @@ mod tests {
         let etag = range.headers()[ETAG].clone();
         assert_eq!(
             range.into_body().collect().await.unwrap().to_bytes(),
-            &BLOCK_BYTES[2..=5]
+            &block_bytes[2..=5]
         );
 
         let head = app
@@ -1277,7 +1886,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(head.status(), StatusCode::OK);
-        assert_eq!(head.headers()[CONTENT_LENGTH], "10");
+        assert_eq!(
+            head.headers()[CONTENT_LENGTH],
+            block_bytes.len().to_string()
+        );
         assert!(
             head.into_body()
                 .collect()
@@ -1317,6 +1929,9 @@ mod tests {
     #[tokio::test]
     async fn manifest_is_private_and_oversized_or_multi_ranges_are_rejected() {
         let directory = valid_fixture();
+        let block_size = fs::metadata(directory.path().join(BLOCKS_FILE))
+            .unwrap()
+            .len();
         let app = app(directory.path(), None, 4);
 
         let manifest = app
@@ -1347,7 +1962,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-            assert_eq!(response.headers()[CONTENT_RANGE], "bytes */10");
+            assert_eq!(
+                response.headers()[CONTENT_RANGE],
+                format!("bytes */{block_size}")
+            );
         }
     }
 }

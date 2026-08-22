@@ -37,6 +37,11 @@ pub enum StreamEvent {
 /// Overview is deliberately concise; `/epochs` retains and renders the
 /// complete non-finished queue.
 pub const OVERVIEW_EPOCH_LIMIT: usize = 12;
+/// Firewatch can cover hundreds of completed archive epochs. Overview keeps
+/// the full counters but renders only an operator-focused sample.
+pub const OVERVIEW_FIREWATCH_LIMIT: usize = 16;
+const OVERVIEW_FIREWATCH_QUEUED_SAMPLE: usize = 8;
+const OVERVIEW_FIREWATCH_ACCEPTED_SAMPLE: usize = 4;
 
 /// Controls how much of a real snapshot reaches the rendered dashboard.
 /// This binary has no authentication of its own -- see
@@ -161,6 +166,105 @@ pub struct ProcessEntry {
     pub write_mib_per_sec: Option<f64>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FirewatchIndexEntry {
+    pub epoch: u32,
+    pub state: String,
+    pub phase: String,
+    pub pct: u8,
+    pub blocks: u64,
+    pub eta_secs: Option<u64>,
+    pub wallet_count: Option<u64>,
+    pub relation_count: Option<u64>,
+    pub parity_status: Option<String>,
+    pub rss_bytes: Option<u64>,
+    pub read_mib_per_sec: Option<f64>,
+    pub write_mib_per_sec: Option<f64>,
+}
+
+impl FirewatchIndexEntry {
+    pub fn counts_label(&self) -> String {
+        match (self.wallet_count, self.relation_count) {
+            (Some(wallets), Some(relations)) => format!(
+                "{} wallets \u{b7} {} relations",
+                format_thousands(wallets),
+                format_thousands(relations)
+            ),
+            (Some(wallets), None) => format!("{} wallets", format_thousands(wallets)),
+            (None, Some(relations)) => {
+                format!("{} relations", format_thousands(relations))
+            }
+            (None, None) => "not reported".to_string(),
+        }
+    }
+
+    pub fn parity_label(&self) -> String {
+        self.parity_status
+            .as_deref()
+            .map(snapshot::humanize)
+            .unwrap_or_else(|| "not checked".to_string())
+    }
+
+    pub fn progress_label(&self) -> String {
+        let eta = self
+            .eta_secs
+            .map(|secs| format!(" \u{b7} ETA {}", format_duration(secs)))
+            .unwrap_or_default();
+        let progress_is_unavailable = self.pct == 0
+            && self.blocks == 0
+            && (self.rss_bytes.is_some()
+                || self.read_mib_per_sec.is_some()
+                || self.write_mib_per_sec.is_some());
+
+        if progress_is_unavailable {
+            match snapshot::normalize(&self.state).as_str() {
+                "paused" => return format!("Paused{eta}"),
+                "running" => {
+                    let activity = match (self.read_mib_per_sec, self.write_mib_per_sec) {
+                        (Some(read), Some(write)) => {
+                            format!("{read:.1}/{write:.1} MiB/s R/W")
+                        }
+                        (Some(read), None) => format!("{read:.1} MiB/s read"),
+                        (None, Some(write)) => format!("{write:.1} MiB/s write"),
+                        (None, None) => self
+                            .rss_bytes
+                            .map(|rss| format!("{} RSS", format_bytes(rss)))
+                            .unwrap_or_default(),
+                    };
+                    return format!("Working \u{b7} {activity}{eta}");
+                }
+                _ => {}
+            }
+        }
+
+        format!(
+            "{}% \u{b7} {} blocks{eta}",
+            self.pct,
+            format_thousands(self.blocks)
+        )
+    }
+
+    pub fn resources_label(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(rss) = self.rss_bytes {
+            parts.push(format!("{} RSS", format_bytes(rss)));
+        }
+        match (self.read_mib_per_sec, self.write_mib_per_sec) {
+            (Some(read), Some(write)) => {
+                parts.push(format!("{read:.1}/{write:.1} MiB/s R/W"));
+            }
+            (Some(read), None) => parts.push(format!("{read:.1} MiB/s read")),
+            (None, Some(write)) => parts.push(format!("{write:.1} MiB/s write")),
+            (None, None) => {}
+        }
+        if parts.is_empty() {
+            "not reported".to_string()
+        } else {
+            parts.join(" \u{b7} ")
+        }
+    }
+}
+
 /// A lane the scheduler has auto-paused, with why -- the "reasoning" panel
 /// only lists paused lanes, not every lane, since a running lane needs no
 /// explanation.
@@ -182,6 +286,7 @@ pub struct SchedulerReasoning {
     pub admission_blocked_reason: Option<String>,
     pub legacy_compact_admission_blocked_reason: Option<String>,
     pub finalizer_admission_blocked_reason: Option<String>,
+    pub registry_reprocess_admission_blocked_reason: Option<String>,
     pub legacy_compact_last_action: Option<String>,
     pub legacy_compact_last_action_unix_secs: Option<u64>,
     pub legacy_compact_tuning_last_decision: Option<String>,
@@ -193,6 +298,7 @@ impl SchedulerReasoning {
         self.admission_blocked_reason.is_none()
             && self.legacy_compact_admission_blocked_reason.is_none()
             && self.finalizer_admission_blocked_reason.is_none()
+            && self.registry_reprocess_admission_blocked_reason.is_none()
             && self.legacy_compact_last_action.is_none()
             && self.legacy_compact_tuning_last_decision.is_none()
             && self.paused_lanes.is_empty()
@@ -223,6 +329,26 @@ pub struct DashboardState {
     pub poh_migration_bytes_done: u64,
     pub poh_migration_bytes_total: u64,
     pub poh_migration_eta_secs: Option<u64>,
+    pub registry_reprocess_epochs_done: u32,
+    pub registry_reprocess_epochs_total: u32,
+    pub registry_reprocess_capacity_configured: u32,
+    pub registry_reprocess_running: u32,
+    pub firewatch_enabled: bool,
+    pub firewatch_capacity_configured: u32,
+    pub firewatch_running: u32,
+    pub firewatch_epochs_total: u32,
+    pub firewatch_epochs_accepted: u32,
+    pub firewatch_epochs_queued: u32,
+    /// Optional coverage fields distinguish an older migration-only
+    /// controller from the all-archive controller without changing schema 1.
+    pub firewatch_archive_epochs_total: Option<u32>,
+    pub firewatch_epochs_eligible: Option<u32>,
+    pub firewatch_epochs_blocked_migration: Option<u32>,
+    pub firewatch_epochs_blocked_wire_profile: Option<u32>,
+    pub firewatch_queue_eta_secs: Option<u64>,
+    pub firewatch_next_epoch: Option<u32>,
+    pub firewatch_admission_blocked_reason: Option<String>,
+    pub firewatch_indexes: Vec<FirewatchIndexEntry>,
     pub live_capture_active: bool,
     pub epochs: Vec<EpochTask>,
     /// The currently-running `poh_signature_count_migration` lanes, one row
@@ -233,6 +359,10 @@ pub struct DashboardState {
     /// was the aggregate byte total and an undifferentiated `tasks_active`
     /// count, with no way to see which epochs were actually in flight.
     pub poh_migration_lanes: Vec<EpochTask>,
+    /// Active first-seen to usage-sorted registry workers. Their epochs are
+    /// archive-complete, so they need a separate list for the same reason as
+    /// the PoH migration workers above.
+    pub registry_reprocess_lanes: Vec<EpochTask>,
     pub tasks_active: u32,
     pub tasks_paused: u32,
     pub error_count: u32,
@@ -267,9 +397,28 @@ impl Default for DashboardState {
             poh_migration_bytes_done: 0,
             poh_migration_bytes_total: 0,
             poh_migration_eta_secs: None,
+            registry_reprocess_epochs_done: 0,
+            registry_reprocess_epochs_total: 0,
+            registry_reprocess_capacity_configured: 0,
+            registry_reprocess_running: 0,
+            firewatch_enabled: false,
+            firewatch_capacity_configured: 0,
+            firewatch_running: 0,
+            firewatch_epochs_total: 0,
+            firewatch_epochs_accepted: 0,
+            firewatch_epochs_queued: 0,
+            firewatch_archive_epochs_total: None,
+            firewatch_epochs_eligible: None,
+            firewatch_epochs_blocked_migration: None,
+            firewatch_epochs_blocked_wire_profile: None,
+            firewatch_queue_eta_secs: None,
+            firewatch_next_epoch: None,
+            firewatch_admission_blocked_reason: None,
+            firewatch_indexes: Vec::new(),
             live_capture_active: false,
             epochs: Vec::new(),
             poh_migration_lanes: Vec::new(),
+            registry_reprocess_lanes: Vec::new(),
             tasks_active: 0,
             tasks_paused: 0,
             error_count: 0,
@@ -326,6 +475,167 @@ impl DashboardState {
         match self.poh_migration_eta_secs {
             Some(secs) => format_duration(secs),
             None => "unknown".to_string(),
+        }
+    }
+
+    pub fn registry_reprocess_pct(&self) -> f32 {
+        100.0 * self.registry_reprocess_epochs_done as f32
+            / self.registry_reprocess_epochs_total.max(1) as f32
+    }
+
+    pub fn registry_reprocess_epoch_label(&self) -> String {
+        let remaining = self
+            .registry_reprocess_epochs_total
+            .saturating_sub(self.registry_reprocess_epochs_done);
+        format!(
+            "{} done \u{b7} {} remaining",
+            format_thousands(self.registry_reprocess_epochs_done as u64),
+            format_thousands(remaining as u64)
+        )
+    }
+
+    pub fn registry_reprocess_worker_label(&self) -> String {
+        format!(
+            "{} active \u{b7} capacity {}",
+            format_thousands(self.registry_reprocess_running as u64),
+            format_thousands(self.registry_reprocess_capacity_configured as u64)
+        )
+    }
+
+    pub fn firewatch_summary_label(&self) -> String {
+        let failed = self
+            .firewatch_indexes
+            .iter()
+            .filter(|entry| snapshot::normalize(&entry.state) == "failed")
+            .count();
+        let profile_audit = self
+            .firewatch_epochs_blocked_wire_profile
+            .unwrap_or_else(|| {
+                self.firewatch_indexes
+                    .iter()
+                    .filter(|entry| snapshot::normalize(&entry.state) == "profile_audit_required")
+                    .count() as u32
+            });
+        format!(
+            "{} accepted \u{b7} {} active \u{b7} {} queued \u{b7} {} failed \u{b7} {} awaiting profile audit",
+            format_thousands(self.firewatch_epochs_accepted as u64),
+            format_thousands(self.firewatch_running as u64),
+            format_thousands(self.firewatch_epochs_queued as u64),
+            format_thousands(failed as u64),
+            format_thousands(profile_audit as u64)
+        )
+    }
+
+    pub fn firewatch_coverage_label(&self) -> String {
+        let archive_total = self
+            .firewatch_archive_epochs_total
+            .unwrap_or(self.archive_complete);
+        let blocked_migration = self.firewatch_epochs_blocked_migration.unwrap_or_else(|| {
+            self.registry_reprocess_epochs_total
+                .saturating_sub(self.registry_reprocess_epochs_done)
+        });
+        match (
+            self.firewatch_epochs_eligible,
+            self.firewatch_epochs_blocked_wire_profile,
+        ) {
+            (Some(eligible), Some(blocked_wire_profile)) => format!(
+                "{} archive-complete \u{b7} {} indexable \u{b7} {} blocked by registry migration \u{b7} {} awaiting profile audit",
+                format_thousands(archive_total as u64),
+                format_thousands(eligible as u64),
+                format_thousands(blocked_migration as u64),
+                format_thousands(blocked_wire_profile as u64)
+            ),
+            (Some(eligible), None) => format!(
+                "{} archive-complete \u{b7} {} indexable \u{b7} {} blocked by registry migration",
+                format_thousands(archive_total as u64),
+                format_thousands(eligible as u64),
+                format_thousands(blocked_migration as u64)
+            ),
+            (None, _) => format!(
+                "{} archive-complete \u{b7} {} tracked by this controller \u{b7} {} blocked by registry migration",
+                format_thousands(archive_total as u64),
+                format_thousands(self.firewatch_epochs_total as u64),
+                format_thousands(blocked_migration as u64)
+            ),
+        }
+    }
+
+    pub fn firewatch_next_label(&self) -> String {
+        self.firewatch_next_epoch
+            .map(|epoch| format!("Epoch {epoch}"))
+            .unwrap_or_else(|| "None queued".to_string())
+    }
+
+    pub fn firewatch_capacity_label(&self) -> String {
+        format!(
+            "{} of {} workers active",
+            format_thousands(self.firewatch_running as u64),
+            format_thousands(self.firewatch_capacity_configured as u64)
+        )
+    }
+
+    pub fn firewatch_queue_eta_label(&self) -> String {
+        self.firewatch_queue_eta_secs
+            .map(format_duration)
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    pub fn overview_firewatch_indexes(&self) -> Vec<&FirewatchIndexEntry> {
+        let mut candidates = self.firewatch_indexes.iter().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            firewatch_overview_priority(left)
+                .cmp(&firewatch_overview_priority(right))
+                .then_with(|| right.epoch.cmp(&left.epoch))
+        });
+
+        let mut visible = candidates
+            .iter()
+            .copied()
+            .filter(|entry| firewatch_overview_priority(entry) <= 1)
+            .take(OVERVIEW_FIREWATCH_LIMIT)
+            .collect::<Vec<_>>();
+
+        append_firewatch_sample(
+            &mut visible,
+            &candidates,
+            OVERVIEW_FIREWATCH_QUEUED_SAMPLE,
+            "queued",
+        );
+        append_firewatch_sample(
+            &mut visible,
+            &candidates,
+            OVERVIEW_FIREWATCH_ACCEPTED_SAMPLE,
+            "accepted",
+        );
+        for candidate in &candidates {
+            if visible.len() == OVERVIEW_FIREWATCH_LIMIT {
+                break;
+            }
+            if !visible.iter().any(|entry| entry.epoch == candidate.epoch) {
+                visible.push(candidate);
+            }
+        }
+        visible.sort_by(|left, right| {
+            firewatch_overview_priority(left)
+                .cmp(&firewatch_overview_priority(right))
+                .then_with(|| right.epoch.cmp(&left.epoch))
+        });
+        visible
+    }
+
+    pub fn firewatch_rows_label(&self) -> String {
+        let visible = self.overview_firewatch_indexes().len();
+        let reported = self.firewatch_indexes.len();
+        if reported == 0 {
+            "No detailed epoch rows reported".to_string()
+        } else if visible == reported {
+            format!("All {} reported epochs", format_thousands(reported as u64))
+        } else {
+            format!(
+                "Priority sample: {} of {} reported epochs. Project counts above include all reported epochs.",
+                format_thousands(visible as u64),
+                format_thousands(reported as u64)
+            )
         }
     }
 
@@ -413,6 +723,46 @@ impl DashboardState {
             format_pct(self.poh_migration_pct()).into(),
         );
         map.insert(
+            "registry_reprocess_epoch_label".into(),
+            self.registry_reprocess_epoch_label().into(),
+        );
+        map.insert(
+            "registry_reprocess_worker_label".into(),
+            self.registry_reprocess_worker_label().into(),
+        );
+        map.insert(
+            "registry_reprocess_pct".into(),
+            format_pct(self.registry_reprocess_pct()).into(),
+        );
+        map.insert(
+            "firewatch_summary_label".into(),
+            self.firewatch_summary_label().into(),
+        );
+        map.insert(
+            "firewatch_coverage_label".into(),
+            self.firewatch_coverage_label().into(),
+        );
+        map.insert(
+            "firewatch_next_label".into(),
+            self.firewatch_next_label().into(),
+        );
+        map.insert(
+            "firewatch_queue_eta_label".into(),
+            self.firewatch_queue_eta_label().into(),
+        );
+        map.insert(
+            "firewatch_capacity_label".into(),
+            self.firewatch_capacity_label().into(),
+        );
+        map.insert(
+            "firewatch_rows_label".into(),
+            self.firewatch_rows_label().into(),
+        );
+        map.insert(
+            "firewatch_admission_blocked_reason".into(),
+            self.firewatch_admission_blocked_reason.clone().into(),
+        );
+        map.insert(
             "live_capture_active".into(),
             self.live_capture_active.into(),
         );
@@ -446,6 +796,32 @@ impl DashboardState {
             map.insert(format!("{sig}_eta"), task.eta_label().into());
             map.insert(format!("{sig}_label"), task.label.clone().into());
             map.insert(format!("{sig}_phase"), task.phase.clone().into());
+        }
+
+        // Registry and PoH jobs can both target an already-complete epoch.
+        // Use a registry-specific signal prefix so two simultaneous workers
+        // cannot overwrite each other's row values.
+        for task in &self.registry_reprocess_lanes {
+            let sig = format!("registry_epoch_{}", task.epoch);
+            map.insert(format!("{sig}_pct"), task.pct.into());
+            map.insert(
+                format!("{sig}_blocks"),
+                format_thousands(task.blocks).into(),
+            );
+            map.insert(format!("{sig}_eta"), registry_task_eta_label(task).into());
+            map.insert(format!("{sig}_label"), task.label.clone().into());
+            map.insert(format!("{sig}_phase"), task.phase.clone().into());
+        }
+
+        for index in self.overview_firewatch_indexes() {
+            let sig = format!("firewatch_epoch_{}", index.epoch);
+            map.insert(format!("{sig}_state"), index.state.clone().into());
+            map.insert(format!("{sig}_phase"), index.phase.clone().into());
+            map.insert(format!("{sig}_pct"), index.pct.into());
+            map.insert(format!("{sig}_progress"), index.progress_label().into());
+            map.insert(format!("{sig}_counts"), index.counts_label().into());
+            map.insert(format!("{sig}_parity"), index.parity_label().into());
+            map.insert(format!("{sig}_resources"), index.resources_label().into());
         }
 
         serde_json::Value::Object(map)
@@ -497,6 +873,76 @@ impl DashboardState {
             })
             .collect();
 
+        let registry_reprocess_lanes = snapshot
+            .lanes
+            .iter()
+            .filter(|lane| lane.kind == "archive_v2_registry_reprocess")
+            .filter_map(|lane| {
+                let epoch = lane.epoch?;
+                Some(EpochTask {
+                    epoch,
+                    label: snapshot::humanize(&lane.state),
+                    phase: lane.phase.clone(),
+                    pct: lane_progress_pct(&lane.progress),
+                    blocks: lane.progress.blocks_done,
+                    eta_secs: lane.progress.eta_secs.unwrap_or(0.0).max(0.0).round() as u64,
+                    hidden_from_overview: false,
+                })
+            })
+            .collect();
+
+        let firewatch_lanes: Vec<_> = snapshot
+            .lanes
+            .iter()
+            .filter(|lane| lane.kind == "firewatch_index")
+            .filter(|lane| lane.epoch.is_some())
+            .collect();
+        let firewatch_next_epoch = firewatch_lanes
+            .iter()
+            .find(|lane| snapshot::normalize(&lane.state) == "queued")
+            .and_then(|lane| lane.epoch);
+        let firewatch_indexes = firewatch_lanes
+            .iter()
+            .map(|lane| FirewatchIndexEntry {
+                epoch: lane.epoch.expect("filtered to Firewatch lanes with epochs"),
+                state: snapshot::humanize(&lane.state),
+                phase: snapshot::humanize(&lane.phase),
+                pct: lane_progress_pct(&lane.progress),
+                blocks: lane.progress.blocks_done,
+                eta_secs: lane
+                    .progress
+                    .eta_secs
+                    .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                    .map(|secs| secs.round() as u64),
+                wallet_count: lane.wallet_count,
+                relation_count: lane.relation_count,
+                parity_status: lane.parity_status.clone(),
+                rss_bytes: lane
+                    .progress
+                    .rss_bytes
+                    .or(lane.rss_bytes)
+                    .or(lane.progress.peak_rss_bytes),
+                read_mib_per_sec: lane
+                    .progress
+                    .source_read_mib_per_sec
+                    .or(lane.progress.disk_read_mib_per_sec)
+                    .or(lane.progress.input_mib_per_sec),
+                write_mib_per_sec: lane.progress.disk_write_mib_per_sec,
+            })
+            .collect();
+        let firewatch_enabled = summary.firewatch_index_epochs_total > 0
+            || summary.firewatch_index_capacity_configured > 0
+            || summary.firewatch_index_archive_epochs_total.is_some()
+            || summary.firewatch_index_epochs_eligible.is_some()
+            || summary
+                .firewatch_index_epochs_blocked_migration
+                .is_some_and(|blocked| blocked > 0)
+            || summary
+                .firewatch_index_epochs_blocked_wire_profile
+                .is_some_and(|blocked| blocked > 0)
+            || !firewatch_lanes.is_empty()
+            || summary.firewatch_index_admission_blocked_reason.is_some();
+
         let paused_lanes = snapshot
             .lanes
             .iter()
@@ -522,6 +968,10 @@ impl DashboardState {
                 .map(|r| redact_text(tier, r)),
             finalizer_admission_blocked_reason: summary
                 .finalizer_admission_blocked_reason
+                .as_deref()
+                .map(|r| redact_text(tier, r)),
+            registry_reprocess_admission_blocked_reason: summary
+                .registry_reprocess_admission_blocked_reason
                 .as_deref()
                 .map(|r| redact_text(tier, r)),
             legacy_compact_last_action: summary
@@ -615,12 +1065,38 @@ impl DashboardState {
                 .poh_migration_eta_secs
                 .filter(|secs| secs.is_finite() && *secs >= 0.0)
                 .map(|secs| secs.round() as u64),
+            registry_reprocess_epochs_done: summary.registry_reprocess_epochs_done,
+            registry_reprocess_epochs_total: summary.registry_reprocess_epochs_total,
+            registry_reprocess_capacity_configured: summary.registry_reprocess_capacity_configured,
+            registry_reprocess_running: summary.registry_reprocess_running,
+            firewatch_enabled,
+            firewatch_capacity_configured: summary.firewatch_index_capacity_configured,
+            firewatch_running: summary.firewatch_index_running,
+            firewatch_epochs_total: summary.firewatch_index_epochs_total,
+            firewatch_epochs_accepted: summary.firewatch_index_epochs_accepted,
+            firewatch_epochs_queued: summary.firewatch_index_epochs_queued,
+            firewatch_archive_epochs_total: summary.firewatch_index_archive_epochs_total,
+            firewatch_epochs_eligible: summary.firewatch_index_epochs_eligible,
+            firewatch_epochs_blocked_migration: summary.firewatch_index_epochs_blocked_migration,
+            firewatch_epochs_blocked_wire_profile: summary
+                .firewatch_index_epochs_blocked_wire_profile,
+            firewatch_queue_eta_secs: summary
+                .firewatch_index_queue_eta_secs
+                .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                .map(|secs| secs.round() as u64),
+            firewatch_next_epoch,
+            firewatch_admission_blocked_reason: summary
+                .firewatch_index_admission_blocked_reason
+                .as_deref()
+                .map(|reason| redact_text(tier, reason)),
+            firewatch_indexes,
             live_capture_active: snapshot
                 .live
                 .iter()
                 .any(|capture| capture.state == "capturing"),
             epochs,
             poh_migration_lanes,
+            registry_reprocess_lanes,
             tasks_active: snapshot
                 .lanes
                 .iter()
@@ -669,6 +1145,55 @@ fn overview_priority(task: &EpochTask) -> u8 {
         "ready" => 1,
         "queued" => 2,
         _ => 3,
+    }
+}
+
+fn firewatch_overview_priority(entry: &FirewatchIndexEntry) -> u8 {
+    match snapshot::normalize(&entry.state).as_str() {
+        "running" | "paused" => 0,
+        "failed" | "blocked" | "profile_audit_required" => 1,
+        "queued" => 2,
+        "accepted" => 3,
+        _ => 4,
+    }
+}
+
+fn append_firewatch_sample<'a>(
+    visible: &mut Vec<&'a FirewatchIndexEntry>,
+    candidates: &[&'a FirewatchIndexEntry],
+    group_limit: usize,
+    state: &str,
+) {
+    let mut added = 0;
+    for candidate in candidates.iter().copied() {
+        if visible.len() == OVERVIEW_FIREWATCH_LIMIT || added == group_limit {
+            break;
+        }
+        if snapshot::normalize(&candidate.state) == state
+            && !visible.iter().any(|entry| entry.epoch == candidate.epoch)
+        {
+            visible.push(candidate);
+            added += 1;
+        }
+    }
+}
+
+fn lane_progress_pct(progress: &snapshot::ProgressSnapshot) -> u8 {
+    let pct = progress.progress_pct.unwrap_or_else(|| {
+        if progress.blocks_total == 0 {
+            0.0
+        } else {
+            100.0 * progress.blocks_done as f32 / progress.blocks_total as f32
+        }
+    });
+    pct.clamp(0.0, 100.0) as u8
+}
+
+pub(crate) fn registry_task_eta_label(task: &EpochTask) -> String {
+    if task.eta_secs == 0 {
+        "unknown".to_string()
+    } else {
+        task.eta_label()
     }
 }
 
@@ -754,6 +1279,13 @@ struct Shared {
     last_overview_epoch_ids: Mutex<Vec<u32>>,
     /// Same idea for the currently rendered PoH migration lanes.
     last_poh_lane_ids: Mutex<Vec<u32>>,
+    /// Same idea for the currently rendered registry reprocess lanes.
+    last_registry_reprocess_lane_ids: Mutex<Vec<u32>>,
+    /// Firewatch rows include terminal parity results as well as active and
+    /// queued work. A state change must remorph the row so its status color
+    /// remains correct, while scalar counts continue to use signal patches.
+    last_firewatch_rows: Mutex<Vec<(u32, String)>>,
+    last_firewatch_enabled: Mutex<bool>,
     /// The stable frame must morph when a previously live dashboard goes
     /// offline or an offline-first page receives its first snapshot.
     last_live: Mutex<bool>,
@@ -806,6 +1338,9 @@ fn shared() -> &'static Shared {
             last_epoch_ids: Mutex::new(Vec::new()),
             last_overview_epoch_ids: Mutex::new(Vec::new()),
             last_poh_lane_ids: Mutex::new(Vec::new()),
+            last_registry_reprocess_lane_ids: Mutex::new(Vec::new()),
+            last_firewatch_rows: Mutex::new(Vec::new()),
+            last_firewatch_enabled: Mutex::new(initial.firewatch_enabled),
             last_live: Mutex::new(initial.live),
             current: Mutex::new(initial),
             tx,
@@ -862,6 +1397,17 @@ async fn publish(state: DashboardState) {
         .iter()
         .map(|task| task.epoch)
         .collect();
+    let registry_reprocess_lane_ids: Vec<u32> = state
+        .registry_reprocess_lanes
+        .iter()
+        .map(|task| task.epoch)
+        .collect();
+    let firewatch_rows: Vec<(u32, String)> = state
+        .overview_firewatch_indexes()
+        .into_iter()
+        .map(|index| (index.epoch, index.state.clone()))
+        .collect();
+    let firewatch_enabled = state.firewatch_enabled;
     let live = state.live;
 
     *shared.current.lock().expect("state mutex poisoned") = state.clone();
@@ -890,10 +1436,20 @@ async fn publish(state: DashboardState) {
     let overview_membership_changed =
         remember_if_changed(&shared.last_overview_epoch_ids, overview_epoch_ids);
     let poh_membership_changed = remember_if_changed(&shared.last_poh_lane_ids, poh_lane_ids);
+    let registry_reprocess_membership_changed = remember_if_changed(
+        &shared.last_registry_reprocess_lane_ids,
+        registry_reprocess_lane_ids,
+    );
+    let firewatch_rows_changed = remember_if_changed(&shared.last_firewatch_rows, firewatch_rows);
+    let firewatch_enabled_changed =
+        remember_if_changed(&shared.last_firewatch_enabled, firewatch_enabled);
     let live_changed = remember_if_changed(&shared.last_live, live);
     if epoch_membership_changed
         || overview_membership_changed
         || poh_membership_changed
+        || registry_reprocess_membership_changed
+        || firewatch_rows_changed
+        || firewatch_enabled_changed
         || live_changed
     {
         let _ = shared.tx.send(StreamEvent::Structure);
@@ -1246,6 +1802,23 @@ mod tests {
     /// every other global-state test.
     static GLOBAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    fn firewatch_entry(epoch: u32, state: &str) -> FirewatchIndexEntry {
+        FirewatchIndexEntry {
+            epoch,
+            state: state.into(),
+            phase: "target build".into(),
+            pct: if state == "accepted" { 100 } else { 0 },
+            blocks: 0,
+            eta_secs: None,
+            wallet_count: None,
+            relation_count: None,
+            parity_status: None,
+            rss_bytes: None,
+            read_mib_per_sec: None,
+            write_mib_per_sec: None,
+        }
+    }
+
     fn snapshot_with_process_and_leaky_error() -> PipelineSnapshot {
         PipelineSnapshot {
             errors: vec![snapshot::PipelineError {
@@ -1513,6 +2086,393 @@ mod tests {
         let signals = state.to_signals();
         assert_eq!(signals["epoch_794_pct"], 0);
         assert_eq!(signals["epoch_794_blocks"], "3,159");
+    }
+
+    #[test]
+    fn registry_reprocess_summary_and_worker_are_mapped_to_distinct_live_signals() {
+        let snapshot = PipelineSnapshot {
+            summary: snapshot::PipelineSummary {
+                registry_reprocess_capacity_configured: 3,
+                registry_reprocess_running: 1,
+                registry_reprocess_epochs_total: 23,
+                registry_reprocess_epochs_done: 2,
+                registry_reprocess_admission_blocked_reason: Some(
+                    "memory reserve is active".into(),
+                ),
+                ..Default::default()
+            },
+            lanes: vec![
+                snapshot::LaneStatus {
+                    id: "registry_reprocess:1000".into(),
+                    kind: "archive_v2_registry_reprocess".into(),
+                    state: "running".into(),
+                    phase: "registry reprocess".into(),
+                    epoch: Some(1000),
+                    progress: snapshot::ProgressSnapshot {
+                        blocks_done: 456_240,
+                        blocks_total: 863_563,
+                        progress_pct: None,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                // A PoH lane for the same epoch proves that its existing
+                // `epoch_1000_*` signals do not collide with registry data.
+                snapshot::LaneStatus {
+                    id: "poh_migration:1000".into(),
+                    kind: "poh_signature_count_migration".into(),
+                    state: "running".into(),
+                    epoch: Some(1000),
+                    progress: snapshot::ProgressSnapshot {
+                        blocks_done: 7,
+                        blocks_total: 10,
+                        progress_pct: Some(70.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+
+        assert_eq!(
+            state.registry_reprocess_epoch_label(),
+            "2 done \u{b7} 21 remaining"
+        );
+        assert_eq!(
+            state.registry_reprocess_worker_label(),
+            "1 active \u{b7} capacity 3"
+        );
+        assert_eq!(state.registry_reprocess_lanes.len(), 1);
+        assert_eq!(state.registry_reprocess_lanes[0].epoch, 1000);
+        assert_eq!(state.registry_reprocess_lanes[0].pct, 52);
+        assert_eq!(
+            state
+                .reasoning
+                .registry_reprocess_admission_blocked_reason
+                .as_deref(),
+            Some("memory reserve is active")
+        );
+
+        let signals = state.to_signals();
+        assert_eq!(signals["registry_reprocess_pct"], "8.7");
+        assert_eq!(signals["registry_epoch_1000_pct"], 52);
+        assert_eq!(signals["registry_epoch_1000_blocks"], "456,240");
+        assert_eq!(signals["registry_epoch_1000_eta"], "unknown");
+        assert_eq!(signals["epoch_1000_pct"], 70);
+        assert_eq!(signals["epoch_1000_blocks"], "7");
+    }
+
+    #[test]
+    fn firewatch_summary_and_per_epoch_build_evidence_map_to_live_signals() {
+        let snapshot = PipelineSnapshot {
+            summary: snapshot::PipelineSummary {
+                firewatch_index_capacity_configured: 1,
+                firewatch_index_running: 1,
+                firewatch_index_epochs_total: 3,
+                firewatch_index_epochs_accepted: 1,
+                firewatch_index_epochs_queued: 1,
+                firewatch_index_archive_epochs_total: Some(736),
+                firewatch_index_epochs_eligible: Some(729),
+                firewatch_index_epochs_blocked_migration: Some(7),
+                firewatch_index_epochs_blocked_wire_profile: Some(0),
+                firewatch_index_queue_eta_secs: Some(86_400.0),
+                firewatch_index_admission_blocked_reason: Some(
+                    "archive compaction has storage priority".into(),
+                ),
+                ..Default::default()
+            },
+            lanes: vec![
+                snapshot::LaneStatus {
+                    id: "firewatch_index:301".into(),
+                    kind: "firewatch_index".into(),
+                    state: "running".into(),
+                    phase: "canonical_build".into(),
+                    epoch: Some(301),
+                    wallet_count: Some(2_045_290),
+                    relation_count: Some(6_018_402),
+                    parity_status: Some("pending".into()),
+                    rss_bytes: Some(900 * 1024 * 1024),
+                    progress: snapshot::ProgressSnapshot {
+                        blocks_done: 250_000,
+                        blocks_total: 400_000,
+                        progress_pct: Some(62.5),
+                        eta_secs: Some(180.0),
+                        source_read_mib_per_sec: Some(82.5),
+                        disk_write_mib_per_sec: Some(3.25),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                snapshot::LaneStatus {
+                    id: "firewatch_index:900".into(),
+                    kind: "firewatch_index".into(),
+                    state: "queued".into(),
+                    phase: "target_build".into(),
+                    epoch: Some(900),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+        assert!(state.firewatch_enabled);
+        assert_eq!(
+            state.tasks_active, 1,
+            "queued Firewatch rows are not active"
+        );
+        assert_eq!(state.firewatch_next_epoch, Some(900));
+        assert_eq!(state.firewatch_indexes.len(), 2);
+        assert_eq!(state.firewatch_indexes[0].phase, "canonical build");
+        assert_eq!(
+            state.firewatch_summary_label(),
+            "1 accepted \u{b7} 1 active \u{b7} 1 queued \u{b7} 0 failed \u{b7} 0 awaiting profile audit"
+        );
+        assert_eq!(
+            state.firewatch_coverage_label(),
+            "736 archive-complete \u{b7} 729 indexable \u{b7} 7 blocked by registry migration \u{b7} 0 awaiting profile audit"
+        );
+        assert_eq!(state.firewatch_queue_eta_label(), "1d 0h");
+        assert_eq!(
+            state.firewatch_indexes[0].counts_label(),
+            "2,045,290 wallets \u{b7} 6,018,402 relations"
+        );
+        assert_eq!(state.firewatch_indexes[0].parity_label(), "pending");
+        assert_eq!(
+            state.firewatch_indexes[0].resources_label(),
+            "900.0 MiB RSS \u{b7} 82.5/3.2 MiB/s R/W"
+        );
+
+        let signals = state.to_signals();
+        assert_eq!(signals["firewatch_next_label"], "Epoch 900");
+        assert_eq!(signals["firewatch_queue_eta_label"], "1d 0h");
+        assert_eq!(
+            signals["firewatch_coverage_label"],
+            "736 archive-complete \u{b7} 729 indexable \u{b7} 7 blocked by registry migration \u{b7} 0 awaiting profile audit"
+        );
+        assert_eq!(signals["firewatch_epoch_301_pct"], 62);
+        assert_eq!(signals["firewatch_epoch_301_phase"], "canonical build");
+        assert_eq!(
+            signals["firewatch_epoch_301_counts"],
+            "2,045,290 wallets \u{b7} 6,018,402 relations"
+        );
+        assert_eq!(signals["firewatch_epoch_301_parity"], "pending");
+    }
+
+    #[test]
+    fn firewatch_active_rows_show_measured_activity_when_progress_is_unavailable() {
+        let snapshot = PipelineSnapshot {
+            lanes: vec![
+                snapshot::LaneStatus {
+                    id: "firewatch_index:864".into(),
+                    kind: "firewatch_index".into(),
+                    state: "running".into(),
+                    phase: "source_build".into(),
+                    epoch: Some(864),
+                    progress: snapshot::ProgressSnapshot {
+                        rss_bytes: Some(640 * 1024 * 1024),
+                        source_read_mib_per_sec: Some(378.9),
+                        eta_secs: Some(180.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                snapshot::LaneStatus {
+                    id: "firewatch_index:865".into(),
+                    kind: "firewatch_index".into(),
+                    state: "paused".into(),
+                    phase: "target_build".into(),
+                    epoch: Some(865),
+                    progress: snapshot::ProgressSnapshot {
+                        rss_bytes: Some(512 * 1024 * 1024),
+                        disk_write_mib_per_sec: Some(12.4),
+                        eta_secs: Some(90.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+        assert_eq!(
+            state.firewatch_indexes[0].progress_label(),
+            "Working \u{b7} 378.9 MiB/s read \u{b7} ETA 3m 0s"
+        );
+        assert_eq!(
+            state.firewatch_indexes[1].progress_label(),
+            "Paused \u{b7} ETA 1m 30s"
+        );
+
+        let signals = state.to_signals();
+        assert_eq!(
+            signals["firewatch_epoch_864_progress"],
+            "Working \u{b7} 378.9 MiB/s read \u{b7} ETA 3m 0s"
+        );
+        assert_eq!(
+            signals["firewatch_epoch_865_progress"],
+            "Paused \u{b7} ETA 1m 30s"
+        );
+    }
+
+    #[test]
+    fn firewatch_profile_audit_rows_are_visible_but_not_active_work() {
+        let snapshot = PipelineSnapshot {
+            summary: snapshot::PipelineSummary {
+                firewatch_index_capacity_configured: 1,
+                firewatch_index_epochs_total: 3,
+                firewatch_index_epochs_accepted: 1,
+                firewatch_index_archive_epochs_total: Some(3),
+                firewatch_index_epochs_eligible: Some(2),
+                firewatch_index_epochs_blocked_migration: Some(0),
+                firewatch_index_epochs_blocked_wire_profile: Some(1),
+                ..Default::default()
+            },
+            lanes: vec![
+                snapshot::LaneStatus {
+                    id: "firewatch_index:10".into(),
+                    kind: "firewatch_index".into(),
+                    state: "accepted".into(),
+                    phase: "parity".into(),
+                    epoch: Some(10),
+                    ..Default::default()
+                },
+                snapshot::LaneStatus {
+                    id: "firewatch_index:11".into(),
+                    kind: "firewatch_index".into(),
+                    state: "failed".into(),
+                    phase: "canonical_build".into(),
+                    epoch: Some(11),
+                    ..Default::default()
+                },
+                snapshot::LaneStatus {
+                    id: "firewatch_index:12".into(),
+                    kind: "firewatch_index".into(),
+                    state: "profile_audit_required".into(),
+                    phase: "wire_profile_audit".into(),
+                    epoch: Some(12),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+        assert_eq!(state.tasks_active, 0);
+        assert_eq!(
+            state.firewatch_summary_label(),
+            "1 accepted \u{b7} 0 active \u{b7} 0 queued \u{b7} 1 failed \u{b7} 1 awaiting profile audit"
+        );
+        assert_eq!(
+            state.firewatch_coverage_label(),
+            "3 archive-complete \u{b7} 2 indexable \u{b7} 0 blocked by registry migration \u{b7} 1 awaiting profile audit"
+        );
+        assert!(
+            state
+                .overview_firewatch_indexes()
+                .iter()
+                .any(|entry| entry.epoch == 12)
+        );
+        let signals = state.to_signals();
+        assert_eq!(
+            signals["firewatch_epoch_12_state"],
+            "profile audit required"
+        );
+        assert_eq!(signals["firewatch_epoch_12_phase"], "wire profile audit");
+    }
+
+    #[test]
+    fn firewatch_queued_row_keeps_counter_label_when_progress_is_zero() {
+        let entry = FirewatchIndexEntry {
+            epoch: 900,
+            state: "queued".into(),
+            phase: "source build".into(),
+            pct: 0,
+            blocks: 0,
+            eta_secs: None,
+            wallet_count: None,
+            relation_count: None,
+            parity_status: None,
+            rss_bytes: Some(256 * 1024 * 1024),
+            read_mib_per_sec: Some(0.0),
+            write_mib_per_sec: None,
+        };
+
+        assert_eq!(entry.progress_label(), "0% \u{b7} 0 blocks");
+    }
+
+    #[test]
+    fn firewatch_overview_uses_a_bounded_priority_sample() {
+        let mut indexes = vec![
+            firewatch_entry(1_000, "running"),
+            firewatch_entry(999, "paused"),
+            firewatch_entry(998, "failed"),
+            firewatch_entry(997, "blocked"),
+        ];
+        indexes.extend((900..930).map(|epoch| firewatch_entry(epoch, "queued")));
+        indexes.extend((700..720).map(|epoch| firewatch_entry(epoch, "accepted")));
+        let state = DashboardState {
+            firewatch_indexes: indexes,
+            ..Default::default()
+        };
+
+        let visible = state.overview_firewatch_indexes();
+        assert_eq!(visible.len(), OVERVIEW_FIREWATCH_LIMIT);
+        for epoch in [1_000, 999, 998, 997] {
+            assert!(visible.iter().any(|entry| entry.epoch == epoch));
+        }
+        assert_eq!(
+            visible
+                .iter()
+                .filter(|entry| snapshot::normalize(&entry.state) == "accepted")
+                .count(),
+            OVERVIEW_FIREWATCH_ACCEPTED_SAMPLE
+        );
+        assert_eq!(
+            state.firewatch_rows_label(),
+            "Priority sample: 16 of 54 reported epochs. Project counts above include all reported epochs."
+        );
+
+        let signals = state.to_signals();
+        assert!(signals.get("firewatch_epoch_1000_state").is_some());
+        assert!(signals.get("firewatch_epoch_700_state").is_none());
+    }
+
+    #[test]
+    fn legacy_firewatch_coverage_label_does_not_claim_full_eligibility() {
+        let state = DashboardState {
+            archive_complete: 736,
+            registry_reprocess_epochs_total: 35,
+            registry_reprocess_epochs_done: 28,
+            firewatch_epochs_total: 28,
+            ..Default::default()
+        };
+        assert_eq!(
+            state.firewatch_coverage_label(),
+            "736 archive-complete \u{b7} 28 tracked by this controller \u{b7} 7 blocked by registry migration"
+        );
+    }
+
+    #[test]
+    fn firewatch_overlay_failure_reason_keeps_the_project_visible() {
+        let snapshot = PipelineSnapshot {
+            summary: snapshot::PipelineSummary {
+                firewatch_index_admission_blocked_reason: Some(
+                    "Firewatch controller status unavailable".into(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let state = DashboardState::from_snapshot(&snapshot, RedactionTier::Full);
+        assert!(state.firewatch_enabled);
+        assert!(state.firewatch_indexes.is_empty());
+        assert_eq!(state.firewatch_epochs_accepted, 0);
     }
 
     #[test]
@@ -1833,6 +2793,18 @@ mod tests {
         }
     }
 
+    fn registry_lane_task(epoch: u32) -> EpochTask {
+        EpochTask {
+            epoch,
+            label: "running".into(),
+            phase: "registry reprocess".into(),
+            pct: 40,
+            blocks: 1_000,
+            eta_secs: 60,
+            hidden_from_overview: false,
+        }
+    }
+
     /// The bug this covers: a worker finishing (or a new one starting)
     /// changes which epochs are in `poh_migration_lanes`/`epochs`, not just
     /// an existing row's field values -- `diff_signals` alone has nothing
@@ -1892,6 +2864,37 @@ mod tests {
         assert!(
             saw_structure,
             "a membership change must broadcast a StreamEvent::Structure marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_broadcasts_structure_when_registry_lane_membership_changes() {
+        let _guard = GLOBAL_STATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        publish(DashboardState {
+            registry_reprocess_lanes: vec![registry_lane_task(1000)],
+            ..snapshot_blocking()
+        })
+        .await;
+        let mut rx = subscribe();
+
+        publish(DashboardState {
+            registry_reprocess_lanes: vec![registry_lane_task(864)],
+            ..snapshot_blocking()
+        })
+        .await;
+
+        let mut saw_structure = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, StreamEvent::Structure) {
+                saw_structure = true;
+            }
+        }
+        assert!(
+            saw_structure,
+            "a registry worker membership change must broadcast a structural frame"
         );
     }
 

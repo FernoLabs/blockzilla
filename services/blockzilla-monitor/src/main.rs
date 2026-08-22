@@ -75,6 +75,12 @@ struct Cli {
     /// monitor's curated public status surface.
     #[arg(long)]
     gap_index_file: Option<std::path::PathBuf>,
+
+    /// Optional schema-1 JSON status from the local Firewatch controller.
+    /// When configured, this file is the authoritative source for only the
+    /// Firewatch summary and rows; scheduler archive telemetry is unchanged.
+    #[arg(long, env = "BLOCKZILLA_MONITOR_FIREWATCH_STATUS_FILE")]
+    firewatch_status_file: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -92,7 +98,7 @@ async fn main() {
     if cli.demo {
         state::start_demo_simulation();
     } else {
-        client::start(cli.upstream.clone());
+        client::start(cli.upstream.clone(), cli.firewatch_status_file);
         runtime_operations::start();
         match cli.gap_index_file {
             Some(path) => client::start_gap_index_file_poller(path),
@@ -124,5 +130,24 @@ mod tests {
     fn zero_stream_limit_is_rejected_by_cli() {
         let parsed = Cli::try_parse_from(["blockzilla-monitor", "--max-stream-connections", "0"]);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn firewatch_status_file_is_optional_and_parses_from_cli() {
+        let absent = Cli::try_parse_from(["blockzilla-monitor"]).unwrap();
+        assert!(absent.firewatch_status_file.is_none());
+
+        let present = Cli::try_parse_from([
+            "blockzilla-monitor",
+            "--firewatch-status-file",
+            "/run/blockzilla/firewatch-status.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            present.firewatch_status_file.as_deref(),
+            Some(std::path::Path::new(
+                "/run/blockzilla/firewatch-status.json"
+            ))
+        );
     }
 }

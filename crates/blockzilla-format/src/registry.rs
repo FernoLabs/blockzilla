@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 #[cfg(not(target_arch = "wasm32"))]
+use memmap2::MmapOptions;
+#[cfg(not(target_arch = "wasm32"))]
 use ph::fmph;
 use solana_pubkey::Pubkey;
 #[cfg(target_arch = "wasm32")]
@@ -53,6 +55,16 @@ pub struct FileBackedKeyIndex {
     len: usize,
     values_offset: u64,
     tags_offset: u64,
+}
+
+/// Result of proving that every `registry.bin` row has its exact one-based ID
+/// in the retained `registry.mphf` generation.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryIndexMappingValidation {
+    pub entries: u32,
+    pub registry_bytes: u64,
+    pub registry_index_bytes: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -399,6 +411,149 @@ impl FileBackedKeyIndex {
             self.len
         );
         Ok(Some(id))
+    }
+
+    /// Prove the exact `registry.bin` row-to-ID mapping.
+    ///
+    /// This is stronger than checking the two files have the same row count.
+    /// Every registry key must resolve to its own one-based row ID and must
+    /// have the exact membership tag used by normal lookups. Two duplicate
+    /// registry rows necessarily select the same MPHF cell, so at least one
+    /// row fails the ID check.
+    ///
+    /// The large value and tag tables stay file-backed through a read-only
+    /// mapping. For 45 million keys this maps about 540 MB, but does not make a
+    /// 540 MB heap copy. `registry.bin` is read once in file order.
+    pub fn validate_registry_file_order(
+        &self,
+        registry_file: &File,
+        registry_path: &Path,
+    ) -> Result<RegistryIndexMappingValidation> {
+        let entries = u32::try_from(self.len).context("registry index length exceeds u32")?;
+        let registry_bytes = registry_file
+            .metadata()
+            .with_context(|| format!("stat {}", registry_path.display()))?
+            .len();
+        let expected_registry_bytes = u64::from(entries)
+            .checked_mul(32)
+            .context("registry byte length overflow")?;
+        anyhow::ensure!(
+            registry_bytes == expected_registry_bytes,
+            "registry.bin is {registry_bytes} bytes, expected {expected_registry_bytes} for {entries} registry.mphf entries"
+        );
+
+        let registry_index_bytes = self
+            .file
+            .metadata()
+            .context("stat retained registry.mphf")?
+            .len();
+        // SAFETY: The map is read-only and refers to the retained descriptor
+        // already used by this FileBackedKeyIndex. Publication and authority
+        // callers keep the generation immutable and verify the retained file
+        // identities before and after this admission scan.
+        let tables = unsafe { MmapOptions::new().map(&self.file) }
+            .context("map retained registry.mphf value and tag tables")?;
+        anyhow::ensure!(
+            tables.len() as u64 == registry_index_bytes,
+            "registry.mphf changed while its tables were mapped"
+        );
+
+        let values_start = usize::try_from(self.values_offset)
+            .context("registry.mphf value table offset exceeds usize")?;
+        let tags_start = usize::try_from(self.tags_offset)
+            .context("registry.mphf tag table offset exceeds usize")?;
+        let tags_bytes = self
+            .len
+            .checked_mul(8)
+            .context("registry.mphf tag table length overflow")?;
+        let tags_end = tags_start
+            .checked_add(tags_bytes)
+            .context("registry.mphf tag table end overflow")?;
+        anyhow::ensure!(
+            values_start <= tags_start && tags_end <= tables.len(),
+            "registry.mphf mapped tables are outside the retained file"
+        );
+
+        let mut reader = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, registry_file);
+        reader
+            .seek(SeekFrom::Start(0))
+            .with_context(|| format!("rewind retained registry {}", registry_path.display()))?;
+        let mut key = [0u8; 32];
+        for id in 1..=entries {
+            reader.read_exact(&mut key).with_context(|| {
+                format!(
+                    "read registry.bin key {id} from {}",
+                    registry_path.display()
+                )
+            })?;
+            let index = self
+                .mphf
+                .get(&key)
+                .and_then(|index| usize::try_from(index).ok())
+                .filter(|index| *index < self.len)
+                .with_context(|| {
+                    format!("registry.mphf has no in-range cell for registry.bin key {id}")
+                })?;
+            let value_offset = values_start
+                .checked_add(
+                    index
+                        .checked_mul(4)
+                        .context("registry.mphf value offset overflow")?,
+                )
+                .context("registry.mphf value offset overflow")?;
+            let value_end = value_offset
+                .checked_add(4)
+                .context("registry.mphf value end overflow")?;
+            let actual_id = u32::from_le_bytes(
+                tables[value_offset..value_end]
+                    .try_into()
+                    .expect("validated registry.mphf value slice length"),
+            );
+            anyhow::ensure!(
+                actual_id == id,
+                "registry.mphf does not map registry.bin key {id} to its one-based position (got {actual_id}); the registry contains a duplicate key or the index belongs to different bytes"
+            );
+
+            let tag_offset = tags_start
+                .checked_add(
+                    index
+                        .checked_mul(8)
+                        .context("registry.mphf tag offset overflow")?,
+                )
+                .context("registry.mphf tag offset overflow")?;
+            let tag_end = tag_offset
+                .checked_add(8)
+                .context("registry.mphf tag end overflow")?;
+            let actual_tag = u64::from_le_bytes(
+                tables[tag_offset..tag_end]
+                    .try_into()
+                    .expect("validated registry.mphf tag slice length"),
+            );
+            anyhow::ensure!(
+                actual_tag == key_tag(&key),
+                "registry.mphf membership tag differs for registry.bin key {id}"
+            );
+        }
+        anyhow::ensure!(
+            registry_file
+                .metadata()
+                .with_context(|| format!("restat {}", registry_path.display()))?
+                .len()
+                == registry_bytes
+                && self
+                    .file
+                    .metadata()
+                    .context("restat retained registry.mphf")?
+                    .len()
+                    == registry_index_bytes,
+            "registry.bin or registry.mphf size changed during mapping validation"
+        );
+
+        Ok(RegistryIndexMappingValidation {
+            entries,
+            registry_bytes,
+            registry_index_bytes,
+        })
     }
 }
 
@@ -783,7 +938,18 @@ impl KeyStore {
     /// Sequential load, no extra buffers.
     pub fn load(path: &Path) -> Result<Self> {
         let f = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
-        let len_bytes = f.metadata().context("stat registry")?.len() as usize;
+        Self::load_file(f, path)
+    }
+
+    /// Sequentially load a registry from a caller-retained file descriptor.
+    ///
+    /// This keeps the registry in the same immutable generation view as other
+    /// files that a pinned archive reader has already opened.
+    pub fn load_file(f: File, path: &Path) -> Result<Self> {
+        let len_bytes = f
+            .metadata()
+            .with_context(|| format!("stat {}", path.display()))?
+            .len() as usize;
 
         anyhow::ensure!(
             len_bytes.is_multiple_of(32),
@@ -797,7 +963,8 @@ impl KeyStore {
         let mut keys = Vec::with_capacity(n);
         for _ in 0..n {
             let mut a = [0u8; 32];
-            r.read_exact(&mut a).context("read pubkey")?;
+            r.read_exact(&mut a)
+                .with_context(|| format!("read {}", path.display()))?;
             keys.push(a);
         }
 
@@ -889,6 +1056,55 @@ mod tests {
         assert_eq!(file_backed.lookup(&missing).unwrap(), None);
         drop(file_backed);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn file_backed_index_proves_exact_registry_row_mapping() {
+        let keys = [[31u8; 32], [32u8; 32], [33u8; 32]];
+        let index_path = temporary_index_path("mapping");
+        let registry_path = index_path.with_extension("bin");
+        KeyIndex::build(keys.to_vec()).write(&index_path).unwrap();
+        write_registry(&registry_path, &keys).unwrap();
+
+        let index = FileBackedKeyIndex::load(&index_path).unwrap();
+        let registry = File::open(&registry_path).unwrap();
+        let validated = index
+            .validate_registry_file_order(&registry, &registry_path)
+            .unwrap();
+        assert_eq!(validated.entries, 3);
+        assert_eq!(validated.registry_bytes, 96);
+        assert_eq!(
+            validated.registry_index_bytes,
+            std::fs::metadata(&index_path).unwrap().len()
+        );
+
+        drop(index);
+        std::fs::remove_file(index_path).unwrap();
+        std::fs::remove_file(registry_path).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn file_backed_index_rejects_duplicate_registry_rows() {
+        let keys = [[41u8; 32], [42u8; 32], [43u8; 32]];
+        let duplicate = [keys[0], keys[0], keys[2]];
+        let index_path = temporary_index_path("duplicate-mapping");
+        let registry_path = index_path.with_extension("bin");
+        KeyIndex::build(keys.to_vec()).write(&index_path).unwrap();
+        write_registry(&registry_path, &duplicate).unwrap();
+
+        let index = FileBackedKeyIndex::load(&index_path).unwrap();
+        let registry = File::open(&registry_path).unwrap();
+        let error = index
+            .validate_registry_file_order(&registry, &registry_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate key"), "{error}");
+
+        drop(index);
+        std::fs::remove_file(index_path).unwrap();
+        std::fs::remove_file(registry_path).unwrap();
     }
 
     #[test]

@@ -1,11 +1,18 @@
 use anyhow::{Context, Result, anyhow, bail};
 use blockzilla_format::{
+    ARCHIVE_V2_BLOCK_ACCESS_FILE, ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE, ARCHIVE_V2_BLOCK_INDEX_FILE,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE, ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC, ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN,
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION, ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
-    ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
-    ARCHIVE_V2_PUBKEY_REGISTRY_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+    ARCHIVE_V2_BLOCKS_FILE, ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    ARCHIVE_V2_GET_BLOCK_INDEX_FILE, ARCHIVE_V2_HOT_INDEX_HEADER_LEN, ARCHIVE_V2_HOT_INDEX_MAGIC,
+    ARCHIVE_V2_HOT_INDEX_ROW_LEN, ARCHIVE_V2_HOT_INDEX_VERSION, ARCHIVE_V2_META_FILE,
+    ARCHIVE_V2_POH_FILE, ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE, ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE, ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE, ARCHIVE_V2_SHREDDING_FILE, ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -29,8 +36,13 @@ const REGISTRY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
 const REGISTRY_INDEX_VERSION: u16 = 2;
 const REGISTRY_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8;
 const VERIFY_CHUNK_ROWS: usize = 8_192;
-const RECEIPT_SCHEMA_VERSION: u64 = 3;
+const RECEIPT_SCHEMA_VERSION: u64 = 4;
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
+const MAX_OWNERSHIP_BYTES: u64 = 64 * 1024;
+const OWNERSHIP_SCHEMA_VERSION: u32 = 2;
+const HOT_SOURCE_FORMAT: &str = "hot_index_v1";
+const V3_SOURCE_FORMAT: &str = "blockhash_index_v3";
+const FIRST_SEEN_REGISTRY_ORDER: &str = "registry_order=first_seen_v1";
 
 const REQUIRED_TARGET_FILES: &[&str] = &[
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
@@ -40,6 +52,15 @@ const REQUIRED_TARGET_FILES: &[&str] = &[
 ];
 
 const ALLOWED_TARGET_FILES: &[&str] = &[
+    OWNERSHIP_FILE,
+    ARCHIVE_V2_META_FILE,
+    ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_BLOCK_INDEX_FILE,
+    ARCHIVE_V2_BLOCK_ACCESS_FILE,
+    ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+    ARCHIVE_V2_GET_BLOCK_INDEX_FILE,
+    ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    ARCHIVE_V2_PUBKEY_HOT_SEED_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
     ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
@@ -47,9 +68,36 @@ const ALLOWED_TARGET_FILES: &[&str] = &[
     ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
     "block-time-gaps.bin",
     ".block-time-gaps.bin.lock",
+    ".complete-hot-v2-shredding-sidecar-v2",
     ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE,
     "poh.wincode",
+    ARCHIVE_V2_SHREDDING_FILE,
+    ARCHIVE_V2_SIGNATURES_FILE,
+    ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
 ];
+
+const COMPLETE_TARGET_NONEMPTY_FILES: &[&str] = &[
+    ARCHIVE_V2_META_FILE,
+    ARCHIVE_V2_BLOCKS_FILE,
+    ARCHIVE_V2_BLOCK_INDEX_FILE,
+    ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_COUNTS_FILE,
+    ARCHIVE_V2_PUBKEY_REGISTRY_INDEX_FILE,
+    ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE,
+    ARCHIVE_V2_POH_FILE,
+    ARCHIVE_V2_SHREDDING_FILE,
+];
+
+#[derive(Debug, Deserialize)]
+struct OwnershipMarker {
+    schema_version: u32,
+    kind: String,
+    id: String,
+    state: String,
+    #[serde(default)]
+    pid: Option<u32>,
+}
 
 pub struct SeedPreviousBlockhashTailsConfig<'a> {
     pub archive_root: &'a Path,
@@ -167,13 +215,12 @@ fn seed_epoch(
     }
     let source_epoch = target_epoch - 1;
     let source_dir = archive_root.join(format!("epoch-{source_epoch}"));
-    let source = source_dir.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE);
     let target_dir = archive_root.join(format!("epoch-{target_epoch}"));
     let target = target_dir.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE);
 
-    ensure_target_safe(&target_dir)?;
-    ensure_source_stable(&source_dir)?;
-    let (payload, mut receipt) = load_v3_tail(&source, source_epoch)?;
+    ensure_target_safe(&target_dir, target_epoch)?;
+    ensure_source_stable(&source_dir, source_epoch)?;
+    let (payload, mut receipt) = load_best_tail(&source_dir, source_epoch)?;
     receipt.insert("schema_version".to_owned(), json!(RECEIPT_SCHEMA_VERSION));
     receipt.insert("target".to_owned(), json!(path_text(&target)?));
     receipt.insert("target_epoch".to_owned(), json!(target_epoch));
@@ -193,8 +240,8 @@ fn seed_epoch(
         receipt.insert("action".to_owned(), json!("would_write"));
     } else {
         // Recheck both sides immediately before the no-replace publication.
-        ensure_target_safe(&target_dir)?;
-        ensure_source_stable(&source_dir)?;
+        ensure_target_safe(&target_dir, target_epoch)?;
+        ensure_source_stable(&source_dir, source_epoch)?;
         if entry_exists(&target)? {
             bail!(
                 "target appeared during verification; refusing race: {}",
@@ -245,10 +292,11 @@ fn discover_epochs(
 
         // Active, incomplete, or unstable predecessors are expected during
         // discovery and are retried by the next timer invocation.
-        if ensure_source_stable(&source_dir).is_err() {
+        if ensure_source_stable(&source_dir, target_epoch - 1).is_err() {
             continue;
         }
-        if is_regular_file(&source_dir.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE))?
+        if (is_regular_file(&source_dir.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE))?
+            || is_regular_file(&source_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE))?)
             && is_regular_file(&source_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE))?
         {
             epochs.push(target_epoch);
@@ -310,9 +358,14 @@ fn receipt_proves_current_tail(
         return Ok(false);
     }
 
-    let source = archive_root
-        .join(format!("epoch-{source_epoch}"))
-        .join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE);
+    let source_dir = archive_root.join(format!("epoch-{source_epoch}"));
+    let source_format = receipt_str(receipt, "source_format");
+    let source_name = match source_format {
+        Some(V3_SOURCE_FORMAT) => ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE,
+        Some(HOT_SOURCE_FORMAT) => ARCHIVE_V2_BLOCK_INDEX_FILE,
+        _ => return Ok(false),
+    };
+    let source = source_dir.join(source_name);
     let blockhash_registry = source.with_file_name(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE);
     let target = archive_root
         .join(format!("epoch-{target_epoch}"))
@@ -349,32 +402,35 @@ fn receipt_proves_current_tail(
         return Ok(false);
     }
 
-    let mut header = [0u8; ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN];
-    if source_file.read_exact(&mut header).is_err() {
-        return Ok(false);
-    }
-    let magic = &header[..8];
-    let version = u16::from_le_bytes(header[8..10].try_into().expect("fixed header"));
-    let row_len = u16::from_le_bytes(header[10..12].try_into().expect("fixed header"));
-    let rows = u64::from_le_bytes(header[12..20].try_into().expect("fixed header"));
-    let Some(expected_source_bytes) = rows
-        .checked_mul(ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN as u64)
-        .and_then(|bytes| bytes.checked_add(ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN as u64))
+    let Some((rows, expected_source_bytes, supported_registry_bytes, hot_blob_bytes)) =
+        receipt_source_shape(&mut source_file, source_format.expect("matched above"))?
     else {
         return Ok(false);
     };
-    let Some(expected_registry_bytes) = rows.checked_mul(REGISTRY_KEY_BYTES) else {
-        return Ok(false);
-    };
-    if magic != ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC
-        || version != ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION
-        || usize::from(row_len) != ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN
-        || rows == 0
+    if rows == 0
         || source_before.len != expected_source_bytes
-        || registry_before.len != expected_registry_bytes
+        || !supported_registry_bytes.contains(&registry_before.len)
         || receipt_u64(receipt, "source_rows") != Some(rows)
+        || receipt_u64(receipt, "blockhash_registry_offset")
+            != Some((registry_before.len / REGISTRY_KEY_BYTES).saturating_sub(rows))
     {
         return Ok(false);
+    }
+    if let Some(hot_blob_bytes) = hot_blob_bytes {
+        let block_blob = source_dir.join(ARCHIVE_V2_BLOCKS_FILE);
+        if receipt_str(receipt, "block_blob") != Some(path_text(&block_blob)?)
+            || !is_regular_file(&block_blob)?
+        {
+            return Ok(false);
+        }
+        let blob_file = open_regular_read(&block_blob)?;
+        let blob_identity = file_identity(&blob_file.metadata()?);
+        if blob_identity.len != hot_blob_bytes
+            || receipt_u64(receipt, "block_blob_bytes") != Some(blob_identity.len)
+            || receipt.get("block_blob_identity") != Some(&file_identity_value(blob_identity))
+        {
+            return Ok(false);
+        }
     }
 
     let mut tail = Vec::with_capacity(usize::try_from(tail_before.len)?);
@@ -423,17 +479,86 @@ fn receipt_sha256_is_well_formed(receipt: &serde_json::Map<String, Value>, key: 
     })
 }
 
-fn ensure_target_safe(target_dir: &Path) -> Result<()> {
+type ReceiptSourceShape = (u64, u64, Vec<u64>, Option<u64>);
+
+fn receipt_source_shape(
+    source: &mut File,
+    source_format: &str,
+) -> Result<Option<ReceiptSourceShape>> {
+    match source_format {
+        V3_SOURCE_FORMAT => {
+            let mut header = [0u8; ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN];
+            if source.read_exact(&mut header).is_err() {
+                return Ok(None);
+            }
+            let rows = u64::from_le_bytes(header[12..20].try_into().expect("fixed header"));
+            let expected_bytes = rows
+                .checked_mul(ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN as u64)
+                .and_then(|bytes| {
+                    bytes.checked_add(ARCHIVE_V2_BLOCKHASH_INDEX_V3_HEADER_LEN as u64)
+                });
+            let registry_bytes = rows.checked_mul(REGISTRY_KEY_BYTES);
+            let valid = &header[..8] == ARCHIVE_V2_BLOCKHASH_INDEX_V3_MAGIC
+                && u16::from_le_bytes(header[8..10].try_into().expect("fixed header"))
+                    == ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION
+                && usize::from(u16::from_le_bytes(
+                    header[10..12].try_into().expect("fixed header"),
+                )) == ARCHIVE_V2_BLOCKHASH_INDEX_V3_ROW_LEN
+                && rows > 0;
+            Ok(match (valid, expected_bytes, registry_bytes) {
+                (true, Some(expected), Some(registry)) => {
+                    Some((rows, expected, vec![registry], None))
+                }
+                _ => None,
+            })
+        }
+        HOT_SOURCE_FORMAT => {
+            let mut header = [0u8; ARCHIVE_V2_HOT_INDEX_HEADER_LEN];
+            if source.read_exact(&mut header).is_err() {
+                return Ok(None);
+            }
+            let rows = u64::from_le_bytes(header[12..20].try_into().expect("fixed header"));
+            let blob_bytes = u64::from_le_bytes(header[20..28].try_into().expect("fixed header"));
+            let flags = u32::from_le_bytes(header[32..36].try_into().expect("fixed header"));
+            let expected_bytes = rows
+                .checked_mul(ARCHIVE_V2_HOT_INDEX_ROW_LEN as u64)
+                .and_then(|bytes| bytes.checked_add(ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64));
+            let registry = rows.checked_mul(REGISTRY_KEY_BYTES);
+            let registry_with_genesis = rows
+                .checked_add(1)
+                .and_then(|rows| rows.checked_mul(REGISTRY_KEY_BYTES));
+            let valid = &header[..8] == ARCHIVE_V2_HOT_INDEX_MAGIC
+                && u16::from_le_bytes(header[8..10].try_into().expect("fixed header"))
+                    == ARCHIVE_V2_HOT_INDEX_VERSION
+                && header[10..12] == [0, 0]
+                && rows > 0
+                && blob_bytes > 0
+                && flags == 0;
+            Ok(valid.then_some((
+                rows,
+                match expected_bytes {
+                    Some(bytes) => bytes,
+                    None => return Ok(None),
+                },
+                match (registry, registry_with_genesis) {
+                    (Some(registry), Some(with_genesis)) => vec![registry, with_genesis],
+                    _ => return Ok(None),
+                },
+                Some(blob_bytes),
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn ensure_target_safe(target_dir: &Path, target_epoch: u64) -> Result<()> {
     let target_metadata = fs::symlink_metadata(target_dir)
         .with_context(|| format!("target directory is missing: {}", target_dir.display()))?;
     if !target_metadata.file_type().is_dir() {
         bail!("target directory is missing: {}", target_dir.display());
     }
 
-    let ownership = target_dir.join(OWNERSHIP_FILE);
-    if entry_exists(&ownership)? {
-        bail!("refusing scheduler-owned target: {}", ownership.display());
-    }
+    let ownership = read_optional_ownership(target_dir)?;
 
     let mut unknown = Vec::new();
     let mut non_regular = Vec::new();
@@ -472,6 +597,22 @@ fn ensure_target_safe(target_dir: &Path) -> Result<()> {
         );
     }
 
+    let mut has_complete_archive_files = false;
+    for name in [
+        ARCHIVE_V2_META_FILE,
+        ARCHIVE_V2_BLOCKS_FILE,
+        ARCHIVE_V2_BLOCK_INDEX_FILE,
+        ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE,
+        ARCHIVE_V2_SHREDDING_FILE,
+        ARCHIVE_V2_SIGNATURES_FILE,
+        ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    ] {
+        has_complete_archive_files |= entry_exists(&target_dir.join(name))?;
+    }
+    if ownership.is_some() || has_complete_archive_files {
+        validate_complete_target(target_dir, target_epoch, ownership.as_ref())?;
+    }
+
     let mut missing = Vec::new();
     for name in REQUIRED_TARGET_FILES {
         let path = target_dir.join(name);
@@ -506,6 +647,127 @@ fn ensure_target_safe(target_dir: &Path) -> Result<()> {
     }
 
     validate_target_registry_sidecars(target_dir)
+}
+
+fn validate_complete_target(
+    target_dir: &Path,
+    target_epoch: u64,
+    ownership: Option<&OwnershipMarker>,
+) -> Result<()> {
+    if let Some(owner) = ownership {
+        validate_complete_owner(owner, target_epoch, &target_dir.join(OWNERSHIP_FILE))?;
+    }
+    for name in COMPLETE_TARGET_NONEMPTY_FILES {
+        let path = target_dir.join(name);
+        if !regular_file_len(&path)?.is_some_and(|bytes| bytes > 0) {
+            bail!(
+                "complete target lacks regular nonempty archive file: {}",
+                path.display()
+            );
+        }
+    }
+    for name in [
+        ARCHIVE_V2_SIGNATURES_FILE,
+        ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE,
+    ] {
+        let path = target_dir.join(name);
+        if !is_regular_file(&path)? {
+            bail!(
+                "complete target lacks regular archive file: {}",
+                path.display()
+            );
+        }
+    }
+    let access = is_regular_file(&target_dir.join(ARCHIVE_V2_BLOCK_ACCESS_FILE))?;
+    let access_index = is_regular_file(&target_dir.join(ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE))?;
+    if access != access_index {
+        bail!(
+            "complete target has only one block-access sidecar: {}",
+            target_dir.display()
+        );
+    }
+    if access {
+        for name in [
+            ARCHIVE_V2_BLOCK_ACCESS_FILE,
+            ARCHIVE_V2_BLOCK_ACCESS_INDEX_FILE,
+        ] {
+            let path = target_dir.join(name);
+            if regular_file_len(&path)? == Some(0) {
+                bail!(
+                    "complete target has an empty block-access file: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    validate_first_seen_manifest(&target_dir.join(ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE))?;
+    load_hot_tail(target_dir, target_epoch)
+        .with_context(|| format!("validate complete target {}", target_dir.display()))?;
+    Ok(())
+}
+
+fn validate_first_seen_manifest(path: &Path) -> Result<()> {
+    let bytes = read_regular_file(path)?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("first-seen manifest is not UTF-8: {}", path.display()))?;
+    let mut values = text
+        .lines()
+        .filter(|line| line.starts_with("registry_order="));
+    if values.next() != Some(FIRST_SEEN_REGISTRY_ORDER) || values.next().is_some() {
+        bail!(
+            "first-seen manifest has no unique {FIRST_SEEN_REGISTRY_ORDER}: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn read_optional_ownership(target_dir: &Path) -> Result<Option<OwnershipMarker>> {
+    let path = target_dir.join(OWNERSHIP_FILE);
+    if !entry_exists(&path)? {
+        return Ok(None);
+    }
+    let mut file = open_regular_read(&path)?;
+    let before = file_identity(&file.metadata()?);
+    let bytes = before.len;
+    if bytes == 0 || bytes > MAX_OWNERSHIP_BYTES {
+        bail!(
+            "ownership marker has invalid byte length {bytes}: {}",
+            path.display()
+        );
+    }
+    let mut payload = Vec::with_capacity(usize::try_from(bytes)?);
+    (&mut file)
+        .take(MAX_OWNERSHIP_BYTES + 1)
+        .read_to_end(&mut payload)
+        .with_context(|| format!("read ownership marker {}", path.display()))?;
+    if payload.len() as u64 != bytes || file_identity(&file.metadata()?) != before {
+        bail!(
+            "ownership marker changed during verification: {}",
+            path.display()
+        );
+    }
+    let owner = serde_json::from_slice(&payload)
+        .with_context(|| format!("decode ownership marker {}", path.display()))?;
+    Ok(Some(owner))
+}
+
+fn validate_complete_owner(owner: &OwnershipMarker, epoch: u64, path: &Path) -> Result<()> {
+    if owner.schema_version != OWNERSHIP_SCHEMA_VERSION
+        || !matches!(
+            owner.kind.as_str(),
+            "historical_scan" | "historical_finalizer"
+        )
+        || owner.id != epoch.to_string()
+        || owner.state != "complete"
+        || owner.pid.is_some()
+    {
+        bail!(
+            "ownership marker is not a completed historical archive for epoch {epoch}: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn validate_target_registry_sidecars(target_dir: &Path) -> Result<()> {
@@ -592,7 +854,7 @@ fn validate_target_registry_sidecars(target_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_source_stable(source_dir: &Path) -> Result<()> {
+fn ensure_source_stable(source_dir: &Path, source_epoch: u64) -> Result<()> {
     let metadata = fs::symlink_metadata(source_dir)
         .with_context(|| format!("predecessor directory is missing: {}", source_dir.display()))?;
     if !metadata.file_type().is_dir() {
@@ -601,14 +863,289 @@ fn ensure_source_stable(source_dir: &Path) -> Result<()> {
             source_dir.display()
         );
     }
-    let ownership = source_dir.join(OWNERSHIP_FILE);
-    if entry_exists(&ownership)? {
-        bail!(
-            "refusing active or scheduler-owned predecessor: {}",
-            ownership.display()
-        );
+    if let Some(owner) = read_optional_ownership(source_dir)? {
+        validate_complete_owner(&owner, source_epoch, &source_dir.join(OWNERSHIP_FILE))?;
     }
     Ok(())
+}
+
+fn load_best_tail(source_dir: &Path, source_epoch: u64) -> Result<(Vec<u8>, Receipt)> {
+    let v3 = source_dir.join(ARCHIVE_V2_BLOCKHASH_INDEX_V3_FILE);
+    if is_regular_file(&v3)? {
+        return load_v3_tail(&v3, source_epoch);
+    }
+    load_hot_tail(source_dir, source_epoch)
+}
+
+fn load_hot_tail(source_dir: &Path, source_epoch: u64) -> Result<(Vec<u8>, Receipt)> {
+    let source = source_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
+    let block_blob = source_dir.join(ARCHIVE_V2_BLOCKS_FILE);
+    let blockhash_registry = source_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE);
+    for path in [&source, &block_blob, &blockhash_registry] {
+        if !is_regular_file(path)? {
+            bail!(
+                "required predecessor hot archive file is missing: {}",
+                path.display()
+            );
+        }
+    }
+
+    let mut source_file = open_regular_read(&source)?;
+    let blob_file = open_regular_read(&block_blob)?;
+    let mut registry_file = open_regular_read(&blockhash_registry)?;
+    let source_before = file_identity(&source_file.metadata()?);
+    let blob_before = file_identity(&blob_file.metadata()?);
+    let registry_before = file_identity(&registry_file.metadata()?);
+
+    let mut header = [0u8; ARCHIVE_V2_HOT_INDEX_HEADER_LEN];
+    read_exact_described(&mut source_file, &mut header, "hot-index header", &source)?;
+    let mut source_digest = Sha256::new();
+    source_digest.update(header);
+    let rows = u64::from_le_bytes(header[12..20].try_into().expect("fixed header"));
+    let blob_bytes = u64::from_le_bytes(header[20..28].try_into().expect("fixed header"));
+    let flags = u32::from_le_bytes(header[32..36].try_into().expect("fixed header"));
+    if &header[..8] != ARCHIVE_V2_HOT_INDEX_MAGIC {
+        bail!("invalid hot-index magic in {}", source.display());
+    }
+    if u16::from_le_bytes(header[8..10].try_into().expect("fixed header"))
+        != ARCHIVE_V2_HOT_INDEX_VERSION
+        || header[10..12] != [0, 0]
+    {
+        bail!(
+            "unsupported hot-index version or reserved bytes in {}",
+            source.display()
+        );
+    }
+    if flags != 0 {
+        bail!(
+            "hot-index flags must be zero for canonical compact blocks in {}: {flags:#x}",
+            source.display()
+        );
+    }
+    if rows == 0 || blob_bytes == 0 {
+        bail!(
+            "hot index or block blob is empty in {}",
+            source_dir.display()
+        );
+    }
+    let expected_source_bytes = rows
+        .checked_mul(u64::try_from(ARCHIVE_V2_HOT_INDEX_ROW_LEN)?)
+        .and_then(|bytes| bytes.checked_add(ARCHIVE_V2_HOT_INDEX_HEADER_LEN as u64))
+        .ok_or_else(|| anyhow!("hot-index length overflow"))?;
+    if source_before.len != expected_source_bytes {
+        bail!(
+            "hot-index size mismatch in {}: expected {expected_source_bytes}, got {}",
+            source.display(),
+            source_before.len
+        );
+    }
+    if blob_before.len != blob_bytes {
+        bail!(
+            "hot-index blob size differs from {}: expected {blob_bytes}, got {}",
+            block_blob.display(),
+            blob_before.len
+        );
+    }
+    let registry_rows = registry_before.len / REGISTRY_KEY_BYTES;
+    if registry_before.len % REGISTRY_KEY_BYTES != 0
+        || !(registry_rows == rows || registry_rows == rows + 1)
+    {
+        bail!(
+            "blockhash registry rows {} do not match hot-index rows {rows} in {}",
+            registry_rows,
+            blockhash_registry.display()
+        );
+    }
+    let registry_offset = registry_rows - rows;
+
+    let epoch_first_slot = source_epoch
+        .checked_mul(crate::SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("source epoch slot range overflow: {source_epoch}"))?;
+    let epoch_last_slot_exclusive = source_epoch
+        .checked_add(1)
+        .and_then(|epoch| epoch.checked_mul(crate::SLOTS_PER_EPOCH))
+        .ok_or_else(|| anyhow!("source epoch slot range overflow: {source_epoch}"))?;
+    let mut registry_digest = Sha256::new();
+    if registry_offset == 1 {
+        let mut genesis = [0u8; REGISTRY_KEY_BYTES as usize];
+        read_exact_described(
+            &mut registry_file,
+            &mut genesis,
+            "blockhash registry genesis row",
+            &blockhash_registry,
+        )?;
+        registry_digest.update(genesis);
+    }
+
+    let mut tail = VecDeque::<([u8; 32], u64)>::with_capacity(TAIL_CAPACITY);
+    let mut source_rows = vec![0u8; VERIFY_CHUNK_ROWS * ARCHIVE_V2_HOT_INDEX_ROW_LEN];
+    let mut registry_rows_buf = vec![0u8; VERIFY_CHUNK_ROWS * REGISTRY_KEY_BYTES as usize];
+    let mut rows_left = rows;
+    let mut row_number = 0u64;
+    let mut previous_slot = None;
+    let mut next_blob_offset = 0u64;
+    let mut next_tx_ordinal = 0u64;
+    let mut next_signature_ordinal = 0u64;
+    while rows_left > 0 {
+        let chunk_rows = usize::try_from(rows_left.min(VERIFY_CHUNK_ROWS as u64))?;
+        let source_bytes = chunk_rows * ARCHIVE_V2_HOT_INDEX_ROW_LEN;
+        let registry_bytes = chunk_rows * REGISTRY_KEY_BYTES as usize;
+        let source_chunk = &mut source_rows[..source_bytes];
+        let registry_chunk = &mut registry_rows_buf[..registry_bytes];
+        read_exact_described(&mut source_file, source_chunk, "hot-index rows", &source)?;
+        read_exact_described(
+            &mut registry_file,
+            registry_chunk,
+            "blockhash registry rows",
+            &blockhash_registry,
+        )?;
+        source_digest.update(&*source_chunk);
+        registry_digest.update(&*registry_chunk);
+
+        for chunk_row in 0..chunk_rows {
+            let row_id = row_number + u64::try_from(chunk_row)?;
+            let source_offset = chunk_row * ARCHIVE_V2_HOT_INDEX_ROW_LEN;
+            let row = &source_chunk[source_offset..source_offset + ARCHIVE_V2_HOT_INDEX_ROW_LEN];
+            let block_id = u32::from_le_bytes(row[0..4].try_into().expect("fixed hot row"));
+            let slot = u64::from_le_bytes(row[4..12].try_into().expect("fixed hot row"));
+            let compressed_offset =
+                u64::from_le_bytes(row[12..20].try_into().expect("fixed hot row"));
+            let compressed_len = u32::from_le_bytes(row[20..24].try_into().expect("fixed hot row"));
+            let uncompressed_len =
+                u32::from_le_bytes(row[24..28].try_into().expect("fixed hot row"));
+            let tx_count = u32::from_le_bytes(row[28..32].try_into().expect("fixed hot row"));
+            let first_tx_ordinal =
+                u64::from_le_bytes(row[32..40].try_into().expect("fixed hot row"));
+            let first_signature_ordinal =
+                u64::from_le_bytes(row[40..48].try_into().expect("fixed hot row"));
+            let signature_count =
+                u32::from_le_bytes(row[48..52].try_into().expect("fixed hot row"));
+            if u64::from(block_id) != row_id {
+                bail!("hot-index block id {block_id} is not contiguous at row {row_id}");
+            }
+            if !(epoch_first_slot..epoch_last_slot_exclusive).contains(&slot)
+                || previous_slot.is_some_and(|previous| slot <= previous)
+            {
+                bail!(
+                    "hot-index slot {slot} is outside epoch {source_epoch} or not strictly increasing at row {row_id}"
+                );
+            }
+            if compressed_len == 0
+                || uncompressed_len == 0
+                || compressed_offset != next_blob_offset
+                || first_tx_ordinal != next_tx_ordinal
+                || first_signature_ordinal != next_signature_ordinal
+            {
+                bail!("hot-index offsets or ordinals are inconsistent at row {row_id}");
+            }
+            next_blob_offset = next_blob_offset
+                .checked_add(u64::from(compressed_len))
+                .ok_or_else(|| anyhow!("hot-index compressed byte count overflow"))?;
+            next_tx_ordinal = next_tx_ordinal
+                .checked_add(u64::from(tx_count))
+                .ok_or_else(|| anyhow!("hot-index transaction count overflow"))?;
+            next_signature_ordinal = next_signature_ordinal
+                .checked_add(u64::from(signature_count))
+                .ok_or_else(|| anyhow!("hot-index signature count overflow"))?;
+            previous_slot = Some(slot);
+
+            let registry_offset = chunk_row * REGISTRY_KEY_BYTES as usize;
+            let blockhash: [u8; 32] = registry_chunk
+                [registry_offset..registry_offset + REGISTRY_KEY_BYTES as usize]
+                .try_into()
+                .expect("fixed registry row");
+            if tail.len() == TAIL_CAPACITY {
+                tail.pop_front();
+            }
+            tail.push_back((blockhash, slot));
+        }
+        rows_left -= u64::try_from(chunk_rows)?;
+        row_number += u64::try_from(chunk_rows)?;
+    }
+    if next_blob_offset != blob_bytes {
+        bail!(
+            "hot-index rows cover {next_blob_offset} blob bytes, expected {blob_bytes}: {}",
+            source.display()
+        );
+    }
+
+    let source_after = file_identity(&source_file.metadata()?);
+    let blob_after = file_identity(&blob_file.metadata()?);
+    let registry_after = file_identity(&registry_file.metadata()?);
+    if source_before != source_after {
+        bail!(
+            "hot index changed during verification: {}",
+            source.display()
+        );
+    }
+    if blob_before != blob_after {
+        bail!(
+            "block blob changed during verification: {}",
+            block_blob.display()
+        );
+    }
+    if registry_before != registry_after {
+        bail!(
+            "blockhash registry changed during verification: {}",
+            blockhash_registry.display()
+        );
+    }
+
+    let mut payload = Vec::with_capacity(tail.len() * TAIL_ROW_LEN);
+    for (blockhash, slot) in &tail {
+        payload.extend_from_slice(blockhash);
+        payload.extend_from_slice(&slot.to_le_bytes());
+    }
+    let mut receipt = Receipt::new();
+    receipt.insert("source_format".to_owned(), json!(HOT_SOURCE_FORMAT));
+    receipt.insert("source".to_owned(), json!(path_text(&source)?));
+    receipt.insert("source_bytes".to_owned(), json!(source_after.len));
+    receipt.insert(
+        "source_identity".to_owned(),
+        file_identity_value(source_after),
+    );
+    receipt.insert(
+        "source_sha256".to_owned(),
+        json!(digest_hex(source_digest.finalize())),
+    );
+    receipt.insert("block_blob".to_owned(), json!(path_text(&block_blob)?));
+    receipt.insert("block_blob_bytes".to_owned(), json!(blob_after.len));
+    receipt.insert(
+        "block_blob_identity".to_owned(),
+        file_identity_value(blob_after),
+    );
+    receipt.insert(
+        "blockhash_registry".to_owned(),
+        json!(path_text(&blockhash_registry)?),
+    );
+    receipt.insert(
+        "blockhash_registry_bytes".to_owned(),
+        json!(registry_after.len),
+    );
+    receipt.insert(
+        "blockhash_registry_identity".to_owned(),
+        file_identity_value(registry_after),
+    );
+    receipt.insert(
+        "blockhash_registry_sha256".to_owned(),
+        json!(digest_hex(registry_digest.finalize())),
+    );
+    receipt.insert(
+        "blockhash_registry_offset".to_owned(),
+        json!(registry_offset),
+    );
+    receipt.insert("source_epoch".to_owned(), json!(source_epoch));
+    receipt.insert("source_rows".to_owned(), json!(rows));
+    receipt.insert("tail_rows".to_owned(), json!(tail.len()));
+    receipt.insert(
+        "tail_first_slot".to_owned(),
+        json!(tail.front().expect("non-empty hot tail").1),
+    );
+    receipt.insert(
+        "tail_last_slot".to_owned(),
+        json!(tail.back().expect("non-empty hot tail").1),
+    );
+    Ok((payload, receipt))
 }
 
 fn load_v3_tail(source: &Path, source_epoch: u64) -> Result<(Vec<u8>, Receipt)> {
@@ -770,6 +1307,7 @@ fn load_v3_tail(source: &Path, source_epoch: u64) -> Result<(Vec<u8>, Receipt)> 
     }
 
     let mut receipt = Receipt::new();
+    receipt.insert("source_format".to_owned(), json!(V3_SOURCE_FORMAT));
     receipt.insert("source".to_owned(), json!(path_text(source)?));
     receipt.insert("source_bytes".to_owned(), json!(source_size));
     receipt.insert(
@@ -796,6 +1334,7 @@ fn load_v3_tail(source: &Path, source_epoch: u64) -> Result<(Vec<u8>, Receipt)> 
         "blockhash_registry_sha256".to_owned(),
         json!(digest_hex(registry_digest.finalize())),
     );
+    receipt.insert("blockhash_registry_offset".to_owned(), json!(0));
     receipt.insert("source_epoch".to_owned(), json!(source_epoch));
     receipt.insert("source_rows".to_owned(), json!(rows));
     receipt.insert("tail_rows".to_owned(), json!(tail.len()));
@@ -1246,6 +1785,81 @@ mod tests {
         directory
     }
 
+    fn write_hot_archive(
+        root: &Path,
+        epoch: u64,
+        rows: u64,
+        registry_offset: u64,
+    ) -> Vec<([u8; 32], u64)> {
+        let directory = root.join(format!("epoch-{epoch}"));
+        fs::create_dir_all(&directory).unwrap();
+        let values = (0..rows)
+            .map(|row| (test_hash(epoch, row), epoch * crate::SLOTS_PER_EPOCH + row))
+            .collect::<Vec<_>>();
+        let mut index = Vec::new();
+        index.extend_from_slice(ARCHIVE_V2_HOT_INDEX_MAGIC);
+        index.extend_from_slice(&ARCHIVE_V2_HOT_INDEX_VERSION.to_le_bytes());
+        index.extend_from_slice(&0u16.to_le_bytes());
+        index.extend_from_slice(&rows.to_le_bytes());
+        index.extend_from_slice(&rows.to_le_bytes());
+        index.extend_from_slice(&1i32.to_le_bytes());
+        index.extend_from_slice(&0u32.to_le_bytes());
+        let mut registry = Vec::new();
+        if registry_offset == 1 {
+            registry.extend_from_slice(&[0xabu8; 32]);
+        }
+        for (row, (blockhash, slot)) in values.iter().enumerate() {
+            let row = row as u64;
+            index.extend_from_slice(&(row as u32).to_le_bytes());
+            index.extend_from_slice(&slot.to_le_bytes());
+            index.extend_from_slice(&row.to_le_bytes());
+            index.extend_from_slice(&1u32.to_le_bytes());
+            index.extend_from_slice(&1u32.to_le_bytes());
+            index.extend_from_slice(&1u32.to_le_bytes());
+            index.extend_from_slice(&row.to_le_bytes());
+            index.extend_from_slice(&row.to_le_bytes());
+            index.extend_from_slice(&1u32.to_le_bytes());
+            registry.extend_from_slice(blockhash);
+        }
+        fs::write(directory.join(ARCHIVE_V2_BLOCK_INDEX_FILE), index).unwrap();
+        fs::write(
+            directory.join(ARCHIVE_V2_BLOCKS_FILE),
+            vec![1u8; rows as usize],
+        )
+        .unwrap();
+        fs::write(directory.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE), registry).unwrap();
+        values
+    }
+
+    fn make_complete_target(root: &Path, epoch: u64, owned: bool) -> PathBuf {
+        let directory = write_target(root, epoch);
+        write_hot_archive(root, epoch, 3, 0);
+        for (name, bytes) in [
+            (ARCHIVE_V2_META_FILE, b"meta".as_slice()),
+            (ARCHIVE_V2_POH_FILE, b"poh".as_slice()),
+            (ARCHIVE_V2_SHREDDING_FILE, b"shreds".as_slice()),
+        ] {
+            fs::write(directory.join(name), bytes).unwrap();
+        }
+        fs::write(
+            directory.join(ARCHIVE_V2_FIRST_SEEN_REGISTRY_MANIFEST_FILE),
+            b"schema_version=1\nregistry_order=first_seen_v1\n",
+        )
+        .unwrap();
+        fs::write(directory.join(ARCHIVE_V2_SIGNATURES_FILE), []).unwrap();
+        fs::write(directory.join(ARCHIVE_V2_VOTE_HASH_REGISTRY_FILE), []).unwrap();
+        if owned {
+            fs::write(
+                directory.join(OWNERSHIP_FILE),
+                format!(
+                    "{{\"schema_version\":2,\"kind\":\"historical_scan\",\"id\":\"{epoch}\",\"state\":\"complete\",\"pid\":null}}"
+                ),
+            )
+            .unwrap();
+        }
+        directory
+    }
+
     fn config<'a>(
         root: &'a Path,
         epochs: &'a [u64],
@@ -1327,6 +1941,103 @@ mod tests {
             .unwrap();
         let second: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(second["action"], "verified_existing");
+    }
+
+    #[test]
+    fn hot_index_fallback_seeds_complete_unowned_target() {
+        let temp = TestDir::new();
+        let root = temp.0.join("archives");
+        fs::create_dir(&root).unwrap();
+        let rows = write_hot_archive(&root, 50, 305, 0);
+        let target = make_complete_target(&root, 51, false);
+        let receipts = temp.0.join("receipts");
+        let epochs = [51];
+
+        let mut output = Vec::new();
+        let mut dry_run = config(&root, &epochs, Some(&receipts));
+        dry_run.dry_run = true;
+        seed_previous_blockhash_tails_to(dry_run, &mut output).unwrap();
+        let dry_record: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(dry_record["action"], "would_write");
+        assert!(!target.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE).exists());
+        assert!(!receipts.exists());
+
+        output.clear();
+        seed_previous_blockhash_tails_to(config(&root, &epochs, Some(&receipts)), &mut output)
+            .unwrap();
+        let record: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(record["action"], "written");
+        assert_eq!(record["source_format"], HOT_SOURCE_FORMAT);
+        assert_eq!(record["blockhash_registry_offset"], 0);
+        assert_eq!(
+            fs::read(target.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)).unwrap(),
+            tail_payload(&rows)
+        );
+        let skipped = seed_previous_blockhash_tails_to(
+            discovery_config(&root, 51, &receipts),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(skipped.candidates, 0);
+    }
+
+    #[test]
+    fn hot_index_fallback_accepts_complete_owned_target_and_genesis_offset() {
+        let temp = TestDir::new();
+        let root = temp.0.join("archives");
+        fs::create_dir(&root).unwrap();
+        let rows = write_hot_archive(&root, 52, 305, 1);
+        let target = make_complete_target(&root, 53, true);
+        let epochs = [53];
+
+        let mut output = Vec::new();
+        seed_previous_blockhash_tails_to(config(&root, &epochs, None), &mut output).unwrap();
+        let record: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(record["blockhash_registry_offset"], 1);
+        assert_eq!(
+            fs::read(target.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE)).unwrap(),
+            tail_payload(&rows)
+        );
+    }
+
+    #[test]
+    fn active_owned_complete_shape_is_rejected_without_writing() {
+        let temp = TestDir::new();
+        let root = temp.0.join("archives");
+        fs::create_dir(&root).unwrap();
+        write_hot_archive(&root, 54, 305, 0);
+        let target = make_complete_target(&root, 55, true);
+        fs::write(
+            target.join(OWNERSHIP_FILE),
+            b"{\"schema_version\":2,\"kind\":\"historical_scan\",\"id\":\"55\",\"state\":\"running\",\"pid\":123}",
+        )
+        .unwrap();
+        let epochs = [55];
+
+        let error = seed_previous_blockhash_tails_to(config(&root, &epochs, None), &mut Vec::new())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not a completed historical archive"));
+        assert!(!target.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE).exists());
+    }
+
+    #[test]
+    fn malformed_hot_index_fails_before_publication() {
+        let temp = TestDir::new();
+        let root = temp.0.join("archives");
+        fs::create_dir(&root).unwrap();
+        write_hot_archive(&root, 56, 305, 0);
+        let source_index = root.join("epoch-56").join(ARCHIVE_V2_BLOCK_INDEX_FILE);
+        let mut index = fs::read(&source_index).unwrap();
+        let last_row = ARCHIVE_V2_HOT_INDEX_HEADER_LEN + 304 * ARCHIVE_V2_HOT_INDEX_ROW_LEN;
+        index[last_row..last_row + 4].copy_from_slice(&303u32.to_le_bytes());
+        fs::write(source_index, index).unwrap();
+        let target = make_complete_target(&root, 57, false);
+        let epochs = [57];
+
+        let error = seed_previous_blockhash_tails_to(config(&root, &epochs, None), &mut Vec::new())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not contiguous"));
+        assert!(!target.join(ARCHIVE_V2_PREV_BLOCKHASH_TAIL_FILE).exists());
     }
 
     #[test]

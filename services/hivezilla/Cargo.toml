@@ -87,7 +87,7 @@ tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wincode = "0.5.4"
+wincode = "=0.5.5"
 yellowstone-grpc-client = "13.1.0"
 yellowstone-grpc-proto = "12.4.0"
 zstd = "0.13.3"

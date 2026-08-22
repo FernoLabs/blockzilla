@@ -6,20 +6,38 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Per-epoch reverse index: wallet pubkey -> program ids it interacted with (direct and CPI)"
+description = "Per-epoch reverse index: signer wallet -> per-program direct and CPI usage"
 default-run = "blockzilla-firebase-indexer"
 
 [[bin]]
 name = "blockzilla-firebase-indexer"
 path = "src/main.rs"
 
+[[bin]]
+name = "firewatch-index-controller"
+path = "src/bin/firewatch-index-controller.rs"
+
+[[bin]]
+name = "firewatch-wire-profile-audit"
+path = "src/bin/firewatch-wire-profile-audit.rs"
+
+[[bin]]
+name = "firewatch-wire-profile-audit-batch"
+path = "src/bin/firewatch-wire-profile-audit-batch.rs"
+
+[[bin]]
+name = "firewatch-wire-profile-marker-transition"
+path = "src/bin/firewatch-wire-profile-marker-transition.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 blockzilla-format = { path = "../blockzilla-format" }
 blockzilla-read-sdk = { path = "../blockzilla-read-sdk" }
 bs58 = "0.5.1"
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
+libc = "0.2.183"
 pprof = { version = "0.15.0", features = ["flamegraph"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "rustls"] }
 rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -28,7 +46,8 @@ smallvec = "1.15.2"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wincode = { version = "0.5.4", features = ["derive"] }
+wincode = { version = "=0.5.5", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"
+zstd = "0.13.3"

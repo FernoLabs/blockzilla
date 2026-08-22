@@ -18,8 +18,10 @@ rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
+smallvec = "1.15.2"
+solana-pubkey = "4.2.0"
 thiserror = "2.0.18"
-wincode = { version = "0.5.4", features = ["derive"] }
+wincode = { version = "=0.5.5", features = ["derive"] }
 zstd = "0.13.3"
 
 [dependencies.reqwest]
