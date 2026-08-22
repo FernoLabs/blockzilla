@@ -18,8 +18,8 @@ use blockzilla_format::{
     WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
     WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
     WincodeArchiveV2Footer, WincodeArchiveV2Genesis, bounded_wincode_leb128_config,
-    canonicalize_archive_v2_metadata_owned,
-    deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_hot_block_blob_borrowed_current,
+    canonicalize_archive_v2_metadata_owned, deserialize_archive_v2_hot_block_blob,
+    deserialize_archive_v2_hot_block_blob_borrowed_current,
     deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards,
 };
 use sha2::{Digest, Sha256};
@@ -119,6 +119,13 @@ impl CompiledPubkeyFilter {
 
     pub fn registry_id_count(&self) -> usize {
         self.registry_ids.len()
+    }
+
+    /// Return the resolved one-based registry ID for a pubkey that was part
+    /// of this compiled filter. Call this once when a hot loop must compare
+    /// many compact references with the same pubkey.
+    pub fn registry_id_for(&self, pubkey: &[u8; 32]) -> Option<u32> {
+        self.resolved_ids.get(pubkey).copied()
     }
 
     /// Test whether one compact reference resolves to this exact pubkey.
@@ -636,12 +643,14 @@ impl<S: RangeSource> ArchiveReader<S> {
         let mut resolved_ids = HashMap::with_capacity(raw_pubkeys.len());
         if !raw_pubkeys.is_empty() && self.registry_entries != 0 {
             let mut offset = 0u64;
+            let mut bytes = Vec::new();
             let registry_size = self.manifest.required_file(REGISTRY_FILE)?.size;
             let chunk_size = (self.options.io_chunk_size / 32).max(1) * 32;
             while offset < registry_size {
                 let length = usize::try_from((registry_size - offset).min(chunk_size as u64))
                     .expect("registry chunk is bounded by usize");
-                let bytes = self.source.read_range(REGISTRY_FILE, offset, length)?;
+                self.source
+                    .read_range_into(REGISTRY_FILE, offset, length, &mut bytes)?;
                 if bytes.len() % 32 != 0 {
                     return Err(Error::InvalidRegistry(
                         "range source split registry on a partial pubkey".into(),
@@ -2244,12 +2253,10 @@ fn metadata_state(
         decode_bytes,
         bounded_wincode_leb128_config::<ARCHIVE_V2_DECODE_PREALLOCATION_LIMIT_BYTES>(),
     )
-    .map_err(|error| {
-            Error::InvalidBlock {
-                slot,
-                message: format!("decode metadata for tx {}: {error}", row.tx_index),
-            }
-        })?;
+    .map_err(|error| Error::InvalidBlock {
+        slot,
+        message: format!("decode metadata for tx {}: {error}", row.tx_index),
+    })?;
     Ok(MetadataState::Decoded(Box::new(metadata)))
 }
 

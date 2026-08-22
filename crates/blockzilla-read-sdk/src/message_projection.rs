@@ -21,7 +21,6 @@ use blockzilla_format::{
     rewrite_archive_v2_hot_message_wire, rewrite_archive_v2_hot_message_wire_pre_unknown_fallbacks,
     wincode_leb128_config,
 };
-use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use thiserror::Error;
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
@@ -150,13 +149,15 @@ impl ArchiveV2MessageProjector {
     /// The selected profile remains authoritative. An invalid selected decode
     /// is an error. An invalid alternate decode returns
     /// [`WireProfileAuditOutcome::SelectedOnly`]. If both profiles are valid,
-    /// a fixed-size digest reports whether their normalized instruction
-    /// semantics are equivalent or divergent. The caller must apply the
-    /// selection policy only after it audits the full generation: one message
-    /// with divergent dual-valid semantics does not make the generation
-    /// ambiguous when another message rejects the alternate grammar. This
-    /// path does not allocate for a valid message and never serializes a
-    /// decoded message.
+    /// the frozen tag tables report whether their normalized instruction
+    /// semantics are equivalent or divergent. Tag zero is Raw in both
+    /// profiles. Every other tag that both profiles accept has a different
+    /// meaning, so this path does not need to hash message bytes. The caller
+    /// must apply the selection policy only after it audits the full
+    /// generation. One message with divergent dual-valid semantics does not
+    /// make the generation ambiguous when another message rejects the
+    /// alternate grammar. This path does not allocate for a valid message and
+    /// never serializes a decoded message.
     pub fn audit_alternate_profile(
         self,
         bytes: &[u8],
@@ -173,8 +174,7 @@ impl ArchiveV2MessageProjector {
         bytes: &[u8],
         mut program_is_valid: impl FnMut(CompactPubkey, ArchiveV2InstructionProgramSemantics) -> bool,
     ) -> MessageProjectionResult<WireProfileAuditOutcome> {
-        let selected_scan =
-            semantic_fingerprint(self.profile, bytes, &mut program_is_valid, false)?;
+        let selected_scan = scan_profile(self.profile, bytes, &mut program_is_valid)?;
         if selected_scan.alternate_is_impossible {
             return Ok(WireProfileAuditOutcome::SelectedOnly);
         }
@@ -182,9 +182,9 @@ impl ArchiveV2MessageProjector {
             return Ok(WireProfileAuditOutcome::BothSemanticallyEquivalent);
         }
         // Only an instruction whose tag remains valid and non-equivalent in
-        // both profiles reaches this slow path. Reparse the selected message
-        // with a semantic digest, then compare it with the alternate profile.
-        let selected = semantic_fingerprint(self.profile, bytes, &mut program_is_valid, true)?;
+        // both profiles reaches this slow path. The selected message was
+        // already validated above. Validate the alternate once; if it also
+        // succeeds, at least one non-Raw tag has a different frozen meaning.
         let alternate_profile = match self.profile {
             ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
                 ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1
@@ -193,16 +193,10 @@ impl ArchiveV2MessageProjector {
                 ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
             }
         };
-        let Ok(alternate) =
-            semantic_fingerprint(alternate_profile, bytes, &mut program_is_valid, true)
-        else {
+        if scan_profile(alternate_profile, bytes, &mut program_is_valid).is_err() {
             return Ok(WireProfileAuditOutcome::SelectedOnly);
-        };
-        Ok(if selected.digest == alternate.digest {
-            WireProfileAuditOutcome::BothSemanticallyEquivalent
-        } else {
-            WireProfileAuditOutcome::BothSemanticallyDivergent
-        })
+        }
+        Ok(WireProfileAuditOutcome::BothSemanticallyDivergent)
     }
 }
 
@@ -516,11 +510,7 @@ fn skip_vote_tower_sync(
     on_reference: &mut impl FnMut(ArchiveV2VoteHashReference),
 ) -> ReadResult<()> {
     skip_vote_state_update(cursor, on_reference)?;
-    read_vote_hash_reference(
-        cursor,
-        Some(ArchiveV2VoteHashKind::BlockId),
-        on_reference,
-    )?;
+    read_vote_hash_reference(cursor, Some(ArchiveV2VoteHashKind::BlockId), on_reference)?;
     Ok(())
 }
 
@@ -780,11 +770,8 @@ fn decode_message<'de, const PRE_UNKNOWN_FALLBACKS: bool>(
     })
 }
 
-const SEMANTIC_FINGERPRINT_DOMAIN: &[u8] = b"blockzilla.archive-v2.message-wire-semantics.v1\0";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SemanticFingerprint {
-    digest: Option<[u8; 32]>,
+struct ProfileScan {
     /// At least one selected instruction cannot be valid in the alternate
     /// profile. This is proved either by an unsupported alternate tag or by
     /// the caller's program-ID predicate.
@@ -794,19 +781,18 @@ struct SemanticFingerprint {
     profile_neutral: bool,
 }
 
-fn semantic_fingerprint(
+fn scan_profile(
     profile: ArchiveV2WireProfile,
     bytes: &[u8],
     program_is_valid: &mut impl FnMut(CompactPubkey, ArchiveV2InstructionProgramSemantics) -> bool,
-    calculate_digest: bool,
-) -> MessageProjectionResult<SemanticFingerprint> {
+) -> MessageProjectionResult<ProfileScan> {
     let mut cursor = bytes;
     let fingerprint = match profile {
         ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
-            fingerprint_message::<false>(&mut cursor, program_is_valid, calculate_digest)?
+            scan_message_profile::<false>(&mut cursor, program_is_valid)?
         }
         ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
-            fingerprint_message::<true>(&mut cursor, program_is_valid, calculate_digest)?
+            scan_message_profile::<true>(&mut cursor, program_is_valid)?
         }
     };
     if !cursor.is_empty() {
@@ -817,14 +803,13 @@ fn semantic_fingerprint(
 
 /// Parse one complete message without materializing its vectors. Only the
 /// instruction-data tag table differs between supported profiles, but this
-/// function validates the full common envelope too. The digest frames every
-/// borrowed instruction field and replaces the wire tag with one stable
-/// semantic tag.
-fn fingerprint_message<const PRE_UNKNOWN_FALLBACKS: bool>(
+/// function validates the full common envelope too. It records only whether
+/// the selected message is profile-neutral and whether the alternate profile
+/// is impossible under the program-family oracle.
+fn scan_message_profile<const PRE_UNKNOWN_FALLBACKS: bool>(
     cursor: &mut &[u8],
     program_is_valid: &mut impl FnMut(CompactPubkey, ArchiveV2InstructionProgramSemantics) -> bool,
-    calculate_digest: bool,
-) -> ReadResult<SemanticFingerprint> {
+) -> ReadResult<ProfileScan> {
     let is_v0 = match get::<u32>(cursor)? {
         0 => false,
         1 => true,
@@ -848,24 +833,29 @@ fn fingerprint_message<const PRE_UNKNOWN_FALLBACKS: bool>(
             "message header does not describe a writable fee payer and valid account partitions",
         ));
     }
-    let mut account_keys = [None; MAX_MESSAGE_ACCOUNTS];
-    for account_key in account_keys.iter_mut().take(account_key_count) {
-        *account_key = Some(get::<CompactPubkey>(cursor)?);
+    // Only the initialized prefix can be addressed by a validated program
+    // index. SmallVec leaves its inline storage uninitialized, so this avoids
+    // clearing about 9 KiB for every message. The 256-key format cap prevents
+    // a spill to the heap.
+    let mut account_keys = SmallVec::<[CompactPubkey; MAX_MESSAGE_ACCOUNTS]>::new();
+    for _ in 0..account_key_count {
+        account_keys.push(get::<CompactPubkey>(cursor)?);
     }
+    debug_assert!(!account_keys.spilled());
     get::<OwnedCompactRecentBlockhash>(cursor)?;
 
     let instruction_count = read_len_bounded_by_remaining(
         cursor,
         "top-level instruction count exceeds remaining input",
     )?;
-    let mut hasher = OptionalSemanticHasher::new(calculate_digest);
-    hasher.update(SEMANTIC_FINGERPRINT_DOMAIN);
-    hasher.update([u8::from(is_v0)]);
-    hasher.update((instruction_count as u64).to_le_bytes());
     let mut maximum_instruction_account = None::<usize>;
     let mut alternate_is_impossible = false;
+    // Selected and alternate instruction boundaries are identical until the
+    // first non-Raw tag. After an unresolved profile-specific payload, a
+    // later selected-profile byte is not known to be an alternate tag.
+    let mut alternate_boundary_is_shared = true;
     let mut profile_neutral = true;
-    for ordinal in 0..instruction_count {
+    for _ in 0..instruction_count {
         let program_id_index = get::<u8>(cursor)?;
         let program_index = usize::from(program_id_index);
         if program_index == 0 || program_index >= account_key_count {
@@ -885,28 +875,29 @@ fn fingerprint_message<const PRE_UNKNOWN_FALLBACKS: bool>(
                     .max(usize::from(*account)),
             );
         }
-        hasher.update((ordinal as u64).to_le_bytes());
-        hasher.update([program_id_index]);
-        hasher.update((accounts_len as u64).to_le_bytes());
-        hasher.update(accounts);
-        let (program_semantics, wire_tag) =
-            fingerprint_instruction_data::<PRE_UNKNOWN_FALLBACKS>(cursor, &mut hasher)?;
-        let program_key = account_keys[program_index].expect("validated static account index");
+        let (semantic_tag, program_semantics, wire_tag) =
+            scan_instruction_data::<PRE_UNKNOWN_FALLBACKS>(cursor)?;
+        let program_key = account_keys[program_index];
         if !program_is_valid(program_key, program_semantics) {
             return Err(wincode::error::invalid_value(
                 "structured instruction payload does not match its static program ID",
             ));
         }
-        profile_neutral &= wire_tag == 0;
-        match alternate_program_semantics::<PRE_UNKNOWN_FALLBACKS>(wire_tag) {
-            None => alternate_is_impossible = true,
-            Some(alternate_semantics)
-                if alternate_semantics != program_semantics
-                    && !program_is_valid(program_key, alternate_semantics) =>
-            {
-                alternate_is_impossible = true;
+        profile_neutral &= semantic_tag == 0;
+        if alternate_boundary_is_shared && !alternate_is_impossible {
+            match alternate_program_semantics::<PRE_UNKNOWN_FALLBACKS>(wire_tag) {
+                None => alternate_is_impossible = true,
+                Some(alternate_semantics)
+                    if alternate_semantics != program_semantics
+                        && !program_is_valid(program_key, alternate_semantics) =>
+                {
+                    alternate_is_impossible = true;
+                }
+                Some(_) => {}
             }
-            Some(_) => {}
+            if wire_tag != 0 && !alternate_is_impossible {
+                alternate_boundary_is_shared = false;
+            }
         }
     }
 
@@ -963,29 +954,10 @@ fn fingerprint_message<const PRE_UNKNOWN_FALLBACKS: bool>(
             "instruction account index is outside resolved message accounts",
         ));
     }
-    Ok(SemanticFingerprint {
-        digest: hasher.finalize(),
+    Ok(ProfileScan {
         alternate_is_impossible,
         profile_neutral,
     })
-}
-
-struct OptionalSemanticHasher(Option<Sha256>);
-
-impl OptionalSemanticHasher {
-    fn new(enabled: bool) -> Self {
-        Self(enabled.then(Sha256::new))
-    }
-
-    fn update(&mut self, bytes: impl AsRef<[u8]>) {
-        if let Some(hasher) = &mut self.0 {
-            hasher.update(bytes);
-        }
-    }
-
-    fn finalize(self) -> Option<[u8; 32]> {
-        self.0.map(|hasher| hasher.finalize().into())
-    }
 }
 
 fn alternate_program_semantics<const PRE_UNKNOWN_FALLBACKS: bool>(
@@ -1012,97 +984,114 @@ fn alternate_program_semantics<const PRE_UNKNOWN_FALLBACKS: bool>(
     }
 }
 
-fn fingerprint_instruction_data<const PRE_UNKNOWN_FALLBACKS: bool>(
+fn scan_instruction_data<const PRE_UNKNOWN_FALLBACKS: bool>(
     cursor: &mut &[u8],
-    hasher: &mut OptionalSemanticHasher,
-) -> ReadResult<(ArchiveV2InstructionProgramSemantics, u32)> {
+) -> ReadResult<(u8, ArchiveV2InstructionProgramSemantics, u32)> {
     let wire_tag = get::<u32>(cursor)?;
-    let payload = *cursor;
+    let Some(semantic_tag) = normalized_instruction_semantic_tag::<PRE_UNKNOWN_FALLBACKS>(wire_tag)
+    else {
+        return Err(invalid_tag_encoding(wire_tag as usize));
+    };
     let mut ignore_reference = |_: ArchiveV2VoteHashReference| {};
-    let (semantic_tag, program_semantics) = if PRE_UNKNOWN_FALLBACKS {
+    let program_semantics = if PRE_UNKNOWN_FALLBACKS {
         match wire_tag {
             0 => {
                 skip_bytes(cursor)?;
-                (0u8, ArchiveV2InstructionProgramSemantics::Raw)
+                ArchiveV2InstructionProgramSemantics::Raw
             }
             1 => {
                 get::<ArchiveV2ComputeBudgetInstructionData>(cursor)?;
-                (3, ArchiveV2InstructionProgramSemantics::ComputeBudget)
+                ArchiveV2InstructionProgramSemantics::ComputeBudget
             }
             2 => {
                 skip_system_instruction_data(cursor)?;
-                (4, ArchiveV2InstructionProgramSemantics::System)
+                ArchiveV2InstructionProgramSemantics::System
             }
             3 => {
                 skip_vote_state_update(cursor, &mut ignore_reference)?;
-                (5, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
             4 => {
                 skip_vote_state_update(cursor, &mut ignore_reference)?;
                 read_vote_hash_reference(cursor, None, &mut ignore_reference)?;
-                (6, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
             5 => {
                 skip_vote_tower_sync(cursor, &mut ignore_reference)?;
-                (7, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
             6 => {
                 skip_vote_tower_sync(cursor, &mut ignore_reference)?;
                 read_vote_hash_reference(cursor, None, &mut ignore_reference)?;
-                (8, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
-            other => return Err(invalid_tag_encoding(other as usize)),
+            _ => unreachable!("the normalized semantic-tag table rejected invalid tags"),
         }
     } else {
         match wire_tag {
             0 => {
                 skip_bytes(cursor)?;
-                (0u8, ArchiveV2InstructionProgramSemantics::Raw)
+                ArchiveV2InstructionProgramSemantics::Raw
             }
             1 => {
                 skip_bytes(cursor)?;
-                (1, ArchiveV2InstructionProgramSemantics::System)
+                ArchiveV2InstructionProgramSemantics::System
             }
             2 => {
                 skip_bytes(cursor)?;
-                (2, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
             3 => {
                 get::<ArchiveV2ComputeBudgetInstructionData>(cursor)?;
-                (3, ArchiveV2InstructionProgramSemantics::ComputeBudget)
+                ArchiveV2InstructionProgramSemantics::ComputeBudget
             }
             4 => {
                 skip_system_instruction_data(cursor)?;
-                (4, ArchiveV2InstructionProgramSemantics::System)
+                ArchiveV2InstructionProgramSemantics::System
             }
             5 => {
                 skip_vote_state_update(cursor, &mut ignore_reference)?;
-                (5, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
             6 => {
                 skip_vote_state_update(cursor, &mut ignore_reference)?;
                 read_vote_hash_reference(cursor, None, &mut ignore_reference)?;
-                (6, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
             7 => {
                 skip_vote_tower_sync(cursor, &mut ignore_reference)?;
-                (7, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
             8 => {
                 skip_vote_tower_sync(cursor, &mut ignore_reference)?;
                 read_vote_hash_reference(cursor, None, &mut ignore_reference)?;
-                (8, ArchiveV2InstructionProgramSemantics::Vote)
+                ArchiveV2InstructionProgramSemantics::Vote
             }
-            other => return Err(invalid_tag_encoding(other as usize)),
+            _ => unreachable!("the normalized semantic-tag table rejected invalid tags"),
         }
     };
-    let payload_len = payload.len().checked_sub(cursor.len()).ok_or_else(|| {
-        wincode::error::invalid_value("instruction payload cursor moved backwards")
-    })?;
-    hasher.update([semantic_tag]);
-    hasher.update((payload_len as u64).to_le_bytes());
-    hasher.update(&payload[..payload_len]);
-    Ok((program_semantics, wire_tag))
+    Ok((semantic_tag, program_semantics, wire_tag))
+}
+
+const fn normalized_instruction_semantic_tag<const PRE_UNKNOWN_FALLBACKS: bool>(
+    wire_tag: u32,
+) -> Option<u8> {
+    if PRE_UNKNOWN_FALLBACKS {
+        match wire_tag {
+            0 => Some(0),
+            1 => Some(3),
+            2 => Some(4),
+            3 => Some(5),
+            4 => Some(6),
+            5 => Some(7),
+            6 => Some(8),
+            _ => None,
+        }
+    } else if wire_tag <= 8 {
+        Some(wire_tag as u8)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1375,6 +1364,52 @@ mod tests {
     }
 
     #[test]
+    fn frozen_non_raw_tags_never_have_the_same_profile_semantics() {
+        assert_eq!(
+            normalized_instruction_semantic_tag::<true>(0),
+            normalized_instruction_semantic_tag::<false>(0)
+        );
+        for wire_tag in 1..=6 {
+            assert_ne!(
+                normalized_instruction_semantic_tag::<true>(wire_tag),
+                normalized_instruction_semantic_tag::<false>(wire_tag)
+            );
+        }
+        assert_eq!(normalized_instruction_semantic_tag::<true>(7), None);
+        assert_eq!(normalized_instruction_semantic_tag::<true>(8), None);
+        assert_eq!(normalized_instruction_semantic_tag::<false>(7), Some(7));
+        assert_eq!(normalized_instruction_semantic_tag::<false>(8), Some(8));
+    }
+
+    #[test]
+    fn audit_keeps_the_maximum_account_key_set_inline() {
+        let message = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: (1..=MAX_MESSAGE_ACCOUNTS)
+                .map(|id| CompactPubkey::Id(id as u32))
+                .collect(),
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: vec![ArchiveV2HotInstruction {
+                program_id_index: u8::MAX,
+                accounts: vec![u8::MAX],
+                data: ArchiveV2HotInstructionData::Raw(vec![]),
+            }],
+        });
+        let bytes = serialize(&message);
+        post_projector().audit_alternate_profile(&bytes).unwrap();
+        let (outcome, allocations) =
+            crate::test_allocations::count_current_thread_allocations(|| {
+                post_projector().audit_alternate_profile(&bytes).unwrap()
+            });
+        assert_eq!(outcome, WireProfileAuditOutcome::BothSemanticallyEquivalent);
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
     fn borrowed_dual_profile_audit_reports_dual_valid_different_semantics() {
         // Historical tag 1 plus payload tag 0 is ComputeBudget::Unused. The
         // same two bytes are current UnknownSystem with an empty byte vector.
@@ -1448,6 +1483,28 @@ mod tests {
             });
         assert_eq!(outcome, WireProfileAuditOutcome::BothSemanticallyDivergent);
         assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn alternate_elimination_stops_after_profile_boundaries_diverge() {
+        // Post sees [Vote tag 5, Vote tag 7, Raw]. Pre sees [Vote tag 5,
+        // Raw, Vote tag 5]. The first tag 5 payload has a different length in
+        // each grammar, so later Post tag boundaries cannot reject Pre.
+        let bytes = decode_hex(
+            "000100000201020000030100050000000001010107010001000100000001010100050000000000",
+        );
+        assert!(post_projector().project(&bytes, |_| {}).is_ok());
+        assert!(pre_projector().project(&bytes, |_| {}).is_ok());
+        let outcome = post_projector()
+            .audit_alternate_profile_with_program_oracle(&bytes, |_, semantics| {
+                matches!(
+                    semantics,
+                    ArchiveV2InstructionProgramSemantics::Raw
+                        | ArchiveV2InstructionProgramSemantics::Vote
+                )
+            })
+            .unwrap();
+        assert_eq!(outcome, WireProfileAuditOutcome::BothSemanticallyDivergent);
     }
 
     #[test]

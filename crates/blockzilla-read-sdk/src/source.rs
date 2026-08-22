@@ -295,7 +295,6 @@ impl PinnedLocalRangeSource {
         object: &str,
         open: impl FnOnce(&Path) -> io::Result<File>,
     ) -> SourceResult<Option<PinnedFile>> {
-        let path = self.path(object)?;
         {
             let files = self.files.lock().map_err(|_| {
                 SourceError::Protocol("pinned local source file cache is poisoned".to_owned())
@@ -304,6 +303,9 @@ impl PinnedLocalRangeSource {
                 return Ok(file.clone());
             }
         }
+        // Cached entries were validated before insertion. Build the path only
+        // for the first open, not for every range read.
+        let path = self.path(object)?;
 
         // Opening a local/NAS object can involve filesystem I/O, so never hold the source-wide
         // cache mutex across it. Multiple first-open racers are reconciled below: whichever

@@ -199,7 +199,11 @@ impl HttpRangeSource {
         Ok(())
     }
 
-    fn full_manifest(&self, expected_length: usize) -> SourceResult<Vec<u8>> {
+    fn full_manifest_into(
+        &self,
+        expected_length: usize,
+        destination: &mut Vec<u8>,
+    ) -> SourceResult<()> {
         if expected_length > self.max_manifest_bytes {
             return Err(SourceError::Protocol(format!(
                 "manifest is {expected_length} bytes, above the {} byte limit",
@@ -223,7 +227,12 @@ impl HttpRangeSource {
             )));
         }
         enforce_content_length(&response, expected_length)?;
-        read_bounded(&mut response, expected_length, GENERATION_MANIFEST_FILE)
+        read_bounded_into(
+            &mut response,
+            expected_length,
+            GENERATION_MANIFEST_FILE,
+            destination,
+        )
     }
 }
 
@@ -261,6 +270,18 @@ impl RangeSource for HttpRangeSource {
     }
 
     fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.read_range_into(object, offset, length, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn read_range_into(
+        &self,
+        object: &str,
+        offset: u64,
+        length: usize,
+        destination: &mut Vec<u8>,
+    ) -> SourceResult<()> {
         if length == 0 {
             let size = self
                 .size(object)?
@@ -273,7 +294,8 @@ impl RangeSource for HttpRangeSource {
                     size,
                 });
             }
-            return Ok(Vec::new());
+            destination.clear();
+            return Ok(());
         }
         if object == GENERATION_MANIFEST_FILE {
             if offset != 0 {
@@ -281,7 +303,7 @@ impl RangeSource for HttpRangeSource {
                     "manifest only supports a complete bounded GET".into(),
                 ));
             }
-            return self.full_manifest(length);
+            return self.full_manifest_into(length, destination);
         }
 
         let length_u64 = u64::try_from(length).map_err(|_| {
@@ -326,7 +348,7 @@ impl RangeSource for HttpRangeSource {
                 "range GET for {object} returned an unexpected Content-Range"
             )));
         }
-        read_bounded(&mut response, length, object)
+        read_bounded_into(&mut response, length, object, destination)
     }
 }
 
@@ -346,26 +368,35 @@ fn enforce_content_length(response: &Response, expected: usize) -> SourceResult<
     Ok(())
 }
 
-fn read_bounded(response: &mut Response, expected: usize, object: &str) -> SourceResult<Vec<u8>> {
+fn read_bounded_into(
+    response: &mut impl Read,
+    expected: usize,
+    object: &str,
+    destination: &mut Vec<u8>,
+) -> SourceResult<()> {
     let bound = u64::try_from(expected)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
-    let mut bytes = Vec::with_capacity(expected.min(8 * 1024 * 1024));
+    destination.clear();
+    let initial_capacity = expected.min(8 * 1024 * 1024);
+    if destination.capacity() < initial_capacity {
+        destination.reserve(initial_capacity);
+    }
     response
         .take(bound)
-        .read_to_end(&mut bytes)
+        .read_to_end(destination)
         .map_err(|source| SourceError::Io {
             object: object.to_owned(),
             source,
         })?;
-    if bytes.len() != expected {
+    if destination.len() != expected {
         return Err(SourceError::ShortRead {
             object: object.to_owned(),
             expected,
-            actual: bytes.len(),
+            actual: destination.len(),
         });
     }
-    Ok(bytes)
+    Ok(())
 }
 
 fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
@@ -412,5 +443,18 @@ mod tests {
         let rendered = format!("{source:?}");
         assert!(!rendered.contains("highly-secret-token"));
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn bounded_read_reuses_destination_capacity() {
+        let mut destination = Vec::with_capacity(64);
+        destination.extend_from_slice(b"old bytes");
+        let allocation = destination.as_ptr();
+        let mut response = std::io::Cursor::new(b"new bytes");
+
+        read_bounded_into(&mut response, 9, "object.bin", &mut destination).unwrap();
+
+        assert_eq!(destination, b"new bytes");
+        assert_eq!(destination.as_ptr(), allocation);
     }
 }

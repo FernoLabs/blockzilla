@@ -53,6 +53,7 @@ enum Classification {
 #[derive(Debug, Default, Serialize)]
 struct Counts {
     blocks: u64,
+    owned_fallback_blocks: u64,
     compressed_block_bytes: u64,
     uncompressed_block_bytes: u64,
     typed_messages: u64,
@@ -67,6 +68,11 @@ struct Counts {
 impl Counts {
     fn merge(&mut self, other: Self) -> Result<(), String> {
         merge_count(&mut self.blocks, other.blocks, "block count")?;
+        merge_count(
+            &mut self.owned_fallback_blocks,
+            other.owned_fallback_blocks,
+            "owned fallback block count",
+        )?;
         merge_count(
             &mut self.compressed_block_bytes,
             other.compressed_block_bytes,
@@ -262,13 +268,15 @@ fn scan(args: &Args, archive: PathBuf) -> Result<(Counts, FirstEvidence), String
         .compile_pubkey_filter([system_program, compute_budget_program, vote_program])
         .map_err(|error| format!("cannot resolve canonical program IDs: {error}"))?;
     let programs = ProgramKeys {
-        filter: &known_programs,
-        system: &system_program,
-        compute_budget: &compute_budget_program,
-        vote: &vote_program,
+        system: ProgramKey::new(&known_programs, system_program),
+        compute_budget: ProgramKey::new(&known_programs, compute_budget_program),
+        vote: ProgramKey::new(&known_programs, vote_program),
     };
-    let row_count = reader.index().rows.len();
-    let ranges = block_ranges(row_count, args.workers);
+    let ranges = weighted_ranges(&reader.index().rows, args.workers, |row| {
+        // Keep ranges contiguous for NAS reads, but balance the compressed
+        // bytes that set the measured cold-storage limit.
+        u64::from(row.compressed_len)
+    });
     let progress = Progress::new(args.epoch, args.progress_blocks);
     let results = thread::scope(|scope| {
         let mut ranges = ranges.into_iter();
@@ -312,15 +320,12 @@ fn scan(args: &Args, archive: PathBuf) -> Result<(Counts, FirstEvidence), String
 
 fn scan_range(
     reader: &ArchiveReader<PinnedLocalRangeSource>,
-    programs: &ProgramKeys<'_>,
+    programs: &ProgramKeys,
     args: &Args,
     range: Range<usize>,
     progress: &Progress,
 ) -> Result<(Counts, FirstEvidence), String> {
-    let post =
-        ArchiveV2MessageProjector::new(ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1);
-    let pre =
-        ArchiveV2MessageProjector::new(ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1);
+    let mut preferred_profile = ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1;
     let mut counts = Counts::default();
     let mut first = FirstEvidence::default();
     let mut blocks = reader
@@ -330,6 +335,12 @@ fn scan_range(
     while let Some(block) = blocks.next_block() {
         let block = block.map_err(|error| format!("cannot decode block frame: {error}"))?;
         increment(&mut counts.blocks, "block count")?;
+        if block.uses_owned_fallback() {
+            increment(
+                &mut counts.owned_fallback_blocks,
+                "owned fallback block count",
+            )?;
+        }
         let typed_before = counts.typed_messages;
         let slot = block.header().slot;
         for row in block.tx_rows() {
@@ -380,8 +391,7 @@ fn scan_range(
                 continue;
             };
             classify_message(
-                post,
-                pre,
+                &mut preferred_profile,
                 programs,
                 bytes,
                 slot,
@@ -397,26 +407,23 @@ fn scan_range(
 
 #[allow(clippy::too_many_arguments)]
 fn classify_message(
-    post: ArchiveV2MessageProjector,
-    pre: ArchiveV2MessageProjector,
-    programs: &ProgramKeys<'_>,
+    preferred_profile: &mut ArchiveV2WireProfile,
+    programs: &ProgramKeys,
     bytes: &[u8],
     slot: u64,
     transaction_index: u32,
     counts: &mut Counts,
     first: &mut FirstEvidence,
 ) -> Result<(), String> {
-    let post_result = post
+    let selected_profile = *preferred_profile;
+    let alternate_profile = alternate_profile(selected_profile);
+    let selected_result = ArchiveV2MessageProjector::new(selected_profile)
         .audit_alternate_profile_with_program_oracle(bytes, |program, semantics| {
             programs.matches(program, semantics)
         });
-    match post_result {
+    match selected_result {
         Ok(WireProfileAuditOutcome::SelectedOnly) => {
-            increment(&mut counts.post_only, "Post-only message count")?;
-            first.post_only.get_or_insert(Location {
-                slot,
-                transaction_index,
-            });
+            record_selected_only(selected_profile, counts, first, slot, transaction_index)?;
         }
         Ok(WireProfileAuditOutcome::BothSemanticallyEquivalent) => {
             increment(&mut counts.both_equivalent, "equivalent message count")?;
@@ -428,37 +435,50 @@ fn classify_message(
                 transaction_index,
             });
         }
-        Err(post_error) => {
-            let pre_result = pre
+        Err(selected_error) => {
+            let alternate_result = ArchiveV2MessageProjector::new(alternate_profile)
                 .audit_alternate_profile_with_program_oracle(bytes, |program, semantics| {
                     programs.matches(program, semantics)
                 });
-            match pre_result {
+            match alternate_result {
                 Ok(WireProfileAuditOutcome::SelectedOnly) => {
-                    increment(&mut counts.pre_only, "Pre-only message count")?;
-                    first.pre_only.get_or_insert(Location {
+                    record_selected_only(
+                        alternate_profile,
+                        counts,
+                        first,
                         slot,
                         transaction_index,
-                    });
+                    )?;
+                    *preferred_profile = alternate_profile;
                 }
                 Ok(other) => {
+                    let (post_error, pre_error) = ordered_profile_errors(
+                        selected_profile,
+                        selected_error.to_string(),
+                        format!("inconsistent alternate result: {other:?}"),
+                    );
                     record_invalid(
                         counts,
                         first,
                         slot,
                         transaction_index,
-                        post_error.to_string(),
-                        format!("inconsistent alternate result: {other:?}"),
+                        post_error,
+                        pre_error,
                     )?;
                 }
-                Err(pre_error) => {
+                Err(alternate_error) => {
+                    let (post_error, pre_error) = ordered_profile_errors(
+                        selected_profile,
+                        selected_error.to_string(),
+                        alternate_error.to_string(),
+                    );
                     record_invalid(
                         counts,
                         first,
                         slot,
                         transaction_index,
-                        post_error.to_string(),
-                        pre_error.to_string(),
+                        post_error,
+                        pre_error,
                     )?;
                 }
             }
@@ -467,14 +487,83 @@ fn classify_message(
     Ok(())
 }
 
-struct ProgramKeys<'a> {
-    filter: &'a CompiledPubkeyFilter,
-    system: &'a [u8; 32],
-    compute_budget: &'a [u8; 32],
-    vote: &'a [u8; 32],
+fn alternate_profile(profile: ArchiveV2WireProfile) -> ArchiveV2WireProfile {
+    match profile {
+        ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1
+        }
+        ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+        }
+    }
 }
 
-impl ProgramKeys<'_> {
+fn record_selected_only(
+    profile: ArchiveV2WireProfile,
+    counts: &mut Counts,
+    first: &mut FirstEvidence,
+    slot: u64,
+    transaction_index: u32,
+) -> Result<(), String> {
+    let location = Location {
+        slot,
+        transaction_index,
+    };
+    match profile {
+        ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
+            increment(&mut counts.post_only, "Post-only message count")?;
+            first.post_only.get_or_insert(location);
+        }
+        ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => {
+            increment(&mut counts.pre_only, "Pre-only message count")?;
+            first.pre_only.get_or_insert(location);
+        }
+    }
+    Ok(())
+}
+
+fn ordered_profile_errors(
+    selected_profile: ArchiveV2WireProfile,
+    selected_error: String,
+    alternate_error: String,
+) -> (String, String) {
+    match selected_profile {
+        ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1 => {
+            (selected_error, alternate_error)
+        }
+        ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1 => (alternate_error, selected_error),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProgramKey {
+    raw: [u8; 32],
+    registry_id: Option<u32>,
+}
+
+impl ProgramKey {
+    fn new(filter: &CompiledPubkeyFilter, raw: [u8; 32]) -> Self {
+        Self {
+            raw,
+            registry_id: filter.registry_id_for(&raw),
+        }
+    }
+
+    fn matches(self, reference: CompactPubkey) -> bool {
+        match reference {
+            CompactPubkey::Raw(raw) => raw == self.raw,
+            CompactPubkey::Id(id) => self.registry_id == Some(id),
+        }
+    }
+}
+
+struct ProgramKeys {
+    system: ProgramKey,
+    compute_budget: ProgramKey,
+    vote: ProgramKey,
+}
+
+impl ProgramKeys {
     fn matches(
         &self,
         program: CompactPubkey,
@@ -483,14 +572,10 @@ impl ProgramKeys<'_> {
         match semantics {
             ArchiveV2InstructionProgramSemantics::Raw => true,
             ArchiveV2InstructionProgramSemantics::ComputeBudget => {
-                self.filter.matches_reference(program, self.compute_budget)
+                self.compute_budget.matches(program)
             }
-            ArchiveV2InstructionProgramSemantics::System => {
-                self.filter.matches_reference(program, self.system)
-            }
-            ArchiveV2InstructionProgramSemantics::Vote => {
-                self.filter.matches_reference(program, self.vote)
-            }
+            ArchiveV2InstructionProgramSemantics::System => self.system.matches(program),
+            ArchiveV2InstructionProgramSemantics::Vote => self.vote.matches(program),
         }
     }
 }
@@ -564,6 +649,53 @@ fn block_ranges(row_count: usize, requested_workers: usize) -> Vec<Range<usize>>
         ranges.push(start..end);
         start = end;
     }
+    ranges
+}
+
+fn weighted_ranges<T>(
+    items: &[T],
+    requested_workers: usize,
+    weight: impl Fn(&T) -> u64,
+) -> Vec<Range<usize>> {
+    if items.is_empty() {
+        return block_ranges(0, requested_workers);
+    }
+    let workers = requested_workers.max(1).min(items.len());
+    let total = items
+        .iter()
+        .map(|item| u128::from(weight(item)))
+        .sum::<u128>();
+    if total == 0 {
+        return block_ranges(items.len(), workers);
+    }
+
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start = 0usize;
+    let mut consumed = 0u128;
+    for boundary in 1..workers {
+        let target = total * boundary as u128 / workers as u128;
+        let max_end = items.len() - (workers - boundary);
+        let mut end = start;
+        while end < max_end {
+            let next = consumed + u128::from(weight(&items[end]));
+            if end > start && consumed < target && target - consumed <= next.saturating_sub(target)
+            {
+                break;
+            }
+            consumed = next;
+            end += 1;
+            if consumed >= target {
+                break;
+            }
+        }
+        if end == start {
+            consumed += u128::from(weight(&items[end]));
+            end += 1;
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges.push(start..items.len());
     ranges
 }
 
@@ -748,5 +880,218 @@ mod tests {
         assert_eq!(block_ranges(0, 4), vec![0..0]);
         assert_eq!(block_ranges(3, 8), vec![0..1, 1..2, 2..3]);
         assert_eq!(block_ranges(10, 4), vec![0..3, 3..6, 6..8, 8..10]);
+    }
+
+    #[test]
+    fn weighted_ranges_keep_heavy_rows_on_the_nearest_side() {
+        let weights = [1u64, 1, 100, 1];
+        assert_eq!(
+            weighted_ranges(&weights, 2, |weight| *weight),
+            vec![0..2, 2..4]
+        );
+        assert_eq!(
+            weighted_ranges(&[0u64, 0, 0], 8, |weight| *weight),
+            block_ranges(3, 8)
+        );
+        assert_eq!(
+            weighted_ranges(&[100u64, 1, 1, 1], 2, |weight| *weight),
+            vec![0..1, 1..4]
+        );
+        assert_eq!(
+            weighted_ranges(&[1u64, 1, 1, 100], 2, |weight| *weight),
+            vec![0..3, 3..4]
+        );
+
+        for len in 0..20 {
+            let weights: Vec<u64> = (0..len)
+                .map(|index| ((index * 17 + len * 3) % 11) as u64)
+                .collect();
+            for workers in 0..25 {
+                let ranges = weighted_ranges(&weights, workers, |weight| *weight);
+                assert_eq!(ranges.first().unwrap().start, 0);
+                assert_eq!(ranges.last().unwrap().end, len);
+                for pair in ranges.windows(2) {
+                    assert_eq!(pair[0].end, pair[1].start);
+                }
+                if len != 0 {
+                    assert!(ranges.iter().all(|range| !range.is_empty()));
+                    assert_eq!(ranges.len(), workers.max(1).min(len));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_order_preserves_pre_classification_and_flips_preference() {
+        // Legacy tag 1 is ComputeBudget::Unused. Post can parse the same
+        // bytes as UnknownSystem(empty), but the program key makes only Pre
+        // valid.
+        let bytes = decode_hex("000100000201020000010101000100");
+        let programs = ProgramKeys {
+            system: ProgramKey {
+                raw: [1; 32],
+                registry_id: None,
+            },
+            compute_budget: ProgramKey {
+                raw: [2; 32],
+                registry_id: Some(2),
+            },
+            vote: ProgramKey {
+                raw: [3; 32],
+                registry_id: None,
+            },
+        };
+
+        let mut preferred = ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1;
+        let mut counts = Counts::default();
+        let mut first = FirstEvidence::default();
+        classify_message(
+            &mut preferred,
+            &programs,
+            &bytes,
+            10,
+            3,
+            &mut counts,
+            &mut first,
+        )
+        .unwrap();
+        assert_eq!(
+            preferred,
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1
+        );
+        assert_eq!(counts.pre_only, 1);
+        assert_eq!(counts.post_only, 0);
+        let location = first.pre_only.unwrap();
+        assert_eq!((location.slot, location.transaction_index), (10, 3));
+
+        let mut preferred = ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1;
+        let mut direct_counts = Counts::default();
+        let mut direct_first = FirstEvidence::default();
+        classify_message(
+            &mut preferred,
+            &programs,
+            &bytes,
+            10,
+            3,
+            &mut direct_counts,
+            &mut direct_first,
+        )
+        .unwrap();
+        assert_eq!(direct_counts.pre_only, counts.pre_only);
+        assert_eq!(direct_counts.post_only, counts.post_only);
+
+        let post_programs = ProgramKeys {
+            system: ProgramKey {
+                raw: [1; 32],
+                registry_id: Some(2),
+            },
+            compute_budget: ProgramKey {
+                raw: [2; 32],
+                registry_id: None,
+            },
+            vote: ProgramKey {
+                raw: [3; 32],
+                registry_id: None,
+            },
+        };
+        let mut preferred = ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1;
+        let mut post_counts = Counts::default();
+        let mut post_first = FirstEvidence::default();
+        classify_message(
+            &mut preferred,
+            &post_programs,
+            &bytes,
+            11,
+            4,
+            &mut post_counts,
+            &mut post_first,
+        )
+        .unwrap();
+        assert_eq!(
+            preferred,
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1
+        );
+        assert_eq!(post_counts.post_only, 1);
+        assert_eq!(post_counts.pre_only, 0);
+        assert_eq!(
+            ordered_profile_errors(
+                ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+                "pre".into(),
+                "post".into(),
+            ),
+            ("post".into(), "pre".into())
+        );
+
+        let neutral = decode_hex("000100000201020000010101000000");
+        for initial in [
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+        ] {
+            let mut preferred = initial;
+            let mut neutral_counts = Counts::default();
+            let mut neutral_first = FirstEvidence::default();
+            classify_message(
+                &mut preferred,
+                &programs,
+                &neutral,
+                12,
+                5,
+                &mut neutral_counts,
+                &mut neutral_first,
+            )
+            .unwrap();
+            assert_eq!(neutral_counts.both_equivalent, 1);
+            assert_eq!(preferred, initial);
+        }
+
+        let divergent = decode_hex(
+            "000100000201020000030100050000000001010107010001000100000001010100050000000000",
+        );
+        let vote_programs = ProgramKeys {
+            system: ProgramKey {
+                raw: [1; 32],
+                registry_id: None,
+            },
+            compute_budget: ProgramKey {
+                raw: [2; 32],
+                registry_id: None,
+            },
+            vote: ProgramKey {
+                raw: [3; 32],
+                registry_id: Some(2),
+            },
+        };
+        for initial in [
+            ArchiveV2WireProfile::PostUnknownInstructionFallbacksV1,
+            ArchiveV2WireProfile::PreUnknownInstructionFallbacksV1,
+        ] {
+            let mut preferred = initial;
+            let mut divergent_counts = Counts::default();
+            let mut divergent_first = FirstEvidence::default();
+            classify_message(
+                &mut preferred,
+                &vote_programs,
+                &divergent,
+                13,
+                6,
+                &mut divergent_counts,
+                &mut divergent_first,
+            )
+            .unwrap();
+            assert_eq!(divergent_counts.both_divergent, 1);
+            assert_eq!(preferred, initial);
+        }
+    }
+
+    fn decode_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap();
+                let low = (pair[1] as char).to_digit(16).unwrap();
+                ((high << 4) | low) as u8
+            })
+            .collect()
     }
 }

@@ -31,6 +31,9 @@ pub use archive::*;
 mod block_time_gaps;
 pub use block_time_gaps::*;
 
+mod layout;
+pub use layout::*;
+
 mod wire_rewrite;
 pub use wire_rewrite::*;
 
