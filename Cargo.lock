@@ -616,7 +616,7 @@ dependencies = [
  "libc",
  "memmap2",
  "minicbor",
- "of-car-reader",
+ "of-car-reader 0.2.0",
  "postcard",
  "prost",
  "rayon",
@@ -707,7 +707,7 @@ dependencies = [
  "five8",
  "gxhash",
  "heapless 0.9.3",
- "of-car-reader",
+ "of-car-reader 0.2.0",
  "ph",
  "postcard",
  "prost",
@@ -782,7 +782,7 @@ dependencies = [
  "blockzilla-format",
  "blockzilla-index-archive-format",
  "blockzilla-read-sdk",
- "of-car-reader",
+ "of-car-reader 0.2.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2605,7 +2605,7 @@ dependencies = [
  "hivezilla-protocol",
  "libc",
  "lru 0.16.4",
- "of-car-reader",
+ "of-car-reader 0.2.0",
  "prost",
  "protoc-bin-vendored",
  "reed-solomon-erasure",
@@ -3654,6 +3654,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "of-car-reader"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7ecea28523a45ff40dc48ec607454edc7566d59ba8b151d82b87c9fd5e895d"
+dependencies = [
+ "minicbor",
+ "pb-rs",
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "quick-protobuf",
+ "ruzstd",
+ "serde",
+ "sha2 0.11.0",
+ "wincode 0.6.1",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "of-slot-ranges"
 version = "0.1.1"
 dependencies = [
@@ -3661,7 +3680,7 @@ dependencies = [
  "bs58",
  "clap 4.6.5",
  "futures",
- "of-car-reader",
+ "of-car-reader 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "reqwest 0.13.4",
  "sha2 0.11.0",
  "tempfile",
@@ -3678,7 +3697,7 @@ dependencies = [
  "base64 0.22.1",
  "five8",
  "js-sys",
- "of-car-reader",
+ "of-car-reader 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "of-slot-ranges",
  "prost",
  "quick-protobuf",
