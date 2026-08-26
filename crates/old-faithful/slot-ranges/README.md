@@ -4,8 +4,10 @@ Build per-epoch slot-to-CAR byte-range indexes for Old Faithful archives.
 
 ## Range-only index from compact indexes
 
-Use `of-slot-ranges` when the Old Faithful compact indexes are available. It
-does not scan the CAR body.
+Use `of-slot-ranges` when the Old Faithful compact indexes are available. The
+normal path does not scan the CAR body. If the compact slot index gives the
+same full CID for more than one candidate slot, the builder reads only that
+CID's exact CAR frame to prove the correct slot.
 
 ```bash
 cargo run --locked -p of-slot-ranges --bin of-slot-ranges -- \
@@ -20,9 +22,10 @@ This writes the legacy 12-byte range index only. It is suitable for
 `getBlockTime` or readers that obtain `previousBlockhash` elsewhere, not for
 Edgezilla's full `getBlock` response.
 
-If `--cars-dir` is omitted, the command fetches the CAR header prefix from
-`files.old-faithful.net`; pass a local plain-CAR directory to avoid that
-request.
+If `--cars-dir` is omitted, the command fetches the CAR header prefix and any
+needed collision-proof frame from `files.old-faithful.net`. Pass a local
+plain-CAR directory to avoid those requests. Use `--base-url` to select a
+different Old Faithful mirror.
 
 ## Full getBlock index from compact indexes and blockhash registries
 
@@ -52,9 +55,11 @@ prefix needs an explicit `--seed-previous-blockhash`. Per-epoch registries must
 be under `epoch-N` or `N`; a multi-epoch build does not reuse a registry file
 from the root directory.
 
-The builder stops if two candidate slots resolve to the same CID. This result
-can be caused by an ambiguous compact hash match, so it is not silently
-deduplicated.
+If two candidate slots resolve to the same full CID, the builder looks up the
+CID's exact `(offset,size)` in the CID index. It reads that exact CAR frame,
+checks the frame CID, recomputes the CID from the payload, decodes the Block,
+and selects the decoded slot only when it is one of the candidates. It stops
+if any proof step fails.
 
 ## Full getBlock index from CAR files
 
@@ -98,10 +103,28 @@ cargo run --locked -p of-slot-ranges --bin of-validate-slot-index-v2 -- \
   --end-epoch 800
 ```
 
-This validator checks exact file and row sizes, CAR range order, canonical
-non-indexed rows, and previous blockhash continuity across every unique block
-slot from the Old Faithful slot-to-CID index. For epoch N after genesis, it
-requires epoch N-1's registry and checks the epoch boundary.
+This validator checks exact file and row sizes, rebuilds every canonical range
+from the CAR header and CID-index `(offset,size)`, compares every raw row, and
+checks previous blockhash continuity across every resolved CID group. A block
+whose exact CID end does not advance beyond the prior canonical end has a zero
+range row but stays in the blockhash chain. For epoch N after genesis, the
+validator requires epoch N-1's registry and checks the epoch boundary.
+
+For an ambiguous compact slot match, the validator uses the local CID index
+when present. Otherwise, it opens the CID index at `files.old-faithful.net`
+with bounded Range requests. It then verifies the exact CAR frame before it
+selects the block slot. Use `--cars-dir` for local plain CAR files and
+`--base-url` for a different mirror.
+
+Use `--reuse-raw` only when the 12-byte raw indexes are existing trusted
+artifacts and the local CID-to-offset indexes are intentionally absent. This
+mode skips only the all-CID canonical range rebuild. It still proves ambiguous
+CID groups with the exact CID index and CAR frame. It also checks raw file
+structure, raw and v2 prefix equality, zero rows for absent slots, registry
+count and order, previous-blockhash alignment, and epoch boundaries. The
+default mode keeps the full canonical CID range proof. The range-build wrapper
+selects `--reuse-raw` only when every requested raw file exists and
+`OVERWRITE=1` is not set.
 
 For an unprefixed direct-CAR epoch-0 registry, pass the same base58 value with
 `--seed-previous-blockhash` to the builder, validator, and sync helper. The
@@ -110,8 +133,10 @@ When validation starts at a nonzero epoch, an explicit seed is the predecessor
 for that first selected epoch. Without it, the validator reads the last hash
 from the preceding epoch registry.
 
-The Old Faithful raw index is the only source for CAR offsets and lengths.
-All blockhash bytes come from `blockhash_registry.bin`.
+The normal builder derives CAR offsets and lengths only from the Old Faithful
+CID index. The normal validator rebuilds those ranges and requires the raw and
+v2 rows to match. All blockhash bytes come from `blockhash_registry.bin`.
+Archive V2 range and offset fields are not used.
 
 For a legacy Archive V2 audit, add `--archive-v2`. In that mode,
 `archive-v2-blocks.index` supplies only the `block_id` order and slot mapping.
@@ -132,7 +157,10 @@ SLOT_INDEX_V2_VALIDATE_BIN=target/release/of-validate-slot-index-v2 \
 
 `push-v2` runs the strict validator before it starts the upload, refuses to
 change an existing remote object, and checks the uploaded objects. The build
-wrappers use this path automatically when `SYNC_R2_AFTER=1`.
+wrappers use this path automatically when `SYNC_R2_AFTER=1`. Set both
+`SLOT_INDEX_START_EPOCH` and `SLOT_INDEX_END_EPOCH` to restrict sync validation
+and upload to one inclusive epoch range. Set `SLOT_INDEX_V2_REUSE_RAW=1` only
+for an explicit trusted-raw sync.
 
 ## Raw Format
 

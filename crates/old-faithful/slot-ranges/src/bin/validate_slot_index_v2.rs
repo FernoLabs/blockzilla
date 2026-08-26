@@ -1,17 +1,26 @@
 use anyhow::{Context, Result, anyhow, bail};
-use of_car_reader::slot_ranges::{
-    SLOT_RANGE_ENTRY_SIZE, SLOT_RANGE_V2_ENTRY_SIZE, SLOTS_PER_EPOCH, decode_slot_range_entry,
-    decode_slot_range_v2_entry,
+use of_car_reader::{
+    compact_index::decode_offset_and_size,
+    slot_ranges::{
+        SLOT_RANGE_ENTRY_SIZE, SLOT_RANGE_V2_ENTRY_SIZE, SLOTS_PER_EPOCH, SlotRange,
+        decode_slot_range_entry, decode_slot_range_v2_entry,
+    },
 };
 use of_slot_ranges::{
-    AsyncCompactIndex, BuildSlotRangesConfig, LocalFileRangeReader,
-    build_block_slots_from_slot_index,
+    AsyncCompactIndex, BlockSlotCandidate, BuildSlotRangesConfig, LocalFileRangeReader,
+    RangeReader, build_block_slot_candidates_from_slot_index,
+    build_slot_ranges_from_indexes_with_block_slots, decode_block_slot_from_car_frame,
+    decode_car_header_total_size,
 };
+use reqwest::blocking::Client;
+use reqwest::header::{CONTENT_RANGE, HeaderValue, RANGE};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     env,
     ffi::{OsStr, OsString},
     fs,
+    future::{Ready, ready},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -29,15 +38,19 @@ const ARCHIVE_V2_HOT_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8 + 8 + 4 + 4;
 const ARCHIVE_V2_HOT_INDEX_ROW_LEN: usize = 4 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 4;
 const MAX_BUCKET_SIZE: usize = 64 * 1024 * 1024;
 const MAINNET_GENESIS_HASH_BASE58: &str = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+const DEFAULT_BASE_URL: &str = "https://files.old-faithful.net";
 
 #[derive(Debug)]
 struct Cli {
     index_dir: PathBuf,
     blockhash_dir: PathBuf,
     indexes_dir: PathBuf,
+    cars_dir: Option<PathBuf>,
+    base_url: String,
     start_epoch: Option<u64>,
     end_epoch: Option<u64>,
     seed_previous_blockhash: Option<[u8; 32]>,
+    reuse_raw: bool,
     mode: ValidationMode,
 }
 
@@ -59,6 +72,7 @@ struct EpochSidecars {
     rows: Vec<ArchiveV2BlockIndexRow>,
     blockhashes: Vec<[u8; 32]>,
     registry_offset: usize,
+    canonical_ranges: Option<Vec<SlotRange>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -84,7 +98,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "usage: of-validate-slot-index-v2 <slot-index-dir> <blockhash-dir> [--indexes-dir DIR] [--start-epoch N] [--end-epoch N] [--seed-previous-blockhash BASE58] [--archive-v2|--registry-only]"
+    "usage: of-validate-slot-index-v2 <slot-index-dir> <blockhash-dir> [--indexes-dir DIR] [--cars-dir DIR] [--base-url URL] [--start-epoch N] [--end-epoch N] [--seed-previous-blockhash BASE58] [--reuse-raw] [--archive-v2|--registry-only]"
 }
 
 fn parse_cli() -> Result<Cli> {
@@ -105,9 +119,13 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let mut end_epoch = None;
     let mut indexes_dir = PathBuf::from("indexes");
     let mut indexes_dir_set = false;
+    let mut cars_dir = None;
+    let mut base_url = DEFAULT_BASE_URL.to_string();
+    let mut base_url_set = false;
     let mut seed_previous_blockhash = None;
     let mut archive_v2 = false;
     let mut registry_only = false;
+    let mut reuse_raw = false;
     while let Some(argument) = arguments.next() {
         let argument = argument
             .to_str()
@@ -124,6 +142,34 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                     .ok_or_else(|| anyhow!("missing value for --indexes-dir"))?;
                 indexes_dir = PathBuf::from(value);
                 indexes_dir_set = true;
+                None
+            }
+            "--cars-dir" => {
+                if cars_dir.is_some() {
+                    bail!("duplicate argument --cars-dir");
+                }
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| anyhow!("missing value for --cars-dir"))?;
+                cars_dir = Some(PathBuf::from(value));
+                None
+            }
+            "--base-url" => {
+                if base_url_set {
+                    bail!("duplicate argument --base-url");
+                }
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| anyhow!("missing value for --base-url"))?;
+                base_url = value
+                    .to_str()
+                    .ok_or_else(|| anyhow!("--base-url value is not valid UTF-8"))?
+                    .trim_end_matches('/')
+                    .to_string();
+                if base_url.is_empty() {
+                    bail!("--base-url must not be empty");
+                }
+                base_url_set = true;
                 None
             }
             "--seed-previous-blockhash" => {
@@ -151,6 +197,13 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                     bail!("duplicate argument --registry-only");
                 }
                 registry_only = true;
+                None
+            }
+            "--reuse-raw" => {
+                if reuse_raw {
+                    bail!("duplicate argument --reuse-raw");
+                }
+                reuse_raw = true;
                 None
             }
             "-h" | "--help" => bail!(usage()),
@@ -181,13 +234,19 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     if archive_v2 && registry_only {
         bail!("--archive-v2 conflicts with --registry-only");
     }
+    if reuse_raw && (archive_v2 || registry_only) {
+        bail!("--reuse-raw is available only in normal Old Faithful index mode");
+    }
     Ok(Cli {
         index_dir,
         blockhash_dir,
         indexes_dir,
+        cars_dir,
+        base_url,
         start_epoch,
         end_epoch,
         seed_previous_blockhash,
+        reuse_raw,
         mode: if archive_v2 {
             ValidationMode::ArchiveV2
         } else if registry_only {
@@ -214,6 +273,10 @@ fn run(cli: Cli) -> Result<()> {
             cli.indexes_dir.display()
         );
     }
+    let http = Client::builder()
+        .user_agent("of-validate-slot-index-v2/1.0")
+        .build()
+        .context("build HTTP client")?;
     let discovered = discover_v2_indexes(&cli.index_dir)?;
     if discovered.is_empty() {
         bail!(
@@ -237,6 +300,9 @@ fn run(cli: Cli) -> Result<()> {
                     &cli.indexes_dir,
                     predecessor_epoch,
                     cli.mode,
+                    &http,
+                    cli.cars_dir.as_deref(),
+                    &cli.base_url,
                 )
             },
         )?;
@@ -248,6 +314,10 @@ fn run(cli: Cli) -> Result<()> {
             &cli.indexes_dir,
             cli.mode,
             predecessor,
+            &http,
+            cli.cars_dir.as_deref(),
+            &cli.base_url,
+            cli.reuse_raw,
         )?;
         total_present_slots = total_present_slots
             .checked_add(summary.present_slots)
@@ -256,9 +326,10 @@ fn run(cli: Cli) -> Result<()> {
             .checked_add(summary.indexed_blocks)
             .ok_or_else(|| anyhow!("indexed block count overflow"))?;
         println!(
-            "epoch={} mode={} indexed_blocks={} present_slots={} missing_ranges={} first_slot={} last_slot={} registry_records={} registry_offset={}",
+            "epoch={} mode={} range_proof={} indexed_blocks={} present_slots={} missing_ranges={} first_slot={} last_slot={} registry_records={} registry_offset={}",
             summary.epoch,
             cli.mode.label(),
+            cli.mode.range_proof_label(cli.reuse_raw),
             summary.indexed_blocks,
             summary.present_slots,
             summary.indexed_blocks - summary.present_slots,
@@ -305,6 +376,15 @@ impl ValidationMode {
             Self::OldFaithfulIndex => "old-faithful-index",
             Self::ArchiveV2 => "archive-v2",
             Self::RegistryOnly => "registry-only",
+        }
+    }
+
+    fn range_proof_label(self, reuse_raw: bool) -> &'static str {
+        match self {
+            Self::OldFaithfulIndex if reuse_raw => "reused-raw",
+            Self::OldFaithfulIndex => "canonical-cid-index",
+            Self::ArchiveV2 => "archive-v2-structure",
+            Self::RegistryOnly => "registry-only-structure",
         }
     }
 }
@@ -366,6 +446,10 @@ fn validate_epoch(
     indexes_dir: &Path,
     mode: ValidationMode,
     predecessor: Option<[u8; 32]>,
+    http: &Client,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+    reuse_raw: bool,
 ) -> Result<EpochSummary> {
     let v2_bytes = read_exact_size(
         v2_path,
@@ -379,9 +463,15 @@ fn validate_epoch(
         "raw slot index",
     )?;
     let sidecars = match mode {
-        ValidationMode::OldFaithfulIndex => {
-            read_old_faithful_index_sidecars(blockhash_root, indexes_dir, epoch)?
-        }
+        ValidationMode::OldFaithfulIndex => read_old_faithful_index_sidecars(
+            blockhash_root,
+            indexes_dir,
+            epoch,
+            http,
+            cars_dir,
+            base_url,
+            !reuse_raw,
+        )?,
         ValidationMode::ArchiveV2 => read_epoch_sidecars(blockhash_root, epoch)?,
         ValidationMode::RegistryOnly => {
             read_registry_only_sidecars(blockhash_root, epoch, &raw_bytes)?
@@ -413,6 +503,35 @@ fn validate_epoch_bytes(
             raw_bytes.len(),
             SLOTS_PER_EPOCH
         );
+    }
+    if let Some(canonical_ranges) = &sidecars.canonical_ranges {
+        if canonical_ranges.len() != SLOTS_PER_EPOCH as usize {
+            bail!(
+                "canonical range list has {} rows, expected {}",
+                canonical_ranges.len(),
+                SLOTS_PER_EPOCH
+            );
+        }
+        let epoch_start = epoch
+            .checked_mul(SLOTS_PER_EPOCH)
+            .ok_or_else(|| anyhow!("epoch start slot overflow for epoch {epoch}"))?;
+        for (slot_in_epoch, (raw_row, expected)) in raw_bytes
+            .chunks_exact(SLOT_RANGE_ENTRY_SIZE)
+            .zip(canonical_ranges)
+            .enumerate()
+        {
+            let actual = decode_slot_range_entry(raw_row)?;
+            if actual != *expected {
+                bail!(
+                    "slot {} raw range offset={} len={} differs from canonical CID-index range offset={} len={}",
+                    epoch_start + slot_in_epoch as u64,
+                    actual.offset,
+                    actual.len,
+                    expected.offset,
+                    expected.len
+                );
+            }
+        }
     }
     let epoch_start = epoch
         .checked_mul(SLOTS_PER_EPOCH)
@@ -606,8 +725,41 @@ fn read_old_faithful_index_sidecars(
     blockhash_root: &Path,
     indexes_dir: &Path,
     epoch: u64,
+    http: &Client,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+    prove_canonical_ranges: bool,
 ) -> Result<EpochSidecars> {
-    let block_slots = read_old_faithful_block_slots(indexes_dir, epoch)?;
+    let (candidates, cid_index_path) = read_old_faithful_block_candidates(indexes_dir, epoch)?;
+    let block_slots = resolve_old_faithful_block_slots(
+        epoch,
+        &candidates,
+        &cid_index_path,
+        http,
+        cars_dir,
+        base_url,
+    )?;
+    let canonical_ranges = prove_canonical_ranges
+        .then(|| {
+            build_canonical_old_faithful_ranges(
+                epoch,
+                indexes_dir,
+                &block_slots,
+                http,
+                cars_dir,
+                base_url,
+            )
+        })
+        .transpose()?;
+    if let Some(ranges) = &canonical_ranges {
+        let canonical_present = ranges.iter().filter(|range| !range.is_empty()).count();
+        eprintln!(
+            "epoch={epoch}: resolved_cid_groups={} canonical_nonempty_ranges={} canonical_empty_blocks={}",
+            block_slots.len(),
+            canonical_present,
+            block_slots.len() - canonical_present
+        );
+    }
     let rows = block_slots
         .into_iter()
         .enumerate()
@@ -620,15 +772,20 @@ fn read_old_faithful_index_sidecars(
         .collect::<Result<Vec<_>>>()?;
     let epoch_dir = registry_only_epoch_dir(blockhash_root, epoch)?;
     let blockhashes = read_blockhash_registry(&epoch_dir.join(BLOCKHASH_REGISTRY_FILE))?;
-    validate_sidecar_parts(epoch, rows, blockhashes).with_context(|| {
+    let mut sidecars = validate_sidecar_parts(epoch, rows, blockhashes).with_context(|| {
         format!(
             "validate Old Faithful slot order against registry in {}",
             epoch_dir.display()
         )
-    })
+    })?;
+    sidecars.canonical_ranges = canonical_ranges;
+    Ok(sidecars)
 }
 
-fn read_old_faithful_block_slots(indexes_dir: &Path, epoch: u64) -> Result<Vec<u64>> {
+fn read_old_faithful_block_candidates(
+    indexes_dir: &Path,
+    epoch: u64,
+) -> Result<(Vec<BlockSlotCandidate>, PathBuf)> {
     let epoch_dir = indexes_dir.join(epoch.to_string());
     let cid_path = epoch_dir.join(format!("epoch-{epoch}.cid"));
     let epoch_cid =
@@ -637,12 +794,16 @@ fn read_old_faithful_block_slots(indexes_dir: &Path, epoch: u64) -> Result<Vec<u
         "epoch-{epoch}-{}-mainnet-slot-to-cid.index",
         epoch_cid.trim()
     ));
+    let cid_index_path = epoch_dir.join(format!(
+        "epoch-{epoch}-{}-mainnet-cid-to-offset-and-size.index",
+        epoch_cid.trim()
+    ));
     let reader = LocalFileRangeReader::open(&slot_index_path)?;
     let mut slot_index = futures::executor::block_on(AsyncCompactIndex::open(
         reader,
         slot_index_path.display().to_string(),
     ))?;
-    let output = futures::executor::block_on(build_block_slots_from_slot_index(
+    let output = futures::executor::block_on(build_block_slot_candidates_from_slot_index(
         epoch,
         &mut slot_index,
         BuildSlotRangesConfig {
@@ -650,7 +811,297 @@ fn read_old_faithful_block_slots(indexes_dir: &Path, epoch: u64) -> Result<Vec<u
             allow_node_read_fallback: true,
         },
     ))?;
-    Ok(output.block_slots)
+    Ok((output.candidates, cid_index_path))
+}
+
+fn resolve_old_faithful_block_slots(
+    epoch: u64,
+    candidates: &[BlockSlotCandidate],
+    cid_index_path: &Path,
+    http: &Client,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+) -> Result<Vec<u64>> {
+    let mut groups: HashMap<[u8; 36], Vec<&BlockSlotCandidate>> = HashMap::new();
+    for candidate in candidates {
+        groups.entry(candidate.cid).or_default().push(candidate);
+    }
+
+    let mut cid_index = if groups.values().any(|group| group.len() > 1) {
+        let (reader, source) = if cid_index_path.is_file() {
+            (
+                IndexRangeReader::Local(LocalFileRangeReader::open(cid_index_path)?),
+                cid_index_path.display().to_string(),
+            )
+        } else {
+            let file_name = cid_index_path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| anyhow!("CID index path has no UTF-8 file name"))?;
+            let url = format!("{base_url}/{epoch}/{file_name}");
+            (
+                IndexRangeReader::Http(HttpRangeReader::new(http.clone(), url.clone())),
+                url,
+            )
+        };
+        let index = futures::executor::block_on(AsyncCompactIndex::open(reader, source.clone()))
+            .with_context(|| format!("open {source}"))?;
+        if index.value_size() != 9 {
+            bail!("{source} has value_size {}, expected 9", index.value_size());
+        }
+        Some(index)
+    } else {
+        None
+    };
+
+    let mut selected = Vec::with_capacity(groups.len());
+    for group in groups.values_mut() {
+        group.sort_unstable_by_key(|candidate| candidate.slot);
+        if group.len() == 1 {
+            selected.push(group[0].slot);
+            continue;
+        }
+
+        let index = cid_index
+            .as_mut()
+            .expect("duplicate groups create a CID index reader");
+        let mut value = [0u8; 9];
+        let found =
+            futures::executor::block_on(index.lookup_into_node_reads(&group[0].cid, &mut value))?;
+        if !found {
+            bail!(
+                "CID index has no exact entry for duplicate CID at candidate slots {}",
+                display_candidate_slots(group)
+            );
+        }
+        let (offset, size) = decode_offset_and_size(&value)?;
+        let bytes = read_car_range(http, epoch, cars_dir, base_url, offset, u64::from(size))?;
+        let decoded_slot = decode_block_slot_from_car_frame(&group[0].cid, &bytes)
+            .context("verify exact CID-index CAR frame")?;
+        let evidence = "exact CID-index CAR frame";
+
+        let matches = group
+            .iter()
+            .filter(|candidate| candidate.slot == decoded_slot)
+            .count();
+        if matches != 1 {
+            bail!(
+                "{evidence} decodes block slot {decoded_slot}, which is not exactly one of candidate slots {}",
+                display_candidate_slots(group)
+            );
+        }
+        eprintln!(
+            "epoch={epoch}: resolved duplicate CID candidate slots {} to slot {decoded_slot} using {evidence}",
+            display_candidate_slots(group)
+        );
+        selected.push(decoded_slot);
+    }
+    selected.sort_unstable();
+    Ok(selected)
+}
+
+fn display_candidate_slots(candidates: &[&BlockSlotCandidate]) -> String {
+    candidates
+        .iter()
+        .map(|candidate| candidate.slot.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn build_canonical_old_faithful_ranges(
+    epoch: u64,
+    indexes_dir: &Path,
+    block_slots: &[u64],
+    http: &Client,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+) -> Result<Vec<SlotRange>> {
+    let epoch_dir = indexes_dir.join(epoch.to_string());
+    let cid_path = epoch_dir.join(format!("epoch-{epoch}.cid"));
+    let epoch_cid =
+        fs::read_to_string(&cid_path).with_context(|| format!("read {}", cid_path.display()))?;
+    let slot_index_path = epoch_dir.join(format!(
+        "epoch-{epoch}-{}-mainnet-slot-to-cid.index",
+        epoch_cid.trim()
+    ));
+    let cid_index_path = epoch_dir.join(format!(
+        "epoch-{epoch}-{}-mainnet-cid-to-offset-and-size.index",
+        epoch_cid.trim()
+    ));
+
+    let slot_reader = LocalFileRangeReader::open(&slot_index_path)?;
+    let mut slot_index = futures::executor::block_on(AsyncCompactIndex::open(
+        slot_reader,
+        slot_index_path.display().to_string(),
+    ))?;
+    let (cid_reader, cid_source) = if cid_index_path.is_file() {
+        (
+            IndexRangeReader::Local(LocalFileRangeReader::open(&cid_index_path)?),
+            cid_index_path.display().to_string(),
+        )
+    } else {
+        let file_name = cid_index_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| anyhow!("CID index path has no UTF-8 file name"))?;
+        let url = format!("{base_url}/{epoch}/{file_name}");
+        (
+            IndexRangeReader::Http(HttpRangeReader::new(http.clone(), url.clone())),
+            url,
+        )
+    };
+    let mut cid_index =
+        futures::executor::block_on(AsyncCompactIndex::open(cid_reader, cid_source.clone()))
+            .with_context(|| format!("open {cid_source}"))?;
+    let prefix = read_car_range(http, epoch, cars_dir, base_url, 0, 16)?;
+    let car_header_size = decode_car_header_total_size(&prefix, "Old Faithful CAR")?;
+    let output = futures::executor::block_on(build_slot_ranges_from_indexes_with_block_slots(
+        epoch,
+        car_header_size,
+        &mut slot_index,
+        &mut cid_index,
+        BuildSlotRangesConfig {
+            max_bucket_payload_bytes: MAX_BUCKET_SIZE,
+            allow_node_read_fallback: true,
+        },
+        block_slots,
+    ))?;
+    if output.block_slots != block_slots {
+        bail!("canonical range builder changed the resolved block slot order");
+    }
+    Ok(output.ranges)
+}
+
+enum IndexRangeReader {
+    Local(LocalFileRangeReader),
+    Http(HttpRangeReader),
+}
+
+impl RangeReader for IndexRangeReader {
+    type ReadFuture<'a>
+        = Ready<Result<()>>
+    where
+        Self: 'a;
+
+    fn read_exact_at<'a>(&'a mut self, offset: u64, out: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        match self {
+            Self::Local(reader) => reader.read_exact_at(offset, out),
+            Self::Http(reader) => reader.read_exact_at(offset, out),
+        }
+    }
+}
+
+struct HttpRangeReader {
+    client: Client,
+    url: String,
+}
+
+impl HttpRangeReader {
+    fn new(client: Client, url: String) -> Self {
+        Self { client, url }
+    }
+}
+
+impl RangeReader for HttpRangeReader {
+    type ReadFuture<'a>
+        = Ready<Result<()>>
+    where
+        Self: 'a;
+
+    fn read_exact_at<'a>(&'a mut self, offset: u64, out: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        ready(
+            http_range_get_exact(&self.client, &self.url, offset, out.len()).and_then(|bytes| {
+                out.copy_from_slice(&bytes);
+                Ok(())
+            }),
+        )
+    }
+}
+
+fn read_car_range(
+    http: &Client,
+    epoch: u64,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>> {
+    if len == 0 {
+        bail!("cannot read an empty CAR range");
+    }
+    let byte_len = usize::try_from(len).context("CAR range length exceeds address space")?;
+    if let Some(path) = find_local_plain_car(epoch, cars_dir) {
+        let mut file = fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("seek {} to {offset}", path.display()))?;
+        let mut bytes = vec![0; byte_len];
+        file.read_exact(&mut bytes)
+            .with_context(|| format!("read {len} bytes at {offset} from {}", path.display()))?;
+        return Ok(bytes);
+    }
+
+    let url = format!("{base_url}/{epoch}/epoch-{epoch}.car");
+    http_range_get_exact(http, &url, offset, byte_len)
+}
+
+fn http_range_get_exact(http: &Client, url: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
+    if len == 0 {
+        bail!("cannot request an empty HTTP range from {url}");
+    }
+    let end = offset
+        .checked_add(u64::try_from(len).context("HTTP range length exceeds u64")? - 1)
+        .ok_or_else(|| anyhow!("HTTP range end overflow"))?;
+    let response = http
+        .get(url)
+        .header(
+            RANGE,
+            HeaderValue::from_str(&format!("bytes={offset}-{end}"))?,
+        )
+        .send()
+        .with_context(|| format!("range GET {url}"))?;
+    if response.status().as_u16() != 206 {
+        bail!(
+            "range GET {url} returned HTTP {}, expected 206",
+            response.status().as_u16()
+        );
+    }
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .ok_or_else(|| anyhow!("range GET {url} has no Content-Range header"))?
+        .to_str()
+        .with_context(|| format!("decode Content-Range from {url}"))?;
+    let expected_prefix = format!("bytes {offset}-{end}/");
+    let total = content_range.strip_prefix(&expected_prefix).ok_or_else(|| {
+        anyhow!(
+            "range GET {url} returned Content-Range {content_range:?}, expected {expected_prefix}..."
+        )
+    })?;
+    if total.is_empty() {
+        bail!("range GET {url} returned an empty Content-Range total");
+    }
+    let bytes = response
+        .bytes()
+        .with_context(|| format!("read range response from {url}"))?;
+    if bytes.len() != len {
+        bail!(
+            "range GET {url} returned {} bytes, expected {len}",
+            bytes.len()
+        );
+    }
+    Ok(bytes.to_vec())
+}
+
+fn find_local_plain_car(epoch: u64, cars_dir: Option<&Path>) -> Option<PathBuf> {
+    let root = cars_dir?;
+    let name = format!("epoch-{epoch}.car");
+    [
+        root.join(&name),
+        root.join(epoch.to_string()).join(&name),
+        root.join(format!("epoch-{epoch}")).join(&name),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 fn read_registry_only_sidecars(root: &Path, epoch: u64, raw_bytes: &[u8]) -> Result<EpochSidecars> {
@@ -685,10 +1136,21 @@ fn read_epoch_last_blockhash(
     indexes_dir: &Path,
     epoch: u64,
     mode: ValidationMode,
+    http: &Client,
+    cars_dir: Option<&Path>,
+    base_url: &str,
 ) -> Result<[u8; 32]> {
     match mode {
         ValidationMode::OldFaithfulIndex => {
-            let sidecars = read_old_faithful_index_sidecars(root, indexes_dir, epoch)?;
+            let sidecars = read_old_faithful_index_sidecars(
+                root,
+                indexes_dir,
+                epoch,
+                http,
+                cars_dir,
+                base_url,
+                false,
+            )?;
             sidecars
                 .rows
                 .last()
@@ -789,6 +1251,7 @@ fn validate_sidecar_parts(
         rows,
         blockhashes,
         registry_offset,
+        canonical_ranges: None,
     })
 }
 
@@ -1099,6 +1562,32 @@ mod tests {
     }
 
     #[test]
+    fn canonical_cid_ranges_reject_mutually_equal_wrong_raw_and_v2_rows() {
+        let (mut v2, mut raw) = empty_indexes();
+        let seed = [7; 32];
+        set_range_and_previous(&mut v2, &mut raw, 0, 999, 12, seed);
+        let mut sidecars = sidecars(0, vec![block(0, 0, 0)], vec![[8; 32]]);
+        sidecars.canonical_ranges = Some(vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize]);
+        let error = validate_epoch_bytes(0, &v2, &raw, &sidecars, Some(seed))
+            .expect_err("equal raw and v2 rows must still match canonical CID boundaries");
+        assert!(error.to_string().contains("canonical CID-index range"));
+    }
+
+    #[test]
+    fn canonical_empty_range_keeps_the_blockhash_chain_entry() {
+        let (mut v2, raw) = empty_indexes();
+        let seed = [7; 32];
+        set_previous(&mut v2, 0, seed);
+        let mut sidecars = sidecars(0, vec![block(0, 0, 0)], vec![[8; 32]]);
+        sidecars.canonical_ranges = Some(vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize]);
+        let summary = validate_epoch_bytes(0, &v2, &raw, &sidecars, Some(seed))
+            .expect("a canonical empty range remains in the blockhash chain");
+        assert_eq!(summary.indexed_blocks, 1);
+        assert_eq!(summary.present_slots, 0);
+        assert_eq!(summary.last_blockhash, Some([8; 32]));
+    }
+
+    #[test]
     fn rejects_current_hash_for_later_indexed_block() {
         let (mut v2, mut raw) = empty_indexes();
         let predecessor = [7; 32];
@@ -1148,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_mode_accepts_epoch_zero_unprefixed_registry_with_explicit_seed() {
+    fn normal_and_reuse_raw_modes_accept_epoch_zero_unprefixed_registry_with_seed() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let index_dir = temporary.path().join("slot-index");
         let indexes_dir = temporary.path().join("indexes");
@@ -1169,9 +1658,16 @@ mod tests {
         fs::write(compact_epoch_dir.join("epoch-0.cid"), "fixture-cid\n").expect("write CID file");
         fs::write(
             compact_epoch_dir.join("epoch-0-fixture-cid-mainnet-slot-to-cid.index"),
-            tiny_compact_index(&0u64.to_le_bytes(), &[1, 2, 3]),
+            tiny_compact_index(&0u64.to_le_bytes(), &[1; 36]),
         )
         .expect("write slot-to-CID index");
+        fs::write(
+            compact_epoch_dir.join("epoch-0-fixture-cid-mainnet-cid-to-offset-and-size.index"),
+            tiny_compact_index(&[1; 36], &offset_size_value(0, 1)),
+        )
+        .expect("write CID-to-offset index");
+        fs::write(temporary.path().join("epoch-0.car"), car_header_prefix())
+            .expect("write CAR header fixture");
         fs::write(
             registry_epoch_dir.join(BLOCKHASH_REGISTRY_FILE),
             current_blockhash,
@@ -1186,10 +1682,36 @@ mod tests {
             &indexes_dir,
             ValidationMode::OldFaithfulIndex,
             Some(seed),
+            &Client::new(),
+            Some(temporary.path()),
+            DEFAULT_BASE_URL,
+            false,
         )
         .expect("normal mode must accept an explicit epoch-zero seed");
         assert_eq!(summary.registry_offset, 0);
         assert_eq!(summary.last_blockhash, Some(current_blockhash));
+
+        fs::remove_file(
+            compact_epoch_dir.join("epoch-0-fixture-cid-mainnet-cid-to-offset-and-size.index"),
+        )
+        .expect("remove CID-to-offset index");
+        fs::remove_file(temporary.path().join("epoch-0.car")).expect("remove CAR fixture");
+        let reused = validate_epoch(
+            0,
+            &v2_path,
+            &index_dir,
+            &blockhash_dir,
+            &indexes_dir,
+            ValidationMode::OldFaithfulIndex,
+            Some(seed),
+            &Client::new(),
+            None,
+            "http://127.0.0.1:1",
+            true,
+        )
+        .expect("reuse-raw mode must not rebuild all canonical CID ranges");
+        assert_eq!(reused.registry_offset, 0);
+        assert_eq!(reused.last_blockhash, Some(current_blockhash));
     }
 
     #[test]
@@ -1336,16 +1858,94 @@ mod tests {
         let expected_slot = 4 * SLOTS_PER_EPOCH + 1;
         fs::write(
             index_epoch_dir.join("epoch-4-fixture-cid-mainnet-slot-to-cid.index"),
-            tiny_compact_index(&expected_slot.to_le_bytes(), &[1, 2, 3]),
+            tiny_compact_index(&expected_slot.to_le_bytes(), &[1; 36]),
         )
         .expect("write slot-to-CID index");
+        fs::write(
+            index_epoch_dir.join("epoch-4-fixture-cid-mainnet-cid-to-offset-and-size.index"),
+            tiny_compact_index(&[1; 36], &offset_size_value(0, 1)),
+        )
+        .expect("write CID-to-offset index");
+        fs::write(temporary.path().join("epoch-4.car"), car_header_prefix())
+            .expect("write CAR header fixture");
         fs::write(registry_epoch_dir.join(BLOCKHASH_REGISTRY_FILE), [8; 32])
             .expect("write blockhash registry");
 
-        let sidecars = read_old_faithful_index_sidecars(&registry_dir, &indexes_dir, 4)
-            .expect("read independent validation inputs");
+        let sidecars = read_old_faithful_index_sidecars(
+            &registry_dir,
+            &indexes_dir,
+            4,
+            &Client::new(),
+            Some(temporary.path()),
+            DEFAULT_BASE_URL,
+            true,
+        )
+        .expect("read independent validation inputs");
         assert_eq!(sidecars.rows, vec![block(0, 4, 1)]);
         assert_eq!(sidecars.blockhashes, vec![[8; 32]]);
+    }
+
+    #[test]
+    fn old_faithful_collision_uses_exact_cid_index_car_frame() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let payload = test_block_payload(7);
+        let cid = *of_car_reader::reconstruct::Cid36::compute(&payload).car_bytes();
+        let frame = test_car_frame(cid, &payload);
+        let offset = 59u64;
+        let mut car = vec![0; offset as usize];
+        car.extend_from_slice(&frame);
+        fs::write(temporary.path().join("epoch-0.car"), car).expect("write CAR fixture");
+
+        let cid_index_path = temporary.path().join("cid.index");
+        fs::write(
+            &cid_index_path,
+            tiny_compact_index(&cid, &offset_size_value(offset, frame.len() as u32)),
+        )
+        .expect("write CID index");
+        let candidates = [
+            BlockSlotCandidate { slot: 7, cid },
+            BlockSlotCandidate { slot: 8, cid },
+        ];
+        let slots = resolve_old_faithful_block_slots(
+            0,
+            &candidates,
+            &cid_index_path,
+            &Client::new(),
+            Some(temporary.path()),
+            DEFAULT_BASE_URL,
+        )
+        .expect("resolve duplicate CID from exact CAR frame");
+        assert_eq!(slots, vec![7]);
+    }
+
+    fn test_block_payload(slot: u8) -> Vec<u8> {
+        assert!(slot < 24);
+        vec![0x86, 0x02, slot, 0x80, 0x80, 0x83, 0xf6, 0xf6, 0xf6, 0xf6]
+    }
+
+    fn test_car_frame(cid: [u8; 36], payload: &[u8]) -> Vec<u8> {
+        let entry_len = cid.len() + payload.len();
+        assert!(entry_len < 128);
+        let mut frame = Vec::with_capacity(entry_len + 1);
+        frame.push(entry_len as u8);
+        frame.extend_from_slice(&cid);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn offset_size_value(offset: u64, size: u32) -> [u8; 9] {
+        assert!(offset < (1u64 << 48));
+        assert!(size < (1u32 << 24));
+        let mut value = [0; 9];
+        value[..6].copy_from_slice(&offset.to_le_bytes()[..6]);
+        value[6..].copy_from_slice(&size.to_le_bytes()[..3]);
+        value
+    }
+
+    fn car_header_prefix() -> [u8; 16] {
+        let mut prefix = [0; 16];
+        prefix[0] = 58;
+        prefix
     }
 
     fn tiny_compact_index(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -1384,6 +1984,17 @@ mod tests {
         assert_eq!(independent.mode, ValidationMode::OldFaithfulIndex);
         assert_eq!(independent.indexes_dir, PathBuf::from("indexes"));
         assert_eq!(independent.seed_previous_blockhash, None);
+        assert_eq!(independent.base_url, DEFAULT_BASE_URL);
+        assert!(!independent.reuse_raw);
+
+        let reused = parse_args([
+            OsString::from("slot-index"),
+            OsString::from("registry"),
+            OsString::from("--reuse-raw"),
+        ])
+        .expect("reuse-raw arguments");
+        assert_eq!(reused.mode, ValidationMode::OldFaithfulIndex);
+        assert!(reused.reuse_raw);
 
         let seeded = parse_args([
             OsString::from("slot-index"),
@@ -1412,6 +2023,19 @@ mod tests {
         ])
         .expect("registry-only arguments");
         assert_eq!(direct_car.mode, ValidationMode::RegistryOnly);
+
+        for alternate_mode in ["--archive-v2", "--registry-only"] {
+            assert!(
+                parse_args([
+                    OsString::from("slot-index"),
+                    OsString::from("sidecars"),
+                    OsString::from(alternate_mode),
+                    OsString::from("--reuse-raw"),
+                ])
+                .is_err(),
+                "{alternate_mode} must reject --reuse-raw"
+            );
+        }
 
         assert!(
             parse_args([

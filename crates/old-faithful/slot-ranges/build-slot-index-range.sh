@@ -10,6 +10,8 @@ Environment:
   INDEXES_DIR       Compact index cache directory. Default: ./indexes
   SLOT_INDEX_DIR    Output directory for epoch-*-slot-ranges.raw. Default: ./out
   CARS_DIR          Optional local plain CAR directory for header reads.
+  OLD_FAITHFUL_BASE_URL
+                    Optional compact-index and plain-CAR mirror base URL.
   BLOCKHASH_DIR     Root with epoch-N/blockhash_registry.bin. Ordered slots
                     come only from the Old Faithful slot-to-CID index.
                     For START_EPOCH > 0, it must also contain epoch-(N-1).
@@ -47,12 +49,15 @@ if [[ -n "${BLOCKHASH_DIR:-}" && -n "${ARCHIVE_V2_DIR:-}" ]]; then
 fi
 
 download_cid_default=0
+reuse_all_raw=1
 if [[ "${OVERWRITE:-0}" == "1" ]]; then
   download_cid_default=1
+  reuse_all_raw=0
 else
   for ((epoch=START_EPOCH; epoch<=END_EPOCH; epoch++)); do
     if [[ ! -s "$SLOT_INDEX_DIR/epoch-$epoch-slot-ranges.raw" ]]; then
       download_cid_default=1
+      reuse_all_raw=0
       break
     fi
   done
@@ -69,6 +74,10 @@ args=(
 
 if [[ -n "${CARS_DIR:-}" ]]; then
   args+=("--cars-dir" "$CARS_DIR")
+fi
+
+if [[ -n "${OLD_FAITHFUL_BASE_URL:-}" ]]; then
+  args+=("--base-url" "$OLD_FAITHFUL_BASE_URL")
 fi
 
 if [[ -n "${BLOCKHASH_DIR:-}" ]]; then
@@ -97,12 +106,23 @@ if [[ -n "${BLOCKHASH_DIR:-}" ]]; then
   if [[ -n "${SEED_PREVIOUS_BLOCKHASH:-}" ]]; then
     validator_seed_args+=("--seed-previous-blockhash" "$SEED_PREVIOUS_BLOCKHASH")
   fi
+  validator_source_args=()
+  if [[ -n "${CARS_DIR:-}" ]]; then
+    validator_source_args+=("--cars-dir" "$CARS_DIR")
+  fi
+  if [[ -n "${OLD_FAITHFUL_BASE_URL:-}" ]]; then
+    validator_source_args+=("--base-url" "$OLD_FAITHFUL_BASE_URL")
+  fi
+  if [[ "$reuse_all_raw" == "1" ]]; then
+    validator_source_args+=("--reuse-raw")
+  fi
   "${CARGO_BIN:-cargo}" run --release -p of-slot-ranges \
     --bin of-validate-slot-index-v2 -- \
     "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR" \
     --indexes-dir "$INDEXES_DIR" \
     --start-epoch "$START_EPOCH" \
     --end-epoch "$END_EPOCH" \
+    "${validator_source_args[@]}" \
     "${validator_seed_args[@]}"
 elif [[ -n "${ARCHIVE_V2_DIR:-}" ]]; then
   validator_seed_args=()
@@ -121,6 +141,9 @@ fi
 if [[ "${SYNC_R2_AFTER:-0}" == "1" ]]; then
   if [[ -n "${BLOCKHASH_DIR:-}" ]]; then
     SLOT_INDEX_V2_VALIDATE_BIN="${SLOT_INDEX_V2_VALIDATE_BIN:-$REPO_ROOT/target/release/of-validate-slot-index-v2}" \
+      SLOT_INDEX_V2_REUSE_RAW="$reuse_all_raw" \
+      SLOT_INDEX_START_EPOCH="$START_EPOCH" \
+      SLOT_INDEX_END_EPOCH="$END_EPOCH" \
       "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2 \
       "$SLOT_INDEX_DIR" "$INDEXES_DIR" "$BLOCKHASH_DIR"
   elif [[ -n "${ARCHIVE_V2_DIR:-}" ]]; then

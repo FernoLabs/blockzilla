@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use of_car_reader::{
     CarBlockReader,
+    compact_index::decode_offset_and_size,
     node::{Node, decode_node},
     slot_ranges::{
         SLOT_RANGE_ENTRY_SIZE, SLOTS_PER_EPOCH, SlotRange, SlotRangeWithPreviousBlockhash,
@@ -11,15 +12,18 @@ use of_car_reader::{
     },
 };
 use of_slot_ranges::{
-    AsyncCompactIndex, BuildSlotRangesConfig, LocalFileRangeReader,
-    build_block_slots_from_slot_index, build_slot_ranges_from_indexes,
-    decode_car_header_total_size,
+    AmbiguousBlockCidError, AsyncCompactIndex, BlockSlotCandidate, BuildSlotRangesConfig,
+    LocalFileRangeReader, RangeReader, build_block_slot_candidates_from_slot_index,
+    build_slot_ranges_from_indexes, build_slot_ranges_from_indexes_with_block_slots,
+    decode_block_slot_from_car_frame, decode_car_header_total_size,
 };
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, RANGE};
+use reqwest::header::{CONTENT_RANGE, HeaderValue, RANGE};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::future::{Ready, ready};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_BUCKET_SIZE: usize = 64 * 1024 * 1024;
@@ -30,6 +34,7 @@ const MAX_BUCKET_SIZE: usize = 64 * 1024 * 1024;
 const CAR_HEADER_PREFIX_READ_LEN: usize = 16;
 const OLD_FAITHFUL_CAR_HEADER_TOTAL_SIZE: u64 = 59;
 const ZSTD_LONG_WINDOW_LOG_MAX: u32 = 31;
+const DEFAULT_BASE_URL: &str = "https://files.old-faithful.net";
 
 #[derive(Parser, Debug)]
 #[command(name = "of-slot-ranges")]
@@ -50,6 +55,10 @@ struct Cli {
     /// If a CAR is missing, only the remote CAR header is fetched in memory.
     #[arg(long = "cars-dir", alias = "car-dir")]
     cars_dir: Option<PathBuf>,
+
+    /// Base URL for remote Old Faithful compact indexes and plain CAR files.
+    #[arg(long, default_value = DEFAULT_BASE_URL)]
+    base_url: String,
 
     /// Root containing epoch-N/blockhash_registry.bin.
     ///
@@ -185,23 +194,59 @@ fn main() -> Result<()> {
                 // Prefer local .car/.car.zst headers, then a tiny remote prefix, then a logged
                 // Old Faithful-specific fallback.
                 let (car_hdr, default_log) =
-                    car_header_total_size(&http, epoch, cli.cars_dir.as_deref())?;
+                    car_header_total_size(&http, epoch, cli.cars_dir.as_deref(), &cli.base_url)?;
                 if let Some(default_log) = default_log {
                     append_header_default_log(&cli.output_dir, epoch, car_hdr, &default_log)?;
                 }
                 eprintln!("epoch={epoch}: car_header_size={car_hdr}");
 
                 let t0 = std::time::Instant::now();
-                let output = futures::executor::block_on(build_slot_ranges_from_indexes(
+                let build_config = BuildSlotRangesConfig {
+                    max_bucket_payload_bytes: MAX_BUCKET_SIZE,
+                    allow_node_read_fallback: true,
+                };
+                let first_build = futures::executor::block_on(build_slot_ranges_from_indexes(
                     epoch,
                     car_hdr,
                     &mut slot_index,
                     &mut cid_index,
-                    BuildSlotRangesConfig {
-                        max_bucket_payload_bytes: MAX_BUCKET_SIZE,
-                        allow_node_read_fallback: true,
-                    },
-                ))?;
+                    build_config,
+                ));
+                let output = match first_build {
+                    Ok(output) => output,
+                    Err(error) if error.downcast_ref::<AmbiguousBlockCidError>().is_some() => {
+                        eprintln!(
+                            "epoch={epoch}: verify duplicate slot-to-CID candidates from exact CAR frames"
+                        );
+                        let candidates = futures::executor::block_on(
+                            build_block_slot_candidates_from_slot_index(
+                                epoch,
+                                &mut slot_index,
+                                build_config,
+                            ),
+                        )?;
+                        let resolved_slots =
+                            futures::executor::block_on(resolve_block_slot_candidates_from_car(
+                                epoch,
+                                &candidates.candidates,
+                                &mut cid_index,
+                                &http,
+                                cli.cars_dir.as_deref(),
+                                &cli.base_url,
+                            ))?;
+                        futures::executor::block_on(
+                            build_slot_ranges_from_indexes_with_block_slots(
+                                epoch,
+                                car_hdr,
+                                &mut slot_index,
+                                &mut cid_index,
+                                build_config,
+                                &resolved_slots,
+                            ),
+                        )?
+                    }
+                    Err(error) => return Err(error),
+                };
                 eprintln!(
                     "epoch={epoch}: done build ranges in {:.2}s present_slots={} slot_bucket_read={} MiB cid_bucket_read={} MiB max_slot_bucket={} MiB max_cid_bucket={} MiB slot_node_fallbacks={} cid_node_fallbacks={}",
                     t0.elapsed().as_secs_f64(),
@@ -265,12 +310,18 @@ fn main() -> Result<()> {
                         blockhash_root.display()
                     )
                 })?;
-            let block_slots = match index_block_slots.take() {
-                Some(block_slots) => block_slots,
-                None => read_block_slots_from_old_faithful_index(epoch, &cli.indexes_dir)?,
-            };
             let raw_ranges = read_slot_ranges_raw_file(&out_path)
                 .with_context(|| format!("read {}", out_path.display()))?;
+            let block_slots = match index_block_slots.take() {
+                Some(block_slots) => block_slots,
+                None => read_block_slots_from_old_faithful_index(
+                    epoch,
+                    &cli.indexes_dir,
+                    &http,
+                    cli.cars_dir.as_deref(),
+                    &cli.base_url,
+                )?,
+            };
             let run_seed = (epoch == cli.start_epoch)
                 .then_some(configured_seed)
                 .flatten();
@@ -362,13 +413,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn read_block_slots_from_old_faithful_index(epoch: u64, indexes_dir: &Path) -> Result<Vec<u64>> {
+fn read_block_slots_from_old_faithful_index(
+    epoch: u64,
+    indexes_dir: &Path,
+    http: &Client,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+) -> Result<Vec<u64>> {
     let epoch_dir = indexes_dir.join(epoch.to_string());
     let cid_path = epoch_dir.join(format!("epoch-{epoch}.cid"));
     let epoch_cid =
         fs::read_to_string(&cid_path).with_context(|| format!("read {}", cid_path.display()))?;
     let slot_index_path = epoch_dir.join(format!(
         "epoch-{epoch}-{}-mainnet-slot-to-cid.index",
+        epoch_cid.trim()
+    ));
+    let cid_index_path = epoch_dir.join(format!(
+        "epoch-{epoch}-{}-mainnet-cid-to-offset-and-size.index",
         epoch_cid.trim()
     ));
     eprintln!(
@@ -380,7 +441,7 @@ fn read_block_slots_from_old_faithful_index(epoch: u64, indexes_dir: &Path) -> R
         reader,
         slot_index_path.display().to_string(),
     ))?;
-    let output = futures::executor::block_on(build_block_slots_from_slot_index(
+    let output = futures::executor::block_on(build_block_slot_candidates_from_slot_index(
         epoch,
         &mut slot_index,
         BuildSlotRangesConfig {
@@ -388,12 +449,182 @@ fn read_block_slots_from_old_faithful_index(epoch: u64, indexes_dir: &Path) -> R
             allow_node_read_fallback: true,
         },
     ))?;
+    let block_slots = if has_duplicate_block_cids(&output.candidates) {
+        let (reader, source) = if cid_index_path.is_file() {
+            (
+                IndexRangeReader::Local(LocalFileRangeReader::open(&cid_index_path)?),
+                cid_index_path.display().to_string(),
+            )
+        } else {
+            let file_name = cid_index_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("CID index path has no UTF-8 file name"))?;
+            let url = format!("{}/{epoch}/{file_name}", base_url.trim_end_matches('/'));
+            (
+                IndexRangeReader::Http(HttpRangeReader::new(http.clone(), url.clone())),
+                url,
+            )
+        };
+        let mut cid_index = futures::executor::block_on(AsyncCompactIndex::open(reader, &source))
+            .with_context(|| format!("open {source}"))?;
+        futures::executor::block_on(resolve_block_slot_candidates_from_car(
+            epoch,
+            &output.candidates,
+            &mut cid_index,
+            http,
+            cars_dir,
+            base_url,
+        ))?
+    } else {
+        let mut slots = output
+            .candidates
+            .iter()
+            .map(|candidate| candidate.slot)
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        slots
+    };
     eprintln!(
         "epoch={epoch}: ordered unique block slots={} slot_index_present_slots={}",
-        output.block_slots.len(),
+        block_slots.len(),
         output.stats.present_slots
     );
-    Ok(output.block_slots)
+    Ok(block_slots)
+}
+
+fn has_duplicate_block_cids(candidates: &[BlockSlotCandidate]) -> bool {
+    let mut seen = std::collections::HashSet::with_capacity(candidates.len());
+    candidates
+        .iter()
+        .any(|candidate| !seen.insert(candidate.cid))
+}
+
+async fn resolve_block_slot_candidates_from_car<C>(
+    epoch: u64,
+    candidates: &[BlockSlotCandidate],
+    cid_index: &mut AsyncCompactIndex<C>,
+    http: &Client,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+) -> Result<Vec<u64>>
+where
+    C: RangeReader,
+{
+    if cid_index.value_size() != 9 {
+        return Err(anyhow!(
+            "{} has value_size {}, expected 9",
+            cid_index.source(),
+            cid_index.value_size()
+        ));
+    }
+    let mut groups: HashMap<[u8; 36], Vec<&BlockSlotCandidate>> = HashMap::new();
+    for candidate in candidates {
+        groups.entry(candidate.cid).or_default().push(candidate);
+    }
+
+    let mut selected = Vec::with_capacity(groups.len());
+    for group in groups.values_mut() {
+        group.sort_unstable_by_key(|candidate| candidate.slot);
+        if group.len() == 1 {
+            selected.push(group[0].slot);
+            continue;
+        }
+
+        let mut value = [0u8; 9];
+        if !cid_index
+            .lookup_into_node_reads(&group[0].cid, &mut value)
+            .await?
+        {
+            return Err(anyhow!(
+                "CID-to-offset index has no exact entry for duplicate candidate slots {}",
+                display_candidate_slots(group)
+            ));
+        }
+        let (offset, size) = decode_offset_and_size(&value)?;
+        let frame = read_exact_car_range(
+            http,
+            epoch,
+            cars_dir,
+            base_url,
+            offset,
+            usize::try_from(size).context("CAR frame size exceeds address space")?,
+        )?;
+        let decoded_slot = decode_block_slot_from_car_frame(&group[0].cid, &frame)
+            .context("verify exact CID-index CAR frame")?;
+        if group
+            .iter()
+            .filter(|candidate| candidate.slot == decoded_slot)
+            .count()
+            != 1
+        {
+            return Err(anyhow!(
+                "exact CID-index CAR frame decodes block slot {decoded_slot}, which is not exactly one of candidate slots {}",
+                display_candidate_slots(group)
+            ));
+        }
+        eprintln!(
+            "epoch={epoch}: resolved duplicate CID candidate slots {} to slot {decoded_slot} from the exact CAR frame",
+            display_candidate_slots(group)
+        );
+        selected.push(decoded_slot);
+    }
+    selected.sort_unstable();
+    Ok(selected)
+}
+
+fn display_candidate_slots(candidates: &[&BlockSlotCandidate]) -> String {
+    candidates
+        .iter()
+        .map(|candidate| candidate.slot.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+enum IndexRangeReader {
+    Local(LocalFileRangeReader),
+    Http(HttpRangeReader),
+}
+
+impl RangeReader for IndexRangeReader {
+    type ReadFuture<'a>
+        = Ready<Result<()>>
+    where
+        Self: 'a;
+
+    fn read_exact_at<'a>(&'a mut self, offset: u64, out: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        match self {
+            Self::Local(reader) => reader.read_exact_at(offset, out),
+            Self::Http(reader) => reader.read_exact_at(offset, out),
+        }
+    }
+}
+
+struct HttpRangeReader {
+    client: Client,
+    url: String,
+}
+
+impl HttpRangeReader {
+    fn new(client: Client, url: String) -> Self {
+        Self { client, url }
+    }
+}
+
+impl RangeReader for HttpRangeReader {
+    type ReadFuture<'a>
+        = Ready<Result<()>>
+    where
+        Self: 'a;
+
+    fn read_exact_at<'a>(&'a mut self, offset: u64, out: &'a mut [u8]) -> Self::ReadFuture<'a> {
+        ready(
+            http_range_get_exact(&self.client, &self.url, offset, out.len()).and_then(|bytes| {
+                out.copy_from_slice(&bytes);
+                Ok(())
+            }),
+        )
+    }
 }
 
 /* ---------------- output writer ---------------- */
@@ -1038,6 +1269,7 @@ fn car_header_total_size(
     http: &Client,
     epoch: u64,
     cars_dir: Option<&Path>,
+    base_url: &str,
 ) -> Result<(u64, Option<String>)> {
     if let Some(local_car_path) = find_local_car(epoch, cars_dir) {
         eprintln!(
@@ -1047,11 +1279,12 @@ fn car_header_total_size(
         return car_header_total_size_from_local_car(&local_car_path).map(|size| (size, None));
     }
 
-    match car_header_total_size_from_remote_car(http, epoch) {
+    match car_header_total_size_from_remote_car(http, epoch, base_url) {
         Ok(size) => Ok((size, None)),
         Err(err) => {
             let log = format!(
-                "url=https://files.old-faithful.net/{epoch}/epoch-{epoch}.car error={err:#}"
+                "url={}/{epoch}/epoch-{epoch}.car error={err:#}",
+                base_url.trim_end_matches('/')
             );
             eprintln!(
                 "epoch={epoch}: warning: remote CAR header fetch failed ({err:#}); using Old Faithful default car_header_size={OLD_FAITHFUL_CAR_HEADER_TOTAL_SIZE}"
@@ -1073,6 +1306,45 @@ fn find_local_car(epoch: u64, cars_dir: Option<&Path>) -> Option<PathBuf> {
     ];
 
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn find_local_plain_car(epoch: u64, cars_dir: Option<&Path>) -> Option<PathBuf> {
+    let root = cars_dir?;
+    let name = format!("epoch-{epoch}.car");
+    [
+        root.join(&name),
+        root.join(epoch.to_string()).join(&name),
+        root.join(format!("epoch-{epoch}")).join(&name),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn read_exact_car_range(
+    http: &Client,
+    epoch: u64,
+    cars_dir: Option<&Path>,
+    base_url: &str,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>> {
+    if len == 0 {
+        return Err(anyhow!("cannot read an empty CAR range"));
+    }
+    if let Some(path) = find_local_plain_car(epoch, cars_dir) {
+        let mut file = File::open(&path).with_context(|| format!("open {}", path.display()))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("seek {} to {offset}", path.display()))?;
+        let mut bytes = vec![0; len];
+        file.read_exact(&mut bytes)
+            .with_context(|| format!("read {len} bytes at {offset} from {}", path.display()))?;
+        return Ok(bytes);
+    }
+    let url = format!(
+        "{}/{epoch}/epoch-{epoch}.car",
+        base_url.trim_end_matches('/')
+    );
+    http_range_get_exact(http, &url, offset, len)
 }
 
 fn car_header_total_size_from_local_car(path: &Path) -> Result<u64> {
@@ -1143,42 +1415,71 @@ fn append_epoch_skip_log(output_dir: &Path, epoch: u64, err: &anyhow::Error) -> 
         .with_context(|| format!("write {}", path.display()))
 }
 
-fn car_header_total_size_from_remote_car(http: &Client, epoch: u64) -> Result<u64> {
+fn car_header_total_size_from_remote_car(http: &Client, epoch: u64, base_url: &str) -> Result<u64> {
     // NOTE: This uses the *plain* .car, because you cannot get the uncompressed CAR header
     // out of a .car.zst with a simple Range request.
-    let url_car = format!("https://files.old-faithful.net/{epoch}/epoch-{epoch}.car");
+    let url_car = format!(
+        "{}/{epoch}/epoch-{epoch}.car",
+        base_url.trim_end_matches('/')
+    );
 
     eprintln!(
         "epoch={epoch}: range fetch remote CAR prefix ({} bytes): {}",
         CAR_HEADER_PREFIX_READ_LEN, url_car
     );
-    let prefix = http_range_get(http, &url_car, 0, CAR_HEADER_PREFIX_READ_LEN as u64 - 1)
+    let prefix = http_range_get_exact(http, &url_car, 0, CAR_HEADER_PREFIX_READ_LEN)
         .with_context(|| format!("range GET {url_car}"))?;
 
     decode_car_header_total_size(&prefix, &url_car)
 }
 
-fn http_range_get(http: &Client, url: &str, start: u64, end: u64) -> Result<Vec<u8>> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        RANGE,
-        HeaderValue::from_str(&format!("bytes={start}-{end}"))?,
-    );
-
-    let resp = http
-        .get(url)
-        .headers(headers)
-        .send()
-        .with_context(|| "send request")?;
-
-    // Many servers respond 206 for Range, but some may ignore Range and return 200.
-    // Either is fine as long as we got enough bytes.
-    let status = resp.status();
-    if !(status.is_success()) {
-        return Err(anyhow!("HTTP {} for {}", status.as_u16(), url));
+fn http_range_get_exact(http: &Client, url: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
+    if len == 0 {
+        return Err(anyhow!("cannot request an empty HTTP range from {url}"));
     }
-
-    let bytes = resp.bytes().with_context(|| "read response body")?;
+    let end = offset
+        .checked_add(u64::try_from(len).context("HTTP range length exceeds u64")? - 1)
+        .ok_or_else(|| anyhow!("HTTP range end overflow for {url}"))?;
+    let response = http
+        .get(url)
+        .header(
+            RANGE,
+            HeaderValue::from_str(&format!("bytes={offset}-{end}"))?,
+        )
+        .send()
+        .with_context(|| format!("range GET {url}"))?;
+    if response.status().as_u16() != 206 {
+        return Err(anyhow!(
+            "range GET {url} returned HTTP {}, expected 206",
+            response.status().as_u16()
+        ));
+    }
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .ok_or_else(|| anyhow!("range GET {url} has no Content-Range header"))?
+        .to_str()
+        .with_context(|| format!("decode Content-Range from {url}"))?;
+    let expected_prefix = format!("bytes {offset}-{end}/");
+    let total = content_range.strip_prefix(&expected_prefix).ok_or_else(|| {
+        anyhow!(
+            "range GET {url} returned Content-Range {content_range:?}, expected {expected_prefix}..."
+        )
+    })?;
+    if total.is_empty() {
+        return Err(anyhow!(
+            "range GET {url} returned an empty Content-Range total"
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .with_context(|| format!("read range response from {url}"))?;
+    if bytes.len() != len {
+        return Err(anyhow!(
+            "range GET {url} returned {} bytes, expected {len}",
+            bytes.len()
+        ));
+    }
     Ok(bytes.to_vec())
 }
 
@@ -1371,7 +1672,7 @@ mod tests {
         fs::create_dir_all(&epoch_dir).expect("create epoch directory");
         fs::write(epoch_dir.join("epoch-4.cid"), "fixture-cid\n").expect("write CID file");
         let expected_slot = 4 * SLOTS_PER_EPOCH + 1;
-        let slot_index = tiny_compact_index(&expected_slot.to_le_bytes(), &[1, 2, 3]);
+        let slot_index = tiny_compact_index(&expected_slot.to_le_bytes(), &[1; 36]);
         fs::write(
             epoch_dir.join("epoch-4-fixture-cid-mainnet-slot-to-cid.index"),
             slot_index,
@@ -1379,10 +1680,79 @@ mod tests {
         .expect("write slot-to-CID index");
 
         assert_eq!(
-            read_block_slots_from_old_faithful_index(4, temporary.path())
-                .expect("read ordered block slots"),
+            read_block_slots_from_old_faithful_index(
+                4,
+                temporary.path(),
+                &Client::new(),
+                None,
+                DEFAULT_BASE_URL,
+            )
+            .expect("read ordered block slots"),
             vec![expected_slot]
         );
+    }
+
+    #[test]
+    fn duplicate_cid_is_resolved_from_exact_car_frame() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let payload = test_block_payload(7);
+        let cid = *of_car_reader::reconstruct::Cid36::compute(&payload).car_bytes();
+        let frame = test_car_frame(cid, &payload);
+        let offset = 59u64;
+        let mut car = vec![0; offset as usize];
+        car.extend_from_slice(&frame);
+        fs::write(temporary.path().join("epoch-0.car"), car).expect("write CAR fixture");
+
+        let cid_index_path = temporary.path().join("cid.index");
+        fs::write(
+            &cid_index_path,
+            tiny_compact_index(&cid, &offset_size_value(offset, frame.len() as u32)),
+        )
+        .expect("write CID index");
+        let reader = LocalFileRangeReader::open(&cid_index_path).expect("open CID index file");
+        let mut cid_index = futures::executor::block_on(AsyncCompactIndex::open(
+            reader,
+            cid_index_path.display().to_string(),
+        ))
+        .expect("open CID index");
+        let candidates = [
+            BlockSlotCandidate { slot: 7, cid },
+            BlockSlotCandidate { slot: 8, cid },
+        ];
+        let slots = futures::executor::block_on(resolve_block_slot_candidates_from_car(
+            0,
+            &candidates,
+            &mut cid_index,
+            &Client::new(),
+            Some(temporary.path()),
+            DEFAULT_BASE_URL,
+        ))
+        .expect("resolve duplicate CID");
+        assert_eq!(slots, vec![7]);
+    }
+
+    fn test_block_payload(slot: u8) -> Vec<u8> {
+        assert!(slot < 24);
+        vec![0x86, 0x02, slot, 0x80, 0x80, 0x83, 0xf6, 0xf6, 0xf6, 0xf6]
+    }
+
+    fn test_car_frame(cid: [u8; 36], payload: &[u8]) -> Vec<u8> {
+        let entry_len = cid.len() + payload.len();
+        assert!(entry_len < 128);
+        let mut frame = Vec::with_capacity(entry_len + 1);
+        frame.push(entry_len as u8);
+        frame.extend_from_slice(&cid);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn offset_size_value(offset: u64, size: u32) -> [u8; 9] {
+        assert!(offset < (1u64 << 48));
+        assert!(size < (1u32 << 24));
+        let mut value = [0; 9];
+        value[..6].copy_from_slice(&offset.to_le_bytes()[..6]);
+        value[6..].copy_from_slice(&size.to_le_bytes()[..3]);
+        value
     }
 
     fn tiny_compact_index(key: &[u8], value: &[u8]) -> Vec<u8> {
