@@ -1,4 +1,4 @@
-use solana_short_vec::ShortU16;
+use crate::short_vec::ShortU16;
 use std::mem::MaybeUninit;
 use wincode::ReadResult;
 use wincode::config::{Config, ConfigCore};

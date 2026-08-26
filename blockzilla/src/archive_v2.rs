@@ -87,6 +87,7 @@ use of_car_reader::{
         RawTransactionNode, StandaloneDataFrame, decode_raw_node,
         decode_raw_node_with_data_buffers,
     },
+    short_vec::decode_shortu16_len,
     versioned_transaction::{VersionedMessage, VersionedTransaction},
 };
 use prost::Message;
@@ -18151,9 +18152,8 @@ fn decode_first_seen_compact_transaction(
     rolling_blockhashes: &RollingBlockhashIndex,
     nonce_recent_blockhashes: &mut u64,
 ) -> Result<OwnedCompactTransaction> {
-    let (decoded_signature_count, prefix_len) =
-        solana_short_vec::decode_shortu16_len(transaction_bytes)
-            .map_err(|()| anyhow!("invalid transaction signature ShortU16 prefix"))?;
+    let (decoded_signature_count, prefix_len) = decode_shortu16_len(transaction_bytes)
+        .map_err(|()| anyhow!("invalid transaction signature ShortU16 prefix"))?;
     let decoded_signature_count = u8::try_from(decoded_signature_count)
         .context("transaction signature count exceeds hot-row u8 maximum")?;
     anyhow::ensure!(
@@ -19868,9 +19868,8 @@ impl<'a> FirstSeenSignatureCollector<'a> {
             self.prefix_len += 1;
             offset += 1;
             if byte & 0x80 == 0 || self.prefix_len == self.prefix.len() {
-                let (count, encoded_len) =
-                    solana_short_vec::decode_shortu16_len(&self.prefix[..self.prefix_len])
-                        .map_err(|()| anyhow!("invalid transaction signature ShortU16 prefix"))?;
+                let (count, encoded_len) = decode_shortu16_len(&self.prefix[..self.prefix_len])
+                    .map_err(|()| anyhow!("invalid transaction signature ShortU16 prefix"))?;
                 anyhow::ensure!(
                     encoded_len == self.prefix_len,
                     "transaction signature ShortU16 consumed {encoded_len} bytes, collected {}",

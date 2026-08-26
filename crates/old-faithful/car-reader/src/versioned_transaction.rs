@@ -1,5 +1,5 @@
 use {
-    solana_short_vec::ShortU16,
+    crate::short_vec::ShortU16,
     std::mem::MaybeUninit,
     wincode::{
         ReadResult, SchemaRead,

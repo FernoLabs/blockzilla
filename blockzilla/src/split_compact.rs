@@ -10,10 +10,10 @@ use of_car_reader::{
         visit_protobuf_transaction_status_meta,
     },
     reconstruct::{Cid36, LosslessCarBlock},
+    short_vec::decode_shortu16_len,
 };
 use prost::Message;
 use solana_pubkey::{Pubkey, pubkey};
-use solana_short_vec::decode_shortu16_len;
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashSet},
