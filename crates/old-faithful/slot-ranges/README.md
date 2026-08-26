@@ -61,6 +61,49 @@ checks the frame CID, recomputes the CID from the payload, decodes the Block,
 and selects the decoded slot only when it is one of the candidates. It stops
 if any proof step fails.
 
+## Direct v2 rebuild from existing raw ranges and public slot lists
+
+Use `--slot-list-dir` to rebuild the production v2 files without compact
+indexes, CID indexes, CAR files, or Archive V2. This path needs existing
+12-byte raw range files, the public Old Faithful slot lists, and the blockhash
+registries:
+
+```bash
+curl -fL https://files.old-faithful.net/800/800.slots.txt \
+  -o /data/slot-lists/800.slots.txt
+
+cargo run --locked -p of-slot-ranges --bin of-slot-ranges -- \
+  --start-epoch 800 \
+  --end-epoch 800 \
+  --output-dir ./slot-index \
+  --blockhash-dir /data/blockhash-registry \
+  --slot-list-dir /data/slot-lists \
+  --overwrite-v2
+```
+
+The local file name can be `epoch-N.slots.txt` or `N.slots.txt`. For epoch 0,
+all lines are current-epoch block slots. For every later epoch, line 1 is the
+epoch boundary predecessor slot `N*432000-1` and is not a current member. All
+remaining lines must be decimal current-epoch slots in strictly increasing
+order. The builder requires each nonempty raw range to be in this member list.
+A listed block can have an empty raw range and still receives the correct
+previous blockhash in the v2 output.
+
+Do not rebuild verified historical v2 files without checking their public raw
+inputs. The builder stops if a nonempty raw row is not in the slot list, and
+the authoritative validator stops on invalid or overlapping ranges. Keep an
+existing verified v2 file when an older public raw file fails these checks.
+
+The range wrapper supports the same path and skips compact-index downloads:
+
+```bash
+SLOT_LIST_DIR=/data/slot-lists \
+BLOCKHASH_DIR=/data/blockhash-registry \
+SLOT_INDEX_DIR=./slot-index \
+OVERWRITE_V2=1 \
+  ./build-slot-index-range.sh 800
+```
+
 ## Full getBlock index from CAR files
 
 Use `of-car-slot-index` to scan a CAR and build the v2 index carrying
@@ -92,8 +135,40 @@ validator (the sync helper invokes this binary automatically):
 cargo run --locked -p of-slot-ranges --bin of-validate-slot-index -- ./slot-index
 ```
 
-Validate normal v2 indexes against the same Old Faithful compact indexes and
-blockhash registries used by the builder:
+For the production serving artifact, validate the v2 files as the source of
+truth:
+
+```bash
+cargo run --locked -p of-slot-ranges --bin of-validate-slot-index-v2 -- \
+  ./slot-index /data/blockhash-registry \
+  --v2-authoritative \
+  --start-epoch 800 \
+  --end-epoch 800
+```
+
+This mode reads only `epoch-N-slot-ranges-v2.raw` and the matching
+`blockhash_registry.bin`. It does not open the 12-byte raw index, compact
+indexes, CID indexes, CAR files, or Archive V2 files. Each v2 file must have
+432000 rows of 44 bytes. A nonzero `previousBlockhash` marks an indexed block
+slot. Such a slot can have an empty CAR range. A row with a zero
+`previousBlockhash` must have a zero offset and a zero length. Nonempty ranges
+must not overflow or overlap.
+
+The validator aligns the indexed rows with the registry and checks that each
+row has the hash of the prior indexed block. This check includes empty-range
+indexed rows and epoch boundaries. The epoch-0 registry can have the mainnet
+genesis prefix. An unprefixed epoch-0 registry needs
+`--seed-previous-blockhash`. If validation starts at a later epoch, the
+validator uses the explicit seed or reads the last hash from the preceding
+epoch registry.
+
+This registry check proves that the v2 chain and registry have the same count,
+order, and hashes. It cannot independently prove that the slots marked by the
+v2 file are the correct block slots, because this mode uses the v2 file itself
+as the slot-membership source.
+
+Use the normal CID-backed mode only for an optional independent range and slot
+audit against the Old Faithful compact indexes:
 
 ```bash
 cargo run --locked -p of-slot-ranges --bin of-validate-slot-index-v2 -- \
@@ -150,17 +225,20 @@ After validation, upload only v2 files to the production prefix:
 
 ```bash
 SLOT_INDEX_V2_VALIDATE_BIN=target/release/of-validate-slot-index-v2 \
-  ./sync-slot-index-r2.sh push-v2 \
-  ./slot-index /path/to/indexes /data/blockhash-registry \
+  ./sync-slot-index-r2.sh push-v2-authoritative \
+  ./slot-index /data/blockhash-registry \
   r2:blockzilla/slot-index-v2
 ```
 
-`push-v2` runs the strict validator before it starts the upload, refuses to
-change an existing remote object, and checks the uploaded objects. The build
-wrappers use this path automatically when `SYNC_R2_AFTER=1`. Set both
+`push-v2-authoritative` runs only the v2-authoritative validator before it
+starts the upload. It refuses to change an existing remote object and checks
+the uploaded objects. The build wrappers use this path when they sync a v2
+build that has a blockhash registry root. Set both
 `SLOT_INDEX_START_EPOCH` and `SLOT_INDEX_END_EPOCH` to restrict sync validation
-and upload to one inclusive epoch range. Set `SLOT_INDEX_V2_REUSE_RAW=1` only
-for an explicit trusted-raw sync.
+and upload to one inclusive epoch range. The upload include list contains only
+the validated epochs. `push-v2` remains available as the optional CID-backed
+audit path. Set `SLOT_INDEX_V2_REUSE_RAW=1` only for that explicit trusted-raw
+audit.
 
 ## Raw Format
 

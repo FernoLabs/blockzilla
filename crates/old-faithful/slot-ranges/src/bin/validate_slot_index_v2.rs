@@ -57,6 +57,7 @@ struct Cli {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ValidationMode {
     OldFaithfulIndex,
+    V2Authoritative,
     ArchiveV2,
     RegistryOnly,
 }
@@ -98,7 +99,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> &'static str {
-    "usage: of-validate-slot-index-v2 <slot-index-dir> <blockhash-dir> [--indexes-dir DIR] [--cars-dir DIR] [--base-url URL] [--start-epoch N] [--end-epoch N] [--seed-previous-blockhash BASE58] [--reuse-raw] [--archive-v2|--registry-only]"
+    "usage: of-validate-slot-index-v2 <slot-index-dir> <blockhash-dir> [--indexes-dir DIR] [--cars-dir DIR] [--base-url URL] [--start-epoch N] [--end-epoch N] [--seed-previous-blockhash BASE58] [--reuse-raw] [--v2-authoritative|--archive-v2|--registry-only]"
 }
 
 fn parse_cli() -> Result<Cli> {
@@ -125,6 +126,7 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     let mut seed_previous_blockhash = None;
     let mut archive_v2 = false;
     let mut registry_only = false;
+    let mut v2_authoritative = false;
     let mut reuse_raw = false;
     while let Some(argument) = arguments.next() {
         let argument = argument
@@ -206,6 +208,13 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
                 reuse_raw = true;
                 None
             }
+            "--v2-authoritative" => {
+                if v2_authoritative {
+                    bail!("duplicate argument --v2-authoritative");
+                }
+                v2_authoritative = true;
+                None
+            }
             "-h" | "--help" => bail!(usage()),
             _ => bail!("unknown argument {argument:?}; {}", usage()),
         };
@@ -231,11 +240,19 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
     {
         bail!("start epoch is greater than end epoch");
     }
-    if archive_v2 && registry_only {
-        bail!("--archive-v2 conflicts with --registry-only");
+    if [archive_v2, registry_only, v2_authoritative]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+        > 1
+    {
+        bail!("--v2-authoritative, --archive-v2, and --registry-only are mutually exclusive");
     }
-    if reuse_raw && (archive_v2 || registry_only) {
+    if reuse_raw && (archive_v2 || registry_only || v2_authoritative) {
         bail!("--reuse-raw is available only in normal Old Faithful index mode");
+    }
+    if v2_authoritative && (indexes_dir_set || cars_dir.is_some() || base_url_set) {
+        bail!("--v2-authoritative does not accept --indexes-dir, --cars-dir, or --base-url");
     }
     Ok(Cli {
         index_dir,
@@ -251,6 +268,8 @@ fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli> {
             ValidationMode::ArchiveV2
         } else if registry_only {
             ValidationMode::RegistryOnly
+        } else if v2_authoritative {
+            ValidationMode::V2Authoritative
         } else {
             ValidationMode::OldFaithfulIndex
         },
@@ -374,6 +393,7 @@ impl ValidationMode {
     fn label(self) -> &'static str {
         match self {
             Self::OldFaithfulIndex => "old-faithful-index",
+            Self::V2Authoritative => "v2-authoritative",
             Self::ArchiveV2 => "archive-v2",
             Self::RegistryOnly => "registry-only",
         }
@@ -383,6 +403,7 @@ impl ValidationMode {
         match self {
             Self::OldFaithfulIndex if reuse_raw => "reused-raw",
             Self::OldFaithfulIndex => "canonical-cid-index",
+            Self::V2Authoritative => "v2-authoritative",
             Self::ArchiveV2 => "archive-v2-structure",
             Self::RegistryOnly => "registry-only-structure",
         }
@@ -456,6 +477,11 @@ fn validate_epoch(
         SLOTS_PER_EPOCH as usize * SLOT_RANGE_V2_ENTRY_SIZE,
         "v2 slot index",
     )?;
+    if mode == ValidationMode::V2Authoritative {
+        let sidecars = read_v2_authoritative_sidecars(blockhash_root, epoch, &v2_bytes)?;
+        return validate_v2_authoritative_epoch_bytes(epoch, &v2_bytes, &sidecars, predecessor)
+            .with_context(|| format!("validate epoch {epoch} from {}", v2_path.display()));
+    }
     let raw_path = index_dir.join(format!("epoch-{epoch}-slot-ranges.raw"));
     let raw_bytes = read_exact_size(
         &raw_path,
@@ -476,9 +502,31 @@ fn validate_epoch(
         ValidationMode::RegistryOnly => {
             read_registry_only_sidecars(blockhash_root, epoch, &raw_bytes)?
         }
+        ValidationMode::V2Authoritative => unreachable!("handled before raw index read"),
     };
     validate_epoch_bytes(epoch, &v2_bytes, &raw_bytes, &sidecars, predecessor)
         .with_context(|| format!("validate epoch {epoch} from {}", v2_path.display()))
+}
+
+fn validate_v2_authoritative_epoch_bytes(
+    epoch: u64,
+    v2_bytes: &[u8],
+    sidecars: &EpochSidecars,
+    predecessor: Option<[u8; 32]>,
+) -> Result<EpochSummary> {
+    let expected_len = SLOTS_PER_EPOCH as usize * SLOT_RANGE_V2_ENTRY_SIZE;
+    if v2_bytes.len() != expected_len {
+        bail!(
+            "v2 index has {} bytes, expected {expected_len} ({} rows of {SLOT_RANGE_V2_ENTRY_SIZE} bytes)",
+            v2_bytes.len(),
+            SLOTS_PER_EPOCH
+        );
+    }
+    let mut derived_raw = Vec::with_capacity(SLOTS_PER_EPOCH as usize * SLOT_RANGE_ENTRY_SIZE);
+    for row in v2_bytes.chunks_exact(SLOT_RANGE_V2_ENTRY_SIZE) {
+        derived_raw.extend_from_slice(&row[..SLOT_RANGE_ENTRY_SIZE]);
+    }
+    validate_epoch_bytes(epoch, v2_bytes, &derived_raw, sidecars, predecessor)
 }
 
 fn validate_epoch_bytes(
@@ -711,6 +759,45 @@ fn registry_boundary_previous(
         }
         offset => bail!("epoch 0 blockhash registry has invalid offset {offset}"),
     }
+}
+
+fn read_v2_authoritative_sidecars(
+    root: &Path,
+    epoch: u64,
+    v2_bytes: &[u8],
+) -> Result<EpochSidecars> {
+    let expected_len = SLOTS_PER_EPOCH as usize * SLOT_RANGE_V2_ENTRY_SIZE;
+    if v2_bytes.len() != expected_len {
+        bail!(
+            "v2 index has {} bytes, expected {expected_len}",
+            v2_bytes.len()
+        );
+    }
+    let epoch_start = epoch
+        .checked_mul(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("epoch start slot overflow for epoch {epoch}"))?;
+    epoch_start
+        .checked_add(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("epoch end slot overflow for epoch {epoch}"))?;
+    let mut rows = Vec::new();
+    for (slot_in_epoch, row) in v2_bytes.chunks_exact(SLOT_RANGE_V2_ENTRY_SIZE).enumerate() {
+        let entry = decode_slot_range_v2_entry(row)?;
+        if entry.previous_blockhash == [0; 32] {
+            continue;
+        }
+        rows.push(ArchiveV2BlockIndexRow {
+            block_id: u32::try_from(rows.len()).context("v2 indexed slot count exceeds u32")?,
+            slot: epoch_start + slot_in_epoch as u64,
+        });
+    }
+    let epoch_dir = v2_authoritative_epoch_dir(root, epoch)?;
+    let blockhashes = read_blockhash_registry(&epoch_dir.join(BLOCKHASH_REGISTRY_FILE))?;
+    validate_sidecar_parts(epoch, rows, blockhashes).with_context(|| {
+        format!(
+            "validate V2-authoritative registry in {}",
+            epoch_dir.display()
+        )
+    })
 }
 
 fn read_epoch_sidecars(root: &Path, epoch: u64) -> Result<EpochSidecars> {
@@ -1157,6 +1244,18 @@ fn read_epoch_last_blockhash(
                 .map(|_| sidecars.blockhashes[sidecars.registry_offset + sidecars.rows.len() - 1])
                 .ok_or_else(|| anyhow!("epoch {epoch} ordered block slot list has no rows"))
         }
+        ValidationMode::V2Authoritative => {
+            let epoch_dir = v2_authoritative_epoch_dir(root, epoch)?;
+            let blockhashes = read_blockhash_registry(&epoch_dir.join(BLOCKHASH_REGISTRY_FILE))?;
+            let last = blockhashes
+                .last()
+                .copied()
+                .ok_or_else(|| anyhow!("epoch {epoch} blockhash registry is empty"))?;
+            if last == [0; 32] {
+                bail!("epoch {epoch} blockhash registry ends with a zero blockhash");
+            }
+            Ok(last)
+        }
         ValidationMode::RegistryOnly => {
             let epoch_dir = registry_only_epoch_dir(root, epoch)?;
             let blockhashes = read_blockhash_registry(&epoch_dir.join(BLOCKHASH_REGISTRY_FILE))?;
@@ -1269,6 +1368,22 @@ fn archive_v2_epoch_dir(root: &Path, epoch: u64) -> Result<PathBuf> {
         .ok_or_else(|| {
             anyhow!(
                 "missing epoch {epoch} {BLOCKHASH_REGISTRY_FILE} or {ARCHIVE_V2_BLOCK_INDEX_FILE} under {}",
+                root.display()
+            )
+        })
+}
+
+fn v2_authoritative_epoch_dir(root: &Path, epoch: u64) -> Result<PathBuf> {
+    let candidates = [
+        root.join(format!("epoch-{epoch}")),
+        root.join(epoch.to_string()),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.join(BLOCKHASH_REGISTRY_FILE).is_file())
+        .ok_or_else(|| {
+            anyhow!(
+                "missing epoch {epoch} {BLOCKHASH_REGISTRY_FILE} under {}",
                 root.display()
             )
         })
@@ -1487,6 +1602,188 @@ mod tests {
     fn set_previous(v2: &mut [u8], slot_in_epoch: usize, previous_blockhash: [u8; 32]) {
         let start = slot_in_epoch * SLOT_RANGE_V2_ENTRY_SIZE + SLOT_RANGE_ENTRY_SIZE;
         v2[start..start + BLOCKHASH_BYTES].copy_from_slice(&previous_blockhash);
+    }
+
+    fn write_registry(root: &Path, epoch: u64, blockhashes: &[[u8; 32]]) {
+        let epoch_dir = root.join(format!("epoch-{epoch}"));
+        fs::create_dir_all(&epoch_dir).expect("create registry epoch directory");
+        let bytes = blockhashes
+            .iter()
+            .flat_map(|blockhash| blockhash.iter().copied())
+            .collect::<Vec<_>>();
+        fs::write(epoch_dir.join(BLOCKHASH_REGISTRY_FILE), bytes)
+            .expect("write blockhash registry");
+    }
+
+    #[test]
+    fn v2_authoritative_mode_reads_only_v2_and_registry() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let index_dir = temporary.path().join("slot-index");
+        let registry_dir = temporary.path().join("registry");
+        fs::create_dir_all(&index_dir).expect("create v2 directory");
+
+        let predecessor = [7; 32];
+        let first_blockhash = [8; 32];
+        let empty_range_blockhash = [9; 32];
+        let last_blockhash = [10; 32];
+        let (mut v2, mut unused_raw) = empty_indexes();
+        set_range_and_previous(&mut v2, &mut unused_raw, 0, 59, 100, predecessor);
+        set_previous(&mut v2, 1, first_blockhash);
+        set_range_and_previous(&mut v2, &mut unused_raw, 2, 159, 120, empty_range_blockhash);
+        let v2_path = index_dir.join("epoch-1-slot-ranges-v2.raw");
+        fs::write(&v2_path, &v2).expect("write v2 index");
+        write_registry(
+            &registry_dir,
+            1,
+            &[first_blockhash, empty_range_blockhash, last_blockhash],
+        );
+
+        let missing_inputs = temporary.path().join("must-not-be-read");
+        let summary = validate_epoch(
+            1,
+            &v2_path,
+            &index_dir,
+            &registry_dir,
+            &missing_inputs,
+            ValidationMode::V2Authoritative,
+            Some(predecessor),
+            &Client::new(),
+            Some(&missing_inputs),
+            "http://127.0.0.1:1",
+            false,
+        )
+        .expect("v2-authoritative mode needs no raw, compact index, CID index, or CAR");
+        assert_eq!(summary.indexed_blocks, 3);
+        assert_eq!(summary.present_slots, 2);
+        assert_eq!(summary.last_blockhash, Some(last_blockhash));
+
+        fs::write(&v2_path, &v2[..v2.len() - 1]).expect("write short v2 index");
+        let error = validate_epoch(
+            1,
+            &v2_path,
+            &index_dir,
+            &registry_dir,
+            &missing_inputs,
+            ValidationMode::V2Authoritative,
+            Some(predecessor),
+            &Client::new(),
+            Some(&missing_inputs),
+            "http://127.0.0.1:1",
+            false,
+        )
+        .expect_err("a short v2 file must fail before registry validation");
+        assert!(error.to_string().contains("expected 19008000"));
+    }
+
+    #[test]
+    fn v2_authoritative_rejects_current_hash_and_wrong_registry_count() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let predecessor = [7; 32];
+        let first_blockhash = [8; 32];
+        let second_blockhash = [9; 32];
+        let (mut v2, mut unused_raw) = empty_indexes();
+        set_range_and_previous(&mut v2, &mut unused_raw, 0, 59, 100, first_blockhash);
+        set_range_and_previous(&mut v2, &mut unused_raw, 2, 159, 120, first_blockhash);
+        write_registry(temporary.path(), 1, &[first_blockhash, second_blockhash]);
+        let sidecars = read_v2_authoritative_sidecars(temporary.path(), 1, &v2)
+            .expect("read authoritative registry");
+        let error = validate_v2_authoritative_epoch_bytes(1, &v2, &sidecars, Some(predecessor))
+            .expect_err("the current first blockhash is not the previous blockhash");
+        assert!(error.to_string().contains("prior ordered blockhash"));
+
+        set_range_and_previous(&mut v2, &mut unused_raw, 0, 59, 100, predecessor);
+        set_range_and_previous(&mut v2, &mut unused_raw, 2, 159, 120, second_blockhash);
+        let error = validate_v2_authoritative_epoch_bytes(1, &v2, &sidecars, Some(predecessor))
+            .expect_err("a later row must not use its current blockhash as the previous hash");
+        assert!(error.to_string().contains("prior ordered blockhash"));
+
+        set_range_and_previous(&mut v2, &mut unused_raw, 2, 159, 120, first_blockhash);
+
+        write_registry(temporary.path(), 1, &[first_blockhash]);
+        let error = read_v2_authoritative_sidecars(temporary.path(), 1, &v2)
+            .expect_err("registry count must equal indexed v2 row count");
+        assert!(format!("{error:#}").contains("1 records for 2 block-index rows"));
+
+        let genesis = mainnet_genesis_hash().expect("mainnet genesis hash");
+        set_range_and_previous(&mut v2, &mut unused_raw, 0, 59, 100, genesis);
+        write_registry(
+            temporary.path(),
+            0,
+            &[genesis, first_blockhash, second_blockhash],
+        );
+        let sidecars = read_v2_authoritative_sidecars(temporary.path(), 0, &v2)
+            .expect("epoch-zero genesis-prefixed registry alignment");
+        let summary = validate_v2_authoritative_epoch_bytes(0, &v2, &sidecars, None)
+            .expect("mainnet genesis prefix supplies the first previous blockhash");
+        assert_eq!(summary.registry_offset, 1);
+    }
+
+    #[test]
+    fn v2_authoritative_rejects_invalid_or_unmarked_range_rows() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let predecessor = [7; 32];
+        let first_blockhash = [8; 32];
+        let second_blockhash = [9; 32];
+        let (mut v2, mut unused_raw) = empty_indexes();
+        set_range_and_previous(&mut v2, &mut unused_raw, 0, 59, 100, predecessor);
+        set_range_and_previous(&mut v2, &mut unused_raw, 1, 1, 0, first_blockhash);
+        write_registry(temporary.path(), 1, &[first_blockhash, second_blockhash]);
+        let sidecars = read_v2_authoritative_sidecars(temporary.path(), 1, &v2)
+            .expect("read authoritative registry");
+        let error = validate_v2_authoritative_epoch_bytes(1, &v2, &sidecars, Some(predecessor))
+            .expect_err("an indexed empty range must have zero offset");
+        assert!(
+            error.to_string().contains("empty slot")
+                && error.to_string().contains("nonzero offset")
+        );
+
+        set_range_and_previous(&mut v2, &mut unused_raw, 1, 0, 0, [0; 32]);
+        let error = read_v2_authoritative_sidecars(temporary.path(), 1, &v2)
+            .expect_err("clearing an indexed empty row must break registry alignment");
+        assert!(format!("{error:#}").contains("2 records for 1 block-index rows"));
+
+        set_range_and_previous(&mut v2, &mut unused_raw, 1, 159, 100, [0; 32]);
+        write_registry(temporary.path(), 1, &[first_blockhash]);
+        let sidecars = read_v2_authoritative_sidecars(temporary.path(), 1, &v2)
+            .expect("derive indexed rows again after clearing the hash");
+        let error = validate_v2_authoritative_epoch_bytes(1, &v2, &sidecars, Some(predecessor))
+            .expect_err("a nonempty non-genesis row cannot have a zero previous hash");
+        assert!(
+            error
+                .to_string()
+                .contains("absent from the ordered block slot list")
+        );
+    }
+
+    #[test]
+    fn v2_authoritative_requires_cross_epoch_predecessor() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let index_dir = temporary.path().join("slot-index");
+        let registry_dir = temporary.path().join("registry");
+        fs::create_dir_all(&index_dir).expect("create v2 directory");
+        let (mut v2, mut unused_raw) = empty_indexes();
+        set_range_and_previous(&mut v2, &mut unused_raw, 0, 59, 100, [7; 32]);
+        fs::write(index_dir.join("epoch-4-slot-ranges-v2.raw"), v2).expect("write v2 index");
+        write_registry(&registry_dir, 4, &[[8; 32]]);
+
+        let error = run(Cli {
+            index_dir,
+            blockhash_dir: registry_dir,
+            indexes_dir: temporary.path().join("missing-compact-indexes"),
+            cars_dir: Some(temporary.path().join("missing-cars")),
+            base_url: "http://127.0.0.1:1".to_owned(),
+            start_epoch: Some(4),
+            end_epoch: Some(4),
+            seed_previous_blockhash: None,
+            reuse_raw: false,
+            mode: ValidationMode::V2Authoritative,
+        })
+        .expect_err("epoch 4 needs either an explicit seed or the epoch-3 registry");
+        assert!(
+            error
+                .to_string()
+                .contains("missing epoch 3 blockhash_registry.bin")
+        );
     }
 
     #[test]
@@ -2024,7 +2321,25 @@ mod tests {
         .expect("registry-only arguments");
         assert_eq!(direct_car.mode, ValidationMode::RegistryOnly);
 
-        for alternate_mode in ["--archive-v2", "--registry-only"] {
+        let authoritative = parse_args([
+            OsString::from("slot-index"),
+            OsString::from("blockhash-registry"),
+            OsString::from("--v2-authoritative"),
+        ])
+        .expect("v2-authoritative arguments");
+        assert_eq!(authoritative.mode, ValidationMode::V2Authoritative);
+        assert!(
+            parse_args([
+                OsString::from("slot-index"),
+                OsString::from("blockhash-registry"),
+                OsString::from("--v2-authoritative"),
+                OsString::from("--indexes-dir"),
+                OsString::from("indexes"),
+            ])
+            .is_err()
+        );
+
+        for alternate_mode in ["--v2-authoritative", "--archive-v2", "--registry-only"] {
             assert!(
                 parse_args([
                     OsString::from("slot-index"),
@@ -2046,6 +2361,101 @@ mod tests {
             ])
             .is_err()
         );
+        assert!(
+            parse_args([
+                OsString::from("slot-index"),
+                OsString::from("sidecars"),
+                OsString::from("--v2-authoritative"),
+                OsString::from("--archive-v2"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authoritative_sync_uploads_only_the_current_selected_range() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Command;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let bin_dir = temporary.path().join("bin");
+        let local_dir = temporary.path().join("slot-index");
+        let registry_dir = temporary.path().join("registry");
+        let log_path = temporary.path().join("sync.log");
+        fs::create_dir_all(&bin_dir).expect("create fake binary directory");
+        fs::create_dir_all(&local_dir).expect("create local v2 directory");
+        fs::create_dir_all(&registry_dir).expect("create registry directory");
+
+        let fake_validator = bin_dir.join("validator");
+        let fake_rclone = bin_dir.join("rclone");
+        for (path, name) in [(&fake_validator, "validator"), (&fake_rclone, "rclone")] {
+            fs::write(
+                path,
+                format!(
+                    "#!/usr/bin/env bash\nprintf '{name}' >> \"$SYNC_TEST_LOG\"\nprintf ' <%s>' \"$@\" >> \"$SYNC_TEST_LOG\"\nprintf '\\n' >> \"$SYNC_TEST_LOG\"\n"
+                ),
+            )
+            .expect("write fake command");
+            let mut permissions = fs::metadata(path)
+                .expect("read fake command mode")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("make fake command executable");
+        }
+
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("sync-slot-index-r2.sh");
+        let original_path = env::var_os("PATH").unwrap_or_default();
+        let command_path = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+        let run_sync = |start: &str, end: &str| {
+            Command::new("/bin/bash")
+                .arg(&script)
+                .arg("push-v2-authoritative")
+                .arg(&local_dir)
+                .arg(&registry_dir)
+                .arg("test-remote")
+                .env("PATH", &command_path)
+                .env("SYNC_TEST_LOG", &log_path)
+                .env("SLOT_INDEX_V2_VALIDATE_BIN", &fake_validator)
+                .env("SLOT_INDEX_START_EPOCH", start)
+                .env("SLOT_INDEX_END_EPOCH", end)
+                .env_remove("SEED_PREVIOUS_BLOCKHASH")
+                .output()
+                .expect("run authoritative sync")
+        };
+
+        let output = run_sync("4", "5");
+        assert!(
+            output.status.success(),
+            "sync failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let first_log = fs::read_to_string(&log_path).expect("read first sync log");
+        assert!(first_log.contains("<--v2-authoritative> <--start-epoch> <4> <--end-epoch> <5>"));
+        for forbidden in ["--indexes-dir", "--cars-dir", "--reuse-raw", "--archive-v2"] {
+            assert!(
+                !first_log.contains(forbidden),
+                "authoritative sync passed forbidden argument {forbidden}"
+            );
+        }
+        assert!(first_log.contains("<--include> <epoch-4-slot-ranges-v2.raw>"));
+        assert!(first_log.contains("<--include> <epoch-5-slot-ranges-v2.raw>"));
+        assert!(!first_log.contains("epoch-6-slot-ranges-v2.raw"));
+
+        fs::write(&log_path, []).expect("clear sync log");
+        let output = run_sync("6", "6");
+        assert!(
+            output.status.success(),
+            "changed sync failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let changed_log = fs::read_to_string(&log_path).expect("read changed sync log");
+        assert!(changed_log.contains("<--v2-authoritative> <--start-epoch> <6> <--end-epoch> <6>"));
+        assert!(changed_log.contains("<--include> <epoch-6-slot-ranges-v2.raw>"));
+        assert!(!changed_log.contains("epoch-4-slot-ranges-v2.raw"));
+        assert!(!changed_log.contains("epoch-5-slot-ranges-v2.raw"));
     }
 
     #[test]

@@ -29,6 +29,8 @@ Usage:
   sync-slot-index-r2.sh pull [local-dir] [remote]
   sync-slot-index-r2.sh push [local-dir] [remote]
   sync-slot-index-r2.sh validate [local-dir]
+  sync-slot-index-r2.sh push-v2-authoritative [local-dir] [blockhash-dir] [remote]
+  sync-slot-index-r2.sh validate-v2-authoritative [local-dir] [blockhash-dir]
   sync-slot-index-r2.sh push-v2 [local-dir] [indexes-dir] [blockhash-dir] [remote]
   sync-slot-index-r2.sh validate-v2 [local-dir] [indexes-dir] [blockhash-dir]
   sync-slot-index-r2.sh push-v2-archive [local-dir] [archive-v2-sidecar-dir] [remote]
@@ -47,9 +49,10 @@ Defaults:
   SLOT_INDEX_START_EPOCH / SLOT_INDEX_END_EPOCH:
                              Validate and upload only this inclusive range.
 
-Raw modes copy only epoch-*-slot-ranges.raw files. push-v2 validates ordered
-slots from Old Faithful slot-to-CID indexes, CAR ranges from raw indexes, and
-hashes from blockhash registries. Archive and direct-CAR modes are explicit.
+Raw modes copy only epoch-*-slot-ranges.raw files. push-v2-authoritative is the
+production v2 path. It validates only the v2 files and blockhash registries.
+push-v2 is an explicit CID-backed audit. Archive and direct-CAR modes are also
+explicit.
 Pull uses --ignore-existing so historical offsets are reused and only missing
 epochs are downloaded.
 EOF
@@ -79,6 +82,19 @@ validate_slot_index_v2() {
   fi
   if [[ "${SLOT_INDEX_V2_REUSE_RAW:-0}" == "1" ]]; then
     args+=(--reuse-raw)
+  fi
+  "$V2_VALIDATOR" "${args[@]}"
+}
+
+validate_slot_index_v2_authoritative() {
+  local root="$1"
+  local registry_root="$2"
+  local args=("$root" "$registry_root" --v2-authoritative)
+  if [[ -n "$V2_START_EPOCH" ]]; then
+    args+=(--start-epoch "$V2_START_EPOCH" --end-epoch "$V2_END_EPOCH")
+  fi
+  if [[ -n "${SEED_PREVIOUS_BLOCKHASH:-}" ]]; then
+    args+=(--seed-previous-blockhash "$SEED_PREVIOUS_BLOCKHASH")
   fi
   "$V2_VALIDATOR" "${args[@]}"
 }
@@ -157,6 +173,12 @@ case "$MODE" in
       --stats 10s \
       --stats-one-line
     ;;
+  push-v2-authoritative)
+    REGISTRY_ROOT="${3:-${BLOCKHASH_DIR:-$LOCAL_DIR/blockhash-registry}}"
+    REMOTE="${4:-${SLOT_INDEX_V2_REMOTE:-r2:blockzilla/slot-index-v2}}"
+    validate_slot_index_v2_authoritative "$LOCAL_DIR" "$REGISTRY_ROOT"
+    upload_slot_index_v2 "$LOCAL_DIR" "$REMOTE"
+    ;;
   push-v2)
     INDEXES_ROOT="${3:-${INDEXES_DIR:-indexes}}"
     REGISTRY_ROOT="${4:-${BLOCKHASH_DIR:-$LOCAL_DIR/blockhash-registry}}"
@@ -178,6 +200,10 @@ case "$MODE" in
     ;;
   validate)
     validate_slot_index "$LOCAL_DIR"
+    ;;
+  validate-v2-authoritative)
+    REGISTRY_ROOT="${3:-${BLOCKHASH_DIR:-$LOCAL_DIR/blockhash-registry}}"
+    validate_slot_index_v2_authoritative "$LOCAL_DIR" "$REGISTRY_ROOT"
     ;;
   validate-v2)
     INDEXES_ROOT="${3:-${INDEXES_DIR:-indexes}}"

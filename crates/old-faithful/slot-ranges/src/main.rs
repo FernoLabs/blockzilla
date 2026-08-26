@@ -62,10 +62,30 @@ struct Cli {
 
     /// Root containing epoch-N/blockhash_registry.bin.
     ///
-    /// Ordered block slots always come from the Old Faithful slot-to-CID index
-    /// under indexes-dir. Archive V2 files are not read in this mode.
+    /// Ordered block slots come from `--slot-list-dir` when set. Otherwise,
+    /// they come from the Old Faithful slot-to-CID index under indexes-dir.
+    /// Archive V2 files are not read in this mode.
     #[arg(long = "blockhash-dir", conflicts_with = "archive_v2_dir")]
     blockhash_dir: Option<PathBuf>,
+
+    /// Local directory containing `epoch-N.slots.txt` or `N.slots.txt`.
+    ///
+    /// With `--blockhash-dir`, this uses the Old Faithful slot list as the
+    /// ordered block-membership source. It requires existing raw range files
+    /// and does not read compact indexes, CID indexes, CAR files, or Archive V2.
+    #[arg(
+        long = "slot-list-dir",
+        requires = "blockhash_dir",
+        conflicts_with_all = [
+            "archive_v2_dir",
+            "indexes_dir",
+            "cars_dir",
+            "base_url",
+            "raw_only",
+            "overwrite"
+        ]
+    )]
+    slot_list_dir: Option<PathBuf>,
 
     /// Optional legacy root containing Archive V2 per-epoch sidecars.
     ///
@@ -109,7 +129,10 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    run(Cli::parse())
+}
+
+fn run(cli: Cli) -> Result<()> {
     let configured_seed = cli
         .seed_previous_blockhash
         .as_deref()
@@ -156,6 +179,13 @@ fn main() -> Result<()> {
         if out_path.exists() && !cli.overwrite {
             eprintln!("epoch={epoch}: keep existing {}", out_path.display());
         } else {
+            if let Some(slot_list_root) = cli.slot_list_dir.as_deref() {
+                return Err(anyhow!(
+                    "epoch={epoch}: --slot-list-dir {} requires the existing raw range file {}; it cannot build or overwrite raw ranges",
+                    slot_list_root.display(),
+                    out_path.display()
+                ));
+            }
             let build_result = (|| -> Result<Vec<u64>> {
                 let epoch_dir = cli.indexes_dir.join(epoch.to_string());
                 let cid_path = epoch_dir.join(format!("epoch-{epoch}.cid"));
@@ -314,13 +344,18 @@ fn main() -> Result<()> {
                 .with_context(|| format!("read {}", out_path.display()))?;
             let block_slots = match index_block_slots.take() {
                 Some(block_slots) => block_slots,
-                None => read_block_slots_from_old_faithful_index(
-                    epoch,
-                    &cli.indexes_dir,
-                    &http,
-                    cli.cars_dir.as_deref(),
-                    &cli.base_url,
-                )?,
+                None => match cli.slot_list_dir.as_deref() {
+                    Some(slot_list_root) => {
+                        read_block_slots_from_old_faithful_slot_list(epoch, slot_list_root)?
+                    }
+                    None => read_block_slots_from_old_faithful_index(
+                        epoch,
+                        &cli.indexes_dir,
+                        &http,
+                        cli.cars_dir.as_deref(),
+                        &cli.base_url,
+                    )?,
+                },
             };
             let run_seed = (epoch == cli.start_epoch)
                 .then_some(configured_seed)
@@ -334,7 +369,12 @@ fn main() -> Result<()> {
                 None => run_seed,
             };
             eprintln!(
-                "epoch={epoch}: build slot ranges v2 from Old Faithful slot index and registry in {}",
+                "epoch={epoch}: build slot ranges v2 from {} and registry in {}",
+                if cli.slot_list_dir.is_some() {
+                    "Old Faithful slots.txt membership"
+                } else {
+                    "Old Faithful slot-to-CID index"
+                },
                 epoch_dir.display()
             );
             let v2 = build_slot_ranges_v2_from_blockhash_registry_sidecar(
@@ -411,6 +451,124 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn read_block_slots_from_old_faithful_slot_list(
+    epoch: u64,
+    slot_list_dir: &Path,
+) -> Result<Vec<u64>> {
+    let candidates = [
+        slot_list_dir.join(format!("epoch-{epoch}.slots.txt")),
+        slot_list_dir.join(format!("{epoch}.slots.txt")),
+    ];
+    let existing = candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    let path = match existing.as_slice() {
+        [path] => path,
+        [] => {
+            return Err(anyhow!(
+                "epoch={epoch}: missing epoch-{epoch}.slots.txt or {epoch}.slots.txt under {}",
+                slot_list_dir.display()
+            ));
+        }
+        paths => {
+            return Err(anyhow!(
+                "epoch={epoch}: multiple Old Faithful slot lists found: {}",
+                paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    };
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("read Old Faithful slot list {}", path.display()))?;
+    let block_slots = decode_old_faithful_slot_list(path, epoch, &contents)?;
+    eprintln!(
+        "epoch={epoch}: ordered block slots={} from {}",
+        block_slots.len(),
+        path.display()
+    );
+    Ok(block_slots)
+}
+
+fn decode_old_faithful_slot_list(path: &Path, epoch: u64, contents: &str) -> Result<Vec<u64>> {
+    let mut raw_lines = contents.split('\n').collect::<Vec<_>>();
+    if raw_lines.last() == Some(&"") {
+        raw_lines.pop();
+    }
+    if raw_lines.is_empty() {
+        return Err(anyhow!("{} has no slot lines", path.display()));
+    }
+
+    let mut slots = Vec::with_capacity(raw_lines.len());
+    for (line_index, raw_line) in raw_lines.into_iter().enumerate() {
+        let line_number = line_index + 1;
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() {
+            return Err(anyhow!("{} line {line_number} is blank", path.display()));
+        }
+        if !line.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(anyhow!(
+                "{} line {line_number} is not a decimal u64: {line:?}",
+                path.display()
+            ));
+        }
+        slots.push(line.parse::<u64>().with_context(|| {
+            format!(
+                "parse decimal slot on line {line_number} of {}",
+                path.display()
+            )
+        })?);
+    }
+
+    let epoch_start = epoch
+        .checked_mul(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("epoch start slot overflow for epoch {epoch}"))?;
+    let epoch_end = epoch_start
+        .checked_add(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("epoch end slot overflow for epoch {epoch}"))?;
+    let current_slots = if epoch == 0 {
+        slots.as_slice()
+    } else {
+        let predecessor = slots[0];
+        let expected_predecessor = epoch_start - 1;
+        if predecessor != expected_predecessor {
+            return Err(anyhow!(
+                "{} line 1 predecessor slot is {predecessor}, expected epoch boundary slot {expected_predecessor}",
+                path.display()
+            ));
+        }
+        &slots[1..]
+    };
+    if current_slots.is_empty() {
+        return Err(anyhow!(
+            "{} has no current-epoch block slots for epoch {epoch}",
+            path.display()
+        ));
+    }
+
+    let mut previous = None;
+    for (position, slot) in current_slots.iter().copied().enumerate() {
+        if !(epoch_start..epoch_end).contains(&slot) {
+            return Err(anyhow!(
+                "{} current slot {slot} at position {position} is outside epoch {epoch} range {epoch_start}..{epoch_end}",
+                path.display()
+            ));
+        }
+        if previous.is_some_and(|previous_slot| slot <= previous_slot) {
+            return Err(anyhow!(
+                "{} current slots are not strictly increasing at position {position}: {slot} follows {}",
+                path.display(),
+                previous.unwrap()
+            ));
+        }
+        previous = Some(slot);
+    }
+    Ok(current_slots.to_vec())
 }
 
 fn read_block_slots_from_old_faithful_index(
@@ -1487,6 +1645,143 @@ fn http_range_get_exact(http: &Client, url: &str, offset: u64, len: usize) -> Re
 mod tests {
     use super::*;
 
+    fn write_test_registry(root: &Path, epoch: u64, blockhashes: &[[u8; 32]]) {
+        let epoch_dir = root.join(format!("epoch-{epoch}"));
+        fs::create_dir_all(&epoch_dir).expect("create blockhash epoch directory");
+        let bytes = blockhashes
+            .iter()
+            .flat_map(|blockhash| blockhash.iter().copied())
+            .collect::<Vec<_>>();
+        fs::write(epoch_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE), bytes)
+            .expect("write blockhash registry");
+    }
+
+    #[test]
+    fn slot_list_build_reuses_raw_and_keeps_empty_member_in_hash_chain() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let output_dir = temporary.path().join("slot-index");
+        let slot_list_dir = temporary.path().join("slot-lists");
+        let blockhash_dir = temporary.path().join("blockhash-registry");
+        fs::create_dir_all(&output_dir).expect("create output directory");
+        fs::create_dir_all(&slot_list_dir).expect("create slot-list directory");
+
+        let epoch = 4;
+        let epoch_start = epoch * SLOTS_PER_EPOCH;
+        let mut raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
+        raw_ranges[0] = SlotRange {
+            offset: 59,
+            len: 100,
+        };
+        raw_ranges[2] = SlotRange {
+            offset: 159,
+            len: 120,
+        };
+        let raw_path = output_dir.join(format!("epoch-{epoch}-slot-ranges.raw"));
+        write_slot_ranges_raw_file(&raw_path, &raw_ranges).expect("write existing raw ranges");
+        fs::write(
+            slot_list_dir.join(format!("{epoch}.slots.txt")),
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                epoch_start - 1,
+                epoch_start,
+                epoch_start + 1,
+                epoch_start + 2
+            ),
+        )
+        .expect("write Old Faithful slot list");
+        let predecessor = [6; 32];
+        let blockhashes = [[7; 32], [8; 32], [9; 32]];
+        write_test_registry(&blockhash_dir, epoch - 1, &[predecessor]);
+        write_test_registry(&blockhash_dir, epoch, &blockhashes);
+
+        let missing_inputs = temporary.path().join("must-not-be-read");
+        run(Cli {
+            start_epoch: epoch,
+            end_epoch: epoch,
+            indexes_dir: missing_inputs.clone(),
+            cars_dir: Some(missing_inputs.clone()),
+            base_url: "http://127.0.0.1:1".to_owned(),
+            blockhash_dir: Some(blockhash_dir),
+            slot_list_dir: Some(slot_list_dir),
+            archive_v2_dir: None,
+            seed_previous_blockhash: None,
+            output_dir: output_dir.clone(),
+            overwrite: false,
+            overwrite_v2: true,
+            raw_only: false,
+        })
+        .expect("direct slot-list build must not read compact indexes, CID indexes, or CARs");
+
+        let v2_path = output_dir.join(format!("epoch-{epoch}-slot-ranges-v2.raw"));
+        let v2 = fs::read(v2_path).expect("read v2 output");
+        assert_eq!(
+            v2.len(),
+            SLOTS_PER_EPOCH as usize * of_car_reader::slot_ranges::SLOT_RANGE_V2_ENTRY_SIZE
+        );
+        let entry = |slot_in_epoch: usize| {
+            let start = slot_in_epoch * of_car_reader::slot_ranges::SLOT_RANGE_V2_ENTRY_SIZE;
+            of_car_reader::slot_ranges::decode_slot_range_v2_entry(
+                &v2[start..start + of_car_reader::slot_ranges::SLOT_RANGE_V2_ENTRY_SIZE],
+            )
+            .expect("decode v2 row")
+        };
+        assert_eq!(entry(0).range, raw_ranges[0]);
+        assert_eq!(entry(0).previous_blockhash, predecessor);
+        assert!(entry(1).range.is_empty());
+        assert_eq!(entry(1).previous_blockhash, blockhashes[0]);
+        assert_eq!(entry(2).range, raw_ranges[2]);
+        assert_eq!(entry(2).previous_blockhash, blockhashes[1]);
+        assert_eq!(entry(3), SlotRangeWithPreviousBlockhash::EMPTY);
+    }
+
+    #[test]
+    fn slot_list_names_and_format_are_strict() {
+        let epoch = 4;
+        let epoch_start = epoch * SLOTS_PER_EPOCH;
+        let valid = format!(
+            "{}\n{}\n{}\n",
+            epoch_start - 1,
+            epoch_start,
+            epoch_start + 2
+        );
+        assert_eq!(
+            decode_old_faithful_slot_list(Path::new("fixture.slots.txt"), epoch, &valid)
+                .expect("decode valid list"),
+            vec![epoch_start, epoch_start + 2]
+        );
+        assert_eq!(
+            decode_old_faithful_slot_list(Path::new("0.slots.txt"), 0, "0\n2\n")
+                .expect("epoch zero has no predecessor line"),
+            vec![0, 2]
+        );
+
+        for (contents, expected) in [
+            ("", "no slot lines"),
+            ("1727999\n\n1728000\n", "line 2 is blank"),
+            ("1727999\nslot\n", "not a decimal u64"),
+            ("1728000\n1728001\n", "predecessor slot"),
+            ("1727999\n1728001\n1728000\n", "not strictly increasing"),
+            ("1727999\n2160000\n", "outside epoch 4"),
+        ] {
+            let error = decode_old_faithful_slot_list(Path::new("bad.slots.txt"), epoch, contents)
+                .expect_err("malformed slot list must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "error {error:#} does not contain {expected:?}"
+            );
+        }
+
+        for name in ["epoch-4.slots.txt", "4.slots.txt"] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            fs::write(temporary.path().join(name), &valid).expect("write named slot list");
+            assert_eq!(
+                read_block_slots_from_old_faithful_slot_list(epoch, temporary.path())
+                    .expect("read supported local name"),
+                vec![epoch_start, epoch_start + 2]
+            );
+        }
+    }
+
     #[test]
     fn independent_registry_stitch_uses_ordered_old_faithful_slots() {
         let temporary = tempfile::tempdir().expect("temporary directory");
@@ -1647,7 +1942,23 @@ mod tests {
         ])
         .expect("independent blockhash mode");
         assert_eq!(cli.blockhash_dir, Some(PathBuf::from("/registry")));
+        assert!(cli.slot_list_dir.is_none());
         assert!(cli.archive_v2_dir.is_none());
+
+        let direct = Cli::try_parse_from([
+            "of-slot-ranges",
+            "--start-epoch",
+            "4",
+            "--end-epoch",
+            "4",
+            "--blockhash-dir",
+            "/registry",
+            "--slot-list-dir",
+            "/slot-lists",
+            "--overwrite-v2",
+        ])
+        .expect("direct slot-list mode");
+        assert_eq!(direct.slot_list_dir, Some(PathBuf::from("/slot-lists")));
 
         assert!(
             Cli::try_parse_from([
@@ -1663,6 +1974,46 @@ mod tests {
             ])
             .is_err()
         );
+        for conflicting_args in [
+            vec!["--slot-list-dir", "/slot-lists"],
+            vec![
+                "--blockhash-dir",
+                "/registry",
+                "--slot-list-dir",
+                "/slot-lists",
+                "--overwrite",
+            ],
+            vec![
+                "--blockhash-dir",
+                "/registry",
+                "--slot-list-dir",
+                "/slot-lists",
+                "--raw-only",
+            ],
+            vec![
+                "--blockhash-dir",
+                "/registry",
+                "--slot-list-dir",
+                "/slot-lists",
+                "--indexes-dir",
+                "/indexes",
+            ],
+            vec![
+                "--blockhash-dir",
+                "/registry",
+                "--slot-list-dir",
+                "/slot-lists",
+                "--cars-dir",
+                "/cars",
+            ],
+        ] {
+            let mut args = vec!["of-slot-ranges", "--start-epoch", "4", "--end-epoch", "4"];
+            args.extend(conflicting_args);
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "conflicting slot-list arguments must fail"
+            );
+        }
     }
 
     #[test]

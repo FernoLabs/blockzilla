@@ -93,7 +93,9 @@ if [[ "${SCAN_ONLY:-0}" != "1" ]]; then
   if [[ "${SYNC_R2_AFTER:-0}" == "1" ]]; then
     SEED_PREVIOUS_BLOCKHASH="$SEED_PREVIOUS_BLOCKHASH" \
       SLOT_INDEX_V2_VALIDATE_BIN="${SLOT_INDEX_V2_VALIDATE_BIN:-$REPO_ROOT/target/release/of-validate-slot-index-v2}" \
-      "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2-registry-only \
+      SLOT_INDEX_START_EPOCH="$START_EPOCH" \
+      SLOT_INDEX_END_EPOCH="$END_EPOCH" \
+      "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2-authoritative \
       "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR"
   fi
 fi
