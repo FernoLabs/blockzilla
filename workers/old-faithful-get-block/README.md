@@ -15,7 +15,8 @@ The Worker exposes JSON-RPC `getBlock`, `getBlockTime`, and `getVersion` on
   restricted to read operations.
 
 Full `getBlock` output requires a validated
-`slot-index/epoch-N-slot-ranges-v2.raw` object carrying `previousBlockhash`.
+`slot-index-v2/epoch-N-slot-ranges-v2.raw` object carrying `previousBlockhash`.
+The Worker also accepts the older `slot-index/` prefix for compatibility.
 Legacy indexes can still locate blocks for `getBlockTime`, but full block routes
 fail with `previous_blockhash_unavailable` rather than returning an invalid
 hash.

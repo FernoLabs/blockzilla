@@ -14,7 +14,7 @@ use blockzilla_format::{
     ArchiveV2VoteHashRef, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync,
     BlockzillaGetBlockBlobEncoding, BlockzillaGetBlockBundleV1, CompactInnerInstructions,
     CompactInstructionError as InstructionError, CompactLogStream, CompactMetaV1, CompactPubkey,
-    CompactReturnData, CompactReward, CompactTokenBalance,
+    CompactReturnData, CompactReward, CompactTokenBalance, CompactTransactionConfig,
     CompactTransactionError as StoredTransactionError, KeyStore, LogEvent,
     OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
     WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_BLOCKZILLA_GET_BLOCK_BUNDLE_VERSION,
@@ -3591,6 +3591,19 @@ async fn stream_message_value(
             )
             .await
         }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            stream_message_fields_value(
+                w,
+                resolver,
+                message.header,
+                &message.account_keys,
+                &message.recent_blockhash,
+                &message.instructions,
+                None,
+                account_objects,
+            )
+            .await
+        }
     }
 }
 
@@ -4350,6 +4363,7 @@ fn stream_message_version_value(w: &mut JsonByteWriter, message: &ArchiveV2HotMe
     match message {
         ArchiveV2HotMessagePayload::Legacy(_) => w.raw(br#""legacy""#),
         ArchiveV2HotMessagePayload::V0(_) => w.raw(b"0"),
+        ArchiveV2HotMessagePayload::V1(_) => w.raw(b"1"),
     }
 }
 
@@ -4357,6 +4371,7 @@ fn stream_account_message_version_value(w: &mut JsonByteWriter, version: &Accoun
     match version {
         AccountMessageVersion::Legacy => w.raw(br#""legacy""#),
         AccountMessageVersion::V0 => w.raw(b"0"),
+        AccountMessageVersion::V1 => w.raw(b"1"),
     }
 }
 
@@ -4398,9 +4413,11 @@ struct AccountMessageLite {
     version: AccountMessageVersion,
 }
 
+#[derive(Clone, Copy)]
 enum AccountMessageVersion {
     Legacy,
     V0,
+    V1,
 }
 
 impl AccountMessageVersion {
@@ -4408,6 +4425,7 @@ impl AccountMessageVersion {
         match self {
             Self::Legacy => Value::String("legacy".to_string()),
             Self::V0 => Value::from(0),
+            Self::V1 => Value::from(1),
         }
     }
 }
@@ -4517,6 +4535,18 @@ async fn account_transaction_value(
                 &program_id_indices,
                 loaded_writable,
                 loaded_readonly,
+            )
+            .await?
+        }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            let program_id_indices = message_program_id_indices(&message.instructions);
+            account_key_objects_value(
+                resolver,
+                message.header,
+                &message.account_keys,
+                &program_id_indices,
+                &[],
+                &[],
             )
             .await?
         }
@@ -4705,37 +4735,59 @@ fn decode_account_message_lite(
         "message",
         row.tx_index,
     )?;
+    decode_account_message_lite_bytes(bytes, row.tx_index)
+}
+
+fn decode_account_message_lite_bytes(
+    bytes: &[u8],
+    tx_index: u32,
+) -> std::result::Result<AccountMessageLite, String> {
     let mut reader = bytes;
     let variant: u32 = read_wincode_value(&mut reader).map_err(|err| {
         format!(
             "decode accounts message variant tx_index {}: {err}",
-            row.tx_index
+            tx_index
         )
     })?;
+    let version = match variant {
+        0 => AccountMessageVersion::Legacy,
+        1 => AccountMessageVersion::V0,
+        2 => AccountMessageVersion::V1,
+        _ => {
+            return Err(format!(
+                "decode accounts message tx_index {}: unsupported message variant {}",
+                tx_index, variant
+            ));
+        }
+    };
     let header = read_wincode_value(&mut reader).map_err(|err| {
         format!(
             "decode accounts message header tx_index {}: {err}",
-            row.tx_index
+            tx_index
         )
     })?;
-    let account_keys = read_wincode_value(&mut reader).map_err(|err| {
-        format!(
-            "decode accounts message keys tx_index {}: {err}",
-            row.tx_index
-        )
-    })?;
+    if matches!(version, AccountMessageVersion::V1) {
+        let _config: CompactTransactionConfig = read_wincode_value(&mut reader).map_err(|err| {
+            format!(
+                "decode accounts message config tx_index {}: {err}",
+                tx_index
+            )
+        })?;
+    }
+    let account_keys = read_wincode_value(&mut reader)
+        .map_err(|err| format!("decode accounts message keys tx_index {}: {err}", tx_index))?;
     let _recent_blockhash: OwnedCompactRecentBlockhash =
         read_wincode_value(&mut reader).map_err(|err| {
             format!(
                 "decode accounts message recent blockhash tx_index {}: {err}",
-                row.tx_index
+                tx_index
             )
         })?;
     let instructions: Vec<blockzilla_format::ArchiveV2HotInstruction> =
         read_wincode_value(&mut reader).map_err(|err| {
             format!(
                 "decode accounts message instructions tx_index {}: {err}",
-                row.tx_index
+                tx_index
             )
         })?;
     let mut program_id_indices = instructions
@@ -4744,16 +4796,6 @@ fn decode_account_message_lite(
         .collect::<Vec<_>>();
     program_id_indices.sort_unstable();
     program_id_indices.dedup();
-    let version = match variant {
-        0 => AccountMessageVersion::Legacy,
-        1 => AccountMessageVersion::V0,
-        _ => {
-            return Err(format!(
-                "decode accounts message tx_index {}: unsupported message variant {}",
-                row.tx_index, variant
-            ));
-        }
-    };
     Ok(AccountMessageLite {
         header,
         account_keys,
@@ -5021,6 +5063,18 @@ async fn message_value(
                 &message.recent_blockhash,
                 &message.instructions,
                 Some(&message.address_table_lookups),
+                account_objects,
+            )
+            .await
+        }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            message_fields_value(
+                resolver,
+                message.header,
+                &message.account_keys,
+                &message.recent_blockhash,
+                &message.instructions,
+                None,
                 account_objects,
             )
             .await
@@ -5791,6 +5845,7 @@ fn message_version_value(message: &ArchiveV2HotMessagePayload) -> Value {
     match message {
         ArchiveV2HotMessagePayload::Legacy(_) => Value::String("legacy".to_string()),
         ArchiveV2HotMessagePayload::V0(_) => Value::from(0),
+        ArchiveV2HotMessagePayload::V1(_) => Value::from(1),
     }
 }
 
@@ -6524,6 +6579,106 @@ fn add_profile_headers(headers: &Headers, profile: Option<&ProfileHandle>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_v1_account_message_after_transaction_config() {
+        let message = ArchiveV2HotMessagePayload::V1(blockzilla_format::ArchiveV2HotV1Message {
+            header: blockzilla_format::CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            config: CompactTransactionConfig {
+                priority_fee: Some(42),
+                compute_unit_limit: Some(1_400_000),
+                loaded_accounts_data_size_limit: Some(65_536),
+                heap_size: Some(262_144),
+            },
+            account_keys: vec![CompactPubkey::Raw([7; 32])],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(3),
+            instructions: vec![blockzilla_format::ArchiveV2HotInstruction {
+                program_id_index: 1,
+                accounts: vec![0],
+                data: ArchiveV2HotInstructionData::Raw(vec![9]),
+            }],
+        });
+        let bytes = wincode::config::serialize(&message, wincode_leb128_config())
+            .expect("serialize v1 message");
+
+        let decoded = decode_account_message_lite_bytes(&bytes, 9).expect("decode v1 accounts");
+
+        assert!(matches!(decoded.version, AccountMessageVersion::V1));
+        assert_eq!(decoded.header.num_required_signatures, 1);
+        assert_eq!(decoded.account_keys, vec![CompactPubkey::Raw([7; 32])]);
+        assert_eq!(decoded.program_id_indices, vec![1]);
+    }
+
+    #[test]
+    fn renders_all_message_versions_for_buffered_and_streaming_paths() {
+        let header = blockzilla_format::CompactMessageHeader {
+            num_required_signatures: 0,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 0,
+        };
+        let legacy =
+            ArchiveV2HotMessagePayload::Legacy(blockzilla_format::ArchiveV2HotLegacyMessage {
+                header,
+                account_keys: Vec::new(),
+                recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+                instructions: Vec::new(),
+            });
+        let v0 = ArchiveV2HotMessagePayload::V0(blockzilla_format::ArchiveV2HotV0Message {
+            header,
+            account_keys: Vec::new(),
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: Vec::new(),
+            address_table_lookups: Vec::new(),
+        });
+        let v1 = ArchiveV2HotMessagePayload::V1(blockzilla_format::ArchiveV2HotV1Message {
+            header,
+            config: CompactTransactionConfig {
+                priority_fee: None,
+                compute_unit_limit: None,
+                loaded_accounts_data_size_limit: None,
+                heap_size: None,
+            },
+            account_keys: Vec::new(),
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: Vec::new(),
+        });
+
+        for (message, expected_value, expected_json) in [
+            (&legacy, Value::String("legacy".to_string()), "\"legacy\""),
+            (&v0, Value::from(0), "0"),
+            (&v1, Value::from(1), "1"),
+        ] {
+            assert_eq!(message_version_value(message), expected_value);
+            let mut writer = JsonByteWriter::with_capacity(8);
+            stream_message_version_value(&mut writer, message);
+            assert_eq!(
+                String::from_utf8(writer.into_inner()).unwrap(),
+                expected_json
+            );
+        }
+
+        for (version, expected_value, expected_json) in [
+            (
+                AccountMessageVersion::Legacy,
+                Value::String("legacy".to_string()),
+                "\"legacy\"",
+            ),
+            (AccountMessageVersion::V0, Value::from(0), "0"),
+            (AccountMessageVersion::V1, Value::from(1), "1"),
+        ] {
+            assert_eq!(version.value(), expected_value);
+            let mut writer = JsonByteWriter::with_capacity(8);
+            stream_account_message_version_value(&mut writer, &version);
+            assert_eq!(
+                String::from_utf8(writer.into_inner()).unwrap(),
+                expected_json
+            );
+        }
+    }
 
     #[test]
     fn transaction_error_render_instruction_custom() {

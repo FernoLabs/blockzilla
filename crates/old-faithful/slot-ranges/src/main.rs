@@ -323,6 +323,7 @@ fn write_slot_ranges_v2_raw_file(
     Ok(())
 }
 
+#[derive(Debug)]
 struct SlotRangesV2Build {
     ranges: Vec<SlotRangeWithPreviousBlockhash>,
     last_blockhash: Option<[u8; 32]>,
@@ -355,6 +356,7 @@ fn build_slot_ranges_v2_from_archive_v2_sidecars(
     if raw_ranges.len() != SLOTS_PER_EPOCH as usize {
         return Err(anyhow!("raw ranges wrong length"));
     }
+    require_non_genesis_seed(epoch, initial_previous_blockhash)?;
 
     let block_index_path = epoch_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
     if !block_index_path.is_file() {
@@ -705,6 +707,7 @@ fn build_slot_ranges_v2_from_local_car(
     epoch: u64,
     initial_previous_blockhash: Option<[u8; 32]>,
 ) -> Result<SlotRangesV2Build> {
+    require_non_genesis_seed(epoch, initial_previous_blockhash)?;
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut reader = CarBlockReader::with_capacity(file, 16 << 20);
     reader
@@ -781,6 +784,30 @@ fn build_slot_ranges_v2_from_local_car(
         ranges,
         last_blockhash,
     })
+}
+
+fn require_non_genesis_seed(
+    epoch: u64,
+    initial_previous_blockhash: Option<[u8; 32]>,
+) -> Result<()> {
+    if epoch > 0 {
+        match initial_previous_blockhash {
+            None => {
+                return Err(anyhow!(
+                    "epoch {epoch} v2 index requires the last blockhash from epoch {}; provide the predecessor blockhash registry",
+                    epoch - 1
+                ));
+            }
+            Some(hash) if hash == [0; 32] => {
+                return Err(anyhow!(
+                    "epoch {epoch} v2 index predecessor blockhash from epoch {} is zero",
+                    epoch - 1
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /* ---------------- CAR header size ---------------- */
@@ -931,4 +958,74 @@ fn http_range_get(http: &Client, url: &str, start: u64, end: u64) -> Result<Vec<
 
     let bytes = resp.bytes().with_context(|| "read response body")?;
     Ok(bytes.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_stitch_uses_predecessor_last_hash_before_current_first_hash() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let epoch_dir = temporary.path().join("epoch-1");
+        fs::create_dir_all(&epoch_dir).expect("create epoch directory");
+
+        let predecessor_last_hash = [7; 32];
+        let current_first_hash = [8; 32];
+        let current_second_hash = [9; 32];
+        let mut registry = Vec::new();
+        registry.extend_from_slice(&current_first_hash);
+        registry.extend_from_slice(&current_second_hash);
+        fs::write(epoch_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE), registry)
+            .expect("write blockhash registry");
+
+        let mut raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
+        raw_ranges[0] = SlotRange {
+            offset: 59,
+            len: 100,
+        };
+        raw_ranges[2] = SlotRange {
+            offset: 159,
+            len: 120,
+        };
+
+        let output = build_slot_ranges_v2_from_archive_v2_sidecars(
+            &epoch_dir,
+            1,
+            &raw_ranges,
+            None,
+            Some(predecessor_last_hash),
+        )
+        .expect("stitch v2 sidecar");
+
+        assert_eq!(output.ranges[0].previous_blockhash, predecessor_last_hash);
+        assert_ne!(output.ranges[0].previous_blockhash, current_first_hash);
+        assert_eq!(output.ranges[2].previous_blockhash, current_first_hash);
+        assert_eq!(output.last_blockhash, Some(current_second_hash));
+    }
+
+    #[test]
+    fn sidecar_stitch_rejects_missing_non_genesis_seed() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
+        let error = build_slot_ranges_v2_from_archive_v2_sidecars(
+            temporary.path(),
+            1,
+            &raw_ranges,
+            None,
+            None,
+        )
+        .expect_err("missing predecessor seed must fail");
+        assert!(error.to_string().contains("last blockhash from epoch 0"));
+
+        let error = build_slot_ranges_v2_from_archive_v2_sidecars(
+            temporary.path(),
+            1,
+            &raw_ranges,
+            None,
+            Some([0; 32]),
+        )
+        .expect_err("zero predecessor seed must fail");
+        assert!(error.to_string().contains("predecessor blockhash"));
+    }
 }

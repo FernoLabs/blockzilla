@@ -43,12 +43,43 @@ For epochs after genesis, the seed directory must contain the previous epoch's
 blockhash registry; a one-off run can instead use `--seed-previous-blockhash`.
 `--require-seed` prevents an incomplete v2 index from being written.
 
+The sidecar stitch also fails when an epoch after genesis has no predecessor
+registry. When a build starts at epoch N, download both epoch N and epoch N-1
+registries. The stitch uses epoch N-1's last hash for the first present block,
+then uses each current block's hash for the next present block.
+
 Validate a directory of raw indexes before or after an R2 sync with the native
 validator (the sync helper invokes this binary automatically):
 
 ```bash
 cargo run --locked -p of-slot-ranges --bin of-validate-slot-index -- ./slot-index
 ```
+
+Validate full v2 indexes against their raw indexes and blockhash registries:
+
+```bash
+cargo run --locked -p of-slot-ranges --bin of-validate-slot-index-v2 -- \
+  ./slot-index /data/blockhash-registry \
+  --start-epoch 800 \
+  --end-epoch 800
+```
+
+This validator checks exact file and row sizes, CAR range order, canonical
+empty rows, and previous blockhash continuity. For epoch N after genesis, it
+requires epoch N-1's registry and checks the epoch boundary.
+
+After validation, upload only v2 files to the production prefix:
+
+```bash
+SLOT_INDEX_V2_VALIDATE_BIN=target/release/of-validate-slot-index-v2 \
+  ./sync-slot-index-r2.sh push-v2 \
+  ./slot-index /data/blockhash-registry \
+  r2:blockzilla/slot-index-v2
+```
+
+`push-v2` runs the strict validator before it starts the upload, refuses to
+change an existing remote object, and checks the uploaded objects. The build
+wrappers use this path automatically when `SYNC_R2_AFTER=1`.
 
 ## Raw Format
 

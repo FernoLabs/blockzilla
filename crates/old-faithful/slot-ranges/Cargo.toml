@@ -24,6 +24,10 @@ required-features = ["cli"]
 name = "of-validate-slot-index"
 path = "src/bin/validate_slot_index.rs"
 
+[[bin]]
+name = "of-validate-slot-index-v2"
+path = "src/bin/validate_slot_index_v2.rs"
+
 [features]
 default = ["cli"]
 cli = [

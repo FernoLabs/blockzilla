@@ -13,10 +13,13 @@ Environment:
                     Default: ./out
   BLOCKHASH_DIR     Root for epoch-N/blockhash_registry.bin.
                     Default: $SLOT_INDEX_DIR/blockhash-registry
+                    For START_EPOCH > 0, it must also contain epoch-(N-1).
   JOBS              Number of CAR epochs to scan concurrently. Default: 4
   PREFER_ZST=1      Prefer epoch-N.car.zst when both raw and zstd exist.
   OVERWRITE=1       Replace existing raw/registry/v2 files.
   SCAN_ONLY=1       Only build raw ranges + blockhash registries; skip v2 stitch.
+  SYNC_R2_AFTER=1   Validate and upload v2 indexes to
+                    r2:blockzilla/slot-index-v2 after the build.
 
 The CAR scan is parallel per epoch. It writes raw slot ranges plus
 blockhash_registry.bin. Unless SCAN_ONLY=1, a second fast pass stitches
@@ -67,4 +70,13 @@ if [[ "${SCAN_ONLY:-0}" != "1" ]]; then
     "--overwrite-v2"
   )
   cargo run --release -p of-slot-ranges --bin of-slot-ranges -- "${v2_args[@]}"
+  cargo run --release -p of-slot-ranges --bin of-validate-slot-index-v2 -- \
+    "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR" \
+    --start-epoch "$START_EPOCH" \
+    --end-epoch "$END_EPOCH"
+  if [[ "${SYNC_R2_AFTER:-0}" == "1" ]]; then
+    SLOT_INDEX_V2_VALIDATE_BIN="${SLOT_INDEX_V2_VALIDATE_BIN:-$REPO_ROOT/target/release/of-validate-slot-index-v2}" \
+      "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2 \
+      "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR"
+  fi
 fi

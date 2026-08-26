@@ -65,6 +65,8 @@ jobs:
       - name: Build Archive V2 Edgezilla Worker
         working-directory: workers/blockzilla-get-block
         run: worker-build --release . --no-default-features --features worker
+      - name: Test Archive V2 Edgezilla Worker
+        run: cargo test --locked -p blockzilla-get-block --no-default-features --features worker --lib
       - name: Build Old Faithful Edgezilla Worker
         working-directory: workers/old-faithful-get-block
         run: worker-build --release .

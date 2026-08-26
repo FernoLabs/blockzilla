@@ -14,11 +14,13 @@ Environment:
                     blockhash_registry.bin. archive-v2-blocks.index is used
                     when present, otherwise non-empty raw slot ranges define
                     the blockhash order.
+                    For START_EPOCH > 0, it must also contain epoch-(N-1).
   OVERWRITE_V2=1    Rebuild epoch-*-slot-ranges-v2.raw while reusing existing
                     epoch-*-slot-ranges.raw when present.
   OVERWRITE=1       Rebuild epoch-*-slot-ranges.raw too, useful when compact
                     index slot order is needed for v2 blockhash alignment.
-  SYNC_R2_AFTER=1   Push SLOT_INDEX_DIR to r2:blockzilla/slot-index after build.
+  SYNC_R2_AFTER=1   Upload v2 to r2:blockzilla/slot-index-v2 when
+                    ARCHIVE_V2_DIR is set; otherwise upload the raw index.
 
 This downloads missing Old Faithful compact index files, builds slot-range
 offset files, and can optionally upload the result to the Cloudflare R2 mirror.
@@ -62,6 +64,20 @@ fi
 cd "$REPO_ROOT"
 "${CARGO_BIN:-cargo}" run --release -p of-slot-ranges --bin of-slot-ranges -- "${args[@]}"
 
+if [[ -n "${ARCHIVE_V2_DIR:-}" ]]; then
+  "${CARGO_BIN:-cargo}" run --release -p of-slot-ranges \
+    --bin of-validate-slot-index-v2 -- \
+    "$SLOT_INDEX_DIR" "$ARCHIVE_V2_DIR" \
+    --start-epoch "$START_EPOCH" \
+    --end-epoch "$END_EPOCH"
+fi
+
 if [[ "${SYNC_R2_AFTER:-0}" == "1" ]]; then
-  "$SCRIPT_DIR/sync-slot-index-r2.sh" push "$SLOT_INDEX_DIR"
+  if [[ -n "${ARCHIVE_V2_DIR:-}" ]]; then
+    SLOT_INDEX_V2_VALIDATE_BIN="${SLOT_INDEX_V2_VALIDATE_BIN:-$REPO_ROOT/target/release/of-validate-slot-index-v2}" \
+      "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2 \
+      "$SLOT_INDEX_DIR" "$ARCHIVE_V2_DIR"
+  else
+    "$SCRIPT_DIR/sync-slot-index-r2.sh" push "$SLOT_INDEX_DIR"
+  fi
 fi
