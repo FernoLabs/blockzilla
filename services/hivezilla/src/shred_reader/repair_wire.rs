@@ -106,7 +106,7 @@ impl fmt::Display for RepairWireError {
 impl Error for RepairWireError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Codec(error) => Some(error.as_ref()),
+            Self::Codec(error) => Some(error),
             Self::ResponseTooShort { .. }
             | Self::NonceMismatch { .. }
             | Self::InvalidSigningLayout { .. }
@@ -122,7 +122,7 @@ impl From<wincode::error::Error> for RepairWireError {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
 struct RepairRequestHeader {
     // Agave signs the serialized packet with this field zeroed, then replaces
     // exactly these 64 bytes in place.
@@ -135,7 +135,7 @@ struct RepairRequestHeader {
 
 /// Keep this enum in exact Agave v4.1.2 declaration order. Bincode encodes the
 /// zero-based variant index as a four-byte little-endian integer.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
 enum RepairProtocol {
     LegacyWindowIndex,
     LegacyHighestWindowIndex,
@@ -183,7 +183,7 @@ enum RepairProtocol {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, wincode::SchemaRead, wincode::SchemaWrite)]
 enum RepairResponse {
     Ping(RepairPing),
 }
@@ -240,9 +240,9 @@ pub fn parse_verified_ping(packet: &[u8]) -> Option<RepairPing> {
 
 /// Encode the signed pong expected by an Agave v4.1.2 repair peer.
 pub fn encode_pong(ping: &RepairPing, sender: &Keypair) -> Result<Vec<u8>, RepairWireError> {
-    Ok(wincode::serialize(&RepairProtocol::Pong(Pong::new(
-        ping, sender,
-    )))?)
+    wincode::serialize(&RepairProtocol::Pong(Pong::new(ping, sender)))
+        .map_err(wincode::error::Error::from)
+        .map_err(RepairWireError::from)
 }
 
 /// Split a raw repair shred packet into payload and trailing nonce.
@@ -329,7 +329,9 @@ fn encode_signed_protocol(
     protocol: &RepairProtocol,
     sender: &Keypair,
 ) -> Result<Vec<u8>, RepairWireError> {
-    let mut payload = wincode::serialize(protocol)?;
+    let mut payload = wincode::serialize(protocol)
+        .map_err(wincode::error::Error::from)
+        .map_err(RepairWireError::from)?;
     if payload.len() < SIGNATURE_END {
         return Err(RepairWireError::InvalidSigningLayout {
             actual: payload.len(),

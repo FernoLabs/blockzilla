@@ -540,8 +540,11 @@ impl BenchArchiveWriters {
         let encode_started_at = Instant::now();
         let block_len = match strategy {
             GrpcFixtureBlockWriteStrategy::Current => usize::try_from(
-                wincode::config::serialized_size(&converted.block, wincode_leb128_config())
-                    .context("measure normalized block wincode size")?,
+                blockzilla_wincode::config::serialized_size(
+                    &converted.block,
+                    wincode_leb128_config(),
+                )
+                .context("measure normalized block wincode size")?,
             )
             .context("normalized block size exceeds usize::MAX")?,
             GrpcFixtureBlockWriteStrategy::ScratchOnce => {

@@ -14,6 +14,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
+use solana_hash::Hash;
 use solana_ledger_compat::{
     DATA_SHREDS_PER_FEC_BLOCK, MAX_CODE_SHREDS_PER_SLOT, MAX_DATA_SHREDS_PER_SLOT, Shred,
 };
@@ -299,11 +300,13 @@ impl RepairTrustStore {
         let identity = TrustedFecIdentity {
             merkle_root: shred
                 .merkle_root()
-                .map_err(|_| TurbineTrustError::MissingMerkleRoot)?,
+                .map_err(|_| TurbineTrustError::MissingMerkleRoot)?
+                .into(),
             chained_merkle_root: ChainedMerkleRootExpectation::Exact(Some(
                 shred
                     .chained_merkle_root()
-                    .map_err(|_| TurbineTrustError::MissingChainedMerkleRoot)?,
+                    .map_err(|_| TurbineTrustError::MissingChainedMerkleRoot)?
+                    .into(),
             )),
             trust_anchor_fec_set_index: shred.fec_set_index(),
         };
@@ -474,9 +477,11 @@ impl RepairTrustStore {
         let Ok(actual_root) = shred.merkle_root() else {
             return false;
         };
+        let actual_root: Hash = actual_root.into();
         let Ok(actual_chain) = shred.chained_merkle_root() else {
             return false;
         };
+        let actual_chain: Hash = actual_chain.into();
         let Ok(mut state) = self.write_state() else {
             return false;
         };
@@ -575,12 +580,13 @@ impl RepairTrust for RepairTrustStore {
         let Ok(actual_root) = shred.merkle_root() else {
             return false;
         };
+        let actual_root: Hash = actual_root.into();
         if expected.merkle_root != actual_root {
             return false;
         }
         match expected.chained_merkle_root {
             ChainedMerkleRootExpectation::Exact(expected) => {
-                shred.chained_merkle_root().ok() == expected
+                shred.chained_merkle_root().ok().map(Into::into) == expected
             }
             ChainedMerkleRootExpectation::LearnFromAnchoredRoot => {
                 shred.chained_merkle_root().is_ok()
@@ -879,7 +885,7 @@ mod tests {
             VERSION,
             &leader,
             b"fec thirty two",
-            fec_0.merkle_root().unwrap(),
+            fec_0.merkle_root().unwrap().into(),
         );
         let fec_64 = signed_test_data_shred_with_chain(
             500,
@@ -887,12 +893,15 @@ mod tests {
             VERSION,
             &leader,
             b"fec sixty four",
-            fec_32.merkle_root().unwrap(),
+            fec_32.merkle_root().unwrap().into(),
         );
 
         store.observe_turbine_packet(fec_64.payload()).unwrap();
         let anchored_32 = store.trusted_fec_identity(500, 32).unwrap();
-        assert_eq!(anchored_32.merkle_root, fec_32.merkle_root().unwrap());
+        assert_eq!(
+            anchored_32.merkle_root,
+            Hash::from(fec_32.merkle_root().unwrap())
+        );
         assert_eq!(
             anchored_32.chained_merkle_root,
             ChainedMerkleRootExpectation::LearnFromAnchoredRoot
@@ -905,7 +914,10 @@ mod tests {
 
         assert!(store.reserve_repair_commitment(&fec_32));
         let anchored_0 = store.trusted_fec_identity(500, 0).unwrap();
-        assert_eq!(anchored_0.merkle_root, fec_0.merkle_root().unwrap());
+        assert_eq!(
+            anchored_0.merkle_root,
+            Hash::from(fec_0.merkle_root().unwrap())
+        );
         assert_eq!(anchored_0.trust_anchor_fec_set_index, 32);
         assert!(store.can_request(&RepairRequest::WindowIndex {
             slot: 500,
@@ -917,7 +929,7 @@ mod tests {
                 .trusted_fec_identity(500, 0)
                 .unwrap()
                 .chained_merkle_root,
-            ChainedMerkleRootExpectation::Exact(fec_0.chained_merkle_root().ok())
+            ChainedMerkleRootExpectation::Exact(fec_0.chained_merkle_root().ok().map(Into::into))
         );
     }
 
@@ -950,7 +962,7 @@ mod tests {
             VERSION,
             &leader,
             b"direct successor",
-            conflicting_fec_32.merkle_root().unwrap(),
+            conflicting_fec_32.merkle_root().unwrap().into(),
         );
         store.observe_turbine_packet(fec_0.payload()).unwrap();
         store.observe_turbine_packet(fec_64.payload()).unwrap();
@@ -993,10 +1005,13 @@ mod tests {
             })
         ));
         let trusted = store.trusted_fec_identity(123, 0).unwrap();
-        assert_eq!(trusted.merkle_root, shred.merkle_root().unwrap());
+        assert_eq!(
+            trusted.merkle_root,
+            Hash::from(shred.merkle_root().unwrap())
+        );
         assert_eq!(
             trusted.chained_merkle_root,
-            ChainedMerkleRootExpectation::Exact(shred.chained_merkle_root().ok())
+            ChainedMerkleRootExpectation::Exact(shred.chained_merkle_root().ok().map(Into::into))
         );
 
         assert_eq!(
@@ -1211,7 +1226,7 @@ mod tests {
             VERSION,
             &leader,
             b"second FEC",
-            first.merkle_root().unwrap(),
+            first.merkle_root().unwrap().into(),
         );
         store.observe_turbine_packet(first.payload()).unwrap();
 

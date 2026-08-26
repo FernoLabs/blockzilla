@@ -1355,7 +1355,7 @@ fn read_rpc_block(path: &Path, slot: u64, max_bytes: u64) -> Result<RpcRepairBlo
             BASE64_STANDARD.encode(&decoded) == payload,
             "RPC repair slot {slot} transaction {tx_index} base64 is not canonical"
         );
-        wincode::deserialize::<VersionedTransaction<'_>>(&decoded).with_context(|| {
+        blockzilla_wincode::deserialize::<VersionedTransaction<'_>>(&decoded).with_context(|| {
             format!(
                 "RPC repair slot {slot} transaction {tx_index} has invalid Solana wire transaction"
             )
@@ -1842,7 +1842,8 @@ mod tests {
                 },
                 txs: Vec::new(),
             };
-            let payload = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+            let payload =
+                blockzilla_wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
             write_u32_varint(&mut blocks, payload.len() as u32).unwrap();
             blocks.write_all(&payload).unwrap();
             index

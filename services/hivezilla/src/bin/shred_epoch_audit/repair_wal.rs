@@ -1426,16 +1426,14 @@ fn decode_and_validate_body(body: &[u8]) -> Result<ValidatedRepairRecord> {
     );
     let actual_merkle_root = shred
         .merkle_root()
-        .map_err(|error| anyhow::anyhow!("derive repair shred Merkle root: {error:?}"))?
-        .to_bytes();
+        .map_err(|error| anyhow::anyhow!("derive repair shred Merkle root: {error:?}"))?;
     ensure!(
         actual_merkle_root == fec_merkle_root,
         "repair WAL FEC Merkle root provenance differs from its shred payload"
     );
     let actual_chained_root = shred
         .chained_merkle_root()
-        .map_err(|error| anyhow::anyhow!("derive repair shred chained Merkle root: {error:?}"))?
-        .to_bytes();
+        .map_err(|error| anyhow::anyhow!("derive repair shred chained Merkle root: {error:?}"))?;
     let chained_merkle_root = chained_merkle_root
         .context("accepted repair WAL provenance omitted its chained Merkle root")?;
     ensure!(
@@ -1548,12 +1546,10 @@ fn fec_identity(shred: &Shred) -> Result<FecIdentity> {
         leader_signature,
         merkle_root: shred
             .merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive shred Merkle root: {error:?}"))?,
         chained_merkle_root: shred
             .chained_merkle_root()
-            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?
-            .to_bytes(),
+            .map_err(|error| anyhow::anyhow!("derive chained shred Merkle root: {error:?}"))?,
         proof_size: variant & 0x0f,
         resigned: matches!(high, 0x70 | 0xb0),
     })
@@ -1966,7 +1962,7 @@ mod tests {
     fn merge_adds_only_unique_repairs_and_requires_the_exact_anchor_chain() {
         let leader = Keypair::new();
         let raw = signed_test_data_shred(700, 0, &leader, [0; 32]);
-        let raw_root = raw.merkle_root().unwrap().to_bytes();
+        let raw_root = raw.merkle_root().unwrap();
         let repaired = signed_test_data_shred(700, 32, &leader, raw_root);
         let record = validated_record(1, &repaired, &leader, 32, false);
 
@@ -2007,7 +2003,7 @@ mod tests {
     fn merge_rejects_an_ambiguous_raw_successor_in_the_anchor_path() {
         let leader = Keypair::new();
         let repaired = signed_test_data_shred(703, 0, &leader, [0; 32]);
-        let repaired_root = repaired.merkle_root().unwrap().to_bytes();
+        let repaired_root = repaired.merkle_root().unwrap();
         let matching_successor = signed_test_data_shred(703, 32, &leader, repaired_root);
         let conflicting_successor = signed_test_data_shred(703, 32, &leader, [1; 32]);
         let record = validated_record(2, &repaired, &leader, 32, true);
