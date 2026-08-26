@@ -3,7 +3,7 @@ use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::log::{StrId, StringTable};
-use crate::{CompactPubkey, KeyStore, PubkeyCompactor};
+use crate::{CompactPubkey, PubkeyCompactor, PubkeyResolver};
 
 /// System Program id
 pub const STR_ID: &str = "11111111111111111111111111111111";
@@ -201,32 +201,35 @@ fn parse_u64_commas(s: &str) -> Option<u64> {
 }
 
 #[inline]
-fn pubkey_id_to_pubkey(store: &KeyStore, id: PubkeyId) -> Pubkey {
-    id.to_pubkey(store).unwrap_or_else(|| {
-        panic!(
-            "SystemProgramLog: PubkeyId out of bounds: id={:?} len={}",
-            id,
-            store.len()
-        )
-    })
+fn pubkey_id_to_pubkey<R: PubkeyResolver + ?Sized>(resolver: &R, id: PubkeyId) -> Pubkey {
+    id.to_pubkey(resolver)
+        .unwrap_or_else(|| panic!("SystemProgramLog: PubkeyId cannot be resolved: id={id:?}"))
 }
 
 #[inline]
-fn pubkey_or_string_to_string(v: PubkeyOrString, st: &StringTable, store: &KeyStore) -> String {
+fn pubkey_or_string_to_string<R: PubkeyResolver + ?Sized>(
+    v: PubkeyOrString,
+    st: &StringTable,
+    resolver: &R,
+) -> String {
     match v {
-        PubkeyOrString::Pubkey(id) => pubkey_id_to_pubkey(store, id).to_string(),
+        PubkeyOrString::Pubkey(id) => pubkey_id_to_pubkey(resolver, id).to_string(),
         PubkeyOrString::Text(sid) => st.resolve(sid).to_string(),
     }
 }
 
 #[inline]
-fn system_address_to_string(v: SystemAddress, st: &StringTable, store: &KeyStore) -> String {
+fn system_address_to_string<R: PubkeyResolver + ?Sized>(
+    v: SystemAddress,
+    st: &StringTable,
+    resolver: &R,
+) -> String {
     match v {
-        SystemAddress::Pubkey(value) => pubkey_or_string_to_string(value, st, store),
+        SystemAddress::Pubkey(value) => pubkey_or_string_to_string(value, st, resolver),
         SystemAddress::Debug { address, base } => {
-            let address = pubkey_or_string_to_string(address, st, store);
+            let address = pubkey_or_string_to_string(address, st, resolver);
             let base = match base {
-                Some(base) => format!("Some({})", pubkey_or_string_to_string(base, st, store)),
+                Some(base) => format!("Some({})", pubkey_or_string_to_string(base, st, resolver)),
                 None => "None".to_string(),
             };
             format!("Address {{ address: {address}, base: {base} }}")
@@ -560,7 +563,7 @@ impl SystemProgramLog {
     }
 
     #[inline]
-    pub fn render(&self, st: &StringTable, store: &KeyStore) -> String {
+    pub fn render<R: PubkeyResolver + ?Sized>(&self, st: &StringTable, resolver: &R) -> String {
         match self {
             Self::Instruction(ix) => ix.as_str().to_string(),
 
@@ -569,8 +572,8 @@ impl SystemProgramLog {
                 derived_addr,
             } => format!(
                 "Create: address {} does not match derived address {}",
-                pubkey_id_to_pubkey(store, *provided_addr),
-                pubkey_or_string_to_string(*derived_addr, st, store),
+                pubkey_id_to_pubkey(resolver, *provided_addr),
+                pubkey_or_string_to_string(*derived_addr, st, resolver),
             ),
 
             Self::TransferFromAddressMismatch {
@@ -578,31 +581,31 @@ impl SystemProgramLog {
                 derived_addr,
             } => format!(
                 "Transfer: 'from' address {} does not match derived address {}",
-                pubkey_id_to_pubkey(store, *provided_addr),
-                pubkey_or_string_to_string(*derived_addr, st, store),
+                pubkey_id_to_pubkey(resolver, *provided_addr),
+                pubkey_or_string_to_string(*derived_addr, st, resolver),
             ),
 
             Self::CreateAccountAlreadyInUse { addr }
             | Self::CreateAccountAccountAlreadyInUse { addr } => format!(
                 "Create Account: account {} already in use",
-                system_address_to_string(*addr, st, store),
+                system_address_to_string(*addr, st, resolver),
             ),
 
             Self::AllocateAlreadyInUse { addr } | Self::AllocateAccountAlreadyInUse { addr } => {
                 format!(
                     "Allocate: account {} already in use",
-                    system_address_to_string(*addr, st, store),
+                    system_address_to_string(*addr, st, resolver),
                 )
             }
 
             Self::AllocateToMustSign { addr } => format!(
                 "Allocate: 'to' account {} must sign",
-                system_address_to_string(*addr, st, store),
+                system_address_to_string(*addr, st, resolver),
             ),
 
             Self::AssignAccountMustSign { addr } => format!(
                 "Assign: account {} must sign",
-                system_address_to_string(*addr, st, store),
+                system_address_to_string(*addr, st, resolver),
             ),
 
             Self::AllocateRequestedTooLarge {
@@ -626,7 +629,7 @@ impl SystemProgramLog {
 
             Self::TransferFromMustSign { from } => format!(
                 "Transfer: `from` account {} must sign",
-                pubkey_id_to_pubkey(store, *from),
+                pubkey_id_to_pubkey(resolver, *from),
             ),
 
             Self::TransferInsufficient { have, need } => {
@@ -648,25 +651,25 @@ impl SystemProgramLog {
             Self::NonceAccountMustBeWriteable { action, account } => format!(
                 "{} nonce account: Account {} must be writeable",
                 action.as_str(),
-                pubkey_or_string_to_string(*account, st, store),
+                pubkey_or_string_to_string(*account, st, resolver),
             ),
 
             Self::NonceAccountMustBeSigner { action, account } => format!(
                 "{} nonce account: Account {} must be a signer",
                 action.as_str(),
-                pubkey_or_string_to_string(*account, st, store),
+                pubkey_or_string_to_string(*account, st, resolver),
             ),
 
             Self::NonceAccountMustSign { action, account } => format!(
                 "{} nonce account: Account {} must sign",
                 action.as_str(),
-                pubkey_or_string_to_string(*account, st, store),
+                pubkey_or_string_to_string(*account, st, resolver),
             ),
 
             Self::NonceAccountStateInvalid { action, account } => format!(
                 "{} nonce account: Account {} state is invalid",
                 action.as_str(),
-                pubkey_or_string_to_string(*account, st, store),
+                pubkey_or_string_to_string(*account, st, resolver),
             ),
 
             Self::NonceInsufficientLamports { action, have, need } => format!(

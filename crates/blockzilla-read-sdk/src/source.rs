@@ -243,6 +243,8 @@ struct PinnedFile {
 #[derive(Debug, Clone)]
 pub struct PinnedLocalRangeSource {
     root: PathBuf,
+    root_directory: Option<Arc<File>>,
+    allowed_objects: Option<Arc<HashMap<String, ()>>>,
     files: Arc<Mutex<HashMap<String, Option<PinnedFile>>>>,
 }
 
@@ -250,12 +252,95 @@ impl PinnedLocalRangeSource {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            root_directory: None,
+            allowed_objects: None,
             files: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    /// Open and pin the source directory before any object lookup.
+    ///
+    /// Every later object open is relative to this descriptor. Replacing the
+    /// pathname cannot make one source instance mix objects from two directory
+    /// generations.
+    pub fn new_anchored(root: impl Into<PathBuf>, allowed_objects: &[&str]) -> SourceResult<Self> {
+        const MAX_ALLOWED_OBJECTS: usize = 64;
+        if allowed_objects.is_empty() || allowed_objects.len() > MAX_ALLOWED_OBJECTS {
+            return Err(SourceError::Protocol(format!(
+                "anchored local source allowlist must contain 1..={MAX_ALLOWED_OBJECTS} objects"
+            )));
+        }
+        let mut allowed = HashMap::with_capacity(allowed_objects.len());
+        for object in allowed_objects {
+            validate_object_name(object)
+                .map_err(|_| SourceError::InvalidName((*object).to_owned()))?;
+            if allowed.insert((*object).to_owned(), ()).is_some() {
+                return Err(SourceError::Protocol(format!(
+                    "anchored local source allowlist contains duplicate object {object}"
+                )));
+            }
+        }
+        let root = root.into();
+        let directory = rustix::fs::open(
+            &root,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::DIRECTORY,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|error| SourceError::Io {
+            object: root.display().to_string(),
+            source: io::Error::from(error),
+        })?;
+        let metadata = directory.metadata().map_err(|source| SourceError::Io {
+            object: root.display().to_string(),
+            source,
+        })?;
+        if !metadata.is_dir() {
+            return Err(SourceError::Protocol(format!(
+                "{} is not a directory",
+                root.display()
+            )));
+        }
+        Ok(Self {
+            root,
+            root_directory: Some(Arc::new(directory)),
+            allowed_objects: Some(Arc::new(allowed)),
+            files: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Clone the pinned source-directory descriptor, when this source was
+    /// created with [`Self::new_anchored`].
+    pub fn pinned_root_file_clone(&self) -> SourceResult<Option<File>> {
+        self.root_directory
+            .as_ref()
+            .map(|directory| {
+                directory.try_clone().map_err(|source| SourceError::Io {
+                    object: self.root.display().to_string(),
+                    source,
+                })
+            })
+            .transpose()
+    }
+
+    /// Clone the descriptor pinned for one immutable object.
+    ///
+    /// The returned handle refers to the same inode that range reads and
+    /// manifest verification use. A caller can therefore use APIs that accept
+    /// `File` without reopening a pathname and creating a replacement race.
+    pub fn pinned_file_clone(&self, object: &str) -> SourceResult<Option<File>> {
+        self.pinned_file(object)?
+            .map(|pinned| {
+                pinned.file.try_clone().map_err(|source| SourceError::Io {
+                    object: object.to_owned(),
+                    source,
+                })
+            })
+            .transpose()
     }
 
     fn path(&self, object: &str) -> SourceResult<PathBuf> {
@@ -264,14 +349,30 @@ impl PinnedLocalRangeSource {
     }
 
     fn pinned_file(&self, object: &str) -> SourceResult<Option<PinnedFile>> {
-        self.pinned_file_with(object, |path| {
-            rustix::fs::open(
-                path,
-                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-                Mode::empty(),
-            )
-            .map(File::from)
-            .map_err(io::Error::from)
+        if let Some(allowed) = &self.allowed_objects
+            && !allowed.contains_key(object)
+        {
+            return Err(SourceError::Protocol(format!(
+                "object {object} is outside the anchored local source allowlist"
+            )));
+        }
+        let root_directory = self.root_directory.clone();
+        self.pinned_file_with(object, move |path| {
+            let descriptor = if let Some(directory) = root_directory {
+                rustix::fs::openat(
+                    directory.as_ref(),
+                    object,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+            } else {
+                rustix::fs::open(
+                    path,
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+            };
+            descriptor.map(File::from).map_err(io::Error::from)
         })
     }
 
@@ -598,6 +699,37 @@ mod tests {
 
         assert_eq!(source.size("object.bin").unwrap(), Some(8));
         assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+    }
+
+    #[test]
+    fn anchored_source_keeps_one_directory_generation_and_enforces_allowlist() {
+        let parent = tempdir().unwrap();
+        let active = parent.path().join("active");
+        let replacement = parent.path().join("replacement");
+        let held = parent.path().join("held");
+        fs::create_dir(&active).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(active.join("object.bin"), b"original").unwrap();
+        fs::write(replacement.join("object.bin"), b"different").unwrap();
+        fs::write(replacement.join("outside.bin"), b"outside").unwrap();
+        let source = PinnedLocalRangeSource::new_anchored(&active, &["object.bin"]).unwrap();
+
+        fs::rename(&active, &held).unwrap();
+        fs::rename(&replacement, &active).unwrap();
+        assert_eq!(source.read_range("object.bin", 0, 8).unwrap(), b"original");
+        assert!(
+            source
+                .read_range("outside.bin", 0, 7)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the anchored local source allowlist")
+        );
+
+        let names = (0..65)
+            .map(|index| format!("{index}.bin"))
+            .collect::<Vec<_>>();
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        assert!(PinnedLocalRangeSource::new_anchored(&held, &names).is_err());
     }
 
     #[test]

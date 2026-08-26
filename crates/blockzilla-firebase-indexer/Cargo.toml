@@ -28,7 +28,8 @@ smallvec = "1.15.2"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wincode = { version = "0.5.4", features = ["derive"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
+zstd = "0.13.3"
 
 [dev-dependencies]
 tempfile = "3.24.0"

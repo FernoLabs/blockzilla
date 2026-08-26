@@ -20,9 +20,9 @@ use wincode::{
 use crate::CompactLogStream;
 use crate::{
     CompactBlockHeader, CompactInnerInstructions, CompactMessageHeader, CompactMetaV1,
-    CompactPubkey, CompactReward, CompactShredding, CompactTransactionError,
-    OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
-    SplitCompactIndexRecord, wincode_leb128_config,
+    CompactPubkey, CompactReward, CompactShredding, CompactTransactionConfig,
+    CompactTransactionError, OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash,
+    OwnedCompactTransaction, SplitCompactIndexRecord, WincodeLeb128Config, wincode_leb128_config,
 };
 
 mod archive;
@@ -599,10 +599,10 @@ pub struct BorrowedArchiveV2HotBlockBlob<'a> {
 
 /// Replay-oriented zero-copy view of a current hot block.
 ///
-/// Unlike [`BorrowedArchiveV2HotBlockBlob`], this view deliberately does not retain block rewards.
-/// The decoder still consumes and validates every reward field and element before lending the
-/// transaction rows and byte regions. This is intended only for consumers whose state projection
-/// does not use rewards.
+/// Unlike [`BorrowedArchiveV2HotBlockBlob`], this view deliberately does not decode or retain
+/// structured block rewards. The decoder still consumes and validates every reward field and
+/// element. It lends the exact encoded reward-option field for consumers that must copy the
+/// original bytes without re-encoding them.
 #[derive(Debug)]
 pub struct BorrowedArchiveV2HotBlockBlobWithoutRewards<'a> {
     pub header: ArchiveV2HotBlockHeader,
@@ -610,6 +610,7 @@ pub struct BorrowedArchiveV2HotBlockBlobWithoutRewards<'a> {
     tx_rows: &'a [[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
     pub message_bytes: &'a [u8],
     pub metadata_bytes: &'a [u8],
+    rewards_field_bytes: &'a [u8],
 }
 
 impl BorrowedArchiveV2HotBlockBlobWithoutRewards<'_> {
@@ -623,6 +624,12 @@ impl BorrowedArchiveV2HotBlockBlobWithoutRewards<'_> {
         ArchiveV2HotTxRowIter {
             rows: self.tx_rows.iter(),
         }
+    }
+
+    /// The exact encoded `Option<ArchiveV2HotRewards>` field from the source block.
+    #[inline]
+    pub fn rewards_field_bytes(&self) -> &[u8] {
+        self.rewards_field_bytes
     }
 }
 
@@ -842,14 +849,13 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current(
 }
 
 #[derive(Debug, SchemaRead)]
-struct ArchiveV2HotBlockHeaderWithoutRewards {
+struct ArchiveV2HotBlockHeaderWithoutRewardsPrefix {
     slot: u64,
     parent_slot: u64,
     blockhash_id: u32,
     previous_blockhash_id: u32,
     block_time: Option<i64>,
     block_height: Option<u64>,
-    _rewards: Option<DiscardedArchiveV2HotRewards>,
 }
 
 #[derive(Debug)]
@@ -881,17 +887,31 @@ unsafe impl<'de, C: Config> SchemaRead<'de, C> for DiscardedArchiveV2HotRewards 
 ///
 /// `header.rewards` is always `None` in the returned replay-only view, regardless of whether the
 /// source carried rewards. Use [`deserialize_archive_v2_hot_block_blob_borrowed_current`] when the
-/// caller needs reward values.
+/// caller needs reward values. [`BorrowedArchiveV2HotBlockBlobWithoutRewards::rewards_field_bytes`]
+/// returns the exact original encoded reward-option field without allocating or re-encoding.
 pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
     bytes: &[u8],
 ) -> ReadResult<BorrowedArchiveV2HotBlockBlobWithoutRewards<'_>> {
-    let (header, tx_count, tx_rows, message_bytes, metadata_bytes): (
-        ArchiveV2HotBlockHeaderWithoutRewards,
+    let mut remaining = bytes;
+    let header = <ArchiveV2HotBlockHeaderWithoutRewardsPrefix as SchemaRead<
+        '_,
+        WincodeLeb128Config,
+    >>::get(remaining.by_ref())?;
+
+    let rewards_field_start = remaining;
+    let _rewards =
+        <Option<DiscardedArchiveV2HotRewards> as SchemaRead<'_, WincodeLeb128Config>>::get(
+            remaining.by_ref(),
+        )?;
+    let rewards_field_len = rewards_field_start.len() - remaining.len();
+    let rewards_field_bytes = &rewards_field_start[..rewards_field_len];
+
+    let (tx_count, tx_rows, message_bytes, metadata_bytes): (
         u32,
         &[[u8; ARCHIVE_V2_HOT_TX_ROW_LEN]],
         &[u8],
         &[u8],
-    ) = wincode::config::deserialize_exact(bytes, wincode_leb128_config())?;
+    ) = wincode::config::deserialize_exact(remaining, wincode_leb128_config())?;
     Ok(BorrowedArchiveV2HotBlockBlobWithoutRewards {
         header: ArchiveV2HotBlockHeader {
             slot: header.slot,
@@ -906,6 +926,7 @@ pub fn deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(
         tx_rows,
         message_bytes,
         metadata_bytes,
+        rewards_field_bytes,
     })
 }
 
@@ -980,6 +1001,33 @@ mod hot_block_slot_time_tests {
         assert_eq!(replay.tx_rows().collect::<Vec<_>>(), owned.tx_rows);
         assert_eq!(replay.message_bytes, owned.message_bytes);
         assert_eq!(replay.metadata_bytes, owned.metadata_bytes);
+    }
+
+    fn assert_exact_rewards_field(block: ArchiveV2HotBlockBlob) {
+        let header_prefix = (
+            block.header.slot,
+            block.header.parent_slot,
+            block.header.blockhash_id,
+            block.header.previous_blockhash_id,
+            block.header.block_time,
+            block.header.block_height,
+        );
+        let prefix_bytes =
+            wincode::config::serialize(&header_prefix, wincode_leb128_config()).unwrap();
+        let expected_field =
+            wincode::config::serialize(&block.header.rewards, wincode_leb128_config()).unwrap();
+        let bytes = wincode::config::serialize(&block, wincode_leb128_config()).unwrap();
+        let expected_source_field =
+            &bytes[prefix_bytes.len()..prefix_bytes.len() + expected_field.len()];
+        assert_eq!(expected_source_field, expected_field);
+
+        let replay =
+            deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards(&bytes).unwrap();
+        assert_eq!(replay.rewards_field_bytes(), expected_source_field);
+        assert_eq!(
+            replay.rewards_field_bytes().as_ptr(),
+            expected_source_field.as_ptr()
+        );
     }
 
     #[test]
@@ -1160,6 +1208,38 @@ mod hot_block_slot_time_tests {
                 assert!(region_end <= frame_end);
             }
         }
+    }
+
+    #[test]
+    fn reward_discarding_decoder_lends_exact_none_field() {
+        let block = current_hot_block_fixture();
+        assert_eq!(
+            wincode::config::serialize(&block.header.rewards, wincode_leb128_config()).unwrap(),
+            [0]
+        );
+        assert_exact_rewards_field(block);
+    }
+
+    #[test]
+    fn reward_discarding_decoder_lends_exact_some_empty_field() {
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: Some(8),
+            decoded: Vec::new(),
+        });
+        assert_exact_rewards_field(block);
+    }
+
+    #[test]
+    fn reward_discarding_decoder_lends_exact_some_id_and_raw_field() {
+        let mut indexed = reward_fixture(17);
+        indexed.pubkey = CompactPubkey::id(513);
+        let mut block = current_hot_block_fixture();
+        block.header.rewards = Some(ArchiveV2HotRewards {
+            num_partitions: None,
+            decoded: vec![indexed, reward_fixture(29)],
+        });
+        assert_exact_rewards_field(block);
     }
 
     #[test]
@@ -1390,6 +1470,8 @@ pub enum ArchiveV2HotMetaRecord {
 pub enum ArchiveV2HotMessagePayload {
     Legacy(ArchiveV2HotLegacyMessage),
     V0(ArchiveV2HotV0Message),
+    // Appended so the existing tags stay put.
+    V1(ArchiveV2HotV1Message),
 }
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -1407,6 +1489,17 @@ pub struct ArchiveV2HotV0Message {
     pub recent_blockhash: OwnedCompactRecentBlockhash,
     pub instructions: Vec<ArchiveV2HotInstruction>,
     pub address_table_lookups: Vec<OwnedCompactAddressTableLookup>,
+}
+
+/// A v1 hot message. No lookup tables, and the compute budget lives in the
+/// header instead of the instruction list.
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct ArchiveV2HotV1Message {
+    pub header: CompactMessageHeader,
+    pub config: CompactTransactionConfig,
+    pub account_keys: Vec<CompactPubkey>,
+    pub recent_blockhash: OwnedCompactRecentBlockhash,
+    pub instructions: Vec<ArchiveV2HotInstruction>,
 }
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -1613,6 +1706,8 @@ pub struct WincodeArchiveV2NoRegistryTx {
 pub enum WincodeArchiveV2NoRegistryMessage {
     Legacy(WincodeArchiveV2NoRegistryLegacyMessage),
     V0(WincodeArchiveV2NoRegistryV0Message),
+    // Appended so the existing tags stay put.
+    V1(WincodeArchiveV2NoRegistryV1Message),
 }
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
@@ -1644,6 +1739,17 @@ pub struct WincodeArchiveV2NoRegistryV0Message {
     pub recent_blockhash: [u8; 32],
     pub instructions: Vec<WincodeArchiveV2NoRegistryInstruction>,
     pub address_table_lookups: Vec<WincodeArchiveV2NoRegistryAddressTableLookup>,
+}
+
+/// A v1 message. No lookup tables, and the compute budget travels in the
+/// header rather than as instructions.
+#[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+pub struct WincodeArchiveV2NoRegistryV1Message {
+    pub header: CompactMessageHeader,
+    pub config: CompactTransactionConfig,
+    pub account_keys: Vec<[u8; 32]>,
+    pub recent_blockhash: [u8; 32],
+    pub instructions: Vec<WincodeArchiveV2NoRegistryInstruction>,
 }
 
 #[derive(Debug, Serialize, Deserialize, SchemaRead, SchemaWrite)]

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{KeyStore, PubkeyCompactor, StrId, StringTable};
+use crate::{PubkeyCompactor, PubkeyResolver, StrId, StringTable};
 
 pub const KNOWN_PROGRAM_LOGS_ENABLED: bool = cfg!(feature = "known-program-logs");
 
@@ -331,11 +331,15 @@ pub fn try_parse_program_log_with_table<C: PubkeyCompactor>(
 }
 
 #[inline]
-pub fn render_program_log(log: &ProgramLog, store: &KeyStore, st: &StringTable) -> String {
+pub fn render_program_log<R: PubkeyResolver + ?Sized>(
+    log: &ProgramLog,
+    resolver: &R,
+    st: &StringTable,
+) -> String {
     match log {
         ProgramLog::Empty => String::new(),
         ProgramLog::Token(t) => t.as_str().to_string(),
-        ProgramLog::Token2022(t) => t.as_str(st, store),
+        ProgramLog::Token2022(t) => t.as_str(st, resolver),
         ProgramLog::Ata(t) => t.as_str().to_string(),
         ProgramLog::AddressLookupTable(x) => x.as_str(st),
         ProgramLog::LoaderV3(x) => x.as_str(st),

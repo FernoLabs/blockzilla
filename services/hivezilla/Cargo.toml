@@ -47,6 +47,10 @@ shred-reconstruction = [
 ]
 shred-reconstruction-backend-own = ["dep:solana-ledger-compat"]
 
+[package.metadata.cargo-machete]
+# Referenced only by the tonic-generated code in OUT_DIR, which machete cannot see.
+ignored = ["tonic-prost"]
+
 [dependencies]
 anyhow = "1.0.102"
 ahash = "0.8.12"
@@ -83,11 +87,11 @@ sha2 = "0.11.0"
 socket2 = "0.6"
 tokio = { version = "1.52.3", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
+tonic = { version = "0.14.6", features = ["tls-ring"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-wincode = "0.5.4"
+wincode = "=0.6.1"
 yellowstone-grpc-client = "13.1.0"
 yellowstone-grpc-proto = "12.4.0"
 zstd = "0.13.3"

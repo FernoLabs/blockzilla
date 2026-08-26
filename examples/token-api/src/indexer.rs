@@ -767,6 +767,7 @@ fn collect_message_key_ids(
     let static_keys = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.account_keys.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.account_keys.as_slice(),
+        ArchiveV2HotMessagePayload::V1(message) => message.account_keys.as_slice(),
     };
     for key in static_keys
         .iter()
@@ -943,6 +944,7 @@ fn message_instructions(message: &ArchiveV2HotMessagePayload) -> &[ArchiveV2HotI
     match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
         ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+        ArchiveV2HotMessagePayload::V1(message) => &message.instructions,
     }
 }
 

@@ -17,7 +17,7 @@ use std::{
     path::Path,
 };
 
-use crate::CompactPubkey;
+use crate::{CompactPubkey, PubkeyResolver};
 
 const KEY_INDEX_MAGIC: &[u8; 8] = b"BZKIDX1!";
 const KEY_INDEX_VERSION: u16 = 2;
@@ -229,6 +229,12 @@ impl KeyIndex {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        Self::load_file(file, path)
+    }
+
+    /// Load and validate an index from one already pinned file descriptor.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_file(file: File, path: &Path) -> Result<Self> {
         let layout = key_index_layout(&file, path)?;
         let mphf = load_preflighted_go_function(&file, layout, path)?;
         let mut reader = BufReader::with_capacity(REGISTRY_IO_BUFFER_SIZE, &file);
@@ -802,6 +808,13 @@ impl KeyStore {
         }
 
         Ok(Self { keys })
+    }
+}
+
+impl PubkeyResolver for KeyStore {
+    #[inline]
+    fn resolve_pubkey(&self, id: u32) -> Option<[u8; 32]> {
+        self.get(id).copied()
     }
 }
 

@@ -34,7 +34,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
 dependencies = [
  "crypto-common 0.1.7",
- "generic-array 0.14.7",
+ "generic-array",
 ]
 
 [[package]]
@@ -586,7 +586,7 @@ version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
- "generic-array 0.14.7",
+ "generic-array",
 ]
 
 [[package]]
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "blockzilla"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -624,6 +624,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "solana-hash",
  "solana-pubkey 4.3.0",
  "solana-short-vec",
  "solana-vote-interface 5.1.1",
@@ -632,13 +633,13 @@ dependencies = [
  "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
- "wincode 0.5.5",
+ "wincode 0.6.1",
  "zstd",
 ]
 
 [[package]]
 name = "blockzilla-archive-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -667,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "blockzilla-compaction-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hivezilla-protocol",
  "sha2 0.11.0",
@@ -676,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "blockzilla-firebase-indexer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blockzilla-format",
@@ -693,12 +694,13 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",
- "wincode 0.5.5",
+ "wincode 0.6.1",
+ "zstd",
 ]
 
 [[package]]
 name = "blockzilla-format"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blockzilla-log-parser",
@@ -713,12 +715,12 @@ dependencies = [
  "serde",
  "sha2 0.11.0",
  "solana-pubkey 4.3.0",
- "wincode 0.5.5",
+ "wincode 0.6.1",
 ]
 
 [[package]]
 name = "blockzilla-get-block"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -730,7 +732,6 @@ dependencies = [
  "futures-util",
  "itoa",
  "js-sys",
- "of-car-reader",
  "pprof",
  "reqwest 0.13.4",
  "ruzstd",
@@ -738,25 +739,68 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wincode 0.5.5",
+ "wincode 0.6.1",
  "worker",
  "zstd",
 ]
 
 [[package]]
+name = "blockzilla-index-archive-convert"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-format",
+ "blockzilla-index-archive-format",
+ "blockzilla-read-sdk",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "solana-pubkey 4.3.0",
+ "solana-signature",
+ "tempfile",
+ "wincode 0.6.1",
+ "zstd",
+]
+
+[[package]]
+name = "blockzilla-index-archive-format"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "wincode 0.6.1",
+]
+
+[[package]]
+name = "blockzilla-index-archive-measure"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blockzilla-format",
+ "blockzilla-index-archive-format",
+ "blockzilla-read-sdk",
+ "of-car-reader",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "wincode 0.6.1",
+ "zstd",
+]
+
+[[package]]
 name = "blockzilla-log-parser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "blockzilla-monitor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap 4.6.5",
@@ -776,24 +820,27 @@ dependencies = [
 
 [[package]]
 name = "blockzilla-read-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blockzilla-format",
+ "blockzilla-index-archive-format",
+ "rayon",
  "reqwest 0.13.4",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.19",
  "url",
- "wincode 0.5.5",
+ "wincode 0.6.1",
  "zstd",
 ]
 
 [[package]]
 name = "blockzilla-replay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -807,7 +854,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
- "curve25519-dalek 2.1.0",
+ "curve25519-dalek 5.0.0",
  "hashbrown 0.15.5",
  "object",
  "pprof",
@@ -820,12 +867,12 @@ dependencies = [
  "tar",
  "target-lexicon",
  "thiserror 2.0.19",
- "wincode 0.5.5",
+ "wincode 0.6.1",
 ]
 
 [[package]]
 name = "blockzilla-shred-codec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -834,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "blockzilla-token-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -847,7 +894,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "wincode 0.5.5",
+ "wincode 0.6.1",
  "zstd",
 ]
 
@@ -1622,7 +1669,7 @@ version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
- "generic-array 0.14.7",
+ "generic-array",
  "rand_core 0.6.4",
  "typenum",
 ]
@@ -1652,19 +1699,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
-]
-
-[[package]]
-name = "curve25519-dalek"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d85653f070353a16313d0046f173f70d1aadd5b42600a14de626f0dfb3473a5"
-dependencies = [
- "byteorder",
- "digest 0.8.1",
- "rand_core 0.5.1",
- "subtle",
- "zeroize",
 ]
 
 [[package]]
@@ -1806,15 +1840,6 @@ name = "derivation-path"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e5c37193a1db1d8ed868c03ec7b152175f26160a5b740e5e484143877e0adf0"
-
-[[package]]
-name = "digest"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3d0c8c8752312f9713efd397ff63acb9f85585afbf179282e720e7704954dd5"
-dependencies = [
- "generic-array 0.12.4",
-]
 
 [[package]]
 name = "digest"
@@ -2301,15 +2326,6 @@ dependencies = [
 
 [[package]]
 name = "generic-array"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffdf9f34f1447443d37393cc6c2b8313aebddcd96906caf34e54c68d8e57d7bd"
-dependencies = [
- "typenum",
-]
-
-[[package]]
-name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
@@ -2330,17 +2346,6 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
-version = "0.1.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc3cb4d91f53b50155bdcfd23f6a4c39ae1969c2ae85982b135750cccaf5fce"
-dependencies = [
- "cfg-if",
- "libc",
- "wasi 0.9.0+wasi-snapshot-preview1",
-]
-
-[[package]]
-name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
@@ -2348,7 +2353,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "wasi 0.11.1+wasi-snapshot-preview1",
+ "wasi",
  "wasm-bindgen",
 ]
 
@@ -2436,9 +2441,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2584,7 +2589,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hivezilla"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -2628,7 +2633,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
- "wincode 0.5.5",
+ "wincode 0.6.1",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",
  "zeroize",
@@ -2637,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "hivezilla-object-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2660,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "hivezilla-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.19",
@@ -3018,7 +3023,7 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
- "generic-array 0.14.7",
+ "generic-array",
 ]
 
 [[package]]
@@ -3413,7 +3418,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
 dependencies = [
  "libc",
- "wasi 0.11.1+wasi-snapshot-preview1",
+ "wasi",
  "windows-sys 0.61.2",
 ]
 
@@ -3640,7 +3645,7 @@ dependencies = [
  "tar",
  "tracing",
  "tracing-subscriber",
- "wincode 0.5.5",
+ "wincode 0.6.1",
  "xxhash-rust",
  "zstd",
 ]
@@ -3663,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "old-faithful-get-block"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base58-turbo",
@@ -3678,7 +3683,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
- "wincode 0.5.5",
+ "wincode 0.6.1",
  "worker",
 ]
 
@@ -4351,15 +4356,6 @@ checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand_core"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90bde5296fc891b0cef12a6d03ddccc162ce7b2aff54160af9338f8d40df6d19"
-dependencies = [
- "getrandom 0.1.16",
 ]
 
 [[package]]
@@ -5248,7 +5244,7 @@ dependencies = [
  "solana-program-error",
  "solana-sanitize",
  "solana-sha256-hasher",
- "wincode 0.6.0",
+ "wincode 0.6.1",
 ]
 
 [[package]]
@@ -5300,7 +5296,7 @@ dependencies = [
  "solana-signer",
  "subtle",
  "thiserror 2.0.19",
- "wincode 0.6.0",
+ "wincode 0.6.1",
  "zeroize",
 ]
 
@@ -5474,9 +5470,9 @@ dependencies = [
 
 [[package]]
 name = "solana-ed25519"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "277eebda58d900c9ded260368ad5d298bd5e10ca7c9934df1758013b24c87545"
+checksum = "ff4c7caf3fe3d70815869a5838ee45b4d2b009eaacea1790ef3cd9b3c89edbbd"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -5606,14 +5602,13 @@ dependencies = [
 
 [[package]]
 name = "solana-gossip"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde-big-array",
  "solana-address 2.7.0",
  "solana-hash",
  "solana-keypair",
- "solana-net-utils",
  "solana-sha256-hasher",
  "solana-signature",
  "tracing",
@@ -5631,7 +5626,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "solana-sanitize",
- "wincode 0.6.0",
+ "wincode 0.6.1",
 ]
 
 [[package]]
@@ -5652,7 +5647,7 @@ dependencies = [
  "solana-define-syscall 5.2.0",
  "solana-instruction-error",
  "solana-pubkey 4.3.0",
- "wincode 0.6.0",
+ "wincode 0.6.1",
 ]
 
 [[package]]
@@ -5716,7 +5711,7 @@ dependencies = [
 
 [[package]]
 name = "solana-ledger-compat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blockzilla-shred-codec",
@@ -6032,7 +6027,7 @@ checksum = "ad654f315da0db7f2d6371767146b7ff212b4d891f7438d441830c5910ef3edd"
 dependencies = [
  "serde",
  "serde_derive",
- "wincode 0.6.0",
+ "wincode 0.6.1",
 ]
 
 [[package]]
@@ -6249,19 +6244,19 @@ dependencies = [
 
 [[package]]
 name = "solana-short-vec"
-version = "3.2.1"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bb8cc883fc7b8ce4a7814cb1441b48c06437049ec11847005cf63bcfa85c546"
+checksum = "c75782529cc4521114c1ecd71c7e2cdebd41a6fe9844b5d088fd36ef08c57c36"
 dependencies = [
  "serde_core",
- "wincode 0.5.5",
+ "wincode 0.6.1",
 ]
 
 [[package]]
 name = "solana-signature"
-version = "3.5.0"
+version = "3.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40256f54e42a6f606722a4a6cad22c9be97d97e524004990d057e394d546f8f0"
+checksum = "fe45ce95700ac8045e422344b88e273843d70185873cc1cc880ba06dd9fa9002"
 dependencies = [
  "five8",
  "serde",
@@ -6269,7 +6264,7 @@ dependencies = [
  "serde_derive",
  "solana-ed25519",
  "solana-sanitize",
- "wincode 0.6.0",
+ "wincode 0.6.1",
 ]
 
 [[package]]
@@ -6460,7 +6455,7 @@ dependencies = [
  "solana-instruction",
  "solana-msg",
  "solana-program-error",
- "wincode 0.6.0",
+ "wincode 0.6.1",
 ]
 
 [[package]]
@@ -8166,12 +8161,6 @@ dependencies = [
 
 [[package]]
 name = "wasi"
-version = "0.9.0+wasi-snapshot-preview1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cccddf32554fecc6acb585f82a32a72e28b48f8c4c1883ddfeeeaa96f7d8e519"
-
-[[package]]
-name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
@@ -8375,22 +8364,22 @@ dependencies = [
  "pastey",
  "proc-macro2",
  "quote",
- "smallvec",
  "thiserror 2.0.19",
  "wincode-derive 0.4.6",
 ]
 
 [[package]]
 name = "wincode"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5d39d1a984eb7ae37afa348f058216d62a6d5f71640f4113a8114386c2a812a"
+checksum = "bfc6339f1ba427bf7ad7c42403b28e524832ba2ddb5eef1bb2cc3b85db6b7b75"
 dependencies = [
  "pastey",
  "proc-macro2",
  "quote",
+ "smallvec",
  "thiserror 2.0.19",
- "wincode-derive 0.5.0",
+ "wincode-derive 0.5.1",
 ]
 
 [[package]]
@@ -8407,9 +8396,9 @@ dependencies = [
 
 [[package]]
 name = "wincode-derive"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cb427b174d0f50b407f003623db1d892986e780651ee9d4231f3c9fe9ffcbb7"
+checksum = "11d582d9fc9d813264407a9e16bfa16846ccf15ef032f9bbcd700741bdc00255"
 dependencies = [
  "darling",
  "proc-macro2",

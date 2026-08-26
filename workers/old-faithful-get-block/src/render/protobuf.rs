@@ -223,25 +223,57 @@ fn quick_transaction<'a>(tx: &'a VersionedTransaction<'a>) -> quick_proto::Trans
 }
 
 fn quick_message<'a>(message: &'a VersionedMessage<'a>) -> quick_proto::Message<'a> {
-    let (account_keys, header, instructions, recent_blockhash, versioned, address_table_lookups) =
-        match message {
-            VersionedMessage::Legacy(m) => (
-                m.account_keys.as_slice(),
-                m.header,
-                m.instructions.as_slice(),
-                m.recent_blockhash.as_slice(),
-                false,
-                [].as_slice(),
-            ),
-            VersionedMessage::V0(m) => (
-                m.account_keys.as_slice(),
-                m.header,
-                m.instructions.as_slice(),
-                m.recent_blockhash.as_slice(),
-                true,
-                m.address_table_lookups.as_slice(),
-            ),
-        };
+    let (
+        account_keys,
+        header,
+        instructions,
+        recent_blockhash,
+        versioned,
+        address_table_lookups,
+        config,
+    ) = match message {
+        VersionedMessage::Legacy(m) => (
+            m.account_keys.as_slice(),
+            m.header,
+            m.instructions.as_slice(),
+            m.recent_blockhash.as_slice(),
+            false,
+            [].as_slice(),
+            None,
+        ),
+        VersionedMessage::V0(m) => (
+            m.account_keys.as_slice(),
+            m.header,
+            m.instructions.as_slice(),
+            m.recent_blockhash.as_slice(),
+            true,
+            m.address_table_lookups.as_slice(),
+            None,
+        ),
+        // `versioned` stays a bool; a present `config` is what marks v1,
+        // matching solana-rpc/superbank#75. v1 has no lookup tables.
+        VersionedMessage::V1(m) => (
+            m.account_keys.as_slice(),
+            m.header,
+            m.instructions.as_slice(),
+            m.recent_blockhash.as_slice(),
+            true,
+            [].as_slice(),
+            // quick-protobuf has no proto3 presence tracking, so these
+            // flatten to scalars and an unset field is indistinguishable
+            // from zero on this renderer. The prost path and the archive
+            // both keep the Option, which is where presence matters.
+            Some(quick_proto::TransactionConfig {
+                priority_fee: m.config.priority_fee.unwrap_or_default(),
+                compute_unit_limit: m.config.compute_unit_limit.unwrap_or_default(),
+                loaded_accounts_data_size_limit: m
+                    .config
+                    .loaded_accounts_data_size_limit
+                    .unwrap_or_default(),
+                heap_size: m.config.heap_size.unwrap_or_default(),
+            }),
+        ),
+    };
 
     quick_proto::Message {
         header: Some(quick_proto::MessageHeader {
@@ -253,6 +285,7 @@ fn quick_message<'a>(message: &'a VersionedMessage<'a>) -> quick_proto::Message<
             .iter()
             .map(|account_key| Cow::Borrowed(account_key.as_slice()))
             .collect(),
+        config,
         recent_blockhash: Cow::Borrowed(recent_blockhash),
         instructions: instructions
             .iter()
@@ -285,25 +318,50 @@ fn quick_reward(reward: proto::Reward) -> quick_proto::Reward<'static> {
 }
 
 fn proto_transaction(tx: &VersionedTransaction<'_>) -> proto::Transaction {
-    let (account_keys, header, instructions, recent_blockhash, versioned, address_table_lookups) =
-        match &tx.message {
-            VersionedMessage::Legacy(m) => (
-                m.account_keys.clone(),
-                m.header,
-                m.instructions.clone(),
-                m.recent_blockhash,
-                false,
-                Vec::new(),
-            ),
-            VersionedMessage::V0(m) => (
-                m.account_keys.clone(),
-                m.header,
-                m.instructions.clone(),
-                m.recent_blockhash,
-                true,
-                m.address_table_lookups.clone(),
-            ),
-        };
+    let (
+        account_keys,
+        header,
+        instructions,
+        recent_blockhash,
+        versioned,
+        address_table_lookups,
+        config,
+    ) = match &tx.message {
+        VersionedMessage::Legacy(m) => (
+            m.account_keys.clone(),
+            m.header,
+            m.instructions.clone(),
+            m.recent_blockhash,
+            false,
+            Vec::new(),
+            None,
+        ),
+        VersionedMessage::V0(m) => (
+            m.account_keys.clone(),
+            m.header,
+            m.instructions.clone(),
+            m.recent_blockhash,
+            true,
+            m.address_table_lookups.clone(),
+            None,
+        ),
+        // `versioned` stays a bool; a present `config` is what marks v1,
+        // matching solana-rpc/superbank#75. v1 has no lookup tables.
+        VersionedMessage::V1(m) => (
+            m.account_keys.clone(),
+            m.header,
+            m.instructions.clone(),
+            m.recent_blockhash,
+            true,
+            Vec::new(),
+            Some(proto::TransactionConfig {
+                priority_fee: m.config.priority_fee,
+                compute_unit_limit: m.config.compute_unit_limit,
+                loaded_accounts_data_size_limit: m.config.loaded_accounts_data_size_limit,
+                heap_size: m.config.heap_size,
+            }),
+        ),
+    };
 
     proto::Transaction {
         signatures: tx.signatures.iter().map(|s| s.to_vec()).collect(),
@@ -314,6 +372,7 @@ fn proto_transaction(tx: &VersionedTransaction<'_>) -> proto::Transaction {
                 num_readonly_unsigned_accounts: header.num_readonly_unsigned_accounts as u32,
             }),
             account_keys: account_keys.into_iter().map(|a| a.to_vec()).collect(),
+            config,
             recent_blockhash: recent_blockhash.to_vec(),
             instructions: instructions
                 .into_iter()

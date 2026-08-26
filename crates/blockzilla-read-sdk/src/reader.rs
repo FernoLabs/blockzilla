@@ -1,4 +1,14 @@
-use std::{collections::HashSet, io::Read, ops::Range};
+use std::{
+    collections::HashSet,
+    io::Read,
+    ops::Range,
+    sync::{
+        Mutex,
+        mpsc::{Receiver, SyncSender, sync_channel},
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use blockzilla_format::{
     ARCHIVE_V2_HOT_INDEX_FLAG_DICTIONARY, ARCHIVE_V2_HOT_INDEX_FLAG_RAW_BLOCKS,
@@ -16,6 +26,7 @@ use blockzilla_format::{
     deserialize_archive_v2_hot_block_blob, deserialize_archive_v2_hot_block_blob_borrowed_current,
     deserialize_archive_v2_hot_block_blob_borrowed_current_without_rewards, wincode_leb128_config,
 };
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -39,6 +50,131 @@ const MAX_GENESIS_BIN_BYTES: usize = 10_000_000;
 const KNOWN_HOT_TX_FLAGS: u32 = (1 << 11) - 1;
 const ARCHIVE_V2_HOT_META_GENESIS_TAG: u8 = 1;
 const HISTORICAL_EPOCH0_HOT_META_GENESIS_TAG: u8 = 4;
+
+/// Reusable storage for independent borrowed block reads.
+///
+/// Create one scratch value per worker. Compressed input, the zstd decoder and
+/// decompressed output stay with that worker and are reused for every block.
+/// A block returned by [`ArchiveReader::read_borrowed_block_reusing`] borrows
+/// this storage, so it cannot be queued or retained across the next read.
+#[derive(Default)]
+pub struct RecycledBlockScratch {
+    compressed: Vec<u8>,
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    decompressed: Vec<u8>,
+    stats: RecycledBlockStats,
+}
+
+impl RecycledBlockScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Measurements accumulated since construction or [`Self::reset_stats`].
+    pub fn stats(&self) -> RecycledBlockStats {
+        self.stats
+    }
+
+    /// Clear measurements without releasing the recycled allocations.
+    pub fn reset_stats(&mut self) {
+        self.stats = RecycledBlockStats::default();
+    }
+}
+
+/// Coarse measurements for one worker's recycled borrowed reads.
+///
+/// Timers surround each source read and each exact zstd/decode operation. No
+/// timing is added inside message or metadata loops.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecycledBlockStats {
+    pub block_count: u64,
+    pub compressed_bytes: u64,
+    pub uncompressed_bytes: u64,
+    pub source_read_wall_time: Duration,
+    pub decompress_decode_wall_time: Duration,
+    pub compressed_buffer_growths: u64,
+    pub decompressed_buffer_growths: u64,
+    pub compressed_buffer_capacity: usize,
+    pub decompressed_buffer_capacity: usize,
+}
+
+pub const MAX_ORDERED_PARALLEL_DECODE_WORKERS: usize = 64;
+pub const MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS: usize = 16;
+pub const MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH: usize = 65_536;
+pub const MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES: usize = 1024 * 1024 * 1024;
+pub const MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Bounded resources for monotonic block I/O with parallel borrowed decoding.
+///
+/// One producer reads frame-aligned ranges in increasing offset order. A
+/// private decode pool projects the blocks in parallel, and the coordinator
+/// publishes owned projection results in exact block-index order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedParallelBlockConfig {
+    /// Target compressed bytes in one frame-aligned read. The reader's
+    /// admitted `prefetch_bytes` option is an additional upper bound. One
+    /// frame is always admitted when it alone is larger than this target.
+    pub compressed_batch_target_bytes: usize,
+    /// Maximum declared uncompressed bytes in one batch. One oversized block
+    /// is still admitted by itself.
+    pub uncompressed_batch_budget_bytes: usize,
+    /// Maximum blocks and caller-owned projection results in one batch.
+    pub max_blocks_per_batch: usize,
+    /// Number of compressed `Vec` tokens recycled between producer and
+    /// coordinator. Three permits one fill, one decode, and one queued batch.
+    pub compressed_buffer_count: usize,
+    /// Threads in the private borrowed-decode and projection pool.
+    pub decode_workers: usize,
+    /// Largest decompression-buffer capacity retained by each worker between
+    /// blocks. Larger buffers are released after their projection completes.
+    pub retained_decompressed_bytes_per_worker: usize,
+    /// Validate current-schema rewards but do not retain them. An exact archive
+    /// converter must keep this false.
+    pub discard_rewards: bool,
+}
+
+impl Default for OrderedParallelBlockConfig {
+    fn default() -> Self {
+        Self {
+            compressed_batch_target_bytes: DEFAULT_PREFETCH_BYTES,
+            uncompressed_batch_budget_bytes: DEFAULT_MAX_BLOCK_BYTES,
+            max_blocks_per_batch: 8_192,
+            compressed_buffer_count: 3,
+            decode_workers: 4,
+            retained_decompressed_bytes_per_worker: 32 * 1024 * 1024,
+            discard_rewards: false,
+        }
+    }
+}
+
+/// Coarse measurements from one ordered parallel block pass.
+///
+/// Durations are measured once per range read or batch. No timing is added to
+/// message, metadata, or transaction loops.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedParallelBlockStats {
+    pub block_count: u64,
+    pub batch_count: u64,
+    /// Largest number of blocks projected before one ordered delivery pass.
+    pub max_blocks_per_batch: usize,
+    pub read_call_count: u64,
+    pub compressed_bytes: u64,
+    pub producer_read_wall_time: Duration,
+    pub coordinator_decode_project_wall_time: Duration,
+    /// Sum of worker time spent in zstd expansion and the exact outer block
+    /// decode. This can exceed wall time because workers run in parallel.
+    pub worker_decompress_decode_sum_time: Duration,
+    /// Sum of caller projection time after the borrowed block is ready. This
+    /// can exceed wall time because workers run in parallel.
+    pub worker_projection_sum_time: Duration,
+    pub producer_wait_for_free_buffer_time: Duration,
+    pub coordinator_wait_for_ready_batch_time: Duration,
+    pub max_compressed_batch_bytes: usize,
+    pub max_declared_uncompressed_batch_bytes: u64,
+    /// Largest decompression allocation retained by any worker after applying
+    /// `retained_decompressed_bytes_per_worker`.
+    pub max_retained_decompressed_buffer_bytes: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashVerification {
@@ -254,10 +390,64 @@ impl BorrowedDecodedBlock<'_> {
         }
     }
 
+    /// Return the exact encoded `Option<ArchiveV2HotRewards>` field from the source block.
+    ///
+    /// This is available only when the block used the current-schema reward-discarding decoder.
+    /// Decoded rewards and historical owned fallbacks do not retain their original wire slice.
+    pub fn rewards_field_bytes(&self) -> Result<&[u8]> {
+        match &self.block {
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(block) => {
+                Ok(block.rewards_field_bytes())
+            }
+            BorrowedDecodedBlockPayload::Current(_) => Err(Error::InvalidBlock {
+                slot: self.index_row.slot,
+                message: "exact reward field bytes are unavailable after decoding rewards".into(),
+            }),
+            BorrowedDecodedBlockPayload::OwnedFallback(_) => Err(Error::InvalidBlock {
+                slot: self.index_row.slot,
+                message: "exact reward field bytes are unavailable for an owned fallback".into(),
+            }),
+        }
+    }
+
     /// Whether this block required the allocation-preserving historical-schema decoder.
     #[inline]
     pub fn uses_owned_fallback(&self) -> bool {
         matches!(&self.block, BorrowedDecodedBlockPayload::OwnedFallback(_))
+    }
+
+    /// Convert this lent block into the existing owned block representation.
+    ///
+    /// For the current schema, the decoded header and rewards move directly
+    /// into the result. Only the compact transaction rows and the two borrowed
+    /// byte lanes are copied. A historical owned fallback passes through with
+    /// no copy or second decode. A reward-discarding view cannot produce an
+    /// exact owned block and is rejected.
+    pub fn into_owned(self) -> Result<DecodedBlock> {
+        let index_row = self.index_row;
+        let block = match self.block {
+            BorrowedDecodedBlockPayload::Current(block) => {
+                let tx_rows = block.tx_rows().collect();
+                let message_bytes = block.message_bytes.to_vec();
+                let metadata_bytes = block.metadata_bytes.to_vec();
+                ArchiveV2HotBlockBlob {
+                    header: block.header,
+                    tx_count: block.tx_count,
+                    tx_rows,
+                    message_bytes,
+                    metadata_bytes,
+                }
+            }
+            BorrowedDecodedBlockPayload::CurrentWithoutRewards(_) => {
+                return Err(Error::InvalidBlock {
+                    slot: index_row.slot,
+                    message: "cannot create an exact owned block after rewards were discarded"
+                        .into(),
+                });
+            }
+            BorrowedDecodedBlockPayload::OwnedFallback(block) => block,
+        };
+        Ok(DecodedBlock { index_row, block })
     }
 }
 
@@ -624,6 +814,401 @@ impl<S: RangeSource> ArchiveReader<S> {
         })
     }
 
+    /// Read, decompress, validate and lend one indexed block with worker-local
+    /// recycled buffers.
+    ///
+    /// This is the random-access companion to [`Self::borrowed_blocks_range`].
+    /// It is intended for an existing ordered worker pipeline: give each
+    /// worker one [`RecycledBlockScratch`], then transform the borrowed block
+    /// into an owned result before the worker returns. The returned block
+    /// cannot outlive `scratch`, which prevents a borrowed source lane from
+    /// entering an ordered result queue. Historical outer schemas can still
+    /// use the SDK's owned compatibility fallback; a converter that admits
+    /// only the current outer schema must reject
+    /// [`BorrowedDecodedBlock::uses_owned_fallback`].
+    pub fn read_borrowed_block_reusing<'scratch>(
+        &self,
+        row_number: usize,
+        scratch: &'scratch mut RecycledBlockScratch,
+        discard_rewards: bool,
+    ) -> Result<BorrowedDecodedBlock<'scratch>> {
+        let row = *self.index.rows.get(row_number).ok_or_else(|| {
+            Error::InvalidIndex(format!("block row {row_number} is out of bounds"))
+        })?;
+        let RecycledBlockScratch {
+            compressed,
+            decompressor,
+            decompressed,
+            stats,
+        } = scratch;
+
+        let old_compressed_capacity = compressed.capacity();
+        let read_started = Instant::now();
+        self.source.read_range_into(
+            BLOCKS_FILE,
+            row.compressed_offset,
+            row.compressed_len as usize,
+            compressed,
+        )?;
+        stats.source_read_wall_time = stats
+            .source_read_wall_time
+            .saturating_add(read_started.elapsed());
+        if compressed.capacity() > old_compressed_capacity {
+            stats.compressed_buffer_growths = stats
+                .compressed_buffer_growths
+                .checked_add(1)
+                .ok_or(Error::Overflow("compressed buffer growth count"))?;
+        }
+        stats.compressed_buffer_capacity = compressed.capacity();
+
+        if decompressor.is_none() {
+            *decompressor =
+                Some(
+                    zstd::bulk::Decompressor::new().map_err(|error| Error::DecodeBlock {
+                        slot: row.slot,
+                        message: format!("create zstd decompressor: {error}"),
+                    })?,
+                );
+        }
+        let old_decompressed_capacity = decompressed.capacity();
+        let expected_decompressed_capacity = row.uncompressed_len as usize;
+        if old_decompressed_capacity < expected_decompressed_capacity {
+            decompressed.reserve_exact(expected_decompressed_capacity);
+            stats.decompressed_buffer_growths = stats
+                .decompressed_buffer_growths
+                .checked_add(1)
+                .ok_or(Error::Overflow("decompressed buffer growth count"))?;
+        }
+        stats.decompressed_buffer_capacity = decompressed.capacity();
+        let decode_started = Instant::now();
+        let block = self.decode_compressed_block_borrowed_reusing(
+            row,
+            compressed,
+            decompressor
+                .as_mut()
+                .expect("decompressor was initialized above"),
+            decompressed,
+            discard_rewards,
+        )?;
+        stats.decompress_decode_wall_time = stats
+            .decompress_decode_wall_time
+            .saturating_add(decode_started.elapsed());
+        stats.block_count = stats
+            .block_count
+            .checked_add(1)
+            .ok_or(Error::Overflow("recycled block count"))?;
+        stats.compressed_bytes = stats
+            .compressed_bytes
+            .checked_add(u64::from(row.compressed_len))
+            .ok_or(Error::Overflow("recycled compressed byte count"))?;
+        stats.uncompressed_bytes = stats
+            .uncompressed_bytes
+            .checked_add(u64::from(row.uncompressed_len))
+            .ok_or(Error::Overflow("recycled uncompressed byte count"))?;
+        Ok(block)
+    }
+
+    /// Read blocks through one monotonic I/O stream, project borrowed blocks
+    /// in a private parallel pool, and publish owned results in exact index
+    /// order.
+    ///
+    /// `make_worker_state` creates one caller state for each decode worker and
+    /// can fail before any block read starts.
+    /// `project` runs in parallel with that state and a block backed by the
+    /// worker's recycled decompression buffer. The block cannot escape the
+    /// callback. `Output` must own all data that `consume_ordered` needs.
+    /// Outputs for at most one bounded batch remain live before ordered
+    /// delivery.
+    ///
+    /// A projection error is selected by row order, not worker completion
+    /// order. No later result is delivered after that error.
+    pub fn process_borrowed_blocks_parallel_ordered<
+        WorkerState,
+        Output,
+        E,
+        MakeWorkerState,
+        Project,
+        Consume,
+    >(
+        &self,
+        range: Range<usize>,
+        config: OrderedParallelBlockConfig,
+        mut make_worker_state: MakeWorkerState,
+        project: Project,
+        mut consume_ordered: Consume,
+    ) -> std::result::Result<OrderedParallelBlockStats, E>
+    where
+        WorkerState: Send,
+        Output: Send,
+        E: From<Error> + Send,
+        MakeWorkerState: FnMut(usize) -> std::result::Result<WorkerState, E>,
+        Project: for<'block> Fn(
+                &mut WorkerState,
+                usize,
+                BorrowedDecodedBlock<'block>,
+            ) -> std::result::Result<Output, E>
+            + Send
+            + Sync,
+        Consume: FnMut(usize, Output) -> std::result::Result<(), E>,
+    {
+        let row_count = self.index.rows.len();
+        if range.start > range.end || range.end > row_count {
+            return Err(E::from(Error::InvalidIndex(format!(
+                "block row range {}..{} is outside 0..{row_count}",
+                range.start, range.end,
+            ))));
+        }
+        validate_ordered_parallel_config(config).map_err(E::from)?;
+        if range.is_empty() {
+            return Ok(OrderedParallelBlockStats::default());
+        }
+
+        let compressed_target = config
+            .compressed_batch_target_bytes
+            .min(self.options.prefetch_bytes);
+        let plans = ordered_parallel_batch_plans(
+            &self.index.rows,
+            range,
+            compressed_target,
+            config.uncompressed_batch_budget_bytes,
+            config.max_blocks_per_batch,
+        )
+        .map_err(E::from)?;
+        let decode_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.decode_workers)
+            .thread_name(|index| format!("blockzilla-block-decode-{index}"))
+            .build()
+            .map_err(|error| {
+                E::from(Error::InvalidManifest(format!(
+                    "cannot create ordered parallel block decode pool: {error}"
+                )))
+            })?;
+        let workers: Vec<_> = (0..config.decode_workers)
+            .map(|worker| {
+                make_worker_state(worker).map(|caller| {
+                    Mutex::new(Some(OrderedParallelWorker {
+                        decompressor: None,
+                        decompressed: Vec::new(),
+                        caller,
+                        max_retained_decompressed_buffer_bytes: 0,
+                        decompress_decode_sum_time: Duration::ZERO,
+                        projection_sum_time: Duration::ZERO,
+                    }))
+                })
+            })
+            .collect::<std::result::Result<_, E>>()?;
+
+        let (free_sender, free_receiver) = sync_channel(config.compressed_buffer_count);
+        for _ in 0..config.compressed_buffer_count {
+            free_sender
+                .send(Vec::new())
+                .expect("the new recycled-buffer channel has a receiver");
+        }
+        let (ready_sender, ready_receiver) = sync_channel(config.compressed_buffer_count);
+
+        thread::scope(|scope| {
+            let producer = scope.spawn(|| {
+                produce_ordered_compressed_batches(self, &plans, free_receiver, ready_sender)
+            });
+            let mut coordinator: OrderedParallelCoordinator<E> =
+                OrderedParallelCoordinator::default();
+            let mut projected = Vec::new();
+
+            'batches: for expected in &plans {
+                let wait_started = Instant::now();
+                let ready = match ready_receiver.recv() {
+                    Ok(ready) => ready,
+                    Err(_) => {
+                        coordinator.producer_disconnected = true;
+                        break;
+                    }
+                };
+                coordinator.stats.coordinator_wait_for_ready_batch_time = coordinator
+                    .stats
+                    .coordinator_wait_for_ready_batch_time
+                    .saturating_add(wait_started.elapsed());
+                if ready.plan != *expected {
+                    coordinator.error = Some(E::from(Error::InvalidIndex(format!(
+                        "ordered block producer returned rows {}..{}, expected {}..{}",
+                        ready.plan.row_start,
+                        ready.plan.row_end,
+                        expected.row_start,
+                        expected.row_end,
+                    ))));
+                    break;
+                }
+
+                let decode_started = Instant::now();
+                decode_pool.install(|| {
+                    self.index.rows[ready.plan.row_start..ready.plan.row_end]
+                        .par_iter()
+                        .enumerate()
+                        .map(|(batch_row, row)| {
+                            let row_number = ready.plan.row_start + batch_row;
+                            let relative_offset = row
+                                .compressed_offset
+                                .checked_sub(ready.plan.compressed_offset)
+                                .ok_or_else(|| {
+                                    Error::InvalidIndex(
+                                        "parallel block frame offset underflow".into(),
+                                    )
+                                })?;
+                            let relative_offset = usize::try_from(relative_offset)
+                                .map_err(|_| Error::Overflow("parallel block frame offset"))?;
+                            let frame_end = relative_offset
+                                .checked_add(row.compressed_len as usize)
+                                .ok_or(Error::Overflow("parallel block frame range"))?;
+                            let compressed =
+                                ready.bytes.get(relative_offset..frame_end).ok_or_else(|| {
+                                    Error::InvalidIndex(
+                                        "parallel block frame is outside its read batch".into(),
+                                    )
+                                })?;
+                            let worker_number = rayon::current_thread_index().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "parallel block task ran outside its decode pool".into(),
+                                )
+                            })?;
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex(
+                                    "parallel block worker state is poisoned".into(),
+                                )
+                            })?;
+                            let mut worker = worker_guard.take().ok_or_else(|| {
+                                Error::InvalidIndex(
+                                    "parallel block worker was re-entered by nested work".into(),
+                                )
+                            })?;
+                            drop(worker_guard);
+                            let result = worker.decode_and_project(
+                                self,
+                                *row,
+                                compressed,
+                                row_number,
+                                config.discard_rewards,
+                                config.retained_decompressed_bytes_per_worker,
+                                &project,
+                            );
+                            let mut worker_guard = workers[worker_number].lock().map_err(|_| {
+                                Error::InvalidIndex(
+                                    "parallel block worker state is poisoned".into(),
+                                )
+                            })?;
+                            *worker_guard = Some(worker);
+                            result
+                        })
+                        .collect_into_vec(&mut projected)
+                });
+                coordinator.stats.coordinator_decode_project_wall_time = coordinator
+                    .stats
+                    .coordinator_decode_project_wall_time
+                    .saturating_add(decode_started.elapsed());
+
+                // Projection results cannot borrow this compressed batch.
+                // Return its allocation token before ordered result handling.
+                let _ = free_sender.send(ready.bytes);
+
+                coordinator.stats.batch_count = match coordinator.stats.batch_count.checked_add(1) {
+                    Some(value) => value,
+                    None => {
+                        coordinator.error = Some(E::from(Error::Overflow("parallel batch count")));
+                        break;
+                    }
+                };
+                let batch_blocks = match u64::try_from(expected.row_end - expected.row_start) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        coordinator.error = Some(E::from(Error::Overflow("parallel block count")));
+                        break;
+                    }
+                };
+                coordinator.stats.block_count =
+                    match coordinator.stats.block_count.checked_add(batch_blocks) {
+                        Some(value) => value,
+                        None => {
+                            coordinator.error =
+                                Some(E::from(Error::Overflow("parallel block count")));
+                            break;
+                        }
+                    };
+                coordinator.stats.max_blocks_per_batch = coordinator
+                    .stats
+                    .max_blocks_per_batch
+                    .max(expected.row_end - expected.row_start);
+
+                for (batch_row, result) in projected.drain(..).enumerate() {
+                    let row_number = expected.row_start + batch_row;
+                    let output = match result {
+                        Ok(output) => output,
+                        Err(error) => {
+                            coordinator.error = Some(error);
+                            break 'batches;
+                        }
+                    };
+                    if let Err(error) = consume_ordered(row_number, output) {
+                        coordinator.error = Some(error);
+                        break 'batches;
+                    }
+                }
+            }
+
+            // Closing both directions wakes a producer blocked on either a
+            // ready batch or a recycled allocation token.
+            drop(ready_receiver);
+            drop(free_sender);
+            let producer_result = producer
+                .join()
+                .map_err(|_| Error::InvalidIndex("ordered block producer thread panicked".into()));
+
+            if let Some(error) = coordinator.error {
+                return Err(error);
+            }
+            let producer_stats = match producer_result {
+                Ok(result) => result.map_err(E::from)?,
+                Err(error) => return Err(E::from(error)),
+            };
+            if coordinator.producer_disconnected {
+                return Err(E::from(Error::InvalidIndex(
+                    "ordered block producer stopped before the requested range was complete".into(),
+                )));
+            }
+            coordinator.stats.read_call_count = producer_stats.read_call_count;
+            coordinator.stats.compressed_bytes = producer_stats.compressed_bytes;
+            coordinator.stats.producer_read_wall_time = producer_stats.read_wall_time;
+            coordinator.stats.producer_wait_for_free_buffer_time =
+                producer_stats.wait_for_free_buffer_time;
+            coordinator.stats.max_compressed_batch_bytes =
+                producer_stats.max_compressed_batch_bytes;
+            coordinator.stats.max_declared_uncompressed_batch_bytes =
+                producer_stats.max_declared_uncompressed_batch_bytes;
+            for worker in &workers {
+                let worker = worker.lock().map_err(|_| {
+                    E::from(Error::InvalidIndex(
+                        "parallel block worker state is poisoned".into(),
+                    ))
+                })?;
+                let worker = worker.as_ref().ok_or_else(|| {
+                    E::from(Error::InvalidIndex(
+                        "parallel block worker state was not restored".into(),
+                    ))
+                })?;
+                coordinator.stats.max_retained_decompressed_buffer_bytes = coordinator
+                    .stats
+                    .max_retained_decompressed_buffer_bytes
+                    .max(worker.max_retained_decompressed_buffer_bytes);
+                coordinator.stats.worker_decompress_decode_sum_time = coordinator
+                    .stats
+                    .worker_decompress_decode_sum_time
+                    .saturating_add(worker.decompress_decode_sum_time);
+                coordinator.stats.worker_projection_sum_time = coordinator
+                    .stats
+                    .worker_projection_sum_time
+                    .saturating_add(worker.projection_sum_time);
+            }
+            Ok(coordinator.stats)
+        })
+    }
+
     pub fn scan<'a>(&'a self, filter: &'a CompiledPubkeyFilter) -> Result<ScanIterator<'a, S>> {
         self.ensure_filter_binding(filter)?;
         Ok(ScanIterator {
@@ -650,16 +1235,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         row: ArchiveV2HotBlockIndexRow,
         compressed: &[u8],
     ) -> Result<DecodedBlock> {
-        if compressed.len() != row.compressed_len as usize {
-            return Err(Error::InvalidBlock {
-                slot: row.slot,
-                message: format!(
-                    "compressed frame is {} bytes, expected {}",
-                    compressed.len(),
-                    row.compressed_len
-                ),
-            });
-        }
+        validate_exact_zstd_frame(&row, compressed)?;
         let expected_length = row.uncompressed_len as usize;
         let bytes = zstd::bulk::decompress(compressed, expected_length).map_err(|error| {
             Error::DecodeBlock {
@@ -677,16 +1253,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         decompressor: &mut zstd::bulk::Decompressor<'static>,
         decompressed: &mut Vec<u8>,
     ) -> Result<DecodedBlock> {
-        if compressed.len() != row.compressed_len as usize {
-            return Err(Error::InvalidBlock {
-                slot: row.slot,
-                message: format!(
-                    "compressed frame is {} bytes, expected {}",
-                    compressed.len(),
-                    row.compressed_len
-                ),
-            });
-        }
+        validate_exact_zstd_frame(&row, compressed)?;
         let expected_length = row.uncompressed_len as usize;
         decompressed.clear();
         if decompressed.capacity() < expected_length {
@@ -720,16 +1287,7 @@ impl<S: RangeSource> ArchiveReader<S> {
         decompressed: &'a mut Vec<u8>,
         discard_rewards: bool,
     ) -> Result<BorrowedDecodedBlock<'a>> {
-        if compressed.len() != row.compressed_len as usize {
-            return Err(Error::InvalidBlock {
-                slot: row.slot,
-                message: format!(
-                    "compressed frame is {} bytes, expected {}",
-                    compressed.len(),
-                    row.compressed_len
-                ),
-            });
-        }
+        validate_exact_zstd_frame(&row, compressed)?;
         let expected_length = row.uncompressed_len as usize;
         decompressed.clear();
         if decompressed.capacity() < expected_length {
@@ -920,6 +1478,321 @@ impl<S: RangeSource> ArchiveReader<S> {
             return Err(Error::FilterBindingMismatch);
         }
         Ok(())
+    }
+}
+
+fn validate_exact_zstd_frame(row: &ArchiveV2HotBlockIndexRow, compressed: &[u8]) -> Result<()> {
+    if compressed.len() != row.compressed_len as usize {
+        return Err(Error::InvalidBlock {
+            slot: row.slot,
+            message: format!(
+                "compressed frame is {} bytes, expected {}",
+                compressed.len(),
+                row.compressed_len
+            ),
+        });
+    }
+    let first_frame_len =
+        zstd::zstd_safe::find_frame_compressed_size(compressed).map_err(|error_code| {
+            Error::DecodeBlock {
+                slot: row.slot,
+                message: format!(
+                    "invalid zstd frame: {}",
+                    zstd::zstd_safe::get_error_name(error_code)
+                ),
+            }
+        })?;
+    if first_frame_len != compressed.len() {
+        return Err(Error::InvalidBlock {
+            slot: row.slot,
+            message: format!(
+                "first zstd frame is {first_frame_len} bytes, but the index row contains {} bytes",
+                compressed.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_ordered_parallel_config(config: OrderedParallelBlockConfig) -> Result<()> {
+    if config.compressed_batch_target_bytes == 0
+        || config.uncompressed_batch_budget_bytes == 0
+        || config.max_blocks_per_batch == 0
+        || config.compressed_buffer_count == 0
+        || config.decode_workers == 0
+    {
+        return Err(Error::InvalidManifest(
+            "ordered parallel block limits and worker counts must be non-zero".into(),
+        ));
+    }
+    if config.decode_workers > MAX_ORDERED_PARALLEL_DECODE_WORKERS {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel decode_workers {} exceeds the {MAX_ORDERED_PARALLEL_DECODE_WORKERS} worker limit",
+            config.decode_workers,
+        )));
+    }
+    if config.compressed_buffer_count > MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel compressed_buffer_count {} exceeds the {MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS} buffer limit",
+            config.compressed_buffer_count,
+        )));
+    }
+    if config.max_blocks_per_batch > MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel max_blocks_per_batch {} exceeds the {MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH} block limit",
+            config.max_blocks_per_batch,
+        )));
+    }
+    if config.uncompressed_batch_budget_bytes > MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel uncompressed batch budget {} exceeds the {MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES} byte limit",
+            config.uncompressed_batch_budget_bytes,
+        )));
+    }
+    let retained_total = config
+        .retained_decompressed_bytes_per_worker
+        .checked_mul(config.decode_workers)
+        .ok_or(Error::Overflow(
+            "ordered parallel retained decompression capacity",
+        ))?;
+    if retained_total > MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES {
+        return Err(Error::InvalidManifest(format!(
+            "ordered parallel retained decompression capacity {retained_total} exceeds the {MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES} byte limit",
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrderedParallelBatchPlan {
+    row_start: usize,
+    row_end: usize,
+    compressed_offset: u64,
+    compressed_len: usize,
+    declared_uncompressed_bytes: u64,
+}
+
+fn ordered_parallel_batch_plans(
+    rows: &[ArchiveV2HotBlockIndexRow],
+    range: Range<usize>,
+    compressed_target: usize,
+    uncompressed_budget: usize,
+    max_blocks_per_batch: usize,
+) -> Result<Vec<OrderedParallelBatchPlan>> {
+    let mut plans = Vec::new();
+    let mut start = range.start;
+    let uncompressed_budget = u64::try_from(uncompressed_budget)
+        .map_err(|_| Error::Overflow("parallel uncompressed batch budget"))?;
+    while start < range.end {
+        let first = rows[start];
+        let mut end = start;
+        let mut compressed_len = 0usize;
+        let mut declared_uncompressed_bytes = 0u64;
+        while end < range.end {
+            let row = rows[end];
+            let expected_offset = first
+                .compressed_offset
+                .checked_add(
+                    u64::try_from(compressed_len)
+                        .map_err(|_| Error::Overflow("parallel compressed batch offset"))?,
+                )
+                .ok_or(Error::Overflow("parallel compressed batch offset"))?;
+            if row.compressed_offset != expected_offset {
+                return Err(Error::InvalidIndex(format!(
+                    "slot {} starts at {}, expected monotonic batch offset {expected_offset}",
+                    row.slot, row.compressed_offset,
+                )));
+            }
+            let next_compressed = compressed_len
+                .checked_add(row.compressed_len as usize)
+                .ok_or(Error::Overflow("parallel compressed batch length"))?;
+            let next_uncompressed = declared_uncompressed_bytes
+                .checked_add(u64::from(row.uncompressed_len))
+                .ok_or(Error::Overflow("parallel uncompressed batch length"))?;
+            if end > start
+                && (end - start >= max_blocks_per_batch
+                    || next_compressed > compressed_target
+                    || next_uncompressed > uncompressed_budget)
+            {
+                break;
+            }
+            compressed_len = next_compressed;
+            declared_uncompressed_bytes = next_uncompressed;
+            end += 1;
+        }
+        plans.push(OrderedParallelBatchPlan {
+            row_start: start,
+            row_end: end,
+            compressed_offset: first.compressed_offset,
+            compressed_len,
+            declared_uncompressed_bytes,
+        });
+        start = end;
+    }
+    Ok(plans)
+}
+
+struct OrderedReadyBatch {
+    plan: OrderedParallelBatchPlan,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+struct OrderedProducerStats {
+    read_call_count: u64,
+    compressed_bytes: u64,
+    read_wall_time: Duration,
+    wait_for_free_buffer_time: Duration,
+    max_compressed_batch_bytes: usize,
+    max_declared_uncompressed_batch_bytes: u64,
+}
+
+fn produce_ordered_compressed_batches<S: RangeSource>(
+    archive: &ArchiveReader<S>,
+    plans: &[OrderedParallelBatchPlan],
+    free_receiver: Receiver<Vec<u8>>,
+    ready_sender: SyncSender<OrderedReadyBatch>,
+) -> Result<OrderedProducerStats> {
+    let mut stats = OrderedProducerStats::default();
+    for plan in plans {
+        let wait_started = Instant::now();
+        let Ok(mut bytes) = free_receiver.recv() else {
+            // The coordinator stopped after an earlier ordered error.
+            return Ok(stats);
+        };
+        stats.wait_for_free_buffer_time = stats
+            .wait_for_free_buffer_time
+            .saturating_add(wait_started.elapsed());
+
+        let read_started = Instant::now();
+        let read_result = archive.source.read_range_into(
+            BLOCKS_FILE,
+            plan.compressed_offset,
+            plan.compressed_len,
+            &mut bytes,
+        );
+        stats.read_wall_time = stats.read_wall_time.saturating_add(read_started.elapsed());
+        read_result?;
+        if bytes.len() != plan.compressed_len {
+            return Err(Error::InvalidIndex(format!(
+                "ordered block range returned {} bytes, expected {}",
+                bytes.len(),
+                plan.compressed_len,
+            )));
+        }
+        stats.read_call_count = stats
+            .read_call_count
+            .checked_add(1)
+            .ok_or(Error::Overflow("parallel range-read count"))?;
+        stats.compressed_bytes = stats
+            .compressed_bytes
+            .checked_add(
+                u64::try_from(bytes.len())
+                    .map_err(|_| Error::Overflow("parallel compressed byte count"))?,
+            )
+            .ok_or(Error::Overflow("parallel compressed byte count"))?;
+        stats.max_compressed_batch_bytes = stats.max_compressed_batch_bytes.max(bytes.len());
+        stats.max_declared_uncompressed_batch_bytes = stats
+            .max_declared_uncompressed_batch_bytes
+            .max(plan.declared_uncompressed_bytes);
+
+        if ready_sender
+            .send(OrderedReadyBatch { plan: *plan, bytes })
+            .is_err()
+        {
+            // The coordinator selected an earlier row-order error.
+            return Ok(stats);
+        }
+    }
+    Ok(stats)
+}
+
+struct OrderedParallelWorker<T> {
+    decompressor: Option<zstd::bulk::Decompressor<'static>>,
+    decompressed: Vec<u8>,
+    caller: T,
+    max_retained_decompressed_buffer_bytes: usize,
+    decompress_decode_sum_time: Duration,
+    projection_sum_time: Duration,
+}
+
+impl<T> OrderedParallelWorker<T> {
+    #[allow(clippy::too_many_arguments)]
+    fn decode_and_project<S, Output, E, Project>(
+        &mut self,
+        archive: &ArchiveReader<S>,
+        row: ArchiveV2HotBlockIndexRow,
+        compressed: &[u8],
+        row_number: usize,
+        discard_rewards: bool,
+        retained_decompressed_bytes: usize,
+        project: &Project,
+    ) -> std::result::Result<Output, E>
+    where
+        S: RangeSource,
+        E: From<Error>,
+        Project: for<'block> Fn(
+            &mut T,
+            usize,
+            BorrowedDecodedBlock<'block>,
+        ) -> std::result::Result<Output, E>,
+    {
+        let result = (|| {
+            if self.decompressor.is_none() {
+                self.decompressor = Some(
+                    zstd::bulk::Decompressor::new()
+                        .map_err(|error| Error::DecodeBlock {
+                            slot: row.slot,
+                            message: format!("create zstd decompressor: {error}"),
+                        })
+                        .map_err(E::from)?,
+                );
+            }
+            let decode_started = Instant::now();
+            let block_result = archive.decode_compressed_block_borrowed_reusing(
+                row,
+                compressed,
+                self.decompressor
+                    .as_mut()
+                    .expect("decompressor was initialized above"),
+                &mut self.decompressed,
+                discard_rewards,
+            );
+            self.decompress_decode_sum_time = self
+                .decompress_decode_sum_time
+                .saturating_add(decode_started.elapsed());
+            let block = block_result.map_err(E::from)?;
+            let projection_started = Instant::now();
+            let projected = project(&mut self.caller, row_number, block);
+            self.projection_sum_time = self
+                .projection_sum_time
+                .saturating_add(projection_started.elapsed());
+            projected
+        })();
+        if self.decompressed.capacity() > retained_decompressed_bytes {
+            self.decompressed = Vec::new();
+        } else {
+            self.max_retained_decompressed_buffer_bytes = self
+                .max_retained_decompressed_buffer_bytes
+                .max(self.decompressed.capacity());
+        }
+        result
+    }
+}
+
+struct OrderedParallelCoordinator<E> {
+    stats: OrderedParallelBlockStats,
+    error: Option<E>,
+    producer_disconnected: bool,
+}
+
+impl<E> Default for OrderedParallelCoordinator<E> {
+    fn default() -> Self {
+        Self {
+            stats: OrderedParallelBlockStats::default(),
+            error: None,
+            producer_disconnected: false,
+        }
     }
 }
 
@@ -1916,6 +2789,7 @@ fn scan_transaction(
     let static_keys = match &message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.account_keys.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.account_keys.as_slice(),
+        ArchiveV2HotMessagePayload::V1(message) => message.account_keys.as_slice(),
     };
     let static_result = evaluate_keys(static_keys, filter, registry_entries);
     let needs_loaded = is_v0 && row.flags & ARCHIVE_V2_TX_FLAG_HAS_LOADED_ADDRESSES != 0;
@@ -2059,7 +2933,7 @@ mod tests {
     use std::{
         fs,
         path::Path,
-        sync::{Arc, Mutex},
+        sync::{Arc, Barrier, Mutex},
     };
 
     use blockzilla_format::{
@@ -2073,7 +2947,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        LocalRangeSource, SourceResult,
+        LocalRangeSource, SourceError, SourceResult,
         manifest::{GenerationFile, compute_generation_digest},
     };
 
@@ -2330,6 +3204,26 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FailingBlocksSource {
+        inner: LocalRangeSource,
+    }
+
+    impl RangeSource for FailingBlocksSource {
+        fn size(&self, object: &str) -> SourceResult<Option<u64>> {
+            self.inner.size(object)
+        }
+
+        fn read_range(&self, object: &str, offset: u64, length: usize) -> SourceResult<Vec<u8>> {
+            if object == BLOCKS_FILE {
+                return Err(SourceError::Protocol(
+                    "injected ordered block read failure".into(),
+                ));
+            }
+            self.inner.read_range(object, offset, length)
+        }
+    }
+
     #[test]
     fn open_trusted_opens_without_a_published_manifest() {
         let fixture = Fixture::build();
@@ -2446,6 +3340,502 @@ mod tests {
     }
 
     #[test]
+    fn ordered_parallel_pipeline_reads_once_and_publishes_row_order() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+
+        let completion_barrier = Arc::new(Barrier::new(2));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let consumed = Arc::new(Mutex::new(Vec::new()));
+        let project_barrier = Arc::clone(&completion_barrier);
+        let project_completed = Arc::clone(&completed);
+        let ordered_consumed = Arc::clone(&consumed);
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    discard_rewards: true,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                move |_, row_number, block| -> Result<u64> {
+                    project_barrier.wait();
+                    if row_number == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    project_completed.lock().unwrap().push(row_number);
+                    assert!(!block.uses_owned_fallback());
+                    Ok(block.header().slot)
+                },
+                move |row_number, slot| {
+                    ordered_consumed.lock().unwrap().push((row_number, slot));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(*completed.lock().unwrap(), vec![1, 0]);
+        assert_eq!(*consumed.lock().unwrap(), vec![(0, 101), (1, 102)]);
+        assert_eq!(stats.block_count, 2);
+        assert_eq!(stats.batch_count, 1);
+        assert_eq!(stats.max_blocks_per_batch, 2);
+        assert_eq!(stats.read_call_count, 1);
+        assert_eq!(stats.compressed_bytes, archive.index().blob_file_bytes);
+        assert_eq!(
+            stats.max_compressed_batch_bytes as u64,
+            archive.index().blob_file_bytes
+        );
+        assert_eq!(
+            stats.max_declared_uncompressed_batch_bytes,
+            archive
+                .index()
+                .rows
+                .iter()
+                .map(|row| u64::from(row.uncompressed_len))
+                .sum::<u64>()
+        );
+        assert!(
+            stats.max_retained_decompressed_buffer_bytes
+                >= archive
+                    .index()
+                    .rows
+                    .iter()
+                    .map(|row| row.uncompressed_len as usize)
+                    .max()
+                    .unwrap()
+        );
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            vec![(0, archive.index().blob_file_bytes as usize)]
+        );
+    }
+
+    #[test]
+    fn ordered_parallel_empty_range_does_not_start_workers_or_read_blocks() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let mut worker_states_created = 0usize;
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                1..1,
+                OrderedParallelBlockConfig::default(),
+                |_| {
+                    worker_states_created += 1;
+                    Ok(())
+                },
+                |_, _, _| -> Result<()> { panic!("empty range ran a projection") },
+                |_, ()| -> Result<()> { panic!("empty range published a result") },
+            )
+            .unwrap();
+
+        assert_eq!(worker_states_created, 0);
+        assert_eq!(stats, OrderedParallelBlockStats::default());
+        assert!(source.reads_for(BLOCKS_FILE).is_empty());
+    }
+
+    #[test]
+    fn ordered_parallel_fallible_worker_setup_stops_before_block_reads() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |worker| -> Result<()> {
+                    Err(Error::InvalidRegistry(format!(
+                        "worker {worker} setup failed"
+                    )))
+                },
+                |_, _, _| -> Result<()> { panic!("failed setup ran a projection") },
+                |_, ()| -> Result<()> { panic!("failed setup published a result") },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidRegistry(_)));
+        assert!(error.to_string().contains("worker 0 setup failed"));
+        assert!(source.reads_for(BLOCKS_FILE).is_empty());
+    }
+
+    #[test]
+    fn ordered_parallel_pipeline_splits_only_on_frame_boundaries() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let first = archive.index().rows[0];
+        let second = archive.index().rows[1];
+        let mut slots = Vec::new();
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: first.compressed_len as usize,
+                    uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+                    compressed_buffer_count: 2,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, _, block| -> Result<u64> { Ok(block.header().slot) },
+                |_, slot| {
+                    slots.push(slot);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(slots, vec![101, 102]);
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.read_call_count, 2);
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            vec![
+                (first.compressed_offset, first.compressed_len as usize),
+                (second.compressed_offset, second.compressed_len as usize),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_parallel_uncompressed_budget_splits_and_admits_one_oversized_frame() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let rows = &archive.index().rows;
+        let mut slots = Vec::new();
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..rows.len(),
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: archive.index().blob_file_bytes as usize,
+                    uncompressed_batch_budget_bytes: 1,
+                    compressed_buffer_count: 2,
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, _, block| -> Result<u64> { Ok(block.header().slot) },
+                |_, slot| {
+                    slots.push(slot);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(slots, vec![101, 102]);
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.read_call_count, 2);
+        assert!(stats.max_declared_uncompressed_batch_bytes > 1);
+        assert_eq!(
+            source.reads_for(BLOCKS_FILE),
+            rows.iter()
+                .map(|row| (row.compressed_offset, row.compressed_len as usize))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ordered_parallel_block_bound_splits_before_projection_results_can_accumulate() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source.clone(), options).unwrap();
+        source.clear();
+        let mut slots = Vec::new();
+
+        let stats = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..archive.index().rows.len(),
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: usize::MAX,
+                    uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+                    max_blocks_per_batch: 1,
+                    compressed_buffer_count: 2,
+                    decode_workers: 2,
+                    retained_decompressed_bytes_per_worker: 0,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, _, block| -> Result<u64> { Ok(block.header().slot) },
+                |_, slot| {
+                    slots.push(slot);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(slots, vec![101, 102]);
+        assert_eq!(stats.batch_count, 2);
+        assert_eq!(stats.read_call_count, 2);
+        assert_eq!(stats.max_blocks_per_batch, 1);
+        assert_eq!(stats.max_retained_decompressed_buffer_bytes, 0);
+    }
+
+    #[test]
+    fn ordered_parallel_pipeline_selects_the_first_row_error() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let completion_barrier = Arc::new(Barrier::new(2));
+        let project_barrier = Arc::clone(&completion_barrier);
+        let consumed = Arc::new(Mutex::new(Vec::new()));
+        let ordered_consumed = Arc::clone(&consumed);
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                move |_, row_number, _| -> Result<()> {
+                    project_barrier.wait();
+                    if row_number == 0 {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(Error::InvalidBlock {
+                        slot: 101 + row_number as u64,
+                        message: format!("row {row_number} failed"),
+                    })
+                },
+                move |row_number, ()| {
+                    ordered_consumed.lock().unwrap().push(row_number);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidBlock { slot: 101, .. }));
+        assert!(error.to_string().contains("row 0 failed"));
+        assert!(consumed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ordered_parallel_preserves_typed_project_and_consume_errors() {
+        #[derive(Debug)]
+        struct TypedError(&'static str);
+
+        impl From<Error> for TypedError {
+            fn from(_: Error) -> Self {
+                Self("reader")
+            }
+        }
+
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let project_error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..1,
+                OrderedParallelBlockConfig {
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok::<_, TypedError>(()),
+                |_, _, _| Err::<(), _>(TypedError("project")),
+                |_, ()| -> std::result::Result<(), TypedError> {
+                    panic!("failed projection published a result")
+                },
+            )
+            .unwrap_err();
+        assert_eq!(project_error.0, "project");
+
+        let consume_error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..1,
+                OrderedParallelBlockConfig {
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok::<_, TypedError>(()),
+                |_, _, _| Ok::<_, TypedError>(()),
+                |_, ()| Err(TypedError("consume")),
+            )
+            .unwrap_err();
+        assert_eq!(consume_error.0, "consume");
+    }
+
+    #[test]
+    fn ordered_parallel_early_error_releases_the_producer() {
+        let fixture = Fixture::build();
+        let source = CountingSource::new(fixture.source());
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source, options).unwrap();
+        let first_frame_bytes = archive.index().rows[0].compressed_len as usize;
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: first_frame_bytes,
+                    compressed_buffer_count: 1,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, row_number, _| -> Result<()> {
+                    Err(Error::InvalidBlock {
+                        slot: 101 + row_number as u64,
+                        message: "stop after the first ordered block".into(),
+                    })
+                },
+                |_, ()| Ok(()),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidBlock { slot: 101, .. }));
+    }
+
+    #[test]
+    fn ordered_parallel_consume_error_releases_the_producer() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let first_frame_bytes = archive.index().rows[0].compressed_len as usize;
+
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_batch_target_bytes: first_frame_bytes,
+                    compressed_buffer_count: 1,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, _, block| Ok(block.header().slot),
+                |row_number, _| {
+                    Err(Error::InvalidMetadata(format!(
+                        "stop while consuming row {row_number}"
+                    )))
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::InvalidMetadata(_)));
+        assert!(error.to_string().contains("consuming row 0"));
+    }
+
+    #[test]
+    fn ordered_parallel_source_error_releases_the_coordinator() {
+        let fixture = Fixture::build();
+        let source = FailingBlocksSource {
+            inner: fixture.source(),
+        };
+        let options = OpenOptions {
+            hash_verification: HashVerification::SizesOnly,
+            ..OpenOptions::default()
+        };
+        let archive = ArchiveReader::open_with_options(source, options).unwrap();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    compressed_buffer_count: 1,
+                    decode_workers: 1,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, _, _| -> Result<()> { panic!("failed source ran a projection") },
+                |_, ()| -> Result<()> { panic!("failed source published a result") },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Source(SourceError::Protocol(_))));
+        assert!(
+            error
+                .to_string()
+                .contains("injected ordered block read failure")
+        );
+    }
+
+    #[test]
+    fn ordered_parallel_config_rejects_excessive_resources() {
+        let invalid = [
+            OrderedParallelBlockConfig {
+                decode_workers: MAX_ORDERED_PARALLEL_DECODE_WORKERS + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                compressed_buffer_count: MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                max_blocks_per_batch: MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+            OrderedParallelBlockConfig {
+                decode_workers: MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+                retained_decompressed_bytes_per_worker:
+                    MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES
+                        / MAX_ORDERED_PARALLEL_DECODE_WORKERS
+                        + 1,
+                ..OrderedParallelBlockConfig::default()
+            },
+        ];
+        for config in invalid {
+            assert!(matches!(
+                validate_ordered_parallel_config(config),
+                Err(Error::InvalidManifest(_))
+            ));
+        }
+
+        assert!(
+            validate_ordered_parallel_config(OrderedParallelBlockConfig {
+                decode_workers: MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+                compressed_buffer_count: MAX_ORDERED_PARALLEL_COMPRESSED_BUFFERS,
+                uncompressed_batch_budget_bytes: MAX_ORDERED_PARALLEL_UNCOMPRESSED_BATCH_BYTES,
+                max_blocks_per_batch: MAX_ORDERED_PARALLEL_BLOCKS_PER_BATCH,
+                retained_decompressed_bytes_per_worker:
+                    MAX_ORDERED_PARALLEL_RETAINED_DECOMPRESSED_BYTES
+                        / MAX_ORDERED_PARALLEL_DECODE_WORKERS,
+                ..OrderedParallelBlockConfig::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn lending_stream_matches_owned_blocks_and_coalesces_the_same_range() {
         let fixture = Fixture::build();
         let source = CountingSource::new(fixture.source());
@@ -2494,6 +3884,167 @@ mod tests {
         assert_eq!(number, owned.len());
         assert!(stream.is_empty());
         assert_eq!(source.reads_for(BLOCKS_FILE).len(), 1);
+    }
+
+    #[test]
+    fn recycled_borrowed_read_matches_owned_and_reuses_both_buffers() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let expected = archive.read_block(0).unwrap();
+        let mut scratch = RecycledBlockScratch::new();
+
+        for pass in 0..2 {
+            let block = archive
+                .read_borrowed_block_reusing(0, &mut scratch, false)
+                .unwrap();
+            assert!(!block.uses_owned_fallback());
+            assert_eq!(block.index_row.block_id, expected.index_row.block_id);
+            assert_eq!(block.index_row.slot, expected.index_row.slot);
+            assert_eq!(
+                block.index_row.compressed_offset,
+                expected.index_row.compressed_offset
+            );
+            assert_eq!(
+                block.index_row.first_tx_ordinal,
+                expected.index_row.first_tx_ordinal
+            );
+            assert_eq!(
+                block.index_row.first_signature_ordinal,
+                expected.index_row.first_signature_ordinal
+            );
+            assert_eq!(block.header().slot, expected.block.header.slot);
+            assert_eq!(
+                block.header().parent_slot,
+                expected.block.header.parent_slot
+            );
+            assert_eq!(block.tx_count(), expected.block.tx_count);
+            assert_eq!(block.tx_rows().collect::<Vec<_>>(), expected.block.tx_rows);
+            assert_eq!(block.message_bytes(), expected.block.message_bytes);
+            assert_eq!(block.metadata_bytes(), expected.block.metadata_bytes);
+            drop(block);
+
+            let stats = scratch.stats();
+            assert_eq!(stats.block_count, pass + 1);
+            assert_eq!(stats.compressed_buffer_growths, 1);
+            assert_eq!(stats.decompressed_buffer_growths, 1);
+            assert!(stats.compressed_buffer_capacity >= expected.index_row.compressed_len as usize);
+            assert!(
+                stats.decompressed_buffer_capacity >= expected.index_row.uncompressed_len as usize
+            );
+        }
+
+        let stats = scratch.stats();
+        assert_eq!(
+            stats.compressed_bytes,
+            u64::from(expected.index_row.compressed_len) * 2
+        );
+        assert_eq!(
+            stats.uncompressed_bytes,
+            u64::from(expected.index_row.uncompressed_len) * 2
+        );
+    }
+
+    #[test]
+    fn borrowed_into_owned_matches_owned_decode_and_rejects_discarded_rewards() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let expected = archive.read_block(0).unwrap();
+        let expected_bytes =
+            wincode::config::serialize(&expected.block, wincode_leb128_config()).unwrap();
+        let expected_rewards_field =
+            wincode::config::serialize(&expected.block.header.rewards, wincode_leb128_config())
+                .unwrap();
+        let mut scratch = RecycledBlockScratch::new();
+
+        let decoded = archive
+            .read_borrowed_block_reusing(0, &mut scratch, false)
+            .unwrap();
+        assert!(
+            decoded
+                .rewards_field_bytes()
+                .unwrap_err()
+                .to_string()
+                .contains("after decoding rewards")
+        );
+        let converted = decoded.into_owned().unwrap();
+        assert_eq!(converted.index_row.block_id, expected.index_row.block_id);
+        assert_eq!(converted.index_row.slot, expected.index_row.slot);
+        assert_eq!(
+            wincode::config::serialize(&converted.block, wincode_leb128_config()).unwrap(),
+            expected_bytes
+        );
+
+        let discarded = archive
+            .read_borrowed_block_reusing(0, &mut scratch, true)
+            .unwrap();
+        assert_eq!(
+            discarded.rewards_field_bytes().unwrap(),
+            expected_rewards_field
+        );
+        let error = discarded.into_owned().unwrap_err();
+        assert!(error.to_string().contains("rewards were discarded"));
+    }
+
+    #[test]
+    fn borrowed_recycled_read_requires_one_exact_zstd_frame() {
+        let fixture = Fixture::build();
+        let archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut row = archive.index().rows[0];
+        let source = fixture.source();
+        let mut compressed = source
+            .read_range(
+                BLOCKS_FILE,
+                row.compressed_offset,
+                row.compressed_len as usize,
+            )
+            .unwrap();
+        let second_frame = compressed.clone();
+        compressed.extend_from_slice(&second_frame);
+        row.compressed_len = compressed.len() as u32;
+
+        let error = archive
+            .decode_compressed_block(row, &compressed)
+            .unwrap_err();
+        assert!(error.to_string().contains("first zstd frame"));
+    }
+
+    #[test]
+    fn ordered_parallel_pipeline_rejects_a_concatenated_frame() {
+        let fixture = Fixture::build();
+        let mut archive = ArchiveReader::open(fixture.source()).unwrap();
+        let mut blocks = fs::read(fixture.directory.path().join(BLOCKS_FILE)).unwrap();
+        let first_frame_end = archive.index.rows[0].compressed_len as usize;
+        let extra = zstd::bulk::compress(b"second-frame", 3).unwrap();
+        blocks.splice(first_frame_end..first_frame_end, extra.iter().copied());
+        fs::write(fixture.directory.path().join(BLOCKS_FILE), blocks).unwrap();
+
+        archive.index.rows[0].compressed_len = archive.index.rows[0]
+            .compressed_len
+            .checked_add(extra.len() as u32)
+            .unwrap();
+        archive.index.rows[1].compressed_offset = archive.index.rows[1]
+            .compressed_offset
+            .checked_add(extra.len() as u64)
+            .unwrap();
+        archive.index.blob_file_bytes = archive
+            .index
+            .blob_file_bytes
+            .checked_add(extra.len() as u64)
+            .unwrap();
+
+        let error = archive
+            .process_borrowed_blocks_parallel_ordered(
+                0..2,
+                OrderedParallelBlockConfig {
+                    decode_workers: 2,
+                    ..OrderedParallelBlockConfig::default()
+                },
+                |_| Ok(()),
+                |_, _, _| -> Result<()> { Ok(()) },
+                |_, ()| -> Result<()> { Ok(()) },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("first zstd frame"));
     }
 
     #[test]
@@ -2625,6 +4176,13 @@ mod tests {
                 .decode_uncompressed_block_borrowed(row, &bytes, discard_rewards)
                 .unwrap();
             assert!(decoded.uses_owned_fallback());
+            assert!(
+                decoded
+                    .rewards_field_bytes()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("owned fallback")
+            );
             assert_eq!(decoded.header().slot, 777);
             assert_eq!(decoded.tx_rows_len(), 0);
         }

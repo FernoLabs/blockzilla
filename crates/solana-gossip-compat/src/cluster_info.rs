@@ -4,9 +4,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use crate::net::{BindIpAddrs, SocketAddrSpace};
 use solana_address::Address as Pubkey;
 use solana_keypair::{Keypair, Signer};
-use solana_net_utils::{SocketAddrSpace, multihomed_sockets::BindIpAddrs};
 
 use crate::contact_info::{ContactInfo, Protocol};
 

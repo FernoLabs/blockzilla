@@ -28,22 +28,13 @@ use blockzilla_format::{
     WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, wincode_leb128_config,
 };
 use blockzilla_read_sdk::{
-    ArchiveReader, BorrowedDecodedBlock, DecodedBlock, GenerationBinding, HashVerification,
-    LocalRangeSource, OpenOptions,
-    manifest::{BLOCK_INDEX_FILE, BLOCKS_FILE, GenerationManifest},
+    ArchiveReader, BorrowedDecodedBlock, CompactV2MessageSchema, DecodedBlock, GenerationBinding,
+    HashVerification, LocalRangeSource, OpenOptions, decode_compact_v2_message,
+    select_compact_v2_message_schema,
 };
 use smallvec::SmallVec;
 use thiserror::Error;
-use wincode::{SchemaRead, SchemaWrite};
-
-const MAY_24_2026_MAINNET_EPOCH_0_BLOCKS_SHA256: &str =
-    "1550941e1eeff2c361427ba1d545bd0f11e33b7cb7fa9d9fe96b8f45c3c8547f";
-const MAY_24_2026_MAINNET_EPOCH_0_INDEX_SHA256: &str =
-    "4bc518d10c71c3340f3ef24ddc1d29c3bf54b8dc9250b7ca322b364aa7b3f7de";
-const MAY_24_2026_MAINNET_EPOCH_1_BLOCKS_SHA256: &str =
-    "3f02379494439c87c70cfd9ab1a6bbdd30c296b29dbd2b13cf6c609f7cda925d";
-const MAY_24_2026_MAINNET_EPOCH_1_INDEX_SHA256: &str =
-    "5c663da2dd58f3bc6acfce90dd42ba63224f20f224bb78de7145d495c571db58";
+use wincode::SchemaRead;
 
 /// Manifest object binding that opts a Compact generation into the exact
 /// pre-`UnknownSystem`/`UnknownVote` Archive V2 hot-message enum ordering.
@@ -52,13 +43,11 @@ const MAY_24_2026_MAINNET_EPOCH_1_INDEX_SHA256: &str =
 /// filename, size, and digest; merely using a similarly named object never
 /// changes the decoder.
 pub const MAY_24_2026_MESSAGE_SCHEMA_MARKER_FILE: &str =
-    "archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker";
-pub const MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE: u64 = 87;
+    blockzilla_read_sdk::COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_FILE;
+pub const MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE: u64 =
+    blockzilla_read_sdk::COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SIZE;
 pub const MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256: &str =
-    "2a3aa5808085bc7b869c7536508227f19e6b9d9e3f5fb34b65ebda9936bf0206";
-#[cfg(test)]
-const MAY_24_2026_MESSAGE_SCHEMA_MARKER_BYTES: &[u8] =
-    include_bytes!("../assets/archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker");
+    blockzilla_read_sdk::COMPACT_V2_MAY24_MESSAGE_SCHEMA_MARKER_SHA256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactProbeConfig {
@@ -196,74 +185,13 @@ pub struct CompactSlotProbe {
 pub enum CompactMessageVersion {
     Legacy,
     V0,
+    V1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompactMessageSchema {
-    Current,
-    /// Archive V2 hot blocks produced on 2026-05-24, before
-    /// `UnknownSystem` and `UnknownVote` were inserted into the instruction
-    /// enum. The insertion shifted every existing non-raw wincode enum tag by
-    /// two without changing the hot-block version.
-    May24_2026PreUnknownInstructionFallbacks,
-}
-
-const MAY24_INLINE_ACCOUNT_KEYS: usize = 8;
-const MAY24_INLINE_INSTRUCTIONS: usize = 2;
-const MAY24_INLINE_INSTRUCTION_ACCOUNTS: usize = 8;
 const COMPACT_INLINE_ACCOUNT_KEYS: usize = 8;
 const COMPACT_INLINE_INSTRUCTIONS: usize = 1;
 const COMPACT_INLINE_INSTRUCTION_ACCOUNTS: usize = 8;
 const COMPACT_INLINE_RAW_INSTRUCTION_BYTES: usize = 64;
-
-#[derive(Debug, SchemaRead, SchemaWrite)]
-enum May24ArchiveV2HotMessagePayload {
-    Legacy(May24ArchiveV2HotLegacyMessage),
-    V0(May24ArchiveV2HotV0Message),
-}
-
-#[derive(Debug, SchemaRead, SchemaWrite)]
-struct May24ArchiveV2HotLegacyMessage {
-    header: CompactMessageHeader,
-    account_keys: SmallVec<[CompactPubkey; MAY24_INLINE_ACCOUNT_KEYS]>,
-    recent_blockhash: OwnedCompactRecentBlockhash,
-    instructions: SmallVec<[May24ArchiveV2HotInstruction; MAY24_INLINE_INSTRUCTIONS]>,
-}
-
-#[derive(Debug, SchemaRead, SchemaWrite)]
-struct May24ArchiveV2HotV0Message {
-    header: CompactMessageHeader,
-    account_keys: SmallVec<[CompactPubkey; MAY24_INLINE_ACCOUNT_KEYS]>,
-    recent_blockhash: OwnedCompactRecentBlockhash,
-    instructions: SmallVec<[May24ArchiveV2HotInstruction; MAY24_INLINE_INSTRUCTIONS]>,
-    address_table_lookups: Vec<OwnedCompactAddressTableLookup>,
-}
-
-#[derive(Debug, SchemaRead, SchemaWrite)]
-struct May24ArchiveV2HotInstruction {
-    program_id_index: u8,
-    accounts: SmallVec<[u8; MAY24_INLINE_INSTRUCTION_ACCOUNTS]>,
-    data: May24ArchiveV2HotInstructionData,
-}
-
-/// Exact pre-2026-06-25 ordering from the writer that produced the two known
-/// mainnet epoch objects. Do not insert variants into this compatibility enum.
-#[derive(Debug, SchemaRead, SchemaWrite)]
-enum May24ArchiveV2HotInstructionData {
-    Raw(SmallVec<[u8; COMPACT_INLINE_RAW_INSTRUCTION_BYTES]>),
-    ComputeBudget(ArchiveV2ComputeBudgetInstructionData),
-    System(ArchiveV2SystemInstructionData),
-    VoteCompactUpdateVoteState(ArchiveV2VoteStateUpdate),
-    VoteCompactUpdateVoteStateSwitch {
-        update: ArchiveV2VoteStateUpdate,
-        switch_proof_hash: ArchiveV2VoteHashRef,
-    },
-    VoteTowerSync(ArchiveV2VoteTowerSync),
-    VoteTowerSyncSwitch {
-        tower: ArchiveV2VoteTowerSync,
-        switch_proof_hash: ArchiveV2VoteHashRef,
-    },
-}
 
 #[derive(Debug)]
 pub struct CompactTransactionProbe {
@@ -711,6 +639,9 @@ where
     Ok(summary)
 }
 
+// Keep these borrowed inputs separate so the hot visit path stays allocation-free and
+// each accounting boundary remains explicit.
+#[allow(clippy::too_many_arguments)]
 fn visit_decoded_compact_slot<F>(
     context: &CompactGenerationContext,
     summary: &mut CompactVisitSummary,
@@ -749,7 +680,7 @@ struct OpenCompactGeneration {
     archive: ArchiveReader<LocalRangeSource>,
     keys: KeyStore,
     blockhashes: BlockhashStore,
-    message_schema: CompactMessageSchema,
+    message_schema: CompactV2MessageSchema,
     context: CompactGenerationContext,
 }
 
@@ -762,76 +693,6 @@ struct DecodedCompactSlot {
 
 #[cfg(test)]
 type DecodedCompactRow = (u64, Option<u64>, u64, DecodedCompactSlot);
-
-#[derive(Debug, Clone, Copy)]
-struct HistoricalMessageSchemaIdentity {
-    epoch: u64,
-    blocks_sha256: &'static str,
-    index_sha256: &'static str,
-}
-
-const MAY_24_2026_MAINNET_IDENTITIES: [HistoricalMessageSchemaIdentity; 2] = [
-    HistoricalMessageSchemaIdentity {
-        epoch: 0,
-        blocks_sha256: MAY_24_2026_MAINNET_EPOCH_0_BLOCKS_SHA256,
-        index_sha256: MAY_24_2026_MAINNET_EPOCH_0_INDEX_SHA256,
-    },
-    HistoricalMessageSchemaIdentity {
-        epoch: 1,
-        blocks_sha256: MAY_24_2026_MAINNET_EPOCH_1_BLOCKS_SHA256,
-        index_sha256: MAY_24_2026_MAINNET_EPOCH_1_INDEX_SHA256,
-    },
-];
-
-fn message_schema_for_manifest(
-    manifest: &GenerationManifest,
-) -> Result<CompactMessageSchema, String> {
-    let blocks = manifest
-        .required_file(BLOCKS_FILE)
-        .map_err(|error| error.to_string())?;
-    let index = manifest
-        .required_file(BLOCK_INDEX_FILE)
-        .map_err(|error| error.to_string())?;
-
-    if let Some(marker) = manifest.file(MAY_24_2026_MESSAGE_SCHEMA_MARKER_FILE) {
-        if marker.size != MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE
-            || marker.sha256 != MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256
-        {
-            return Err(format!(
-                "malformed May 24 2026 historical message-schema marker binding: {} must have size {} and sha256 {}, found size {} and sha256 {}",
-                MAY_24_2026_MESSAGE_SCHEMA_MARKER_FILE,
-                MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE,
-                MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256,
-                marker.size,
-                marker.sha256,
-            ));
-        }
-        return Ok(CompactMessageSchema::May24_2026PreUnknownInstructionFallbacks);
-    }
-
-    for identity in MAY_24_2026_MAINNET_IDENTITIES {
-        let blocks_match = blocks.sha256 == identity.blocks_sha256;
-        let index_match = index.sha256 == identity.index_sha256;
-        let provenance_matches = manifest.cluster_id == "mainnet-beta"
-            && manifest.epoch == identity.epoch
-            && manifest.slots_per_epoch == 432_000;
-        if blocks_match && index_match && provenance_matches {
-            return Ok(CompactMessageSchema::May24_2026PreUnknownInstructionFallbacks);
-        }
-        if blocks_match || index_match {
-            return Err(format!(
-                "known May 24 2026 historical message bytes have mismatched provenance: cluster={} epoch={} slots_per_epoch={} blocks_sha256={} index_sha256={}",
-                manifest.cluster_id,
-                manifest.epoch,
-                manifest.slots_per_epoch,
-                blocks.sha256,
-                index.sha256,
-            ));
-        }
-    }
-
-    Ok(CompactMessageSchema::Current)
-}
 
 impl OpenCompactGeneration {
     fn open(root: &Path) -> Result<Self, CompactProbeError> {
@@ -850,12 +711,10 @@ impl OpenCompactGeneration {
         // control plane and every indexed frame is still bounds/decompression
         // checked while streaming; full payload authentication belongs at the
         // archive admission boundary, not in this trusted replay hot path.
-        let message_schema =
-            message_schema_for_manifest(archive.manifest()).map_err(|message| {
-                CompactProbeError::Open {
-                    root: root.clone(),
-                    message,
-                }
+        let message_schema = select_compact_v2_message_schema(archive.source(), archive.manifest())
+            .map_err(|message| CompactProbeError::Open {
+                root: root.clone(),
+                message: message.to_string(),
             })?;
         let registry_path = root.join(ARCHIVE_V2_PUBKEY_REGISTRY_FILE);
         let keys = KeyStore::load(&registry_path).map_err(|error| CompactProbeError::Sidecar {
@@ -1165,7 +1024,7 @@ fn own_transaction(
     metadata_region: &[u8],
     keys: &KeyStore,
     blockhashes: &BlockhashStore,
-    message_schema: CompactMessageSchema,
+    message_schema: CompactV2MessageSchema,
 ) -> Result<CompactTransactionProbe, CompactProbeError> {
     if row.flags & ARCHIVE_V2_TX_FLAG_TX_RAW_FALLBACK != 0 {
         return Err(CompactProbeError::RawTransactionFallback {
@@ -1181,75 +1040,48 @@ fn own_transaction(
         .get(start..end)
         .ok_or_else(|| tx_error(slot, row.tx_index, "message range is outside block payload"))?;
     let balance_oracle = decode_balance_oracle(slot, row, metadata_region)?;
-    match message_schema {
-        CompactMessageSchema::Current => {
-            let payload: ArchiveV2HotMessagePayload =
-                wincode::config::deserialize_exact(bytes, wincode_leb128_config()).map_err(
-                    |error| tx_error(slot, row.tx_index, format!("decode message: {error}")),
-                )?;
-            match payload {
-                ArchiveV2HotMessagePayload::Legacy(message) => own_decoded_transaction(
-                    slot,
-                    row,
-                    CompactMessageVersion::Legacy,
-                    message.header,
-                    message.account_keys,
-                    message.recent_blockhash,
-                    message.instructions.into_iter().map(Into::into),
-                    Vec::new(),
-                    balance_oracle,
-                    keys,
-                    blockhashes,
-                ),
-                ArchiveV2HotMessagePayload::V0(message) => own_decoded_transaction(
-                    slot,
-                    row,
-                    CompactMessageVersion::V0,
-                    message.header,
-                    message.account_keys,
-                    message.recent_blockhash,
-                    message.instructions.into_iter().map(Into::into),
-                    message.address_table_lookups,
-                    balance_oracle,
-                    keys,
-                    blockhashes,
-                ),
-            }
-        }
-        CompactMessageSchema::May24_2026PreUnknownInstructionFallbacks => {
-            let payload: May24ArchiveV2HotMessagePayload =
-                wincode::config::deserialize_exact(bytes, wincode_leb128_config()).map_err(
-                    |error| tx_error(slot, row.tx_index, format!("decode message: {error}")),
-                )?;
-            match payload {
-                May24ArchiveV2HotMessagePayload::Legacy(message) => own_decoded_transaction(
-                    slot,
-                    row,
-                    CompactMessageVersion::Legacy,
-                    message.header,
-                    message.account_keys,
-                    message.recent_blockhash,
-                    message.instructions.into_iter().map(Into::into),
-                    Vec::new(),
-                    balance_oracle,
-                    keys,
-                    blockhashes,
-                ),
-                May24ArchiveV2HotMessagePayload::V0(message) => own_decoded_transaction(
-                    slot,
-                    row,
-                    CompactMessageVersion::V0,
-                    message.header,
-                    message.account_keys,
-                    message.recent_blockhash,
-                    message.instructions.into_iter().map(Into::into),
-                    message.address_table_lookups,
-                    balance_oracle,
-                    keys,
-                    blockhashes,
-                ),
-            }
-        }
+    let payload = decode_compact_v2_message(message_schema, bytes)
+        .map_err(|error| tx_error(slot, row.tx_index, format!("decode message: {error}")))?;
+    match payload {
+        ArchiveV2HotMessagePayload::Legacy(message) => own_decoded_transaction(
+            slot,
+            row,
+            CompactMessageVersion::Legacy,
+            message.header,
+            message.account_keys,
+            message.recent_blockhash,
+            message.instructions.into_iter().map(Into::into),
+            Vec::new(),
+            balance_oracle,
+            keys,
+            blockhashes,
+        ),
+        ArchiveV2HotMessagePayload::V1(message) => own_decoded_transaction(
+            slot,
+            row,
+            CompactMessageVersion::V1,
+            message.header,
+            message.account_keys,
+            message.recent_blockhash,
+            message.instructions.into_iter().map(Into::into),
+            Vec::new(),
+            balance_oracle,
+            keys,
+            blockhashes,
+        ),
+        ArchiveV2HotMessagePayload::V0(message) => own_decoded_transaction(
+            slot,
+            row,
+            CompactMessageVersion::V0,
+            message.header,
+            message.account_keys,
+            message.recent_blockhash,
+            message.instructions.into_iter().map(Into::into),
+            message.address_table_lookups,
+            balance_oracle,
+            keys,
+            blockhashes,
+        ),
     }
 }
 
@@ -1430,16 +1262,6 @@ impl From<ArchiveV2HotInstruction> for DecodedCompactInstruction {
     }
 }
 
-impl From<May24ArchiveV2HotInstruction> for DecodedCompactInstruction {
-    fn from(value: May24ArchiveV2HotInstruction) -> Self {
-        Self {
-            program_id_index: value.program_id_index,
-            accounts: value.accounts,
-            data: value.data.into(),
-        }
-    }
-}
-
 fn own_account_keys(
     slot: u64,
     tx_index: u32,
@@ -1481,34 +1303,6 @@ impl From<ArchiveV2HotInstructionData> for CompactInstructionData {
             },
             ArchiveV2HotInstructionData::VoteTowerSync(tower) => Self::VoteTowerSync(tower),
             ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
-                tower,
-                switch_proof_hash,
-            } => Self::VoteTowerSyncSwitch {
-                tower,
-                switch_proof_hash,
-            },
-        }
-    }
-}
-
-impl From<May24ArchiveV2HotInstructionData> for CompactInstructionData {
-    fn from(value: May24ArchiveV2HotInstructionData) -> Self {
-        match value {
-            May24ArchiveV2HotInstructionData::Raw(bytes) => Self::Raw(bytes),
-            May24ArchiveV2HotInstructionData::ComputeBudget(data) => Self::ComputeBudget(data),
-            May24ArchiveV2HotInstructionData::System(data) => Self::System(data),
-            May24ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update) => {
-                Self::VoteCompactUpdateVoteState(update)
-            }
-            May24ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
-                update,
-                switch_proof_hash,
-            } => Self::VoteCompactUpdateVoteStateSwitch {
-                update,
-                switch_proof_hash,
-            },
-            May24ArchiveV2HotInstructionData::VoteTowerSync(tower) => Self::VoteTowerSync(tower),
-            May24ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
                 tower,
                 switch_proof_hash,
             } => Self::VoteTowerSyncSwitch {
@@ -1953,45 +1747,6 @@ mod tests {
             .collect()
     }
 
-    fn manifest_with_message_objects(
-        cluster_id: &str,
-        epoch: u64,
-        blocks_sha256: &str,
-        index_sha256: &str,
-    ) -> GenerationManifest {
-        GenerationManifest {
-            schema_version: 1,
-            cluster_id: cluster_id.to_owned(),
-            epoch,
-            generation_id: "test".to_owned(),
-            generation_digest: "00".repeat(32),
-            slots_per_epoch: 432_000,
-            complete: true,
-            files: vec![
-                blockzilla_read_sdk::manifest::GenerationFile {
-                    name: BLOCKS_FILE.to_owned(),
-                    size: 0,
-                    sha256: blocks_sha256.to_owned(),
-                },
-                blockzilla_read_sdk::manifest::GenerationFile {
-                    name: BLOCK_INDEX_FILE.to_owned(),
-                    size: 0,
-                    sha256: index_sha256.to_owned(),
-                },
-            ],
-        }
-    }
-
-    fn add_message_schema_marker(manifest: &mut GenerationManifest, size: u64, sha256: &str) {
-        manifest
-            .files
-            .push(blockzilla_read_sdk::manifest::GenerationFile {
-                name: MAY_24_2026_MESSAGE_SCHEMA_MARKER_FILE.to_owned(),
-                size,
-                sha256: sha256.to_owned(),
-            });
-    }
-
     #[test]
     fn reversed_slot_range_is_rejected() {
         let error = validate_config(CompactProbeConfig {
@@ -2042,25 +1797,15 @@ mod tests {
             .to_string();
         assert!(current_error.contains("164162258") || current_error.contains("read"));
 
-        let payload: May24ArchiveV2HotMessagePayload =
-            wincode::config::deserialize_exact(&bytes, wincode_leb128_config()).unwrap();
-        let encoded = wincode::config::serialize(&payload, wincode_leb128_config()).unwrap();
-        assert_eq!(encoded, bytes, "SmallVec wire schema must remain exact");
-
-        let May24ArchiveV2HotMessagePayload::Legacy(message) = payload else {
+        let payload =
+            decode_compact_v2_message(CompactV2MessageSchema::May24PreUnknownFallbacks, &bytes)
+                .unwrap();
+        let ArchiveV2HotMessagePayload::Legacy(message) = payload else {
             panic!("expected legacy transaction message");
         };
-        assert!(!message.account_keys.spilled());
-        assert!(!message.instructions.spilled());
         assert_eq!(message.instructions.len(), 2);
-        assert!(
-            message
-                .instructions
-                .iter()
-                .all(|instruction| !instruction.accounts.spilled())
-        );
         match &message.instructions[0].data {
-            May24ArchiveV2HotInstructionData::System(
+            ArchiveV2HotInstructionData::System(
                 ArchiveV2SystemInstructionData::AllocateWithSeed {
                     base,
                     seed,
@@ -2085,153 +1830,16 @@ mod tests {
         }
         assert!(matches!(
             &message.instructions[1].data,
-            May24ArchiveV2HotInstructionData::Raw(data)
+            ArchiveV2HotInstructionData::Raw(data)
                 if data.as_slice() == decode_hex("030000000080c6a47e8d0300").as_slice()
         ));
-        let May24ArchiveV2HotInstructionData::Raw(raw) = &message.instructions[1].data else {
-            unreachable!("fixture raw instruction was checked above");
-        };
-        assert!(!raw.spilled());
 
         let mut trailing = bytes;
         trailing.push(0);
-        let trailing_result: Result<May24ArchiveV2HotMessagePayload, _> =
-            wincode::config::deserialize_exact(&trailing, wincode_leb128_config());
-        assert!(trailing_result.is_err());
-    }
-
-    #[test]
-    fn historical_message_schema_is_selected_only_for_exact_pinned_identity() {
-        let epoch_zero = manifest_with_message_objects(
-            "mainnet-beta",
-            0,
-            MAY_24_2026_MAINNET_EPOCH_0_BLOCKS_SHA256,
-            MAY_24_2026_MAINNET_EPOCH_0_INDEX_SHA256,
-        );
-        assert_eq!(
-            message_schema_for_manifest(&epoch_zero).unwrap(),
-            CompactMessageSchema::May24_2026PreUnknownInstructionFallbacks
-        );
-
-        let epoch_one = manifest_with_message_objects(
-            "mainnet-beta",
-            1,
-            MAY_24_2026_MAINNET_EPOCH_1_BLOCKS_SHA256,
-            MAY_24_2026_MAINNET_EPOCH_1_INDEX_SHA256,
-        );
-        assert_eq!(
-            message_schema_for_manifest(&epoch_one).unwrap(),
-            CompactMessageSchema::May24_2026PreUnknownInstructionFallbacks
-        );
-
-        let mislabeled = manifest_with_message_objects(
-            "mainnet-beta",
-            1,
-            MAY_24_2026_MAINNET_EPOCH_0_BLOCKS_SHA256,
-            MAY_24_2026_MAINNET_EPOCH_0_INDEX_SHA256,
-        );
-        assert!(message_schema_for_manifest(&mislabeled).is_err());
-
-        let partial = manifest_with_message_objects(
-            "mainnet-beta",
-            0,
-            MAY_24_2026_MAINNET_EPOCH_0_BLOCKS_SHA256,
-            &"11".repeat(32),
-        );
-        assert!(message_schema_for_manifest(&partial).is_err());
-
-        let current =
-            manifest_with_message_objects("mainnet-beta", 2, &"22".repeat(32), &"33".repeat(32));
-        assert_eq!(
-            message_schema_for_manifest(&current).unwrap(),
-            CompactMessageSchema::Current
-        );
-
-        let mut similarly_named = current;
-        similarly_named
-            .files
-            .push(blockzilla_read_sdk::manifest::GenerationFile {
-                name: format!("{MAY_24_2026_MESSAGE_SCHEMA_MARKER_FILE}.copy"),
-                size: MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE,
-                sha256: MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256.to_owned(),
-            });
-        assert_eq!(
-            message_schema_for_manifest(&similarly_named).unwrap(),
-            CompactMessageSchema::Current
-        );
-    }
-
-    #[test]
-    fn historical_message_schema_marker_asset_matches_its_manifest_binding() {
-        use sha2::{Digest as _, Sha256};
-
-        assert_eq!(
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_BYTES.len() as u64,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE
-        );
-        let digest: [u8; 32] = Sha256::digest(MAY_24_2026_MESSAGE_SCHEMA_MARKER_BYTES).into();
-        assert_eq!(
-            digest.as_slice(),
-            decode_hex(MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256)
-        );
-    }
-
-    #[test]
-    fn exact_message_schema_marker_selects_historical_decoder() {
-        let mut manifest =
-            manifest_with_message_objects("mainnet-beta", 2, &"22".repeat(32), &"33".repeat(32));
-        add_message_schema_marker(
-            &mut manifest,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256,
-        );
-
-        assert_eq!(
-            message_schema_for_manifest(&manifest).unwrap(),
-            CompactMessageSchema::May24_2026PreUnknownInstructionFallbacks
-        );
-    }
-
-    #[test]
-    fn malformed_message_schema_marker_binding_is_rejected() {
-        let mut wrong_size =
-            manifest_with_message_objects("mainnet-beta", 2, &"22".repeat(32), &"33".repeat(32));
-        add_message_schema_marker(
-            &mut wrong_size,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE + 1,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256,
-        );
         assert!(
-            message_schema_for_manifest(&wrong_size)
-                .unwrap_err()
-                .contains("malformed May 24 2026 historical message-schema marker binding")
+            decode_compact_v2_message(CompactV2MessageSchema::May24PreUnknownFallbacks, &trailing,)
+                .is_err()
         );
-
-        let mut wrong_digest =
-            manifest_with_message_objects("mainnet-beta", 2, &"22".repeat(32), &"33".repeat(32));
-        add_message_schema_marker(
-            &mut wrong_digest,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE,
-            &"44".repeat(32),
-        );
-        assert!(
-            message_schema_for_manifest(&wrong_digest)
-                .unwrap_err()
-                .contains("malformed May 24 2026 historical message-schema marker binding")
-        );
-
-        let mut malformed_pinned = manifest_with_message_objects(
-            "mainnet-beta",
-            0,
-            MAY_24_2026_MAINNET_EPOCH_0_BLOCKS_SHA256,
-            MAY_24_2026_MAINNET_EPOCH_0_INDEX_SHA256,
-        );
-        add_message_schema_marker(
-            &mut malformed_pinned,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SIZE + 1,
-            MAY_24_2026_MESSAGE_SCHEMA_MARKER_SHA256,
-        );
-        assert!(message_schema_for_manifest(&malformed_pinned).is_err());
     }
 
     #[test]
@@ -2417,7 +2025,7 @@ mod tests {
             &[],
             &keys,
             &blockhashes,
-            CompactMessageSchema::Current,
+            CompactV2MessageSchema::Current,
         )
         .unwrap_err();
         assert!(matches!(

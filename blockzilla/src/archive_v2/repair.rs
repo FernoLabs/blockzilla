@@ -2005,6 +2005,11 @@ fn visit_no_registry_pubkeys(
                     visit(*pubkey)?;
                 }
             }
+            blockzilla_format::WincodeArchiveV2NoRegistryMessage::V1(message) => {
+                for pubkey in &message.account_keys {
+                    visit(*pubkey)?;
+                }
+            }
             blockzilla_format::WincodeArchiveV2NoRegistryMessage::V0(message) => {
                 for pubkey in &message.account_keys {
                     visit(*pubkey)?;

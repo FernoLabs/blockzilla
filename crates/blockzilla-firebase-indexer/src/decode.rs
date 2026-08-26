@@ -62,9 +62,10 @@
 
 use blockzilla_format::{
     ArchiveV2ComputeBudgetInstructionData, ArchiveV2VoteHashRef, CompactInnerInstruction,
-    CompactMessageHeader, CompactPubkey, CompactReward, CompactTokenBalance, DataArray,
-    OwnedCompactRecentBlockhash, WincodeLeb128Config,
+    CompactMessageHeader, CompactPubkey, CompactReward, CompactTokenBalance,
+    CompactTransactionConfig, DataArray, OwnedCompactRecentBlockhash, WincodeLeb128Config,
 };
+use blockzilla_read_sdk::{CompactV2MessageSchema, CompactV2MetadataSchema};
 use wincode::{ReadResult, SchemaRead, error::invalid_tag_encoding, io::Reader};
 
 pub type Cfg = WincodeLeb128Config;
@@ -195,8 +196,32 @@ fn skip_vote_tower_sync(cursor: &mut &[u8]) -> ReadResult<()> {
 /// allocating for the `Raw`/`UnknownSystem`/`UnknownVote` catch-all variants
 /// — which is what every instruction for a program `blockzilla_format`
 /// doesn't specifically decode (i.e. every token/DeFi program) uses.
-fn skip_instruction_data(cursor: &mut &[u8]) -> ReadResult<()> {
+fn skip_instruction_data(
+    cursor: &mut &[u8],
+    message_schema: CompactV2MessageSchema,
+) -> ReadResult<()> {
     let tag = get::<u32>(cursor)?;
+    if message_schema == CompactV2MessageSchema::May24PreUnknownFallbacks {
+        match tag {
+            0 => skip_bytes(cursor)?,
+            1 => {
+                get::<ArchiveV2ComputeBudgetInstructionData>(cursor)?;
+            }
+            2 => skip_system_instruction_data(cursor)?,
+            3 => skip_vote_state_update(cursor)?,
+            4 => {
+                skip_vote_state_update(cursor)?;
+                get::<ArchiveV2VoteHashRef>(cursor)?;
+            }
+            5 => skip_vote_tower_sync(cursor)?,
+            6 => {
+                skip_vote_tower_sync(cursor)?;
+                get::<ArchiveV2VoteHashRef>(cursor)?;
+            }
+            other => return Err(invalid_tag_encoding(other as usize)),
+        }
+        return Ok(());
+    }
     match tag {
         0..=2 => skip_bytes(cursor)?, // Raw | UnknownSystem | UnknownVote
         3 => {
@@ -231,7 +256,10 @@ pub struct BorrowedInstruction<'de> {
     pub accounts: &'de [u8],
 }
 
-fn read_instruction<'de>(cursor: &mut &'de [u8]) -> ReadResult<BorrowedInstruction<'de>> {
+fn read_instruction<'de>(
+    cursor: &mut &'de [u8],
+    message_schema: CompactV2MessageSchema,
+) -> ReadResult<BorrowedInstruction<'de>> {
     let program_id_index = get::<u8>(cursor)?;
     // Repeated account indices are legal, so this slice's *length* is not
     // bounded by the number of distinct message accounts. It is still
@@ -241,7 +269,7 @@ fn read_instruction<'de>(cursor: &mut &'de [u8]) -> ReadResult<BorrowedInstructi
         "instruction account-index count exceeds remaining input",
     )?;
     let accounts = cursor.take_borrowed(accounts_len)?;
-    skip_instruction_data(cursor)?;
+    skip_instruction_data(cursor, message_schema)?;
     Ok(BorrowedInstruction {
         program_id_index,
         accounts,
@@ -309,6 +337,31 @@ pub struct DecodedMessage {
     pub account_keys: Vec<CompactPubkey>,
     pub is_v0: bool,
     pub num_required_signatures: u8,
+    pub num_readonly_signed_accounts: u8,
+    pub num_readonly_unsigned_accounts: u8,
+    pub instruction_count: usize,
+    pub expected_loaded_writable: usize,
+    pub expected_loaded_readonly: usize,
+}
+
+/// One account-bearing event from the borrowed message traversal.
+pub enum MessageAccountEvent<'de> {
+    StaticAccountCount(usize),
+    StaticAccount {
+        source_position: usize,
+        key: CompactPubkey,
+    },
+    Instruction(BorrowedInstruction<'de>),
+}
+
+/// Message shape retained after the streaming account traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamedMessageShape {
+    pub static_account_count: usize,
+    pub is_v0: bool,
+    pub num_required_signatures: u8,
+    pub num_readonly_signed_accounts: u8,
+    pub num_readonly_unsigned_accounts: u8,
     pub instruction_count: usize,
     pub expected_loaded_writable: usize,
     pub expected_loaded_readonly: usize,
@@ -316,22 +369,73 @@ pub struct DecodedMessage {
 
 pub fn decode_message<'de>(
     cursor: &mut &'de [u8],
+    on_instruction: impl FnMut(BorrowedInstruction<'de>),
+) -> ReadResult<DecodedMessage> {
+    decode_message_with_schema(cursor, CompactV2MessageSchema::Current, on_instruction)
+}
+
+/// Decode the account-bearing message fields under one explicitly selected
+/// Compact V2 message grammar.
+pub fn decode_message_with_schema<'de>(
+    cursor: &mut &'de [u8],
+    message_schema: CompactV2MessageSchema,
     mut on_instruction: impl FnMut(BorrowedInstruction<'de>),
 ) -> ReadResult<DecodedMessage> {
-    let is_v0 = match get::<u32>(cursor)? {
-        0 => false,
-        1 => true,
-        other => return Err(invalid_tag_encoding(other as usize)),
+    let mut account_keys = Vec::new();
+    let shape = stream_message_accounts_with_schema(cursor, message_schema, |event| {
+        match event {
+            MessageAccountEvent::StaticAccountCount(count) => {
+                account_keys.reserve_exact(count);
+            }
+            MessageAccountEvent::StaticAccount { key, .. } => account_keys.push(key),
+            MessageAccountEvent::Instruction(instruction) => on_instruction(instruction),
+        }
+        Ok::<(), wincode::error::ReadError>(())
+    })?;
+    Ok(DecodedMessage {
+        account_keys,
+        is_v0: shape.is_v0,
+        num_required_signatures: shape.num_required_signatures,
+        num_readonly_signed_accounts: shape.num_readonly_signed_accounts,
+        num_readonly_unsigned_accounts: shape.num_readonly_unsigned_accounts,
+        instruction_count: shape.instruction_count,
+        expected_loaded_writable: shape.expected_loaded_writable,
+        expected_loaded_readonly: shape.expected_loaded_readonly,
+    })
+}
+
+/// Traverse message accounts and borrowed instruction indexes without
+/// allocating an owned message-account lane.
+pub fn stream_message_accounts_with_schema<'de, E>(
+    cursor: &mut &'de [u8],
+    message_schema: CompactV2MessageSchema,
+    mut on_event: impl FnMut(MessageAccountEvent<'de>) -> Result<(), E>,
+) -> Result<StreamedMessageShape, E>
+where
+    E: From<wincode::error::ReadError> + From<wincode::io::ReadError>,
+{
+    let message_tag = get::<u32>(cursor)?;
+    let (is_v0, is_v1) = match (message_schema, message_tag) {
+        (_, 0) => (false, false),
+        (_, 1) => (true, false),
+        (CompactV2MessageSchema::Current, 2) => (false, true),
+        (_, other) => return Err(invalid_tag_encoding(other as usize).into()),
     };
     let header = get::<CompactMessageHeader>(cursor)?;
+    if is_v1 {
+        get::<CompactTransactionConfig>(cursor)?;
+    }
     let account_key_count = read_bounded_len(
         cursor,
         MAX_MESSAGE_ACCOUNTS,
         "static account key count exceeds message account cap",
     )?;
-    let mut account_keys = Vec::with_capacity(account_key_count);
-    for _ in 0..account_key_count {
-        account_keys.push(get::<CompactPubkey>(cursor)?);
+    on_event(MessageAccountEvent::StaticAccountCount(account_key_count))?;
+    for source_position in 0..account_key_count {
+        on_event(MessageAccountEvent::StaticAccount {
+            source_position,
+            key: get::<CompactPubkey>(cursor)?,
+        })?;
     }
     get::<OwnedCompactRecentBlockhash>(cursor)?;
 
@@ -340,7 +444,10 @@ pub fn decode_message<'de>(
         "top-level instruction count exceeds remaining input",
     )?;
     for _ in 0..instruction_count {
-        on_instruction(read_instruction(cursor)?);
+        on_event(MessageAccountEvent::Instruction(read_instruction(
+            cursor,
+            message_schema,
+        )?))?;
     }
 
     let mut expected_loaded_writable = 0usize;
@@ -372,23 +479,25 @@ pub fn decode_message<'de>(
             expected_loaded_readonly = expected_loaded_readonly
                 .checked_add(readonly)
                 .ok_or_else(|| wincode::error::invalid_value("loaded readonly count overflow"))?;
-            let total_accounts = account_keys
-                .len()
+            let total_accounts = account_key_count
                 .checked_add(expected_loaded_writable)
                 .and_then(|count| count.checked_add(expected_loaded_readonly))
                 .ok_or_else(|| wincode::error::invalid_value("message account count overflow"))?;
             if total_accounts > MAX_MESSAGE_ACCOUNTS {
                 return Err(wincode::error::invalid_value(
                     "static and loaded account count exceeds message account cap",
-                ));
+                )
+                .into());
             }
         }
     }
 
-    Ok(DecodedMessage {
-        account_keys,
+    Ok(StreamedMessageShape {
+        static_account_count: account_key_count,
         is_v0,
         num_required_signatures: header.num_required_signatures,
+        num_readonly_signed_accounts: header.num_readonly_signed_accounts,
+        num_readonly_unsigned_accounts: header.num_readonly_unsigned_accounts,
         instruction_count,
         expected_loaded_writable,
         expected_loaded_readonly,
@@ -403,6 +512,55 @@ pub struct BorrowedInnerInstruction<'de> {
     pub accounts: &'de [u8],
 }
 
+/// One account-bearing event from the borrowed metadata traversal.
+pub enum MetadataAccountEvent<'de> {
+    InnerInstruction(BorrowedInnerInstruction<'de>),
+    LoadedWritableCount(usize),
+    LoadedWritable(CompactPubkey),
+    LoadedReadonlyCount(usize),
+    LoadedReadonly(CompactPubkey),
+}
+
+/// Metadata shape retained after the streaming account traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamedMetadataShape {
+    pub has_error: bool,
+    pub inner_instructions_present: bool,
+    pub loaded_writable_count: usize,
+    pub loaded_readonly_count: usize,
+}
+
+/// Exact borrowed Compact V2 metadata field ranges for the source-split
+/// canary. Every range includes its source Wincode tag or length prefix.
+/// The two outcome ranges are non-contiguous in `CompactMetaV1` and must be
+/// length-framed before they are joined in a derived output record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowedMetadataEffectFields<'de> {
+    pub outcome_head: &'de [u8],
+    pub pre_balances: &'de [u8],
+    pub post_balances: &'de [u8],
+    pub inner_instructions: &'de [u8],
+    pub logs: &'de [u8],
+    pub pre_token_balances: &'de [u8],
+    pub post_token_balances: &'de [u8],
+    pub transaction_rewards: &'de [u8],
+    pub loaded_writable: &'de [u8],
+    pub loaded_readonly: &'de [u8],
+    pub outcome_tail: &'de [u8],
+}
+
+/// Shape and exact field ranges from one complete decoded metadata row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamedMetadataEffects<'de> {
+    pub shape: StreamedMetadataShape,
+    pub fields: BorrowedMetadataEffectFields<'de>,
+    pub inner_group_count: usize,
+    pub logs_present: bool,
+    pub pre_token_balance_count: usize,
+    pub post_token_balance_count: usize,
+    pub transaction_reward_count: usize,
+}
+
 pub struct DecodedMetadataPrefix {
     pub has_error: bool,
     pub inner_instructions_present: bool,
@@ -412,10 +570,21 @@ pub struct DecodedMetadataPrefix {
 /// Decode just the archived transaction outcome. This is sufficient when the
 /// row flags prove there are neither inner instructions nor loaded addresses.
 pub fn decode_metadata_error(cursor: &mut &[u8]) -> ReadResult<bool> {
+    decode_metadata_error_with_schema(cursor, CompactV2MetadataSchema::CurrentTypedError)
+}
+
+/// Decode only the outcome under one explicitly selected metadata grammar.
+pub fn decode_metadata_error_with_schema(
+    cursor: &mut &[u8],
+    metadata_schema: CompactV2MetadataSchema,
+) -> ReadResult<bool> {
     match get::<u8>(cursor)? {
         0 => Ok(false),
         1 => {
-            skip_transaction_error(cursor)?;
+            match metadata_schema {
+                CompactV2MetadataSchema::CurrentTypedError => skip_transaction_error(cursor)?,
+                CompactV2MetadataSchema::LegacyRawError => skip_bytes(cursor)?,
+            }
             Ok(true)
         }
         other => Err(invalid_tag_encoding(other as usize)),
@@ -718,9 +887,9 @@ fn skip_log_event(cursor: &mut &[u8]) -> ReadResult<()> {
 /// Stream past a `CompactLogStream` without materializing any outer or
 /// nested vectors/strings. Every allocation-bearing known-program payload is
 /// skipped from its bounded wire representation as well.
-fn skip_logs(cursor: &mut &[u8]) -> ReadResult<()> {
+fn skip_logs_present(cursor: &mut &[u8]) -> ReadResult<bool> {
     match get::<u8>(cursor)? {
-        0 => Ok(()),
+        0 => Ok(false),
         1 => {
             let event_count =
                 read_len_bounded_by_remaining(cursor, "log event count exceeds remaining input")?;
@@ -752,13 +921,17 @@ fn skip_logs(cursor: &mut &[u8]) -> ReadResult<()> {
                 get::<u32>(cursor)?;
             }
             skip_bytes(cursor)?; // DataTable::bytes
-            Ok(())
+            Ok(true)
         }
         other => Err(invalid_tag_encoding(other as usize)),
     }
 }
 
-fn skip_token_balances(cursor: &mut &[u8], maximum: usize) -> ReadResult<()> {
+fn skip_logs(cursor: &mut &[u8]) -> ReadResult<()> {
+    skip_logs_present(cursor).map(|_| ())
+}
+
+fn skip_token_balances_count(cursor: &mut &[u8], maximum: usize) -> ReadResult<usize> {
     let count = read_bounded_len(
         cursor,
         maximum,
@@ -767,28 +940,23 @@ fn skip_token_balances(cursor: &mut &[u8], maximum: usize) -> ReadResult<()> {
     for _ in 0..count {
         get::<CompactTokenBalance>(cursor)?;
     }
-    Ok(())
+    Ok(count)
 }
 
-fn skip_rewards(cursor: &mut &[u8]) -> ReadResult<()> {
+fn skip_token_balances(cursor: &mut &[u8], maximum: usize) -> ReadResult<()> {
+    skip_token_balances_count(cursor, maximum).map(|_| ())
+}
+
+fn skip_rewards_count(cursor: &mut &[u8]) -> ReadResult<usize> {
     let count = read_len_bounded_by_remaining(cursor, "reward count exceeds remaining input")?;
     for _ in 0..count {
         get::<CompactReward>(cursor)?;
     }
-    Ok(())
+    Ok(count)
 }
 
-fn read_loaded_addresses(cursor: &mut &[u8], maximum: usize) -> ReadResult<Vec<CompactPubkey>> {
-    let count = read_bounded_len(
-        cursor,
-        maximum,
-        "loaded address count exceeds total message account count",
-    )?;
-    let mut addresses = Vec::with_capacity(count);
-    for _ in 0..count {
-        addresses.push(get::<CompactPubkey>(cursor)?);
-    }
-    Ok(addresses)
+fn skip_rewards(cursor: &mut &[u8]) -> ReadResult<()> {
+    skip_rewards_count(cursor).map(|_| ())
 }
 
 /// Decode `CompactMetaV1`'s `err`/`fee`/`pre_balances`/`post_balances`
@@ -809,14 +977,81 @@ pub fn decode_metadata_prefix<'de>(
     cursor: &mut &'de [u8],
     need_loaded_addresses: bool,
     limits: MetadataDecodeLimits,
+    on_inner_instruction: impl FnMut(BorrowedInnerInstruction<'de>),
+) -> ReadResult<DecodedMetadataPrefix> {
+    decode_metadata_prefix_with_schema(
+        cursor,
+        CompactV2MetadataSchema::CurrentTypedError,
+        need_loaded_addresses,
+        limits,
+        on_inner_instruction,
+    )
+}
+
+/// Decode the account-bearing metadata prefix under one explicitly selected
+/// Compact V2 metadata grammar.
+pub fn decode_metadata_prefix_with_schema<'de>(
+    cursor: &mut &'de [u8],
+    metadata_schema: CompactV2MetadataSchema,
+    need_loaded_addresses: bool,
+    limits: MetadataDecodeLimits,
     mut on_inner_instruction: impl FnMut(BorrowedInnerInstruction<'de>),
 ) -> ReadResult<DecodedMetadataPrefix> {
+    let mut loaded_writable_addresses = Vec::new();
+    let mut loaded_readonly_addresses = Vec::new();
+    let shape = stream_metadata_accounts_with_schema(
+        cursor,
+        metadata_schema,
+        need_loaded_addresses,
+        limits,
+        |event| {
+            match event {
+                MetadataAccountEvent::InnerInstruction(instruction) => {
+                    on_inner_instruction(instruction);
+                }
+                MetadataAccountEvent::LoadedWritableCount(count) => {
+                    loaded_writable_addresses.reserve_exact(count);
+                }
+                MetadataAccountEvent::LoadedWritable(key) => {
+                    loaded_writable_addresses.push(key);
+                }
+                MetadataAccountEvent::LoadedReadonlyCount(count) => {
+                    loaded_readonly_addresses.reserve_exact(count);
+                }
+                MetadataAccountEvent::LoadedReadonly(key) => {
+                    loaded_readonly_addresses.push(key);
+                }
+            }
+            Ok::<(), wincode::error::ReadError>(())
+        },
+    )?;
+    Ok(DecodedMetadataPrefix {
+        has_error: shape.has_error,
+        inner_instructions_present: shape.inner_instructions_present,
+        loaded_addresses: need_loaded_addresses
+            .then_some((loaded_writable_addresses, loaded_readonly_addresses)),
+    })
+}
+
+/// Traverse inner-instruction indexes and loaded account references without
+/// allocating owned metadata account lanes.
+pub fn stream_metadata_accounts_with_schema<'de, E>(
+    cursor: &mut &'de [u8],
+    metadata_schema: CompactV2MetadataSchema,
+    need_loaded_addresses: bool,
+    limits: MetadataDecodeLimits,
+    mut on_event: impl FnMut(MetadataAccountEvent<'de>) -> Result<(), E>,
+) -> Result<StreamedMetadataShape, E>
+where
+    E: From<wincode::error::ReadError> + From<wincode::io::ReadError>,
+{
     if limits.total_message_accounts > MAX_MESSAGE_ACCOUNTS {
         return Err(wincode::error::invalid_value(
             "total message account count exceeds message account cap",
-        ));
+        )
+        .into());
     }
-    let has_error = decode_metadata_error(cursor)?;
+    let has_error = decode_metadata_error_with_schema(cursor, metadata_schema)?;
     get::<u64>(cursor)?; // fee
     skip_balances(cursor, limits.total_message_accounts)?;
     skip_balances(cursor, limits.total_message_accounts)?;
@@ -835,7 +1070,8 @@ pub fn decode_metadata_prefix<'de>(
                 if group_index >= limits.top_level_instruction_count {
                     return Err(wincode::error::invalid_value(
                         "inner-instruction group index is outside top-level instructions",
-                    ));
+                    )
+                    .into());
                 }
                 let inner_count = read_len_bounded_by_remaining(
                     cursor,
@@ -848,21 +1084,23 @@ pub fn decode_metadata_prefix<'de>(
                     if program_index >= limits.total_message_accounts {
                         return Err(wincode::error::invalid_value(
                             "inner-instruction program index is outside message accounts",
-                        ));
+                        )
+                        .into());
                     }
-                    on_inner_instruction(instruction);
+                    on_event(MetadataAccountEvent::InnerInstruction(instruction))?;
                 }
             }
             true
         }
-        other => return Err(invalid_tag_encoding(other as usize)),
+        other => return Err(invalid_tag_encoding(other as usize).into()),
     };
 
     if !need_loaded_addresses {
-        return Ok(DecodedMetadataPrefix {
+        return Ok(StreamedMetadataShape {
             has_error,
             inner_instructions_present,
-            loaded_addresses: None,
+            loaded_writable_count: 0,
+            loaded_readonly_count: 0,
         });
     }
 
@@ -870,19 +1108,337 @@ pub fn decode_metadata_prefix<'de>(
     skip_token_balances(cursor, limits.total_message_accounts)?;
     skip_token_balances(cursor, limits.total_message_accounts)?;
     skip_rewards(cursor)?;
-    let loaded_writable_addresses = read_loaded_addresses(cursor, limits.total_message_accounts)?;
-    let loaded_readonly_addresses = read_loaded_addresses(cursor, limits.total_message_accounts)?;
-    if loaded_writable_addresses.len() + loaded_readonly_addresses.len()
-        > limits.total_message_accounts
+    let loaded_writable_count = read_bounded_len(
+        cursor,
+        limits.total_message_accounts,
+        "loaded address count exceeds total message account count",
+    )?;
+    on_event(MetadataAccountEvent::LoadedWritableCount(
+        loaded_writable_count,
+    ))?;
+    for _ in 0..loaded_writable_count {
+        on_event(MetadataAccountEvent::LoadedWritable(get::<CompactPubkey>(
+            cursor,
+        )?))?;
+    }
+    let loaded_readonly_count = read_bounded_len(
+        cursor,
+        limits.total_message_accounts,
+        "loaded address count exceeds total message account count",
+    )?;
+    on_event(MetadataAccountEvent::LoadedReadonlyCount(
+        loaded_readonly_count,
+    ))?;
+    for _ in 0..loaded_readonly_count {
+        on_event(MetadataAccountEvent::LoadedReadonly(get::<CompactPubkey>(
+            cursor,
+        )?))?;
+    }
+    if loaded_writable_count + loaded_readonly_count > limits.total_message_accounts {
+        return Err(wincode::error::invalid_value(
+            "loaded address count exceeds total message account count",
+        )
+        .into());
+    }
+    Ok(StreamedMetadataShape {
+        has_error,
+        inner_instructions_present,
+        loaded_writable_count,
+        loaded_readonly_count,
+    })
+}
+
+#[inline]
+fn consumed_prefix<'de>(start: &'de [u8], remaining: &[u8]) -> &'de [u8] {
+    let consumed = start
+        .len()
+        .checked_sub(remaining.len())
+        .expect("metadata cursor remains a suffix of its source");
+    &start[..consumed]
+}
+
+/// Traverse one complete decoded `CompactMetaV1` record once, lending exact
+/// source field ranges while emitting the same account events as
+/// [`stream_metadata_accounts_with_schema`].
+///
+/// This function is for the source-split canary. It always consumes loaded
+/// address lanes and the complete metadata tail, and it rejects trailing
+/// bytes. It does not allocate or normalize any effect value.
+pub fn stream_metadata_effects_with_schema<'de, E>(
+    cursor: &mut &'de [u8],
+    metadata_schema: CompactV2MetadataSchema,
+    limits: MetadataDecodeLimits,
+    on_event: impl FnMut(MetadataAccountEvent<'de>) -> Result<(), E>,
+) -> Result<StreamedMetadataEffects<'de>, E>
+where
+    E: From<wincode::error::ReadError> + From<wincode::io::ReadError>,
+{
+    stream_metadata_effects_impl(cursor, metadata_schema, Some(limits), on_event)
+}
+
+/// Traverse complete metadata for a raw transaction without inventing
+/// relational message-account or top-level-instruction counts.
+///
+/// Wire collection sizes remain bounded by the protocol account cap and by
+/// the input length. Index values are decoded but are not compared with an
+/// unavailable message shape.
+pub fn stream_metadata_effects_structural_with_schema<'de, E>(
+    cursor: &mut &'de [u8],
+    metadata_schema: CompactV2MetadataSchema,
+    on_event: impl FnMut(MetadataAccountEvent<'de>) -> Result<(), E>,
+) -> Result<StreamedMetadataEffects<'de>, E>
+where
+    E: From<wincode::error::ReadError> + From<wincode::io::ReadError>,
+{
+    stream_metadata_effects_impl(cursor, metadata_schema, None, on_event)
+}
+
+fn stream_metadata_effects_impl<'de, E>(
+    cursor: &mut &'de [u8],
+    metadata_schema: CompactV2MetadataSchema,
+    limits: Option<MetadataDecodeLimits>,
+    mut on_event: impl FnMut(MetadataAccountEvent<'de>) -> Result<(), E>,
+) -> Result<StreamedMetadataEffects<'de>, E>
+where
+    E: From<wincode::error::ReadError> + From<wincode::io::ReadError>,
+{
+    let total_message_accounts = limits
+        .map(|limits| limits.total_message_accounts)
+        .unwrap_or(MAX_MESSAGE_ACCOUNTS);
+    if total_message_accounts > MAX_MESSAGE_ACCOUNTS {
+        return Err(wincode::error::invalid_value(
+            "total message account count exceeds message account cap",
+        )
+        .into());
+    }
+
+    let outcome_head_start = *cursor;
+    let has_error = decode_metadata_error_with_schema(cursor, metadata_schema)?;
+    get::<u64>(cursor)?; // fee
+    let outcome_head = consumed_prefix(outcome_head_start, cursor);
+
+    let pre_balances_start = *cursor;
+    skip_balances(cursor, total_message_accounts)?;
+    let pre_balances = consumed_prefix(pre_balances_start, cursor);
+    let post_balances_start = *cursor;
+    skip_balances(cursor, total_message_accounts)?;
+    let post_balances = consumed_prefix(post_balances_start, cursor);
+
+    let inner_start = *cursor;
+    let (inner_instructions_present, inner_group_count) = match get::<u8>(cursor)? {
+        0 => (false, 0),
+        1 => {
+            let group_count = if let Some(limits) = limits {
+                read_bounded_len(
+                    cursor,
+                    limits.top_level_instruction_count.min(cursor.len()),
+                    "inner-instruction group count exceeds top-level instruction count",
+                )?
+            } else {
+                read_len_bounded_by_remaining(
+                    cursor,
+                    "inner-instruction group count exceeds remaining input",
+                )?
+            };
+            for _ in 0..group_count {
+                let group_index = usize::try_from(get::<u32>(cursor)?)
+                    .map_err(|_| wincode::error::pointer_sized_decode_error())?;
+                if limits.is_some_and(|limits| group_index >= limits.top_level_instruction_count) {
+                    return Err(wincode::error::invalid_value(
+                        "inner-instruction group index is outside top-level instructions",
+                    )
+                    .into());
+                }
+                let inner_count = read_len_bounded_by_remaining(
+                    cursor,
+                    "inner-instruction count exceeds remaining input",
+                )?;
+                for _ in 0..inner_count {
+                    let instruction = read_inner_instruction(cursor)?;
+                    let program_index = usize::try_from(instruction.program_id_index)
+                        .map_err(|_| wincode::error::pointer_sized_decode_error())?;
+                    if limits.is_some_and(|limits| program_index >= limits.total_message_accounts) {
+                        return Err(wincode::error::invalid_value(
+                            "inner-instruction program index is outside message accounts",
+                        )
+                        .into());
+                    }
+                    on_event(MetadataAccountEvent::InnerInstruction(instruction))?;
+                }
+            }
+            (true, group_count)
+        }
+        other => return Err(invalid_tag_encoding(other as usize).into()),
+    };
+    let inner_instructions = consumed_prefix(inner_start, cursor);
+
+    let logs_start = *cursor;
+    let logs_present = skip_logs_present(cursor)?;
+    let logs = consumed_prefix(logs_start, cursor);
+
+    let pre_token_start = *cursor;
+    let pre_token_balance_count = skip_token_balances_count(cursor, total_message_accounts)?;
+    let pre_token_balances = consumed_prefix(pre_token_start, cursor);
+    let post_token_start = *cursor;
+    let post_token_balance_count = skip_token_balances_count(cursor, total_message_accounts)?;
+    let post_token_balances = consumed_prefix(post_token_start, cursor);
+
+    let rewards_start = *cursor;
+    let transaction_reward_count = skip_rewards_count(cursor)?;
+    let transaction_rewards = consumed_prefix(rewards_start, cursor);
+
+    let loaded_writable_start = *cursor;
+    let loaded_writable_count = read_bounded_len(
+        cursor,
+        total_message_accounts,
+        "loaded address count exceeds total message account count",
+    )?;
+    on_event(MetadataAccountEvent::LoadedWritableCount(
+        loaded_writable_count,
+    ))?;
+    for _ in 0..loaded_writable_count {
+        on_event(MetadataAccountEvent::LoadedWritable(get::<CompactPubkey>(
+            cursor,
+        )?))?;
+    }
+    let loaded_writable = consumed_prefix(loaded_writable_start, cursor);
+
+    let loaded_readonly_start = *cursor;
+    let loaded_readonly_count = read_bounded_len(
+        cursor,
+        total_message_accounts,
+        "loaded address count exceeds total message account count",
+    )?;
+    on_event(MetadataAccountEvent::LoadedReadonlyCount(
+        loaded_readonly_count,
+    ))?;
+    for _ in 0..loaded_readonly_count {
+        on_event(MetadataAccountEvent::LoadedReadonly(get::<CompactPubkey>(
+            cursor,
+        )?))?;
+    }
+    let loaded_readonly = consumed_prefix(loaded_readonly_start, cursor);
+    if loaded_writable_count
+        .checked_add(loaded_readonly_count)
+        .is_none_or(|count| count > total_message_accounts)
     {
         return Err(wincode::error::invalid_value(
             "loaded address count exceeds total message account count",
-        ));
+        )
+        .into());
     }
-    Ok(DecodedMetadataPrefix {
-        has_error,
-        inner_instructions_present,
-        loaded_addresses: Some((loaded_writable_addresses, loaded_readonly_addresses)),
+
+    let outcome_tail_start = *cursor;
+    match get::<u8>(cursor)? {
+        0 => {}
+        1 => {
+            get::<CompactPubkey>(cursor)?;
+            skip_bytes(cursor)?;
+        }
+        other => return Err(invalid_tag_encoding(other as usize).into()),
+    }
+    get::<Option<u64>>(cursor)?;
+    get::<Option<u64>>(cursor)?;
+    let outcome_tail = consumed_prefix(outcome_tail_start, cursor);
+    if !cursor.is_empty() {
+        return Err(wincode::error::invalid_value("metadata has trailing bytes").into());
+    }
+
+    Ok(StreamedMetadataEffects {
+        shape: StreamedMetadataShape {
+            has_error,
+            inner_instructions_present,
+            loaded_writable_count,
+            loaded_readonly_count,
+        },
+        fields: BorrowedMetadataEffectFields {
+            outcome_head,
+            pre_balances,
+            post_balances,
+            inner_instructions,
+            logs,
+            pre_token_balances,
+            post_token_balances,
+            transaction_rewards,
+            loaded_writable,
+            loaded_readonly,
+            outcome_tail,
+        },
+        inner_group_count,
+        logs_present,
+        pre_token_balance_count,
+        post_token_balance_count,
+        transaction_reward_count,
+    })
+}
+
+/// Finish and validate the metadata grammar after
+/// [`stream_metadata_accounts_with_schema`].
+///
+/// The account projection intentionally stops as soon as it has all account
+/// fields. A verifier must call this function and then require an empty cursor
+/// so malformed or trailing non-account metadata cannot be accepted. When
+/// `loaded_addresses_were_streamed` is false, this consumes the whole tail
+/// starting at `logs`; otherwise it starts at `return_data`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinishedMetadataTail {
+    pub unstreamed_loaded_writable_count: usize,
+    pub unstreamed_loaded_readonly_count: usize,
+}
+
+pub fn finish_metadata_tail_exact(
+    cursor: &mut &[u8],
+    loaded_addresses_were_streamed: bool,
+    limits: MetadataDecodeLimits,
+) -> ReadResult<FinishedMetadataTail> {
+    let mut unstreamed_loaded_writable_count = 0usize;
+    let mut unstreamed_loaded_readonly_count = 0usize;
+    if !loaded_addresses_were_streamed {
+        skip_logs(cursor)?;
+        skip_token_balances(cursor, limits.total_message_accounts)?;
+        skip_token_balances(cursor, limits.total_message_accounts)?;
+        skip_rewards(cursor)?;
+        let loaded_writable = read_bounded_len(
+            cursor,
+            limits.total_message_accounts,
+            "loaded address count exceeds total message account count",
+        )?;
+        for _ in 0..loaded_writable {
+            get::<CompactPubkey>(cursor)?;
+        }
+        let loaded_readonly = read_bounded_len(
+            cursor,
+            limits.total_message_accounts,
+            "loaded address count exceeds total message account count",
+        )?;
+        for _ in 0..loaded_readonly {
+            get::<CompactPubkey>(cursor)?;
+        }
+        if loaded_writable
+            .checked_add(loaded_readonly)
+            .is_none_or(|count| count > limits.total_message_accounts)
+        {
+            return Err(wincode::error::invalid_value(
+                "loaded address count exceeds total message account count",
+            ));
+        }
+        unstreamed_loaded_writable_count = loaded_writable;
+        unstreamed_loaded_readonly_count = loaded_readonly;
+    }
+
+    match get::<u8>(cursor)? {
+        0 => {}
+        1 => {
+            get::<CompactPubkey>(cursor)?;
+            skip_bytes(cursor)?;
+        }
+        other => return Err(invalid_tag_encoding(other as usize)),
+    }
+    get::<Option<u64>>(cursor)?;
+    get::<Option<u64>>(cursor)?;
+    Ok(FinishedMetadataTail {
+        unstreamed_loaded_writable_count,
+        unstreamed_loaded_readonly_count,
     })
 }
 
@@ -915,19 +1471,884 @@ mod tests {
     };
     use blockzilla_format::{
         ArchiveV2HotInstruction, ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage,
-        ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2SystemInstructionData,
-        ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, CompactInnerInstructions,
-        CompactInstructionError, CompactLogStream, CompactMessageHeader, CompactMetaV1,
-        CompactTransactionError, DataTable, LogEvent, OwnedCompactAddressTableLookup,
-        OwnedCompactRecentBlockhash, StringTable, wincode_leb128_config,
+        ArchiveV2HotMessagePayload, ArchiveV2HotV0Message, ArchiveV2HotV1Message,
+        ArchiveV2SystemInstructionData, ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate,
+        CompactInnerInstructions, CompactInstructionError, CompactLogStream, CompactMessageHeader,
+        CompactMetaV1, CompactReturnData, CompactTransactionError, DataTable, LogEvent,
+        OwnedCompactAddressTableLookup, OwnedCompactRecentBlockhash, StringTable,
+        wincode_leb128_config,
     };
 
     fn serialize<T: wincode::SchemaWrite<Cfg, Src = T>>(value: &T) -> Vec<u8> {
         wincode::config::serialize(value, wincode_leb128_config()).unwrap()
     }
 
+    #[test]
+    fn exact_metadata_finisher_consumes_tail_and_exposes_trailing_bytes() {
+        let metadata = CompactMetaV1 {
+            err: None,
+            fee: 5_000,
+            pre_balances: vec![9],
+            post_balances: vec![8],
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: vec![CompactPubkey::Id(1)],
+            loaded_readonly_addresses: vec![CompactPubkey::Raw([2; 32])],
+            return_data: Some(CompactReturnData {
+                program_id: CompactPubkey::Id(3),
+                data: vec![4, 5, 6],
+            }),
+            compute_units_consumed: Some(7),
+            cost_units: Some(8),
+        };
+        let encoded = serialize(&metadata);
+        for loaded_were_streamed in [false, true] {
+            let mut cursor = encoded.as_slice();
+            stream_metadata_accounts_with_schema(
+                &mut cursor,
+                CompactV2MetadataSchema::CurrentTypedError,
+                loaded_were_streamed,
+                MetadataDecodeLimits {
+                    total_message_accounts: 3,
+                    top_level_instruction_count: 0,
+                },
+                |_| Ok::<_, wincode::error::ReadError>(()),
+            )
+            .unwrap();
+            finish_metadata_tail_exact(
+                &mut cursor,
+                loaded_were_streamed,
+                MetadataDecodeLimits {
+                    total_message_accounts: 3,
+                    top_level_instruction_count: 0,
+                },
+            )
+            .unwrap();
+            assert!(cursor.is_empty());
+        }
+
+        let mut with_trailing = encoded.clone();
+        with_trailing.push(0xaa);
+        let mut cursor = with_trailing.as_slice();
+        stream_metadata_accounts_with_schema(
+            &mut cursor,
+            CompactV2MetadataSchema::CurrentTypedError,
+            true,
+            MetadataDecodeLimits {
+                total_message_accounts: 3,
+                top_level_instruction_count: 0,
+            },
+            |_| Ok::<_, wincode::error::ReadError>(()),
+        )
+        .unwrap();
+        finish_metadata_tail_exact(
+            &mut cursor,
+            true,
+            MetadataDecodeLimits {
+                total_message_accounts: 3,
+                top_level_instruction_count: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(cursor, &[0xaa]);
+    }
+
+    #[test]
+    fn exact_metadata_finisher_rejects_truncated_tail() {
+        let metadata = CompactMetaV1 {
+            err: None,
+            fee: 1,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: Vec::new(),
+            loaded_readonly_addresses: Vec::new(),
+            return_data: Some(CompactReturnData {
+                program_id: CompactPubkey::Raw([7; 32]),
+                data: vec![1, 2, 3, 4],
+            }),
+            compute_units_consumed: Some(9),
+            cost_units: Some(10),
+        };
+        let encoded = serialize(&metadata);
+        let mut full_cursor = encoded.as_slice();
+        stream_metadata_accounts_with_schema(
+            &mut full_cursor,
+            CompactV2MetadataSchema::CurrentTypedError,
+            true,
+            MetadataDecodeLimits {
+                total_message_accounts: 1,
+                top_level_instruction_count: 0,
+            },
+            |_| Ok::<_, wincode::error::ReadError>(()),
+        )
+        .unwrap();
+        let tail = full_cursor;
+        assert!(tail.len() > 1);
+        for length in 0..tail.len() {
+            let mut truncated = &tail[..length];
+            assert!(
+                finish_metadata_tail_exact(
+                    &mut truncated,
+                    true,
+                    MetadataDecodeLimits {
+                        total_message_accounts: 1,
+                        top_level_instruction_count: 0,
+                    },
+                )
+                .is_err(),
+                "truncated metadata tail length {length} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn source_split_metadata_ranges_reconstruct_current_record_exactly() {
+        let metadata = CompactMetaV1 {
+            err: Some(CompactTransactionError::AccountInUse),
+            fee: 9,
+            pre_balances: vec![10, 11],
+            post_balances: vec![12, 13],
+            inner_instructions: Some(vec![CompactInnerInstructions {
+                index: 0,
+                instructions: vec![CompactInnerInstruction {
+                    program_id_index: 2,
+                    accounts: vec![0, 1],
+                    data: vec![4, 5],
+                    stack_height: Some(3),
+                }],
+            }]),
+            logs: Some(CompactLogStream {
+                events: Vec::new(),
+                strings: StringTable::default(),
+                data: DataTable::default(),
+            }),
+            pre_token_balances: vec![CompactTokenBalance {
+                account_index: 0,
+                mint: Some(CompactPubkey::Id(1)),
+                owner: Some(CompactPubkey::Raw([2; 32])),
+                program_id: None,
+                amount: 14,
+                decimals: 6,
+            }],
+            post_token_balances: vec![CompactTokenBalance {
+                account_index: 1,
+                mint: None,
+                owner: Some(CompactPubkey::Id(2)),
+                program_id: Some(CompactPubkey::Raw([3; 32])),
+                amount: 15,
+                decimals: 7,
+            }],
+            rewards: vec![CompactReward {
+                pubkey: CompactPubkey::Raw([4; 32]),
+                lamports: -5,
+                post_balance: 16,
+                reward_type: 2,
+                commission: Some(8),
+            }],
+            loaded_writable_addresses: vec![CompactPubkey::Id(2)],
+            loaded_readonly_addresses: Vec::new(),
+            return_data: Some(CompactReturnData {
+                program_id: CompactPubkey::Raw([6; 32]),
+                data: vec![7, 8],
+            }),
+            compute_units_consumed: Some(17),
+            cost_units: Some(18),
+        };
+        let encoded = serialize(&metadata);
+        let mut cursor = encoded.as_slice();
+        let effects = stream_metadata_effects_with_schema(
+            &mut cursor,
+            CompactV2MetadataSchema::CurrentTypedError,
+            MetadataDecodeLimits {
+                total_message_accounts: 3,
+                top_level_instruction_count: 1,
+            },
+            |_| Ok::<(), wincode::error::ReadError>(()),
+        )
+        .unwrap();
+        assert!(cursor.is_empty());
+        assert_eq!(effects.inner_group_count, 1);
+        assert!(effects.logs_present);
+        assert_eq!(effects.pre_token_balance_count, 1);
+        assert_eq!(effects.post_token_balance_count, 1);
+        assert_eq!(effects.transaction_reward_count, 1);
+
+        let mut expected_head = serialize(&metadata.err);
+        expected_head.extend(serialize(&metadata.fee));
+        let mut expected_tail = serialize(&metadata.return_data);
+        expected_tail.extend(serialize(&metadata.compute_units_consumed));
+        expected_tail.extend(serialize(&metadata.cost_units));
+        assert_eq!(effects.fields.outcome_head, expected_head);
+        assert_eq!(
+            effects.fields.pre_balances,
+            serialize(&metadata.pre_balances)
+        );
+        assert_eq!(
+            effects.fields.post_balances,
+            serialize(&metadata.post_balances)
+        );
+        assert_eq!(
+            effects.fields.inner_instructions,
+            serialize(&metadata.inner_instructions)
+        );
+        assert_eq!(effects.fields.logs, serialize(&metadata.logs));
+        assert_eq!(
+            effects.fields.pre_token_balances,
+            serialize(&metadata.pre_token_balances)
+        );
+        assert_eq!(
+            effects.fields.post_token_balances,
+            serialize(&metadata.post_token_balances)
+        );
+        assert_eq!(
+            effects.fields.transaction_rewards,
+            serialize(&metadata.rewards)
+        );
+        assert_eq!(
+            effects.fields.loaded_writable,
+            serialize(&metadata.loaded_writable_addresses)
+        );
+        assert_eq!(
+            effects.fields.loaded_readonly,
+            serialize(&metadata.loaded_readonly_addresses)
+        );
+        assert_eq!(effects.fields.outcome_tail, expected_tail);
+
+        let mut reconstructed = Vec::new();
+        reconstructed.extend_from_slice(effects.fields.outcome_head);
+        reconstructed.extend_from_slice(effects.fields.pre_balances);
+        reconstructed.extend_from_slice(effects.fields.post_balances);
+        reconstructed.extend_from_slice(effects.fields.inner_instructions);
+        reconstructed.extend_from_slice(effects.fields.logs);
+        reconstructed.extend_from_slice(effects.fields.pre_token_balances);
+        reconstructed.extend_from_slice(effects.fields.post_token_balances);
+        reconstructed.extend_from_slice(effects.fields.transaction_rewards);
+        reconstructed.extend_from_slice(effects.fields.loaded_writable);
+        reconstructed.extend_from_slice(effects.fields.loaded_readonly);
+        reconstructed.extend_from_slice(effects.fields.outcome_tail);
+        assert_eq!(reconstructed, encoded);
+    }
+
+    #[test]
+    fn source_split_legacy_ranges_are_exact_and_structural_mode_has_no_fake_relations() {
+        let legacy = legacy_raw_metadata_bytes(
+            Some(vec![0xaa, 0xbb]),
+            Some(vec![CompactInnerInstructions {
+                index: 300,
+                instructions: vec![CompactInnerInstruction {
+                    program_id_index: 500,
+                    accounts: vec![255],
+                    data: vec![1],
+                    stack_height: None,
+                }],
+            }]),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut relational = legacy.as_slice();
+        assert!(
+            stream_metadata_effects_with_schema(
+                &mut relational,
+                CompactV2MetadataSchema::LegacyRawError,
+                MetadataDecodeLimits {
+                    total_message_accounts: MAX_MESSAGE_ACCOUNTS,
+                    top_level_instruction_count: MAX_MESSAGE_ACCOUNTS,
+                },
+                |_| Ok::<(), wincode::error::ReadError>(()),
+            )
+            .is_err()
+        );
+        let mut structural = legacy.as_slice();
+        let effects = stream_metadata_effects_structural_with_schema(
+            &mut structural,
+            CompactV2MetadataSchema::LegacyRawError,
+            |_| Ok::<(), wincode::error::ReadError>(()),
+        )
+        .unwrap();
+        assert!(structural.is_empty());
+        assert!(effects.shape.has_error);
+        assert_eq!(effects.inner_group_count, 1);
+        let mut reconstructed = Vec::new();
+        reconstructed.extend_from_slice(effects.fields.outcome_head);
+        reconstructed.extend_from_slice(effects.fields.pre_balances);
+        reconstructed.extend_from_slice(effects.fields.post_balances);
+        reconstructed.extend_from_slice(effects.fields.inner_instructions);
+        reconstructed.extend_from_slice(effects.fields.logs);
+        reconstructed.extend_from_slice(effects.fields.pre_token_balances);
+        reconstructed.extend_from_slice(effects.fields.post_token_balances);
+        reconstructed.extend_from_slice(effects.fields.transaction_rewards);
+        reconstructed.extend_from_slice(effects.fields.loaded_writable);
+        reconstructed.extend_from_slice(effects.fields.loaded_readonly);
+        reconstructed.extend_from_slice(effects.fields.outcome_tail);
+        assert_eq!(reconstructed, legacy);
+
+        let mut trailing = legacy;
+        trailing.push(0xff);
+        assert!(
+            stream_metadata_effects_structural_with_schema(
+                &mut trailing.as_slice(),
+                CompactV2MetadataSchema::LegacyRawError,
+                |_| Ok::<(), wincode::error::ReadError>(()),
+            )
+            .is_err()
+        );
+    }
+
     fn append<T: wincode::SchemaWrite<Cfg, Src = T>>(bytes: &mut Vec<u8>, value: &T) {
         bytes.extend(serialize(value));
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum OwnedMessageAccountEvent {
+        StaticAccountCount(usize),
+        StaticAccount {
+            source_position: usize,
+            key: CompactPubkey,
+        },
+        Instruction {
+            program_id_index: u8,
+            accounts: Vec<u8>,
+        },
+    }
+
+    fn assert_message_stream_matches_owned(
+        bytes: &[u8],
+        schema: CompactV2MessageSchema,
+    ) -> (DecodedMessage, Vec<OwnedMessageAccountEvent>) {
+        let mut owned_cursor = bytes;
+        let mut owned_instructions = Vec::new();
+        let owned = decode_message_with_schema(&mut owned_cursor, schema, |instruction| {
+            owned_instructions.push((instruction.program_id_index, instruction.accounts.to_vec()));
+        })
+        .unwrap();
+
+        let mut streamed_cursor = bytes;
+        let mut streamed_events = Vec::new();
+        let streamed = stream_message_accounts_with_schema(&mut streamed_cursor, schema, |event| {
+            streamed_events.push(match event {
+                MessageAccountEvent::StaticAccountCount(count) => {
+                    OwnedMessageAccountEvent::StaticAccountCount(count)
+                }
+                MessageAccountEvent::StaticAccount {
+                    source_position,
+                    key,
+                } => OwnedMessageAccountEvent::StaticAccount {
+                    source_position,
+                    key,
+                },
+                MessageAccountEvent::Instruction(instruction) => {
+                    OwnedMessageAccountEvent::Instruction {
+                        program_id_index: instruction.program_id_index,
+                        accounts: instruction.accounts.to_vec(),
+                    }
+                }
+            });
+            Ok::<(), wincode::error::ReadError>(())
+        })
+        .unwrap();
+
+        let mut expected_events = Vec::new();
+        expected_events.push(OwnedMessageAccountEvent::StaticAccountCount(
+            owned.account_keys.len(),
+        ));
+        expected_events.extend(owned.account_keys.iter().copied().enumerate().map(
+            |(source_position, key)| OwnedMessageAccountEvent::StaticAccount {
+                source_position,
+                key,
+            },
+        ));
+        expected_events.extend(
+            owned_instructions
+                .iter()
+                .map(
+                    |(program_id_index, accounts)| OwnedMessageAccountEvent::Instruction {
+                        program_id_index: *program_id_index,
+                        accounts: accounts.clone(),
+                    },
+                ),
+        );
+
+        assert_eq!(streamed_events, expected_events);
+        assert_eq!(streamed_cursor, owned_cursor);
+        assert_eq!(
+            streamed,
+            StreamedMessageShape {
+                static_account_count: owned.account_keys.len(),
+                is_v0: owned.is_v0,
+                num_required_signatures: owned.num_required_signatures,
+                num_readonly_signed_accounts: owned.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: owned.num_readonly_unsigned_accounts,
+                instruction_count: owned.instruction_count,
+                expected_loaded_writable: owned.expected_loaded_writable,
+                expected_loaded_readonly: owned.expected_loaded_readonly,
+            }
+        );
+        (owned, streamed_events)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum OwnedMetadataAccountEvent {
+        InnerInstruction {
+            program_id_index: u32,
+            accounts: Vec<u8>,
+        },
+        LoadedWritableCount(usize),
+        LoadedWritable(CompactPubkey),
+        LoadedReadonlyCount(usize),
+        LoadedReadonly(CompactPubkey),
+    }
+
+    fn assert_metadata_stream_matches_owned(
+        bytes: &[u8],
+        schema: CompactV2MetadataSchema,
+        limits: MetadataDecodeLimits,
+    ) -> (DecodedMetadataPrefix, Vec<OwnedMetadataAccountEvent>) {
+        let mut owned_cursor = bytes;
+        let mut owned_inner = Vec::new();
+        let owned = decode_metadata_prefix_with_schema(
+            &mut owned_cursor,
+            schema,
+            true,
+            limits,
+            |instruction| {
+                owned_inner.push((instruction.program_id_index, instruction.accounts.to_vec()));
+            },
+        )
+        .unwrap();
+
+        let mut streamed_cursor = bytes;
+        let mut streamed_events = Vec::new();
+        let streamed = stream_metadata_accounts_with_schema(
+            &mut streamed_cursor,
+            schema,
+            true,
+            limits,
+            |event| {
+                streamed_events.push(match event {
+                    MetadataAccountEvent::InnerInstruction(instruction) => {
+                        OwnedMetadataAccountEvent::InnerInstruction {
+                            program_id_index: instruction.program_id_index,
+                            accounts: instruction.accounts.to_vec(),
+                        }
+                    }
+                    MetadataAccountEvent::LoadedWritableCount(count) => {
+                        OwnedMetadataAccountEvent::LoadedWritableCount(count)
+                    }
+                    MetadataAccountEvent::LoadedWritable(key) => {
+                        OwnedMetadataAccountEvent::LoadedWritable(key)
+                    }
+                    MetadataAccountEvent::LoadedReadonlyCount(count) => {
+                        OwnedMetadataAccountEvent::LoadedReadonlyCount(count)
+                    }
+                    MetadataAccountEvent::LoadedReadonly(key) => {
+                        OwnedMetadataAccountEvent::LoadedReadonly(key)
+                    }
+                });
+                Ok::<(), wincode::error::ReadError>(())
+            },
+        )
+        .unwrap();
+
+        let (loaded_writable, loaded_readonly) = owned.loaded_addresses.as_ref().unwrap();
+        let mut expected_events = owned_inner
+            .iter()
+            .map(
+                |(program_id_index, accounts)| OwnedMetadataAccountEvent::InnerInstruction {
+                    program_id_index: *program_id_index,
+                    accounts: accounts.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        expected_events.push(OwnedMetadataAccountEvent::LoadedWritableCount(
+            loaded_writable.len(),
+        ));
+        expected_events.extend(
+            loaded_writable
+                .iter()
+                .copied()
+                .map(OwnedMetadataAccountEvent::LoadedWritable),
+        );
+        expected_events.push(OwnedMetadataAccountEvent::LoadedReadonlyCount(
+            loaded_readonly.len(),
+        ));
+        expected_events.extend(
+            loaded_readonly
+                .iter()
+                .copied()
+                .map(OwnedMetadataAccountEvent::LoadedReadonly),
+        );
+
+        assert_eq!(streamed_events, expected_events);
+        assert_eq!(streamed_cursor, owned_cursor);
+        assert_eq!(streamed.has_error, owned.has_error);
+        assert_eq!(
+            streamed.inner_instructions_present,
+            owned.inner_instructions_present
+        );
+        assert_eq!(streamed.loaded_writable_count, loaded_writable.len());
+        assert_eq!(streamed.loaded_readonly_count, loaded_readonly.len());
+        (owned, streamed_events)
+    }
+
+    fn assert_message_stream_error_matches_owned(bytes: &[u8], schema: CompactV2MessageSchema) {
+        let mut owned_cursor = bytes;
+        let owned_error = decode_message_with_schema(&mut owned_cursor, schema, |_| {})
+            .err()
+            .expect("owned message decoder must reject the fixture")
+            .to_string();
+        let mut streamed_cursor = bytes;
+        let streamed_error =
+            stream_message_accounts_with_schema(&mut streamed_cursor, schema, |_| {
+                Ok::<(), wincode::error::ReadError>(())
+            })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(streamed_error, owned_error);
+        assert_eq!(streamed_cursor, owned_cursor);
+    }
+
+    fn assert_metadata_stream_error_matches_owned(
+        bytes: &[u8],
+        schema: CompactV2MetadataSchema,
+        limits: MetadataDecodeLimits,
+    ) {
+        let mut owned_cursor = bytes;
+        let owned_error =
+            decode_metadata_prefix_with_schema(&mut owned_cursor, schema, true, limits, |_| {})
+                .err()
+                .expect("owned metadata decoder must reject the fixture")
+                .to_string();
+        let mut streamed_cursor = bytes;
+        let streamed_error = stream_metadata_accounts_with_schema(
+            &mut streamed_cursor,
+            schema,
+            true,
+            limits,
+            |_| Ok::<(), wincode::error::ReadError>(()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(streamed_error, owned_error);
+        assert_eq!(streamed_cursor, owned_cursor);
+    }
+
+    fn legacy_raw_metadata_bytes(
+        raw_error: Option<Vec<u8>>,
+        inner_instructions: Option<Vec<CompactInnerInstructions>>,
+        loaded_writable_addresses: Vec<CompactPubkey>,
+        loaded_readonly_addresses: Vec<CompactPubkey>,
+    ) -> Vec<u8> {
+        let mut bytes = serialize(&raw_error);
+        append(&mut bytes, &5_000_u64);
+        append(&mut bytes, &Vec::<u64>::new());
+        append(&mut bytes, &Vec::<u64>::new());
+        append(&mut bytes, &inner_instructions);
+        append(&mut bytes, &Option::<CompactLogStream>::None);
+        append(&mut bytes, &Vec::<CompactTokenBalance>::new());
+        append(&mut bytes, &Vec::<CompactTokenBalance>::new());
+        append(&mut bytes, &Vec::<CompactReward>::new());
+        append(&mut bytes, &loaded_writable_addresses);
+        append(&mut bytes, &loaded_readonly_addresses);
+        append(
+            &mut bytes,
+            &Option::<blockzilla_format::CompactReturnData>::None,
+        );
+        append(&mut bytes, &Option::<u64>::None);
+        append(&mut bytes, &Option::<u64>::None);
+        bytes
+    }
+
+    #[test]
+    fn streaming_message_events_match_owned_current_and_may24_profiles() {
+        let legacy = ArchiveV2HotMessagePayload::Legacy(ArchiveV2HotLegacyMessage {
+            header: CompactMessageHeader {
+                num_required_signatures: 2,
+                num_readonly_signed_accounts: 1,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![
+                CompactPubkey::Id(1),
+                CompactPubkey::Raw([2; 32]),
+                CompactPubkey::Id(3),
+            ],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+            instructions: vec![ArchiveV2HotInstruction {
+                program_id_index: 2,
+                accounts: vec![1, 0, 1],
+                data: ArchiveV2HotInstructionData::Raw(vec![7, 8]),
+            }],
+        });
+        let legacy_bytes = serialize(&legacy);
+        for schema in [
+            CompactV2MessageSchema::Current,
+            CompactV2MessageSchema::May24PreUnknownFallbacks,
+        ] {
+            let (decoded, events) = assert_message_stream_matches_owned(&legacy_bytes, schema);
+            assert!(!decoded.is_v0);
+            assert_eq!(decoded.account_keys.len(), 3);
+            assert_eq!(events.len(), 5);
+        }
+
+        let v0 = ArchiveV2HotMessagePayload::V0(ArchiveV2HotV0Message {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+            account_keys: vec![CompactPubkey::Id(4), CompactPubkey::Raw([5; 32])],
+            recent_blockhash: OwnedCompactRecentBlockhash::Nonce([6; 32]),
+            instructions: vec![ArchiveV2HotInstruction {
+                program_id_index: 1,
+                accounts: vec![0, 2, 3],
+                data: ArchiveV2HotInstructionData::Raw(Vec::new()),
+            }],
+            address_table_lookups: vec![OwnedCompactAddressTableLookup {
+                account_key: CompactPubkey::Id(7),
+                writable_indexes: vec![0],
+                readonly_indexes: vec![1, 2],
+            }],
+        });
+        let (decoded, events) =
+            assert_message_stream_matches_owned(&serialize(&v0), CompactV2MessageSchema::Current);
+        assert!(decoded.is_v0);
+        assert_eq!(decoded.expected_loaded_writable, 1);
+        assert_eq!(decoded.expected_loaded_readonly, 2);
+        assert_eq!(events.len(), 4);
+
+        let v1 = ArchiveV2HotMessagePayload::V1(ArchiveV2HotV1Message {
+            header: CompactMessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            config: CompactTransactionConfig {
+                priority_fee: Some(9),
+                compute_unit_limit: Some(10),
+                loaded_accounts_data_size_limit: Some(11),
+                heap_size: Some(12),
+            },
+            account_keys: vec![CompactPubkey::Raw([8; 32]), CompactPubkey::Id(9)],
+            recent_blockhash: OwnedCompactRecentBlockhash::Id(1),
+            instructions: vec![ArchiveV2HotInstruction {
+                program_id_index: 1,
+                accounts: vec![0],
+                data: ArchiveV2HotInstructionData::Raw(vec![13]),
+            }],
+        });
+        let (decoded, events) =
+            assert_message_stream_matches_owned(&serialize(&v1), CompactV2MessageSchema::Current);
+        assert!(!decoded.is_v0);
+        assert_eq!(decoded.expected_loaded_writable, 0);
+        assert_eq!(decoded.expected_loaded_readonly, 0);
+        assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn streaming_metadata_events_match_owned_current_and_legacy_profiles() {
+        let inner_instructions = Some(vec![CompactInnerInstructions {
+            index: 1,
+            instructions: vec![CompactInnerInstruction {
+                program_id_index: 2,
+                accounts: vec![0, 3, 0],
+                data: vec![9, 8, 7],
+                stack_height: Some(2),
+            }],
+        }]);
+        let loaded_writable = vec![CompactPubkey::Id(3)];
+        let loaded_readonly = vec![CompactPubkey::Raw([4; 32])];
+        let current = CompactMetaV1 {
+            err: Some(CompactTransactionError::InvalidProgramForExecution),
+            fee: 5_000,
+            pre_balances: vec![10, 20],
+            post_balances: vec![9, 21],
+            inner_instructions: inner_instructions.clone(),
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: loaded_writable.clone(),
+            loaded_readonly_addresses: loaded_readonly.clone(),
+            return_data: None,
+            compute_units_consumed: Some(42),
+            cost_units: Some(84),
+        };
+        let limits = MetadataDecodeLimits {
+            total_message_accounts: 4,
+            top_level_instruction_count: 2,
+        };
+        let (decoded, events) = assert_metadata_stream_matches_owned(
+            &serialize(&current),
+            CompactV2MetadataSchema::CurrentTypedError,
+            limits,
+        );
+        assert!(decoded.has_error);
+        assert!(decoded.inner_instructions_present);
+        assert_eq!(events.len(), 5);
+
+        let legacy = legacy_raw_metadata_bytes(
+            Some(vec![8, 0, 0, 0]),
+            inner_instructions,
+            loaded_writable,
+            loaded_readonly,
+        );
+        let (decoded, events) = assert_metadata_stream_matches_owned(
+            &legacy,
+            CompactV2MetadataSchema::LegacyRawError,
+            limits,
+        );
+        assert!(decoded.has_error);
+        assert!(decoded.inner_instructions_present);
+        assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn streaming_decoders_preserve_owned_errors_and_callback_failures() {
+        let valid = serialize(&ArchiveV2HotMessagePayload::Legacy(
+            ArchiveV2HotLegacyMessage {
+                header: CompactMessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![CompactPubkey::Id(1)],
+                recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+                instructions: vec![ArchiveV2HotInstruction {
+                    program_id_index: 0,
+                    accounts: vec![0],
+                    data: ArchiveV2HotInstructionData::Raw(vec![1, 2, 3]),
+                }],
+            },
+        ));
+        assert_message_stream_error_matches_owned(
+            &valid[..valid.len() - 1],
+            CompactV2MessageSchema::Current,
+        );
+        assert_message_stream_error_matches_owned(
+            &serialize(&3_u32),
+            CompactV2MessageSchema::Current,
+        );
+        assert_message_stream_error_matches_owned(
+            &serialize(&ArchiveV2HotMessagePayload::Legacy(
+                ArchiveV2HotLegacyMessage {
+                    header: CompactMessageHeader {
+                        num_required_signatures: 1,
+                        num_readonly_signed_accounts: 0,
+                        num_readonly_unsigned_accounts: 0,
+                    },
+                    account_keys: vec![CompactPubkey::Id(1); MAX_MESSAGE_ACCOUNTS + 1],
+                    recent_blockhash: OwnedCompactRecentBlockhash::Id(0),
+                    instructions: Vec::new(),
+                },
+            )),
+            CompactV2MessageSchema::Current,
+        );
+        let mut may24_rejects_v1 = serialize(&2_u32);
+        append(
+            &mut may24_rejects_v1,
+            &CompactMessageHeader {
+                num_required_signatures: 0,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 0,
+            },
+        );
+        assert_message_stream_error_matches_owned(
+            &may24_rejects_v1,
+            CompactV2MessageSchema::May24PreUnknownFallbacks,
+        );
+
+        let callback_error = stream_message_accounts_with_schema(
+            &mut valid.as_slice(),
+            CompactV2MessageSchema::Current,
+            |event| match event {
+                MessageAccountEvent::StaticAccount { .. } => {
+                    Err(anyhow::anyhow!("message callback stopped"))
+                }
+                _ => Ok(()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(callback_error.to_string(), "message callback stopped");
+
+        let limits = MetadataDecodeLimits {
+            total_message_accounts: 1,
+            top_level_instruction_count: 1,
+        };
+        let mut invalid_inner_tag = serialize(&Option::<CompactTransactionError>::None);
+        append(&mut invalid_inner_tag, &0_u64);
+        append(&mut invalid_inner_tag, &Vec::<u64>::new());
+        append(&mut invalid_inner_tag, &Vec::<u64>::new());
+        append(&mut invalid_inner_tag, &2_u8);
+        assert_metadata_stream_error_matches_owned(
+            &invalid_inner_tag,
+            CompactV2MetadataSchema::CurrentTypedError,
+            limits,
+        );
+
+        let loaded_over_bound = CompactMetaV1 {
+            err: None,
+            fee: 0,
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
+            inner_instructions: None,
+            logs: None,
+            pre_token_balances: Vec::new(),
+            post_token_balances: Vec::new(),
+            rewards: Vec::new(),
+            loaded_writable_addresses: vec![CompactPubkey::Id(1), CompactPubkey::Id(2)],
+            loaded_readonly_addresses: Vec::new(),
+            return_data: None,
+            compute_units_consumed: None,
+            cost_units: None,
+        };
+        assert_metadata_stream_error_matches_owned(
+            &serialize(&loaded_over_bound),
+            CompactV2MetadataSchema::CurrentTypedError,
+            limits,
+        );
+
+        let valid_metadata = CompactMetaV1 {
+            loaded_writable_addresses: vec![CompactPubkey::Id(1)],
+            ..loaded_over_bound
+        };
+        let valid_metadata = serialize(&valid_metadata);
+        let mut consumed_cursor = valid_metadata.as_slice();
+        stream_metadata_accounts_with_schema(
+            &mut consumed_cursor,
+            CompactV2MetadataSchema::CurrentTypedError,
+            true,
+            limits,
+            |_| Ok::<(), wincode::error::ReadError>(()),
+        )
+        .unwrap();
+        let consumed = valid_metadata.len() - consumed_cursor.len();
+        assert_metadata_stream_error_matches_owned(
+            &valid_metadata[..consumed - 1],
+            CompactV2MetadataSchema::CurrentTypedError,
+            limits,
+        );
+
+        let callback_error = stream_metadata_accounts_with_schema(
+            &mut valid_metadata.as_slice(),
+            CompactV2MetadataSchema::CurrentTypedError,
+            true,
+            limits,
+            |event| match event {
+                MetadataAccountEvent::LoadedWritable(_) => {
+                    Err(anyhow::anyhow!("metadata callback stopped"))
+                }
+                _ => Ok(()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(callback_error.to_string(), "metadata callback stopped");
     }
 
     #[test]
@@ -943,7 +2364,7 @@ mod tests {
         );
         let system_bytes = serialize(&system);
         let mut cursor = system_bytes.as_slice();
-        skip_instruction_data(&mut cursor).unwrap();
+        skip_instruction_data(&mut cursor, CompactV2MessageSchema::Current).unwrap();
         assert!(cursor.is_empty());
 
         let vote =
@@ -958,7 +2379,7 @@ mod tests {
             });
         let vote_bytes = serialize(&vote);
         let mut cursor = vote_bytes.as_slice();
-        skip_instruction_data(&mut cursor).unwrap();
+        skip_instruction_data(&mut cursor, CompactV2MessageSchema::Current).unwrap();
         assert!(cursor.is_empty());
 
         let outcome = Some(CompactTransactionError::InstructionError(
@@ -1012,13 +2433,17 @@ mod tests {
         append(&mut system, &3u32); // CreateAccountWithSeed
         append(&mut system, &[0u8; 32]);
         system.extend_from_slice(&huge_length);
-        assert!(skip_instruction_data(&mut system.as_slice()).is_err());
+        assert!(
+            skip_instruction_data(&mut system.as_slice(), CompactV2MessageSchema::Current).is_err()
+        );
 
         let mut vote = Vec::new();
         append(&mut vote, &5u32); // VoteCompactUpdateVoteState
         append(&mut vote, &Option::<u64>::None);
         vote.extend_from_slice(&huge_length);
-        assert!(skip_instruction_data(&mut vote.as_slice()).is_err());
+        assert!(
+            skip_instruction_data(&mut vote.as_slice(), CompactV2MessageSchema::Current).is_err()
+        );
 
         let mut outcome = Vec::new();
         append(&mut outcome, &1u8); // Some(transaction error)

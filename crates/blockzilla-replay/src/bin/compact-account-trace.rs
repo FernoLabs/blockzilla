@@ -502,6 +502,7 @@ fn message_version(value: CompactMessageVersion) -> &'static str {
     match value {
         CompactMessageVersion::Legacy => "legacy",
         CompactMessageVersion::V0 => "v0",
+        CompactMessageVersion::V1 => "v1",
     }
 }
 

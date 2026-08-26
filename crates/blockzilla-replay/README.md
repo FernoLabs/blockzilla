@@ -112,7 +112,7 @@ cargo run -p blockzilla-replay --bin blockzilla-replay-poc -- \
 Compact generations encoded before the `UnknownSystem` and `UnknownVote`
 instruction fallbacks were inserted can opt into that historical message schema
 by copying
-`assets/archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker` into
+`../blockzilla-read-sdk/assets/archive-v2-message-schema-may24-pre-unknown-fallbacks-v1.marker` into
 the generation and listing this exact tuple in `archive-v2-generation.json`:
 
 ```text
@@ -121,10 +121,9 @@ size   87
 sha256 2a3aa5808085bc7b869c7536508227f19e6b9d9e3f5fb34b65ebda9936bf0206
 ```
 
-The generation digest must bind that file entry. The replay reader rejects the
-reserved marker filename with any other size or digest. Existing mainnet epoch
-0 and 1 manifests remain supported through their exact pinned blocks/index
-identities, while an unmarked, unpinned generation uses the current schema.
+The generation digest must bind that file entry. The reader checks the exact
+marker bytes, not only the declared file entry. It rejects unmarked mainnet
+epochs 0 and 1 instead of guessing a message schema.
 
 Run the bounded launch Config/System/Stake/Vote mutation path:
 

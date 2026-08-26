@@ -57,6 +57,11 @@ pub(crate) fn count_pubkeys(
                     visit_required_raw(*key, &mut add, &mut registry_refs)?;
                 }
             }
+            OwnedCompactMessage::V1(message) => {
+                for key in &message.account_keys {
+                    visit_required_raw(*key, &mut add, &mut registry_refs)?;
+                }
+            }
             OwnedCompactMessage::V0(message) => {
                 for key in &message.account_keys {
                     visit_required_raw(*key, &mut add, &mut registry_refs)?;
@@ -137,6 +142,11 @@ fn count_message_raw_pubkeys(message: &OwnedCompactMessage, raw: &mut u64) {
             }
             for lookup in &message.address_table_lookups {
                 count_raw_key(lookup.account_key, raw);
+            }
+        }
+        OwnedCompactMessage::V1(message) => {
+            for key in &message.account_keys {
+                count_raw_key(*key, raw);
             }
         }
     }
@@ -462,6 +472,11 @@ fn rekey_message_pubkeys(
 ) {
     match message {
         OwnedCompactMessage::Legacy(message) => {
+            for key in &mut message.account_keys {
+                rekey_pubkey(key, resolve, stats);
+            }
+        }
+        OwnedCompactMessage::V1(message) => {
             for key in &mut message.account_keys {
                 rekey_pubkey(key, resolve, stats);
             }

@@ -42,6 +42,10 @@ Archive V2 is pre-1.0. Pin the Git revision used to produce and read an archive.
 
 ## Proposed architecture
 
+- [Blockzilla Index Archive](design/blockzilla-index-archive.md): indexer-first
+  replacement for Archive V2 — column planes for replay and filtering, resolved
+  transaction accounts, rebuildable posting indexes, and the migration path
+  from today's V2 generations via an offline column transform.
 - [Rust runtime boundary](architecture/rust-runtime-boundary.md): ownership
   rule for production logic, the narrow external-tool exceptions, and the
   migration order for remaining Python and shell implementations.

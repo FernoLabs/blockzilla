@@ -735,6 +735,10 @@ fn write_transaction_version(
             w.raw(b"0");
             Ok(())
         }
+        VersionedMessage::V1(_) => {
+            w.raw(b"1");
+            Ok(())
+        }
     }
 }
 
@@ -755,6 +759,16 @@ fn write_message(w: &mut JsonWriter, message: &VersionedMessage<'_>) -> Result<(
             message.recent_blockhash,
             &message.instructions,
             Some(&message.address_table_lookups),
+        ),
+        // v1 has no lookup tables. Its header config is not rendered here
+        // because SIMD-0385's RPC shape for it is not settled.
+        VersionedMessage::V1(message) => write_message_fields(
+            w,
+            message.header,
+            &message.account_keys,
+            message.recent_blockhash,
+            &message.instructions,
+            None,
         ),
     }
 }
@@ -815,6 +829,7 @@ fn write_account_key_objects(
     let (header, account_keys) = match &tx.message {
         VersionedMessage::Legacy(message) => (message.header, message.account_keys.as_slice()),
         VersionedMessage::V0(message) => (message.header, message.account_keys.as_slice()),
+        VersionedMessage::V1(message) => (message.header, message.account_keys.as_slice()),
     };
 
     let required_signatures = header.num_required_signatures as usize;
@@ -877,6 +892,7 @@ fn write_account_key_objects_borrowed(
     let (header, account_keys) = match &tx.message {
         VersionedMessage::Legacy(message) => (message.header, message.account_keys.as_slice()),
         VersionedMessage::V0(message) => (message.header, message.account_keys.as_slice()),
+        VersionedMessage::V1(message) => (message.header, message.account_keys.as_slice()),
     };
 
     let required_signatures = header.num_required_signatures as usize;

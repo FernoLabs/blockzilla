@@ -3561,6 +3561,11 @@ pub(crate) fn visit_pubkeys_from_block(
                         visit(*pubkey)?;
                     }
                 }
+                WincodeArchiveV2NoRegistryMessage::V1(message) => {
+                    for pubkey in &message.account_keys {
+                        visit(*pubkey)?;
+                    }
+                }
                 WincodeArchiveV2NoRegistryMessage::V0(message) => {
                     for pubkey in &message.account_keys {
                         visit(*pubkey)?;

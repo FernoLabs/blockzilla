@@ -33,8 +33,8 @@ zstd-wasm = ["dep:ruzstd"]
 
 [dependencies]
 minicbor = { version = "2.2.2", features = ["full"] }
-solana-short-vec = { version = "=3.2.1", default-features = false, features = ["wincode"] }
-wincode = { version = "0.5.4", features = ["derive"] }
+solana-short-vec = { version = "=3.3.0", default-features = false, features = ["wincode"] }
+wincode = { version = "=0.6.1", features = ["derive"] }
 zstd = { version = "0.13.3", optional = true }
 ruzstd = { version = "0.8.3", optional = true }
 prost = "0.14.3"

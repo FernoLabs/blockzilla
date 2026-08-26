@@ -57,7 +57,6 @@ futures-channel = { version = "0.3.32", default-features = false, features = ["a
 futures-util = { version = "0.3.32", default-features = false, optional = true }
 itoa = "1.0.18"
 js-sys = { version = "0.3.98", optional = true }
-of-car-reader = { path = "../../crates/old-faithful/car-reader", default-features = false }
 pprof = { version = "0.15.0", features = ["flamegraph"], optional = true }
 reqwest = { version = "0.13.3", default-features = false, features = ["brotli", "deflate", "gzip", "http2", "json", "rustls", "zstd"], optional = true }
 ruzstd = { version = "0.8.3", optional = true }
@@ -65,10 +64,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time"], optional = true }
-tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", optional = true }
 wasm-bindgen = { version = "0.2.121", optional = true }
 wasm-bindgen-futures = { version = "0.4.71", optional = true }
 worker = { version = "0.8.3", features = ["http"], optional = true }
-wincode = "0.5.4"
+wincode = "=0.6.1"
 zstd = { version = "0.13.3", optional = true }

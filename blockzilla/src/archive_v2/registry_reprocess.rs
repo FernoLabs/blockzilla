@@ -2457,6 +2457,11 @@ fn visit_message_pubkeys(
                 visit(key, ReferenceClass::Eligible)?;
             }
         }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            for key in &mut message.account_keys {
+                visit(key, ReferenceClass::Eligible)?;
+            }
+        }
         ArchiveV2HotMessagePayload::V0(message) => {
             for key in &mut message.account_keys {
                 visit(key, ReferenceClass::Eligible)?;

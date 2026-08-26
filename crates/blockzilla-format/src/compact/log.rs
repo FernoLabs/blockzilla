@@ -10,7 +10,7 @@ use solana_pubkey::Pubkey;
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::program_logs::{self, ProgramLog, system_program};
-use crate::{CompactPubkey, KeyIndex, KeyStore, PubkeyCompactor};
+use crate::{CompactPubkey, KeyIndex, PubkeyCompactor, PubkeyResolver};
 
 pub type StrId = u32;
 pub type ProgramId = CompactPubkey;
@@ -403,6 +403,249 @@ pub enum LogEvent {
     },
 }
 
+impl CompactLogStream {
+    /// Visits every compact public-key reference stored in this log stream.
+    ///
+    /// Events are visited in stream order. Fields use the deterministic order
+    /// of the legacy JSON inspection path so validation keeps the same first
+    /// error. The visitor is fallible so callers can validate registry
+    /// identifiers without building an intermediate representation.
+    #[inline]
+    pub fn try_for_each_pubkey<E>(
+        &self,
+        mut visitor: impl FnMut(CompactPubkey) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for event in &self.events {
+            try_visit_log_event_pubkeys(event, &mut visitor)?;
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn try_visit_log_event_pubkeys<E>(
+    event: &LogEvent,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match event {
+        LogEvent::System(log) => try_visit_system_program_log_pubkeys(log, visitor),
+        LogEvent::LoaderUpgradedProgram { program }
+        | LogEvent::Invoke { program, depth: _ }
+        | LogEvent::BpfInvoke { program }
+        | LogEvent::Consumed {
+            program,
+            used: _,
+            limit: _,
+        }
+        | LogEvent::Success { program }
+        | LogEvent::BpfSuccess { program }
+        | LogEvent::Failure { program, reason: _ }
+        | LogEvent::BpfFailure { program, reason: _ }
+        | LogEvent::FailureCustomProgramError { program, code: _ }
+        | LogEvent::BpfFailureCustomProgramError { program, code: _ }
+        | LogEvent::FailureInvalidAccountData { program }
+        | LogEvent::BpfFailureInvalidAccountData { program }
+        | LogEvent::FailureInvalidProgramArgument { program }
+        | LogEvent::BpfFailureInvalidProgramArgument { program }
+        | LogEvent::Return { program, data: _ } => visitor(*program),
+        LogEvent::LoaderFinalizedAccount { account }
+        | LogEvent::RuntimeWritablePrivilegeEscalated { account }
+        | LogEvent::RuntimeSignerPrivilegeEscalated { account }
+        | LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { account } => visitor(*account),
+        LogEvent::ProgramLog(log) | LogEvent::ProgramPlainLog(log) => {
+            try_visit_program_log_pubkeys(log, visitor)
+        }
+        LogEvent::ProgramIdLog { program, log } => {
+            try_visit_program_log_pubkeys(log, visitor)?;
+            visitor(*program)
+        }
+        LogEvent::ProgramNotDeployed { program } | LogEvent::ProgramNotCached { program } => {
+            if let Some(program) = program {
+                visitor(*program)?;
+            }
+            Ok(())
+        }
+        LogEvent::LogTruncated
+        | LogEvent::StakeMergingAccounts
+        | LogEvent::ProgramLogError { msg: _ }
+        | LogEvent::ProgramAccountNotWritable
+        | LogEvent::ProgramIdMismatch
+        | LogEvent::ProgramNotUpgradeable
+        | LogEvent::ProgramAndProgramDataAccountMismatch
+        | LogEvent::ProgramWasExtendedInThisBlockAlready
+        | LogEvent::BpfConsumed { used: _, limit: _ }
+        | LogEvent::FailedToComplete { reason: _ }
+        | LogEvent::CustomProgramError { code: _ }
+        | LogEvent::Data { data: _ }
+        | LogEvent::Consumption { units: _ }
+        | LogEvent::CbRequestUnits { units: _ }
+        | LogEvent::UnknownProgram { program: _ }
+        | LogEvent::UnknownAccount { account: _ }
+        | LogEvent::VerifyEd25519
+        | LogEvent::VerifySecp256k1
+        | LogEvent::CloseContextState
+        | LogEvent::Plain { text: _ }
+        | LogEvent::Unparsed { text: _ } => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_program_log_pubkeys<E>(
+    log: &ProgramLog,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match log {
+        ProgramLog::Token2022(log) => try_visit_token_2022_log_pubkeys(log, visitor),
+        ProgramLog::Empty
+        | ProgramLog::Token(_)
+        | ProgramLog::Ata(_)
+        | ProgramLog::AddressLookupTable(_)
+        | ProgramLog::LoaderV3(_)
+        | ProgramLog::LoaderV4(_)
+        | ProgramLog::Memo(_)
+        | ProgramLog::Record(_)
+        | ProgramLog::TransferHook(_)
+        | ProgramLog::AccountCompression(_)
+        | ProgramLog::Stake(_)
+        | ProgramLog::ZkElgamalProof(_)
+        | ProgramLog::AnchorInstruction { name: _ }
+        | ProgramLog::AnchorErrorOccurred {
+            code: _,
+            number: _,
+            msg: _,
+        }
+        | ProgramLog::AnchorErrorThrown {
+            file: _,
+            line: _,
+            code: _,
+            number: _,
+            msg: _,
+        }
+        | ProgramLog::Unknown(_) => Ok(()),
+        #[cfg(feature = "known-program-logs")]
+        ProgramLog::Known(_) => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_token_2022_log_pubkeys<E>(
+    log: &program_logs::token_2022::Token2022Log,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    use program_logs::token_2022::Token2022Log;
+
+    match log {
+        Token2022Log::ErrorHarvestingFrom {
+            account_key,
+            error: _,
+        }
+        | Token2022Log::ErrorHarvestingFrom2 {
+            account_key,
+            error: _,
+        }
+        | Token2022Log::ErrorHarvestingFrom3 {
+            account_key,
+            error: _,
+        }
+        | Token2022Log::ErrorHarvestingFrom4 {
+            account_key,
+            error: _,
+        } => visitor(*account_key),
+        Token2022Log::Error(_)
+        | Token2022Log::Static(_)
+        | Token2022Log::CalculatedFee {
+            calculated_fee: _,
+            fee: _,
+        }
+        | Token2022Log::AccountNeedsResizePlusBytesDebug { bytes: _ }
+        | Token2022Log::AccountNeedsResizePlusBytesDebug2 { bytes: _ } => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_system_program_log_pubkeys<E>(
+    log: &system_program::SystemProgramLog,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    use system_program::SystemProgramLog;
+
+    match log {
+        SystemProgramLog::CreateAddressMismatch {
+            provided_addr,
+            derived_addr,
+        }
+        | SystemProgramLog::TransferFromAddressMismatch {
+            provided_addr,
+            derived_addr,
+        } => {
+            try_visit_pubkey_or_string(*derived_addr, visitor)?;
+            visitor(*provided_addr)
+        }
+        SystemProgramLog::CreateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AllocateAlreadyInUse { addr }
+        | SystemProgramLog::AllocateToMustSign { addr }
+        | SystemProgramLog::AllocateAccountAlreadyInUse { addr }
+        | SystemProgramLog::AssignAccountMustSign { addr }
+        | SystemProgramLog::CreateAccountAccountAlreadyInUse { addr } => {
+            try_visit_system_address(*addr, visitor)
+        }
+        SystemProgramLog::TransferFromMustSign { from } => visitor(*from),
+        SystemProgramLog::NonceAccountMustBeWriteable { action: _, account }
+        | SystemProgramLog::NonceAccountMustBeSigner { action: _, account }
+        | SystemProgramLog::NonceAccountMustSign { action: _, account }
+        | SystemProgramLog::NonceAccountStateInvalid { action: _, account } => {
+            try_visit_pubkey_or_string(*account, visitor)
+        }
+        SystemProgramLog::Instruction(_)
+        | SystemProgramLog::AllocateRequestedTooLarge {
+            requested: _,
+            max_allowed: _,
+        }
+        | SystemProgramLog::CreateAccountDataSizeLimitedInInnerInstructions { limit: _ }
+        | SystemProgramLog::TransferFromMustNotCarryData
+        | SystemProgramLog::TransferInsufficient { have: _, need: _ }
+        | SystemProgramLog::AdvanceNonceRecentBlockhashesEmpty
+        | SystemProgramLog::InitializeNonceRecentBlockhashesEmpty
+        | SystemProgramLog::AuthorizeNonceAccount { msg: _ }
+        | SystemProgramLog::NonceInsufficientLamports {
+            action: _,
+            have: _,
+            need: _,
+        }
+        | SystemProgramLog::NonceCanOnlyAdvanceOncePerSlot { action: _ } => Ok(()),
+    }
+}
+
+#[inline]
+fn try_visit_system_address<E>(
+    address: system_program::SystemAddress,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match address {
+        system_program::SystemAddress::Pubkey(pubkey) => {
+            try_visit_pubkey_or_string(pubkey, visitor)
+        }
+        system_program::SystemAddress::Debug { address, base } => {
+            try_visit_pubkey_or_string(address, visitor)?;
+            if let Some(base) = base {
+                try_visit_pubkey_or_string(base, visitor)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+#[inline]
+fn try_visit_pubkey_or_string<E>(
+    pubkey: system_program::PubkeyOrString,
+    visitor: &mut impl FnMut(CompactPubkey) -> Result<(), E>,
+) -> Result<(), E> {
+    match pubkey {
+        system_program::PubkeyOrString::Pubkey(pubkey) => visitor(pubkey),
+        system_program::PubkeyOrString::Text(_) => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactLogParseCount {
     pub label: String,
@@ -602,14 +845,9 @@ fn could_be_system_program_log(line: &str) -> bool {
 }
 
 #[inline]
-fn pid_to_pubkey(store: &KeyStore, pid: ProgramId) -> Pubkey {
-    pid.to_pubkey(store).unwrap_or_else(|| {
-        panic!(
-            "log.rs: ProgramId out of bounds: pid={:?} len={}",
-            pid,
-            store.len()
-        )
-    })
+fn pid_to_pubkey<R: PubkeyResolver + ?Sized>(resolver: &R, pid: ProgramId) -> Pubkey {
+    pid.to_pubkey(resolver)
+        .unwrap_or_else(|| panic!("log.rs: ProgramId cannot be resolved: pid={pid:?}"))
 }
 
 pub fn parse_logs(lines: &[String], index: &KeyIndex) -> CompactLogStream {
@@ -1239,7 +1477,10 @@ fn update_program_stack<'a>(parsed: ParsedLogLine<'a>, stack: &mut Vec<&'a str>)
     }
 }
 
-pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
+pub fn render_logs<R: PubkeyResolver + ?Sized>(
+    cls: &CompactLogStream,
+    resolver: &R,
+) -> Vec<String> {
     let mut out = Vec::with_capacity(cls.events.len());
     let st = &cls.strings;
     let dt = &cls.data;
@@ -1248,12 +1489,12 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
         match ev {
             LogEvent::Invoke { program, depth, .. } => out.push(format!(
                 "Program {} invoke [{}]",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 depth
             )),
             LogEvent::BpfInvoke { program } => out.push(format!(
                 "Call BPF program {}",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::Consumed {
                 program,
@@ -1261,7 +1502,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 limit,
             } => out.push(format!(
                 "Program {} consumed {} of {} compute units",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 used,
                 limit
             )),
@@ -1270,65 +1511,65 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
             }
             LogEvent::Success { program } => out.push(format!(
                 "Program {} success",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::BpfSuccess { program } => out.push(format!(
                 "BPF program {} success",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::Failure { program, reason } => out.push(format!(
                 "Program {} failed: {}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 st.resolve(*reason)
             )),
             LogEvent::BpfFailure { program, reason } => out.push(format!(
                 "BPF program {} failed {}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 st.resolve(*reason)
             )),
             LogEvent::FailureCustomProgramError { program, code } => out.push(format!(
                 "Program {} failed: custom program error: 0x{:x}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 code
             )),
             LogEvent::BpfFailureCustomProgramError { program, code } => out.push(format!(
                 "BPF program {} failed custom program error: 0x{:x}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 code
             )),
             LogEvent::FailureInvalidAccountData { program } => out.push(format!(
                 "Program {} failed: invalid account data for instruction",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::BpfFailureInvalidAccountData { program } => out.push(format!(
                 "BPF program {} failed invalid account data for instruction",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::FailureInvalidProgramArgument { program } => out.push(format!(
                 "Program {} failed: invalid program argument",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::BpfFailureInvalidProgramArgument { program } => out.push(format!(
                 "BPF program {} failed invalid program argument",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::FailedToComplete { reason } => out.push(format!(
                 "Program failed to complete: {}",
                 st.resolve(*reason)
             )),
-            LogEvent::System(sys) => out.push(sys.render(st, store)),
+            LogEvent::System(sys) => out.push(sys.render(st, resolver)),
             LogEvent::LogTruncated => out.push("Log truncated".to_string()),
             LogEvent::StakeMergingAccounts => out.push("Merging stake accounts".to_string()),
             LogEvent::LoaderUpgradedProgram { program } => out.push(format!(
                 "Upgraded program {}",
-                pid_to_pubkey(store, *program)
+                pid_to_pubkey(resolver, *program)
             )),
             LogEvent::LoaderFinalizedAccount { account } => out.push(format!(
                 "Finalized account {}",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::ProgramLog(log) => {
-                let payload = program_logs::render_program_log(log, store, st);
+                let payload = program_logs::render_program_log(log, resolver, st);
                 if payload.is_empty() {
                     out.push("Program log:".to_string());
                 } else {
@@ -1339,8 +1580,8 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 out.push(format!("Program log: Error: {}", st.resolve(*msg)));
             }
             LogEvent::ProgramIdLog { program, log } => {
-                let payload = program_logs::render_program_log(log, store, st);
-                let program = pid_to_pubkey(store, *program);
+                let payload = program_logs::render_program_log(log, resolver, st);
+                let program = pid_to_pubkey(resolver, *program);
                 if payload.is_empty() {
                     out.push(format!("Program {program} log:"));
                 } else {
@@ -1348,7 +1589,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 }
             }
             LogEvent::ProgramPlainLog(log) => {
-                out.push(program_logs::render_program_log(log, store, st));
+                out.push(program_logs::render_program_log(log, resolver, st));
             }
             LogEvent::ProgramAccountNotWritable => {
                 out.push("Program account not writeable".to_string())
@@ -1365,7 +1606,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
             }
             LogEvent::Return { program, data } => out.push(format!(
                 "Program return: {} {}",
-                pid_to_pubkey(store, *program),
+                pid_to_pubkey(resolver, *program),
                 dt.render(*data),
             )),
             LogEvent::Data { data } => out.push(format!("Program data: {}", dt.render(*data))),
@@ -1379,7 +1620,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 if let Some(pid) = program {
                     out.push(format!(
                         "Program {} is not deployed",
-                        pid_to_pubkey(store, *pid)
+                        pid_to_pubkey(resolver, *pid)
                     ));
                 } else {
                     out.push("Program is not deployed".to_string());
@@ -1389,7 +1630,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
                 if let Some(pid) = program {
                     out.push(format!(
                         "Program {} is not cached",
-                        pid_to_pubkey(store, *pid)
+                        pid_to_pubkey(resolver, *pid)
                     ));
                 } else {
                     out.push("Program is not cached".to_string());
@@ -1406,15 +1647,15 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
             LogEvent::VerifySecp256k1 => out.push("VerifySecp256k1".to_string()),
             LogEvent::RuntimeWritablePrivilegeEscalated { account } => out.push(format!(
                 "{}'s writable privilege escalated",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::RuntimeSignerPrivilegeEscalated { account } => out.push(format!(
                 "{}'s signer privilege escalated",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::RuntimeAccountOwnerBalanceVerificationFailed { account } => out.push(format!(
                 "failed to verify account {} instruction spent from the balance of an account it does not own",
-                pid_to_pubkey(store, *account)
+                pid_to_pubkey(resolver, *account)
             )),
             LogEvent::CloseContextState => out.push("CloseContextState".to_string()),
             LogEvent::Plain { text } | LogEvent::Unparsed { text } => {
@@ -1430,6 +1671,7 @@ pub fn render_logs(cls: &CompactLogStream, store: &KeyStore) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KeyStore;
 
     fn key_index(keys: &[&str]) -> KeyIndex {
         KeyIndex::build(

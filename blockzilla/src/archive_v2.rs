@@ -24,24 +24,25 @@ use blockzilla_format::{
     ArchiveV2HotBlockHeader, ArchiveV2HotBlockIndexRow, ArchiveV2HotInstruction,
     ArchiveV2HotInstructionData, ArchiveV2HotLegacyMessage, ArchiveV2HotMessagePayload,
     ArchiveV2HotMetaRecord, ArchiveV2HotRewards, ArchiveV2HotTxRow, ArchiveV2HotV0Message,
-    ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef, ArchiveV2VoteLockoutOffset,
-    ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync, BLOCK_TIME_GAP_FILE, CompactBlockHeader,
-    CompactInnerInstruction, CompactInnerInstructions, CompactLogStream, CompactMessageHeader,
-    CompactMetaV1, CompactPohEntry, CompactPubkey, CompactReturnData, CompactReward,
-    CompactShredding, CompactTokenBalance, CompactTransactionError, KeyIndex, KeyStore,
+    ArchiveV2HotV1Message, ArchiveV2SystemInstructionData, ArchiveV2VoteHashRef,
+    ArchiveV2VoteLockoutOffset, ArchiveV2VoteStateUpdate, ArchiveV2VoteTowerSync,
+    BLOCK_TIME_GAP_FILE, CompactBlockHeader, CompactInnerInstruction, CompactInnerInstructions,
+    CompactLogStream, CompactMessageHeader, CompactMetaV1, CompactPohEntry, CompactPubkey,
+    CompactReturnData, CompactReward, CompactShredding, CompactTokenBalance,
+    CompactTransactionConfig, CompactTransactionError, KeyIndex, KeyStore,
     LIVE_PRE_HOT_BLOCK_VERSION, LIVE_PUBKEY_RUN_HOT_FILE, LIVE_PUBKEY_RUN_RECORD_LEN,
     LIVE_PUBKEY_RUNS_DIR, LivePreHotBlock, LivePreHotRecord, LogEvent,
     OwnedCompactAddressTableLookup, OwnedCompactInstruction, OwnedCompactLegacyMessage,
     OwnedCompactMessage, OwnedCompactRecentBlockhash, OwnedCompactTransaction,
-    OwnedCompactV0Message, SplitCompactIndexRecord, WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION,
-    WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS, WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY,
-    WINCODE_ARCHIVE_V2_FLAG_LEB128, WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY,
-    WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION, WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block,
-    WincodeArchiveV2BlockHeader, WincodeArchiveV2Footer, WincodeArchiveV2Genesis,
-    WincodeArchiveV2GenesisAccount, WincodeArchiveV2GenesisBuiltin,
-    WincodeArchiveV2GenesisEpochSchedule, WincodeArchiveV2GenesisFeeParams,
-    WincodeArchiveV2GenesisInflationParams, WincodeArchiveV2GenesisPohParams,
-    WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
+    OwnedCompactV0Message, OwnedCompactV1Message, SplitCompactIndexRecord,
+    WINCODE_ARCHIVE_V2_BLOCK_ACCESS_VERSION, WINCODE_ARCHIVE_V2_FLAG_ALL_PUBKEY_REF_COUNTS,
+    WINCODE_ARCHIVE_V2_FLAG_FIRST_SEEN_REGISTRY, WINCODE_ARCHIVE_V2_FLAG_LEB128,
+    WINCODE_ARCHIVE_V2_FLAG_NO_REGISTRY, WINCODE_ARCHIVE_V2_HOT_BLOCK_VERSION,
+    WINCODE_ARCHIVE_V2_VERSION, WincodeArchiveV2Block, WincodeArchiveV2BlockHeader,
+    WincodeArchiveV2Footer, WincodeArchiveV2Genesis, WincodeArchiveV2GenesisAccount,
+    WincodeArchiveV2GenesisBuiltin, WincodeArchiveV2GenesisEpochSchedule,
+    WincodeArchiveV2GenesisFeeParams, WincodeArchiveV2GenesisInflationParams,
+    WincodeArchiveV2GenesisPohParams, WincodeArchiveV2GenesisRentParams, WincodeArchiveV2Header,
     WincodeArchiveV2NoRegistryAddressTableLookup, WincodeArchiveV2NoRegistryBlock,
     WincodeArchiveV2NoRegistryBlockHeader, WincodeArchiveV2NoRegistryGenesis,
     WincodeArchiveV2NoRegistryGenesisAccount, WincodeArchiveV2NoRegistryGenesisBuiltin,
@@ -51,11 +52,11 @@ use blockzilla_format::{
     WincodeArchiveV2NoRegistryReturnData, WincodeArchiveV2NoRegistryReward,
     WincodeArchiveV2NoRegistryRewards, WincodeArchiveV2NoRegistryTokenBalance,
     WincodeArchiveV2NoRegistryTransaction, WincodeArchiveV2NoRegistryTx,
-    WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2Payload, WincodeArchiveV2PohRecord,
-    WincodeArchiveV2Record, WincodeArchiveV2Rewards, WincodeArchiveV2ShreddingRecord,
-    WincodeArchiveV2Transaction, WincodeLeb128FramedReader, WincodeLeb128FramedWriter,
-    archive_v2_get_block_index_path, archive_v2_hot_index_path,
-    deserialize_archive_v2_hot_block_blob, encode_with_scratch,
+    WincodeArchiveV2NoRegistryV0Message, WincodeArchiveV2NoRegistryV1Message,
+    WincodeArchiveV2Payload, WincodeArchiveV2PohRecord, WincodeArchiveV2Record,
+    WincodeArchiveV2Rewards, WincodeArchiveV2ShreddingRecord, WincodeArchiveV2Transaction,
+    WincodeLeb128FramedReader, WincodeLeb128FramedWriter, archive_v2_get_block_index_path,
+    archive_v2_hot_index_path, deserialize_archive_v2_hot_block_blob, encode_with_scratch,
     live_producer::LivePubkeyCountRecord,
     program_logs::{
         ProgramLog,
@@ -91,10 +92,10 @@ use of_car_reader::{
 use prost::Message;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use solana_hash::Hash as SolanaHash;
 use solana_pubkey::Pubkey;
-use solana_vote_interface::{
-    instruction::VoteInstruction,
-    state::{TowerSync as SolanaTowerSync, VoteStateUpdate as SolanaVoteStateUpdate},
+use solana_vote_interface::state::{
+    Lockout, TowerSync as SolanaTowerSync, VoteStateUpdate as SolanaVoteStateUpdate,
 };
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt};
@@ -6166,6 +6167,7 @@ impl HotBlockBuffers {
         self.hot_instructions = match message {
             ArchiveV2HotMessagePayload::Legacy(message) => message.instructions,
             ArchiveV2HotMessagePayload::V0(message) => message.instructions,
+            ArchiveV2HotMessagePayload::V1(message) => message.instructions,
         };
         self.hot_instructions.clear();
     }
@@ -7041,6 +7043,10 @@ fn collect_access_message_refs(
                 collect_access_pubkey_id(lookup.account_key, pubkey_ids);
             }
         }
+        ArchiveV2HotMessagePayload::V1(message) => {
+            collect_access_pubkeys(message.account_keys.iter().copied(), pubkey_ids);
+            collect_access_recent_blockhash_id(&message.recent_blockhash, blockhash_ids);
+        }
     }
 }
 
@@ -7051,6 +7057,7 @@ fn collect_access_message_vote_hash_refs(
     let instructions = match message {
         ArchiveV2HotMessagePayload::Legacy(message) => message.instructions.as_slice(),
         ArchiveV2HotMessagePayload::V0(message) => message.instructions.as_slice(),
+        ArchiveV2HotMessagePayload::V1(message) => message.instructions.as_slice(),
     };
     for instruction in instructions {
         collect_access_instruction_vote_hash_refs(&instruction.data, vote_hash_block_ids);
@@ -7390,6 +7397,37 @@ fn hot_message_from_owned_with_instruction_scratch(
                 flags,
             ))
         }
+        OwnedCompactMessage::V1(message) => {
+            let has_compact_vote = match hot_instructions_from_owned_into(
+                message.instructions,
+                &message.account_keys,
+                known_program_ids,
+                slot_to_block_id,
+                vote_hashes,
+                instruction_scratch,
+            ) {
+                Ok(has_compact_vote) => has_compact_vote,
+                Err(error) => {
+                    instruction_scratch.clear();
+                    return Err(error);
+                }
+            };
+            let flags = if has_compact_vote {
+                ARCHIVE_V2_TX_FLAG_HAS_COMPACT_VOTE_IX
+            } else {
+                0
+            };
+            Ok((
+                ArchiveV2HotMessagePayload::V1(ArchiveV2HotV1Message {
+                    header: message.header,
+                    config: message.config,
+                    account_keys: message.account_keys,
+                    recent_blockhash: message.recent_blockhash,
+                    instructions: std::mem::take(instruction_scratch),
+                }),
+                flags,
+            ))
+        }
         OwnedCompactMessage::V0(message) => {
             let has_compact_vote = match hot_instructions_from_owned_into(
                 message.instructions,
@@ -7586,9 +7624,10 @@ fn parse_hot_vote_instruction_data(
         return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec()));
     }
 
-    let instruction_result: std::result::Result<VoteInstruction, _> = bincode::deserialize(data);
-    let instruction = match instruction_result {
-        Ok(instruction) => instruction,
+    let instruction = match decode_compact_vote_instruction(data) {
+        Ok(Some(instruction)) => instruction,
+        // A shape the archive keeps raw, which decoded cleanly.
+        Ok(None) => return Ok(ArchiveV2HotInstructionData::Raw(data.to_vec())),
         Err(_) => {
             match try_parse_historical_tower_sync_instruction_data(
                 data,
@@ -7604,7 +7643,7 @@ fn parse_hot_vote_instruction_data(
     };
 
     let parsed = match instruction {
-        VoteInstruction::CompactUpdateVoteState(update) => {
+        CompactVoteInstruction::CompactUpdateVoteState(update) => {
             let update =
                 match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
                 {
@@ -7613,20 +7652,20 @@ fn parse_hot_vote_instruction_data(
                 };
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteState(update)
         }
-        VoteInstruction::CompactUpdateVoteStateSwitch(update, switch_proof_hash) => {
+        CompactVoteInstruction::CompactUpdateVoteStateSwitch(update, switch_proof_hash) => {
             let update =
                 match archive_vote_state_update_from_solana(&update, slot_to_block_id, vote_hashes)
                 {
                     Ok(update) => update,
                     Err(_) => return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec())),
                 };
-            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
+            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash);
             ArchiveV2HotInstructionData::VoteCompactUpdateVoteStateSwitch {
                 update,
                 switch_proof_hash,
             }
         }
-        VoteInstruction::TowerSync(tower) => {
+        CompactVoteInstruction::TowerSync(tower) => {
             let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
             {
                 Ok(tower) => tower,
@@ -7634,21 +7673,208 @@ fn parse_hot_vote_instruction_data(
             };
             ArchiveV2HotInstructionData::VoteTowerSync(tower)
         }
-        VoteInstruction::TowerSyncSwitch(tower, switch_proof_hash) => {
+        CompactVoteInstruction::TowerSyncSwitch(tower, switch_proof_hash) => {
             let tower = match archive_tower_sync_from_solana(&tower, slot_to_block_id, vote_hashes)
             {
                 Ok(tower) => tower,
                 Err(_) => return Ok(ArchiveV2HotInstructionData::UnknownVote(data.to_vec())),
             };
-            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash.to_bytes());
+            let switch_proof_hash = vote_hashes.ref_aux_hash(switch_proof_hash);
             ArchiveV2HotInstructionData::VoteTowerSyncSwitch {
                 tower,
                 switch_proof_hash,
             }
         }
-        _ => ArchiveV2HotInstructionData::Raw(data.to_vec()),
     };
     Ok(parsed)
+}
+
+/// The four vote instruction shapes the archive stores typed. Every other tag
+/// is kept raw, so it never needs a decode at all.
+enum CompactVoteInstruction {
+    CompactUpdateVoteState(SolanaVoteStateUpdate),
+    CompactUpdateVoteStateSwitch(SolanaVoteStateUpdate, [u8; 32]),
+    TowerSync(SolanaTowerSync),
+    TowerSyncSwitch(SolanaTowerSync, [u8; 32]),
+}
+
+/// Decode a vote instruction without bincode.
+///
+/// `Ok(None)` means the tag is not one of the four typed shapes, which is a
+/// routine outcome rather than a failure — the caller keeps those raw. The
+/// compact grammar is `serde_compact_vote_state_update` / `serde_tower_sync`:
+/// a fixed `root` where `u64::MAX` encodes absence, `short_vec` lockout
+/// offsets, a hash, an optional timestamp, and for tower sync a block id.
+fn decode_compact_vote_instruction(data: &[u8]) -> Result<Option<CompactVoteInstruction>> {
+    let mut cursor = VoteInstructionCursor::new(data);
+    let decoded = match cursor.read_u32_le()? {
+        12 => CompactVoteInstruction::CompactUpdateVoteState(read_compact_vote_state_update(
+            &mut cursor,
+        )?),
+        13 => {
+            let update = read_compact_vote_state_update(&mut cursor)?;
+            CompactVoteInstruction::CompactUpdateVoteStateSwitch(update, cursor.read_pubkey()?)
+        }
+        14 => CompactVoteInstruction::TowerSync(read_compact_tower_sync(&mut cursor)?),
+        15 => {
+            let tower = read_compact_tower_sync(&mut cursor)?;
+            CompactVoteInstruction::TowerSyncSwitch(tower, cursor.read_pubkey()?)
+        }
+        tag => {
+            validate_non_typed_vote_instruction(&mut cursor, tag)?;
+            cursor.ensure_eof()?;
+            return Ok(None);
+        }
+    };
+    cursor.ensure_eof()?;
+    Ok(Some(decoded))
+}
+
+/// Walk a vote instruction the archive keeps raw, to prove it decodes.
+///
+/// The archive distinguishes an instruction it simply chooses not to type
+/// (`Raw`) from one that fails to decode (`UnknownVote`). Returning early on
+/// the tag alone would collapse that distinction and silently reclassify
+/// malformed data, so the body is walked for its shape. No value is kept.
+fn validate_non_typed_vote_instruction(
+    cursor: &mut VoteInstructionCursor<'_>,
+    tag: u32,
+) -> Result<()> {
+    match tag {
+        // InitializeAccount(VoteInit): three pubkeys then a commission byte.
+        0 => {
+            cursor.read_slice(97)?;
+        }
+        // Authorize(Pubkey, VoteAuthorize)
+        1 => {
+            cursor.read_pubkey()?;
+            read_vote_authorize(cursor)?;
+        }
+        2 => read_vote(cursor)?,
+        // Withdraw(u64)
+        3 => {
+            cursor.read_u64_le()?;
+        }
+        // UpdateValidatorIdentity carries no data.
+        4 => {}
+        // UpdateCommission(u8)
+        5 => {
+            cursor.read_array::<1>()?;
+        }
+        // VoteSwitch(Vote, Hash)
+        6 => {
+            read_vote(cursor)?;
+            cursor.read_pubkey()?;
+        }
+        7 => read_vote_authorize(cursor)?,
+        8 => read_uncompacted_vote_state_update(cursor)?,
+        // UpdateVoteStateSwitch(VoteStateUpdate, Hash)
+        9 => {
+            read_uncompacted_vote_state_update(cursor)?;
+            cursor.read_pubkey()?;
+        }
+        // AuthorizeWithSeed(VoteAuthorizeWithSeedArgs)
+        10 => {
+            read_vote_authorize(cursor)?;
+            cursor.read_pubkey()?;
+            cursor.read_system_seed()?;
+            cursor.read_pubkey()?;
+        }
+        // AuthorizeCheckedWithSeed(VoteAuthorizeCheckedWithSeedArgs)
+        11 => {
+            read_vote_authorize(cursor)?;
+            cursor.read_pubkey()?;
+            cursor.read_system_seed()?;
+        }
+        16 => read_commission_kind(cursor)?,
+        // UpdateCommissionBps { commission_bps: u16, kind: CommissionKind }
+        17 => {
+            cursor.read_array::<2>()?;
+            read_commission_kind(cursor)?;
+        }
+        // DepositDelegatorRewards { deposit: u64 }
+        18 => {
+            cursor.read_u64_le()?;
+        }
+        other => anyhow::bail!("unknown vote instruction tag {other}"),
+    }
+    Ok(())
+}
+
+fn read_vote_authorize(cursor: &mut VoteInstructionCursor<'_>) -> Result<()> {
+    match cursor.read_u32_le()? {
+        // Voter and Withdrawer carry nothing.
+        0 | 1 => Ok(()),
+        // VoterWithBLS: a compressed BLS public key then its proof of possession.
+        2 => {
+            cursor.read_slice(48 + 96)?;
+            Ok(())
+        }
+        other => anyhow::bail!("unknown VoteAuthorize tag {other}"),
+    }
+}
+
+fn read_commission_kind(cursor: &mut VoteInstructionCursor<'_>) -> Result<()> {
+    match cursor.read_u32_le()? {
+        0 | 1 => Ok(()),
+        other => anyhow::bail!("unknown CommissionKind tag {other}"),
+    }
+}
+
+fn read_vote(cursor: &mut VoteInstructionCursor<'_>) -> Result<()> {
+    let slots = cursor.read_u64_le()?;
+    for _ in 0..slots {
+        cursor.read_u64_le()?;
+    }
+    cursor.read_pubkey()?;
+    cursor.read_option_i64_le()?;
+    Ok(())
+}
+
+/// The uncompacted `VoteStateUpdate`: a length-prefixed lockout vector of
+/// `(slot, confirmation_count)`, then root, hash and timestamp.
+fn read_uncompacted_vote_state_update(cursor: &mut VoteInstructionCursor<'_>) -> Result<()> {
+    let lockouts = cursor.read_u64_le()?;
+    for _ in 0..lockouts {
+        cursor.read_u64_le()?;
+        cursor.read_u32_le()?;
+    }
+    cursor.read_option_u64_le()?;
+    cursor.read_pubkey()?;
+    cursor.read_option_i64_le()?;
+    Ok(())
+}
+
+fn read_compact_vote_state_update(
+    cursor: &mut VoteInstructionCursor<'_>,
+) -> Result<SolanaVoteStateUpdate> {
+    let root = cursor.read_u64_le()?;
+    let root = (root != u64::MAX).then_some(root);
+    let lockouts = cursor.read_compact_lockouts(root)?;
+    let hash = SolanaHash::new_from_array(cursor.read_pubkey()?);
+    let timestamp = cursor.read_option_i64_le()?;
+    Ok(SolanaVoteStateUpdate {
+        lockouts,
+        root,
+        hash,
+        timestamp,
+    })
+}
+
+fn read_compact_tower_sync(cursor: &mut VoteInstructionCursor<'_>) -> Result<SolanaTowerSync> {
+    let root = cursor.read_u64_le()?;
+    let root = (root != u64::MAX).then_some(root);
+    let lockouts = cursor.read_compact_lockouts(root)?;
+    let hash = SolanaHash::new_from_array(cursor.read_pubkey()?);
+    let timestamp = cursor.read_option_i64_le()?;
+    let block_id = SolanaHash::new_from_array(cursor.read_pubkey()?);
+    Ok(SolanaTowerSync {
+        lockouts,
+        root,
+        hash,
+        timestamp,
+        block_id,
+    })
 }
 
 fn try_parse_historical_tower_sync_instruction_data(
@@ -8144,6 +8370,74 @@ impl<'a> VoteInstructionCursor<'a> {
 
     fn read_pubkey(&mut self) -> Result<[u8; 32]> {
         self.read_array::<32>()
+    }
+
+    /// `short_vec` ShortU16: seven bits per byte, low group first, high bit
+    /// continues. The rejections matter as much as the value — a zero
+    /// continuation byte, a third byte that continues, and anything past three
+    /// bytes are all refused, so a non-canonical length cannot decode.
+    fn read_short_u16(&mut self) -> Result<u16> {
+        let mut value: u32 = 0;
+        for nth_byte in 0..3usize {
+            let byte = self.read_array::<1>()?[0];
+            if byte == 0 && nth_byte != 0 {
+                anyhow::bail!("non-canonical short_u16: aliased zero byte at index {nth_byte}");
+            }
+            let done = byte & 0x80 == 0;
+            if nth_byte == 2 && !done {
+                anyhow::bail!("non-canonical short_u16: third byte continues");
+            }
+            value |= u32::from(byte & 0x7f) << (nth_byte * 7);
+            let narrowed = u16::try_from(value)
+                .with_context(|| format!("short_u16 overflows u16: {value}"))?;
+            if done {
+                return Ok(narrowed);
+            }
+        }
+        anyhow::bail!("non-canonical short_u16: no terminating byte")
+    }
+
+    /// `serde_varint` for `u64`: seven bits per byte, low group first, high bit
+    /// continues. Mirrors the canonical decoder's two refusals — a terminating
+    /// byte whose bits were shifted out, and a zero byte that is not the whole
+    /// value — so padded encodings fail here exactly as they do upstream.
+    fn read_varint_u64(&mut self) -> Result<u64> {
+        let mut out: u64 = 0;
+        let mut shift: u32 = 0;
+        while shift < u64::BITS {
+            let byte = self.read_array::<1>()?[0];
+            out |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                anyhow::ensure!((out >> shift) as u8 == byte, "varint overflows u64");
+                anyhow::ensure!(
+                    byte != 0 || (shift == 0 && out == 0),
+                    "non-canonical varint: aliased zero byte"
+                );
+                return Ok(out);
+            }
+            shift += 7;
+        }
+        anyhow::bail!("varint exceeds u64 range")
+    }
+
+    /// Compact lockouts: a `short_vec` count, then `(varint offset, u8
+    /// confirmation count)` pairs whose slots accumulate forward from the root.
+    fn read_compact_lockouts(&mut self, root: Option<u64>) -> Result<VecDeque<Lockout>> {
+        let count = self.read_short_u16()?;
+        let mut lockouts = VecDeque::with_capacity(usize::from(count));
+        let mut slot = root.unwrap_or_default();
+        for _ in 0..count {
+            let offset = self.read_varint_u64()?;
+            let confirmation_count = self.read_array::<1>()?[0];
+            slot = slot
+                .checked_add(offset)
+                .context("compact vote lockout offset overflows the slot it extends")?;
+            lockouts.push_back(Lockout::new_with_confirmation_count(
+                slot,
+                u32::from(confirmation_count),
+            ));
+        }
+        Ok(lockouts)
     }
 
     fn read_system_seed(&mut self) -> Result<String> {
@@ -9381,6 +9675,11 @@ fn count_no_registry_tx_pubkeys(
                 counter.add32(&lookup.account_key);
             }
         }
+        WincodeArchiveV2NoRegistryMessage::V1(message) => {
+            for key in &message.account_keys {
+                counter.add32(key);
+            }
+        }
     }
 }
 
@@ -9579,6 +9878,29 @@ fn optimize_no_registry_message(
         WincodeArchiveV2NoRegistryMessage::Legacy(message) => {
             OwnedCompactMessage::Legacy(OwnedCompactLegacyMessage {
                 header: message.header,
+                account_keys: compact_required_keys(
+                    key_index,
+                    &message.account_keys,
+                    "transaction account key",
+                )?,
+                recent_blockhash: resolve_recent_blockhash(
+                    rolling_blockhashes,
+                    &message.recent_blockhash,
+                    slot,
+                    tx_index,
+                    nonce_recent_blockhashes,
+                )?,
+                instructions: message
+                    .instructions
+                    .into_iter()
+                    .map(owned_no_registry_instruction)
+                    .collect(),
+            })
+        }
+        WincodeArchiveV2NoRegistryMessage::V1(message) => {
+            OwnedCompactMessage::V1(OwnedCompactV1Message {
+                header: message.header,
+                config: message.config,
                 account_keys: compact_required_keys(
                     key_index,
                     &message.account_keys,
@@ -15432,6 +15754,7 @@ fn owned_message_account_keys_for_analysis(message: &OwnedCompactMessage) -> &[C
     match message {
         OwnedCompactMessage::Legacy(message) => &message.account_keys,
         OwnedCompactMessage::V0(message) => &message.account_keys,
+        OwnedCompactMessage::V1(message) => &message.account_keys,
     }
 }
 
@@ -15439,6 +15762,7 @@ fn hot_message_account_keys_for_analysis(message: &ArchiveV2HotMessagePayload) -
     match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.account_keys,
         ArchiveV2HotMessagePayload::V0(message) => &message.account_keys,
+        ArchiveV2HotMessagePayload::V1(message) => &message.account_keys,
     }
 }
 
@@ -15448,6 +15772,7 @@ fn owned_message_instructions_for_analysis(
     match message {
         OwnedCompactMessage::Legacy(message) => &message.instructions,
         OwnedCompactMessage::V0(message) => &message.instructions,
+        OwnedCompactMessage::V1(message) => &message.instructions,
     }
 }
 
@@ -15457,6 +15782,7 @@ fn hot_message_instructions_for_analysis(
     match message {
         ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
         ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+        ArchiveV2HotMessagePayload::V1(message) => &message.instructions,
     }
 }
 
@@ -16754,6 +17080,18 @@ fn analyze_owned_message_space(
             count_recent_blockhash(&message.recent_blockhash, stats);
             analyze_owned_instructions(&message.instructions, stats)?;
         }
+        OwnedCompactMessage::V1(message) => {
+            add_wincode_size!(stats, "tx/message_v1_header", &message.header);
+            add_wincode_size!(stats, "tx/message_v1_config", &message.config);
+            add_wincode_size!(stats, "tx/account_keys", &message.account_keys);
+            add_wincode_size!(stats, "tx/recent_blockhash", &message.recent_blockhash);
+            add_wincode_size!(stats, "tx/instructions", &message.instructions);
+            for key in &message.account_keys {
+                count_compact_pubkey(*key, stats);
+            }
+            count_recent_blockhash(&message.recent_blockhash, stats);
+            analyze_owned_instructions(&message.instructions, stats)?;
+        }
         OwnedCompactMessage::V0(message) => {
             add_wincode_size!(stats, "tx/message_v0_header", &message.header);
             add_wincode_size!(stats, "tx/account_keys", &message.account_keys);
@@ -17888,6 +18226,31 @@ fn to_owned_compact_message(
                     .collect(),
             })
         }
+        VersionedMessage::V1(message) => OwnedCompactMessage::V1(OwnedCompactV1Message {
+            header: CompactMessageHeader {
+                num_required_signatures: message.header.num_required_signatures,
+                num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
+                num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
+            },
+            config: compact_transaction_config(&message.config),
+            account_keys: message
+                .account_keys
+                .into_iter()
+                .map(|key| key_index.compact(key))
+                .collect(),
+            recent_blockhash: resolve_recent_blockhash(
+                rolling_blockhashes,
+                message.recent_blockhash,
+                slot,
+                tx_index,
+                nonce_recent_blockhashes,
+            )?,
+            instructions: message
+                .instructions
+                .into_iter()
+                .map(owned_instruction)
+                .collect(),
+        }),
         VersionedMessage::V0(message) => OwnedCompactMessage::V0(OwnedCompactV0Message {
             header: CompactMessageHeader {
                 num_required_signatures: message.header.num_required_signatures,
@@ -17934,6 +18297,19 @@ fn owned_instruction(
     }
 }
 
+/// Carry a v1 header's compute budget into the archive. Which fields are set
+/// is what reproduces the wire config mask, so nothing is normalised here.
+fn compact_transaction_config(
+    config: &of_car_reader::versioned_transaction::V1TransactionConfig,
+) -> CompactTransactionConfig {
+    CompactTransactionConfig {
+        priority_fee: config.priority_fee,
+        compute_unit_limit: config.compute_unit_limit,
+        loaded_accounts_data_size_limit: config.loaded_accounts_data_size_limit,
+        heap_size: config.heap_size,
+    }
+}
+
 fn to_no_registry_transaction(vtx: VersionedTransaction<'_>) -> WincodeArchiveV2NoRegistryTx {
     let signatures = vtx
         .signatures
@@ -17948,6 +18324,23 @@ fn to_no_registry_transaction(vtx: VersionedTransaction<'_>) -> WincodeArchiveV2
                     num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
                     num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
                 },
+                account_keys: message.account_keys.into_iter().copied().collect(),
+                recent_blockhash: *message.recent_blockhash,
+                instructions: message
+                    .instructions
+                    .into_iter()
+                    .map(no_registry_instruction)
+                    .collect(),
+            })
+        }
+        VersionedMessage::V1(message) => {
+            WincodeArchiveV2NoRegistryMessage::V1(WincodeArchiveV2NoRegistryV1Message {
+                header: CompactMessageHeader {
+                    num_required_signatures: message.header.num_required_signatures,
+                    num_readonly_signed_accounts: message.header.num_readonly_signed_accounts,
+                    num_readonly_unsigned_accounts: message.header.num_readonly_unsigned_accounts,
+                },
+                config: compact_transaction_config(&message.config),
                 account_keys: message.account_keys.into_iter().copied().collect(),
                 recent_blockhash: *message.recent_blockhash,
                 instructions: message
@@ -20143,6 +20536,7 @@ mod tests {
     use of_car_reader::versioned_transaction::{
         CompiledInstruction, MessageAddressTableLookup, MessageHeader, V0Message,
     };
+    use solana_vote_interface::instruction::VoteInstruction;
     use solana_vote_interface::state::Lockout;
 
     #[test]
@@ -21742,6 +22136,152 @@ mod tests {
         assert_eq!(limit, 497);
     }
 
+    /// The native vote decoder must agree with bincode on every input, not just
+    /// the ones it types. Divergence here is silent in production — a shape that
+    /// fails to decode becomes `UnknownVote` instead of `Raw` — so bincode is
+    /// kept as a dev-dependency purely to serve as the oracle.
+    #[test]
+    fn native_vote_decoder_matches_bincode_on_every_shape() {
+        fn tower(
+            root: Option<u64>,
+            slots: &[(u64, u32)],
+            timestamp: Option<i64>,
+        ) -> SolanaTowerSync {
+            SolanaTowerSync {
+                lockouts: slots
+                    .iter()
+                    .map(|(slot, count)| Lockout::new_with_confirmation_count(*slot, *count))
+                    .collect(),
+                root,
+                hash: SolanaHash::new_from_array([7u8; 32]),
+                timestamp,
+                block_id: SolanaHash::new_from_array([9u8; 32]),
+            }
+        }
+        fn update(
+            root: Option<u64>,
+            slots: &[(u64, u32)],
+            timestamp: Option<i64>,
+        ) -> SolanaVoteStateUpdate {
+            SolanaVoteStateUpdate {
+                lockouts: slots
+                    .iter()
+                    .map(|(slot, count)| Lockout::new_with_confirmation_count(*slot, *count))
+                    .collect(),
+                root,
+                hash: SolanaHash::new_from_array([3u8; 32]),
+                timestamp,
+            }
+        }
+
+        // Roots present and absent, empty and long towers, offsets that cross the
+        // varint boundary, and timestamps both ways.
+        let long: Vec<(u64, u32)> = (0..31)
+            .map(|i| (1_000 + i * 129, (i % 32) as u32))
+            .collect();
+        let shapes = [
+            (None, vec![], None),
+            (Some(0), vec![(0, 1)], None),
+            (Some(100), vec![(228, 31)], Some(-1)),
+            (Some(u64::MAX - 1), vec![(u64::MAX, 1)], Some(i64::MAX)),
+            (Some(5), long.clone(), Some(1_700_000_000)),
+            (None, long, None),
+        ];
+
+        let mut typed = 0usize;
+        for (root, slots, timestamp) in shapes {
+            for instruction in [
+                VoteInstruction::TowerSync(tower(root, &slots, timestamp)),
+                VoteInstruction::TowerSyncSwitch(
+                    tower(root, &slots, timestamp),
+                    solana_hash::Hash::new_from_array([5u8; 32]),
+                ),
+                VoteInstruction::CompactUpdateVoteState(update(root, &slots, timestamp)),
+                VoteInstruction::CompactUpdateVoteStateSwitch(
+                    update(root, &slots, timestamp),
+                    solana_hash::Hash::new_from_array([5u8; 32]),
+                ),
+            ] {
+                let Ok(bytes) = bincode::serialize(&instruction) else {
+                    continue;
+                };
+                let decoded = decode_compact_vote_instruction(&bytes)
+                    .expect("native decoder rejected bytes bincode produced")
+                    .expect("native decoder returned raw for a typed shape");
+                match (instruction, decoded) {
+                    (VoteInstruction::TowerSync(want), CompactVoteInstruction::TowerSync(got)) => {
+                        assert_eq!(want, got)
+                    }
+                    (
+                        VoteInstruction::TowerSyncSwitch(want, want_hash),
+                        CompactVoteInstruction::TowerSyncSwitch(got, got_hash),
+                    ) => {
+                        assert_eq!(want, got);
+                        assert_eq!(want_hash.to_bytes(), got_hash);
+                    }
+                    (
+                        VoteInstruction::CompactUpdateVoteState(want),
+                        CompactVoteInstruction::CompactUpdateVoteState(got),
+                    ) => assert_eq!(want, got),
+                    (
+                        VoteInstruction::CompactUpdateVoteStateSwitch(want, want_hash),
+                        CompactVoteInstruction::CompactUpdateVoteStateSwitch(got, got_hash),
+                    ) => {
+                        assert_eq!(want, got);
+                        assert_eq!(want_hash.to_bytes(), got_hash);
+                    }
+                    (other, _) => panic!("variant mismatch decoding {other:?}"),
+                }
+                typed += 1;
+            }
+        }
+        assert!(typed >= 20, "expected broad typed coverage, got {typed}");
+
+        // Shapes the archive keeps raw must still prove they decode, so that a
+        // well-formed one stays `Raw` and a malformed one becomes `UnknownVote`.
+        for instruction in [
+            VoteInstruction::UpdateValidatorIdentity,
+            VoteInstruction::Withdraw(u64::MAX),
+            VoteInstruction::UpdateCommission(255),
+            VoteInstruction::AuthorizeChecked(
+                solana_vote_interface::state::VoteAuthorize::Withdrawer,
+            ),
+        ] {
+            let bytes = bincode::serialize(&instruction).expect("serialize");
+            assert!(
+                decode_compact_vote_instruction(&bytes)
+                    .expect("native decoder rejected a well-formed raw shape")
+                    .is_none(),
+                "expected raw classification for {instruction:?}"
+            );
+        }
+
+        // Truncations and unknown tags must fail on both sides, or the archive
+        // would record a different variant than it does today.
+        let sample = bincode::serialize(&VoteInstruction::TowerSync(tower(
+            Some(1),
+            &[(2, 3)],
+            Some(4),
+        )))
+        .expect("serialize");
+        for cut in 1..sample.len() {
+            let truncated = &sample[..cut];
+            if bincode::deserialize::<VoteInstruction>(truncated).is_err() {
+                assert!(
+                    decode_compact_vote_instruction(truncated).is_err(),
+                    "native decoder accepted {cut} bytes that bincode rejected"
+                );
+            }
+        }
+        let mut unknown = sample.clone();
+        unknown[..4].copy_from_slice(&99u32.to_le_bytes());
+        assert!(decode_compact_vote_instruction(&unknown).is_err());
+        // Trailing bytes are not a valid encoding on either side.
+        let mut trailing = sample.clone();
+        trailing.push(0);
+        assert!(decode_compact_vote_instruction(&trailing).is_err());
+    }
+
     #[test]
     fn hot_system_parser_compacts_common_bincode_forms() {
         let mut transfer = Vec::new();
@@ -22021,6 +22561,7 @@ mod tests {
             match message {
                 ArchiveV2HotMessagePayload::Legacy(message) => &message.instructions,
                 ArchiveV2HotMessagePayload::V0(message) => &message.instructions,
+                ArchiveV2HotMessagePayload::V1(message) => &message.instructions,
             }
         }
 

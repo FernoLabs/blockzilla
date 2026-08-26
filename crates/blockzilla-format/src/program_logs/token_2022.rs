@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{CompactPubkey, KeyStore, PubkeyCompactor, StrId, StringTable};
+use crate::{CompactPubkey, PubkeyCompactor, PubkeyResolver, StrId, StringTable};
 
 /// SPL Token-2022 program id
 pub const STR_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -603,7 +603,7 @@ impl Token2022Log {
     }
 
     #[inline]
-    pub fn as_str(&self, st: &StringTable, store: &KeyStore) -> String {
+    pub fn as_str<R: PubkeyResolver + ?Sized>(&self, st: &StringTable, resolver: &R) -> String {
         match self {
             Self::Error(e) => e.as_str().to_string(),
             Self::Static(log) => log.as_str().to_string(),
@@ -625,7 +625,7 @@ impl Token2022Log {
             | Self::ErrorHarvestingFrom3 { account_key, error }
             | Self::ErrorHarvestingFrom4 { account_key, error } => format!(
                 "Error harvesting from {}: {}",
-                pubkey_id_to_string(store, *account_key),
+                pubkey_id_to_string(resolver, *account_key),
                 st.resolve(*error),
             ),
         }
@@ -633,8 +633,8 @@ impl Token2022Log {
 }
 
 #[inline]
-fn pubkey_id_to_string(store: &KeyStore, id: PubkeyId) -> String {
-    id.to_pubkey(store)
+fn pubkey_id_to_string<R: PubkeyResolver + ?Sized>(resolver: &R, id: PubkeyId) -> String {
+    id.to_pubkey(resolver)
         .map(|pubkey| pubkey.to_string())
         .unwrap_or_else(|| format!("<pubkey-id-oob:{id:?}>"))
 }
