@@ -1,5 +1,5 @@
 use {
-    solana_short_vec::ShortU16,
+    crate::short_vec::ShortU16,
     std::mem::MaybeUninit,
     wincode::{
         ReadResult, SchemaRead,
@@ -242,5 +242,75 @@ unsafe impl<'de, C: Config> SchemaRead<'de, C> for VersionedMessage<'de> {
             instructions,
         }));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encoded_v1_transaction() -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // One signature, encoded with Solana's ShortU16 length prefix.
+        bytes.push(1);
+        bytes.extend_from_slice(&[7; 64]);
+
+        bytes.push(MESSAGE_VERSION_PREFIX | 1);
+        bytes.extend_from_slice(&[1, 0, 1]);
+        bytes.extend_from_slice(&V1_CONFIG_KNOWN_BITS.to_le_bytes());
+        bytes.extend_from_slice(&[9; 32]);
+        bytes.push(1); // instructions
+        bytes.push(2); // addresses
+        bytes.extend_from_slice(&[1; 32]);
+        bytes.extend_from_slice(&[2; 32]);
+
+        bytes.extend_from_slice(&42u64.to_le_bytes());
+        bytes.extend_from_slice(&1_400_000u32.to_le_bytes());
+        bytes.extend_from_slice(&65_536u32.to_le_bytes());
+        bytes.extend_from_slice(&262_144u32.to_le_bytes());
+
+        // One instruction header, followed by its account and data payloads.
+        bytes.push(1); // program id index
+        bytes.push(1); // account count
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+
+        bytes
+    }
+
+    #[test]
+    fn decodes_v1_message_and_transaction_config() {
+        let bytes = encoded_v1_transaction();
+        let transaction =
+            wincode::deserialize::<VersionedTransaction<'_>>(&bytes).expect("decode v1 tx");
+
+        assert_eq!(transaction.signatures.len(), 1);
+        assert_eq!(transaction.signatures[0].as_slice(), &[7; 64]);
+
+        let VersionedMessage::V1(message) = transaction.message else {
+            panic!("expected v1 message");
+        };
+        assert_eq!(
+            message.header,
+            MessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            }
+        );
+        assert_eq!(message.account_keys.len(), 2);
+        assert_eq!(message.account_keys[0].as_slice(), &[1; 32]);
+        assert_eq!(message.account_keys[1].as_slice(), &[2; 32]);
+        assert_eq!(message.recent_blockhash.as_slice(), &[9; 32]);
+        assert_eq!(message.config.priority_fee, Some(42));
+        assert_eq!(message.config.compute_unit_limit, Some(1_400_000));
+        assert_eq!(message.config.loaded_accounts_data_size_limit, Some(65_536));
+        assert_eq!(message.config.heap_size, Some(262_144));
+        assert_eq!(message.instructions.len(), 1);
+        assert_eq!(message.instructions[0].program_id_index, 1);
+        assert_eq!(message.instructions[0].accounts, [0]);
+        assert_eq!(message.instructions[0].data, [0xaa, 0xbb, 0xcc]);
     }
 }

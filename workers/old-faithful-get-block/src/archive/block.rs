@@ -1,4 +1,4 @@
-use super::http;
+use super::{http, v2_slot_index_keys};
 use crate::error::{FetchError, FetchResult, MAX_CAR_BLOCK_BYTES};
 use anyhow::{Result as AnyhowResult, anyhow};
 use of_car_reader::compact_index::decode_offset_and_size;
@@ -102,30 +102,31 @@ async fn get_slot_lookup_from_raw_index(
     slot: u64,
 ) -> FetchResult<Option<SlotLookup>> {
     let slot_in_epoch = slot_in_epoch(slot);
-    let v2_key = format!("slot-index/epoch-{epoch}-slot-ranges-v2.raw");
-    if let Some(bytes) = get_r2_range(
-        index_bucket,
-        &v2_key,
-        slot_range_v2_entry_offset(slot_in_epoch).map_err(|err| {
-            FetchError::MalformedSlotIndexEntry {
-                key: v2_key.clone(),
-                reason: err.to_string(),
-            }
-        })?,
-        SLOT_RANGE_V2_ENTRY_SIZE,
-    )
-    .await?
-    {
-        let entry = decode_slot_range_v2_entry(&bytes).map_err(|err| {
-            FetchError::MalformedSlotIndexEntry {
-                key: v2_key,
-                reason: err.to_string(),
-            }
-        })?;
-        return Ok(Some(SlotLookup {
-            range: entry.range,
-            previous_blockhash: indexed_previous_blockhash(slot, entry.previous_blockhash),
-        }));
+    for v2_key in v2_slot_index_keys(epoch) {
+        if let Some(bytes) = get_r2_range(
+            index_bucket,
+            &v2_key,
+            slot_range_v2_entry_offset(slot_in_epoch).map_err(|err| {
+                FetchError::MalformedSlotIndexEntry {
+                    key: v2_key.clone(),
+                    reason: err.to_string(),
+                }
+            })?,
+            SLOT_RANGE_V2_ENTRY_SIZE,
+        )
+        .await?
+        {
+            let entry = decode_slot_range_v2_entry(&bytes).map_err(|err| {
+                FetchError::MalformedSlotIndexEntry {
+                    key: v2_key,
+                    reason: err.to_string(),
+                }
+            })?;
+            return Ok(Some(SlotLookup {
+                range: entry.range,
+                previous_blockhash: indexed_previous_blockhash(slot, entry.previous_blockhash),
+            }));
+        }
     }
 
     let raw_key = format!("slot-index/epoch-{epoch}-slot-ranges.raw");

@@ -24,6 +24,11 @@ required-features = ["cli"]
 name = "of-validate-slot-index"
 path = "src/bin/validate_slot_index.rs"
 
+[[bin]]
+name = "of-validate-slot-index-v2"
+path = "src/bin/validate_slot_index_v2.rs"
+required-features = ["cli"]
+
 [features]
 default = ["cli"]
 cli = [
@@ -38,7 +43,7 @@ cli = [
 
 [dependencies]
 anyhow = "1.0.102"
-of-car-reader = { path = "../car-reader", version = "0.1.0", default-features = false, features = ["compact-index"] }
+of-car-reader = { path = "../car-reader", version = "0.2.0", default-features = false, features = ["compact-index"] }
 bs58 = { version = "0.5.1", optional = true }
 clap = { version = "4.6.1", features = ["derive"], optional = true }
 futures = { version = "0.3.32", features = ["executor"], optional = true }

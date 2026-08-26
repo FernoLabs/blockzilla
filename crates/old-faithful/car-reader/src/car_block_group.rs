@@ -1,4 +1,4 @@
-use solana_short_vec::decode_shortu16_len;
+use crate::short_vec::decode_shortu16_len;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::mem::MaybeUninit;

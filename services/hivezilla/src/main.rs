@@ -35,6 +35,7 @@ use hivezilla::{
         ShredSpoolPullRuntimeConfig, ShredSpoolPullServerRuntime, ShredUdpRecordConfig,
         SpoolJournalIdentity, bridge_shred_spool, load_ingest_receiver_config, record_shred_udp,
     },
+    raw_recorder_support::{RawRecorderSupportArgs, run_raw_recorder_support},
     repair::{EpochRepairCaptureSlice, PrepareEpochRepairConfig, prepare_epoch_repair},
     rpc::{
         RpcBackfillConfig, RpcEpochSyncConfig, RpcRateLimitConfig, backfill_get_blocks,
@@ -124,6 +125,9 @@ enum Command {
     ServeShredSpoolPullSource(ServeShredSpoolPullSourceArgs),
     /// Aggregate recorder and loopback receiver telemetry into a bounded public status service.
     ServeShredStatus(ServeShredStatusArgs),
+    /// Internal native helpers for the raw-recorder shell supervisor.
+    #[command(hide = true)]
+    RawRecorderSupport(RawRecorderSupportArgs),
     /// Portably supervise one long-lived service with bounded restart and health policy.
     Supervise(SuperviseArgs),
     /// Notify a parent Hivezilla supervisor of readiness or one heartbeat.
@@ -1636,6 +1640,7 @@ async fn main() -> Result<()> {
             tracing::info!("direct mTLS raw-shred pull source stopped cleanly");
         }
         Command::ServeShredStatus(args) => serve_shred_status(args).await?,
+        Command::RawRecorderSupport(args) => run_raw_recorder_support(args)?,
         #[cfg(feature = "shred-reconstruction")]
         Command::ServeShredReader => {
             shred_reader::run().await?;

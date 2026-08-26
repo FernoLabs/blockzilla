@@ -394,3 +394,62 @@ fn proto_transaction(tx: &VersionedTransaction<'_>) -> proto::Transaction {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use of_car_reader::versioned_transaction::{
+        CompiledInstruction, MessageHeader, V1Message, V1TransactionConfig,
+    };
+
+    #[test]
+    fn maps_v1_transaction_config_in_both_protobuf_paths() {
+        let signature = [7; 64];
+        let signer = [1; 32];
+        let program = [2; 32];
+        let recent_blockhash = [9; 32];
+        let transaction = VersionedTransaction {
+            signatures: vec![&signature],
+            message: VersionedMessage::V1(V1Message {
+                header: MessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                config: V1TransactionConfig {
+                    priority_fee: Some(42),
+                    compute_unit_limit: Some(1_400_000),
+                    loaded_accounts_data_size_limit: Some(65_536),
+                    heap_size: Some(262_144),
+                },
+                account_keys: vec![&signer, &program],
+                recent_blockhash: &recent_blockhash,
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: vec![0xaa, 0xbb, 0xcc],
+                }],
+            }),
+        };
+
+        let prost = proto_transaction(&transaction)
+            .message
+            .expect("prost v1 message");
+        assert!(prost.versioned);
+        assert!(prost.address_table_lookups.is_empty());
+        let prost_config = prost.config.expect("prost v1 config");
+        assert_eq!(prost_config.priority_fee, Some(42));
+        assert_eq!(prost_config.compute_unit_limit, Some(1_400_000));
+        assert_eq!(prost_config.loaded_accounts_data_size_limit, Some(65_536));
+        assert_eq!(prost_config.heap_size, Some(262_144));
+
+        let quick = quick_message(&transaction.message);
+        assert!(quick.versioned);
+        assert!(quick.address_table_lookups.is_empty());
+        let quick_config = quick.config.expect("quick-protobuf v1 config");
+        assert_eq!(quick_config.priority_fee, 42);
+        assert_eq!(quick_config.compute_unit_limit, 1_400_000);
+        assert_eq!(quick_config.loaded_accounts_data_size_limit, 65_536);
+        assert_eq!(quick_config.heap_size, 262_144);
+    }
+}

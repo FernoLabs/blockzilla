@@ -31,9 +31,9 @@ code rather than assumed.
 
 | Consumer | What it does today | Cost |
 |---|---|---|
-| Firewatch index build | Full archive re-decode **once per 8M-account chunk** — [`build.rs:563`](../../crates/blockzilla-firebase-indexer/src/build.rs:563), `DEFAULT_MAX_ACCOUNTS_PER_CHUNK = 8_000_000` | N full decodes of an epoch to build **one** index |
-| Account resolution | `project_archive_v2_metadata_prefix` — a hand-written field-order walker that decodes into transaction status metadata purely to reach `loaded_addresses` ([`build.rs:1901`](../../crates/blockzilla-firebase-indexer/src/build.rs:1901)) | Every V0 transaction pays a metadata decode to learn its own account list |
-| Remote read | Gateway serves whole files with HTTP `Range` — `/v1/epochs/{epoch}/files/{name}` ([`gateway lib.rs:495`](../../services/blockzilla-archive-gateway/src/lib.rs:495)) | Access granularity is a ranged GET; per-request latency dominates, so page layout and directory size matter more than raw decode speed |
+| Firewatch index build | Full archive re-decode **once per 8M-account chunk** — [`build.rs:550`](../../crates/blockzilla-firebase-indexer/src/build.rs#L550), `DEFAULT_MAX_ACCOUNTS_PER_CHUNK = 8_000_000` | N full decodes of an epoch to build **one** index |
+| Account resolution | `decode::decode_metadata_prefix` — a hand-written field-order walker that decodes into transaction status metadata purely to reach `loaded_addresses` ([`decode.rs:976`](../../crates/blockzilla-firebase-indexer/src/decode.rs#L976)) | Every V0 transaction pays a metadata decode to learn its own account list |
+| Remote read | Gateway serves whole files with HTTP `Range` — `/v1/epochs/{epoch}/files/{name}` ([`gateway lib.rs:501`](../../services/blockzilla-archive-gateway/src/lib.rs#L501)) | Access granularity is a ranged GET; per-request latency dominates, so page layout and directory size matter more than raw decode speed |
 | Replay | Needs message + account list + recent blockhash, and explicitly *not* effects. `SplitCompactIndexRecord` already splits `block_offset/len` from `runtime_offset/len` | The separation is already understood; it just isn't the published shape |
 
 The first row is the whole argument. **The archive is re-decoded N times to
@@ -120,7 +120,7 @@ This is the complaint that started the review, and it is worse than it looked.
 `ARCHIVE_V2_BLOCKHASH_INDEX_V3_VERSION` (a "v3" file inside "V2"),
 `KEY_INDEX_VERSION`, `BLOCK_TIME_GAP_VERSION`, and more — plus ~25
 `V1`/`V2`-suffixed public types. None of them identifies an archive generation.
-Readers additionally *trial-decode*: [`v2/mod.rs:472`](../../crates/blockzilla-format/src/v2/mod.rs:472)
+Readers additionally *trial-decode*: [`v2/mod.rs:469`](../../crates/blockzilla-format/src/v2/mod.rs#L469)
 tries a schema and updates it on fallback.
 
 The rules:
@@ -269,7 +269,7 @@ Wincode payload with five required zero bytes for direct row addressing.
 The account vectors store the resolved runtime order: static keys, then loaded
 writable keys, then loaded readonly keys. This data:
 
-- deletes `project_archive_v2_metadata_prefix` from the indexer;
+- removes the `decode::decode_metadata_prefix` call from the indexer scan path;
 - is exactly the vector replay hands to the runtime, in the order it needs it;
 - lets an account index builder scan one transaction stream;
 - makes `indexes/accounts.pages` rebuildable from canonical data alone.
@@ -638,10 +638,10 @@ code does.**
   its reconstruction.** An
   earlier revision of this document claimed it was preserved byte-exact, citing
   `CompactInstruction { data: &'a [u8] }`
-  ([`compact/tx.rs:35`](../../crates/blockzilla-format/src/compact/tx.rs:35)).
+  ([`compact/tx.rs:50`](../../crates/blockzilla-format/src/compact/tx.rs#L50)).
   That is the wrong type. The **published hot block** uses
   `ArchiveV2HotInstructionData`
-  ([`v2/mod.rs:1594`](../../crates/blockzilla-format/src/v2/mod.rs:1594)), an
+  ([`v2/mod.rs:1513`](../../crates/blockzilla-format/src/v2/mod.rs#L1513)), an
   enum that parses System, Vote, and Compute Budget instructions into typed
   variants — `System(..)`, `VoteTowerSync(..)`, `SetComputeUnitLimit(u32)` —
   and keeps raw bytes only in `Raw`, `UnknownSystem`, and `UnknownVote`. For
@@ -651,7 +651,7 @@ code does.**
   Ed25519 signature. No candidate or more than one candidate is a hard stop.
 - Logs round-trip through a typed event stream with an `Unknown(StrId)` raw
   fallback and existing round-trip tests
-  ([`compact/log.rs:1506`](../../crates/blockzilla-format/src/compact/log.rs:1506)).
+  ([`compact/log.rs:1748`](../../crates/blockzilla-format/src/compact/log.rs#L1748)).
 - Anything that failed to decode at write time is retained verbatim via
   `WincodeArchiveV2Payload::Raw { bytes, error }`, flagged with
   `TX_RAW_FALLBACK` / `METADATA_RAW_FALLBACK`, and **already counted per
@@ -730,7 +730,7 @@ whole source and target files are intentionally not byte-identical.
 
 The reconstruction it needs **already exists and is already in production**:
 `instruction_data_base58` in
-[`workers/blockzilla-get-block/src/worker.rs:5198`](../../workers/blockzilla-get-block/src/worker.rs:5198)
+[`workers/blockzilla-get-block/src/worker.rs:5252`](../../workers/blockzilla-get-block/src/worker.rs#L5252)
 rebuilds raw instruction bytes from the typed variants — a discriminant byte
 plus little-endian fields for Compute Budget, `system_instruction_bytes` for
 System, `vote_update_instruction_bytes` for the Vote variants.
@@ -765,7 +765,9 @@ that was never built.
 
 ### 6.2.2 Blast radius, and whether CAR would be needed
 
-Per the [storage status](../operations/archive-storage-status-2026-08-10.md):
+Using the [completion audit](../operations/archive-completion-audit-2026-08-04.md),
+the [dated storage total](measurements/epoch-2-real-conversion-2026-08-14.md),
+and the [retained-CAR inventory](index-archive-HANDOFF.md):
 
 | | |
 |---|---|
@@ -834,7 +836,7 @@ Add two derived, deletable sidecars to the *existing* Archive V2 generation:
 `resolved_accounts` (the §3.3 column) and `accounts.postings` (the §3.4 index).
 Both are additive, rebuildable, and require no migration.
 
-- Exit: `project_archive_v2_metadata_prefix` is off the indexer hot path, and
+- Exit: `decode::decode_metadata_prefix` is off the indexer hot path, and
   index build no longer needs one full re-decode per account chunk.
 - **This phase also produces the full-epoch numbers that Phases 1–2 need.**
   Nothing downstream should be frozen before it reports.

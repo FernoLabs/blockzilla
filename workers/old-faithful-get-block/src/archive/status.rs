@@ -1,3 +1,4 @@
+use super::v2_slot_index_keys;
 use crate::error::{FetchError, FetchResult, SourceError};
 use of_car_reader::slot_ranges::SLOTS_PER_EPOCH;
 use serde::{Deserialize, Serialize};
@@ -121,16 +122,21 @@ async fn epoch_index_presence(
     scan_target_epoch: u64,
     cluster_epoch_hint: Option<&ClusterEpochHint>,
 ) -> FetchResult<Option<IndexPresenceInfo>> {
-    let v2_path = format!("slot-index/epoch-{epoch}-slot-ranges-v2.raw");
     let raw_path = format!("slot-index/epoch-{epoch}-slot-ranges.raw");
-    let (index_path, index_version, previous_blockhash_available) =
-        if index_bucket.head(&v2_path).await?.is_some() {
-            (v2_path, "slot-ranges-v2", true)
-        } else if index_bucket.head(&raw_path).await?.is_some() {
-            (raw_path, "slot-ranges-raw", false)
-        } else {
-            return Ok(None);
-        };
+    let mut v2_path = None;
+    for candidate in v2_slot_index_keys(epoch) {
+        if index_bucket.head(&candidate).await?.is_some() {
+            v2_path = Some(candidate);
+            break;
+        }
+    }
+    let (index_path, index_version, previous_blockhash_available) = if let Some(v2_path) = v2_path {
+        (v2_path, "slot-ranges-v2", true)
+    } else if index_bucket.head(&raw_path).await?.is_some() {
+        (raw_path, "slot-ranges-raw", false)
+    } else {
+        return Ok(None);
+    };
 
     let first_epoch_slot =
         epoch

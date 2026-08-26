@@ -11,7 +11,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! of-car-reader = "0.1.2"
+//! of-car-reader = "0.2.0"
 //! ```
 //!
 //! Default features enable Solana genesis archive parsing and native zstd
@@ -19,7 +19,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! of-car-reader = { version = "0.1.2", default-features = false }
+//! of-car-reader = { version = "0.2.0", default-features = false }
 //! ```
 //!
 //! # Which API should I use?
@@ -184,6 +184,7 @@ pub mod metadata_decoder;
 pub mod node;
 pub mod reader;
 pub mod reconstruct;
+pub mod short_vec;
 pub mod slot_ranges;
 pub mod stored_transaction;
 pub mod versioned_transaction;

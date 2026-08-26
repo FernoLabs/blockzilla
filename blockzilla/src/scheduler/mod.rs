@@ -21405,6 +21405,8 @@ mod tests {
         .unwrap();
 
         let marker = read_poh_migration_marker(&config.state_root, 700).unwrap();
+        wait_for_spawned_process(|| trusted_adopted_poh_migration(&config, 700, &marker).is_some())
+            .await;
         let adopted = trusted_adopted_poh_migration(&config, 700, &marker).unwrap();
         assert!(adopted.identity_trusted);
         assert_eq!(adopted.worker_threads, Some(2));

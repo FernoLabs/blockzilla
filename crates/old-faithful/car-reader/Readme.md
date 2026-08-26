@@ -13,7 +13,7 @@ Use this crate to:
 
 ```toml
 [dependencies]
-of-car-reader = "0.1.2"
+of-car-reader = "0.2.0"
 ```
 
 Default features enable genesis parsing and native zstd support. For plain CAR
@@ -21,7 +21,7 @@ reading only:
 
 ```toml
 [dependencies]
-of-car-reader = { version = "0.1.2", default-features = false }
+of-car-reader = { version = "0.2.0", default-features = false }
 ```
 
 ## Quick Start

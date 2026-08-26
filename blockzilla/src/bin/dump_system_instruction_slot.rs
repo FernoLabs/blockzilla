@@ -171,6 +171,7 @@ fn message_account_key<'a>(message: &'a VersionedMessage<'a>, index: u8) -> Opti
     match message {
         VersionedMessage::Legacy(message) => message.account_keys.get(index as usize).copied(),
         VersionedMessage::V0(message) => message.account_keys.get(index as usize).copied(),
+        VersionedMessage::V1(message) => message.account_keys.get(index as usize).copied(),
     }
 }
 
@@ -178,6 +179,7 @@ fn message_instructions<'a>(message: &'a VersionedMessage<'a>) -> &'a [CompiledI
     match message {
         VersionedMessage::Legacy(message) => &message.instructions,
         VersionedMessage::V0(message) => &message.instructions,
+        VersionedMessage::V1(message) => &message.instructions,
     }
 }
 

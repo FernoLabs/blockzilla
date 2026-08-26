@@ -438,7 +438,7 @@ async fn initialize_components(
     .context("open isolated repair provenance WAL")?;
     let runtime = RepairRuntime::bind_with_wal_worker(
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        cluster_info.keypair(),
+        cluster_info.keypair().clone(),
         trust.clone(),
         peers,
         RepairRuntimeConfig {
