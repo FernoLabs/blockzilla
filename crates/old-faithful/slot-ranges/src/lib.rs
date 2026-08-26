@@ -4,7 +4,7 @@ use of_car_reader::compact_index::{
     decode_offset_and_size, truncate_entry_hash,
 };
 use of_car_reader::slot_ranges::{SLOTS_PER_EPOCH, SlotRange};
-use std::collections::HashSet;
+use std::collections::HashMap;
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use std::future::{Ready, ready};
 
@@ -176,16 +176,20 @@ where
     }
 
     let mut block_slots = Vec::new();
-    let mut seen_block_cids = HashSet::new();
+    let mut seen_block_cids = HashMap::new();
     for i in 0..SLOTS_PER_EPOCH as usize {
         if !get_bit(&slot_has_cid, i) {
             continue;
         }
         stats.present_slots += 1;
         let cid = &slot_cids[i * cid_value_size..(i + 1) * cid_value_size];
-        if seen_block_cids.insert(cid.to_vec()) {
-            block_slots.push(epoch_start_slot + i as u64);
+        let slot = epoch_start_slot + i as u64;
+        if let Some(previous_slot) = seen_block_cids.insert(cid.to_vec(), slot) {
+            return Err(anyhow!(
+                "slot-to-CID index maps one CID to multiple candidate slots {previous_slot} and {slot}; the compact hash match is ambiguous"
+            ));
         }
+        block_slots.push(slot);
     }
     stats.unique_block_slots = block_slots.len() as u32;
 
@@ -443,16 +447,20 @@ where
 
     let mut cid_groups = Vec::new();
     let mut block_slots = Vec::new();
-    let mut seen_block_cids = HashSet::new();
+    let mut seen_block_cids = HashMap::new();
     for i in 0..SLOTS_PER_EPOCH as usize {
         if !get_bit(&slot_has_cid, i) {
             continue;
         }
         stats.present_slots += 1;
         let cid = &slot_cids[i * cid_value_size..(i + 1) * cid_value_size];
-        if seen_block_cids.insert(cid.to_vec()) {
-            block_slots.push(epoch_start_slot + i as u64);
+        let slot = epoch_start_slot + i as u64;
+        if let Some(previous_slot) = seen_block_cids.insert(cid.to_vec(), slot) {
+            return Err(anyhow!(
+                "slot-to-CID index maps one CID to multiple candidate slots {previous_slot} and {slot}; the compact hash match is ambiguous"
+            ));
         }
+        block_slots.push(slot);
         let bucket = bucket_hash(cid, cid_index.num_buckets());
         cid_groups.push((bucket, i as u32));
     }
@@ -690,6 +698,82 @@ mod tests {
             *max_read.borrow(),
             of_car_reader::compact_index::COMPACT_INDEX_FIXED_HEADER_SIZE
         );
+    }
+
+    #[test]
+    fn block_slot_builder_rejects_one_cid_for_multiple_candidate_slots() {
+        let slot_reader = MemoryRangeReader {
+            bytes: ambiguous_slot_compact_index(&[1, 2, 3]),
+            max_read: Rc::new(RefCell::new(0)),
+        };
+        let mut slot_index =
+            futures::executor::block_on(AsyncCompactIndex::open(slot_reader, "ambiguous-slot"))
+                .expect("open slot index");
+        let error = futures::executor::block_on(build_block_slots_from_slot_index(
+            0,
+            &mut slot_index,
+            BuildSlotRangesConfig::default(),
+        ))
+        .expect_err("duplicate CID candidate must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("multiple candidate slots 0 and 1")
+        );
+    }
+
+    #[test]
+    fn range_builder_rejects_one_cid_for_multiple_candidate_slots() {
+        let slot_reader = MemoryRangeReader {
+            bytes: ambiguous_slot_compact_index(&[1, 2, 3]),
+            max_read: Rc::new(RefCell::new(0)),
+        };
+        let cid_reader = MemoryRangeReader {
+            bytes: tiny_compact_index(&[1, 2, 3], &[0; 9]),
+            max_read: Rc::new(RefCell::new(0)),
+        };
+        let mut slot_index =
+            futures::executor::block_on(AsyncCompactIndex::open(slot_reader, "ambiguous-slot"))
+                .expect("open slot index");
+        let mut cid_index = futures::executor::block_on(AsyncCompactIndex::open(cid_reader, "cid"))
+            .expect("open CID index");
+        let error = futures::executor::block_on(build_slot_ranges_from_indexes(
+            0,
+            59,
+            &mut slot_index,
+            &mut cid_index,
+            BuildSlotRangesConfig::default(),
+        ))
+        .expect_err("duplicate CID candidate must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("multiple candidate slots 0 and 1")
+        );
+    }
+
+    fn ambiguous_slot_compact_index(value: &[u8]) -> Vec<u8> {
+        let hash_domain = 11u32;
+        let header_len = 13u32;
+        let bucket_count = 1u32;
+        let fixed_len = of_car_reader::compact_index::COMPACT_INDEX_FIXED_HEADER_SIZE;
+        let data_offset = fixed_len + BUCKET_HEADER_SIZE;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(of_car_reader::compact_index::COMPACT_INDEX_MAGIC);
+        out.extend_from_slice(&header_len.to_le_bytes());
+        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        out.extend_from_slice(&bucket_count.to_le_bytes());
+        out.push(1);
+
+        let mut bucket_header = [0u8; BUCKET_HEADER_SIZE];
+        bucket_header[0..4].copy_from_slice(&hash_domain.to_le_bytes());
+        bucket_header[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bucket_header[8] = 0;
+        bucket_header[10..16].copy_from_slice(&(data_offset as u64).to_le_bytes()[..6]);
+        out.extend_from_slice(&bucket_header);
+        out.extend_from_slice(value);
+        out
     }
 
     fn tiny_compact_index(key: &[u8], value: &[u8]) -> Vec<u8> {

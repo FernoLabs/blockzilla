@@ -11,14 +11,15 @@ use of_car_reader::{
     },
 };
 use of_slot_ranges::{
-    AsyncCompactIndex, BuildSlotRangesConfig, LocalFileRangeReader, build_slot_ranges_from_indexes,
+    AsyncCompactIndex, BuildSlotRangesConfig, LocalFileRangeReader,
+    build_block_slots_from_slot_index, build_slot_ranges_from_indexes,
     decode_car_header_total_size,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, RANGE};
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_BUCKET_SIZE: usize = 64 * 1024 * 1024;
@@ -50,15 +51,33 @@ struct Cli {
     #[arg(long = "cars-dir", alias = "car-dir")]
     cars_dir: Option<PathBuf>,
 
-    /// Optional root containing Archive V2 per-epoch sidecars.
+    /// Root containing epoch-N/blockhash_registry.bin.
+    ///
+    /// Ordered block slots always come from the Old Faithful slot-to-CID index
+    /// under indexes-dir. Archive V2 files are not read in this mode.
+    #[arg(long = "blockhash-dir", conflicts_with = "archive_v2_dir")]
+    blockhash_dir: Option<PathBuf>,
+
+    /// Optional legacy root containing Archive V2 per-epoch sidecars.
     ///
     /// When present, v2 slot ranges are rebuilt from `blockhash_registry.bin`,
     /// using the 12-byte slot range output for CAR offsets. If
-    /// `archive-v2-blocks.index` exists it is used as the slot/order source;
-    /// otherwise blockhashes are consumed in non-empty raw slot-range order.
-    /// This avoids rescanning full CAR files for blockhashes.
-    #[arg(long = "archive-v2-dir", alias = "block-index-dir")]
+    /// `archive-v2-blocks.index` exists it is used as the slot/order source.
+    /// Prefer blockhash-dir for builds based on Old Faithful compact indexes.
+    #[arg(
+        long = "archive-v2-dir",
+        alias = "block-index-dir",
+        conflicts_with = "blockhash_dir"
+    )]
     archive_v2_dir: Option<PathBuf>,
+
+    /// Base58 previous blockhash for the first epoch in this run.
+    ///
+    /// Epoch 0 needs this value when its registry does not contain the
+    /// mainnet genesis hash as a prefix. Later epochs normally read the last
+    /// hash from the preceding epoch registry.
+    #[arg(long = "seed-previous-blockhash")]
+    seed_previous_blockhash: Option<String>,
 
     /// Directory where `epoch-*-slot-ranges.raw` files are written.
     #[arg(long = "output-dir", default_value = "out", alias = "out-dir")]
@@ -82,6 +101,11 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let configured_seed = cli
+        .seed_previous_blockhash
+        .as_deref()
+        .map(decode_base58_hash)
+        .transpose()?;
     fs::create_dir_all(&cli.output_dir)?;
 
     let http = Client::builder()
@@ -90,6 +114,9 @@ fn main() -> Result<()> {
         .context("build reqwest client")?;
 
     let mut previous_epoch_last_blockhash: Option<[u8; 32]> = None;
+    let allow_archive_root_fallback = cli.blockhash_dir.is_none()
+        && cli.archive_v2_dir.is_some()
+        && cli.start_epoch == cli.end_epoch;
 
     for epoch in cli.start_epoch..=cli.end_epoch {
         let out_path = cli
@@ -101,9 +128,13 @@ fn main() -> Result<()> {
 
         if out_v2_path.exists() && !cli.overwrite && !cli.overwrite_v2 {
             eprintln!("skip epoch={epoch} exists: {}", out_v2_path.display());
-            if let Some(last) =
-                last_blockhash_from_archive_v2(epoch, cli.archive_v2_dir.as_deref(), true)?
-            {
+            if let Some(last) = last_blockhash_from_registry(
+                epoch,
+                cli.blockhash_dir
+                    .as_deref()
+                    .or(cli.archive_v2_dir.as_deref()),
+                allow_archive_root_fallback,
+            )? {
                 previous_epoch_last_blockhash = Some(last);
             } else {
                 previous_epoch_last_blockhash = None;
@@ -215,33 +246,81 @@ fn main() -> Result<()> {
             eprintln!("epoch={epoch}: raw-only, skip slot ranges v2");
         } else if out_v2_path.exists() && !cli.overwrite && !cli.overwrite_v2 {
             eprintln!("epoch={epoch}: keep existing {}", out_v2_path.display());
-            if let Some(last) =
-                last_blockhash_from_archive_v2(epoch, cli.archive_v2_dir.as_deref(), true)?
-            {
+            if let Some(last) = last_blockhash_from_registry(
+                epoch,
+                cli.blockhash_dir
+                    .as_deref()
+                    .or(cli.archive_v2_dir.as_deref()),
+                allow_archive_root_fallback,
+            )? {
                 previous_epoch_last_blockhash = Some(last);
             } else {
                 previous_epoch_last_blockhash = None;
             }
-        } else if let Some(archive_v2_root) = cli.archive_v2_dir.as_deref() {
-            let epoch_dir = find_archive_v2_blockhash_dir(archive_v2_root, epoch, true)
+        } else if let Some(blockhash_root) = cli.blockhash_dir.as_deref() {
+            let epoch_dir = find_archive_v2_blockhash_dir(blockhash_root, epoch, false)
                 .ok_or_else(|| {
                     anyhow!(
-                        "epoch={epoch}: Archive V2 blockhash sidecar dir not found under {}",
-                        archive_v2_root.display()
+                        "epoch={epoch}: blockhash registry directory not found under {}",
+                        blockhash_root.display()
                     )
                 })?;
+            let block_slots = match index_block_slots.take() {
+                Some(block_slots) => block_slots,
+                None => read_block_slots_from_old_faithful_index(epoch, &cli.indexes_dir)?,
+            };
+            let raw_ranges = read_slot_ranges_raw_file(&out_path)
+                .with_context(|| format!("read {}", out_path.display()))?;
+            let run_seed = (epoch == cli.start_epoch)
+                .then_some(configured_seed)
+                .flatten();
+            let initial_previous_blockhash = match previous_epoch_last_blockhash {
+                Some(hash) => Some(hash),
+                None if epoch > 0 => {
+                    last_blockhash_from_registry(epoch - 1, Some(blockhash_root), false)?
+                        .or(run_seed)
+                }
+                None => run_seed,
+            };
+            eprintln!(
+                "epoch={epoch}: build slot ranges v2 from Old Faithful slot index and registry in {}",
+                epoch_dir.display()
+            );
+            let v2 = build_slot_ranges_v2_from_blockhash_registry_sidecar(
+                &epoch_dir,
+                epoch,
+                &raw_ranges,
+                Some(&block_slots),
+                initial_previous_blockhash,
+            )?;
+            previous_epoch_last_blockhash = v2.last_blockhash;
+            eprintln!("epoch={epoch}: write {}", out_v2_path.display());
+            write_slot_ranges_v2_raw_file(&out_v2_path, &v2.ranges)?;
+        } else if let Some(archive_v2_root) = cli.archive_v2_dir.as_deref() {
+            let epoch_dir =
+                find_archive_v2_blockhash_dir(archive_v2_root, epoch, allow_archive_root_fallback)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "epoch={epoch}: Archive V2 blockhash sidecar dir not found under {}",
+                            archive_v2_root.display()
+                        )
+                    })?;
             eprintln!(
                 "epoch={epoch}: build slot ranges v2 from Archive V2 sidecars in {}",
                 epoch_dir.display()
             );
             let raw_ranges = read_slot_ranges_raw_file(&out_path)
                 .with_context(|| format!("read {}", out_path.display()))?;
+            let run_seed = (epoch == cli.start_epoch)
+                .then_some(configured_seed)
+                .flatten();
             let initial_previous_blockhash = match previous_epoch_last_blockhash {
                 Some(hash) => Some(hash),
                 None if epoch > 0 => {
-                    last_blockhash_from_archive_v2(epoch - 1, cli.archive_v2_dir.as_deref(), false)?
+                    last_blockhash_from_registry(epoch - 1, Some(archive_v2_root), false)?
+                        .or(run_seed)
                 }
-                None => None,
+                None => run_seed,
             };
             let v2 = build_slot_ranges_v2_from_archive_v2_sidecars(
                 &epoch_dir,
@@ -261,7 +340,11 @@ fn main() -> Result<()> {
             let v2 = build_slot_ranges_v2_from_local_car(
                 &local_car_path,
                 epoch,
-                previous_epoch_last_blockhash,
+                previous_epoch_last_blockhash.or_else(|| {
+                    (epoch == cli.start_epoch)
+                        .then_some(configured_seed)
+                        .flatten()
+                }),
             )?;
             previous_epoch_last_blockhash = v2.last_blockhash;
             eprintln!("epoch={epoch}: write {}", out_v2_path.display());
@@ -277,6 +360,40 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn read_block_slots_from_old_faithful_index(epoch: u64, indexes_dir: &Path) -> Result<Vec<u64>> {
+    let epoch_dir = indexes_dir.join(epoch.to_string());
+    let cid_path = epoch_dir.join(format!("epoch-{epoch}.cid"));
+    let epoch_cid =
+        fs::read_to_string(&cid_path).with_context(|| format!("read {}", cid_path.display()))?;
+    let slot_index_path = epoch_dir.join(format!(
+        "epoch-{epoch}-{}-mainnet-slot-to-cid.index",
+        epoch_cid.trim()
+    ));
+    eprintln!(
+        "epoch={epoch}: read ordered block slots from {}",
+        slot_index_path.display()
+    );
+    let reader = LocalFileRangeReader::open(&slot_index_path)?;
+    let mut slot_index = futures::executor::block_on(AsyncCompactIndex::open(
+        reader,
+        slot_index_path.display().to_string(),
+    ))?;
+    let output = futures::executor::block_on(build_block_slots_from_slot_index(
+        epoch,
+        &mut slot_index,
+        BuildSlotRangesConfig {
+            max_bucket_payload_bytes: MAX_BUCKET_SIZE,
+            allow_node_read_fallback: true,
+        },
+    ))?;
+    eprintln!(
+        "epoch={epoch}: ordered unique block slots={} slot_index_present_slots={}",
+        output.block_slots.len(),
+        output.stats.present_slots
+    );
+    Ok(output.block_slots)
 }
 
 /* ---------------- output writer ---------------- */
@@ -339,6 +456,7 @@ const ARCHIVE_V2_HOT_INDEX_MAGIC: &[u8; 8] = b"BZV2HIX1";
 const ARCHIVE_V2_HOT_INDEX_VERSION: u16 = 1;
 const ARCHIVE_V2_HOT_INDEX_HEADER_LEN: usize = 8 + 2 + 2 + 8 + 8 + 4 + 4;
 const ARCHIVE_V2_HOT_INDEX_ROW_LEN: usize = 4 + 8 + 8 + 4 + 4 + 4 + 8 + 8 + 4;
+const MAINNET_GENESIS_HASH_BASE58: &str = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 
 #[derive(Debug, Clone, Copy)]
 struct ArchiveV2BlockIndexRow {
@@ -356,7 +474,9 @@ fn build_slot_ranges_v2_from_archive_v2_sidecars(
     if raw_ranges.len() != SLOTS_PER_EPOCH as usize {
         return Err(anyhow!("raw ranges wrong length"));
     }
-    require_non_genesis_seed(epoch, initial_previous_blockhash)?;
+    if epoch > 0 {
+        require_epoch_seed(epoch, initial_previous_blockhash)?;
+    }
 
     let block_index_path = epoch_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE);
     if !block_index_path.is_file() {
@@ -371,24 +491,30 @@ fn build_slot_ranges_v2_from_archive_v2_sidecars(
 
     let mut rows = read_archive_v2_block_index_rows(&block_index_path)?;
     rows.sort_by_key(|row| row.block_id);
+    for (position, row) in rows.iter().enumerate() {
+        let expected_block_id = u32::try_from(position).context("block index exceeds u32")?;
+        if row.block_id != expected_block_id {
+            return Err(anyhow!(
+                "Archive V2 block index row {position} has block_id {}, expected {expected_block_id}",
+                row.block_id
+            ));
+        }
+    }
+    let row_slots = rows.iter().map(|row| row.slot).collect::<Vec<_>>();
+    validate_ordered_block_slots(epoch, raw_ranges, &row_slots)?;
     let blockhashes = read_blockhash_registry(&epoch_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE))?;
-    let blockhash_id_offset = blockhash_id_offset(rows.len(), blockhashes.len())?;
+    let alignment =
+        blockhash_registry_alignment(epoch, rows.len(), &blockhashes, initial_previous_blockhash)?;
 
     let mut ranges = vec![SlotRangeWithPreviousBlockhash::EMPTY; SLOTS_PER_EPOCH as usize];
-    let genesis_previous_blockhash = (blockhash_id_offset == 1)
-        .then(|| blockhashes.first().copied())
-        .flatten();
-    let mut previous_blockhash = initial_previous_blockhash.or(genesis_previous_blockhash);
+    let mut previous_blockhash = alignment.initial_previous_blockhash;
     let mut last_blockhash = None;
     let mut present_slots = 0u64;
 
     for row in rows {
-        if epoch_for_slot(row.slot) != epoch {
-            continue;
-        }
         let hash_index = row
             .block_id
-            .checked_add(blockhash_id_offset)
+            .checked_add(u32::try_from(alignment.registry_offset)?)
             .ok_or_else(|| anyhow!("blockhash id overflow for block_id {}", row.block_id))?
             as usize;
         let blockhash = *blockhashes.get(hash_index).ok_or_else(|| {
@@ -408,20 +534,18 @@ fn build_slot_ranges_v2_from_archive_v2_sidecars(
                 row.slot
             );
         }
-        let previous = previous_blockhash
-            .or_else(|| (row.slot == 0).then_some(blockhash))
-            .unwrap_or([0; 32]);
         ranges[idx] = SlotRangeWithPreviousBlockhash {
             range,
-            previous_blockhash: previous,
+            previous_blockhash,
         };
-        previous_blockhash = Some(blockhash);
+        previous_blockhash = blockhash;
         last_blockhash = Some(blockhash);
         present_slots += 1;
     }
 
     eprintln!(
-        "epoch={epoch}: built v2 from Archive V2 block index present_slots={present_slots} blockhash_id_offset={blockhash_id_offset}"
+        "epoch={epoch}: built v2 from Archive V2 block index present_slots={present_slots} blockhash_id_offset={}",
+        alignment.registry_offset
     );
 
     Ok(SlotRangesV2Build {
@@ -437,6 +561,12 @@ fn build_slot_ranges_v2_from_blockhash_registry_sidecar(
     index_block_slots: Option<&[u64]>,
     initial_previous_blockhash: Option<[u8; 32]>,
 ) -> Result<SlotRangesV2Build> {
+    if raw_ranges.len() != SLOTS_PER_EPOCH as usize {
+        return Err(anyhow!("raw ranges wrong length"));
+    }
+    if epoch > 0 {
+        require_epoch_seed(epoch, initial_previous_blockhash)?;
+    }
     let blockhashes = read_blockhash_registry(&epoch_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE))?;
     let raw_present_slots = raw_ranges
         .iter()
@@ -444,9 +574,9 @@ fn build_slot_ranges_v2_from_blockhash_registry_sidecar(
         .filter(|range| !range.is_empty())
         .count();
     let raw_block_slots: Vec<u64>;
-    let block_slots = if raw_present_slots == blockhashes.len()
-        || raw_present_slots.checked_add(1) == Some(blockhashes.len())
-    {
+    let block_slots = if let Some(slots) = index_block_slots {
+        slots
+    } else {
         raw_block_slots = raw_ranges
             .iter()
             .copied()
@@ -456,53 +586,46 @@ fn build_slot_ranges_v2_from_blockhash_registry_sidecar(
             })
             .collect();
         &raw_block_slots
-    } else if let Some(slots) = index_block_slots {
-        slots
-    } else {
-        return Err(anyhow!(
-            "blockhash registry has {} hashes for {raw_present_slots} non-empty raw ranges; rebuild v1 ranges or provide block slot order",
-            blockhashes.len()
-        ));
     };
-    let blockhash_id_offset = blockhash_id_offset(block_slots.len(), blockhashes.len())?;
-    let genesis_previous_blockhash = (blockhash_id_offset == 1)
-        .then(|| blockhashes.first().copied())
-        .flatten();
+    validate_ordered_block_slots(epoch, raw_ranges, block_slots)?;
+    let alignment = blockhash_registry_alignment(
+        epoch,
+        block_slots.len(),
+        &blockhashes,
+        initial_previous_blockhash,
+    )?;
 
     let mut ranges = vec![SlotRangeWithPreviousBlockhash::EMPTY; SLOTS_PER_EPOCH as usize];
-    let mut previous_blockhash = initial_previous_blockhash.or(genesis_previous_blockhash);
+    let mut previous_blockhash = alignment.initial_previous_blockhash;
     let mut last_blockhash = None;
     let epoch_start = epoch
         .checked_mul(SLOTS_PER_EPOCH)
         .ok_or_else(|| anyhow!("epoch start slot overflow for epoch {epoch}"))?;
 
     for (block_i, slot) in block_slots.iter().copied().enumerate() {
-        if epoch_for_slot(slot) != epoch {
-            continue;
-        }
         let slot_in_epoch =
             usize::try_from(slot_in_epoch(slot)).context("slot-in-epoch exceeds usize")?;
         let range = raw_ranges[slot_in_epoch];
 
         let hash_index = block_i
-            .checked_add(blockhash_id_offset as usize)
+            .checked_add(alignment.registry_offset)
             .ok_or_else(|| anyhow!("blockhash id overflow for block index {block_i}"))?;
         let blockhash = *blockhashes.get(hash_index).ok_or_else(|| {
             anyhow!("missing blockhash id {hash_index} for block index {block_i}")
         })?;
-        let previous = previous_blockhash.unwrap_or([0; 32]);
         ranges[slot_in_epoch] = SlotRangeWithPreviousBlockhash {
             range,
-            previous_blockhash: previous,
+            previous_blockhash,
         };
-        previous_blockhash = Some(blockhash);
+        previous_blockhash = blockhash;
         last_blockhash = Some(blockhash);
     }
 
     eprintln!(
-        "epoch={epoch}: built v2 from blockhash registry only block_slots={} raw_present_slots={} blockhash_id_offset={blockhash_id_offset} first_slot={} last_slot={}",
+        "epoch={epoch}: built v2 from ordered block slots and blockhash registry block_slots={} raw_present_slots={} blockhash_id_offset={} first_slot={} last_slot={}",
         block_slots.len(),
         raw_present_slots,
+        alignment.registry_offset,
         block_slots.first().copied().unwrap_or(epoch_start),
         block_slots.last().copied().unwrap_or(epoch_start),
     );
@@ -513,7 +636,48 @@ fn build_slot_ranges_v2_from_blockhash_registry_sidecar(
     })
 }
 
-fn last_blockhash_from_archive_v2(
+fn validate_ordered_block_slots(
+    epoch: u64,
+    raw_ranges: &[SlotRange],
+    block_slots: &[u64],
+) -> Result<()> {
+    let epoch_start = epoch
+        .checked_mul(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("epoch start slot overflow for epoch {epoch}"))?;
+    let epoch_end = epoch_start
+        .checked_add(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("epoch end slot overflow for epoch {epoch}"))?;
+    let mut member = vec![false; SLOTS_PER_EPOCH as usize];
+    let mut previous_slot = None;
+    for (position, slot) in block_slots.iter().copied().enumerate() {
+        if !(epoch_start..epoch_end).contains(&slot) {
+            return Err(anyhow!(
+                "ordered block slot {slot} at position {position} is outside epoch {epoch} range {epoch_start}..{epoch_end}"
+            ));
+        }
+        if previous_slot.is_some_and(|previous| slot <= previous) {
+            return Err(anyhow!(
+                "ordered block slots are not strictly increasing at position {position}: {slot} follows {}",
+                previous_slot.unwrap()
+            ));
+        }
+        let slot_in_epoch =
+            usize::try_from(slot - epoch_start).context("slot-in-epoch exceeds address space")?;
+        member[slot_in_epoch] = true;
+        previous_slot = Some(slot);
+    }
+    for (slot_in_epoch, range) in raw_ranges.iter().enumerate() {
+        if !range.is_empty() && !member[slot_in_epoch] {
+            return Err(anyhow!(
+                "raw-present slot {} is absent from the ordered block slot list",
+                epoch_start + slot_in_epoch as u64
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn last_blockhash_from_registry(
     epoch: u64,
     archive_v2_root: Option<&Path>,
     allow_root_fallback: bool,
@@ -527,17 +691,82 @@ fn last_blockhash_from_archive_v2(
     read_last_blockhash_registry(&epoch_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE)).map(Some)
 }
 
-fn blockhash_id_offset(row_count: usize, blockhash_count: usize) -> Result<u32> {
-    match blockhash_count.checked_sub(row_count) {
-        Some(0) => Ok(0),
-        Some(1) => Ok(1),
-        Some(extra) => Err(anyhow!(
-            "blockhash registry has {blockhash_count} hashes for {row_count} rows; expected equal length or one genesis-prefixed hash, got {extra} extra"
-        )),
-        None => Err(anyhow!(
-            "blockhash registry has {blockhash_count} hashes but block index has {row_count} rows"
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct BlockhashRegistryAlignment {
+    registry_offset: usize,
+    initial_previous_blockhash: [u8; 32],
+}
+
+fn blockhash_registry_alignment(
+    epoch: u64,
+    row_count: usize,
+    blockhashes: &[[u8; 32]],
+    explicit_seed: Option<[u8; 32]>,
+) -> Result<BlockhashRegistryAlignment> {
+    let blockhash_count = blockhashes.len();
+    for (record, blockhash) in blockhashes.iter().enumerate() {
+        if *blockhash == [0; 32] {
+            return Err(anyhow!("blockhash registry record {record} is zero"));
+        }
+    }
+    let registry_offset = blockhash_count.checked_sub(row_count).ok_or_else(|| {
+        anyhow!(
+            "blockhash registry has {blockhash_count} hashes but ordered block slot list has {row_count} rows"
+        )
+    })?;
+
+    if epoch > 0 {
+        if registry_offset != 0 {
+            return Err(anyhow!(
+                "epoch {epoch} blockhash registry has {blockhash_count} hashes for {row_count} ordered block slots; only epoch 0 can contain a genesis prefix"
+            ));
+        }
+        return Ok(BlockhashRegistryAlignment {
+            registry_offset,
+            initial_previous_blockhash: require_epoch_seed(epoch, explicit_seed)?,
+        });
+    }
+
+    match registry_offset {
+        0 => Ok(BlockhashRegistryAlignment {
+            registry_offset,
+            initial_previous_blockhash: require_epoch_seed(epoch, explicit_seed)?,
+        }),
+        1 => {
+            let registry_genesis = blockhashes[0];
+            let expected_genesis = explicit_seed.unwrap_or(mainnet_genesis_hash()?);
+            if registry_genesis != expected_genesis {
+                return Err(anyhow!(
+                    "epoch 0 blockhash registry genesis prefix does not match {}",
+                    if explicit_seed.is_some() {
+                        "--seed-previous-blockhash"
+                    } else {
+                        "the mainnet genesis hash"
+                    }
+                ));
+            }
+            Ok(BlockhashRegistryAlignment {
+                registry_offset,
+                initial_previous_blockhash: registry_genesis,
+            })
+        }
+        extra => Err(anyhow!(
+            "epoch 0 blockhash registry has {blockhash_count} hashes for {row_count} ordered block slots (offset {extra}); expected one genesis-prefixed hash or equal length with --seed-previous-blockhash"
         )),
     }
+}
+
+fn mainnet_genesis_hash() -> Result<[u8; 32]> {
+    decode_base58_hash(MAINNET_GENESIS_HASH_BASE58)
+}
+
+fn decode_base58_hash(value: &str) -> Result<[u8; 32]> {
+    let bytes = bs58::decode(value)
+        .into_vec()
+        .with_context(|| format!("decode base58 blockhash {value}"))?;
+    bytes
+        .try_into()
+        .map_err(|bytes: Vec<u8>| anyhow!("blockhash must be 32 bytes, got {}", bytes.len()))
 }
 
 fn read_blockhash_registry(path: &Path) -> Result<Vec<[u8; 32]>> {
@@ -549,36 +778,28 @@ fn read_blockhash_registry(path: &Path) -> Result<Vec<[u8; 32]>> {
             bytes.len()
         ));
     }
-    Ok(bytes
+    bytes
         .chunks_exact(32)
-        .map(|chunk| {
+        .enumerate()
+        .map(|(record, chunk)| {
             let mut hash = [0u8; 32];
             hash.copy_from_slice(chunk);
-            hash
+            if hash == [0; 32] {
+                return Err(anyhow!(
+                    "{} blockhash registry record {record} is zero",
+                    path.display()
+                ));
+            }
+            Ok(hash)
         })
-        .collect())
+        .collect()
 }
 
 fn read_last_blockhash_registry(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let len = file
-        .metadata()
-        .with_context(|| format!("stat {}", path.display()))?
-        .len();
-    if len == 0 || len % 32 != 0 {
-        return Err(anyhow!(
-            "{} has invalid length {} (expected a non-empty multiple of 32)",
-            path.display(),
-            len
-        ));
-    }
-
-    file.seek(SeekFrom::End(-32))
-        .with_context(|| format!("seek {}", path.display()))?;
-    let mut hash = [0u8; 32];
-    file.read_exact(&mut hash)
-        .with_context(|| format!("read last blockhash from {}", path.display()))?;
-    Ok(hash)
+    read_blockhash_registry(path)?
+        .last()
+        .copied()
+        .ok_or_else(|| anyhow!("{} blockhash registry is empty", path.display()))
 }
 
 fn read_archive_v2_block_index_rows(path: &Path) -> Result<Vec<ArchiveV2BlockIndexRow>> {
@@ -707,7 +928,7 @@ fn build_slot_ranges_v2_from_local_car(
     epoch: u64,
     initial_previous_blockhash: Option<[u8; 32]>,
 ) -> Result<SlotRangesV2Build> {
-    require_non_genesis_seed(epoch, initial_previous_blockhash)?;
+    let initial_previous_blockhash = require_epoch_seed(epoch, initial_previous_blockhash)?;
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut reader = CarBlockReader::with_capacity(file, 16 << 20);
     reader
@@ -756,18 +977,15 @@ fn build_slot_ranges_v2_from_local_car(
                 if epoch_for_slot(block.slot) == epoch {
                     let len = u32::try_from(end.saturating_sub(start))
                         .context("CAR block range exceeds u32")?;
-                    let previous = previous_blockhash
-                        .or_else(|| (block.slot == 0).then_some(pending_blockhash))
-                        .unwrap_or([0; 32]);
                     let idx = usize::try_from(slot_in_epoch(block.slot))
                         .context("slot-in-epoch exceeds usize")?;
                     ranges[idx] = SlotRangeWithPreviousBlockhash {
                         range: SlotRange { offset: start, len },
-                        previous_blockhash: previous,
+                        previous_blockhash,
                     };
                 }
 
-                previous_blockhash = Some(pending_blockhash);
+                previous_blockhash = pending_blockhash;
                 last_blockhash = Some(pending_blockhash);
                 pending_start = None;
                 pending_blockhash = [0; 32];
@@ -786,28 +1004,32 @@ fn build_slot_ranges_v2_from_local_car(
     })
 }
 
-fn require_non_genesis_seed(
+fn require_epoch_seed(
     epoch: u64,
     initial_previous_blockhash: Option<[u8; 32]>,
-) -> Result<()> {
-    if epoch > 0 {
-        match initial_previous_blockhash {
-            None => {
-                return Err(anyhow!(
-                    "epoch {epoch} v2 index requires the last blockhash from epoch {}; provide the predecessor blockhash registry",
-                    epoch - 1
-                ));
-            }
-            Some(hash) if hash == [0; 32] => {
-                return Err(anyhow!(
-                    "epoch {epoch} v2 index predecessor blockhash from epoch {} is zero",
-                    epoch - 1
-                ));
-            }
-            Some(_) => {}
+) -> Result<[u8; 32]> {
+    let hash = initial_previous_blockhash.ok_or_else(|| {
+        if epoch == 0 {
+            anyhow!(
+                "epoch 0 v2 index requires a genesis-prefixed blockhash registry or --seed-previous-blockhash"
+            )
+        } else {
+            anyhow!(
+                "epoch {epoch} v2 index requires the last blockhash from epoch {}; provide the predecessor blockhash registry",
+                epoch - 1
+            )
         }
+    })?;
+    if hash == [0; 32] {
+        if epoch == 0 {
+            return Err(anyhow!("epoch 0 v2 index genesis seed is zero"));
+        }
+        return Err(anyhow!(
+            "epoch {epoch} v2 index predecessor blockhash from epoch {} is zero",
+            epoch - 1
+        ));
     }
-    Ok(())
+    Ok(hash)
 }
 
 /* ---------------- CAR header size ---------------- */
@@ -963,6 +1185,234 @@ fn http_range_get(http: &Client, url: &str, start: u64, end: u64) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_registry_stitch_uses_ordered_old_faithful_slots() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let epoch_dir = temporary.path().join("epoch-4");
+        fs::create_dir_all(&epoch_dir).expect("create epoch directory");
+        let predecessor_last_hash = [6; 32];
+        let blockhashes = [[7; 32], [8; 32], [9; 32]];
+        let registry = blockhashes.concat();
+        fs::write(epoch_dir.join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE), registry)
+            .expect("write blockhash registry");
+        fs::write(epoch_dir.join(ARCHIVE_V2_BLOCK_INDEX_FILE), b"not used")
+            .expect("write ignored Archive V2 index");
+
+        let epoch_start = 4 * SLOTS_PER_EPOCH;
+        let ordered_block_slots = [epoch_start, epoch_start + 1, epoch_start + 2];
+        let mut raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
+        raw_ranges[0] = SlotRange {
+            offset: 59,
+            len: 100,
+        };
+        raw_ranges[2] = SlotRange {
+            offset: 159,
+            len: 120,
+        };
+
+        let output = build_slot_ranges_v2_from_blockhash_registry_sidecar(
+            &epoch_dir,
+            4,
+            &raw_ranges,
+            Some(&ordered_block_slots),
+            Some(predecessor_last_hash),
+        )
+        .expect("stitch from Old Faithful slot order");
+
+        assert_eq!(output.ranges[0].previous_blockhash, predecessor_last_hash);
+        assert!(output.ranges[1].range.is_empty());
+        assert_eq!(output.ranges[1].previous_blockhash, blockhashes[0]);
+        assert_eq!(output.ranges[2].previous_blockhash, blockhashes[1]);
+        assert_eq!(output.last_blockhash, Some(blockhashes[2]));
+    }
+
+    #[test]
+    fn independent_stitch_rejects_invalid_ordered_slots() {
+        let epoch = 4;
+        let epoch_start = epoch * SLOTS_PER_EPOCH;
+        let raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
+
+        for slots in [
+            vec![epoch_start, epoch_start],
+            vec![epoch_start + 1, epoch_start],
+            vec![epoch_start - 1],
+            vec![epoch_start + SLOTS_PER_EPOCH],
+        ] {
+            let error = validate_ordered_block_slots(epoch, &raw_ranges, &slots)
+                .expect_err("invalid ordered slots must fail");
+            assert!(
+                error.to_string().contains("strictly increasing")
+                    || error.to_string().contains("outside epoch")
+            );
+        }
+    }
+
+    #[test]
+    fn independent_stitch_rejects_raw_slot_missing_from_ordered_slots() {
+        let epoch = 4;
+        let epoch_start = epoch * SLOTS_PER_EPOCH;
+        let mut raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
+        raw_ranges[2] = SlotRange { offset: 59, len: 1 };
+        let error = validate_ordered_block_slots(epoch, &raw_ranges, &[epoch_start])
+            .expect_err("raw-present slot must be in the compact slot list");
+        assert!(error.to_string().contains("raw-present slot"));
+    }
+
+    #[test]
+    fn builder_rejects_zero_blockhash_registry_record() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE);
+        let mut registry = Vec::new();
+        registry.extend_from_slice(&[7; 32]);
+        registry.extend_from_slice(&[0; 32]);
+        fs::write(&path, registry).expect("write registry");
+        let error = read_blockhash_registry(&path).expect_err("zero hash must fail");
+        assert!(error.to_string().contains("record 1 is zero"));
+    }
+
+    #[test]
+    fn registry_alignment_limits_genesis_prefix_to_epoch_zero() {
+        let genesis = mainnet_genesis_hash().expect("mainnet genesis hash");
+        let epoch_zero = blockhash_registry_alignment(0, 1, &[genesis, [7; 32]], None)
+            .expect("epoch zero genesis prefix");
+        assert_eq!(epoch_zero.registry_offset, 1);
+        assert_eq!(epoch_zero.initial_previous_blockhash, genesis);
+
+        let wrong_seed = blockhash_registry_alignment(0, 1, &[genesis, [7; 32]], Some([9; 32]))
+            .expect_err("a present genesis prefix must match the explicit seed");
+        assert!(wrong_seed.to_string().contains("--seed-previous-blockhash"));
+
+        let missing_seed = blockhash_registry_alignment(0, 1, &[[7; 32]], None)
+            .expect_err("unprefixed epoch zero needs a seed");
+        assert!(
+            missing_seed
+                .to_string()
+                .contains("--seed-previous-blockhash")
+        );
+
+        let later_prefix = blockhash_registry_alignment(1, 1, &[[7; 32], [8; 32]], Some([6; 32]))
+            .expect_err("later epoch cannot have a registry prefix");
+        assert!(later_prefix.to_string().contains("only epoch 0"));
+    }
+
+    #[test]
+    fn normal_epoch_zero_accepts_unprefixed_registry_with_explicit_seed() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        fs::write(
+            temporary.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            [7; 32],
+        )
+        .expect("write unprefixed registry");
+        let raw_ranges = vec![SlotRange::EMPTY; SLOTS_PER_EPOCH as usize];
+        let seed = mainnet_genesis_hash().expect("mainnet genesis hash");
+        let output = build_slot_ranges_v2_from_blockhash_registry_sidecar(
+            temporary.path(),
+            0,
+            &raw_ranges,
+            Some(&[0]),
+            Some(seed),
+        )
+        .expect("explicit seed makes an unprefixed epoch-zero registry safe");
+        assert_eq!(output.ranges[0].previous_blockhash, seed);
+        assert_eq!(output.last_blockhash, Some([7; 32]));
+    }
+
+    #[test]
+    fn normal_registry_lookup_never_reuses_root_file() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        fs::write(
+            temporary.path().join(ARCHIVE_V2_BLOCKHASH_REGISTRY_FILE),
+            [7; 32],
+        )
+        .expect("write root registry");
+        assert!(find_archive_v2_blockhash_dir(temporary.path(), 4, false).is_none());
+        assert_eq!(
+            find_archive_v2_blockhash_dir(temporary.path(), 4, true),
+            Some(temporary.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn blockhash_dir_is_an_explicit_independent_mode() {
+        let cli = Cli::try_parse_from([
+            "of-slot-ranges",
+            "--start-epoch",
+            "4",
+            "--end-epoch",
+            "4",
+            "--blockhash-dir",
+            "/registry",
+        ])
+        .expect("independent blockhash mode");
+        assert_eq!(cli.blockhash_dir, Some(PathBuf::from("/registry")));
+        assert!(cli.archive_v2_dir.is_none());
+
+        assert!(
+            Cli::try_parse_from([
+                "of-slot-ranges",
+                "--start-epoch",
+                "4",
+                "--end-epoch",
+                "4",
+                "--blockhash-dir",
+                "/registry",
+                "--archive-v2-dir",
+                "/archive",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reused_raw_v2_build_reads_slots_from_old_faithful_index() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let epoch_dir = temporary.path().join("4");
+        fs::create_dir_all(&epoch_dir).expect("create epoch directory");
+        fs::write(epoch_dir.join("epoch-4.cid"), "fixture-cid\n").expect("write CID file");
+        let expected_slot = 4 * SLOTS_PER_EPOCH + 1;
+        let slot_index = tiny_compact_index(&expected_slot.to_le_bytes(), &[1, 2, 3]);
+        fs::write(
+            epoch_dir.join("epoch-4-fixture-cid-mainnet-slot-to-cid.index"),
+            slot_index,
+        )
+        .expect("write slot-to-CID index");
+
+        assert_eq!(
+            read_block_slots_from_old_faithful_index(4, temporary.path())
+                .expect("read ordered block slots"),
+            vec![expected_slot]
+        );
+    }
+
+    fn tiny_compact_index(key: &[u8], value: &[u8]) -> Vec<u8> {
+        use of_car_reader::compact_index::{
+            BUCKET_HEADER_SIZE, COMPACT_INDEX_FIXED_HEADER_SIZE, COMPACT_INDEX_MAGIC,
+            truncate_entry_hash,
+        };
+
+        let hash_domain = 11u32;
+        let hash_len = 8u8;
+        let header_len = 13u32;
+        let bucket_count = 1u32;
+        let data_offset = COMPACT_INDEX_FIXED_HEADER_SIZE + BUCKET_HEADER_SIZE;
+        let target = truncate_entry_hash(hash_domain, key, hash_len as usize);
+        let mut out = Vec::new();
+        out.extend_from_slice(COMPACT_INDEX_MAGIC);
+        out.extend_from_slice(&header_len.to_le_bytes());
+        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        out.extend_from_slice(&bucket_count.to_le_bytes());
+        out.push(1);
+        let mut bucket_header = [0u8; BUCKET_HEADER_SIZE];
+        bucket_header[0..4].copy_from_slice(&hash_domain.to_le_bytes());
+        bucket_header[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bucket_header[8] = hash_len;
+        bucket_header[10..16].copy_from_slice(&(data_offset as u64).to_le_bytes()[..6]);
+        out.extend_from_slice(&bucket_header);
+        out.extend_from_slice(&target.to_le_bytes());
+        out.extend_from_slice(value);
+        out
+    }
 
     #[test]
     fn sidecar_stitch_uses_predecessor_last_hash_before_current_first_hash() {

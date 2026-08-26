@@ -27,6 +27,7 @@ path = "src/bin/validate_slot_index.rs"
 [[bin]]
 name = "of-validate-slot-index-v2"
 path = "src/bin/validate_slot_index_v2.rs"
+required-features = ["cli"]
 
 [features]
 default = ["cli"]
