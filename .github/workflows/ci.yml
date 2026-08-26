@@ -94,6 +94,8 @@ jobs:
           python3 services/hivezilla/scripts/test_ingest_status_server.py
           python3 services/hivezilla/scripts/test_shred_status_server.py
       - name: Build native Hivezilla recorder support binary
+        env:
+          RUSTFLAGS: -C target-cpu=native
         run: cargo build --locked -p hivezilla --bin hivezilla
       - name: Test shell operational helpers
         run: |
