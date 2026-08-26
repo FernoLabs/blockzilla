@@ -33,7 +33,7 @@ prost = "0.14.3"
 wincode = { version = "=0.6.1", features = ["derive"] }
 solana-pubkey = "4.2.0"
 sha2 = "0.11.0"
-of-car-reader = { path = "../old-faithful/car-reader", default-features = false }
+of-car-reader = { path = "../old-faithful/car-reader", version = "0.2.0", default-features = false }
 blockzilla-log-parser = { path = "../blockzilla-log-parser" }
 data-encoding = "2.11.0"
 five8 = "1.0.0"

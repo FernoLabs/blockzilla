@@ -1,6 +1,6 @@
 [package]
 name = "of-car-reader"
-version = "0.1.3"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,6 +18,21 @@ exclude = [
 name = "reader"
 path = "src/bin/reader.rs"
 required-features = ["reader"]
+
+[[bin]]
+name = "car_continuations"
+path = "src/bin/car_continuations.rs"
+required-features = ["zstd-native"]
+
+[[bin]]
+name = "car_skipped_slots"
+path = "src/bin/car_skipped_slots.rs"
+required-features = ["zstd-native"]
+
+[[bin]]
+name = "car_validate_lossless"
+path = "src/bin/car_validate_lossless.rs"
+required-features = ["zstd-native"]
 
 [[bench]]
 name = "big_block"
