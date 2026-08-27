@@ -21,6 +21,11 @@ path = "src/bin/car_slot_index.rs"
 required-features = ["cli"]
 
 [[bin]]
+name = "of-repair-slot-ranges"
+path = "src/bin/repair_slot_ranges.rs"
+required-features = ["cli"]
+
+[[bin]]
 name = "of-validate-slot-index"
 path = "src/bin/validate_slot_index.rs"
 

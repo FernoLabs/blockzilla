@@ -81,18 +81,102 @@ cargo run --locked -p of-slot-ranges --bin of-slot-ranges -- \
   --overwrite-v2
 ```
 
-The local file name can be `epoch-N.slots.txt` or `N.slots.txt`. For epoch 0,
-all lines are current-epoch block slots. For every later epoch, line 1 is the
-epoch boundary predecessor slot `N*432000-1` and is not a current member. All
-remaining lines must be decimal current-epoch slots in strictly increasing
-order. The builder requires each nonempty raw range to be in this member list.
-A listed block can have an empty raw range and still receives the correct
-previous blockhash in the v2 output.
+The local file name can be `epoch-N.slots.txt` or `N.slots.txt`. Lines are
+decimal slots in strictly increasing order. A list can have at most one slot
+from the preceding epoch, followed by the current-epoch block slots, and at
+most one slot from the next epoch. The boundary values are the actual last or
+first present blocks; they are not necessarily epoch boundary slot numbers.
+The builder uses only current-epoch slots as members. When an adjacent slot
+list is present in the same directory, it checks a listed predecessor against
+the prior list's last current slot and a listed successor against the next
+list's first current slot. A listed current block can have an empty raw range
+and still receives the correct previous blockhash in the v2 output.
 
 Do not rebuild verified historical v2 files without checking their public raw
 inputs. The builder stops if a nonempty raw row is not in the slot list, and
 the authoritative validator stops on invalid or overlapping ranges. Keep an
 existing verified v2 file when an older public raw file fails these checks.
+
+## Repair malformed public raw ranges without CID indexes
+
+Use `of-repair-slot-ranges` when the public 12-byte raw file has missing,
+overlapping, oversized, or nonmember rows. The repair needs the public slot
+list and a seekable plain CAR file. It does not read a slot-to-CID or
+CID-to-offset index.
+
+```bash
+cargo run --locked -p of-slot-ranges --bin of-repair-slot-ranges -- \
+  --epoch 4 \
+  --raw /data/public-raw \
+  --slots /data/slot-lists \
+  --car 'https://files.old-faithful.net/' \
+  --assume-immutable-http \
+  --plan
+
+cargo run --locked -p of-slot-ranges --bin of-repair-slot-ranges -- \
+  --epoch 4 \
+  --raw /data/public-raw \
+  --slots /data/slot-lists \
+  --car 'https://files.old-faithful.net/' \
+  --assume-immutable-http \
+  --output /data/candidate/epoch-4-slot-ranges.raw
+```
+
+`--raw` and `--slots` accept either the exact file or a directory. A CAR URL
+ending in `/` resolves to `{epoch}/epoch-{epoch}.car`; an exact URL or a URL
+with `{epoch}` is also accepted. HTTP sources must support exact Range
+responses. By default, the tool requires and pins a strong ETag. The public
+Old Faithful endpoint does not provide one, so its immutable epoch URLs need
+the explicit `--assume-immutable-http` audit
+override. In that mode, the tool fetches every selected segment twice in
+reverse verification order, requires matching SHA-256 values, and requires the
+same exact object length on every read. This check detects a change during the
+repair, but the operator must still guarantee that the epoch URL stays
+immutable after the check. `--plan` prints the selected and double-read
+transfer byte counts without reading the selected segments or writing output.
+Use `--overwrite` only for an existing candidate output.
+
+For a CAR with a trusted whole-object digest, use
+`--expected-car-sha256`. This mode forces one segment over the complete plain
+CAR, rebuilds every listed current-epoch Block range, and checks the streaming
+SHA-256 before it writes the candidate. The digest authorizes one pass from an
+HTTP source that has no ETag, so `--assume-immutable-http` is not needed and no
+second HTTP read occurs. `--plan` reports one full-object transfer.
+
+```bash
+cargo run --release --locked -p of-slot-ranges --bin of-repair-slot-ranges -- \
+  --epoch 304 \
+  --raw /data/public-raw \
+  --slots /data/slot-lists \
+  --car 'https://files.old-faithful.net/' \
+  --expected-car-sha256 7cd069372272ea081de4f3b2755ec56023669c062be50882bcfed19d667ede21 \
+  --output /data/candidate/epoch-304-slot-ranges.raw
+```
+
+The official plain-CAR SHA-256 values for the large repair epochs are:
+
+| Epoch | SHA-256 |
+| ---: | --- |
+| 304 | `7cd069372272ea081de4f3b2755ec56023669c062be50882bcfed19d667ede21` |
+| 312 | `e92f38a13f1e51827c843450f164c05356b88cd67985cd317e6c9cd6725ee5bd` |
+
+The repair keeps structurally coherent block rows. It clears all rows that are
+not in `N.slots.txt`. For each incoherent run, it reads only the CAR bytes
+between the adjacent coherent block boundaries. A run at the start uses the
+CAR header and verifies a listed preceding-epoch Block when present. If the
+list omits that boundary, it can decode at most one adjacent-epoch boundary
+Block from the CAR. A run at the end uses the exact CAR object length and uses
+the same rule for an optional next-epoch Block. The tool parses all frames in
+the selected bytes with `of-car-reader`. For every Block candidate it loads the
+complete payload, recomputes and compares the CAR CID, decodes the full Block,
+and requires the current Block slots to equal the selected slot-list run in
+order. It writes no output unless all current members have contiguous, nonzero
+ranges of at most 64 MiB, all other rows are zero, and the result has exactly
+432000 rows.
+
+Compressed `.car.zst` files cannot support bounded repair reads. Use
+`of-car-slot-index --raw-only` to scan one of those files and rebuild the
+complete epoch instead.
 
 The range wrapper supports the same path and skips compact-index downloads:
 
@@ -227,13 +311,17 @@ After validation, upload only v2 files to the production prefix:
 SLOT_INDEX_V2_VALIDATE_BIN=target/release/of-validate-slot-index-v2 \
   ./sync-slot-index-r2.sh push-v2-authoritative \
   ./slot-index /data/blockhash-registry \
-  r2:blockzilla/slot-index-v2
+  r2:blockzilla/slot-index-v2-verified
 ```
 
 `push-v2-authoritative` runs only the v2-authoritative validator before it
 starts the upload. It refuses to change an existing remote object and checks
-the uploaded objects. The build wrappers use this path when they sync a v2
-build that has a blockhash registry root. Set both
+the uploaded objects. Its built-in default remains the legacy
+`r2:blockzilla/slot-index-v2` prefix. Production verified-only uploads must
+pass `r2:blockzilla/slot-index-v2-verified` explicitly. The build wrappers use
+this path when they sync a v2 build that has a blockhash registry root, and
+they require `SLOT_INDEX_V2_REMOTE` so they cannot select a production prefix
+implicitly. Set both
 `SLOT_INDEX_START_EPOCH` and `SLOT_INDEX_END_EPOCH` to restrict sync validation
 and upload to one inclusive epoch range. The upload include list contains only
 the validated epochs. `push-v2` remains available as the optional CID-backed

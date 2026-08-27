@@ -4,10 +4,10 @@ mod http_response;
 mod render;
 mod rpc;
 
-use crate::archive::get_block;
+use crate::archive::{SlotIndexFallbackPolicy, get_block, slot_index_fallback_policy};
 use crate::http_response::{
-    BlockResponseFormat, BlockResponseMode, INFO_CACHE_CONTROL, block_response,
-    cached_json_response, json_error, with_server_timing,
+    BlockResponseFormat, BlockResponseMode, ERROR_CACHE_CONTROL, INFO_CACHE_CONTROL,
+    block_response, cached_json_response, json_error, with_server_timing,
 };
 use worker::*;
 
@@ -31,20 +31,35 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
 
 async fn handle_info(env: Env) -> Result<Response> {
     let info = archive::get_status(&env).await;
+    let ok = info.is_ready();
+    let (status, cache_control) = info_http_policy(ok);
+    let slot_index_source = info.slot_index_source();
+    let previous_blockhash_source = info.previous_blockhash_source();
 
-    cached_json_response(
+    let response = cached_json_response(
         &serde_json::json!({
-            "ok": true,
+            "ok": ok,
             "json_rpc_methods": ["getBlock", "getBlockTime", "getVersion"],
             "block_routes": ["/block/:slot", "/block-lite/:slot"],
-            "slot_index_source": "r2-precomputed-slot-ranges-with-r2-compact-fallback",
-            "previous_blockhash_source": "r2-slot-ranges-v2-raw",
+            "slot_index_fallback_policy": info.slot_index_fallback_policy,
+            "slot_index_source": slot_index_source,
+            "previous_blockhash_source": previous_blockhash_source,
             "archive_source": "official-old-faithful-http",
             "index_presence": info.index_presence,
+            "index_presence_error": info.index_presence_error,
             "cluster_epoch_hint_error": info.cluster_epoch_hint_error,
         }),
-        INFO_CACHE_CONTROL,
-    )
+        cache_control,
+    )?;
+    Ok(response.with_status(status))
+}
+
+fn info_http_policy(ok: bool) -> (u16, &'static str) {
+    if ok {
+        (200, INFO_CACHE_CONTROL)
+    } else {
+        (503, ERROR_CACHE_CONTROL)
+    }
 }
 
 async fn handle_block(req: Request, env: &Env, ctx: &Context, raw_slot: &str) -> Result<Response> {
@@ -74,7 +89,15 @@ async fn handle_block_response(
     };
 
     let fetch_started_at = js_sys::Date::now();
-    let cache_key = block_cache_key(slot, mode, format, include_rewards);
+    let fallback_policy = match slot_index_fallback_policy(env) {
+        Ok(policy) => policy,
+        Err(err) => {
+            console_error!("Invalid slot index policy: {:?}", err);
+            let response = json_error(err.status_code(), err.code(), &err.client_message())?;
+            return with_server_timing(response, started_at, fetch_started_at, js_sys::Date::now());
+        }
+    };
+    let cache_key = block_cache_key(slot, mode, format, include_rewards, fallback_policy);
     let cache = Cache::default();
     match cache.get(cache_key.clone(), false).await {
         Ok(Some(response)) => {
@@ -165,9 +188,11 @@ fn block_cache_key(
     mode: BlockResponseMode,
     format: BlockResponseFormat,
     include_rewards: bool,
+    fallback_policy: SlotIndexFallbackPolicy,
 ) -> String {
     format!(
-        "https://of-getblock-worker.cache/v2/{}/{slot}.{}?rewards={include_rewards}",
+        "https://of-getblock-worker.cache/v3/{}/{}/{slot}.{}?rewards={include_rewards}",
+        fallback_policy.as_str(),
         match mode {
             BlockResponseMode::Full => "block",
             BlockResponseMode::Lite => "block-lite",
@@ -228,4 +253,40 @@ fn parse_include_rewards(req: &Request) -> std::result::Result<bool, Response> {
 fn invalid_slot_response() -> Response {
     json_error(400, "invalid_slot", "slot must be an unsigned integer")
         .unwrap_or_else(|_| Response::error("Invalid slot", 400).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BlockResponseFormat, BlockResponseMode, ERROR_CACHE_CONTROL, INFO_CACHE_CONTROL,
+        SlotIndexFallbackPolicy, block_cache_key, info_http_policy,
+    };
+
+    #[test]
+    fn cache_keys_are_isolated_from_old_and_fallback_index_results() {
+        let verified = block_cache_key(
+            42,
+            BlockResponseMode::Lite,
+            BlockResponseFormat::Protobuf,
+            false,
+            SlotIndexFallbackPolicy::VerifiedOnly,
+        );
+        let fallback = block_cache_key(
+            42,
+            BlockResponseMode::Lite,
+            BlockResponseFormat::Protobuf,
+            false,
+            SlotIndexFallbackPolicy::ValidatedV2,
+        );
+
+        assert!(verified.contains("/v3/verified-only/"));
+        assert!(fallback.contains("/v3/validated-v2/"));
+        assert_ne!(verified, fallback);
+    }
+
+    #[test]
+    fn unhealthy_info_is_not_cached_as_a_success() {
+        assert_eq!(info_http_policy(true), (200, INFO_CACHE_CONTROL));
+        assert_eq!(info_http_policy(false), (503, ERROR_CACHE_CONTROL));
+    }
 }

@@ -101,8 +101,7 @@ fn car_bytes_to_json_bytes_inner(
     let mut block = read_car_block(bytes, include_rewards, transaction_read_mode)?;
     let tx_count = block.get_len().0;
     let rewards = if include_rewards {
-        let rewards = decode_block_rewards_proto(block.rewards.as_ref())?;
-        rewards
+        decode_block_rewards_proto(block.rewards.as_ref())?
     } else {
         None
     };
