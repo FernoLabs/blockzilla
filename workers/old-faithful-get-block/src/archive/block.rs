@@ -1,4 +1,4 @@
-use super::{http, v2_slot_index_keys};
+use super::{SlotIndexFallbackPolicy, http, slot_index_fallback_policy, v2_slot_index_keys};
 use crate::error::{FetchError, FetchResult, MAX_CAR_BLOCK_BYTES};
 use anyhow::{Result as AnyhowResult, anyhow};
 use of_car_reader::compact_index::decode_offset_and_size;
@@ -35,7 +35,8 @@ pub(crate) async fn get_block(
 ) -> FetchResult<FetchedBlock> {
     let index_bucket = env.bucket(INDEX_BUCKET_BINDING)?;
     let epoch = epoch_for_slot(slot);
-    let slot_lookup = get_slot_lookup(&index_bucket, epoch, slot)
+    let fallback_policy = slot_index_fallback_policy(env)?;
+    let slot_lookup = get_slot_lookup(&index_bucket, epoch, slot, fallback_policy)
         .await?
         .unwrap_or(SlotLookup {
             range: SlotRange::EMPTY,
@@ -88,21 +89,31 @@ async fn get_slot_lookup(
     index_bucket: &Bucket,
     epoch: u64,
     slot: u64,
+    fallback_policy: SlotIndexFallbackPolicy,
 ) -> FetchResult<Option<SlotLookup>> {
-    if let Some(lookup) = get_slot_lookup_from_raw_index(index_bucket, epoch, slot).await? {
+    if let Some(lookup) =
+        get_slot_lookup_from_raw_index(index_bucket, epoch, slot, fallback_policy).await?
+    {
         return Ok(Some(lookup));
     }
 
-    get_slot_lookup_from_compact_indexes(index_bucket, epoch, slot).await
+    if fallback_policy.allows_legacy() {
+        return get_slot_lookup_from_compact_indexes(index_bucket, epoch, slot).await;
+    }
+
+    Err(FetchError::IndexUnavailable {
+        keys: v2_slot_index_keys(epoch, fallback_policy),
+    })
 }
 
 async fn get_slot_lookup_from_raw_index(
     index_bucket: &Bucket,
     epoch: u64,
     slot: u64,
+    fallback_policy: SlotIndexFallbackPolicy,
 ) -> FetchResult<Option<SlotLookup>> {
     let slot_in_epoch = slot_in_epoch(slot);
-    for v2_key in v2_slot_index_keys(epoch) {
+    for v2_key in v2_slot_index_keys(epoch, fallback_policy) {
         if let Some(bytes) = get_r2_range(
             index_bucket,
             &v2_key,
@@ -127,6 +138,10 @@ async fn get_slot_lookup_from_raw_index(
                 previous_blockhash: indexed_previous_blockhash(slot, entry.previous_blockhash),
             }));
         }
+    }
+
+    if !fallback_policy.allows_legacy() {
+        return Ok(None);
     }
 
     let raw_key = format!("slot-index/epoch-{epoch}-slot-ranges.raw");

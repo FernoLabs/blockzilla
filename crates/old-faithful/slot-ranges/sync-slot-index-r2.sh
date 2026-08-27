@@ -39,7 +39,8 @@ Usage:
 Defaults:
   local-dir: $SLOT_INDEX_DIR or ./out
   raw remote: $SLOT_INDEX_REMOTE or r2:blockzilla/slot-index
-  v2 remote:  $SLOT_INDEX_V2_REMOTE or r2:blockzilla/slot-index-v2
+  v2 remote:  $SLOT_INDEX_V2_REMOTE or the legacy
+              r2:blockzilla/slot-index-v2 prefix
   SEED_PREVIOUS_BLOCKHASH: Optional base58 epoch-0 genesis seed for an
                            unprefixed direct-CAR registry.
   CARS_DIR: Optional local plain CAR root for duplicate-CID proof reads.
@@ -49,8 +50,9 @@ Defaults:
   SLOT_INDEX_START_EPOCH / SLOT_INDEX_END_EPOCH:
                              Validate and upload only this inclusive range.
 
-Raw modes copy only epoch-*-slot-ranges.raw files. push-v2-authoritative is the
-production v2 path. It validates only the v2 files and blockhash registries.
+Raw modes copy only epoch-*-slot-ranges.raw files. push-v2-authoritative
+validates only the v2 files and blockhash registries. Production verified-only
+uploads must pass r2:blockzilla/slot-index-v2-verified explicitly.
 push-v2 is an explicit CID-backed audit. Archive and direct-CAR modes are also
 explicit.
 Pull uses --ignore-existing so historical offsets are reused and only missing

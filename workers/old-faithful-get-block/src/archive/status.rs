@@ -1,6 +1,11 @@
-use super::v2_slot_index_keys;
+use super::{
+    SlotIndexFallbackPolicy, slot_index_fallback_policy, v2_slot_index_keys,
+    verified_v2_slot_index_key,
+};
 use crate::error::{FetchError, FetchResult, SourceError};
-use of_car_reader::slot_ranges::SLOTS_PER_EPOCH;
+use of_car_reader::slot_ranges::{
+    SLOT_RANGE_ENTRY_SIZE, SLOT_RANGE_V2_ENTRY_SIZE, SLOTS_PER_EPOCH,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use wasm_bindgen::JsValue;
@@ -12,6 +17,8 @@ const DEFAULT_CLUSTER_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
 const DEFAULT_CLUSTER_EPOCH_SLOT_MS: u64 = 400;
 const DEFAULT_CLUSTER_EPOCH_CACHE_MIN_MS: u64 = 5 * 60 * 1000;
 const DEFAULT_CLUSTER_EPOCH_CACHE_MAX_MS: u64 = 60 * 60 * 1000;
+const EXPECTED_RAW_SLOT_INDEX_BYTES: u64 = SLOTS_PER_EPOCH * SLOT_RANGE_ENTRY_SIZE as u64;
+const EXPECTED_V2_SLOT_INDEX_BYTES: u64 = SLOTS_PER_EPOCH * SLOT_RANGE_V2_ENTRY_SIZE as u64;
 
 thread_local! {
     static CLUSTER_EPOCH_CACHE: RefCell<Option<CachedClusterEpochHint>> = const { RefCell::new(None) };
@@ -20,7 +27,33 @@ thread_local! {
 #[derive(Serialize)]
 pub(crate) struct InfoAvailability {
     pub(crate) index_presence: Option<IndexPresenceInfo>,
+    pub(crate) index_presence_error: Option<&'static str>,
+    pub(crate) slot_index_fallback_policy: Option<&'static str>,
     pub(crate) cluster_epoch_hint_error: Option<String>,
+}
+
+impl InfoAvailability {
+    pub(crate) fn is_ready(&self) -> bool {
+        self.slot_index_fallback_policy.is_some()
+            && self.index_presence_error.is_none()
+            && self
+                .index_presence
+                .as_ref()
+                .is_some_and(|presence| presence.v2_previous_blockhash_index_present)
+    }
+
+    pub(crate) fn slot_index_source(&self) -> Option<&'static str> {
+        self.index_presence
+            .as_ref()
+            .map(|presence| presence.index_version)
+    }
+
+    pub(crate) fn previous_blockhash_source(&self) -> Option<&'static str> {
+        self.index_presence
+            .as_ref()
+            .filter(|presence| presence.v2_previous_blockhash_index_present)
+            .map(|presence| presence.index_version)
+    }
 }
 
 #[derive(Serialize)]
@@ -35,6 +68,7 @@ pub(crate) struct IndexPresenceInfo {
     index_version: &'static str,
     range_index_object_present: bool,
     v2_previous_blockhash_index_present: bool,
+    slot_index_fallback_policy: &'static str,
     scan_start_epoch: u64,
     scan_target_epoch: u64,
     cluster_epoch_hint: Option<ClusterEpochHint>,
@@ -72,12 +106,33 @@ pub(crate) async fn get(env: &Env) -> InfoAvailability {
         worker::console_warn!("getEpochInfo hint unavailable");
     }
     let cluster_epoch_hint = hint_result.ok().flatten();
-    let index_presence = latest_index_presence(env, cluster_epoch_hint.as_ref())
-        .await
-        .ok();
+
+    let fallback_policy = match slot_index_fallback_policy(env) {
+        Ok(policy) => policy,
+        Err(err) => {
+            worker::console_error!("invalid slot-index policy: {}", err.client_message());
+            return InfoAvailability {
+                index_presence: None,
+                index_presence_error: Some(err.code()),
+                slot_index_fallback_policy: None,
+                cluster_epoch_hint_error,
+            };
+        }
+    };
+    let (index_presence, index_presence_error) =
+        match latest_index_presence(env, cluster_epoch_hint.as_ref(), fallback_policy).await {
+            Ok(presence) if presence.v2_previous_blockhash_index_present => (Some(presence), None),
+            Ok(presence) => (Some(presence), Some("previous_blockhash_unavailable")),
+            Err(err) => {
+                worker::console_error!("slot-index availability check failed: {}", err.code());
+                (None, Some(err.code()))
+            }
+        };
 
     InfoAvailability {
         index_presence,
+        index_presence_error,
+        slot_index_fallback_policy: Some(fallback_policy.as_str()),
         cluster_epoch_hint_error,
     }
 }
@@ -85,6 +140,7 @@ pub(crate) async fn get(env: &Env) -> InfoAvailability {
 async fn latest_index_presence(
     env: &Env,
     cluster_epoch_hint: Option<&ClusterEpochHint>,
+    fallback_policy: SlotIndexFallbackPolicy,
 ) -> FetchResult<IndexPresenceInfo> {
     let start = env_u64(env, "OF_AVAILABILITY_SCAN_START_EPOCH")
         .unwrap_or(DEFAULT_AVAILABILITY_SCAN_START_EPOCH);
@@ -103,8 +159,15 @@ async fn latest_index_presence(
     let index_bucket = env.bucket("OF_INDEXES")?;
 
     for epoch in (start..=end).rev() {
-        if let Some(info) =
-            epoch_index_presence(&index_bucket, epoch, start, end, cluster_epoch_hint).await?
+        if let Some(info) = epoch_index_presence(
+            &index_bucket,
+            epoch,
+            start,
+            end,
+            cluster_epoch_hint,
+            fallback_policy,
+        )
+        .await?
         {
             return Ok(info);
         }
@@ -121,18 +184,45 @@ async fn epoch_index_presence(
     scan_start_epoch: u64,
     scan_target_epoch: u64,
     cluster_epoch_hint: Option<&ClusterEpochHint>,
+    fallback_policy: SlotIndexFallbackPolicy,
 ) -> FetchResult<Option<IndexPresenceInfo>> {
     let raw_path = format!("slot-index/epoch-{epoch}-slot-ranges.raw");
+    let verified_v2_path = verified_v2_slot_index_key(epoch);
     let mut v2_path = None;
-    for candidate in v2_slot_index_keys(epoch) {
-        if index_bucket.head(&candidate).await?.is_some() {
+    for candidate in v2_slot_index_keys(epoch, fallback_policy) {
+        if let Some(object) = index_bucket.head(&candidate).await? {
+            if object.size() != EXPECTED_V2_SLOT_INDEX_BYTES {
+                return Err(FetchError::MalformedSlotIndexEntry {
+                    key: candidate,
+                    reason: format!(
+                        "object has {} bytes, expected {EXPECTED_V2_SLOT_INDEX_BYTES}",
+                        object.size()
+                    ),
+                });
+            }
             v2_path = Some(candidate);
             break;
         }
     }
     let (index_path, index_version, previous_blockhash_available) = if let Some(v2_path) = v2_path {
-        (v2_path, "slot-ranges-v2", true)
-    } else if index_bucket.head(&raw_path).await?.is_some() {
+        let index_version = if v2_path == verified_v2_path {
+            "slot-ranges-v2-verified"
+        } else {
+            "slot-ranges-v2-fallback"
+        };
+        (v2_path, index_version, true)
+    } else if !fallback_policy.allows_legacy() {
+        return Ok(None);
+    } else if let Some(object) = index_bucket.head(&raw_path).await? {
+        if object.size() != EXPECTED_RAW_SLOT_INDEX_BYTES {
+            return Err(FetchError::MalformedSlotIndexEntry {
+                key: raw_path,
+                reason: format!(
+                    "object has {} bytes, expected {EXPECTED_RAW_SLOT_INDEX_BYTES}",
+                    object.size()
+                ),
+            });
+        }
         (raw_path, "slot-ranges-raw", false)
     } else {
         return Ok(None);
@@ -163,6 +253,7 @@ async fn epoch_index_presence(
         index_version,
         range_index_object_present: true,
         v2_previous_blockhash_index_present: previous_blockhash_available,
+        slot_index_fallback_policy: fallback_policy.as_str(),
         scan_start_epoch,
         scan_target_epoch,
         cluster_epoch_hint: cluster_epoch_hint.cloned(),
@@ -311,4 +402,74 @@ fn env_string(env: &Env, name: &str) -> Option<String> {
         .ok()
         .map(|value| value.to_string())
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IndexPresenceInfo, InfoAvailability};
+
+    fn presence(has_previous_blockhash: bool) -> IndexPresenceInfo {
+        IndexPresenceInfo {
+            latest_indexed_epoch: 7,
+            epoch_end_slot: 3_455_999,
+            first_epoch_slot: 3_024_000,
+            last_epoch_slot: 3_455_999,
+            slots_per_epoch: 432_000,
+            expected_car_path: "7/epoch-7.car".to_string(),
+            index_object_path: "slot-index-v2-verified/epoch-7-slot-ranges-v2.raw".to_string(),
+            index_version: if has_previous_blockhash {
+                "slot-ranges-v2-verified"
+            } else {
+                "slot-ranges-raw"
+            },
+            range_index_object_present: true,
+            v2_previous_blockhash_index_present: has_previous_blockhash,
+            slot_index_fallback_policy: "verified-only",
+            scan_start_epoch: 0,
+            scan_target_epoch: 7,
+            cluster_epoch_hint: None,
+        }
+    }
+
+    fn availability(
+        index_presence: Option<IndexPresenceInfo>,
+        index_presence_error: Option<&'static str>,
+        policy: Option<&'static str>,
+    ) -> InfoAvailability {
+        InfoAvailability {
+            index_presence,
+            index_presence_error,
+            slot_index_fallback_policy: policy,
+            cluster_epoch_hint_error: None,
+        }
+    }
+
+    #[test]
+    fn readiness_requires_a_v2_index_and_a_valid_policy() {
+        let ready = availability(Some(presence(true)), None, Some("verified-only"));
+        assert!(ready.is_ready());
+        assert_eq!(ready.slot_index_source(), Some("slot-ranges-v2-verified"));
+        assert_eq!(
+            ready.previous_blockhash_source(),
+            Some("slot-ranges-v2-verified")
+        );
+
+        let missing = availability(None, Some("slot_index_missing"), Some("verified-only"));
+        assert!(!missing.is_ready());
+        assert_eq!(missing.slot_index_source(), None);
+
+        let r2_error = availability(None, Some("worker_error"), Some("verified-only"));
+        assert!(!r2_error.is_ready());
+
+        let invalid_policy = availability(None, Some("configuration_error"), None);
+        assert!(!invalid_policy.is_ready());
+
+        let legacy_only = availability(
+            Some(presence(false)),
+            Some("previous_blockhash_unavailable"),
+            Some("validated-legacy"),
+        );
+        assert!(!legacy_only.is_ready());
+        assert_eq!(legacy_only.previous_blockhash_source(), None);
+    }
 }

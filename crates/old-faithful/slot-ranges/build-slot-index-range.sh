@@ -29,8 +29,12 @@ Environment:
                     epoch-*-slot-ranges.raw when present.
   OVERWRITE=1       Rebuild epoch-*-slot-ranges.raw too, useful when compact
                     index slot order is needed for v2 blockhash alignment.
-  SYNC_R2_AFTER=1   Upload v2 to r2:blockzilla/slot-index-v2 after strict
-                    validation when a blockhash source is set.
+  SYNC_R2_AFTER=1   Upload v2 after strict validation when a blockhash source
+                    is set. V2 uploads require SLOT_INDEX_V2_REMOTE.
+  SLOT_INDEX_V2_REMOTE
+                    Explicit v2 upload target. Use
+                    r2:blockzilla/slot-index-v2-verified for the verified-only
+                    Old Faithful Worker.
 
 Without SLOT_LIST_DIR, this downloads missing Old Faithful compact index files,
 builds slot-range offset files, and can optionally upload the result to the
@@ -58,6 +62,12 @@ if [[ -n "${SLOT_LIST_DIR:-}" && -z "${BLOCKHASH_DIR:-}" ]]; then
 fi
 if [[ -n "${SLOT_LIST_DIR:-}" && "${OVERWRITE:-0}" == "1" ]]; then
   echo "SLOT_LIST_DIR requires reused raw files; do not set OVERWRITE=1" >&2
+  exit 2
+fi
+if [[ "${SYNC_R2_AFTER:-0}" == "1" \
+  && ( -n "${BLOCKHASH_DIR:-}" || -n "${ARCHIVE_V2_DIR:-}" ) \
+  && -z "${SLOT_INDEX_V2_REMOTE:-}" ]]; then
+  echo "SYNC_R2_AFTER=1 with a v2 build requires SLOT_INDEX_V2_REMOTE" >&2
   exit 2
 fi
 
@@ -179,11 +189,11 @@ if [[ "${SYNC_R2_AFTER:-0}" == "1" ]]; then
       SLOT_INDEX_START_EPOCH="$START_EPOCH" \
       SLOT_INDEX_END_EPOCH="$END_EPOCH" \
       "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2-authoritative \
-      "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR"
+      "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR" "$SLOT_INDEX_V2_REMOTE"
   elif [[ -n "${ARCHIVE_V2_DIR:-}" ]]; then
     SLOT_INDEX_V2_VALIDATE_BIN="${SLOT_INDEX_V2_VALIDATE_BIN:-$REPO_ROOT/target/release/of-validate-slot-index-v2}" \
       "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2-archive \
-      "$SLOT_INDEX_DIR" "$ARCHIVE_V2_DIR"
+      "$SLOT_INDEX_DIR" "$ARCHIVE_V2_DIR" "$SLOT_INDEX_V2_REMOTE"
   else
     "$SCRIPT_DIR/sync-slot-index-r2.sh" push "$SLOT_INDEX_DIR"
   fi

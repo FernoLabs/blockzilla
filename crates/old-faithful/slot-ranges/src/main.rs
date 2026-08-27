@@ -457,36 +457,58 @@ fn read_block_slots_from_old_faithful_slot_list(
     epoch: u64,
     slot_list_dir: &Path,
 ) -> Result<Vec<u64>> {
-    let candidates = [
-        slot_list_dir.join(format!("epoch-{epoch}.slots.txt")),
-        slot_list_dir.join(format!("{epoch}.slots.txt")),
-    ];
-    let existing = candidates
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    let path = match existing.as_slice() {
-        [path] => path,
-        [] => {
-            return Err(anyhow!(
-                "epoch={epoch}: missing epoch-{epoch}.slots.txt or {epoch}.slots.txt under {}",
-                slot_list_dir.display()
-            ));
-        }
-        paths => {
-            return Err(anyhow!(
-                "epoch={epoch}: multiple Old Faithful slot lists found: {}",
-                paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-    };
-    let contents = fs::read_to_string(path)
+    let path = find_old_faithful_slot_list(slot_list_dir, epoch)?.ok_or_else(|| {
+        anyhow!(
+            "epoch={epoch}: missing epoch-{epoch}.slots.txt or {epoch}.slots.txt under {}",
+            slot_list_dir.display()
+        )
+    })?;
+    let contents = fs::read_to_string(&path)
         .with_context(|| format!("read Old Faithful slot list {}", path.display()))?;
-    let block_slots = decode_old_faithful_slot_list(path, epoch, &contents)?;
+    let decoded = decode_old_faithful_slot_list(&path, epoch, &contents)?;
+    if let Some(before) = decoded.before {
+        if let Some(previous_path) = find_old_faithful_slot_list(slot_list_dir, epoch - 1)? {
+            let previous_contents = fs::read_to_string(&previous_path).with_context(|| {
+                format!("read Old Faithful slot list {}", previous_path.display())
+            })?;
+            let previous =
+                decode_old_faithful_slot_list(&previous_path, epoch - 1, &previous_contents)?;
+            let expected = previous.current.last().copied().ok_or_else(|| {
+                anyhow!(
+                    "{} has no current-epoch block slots",
+                    previous_path.display()
+                )
+            })?;
+            if before != expected {
+                return Err(anyhow!(
+                    "{} before-epoch boundary {before} differs from the last current slot {expected} in {}",
+                    path.display(),
+                    previous_path.display()
+                ));
+            }
+        }
+    }
+    if let Some(after) = decoded.after {
+        let next_epoch = epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("next epoch overflow for epoch {epoch}"))?;
+        if let Some(next_path) = find_old_faithful_slot_list(slot_list_dir, next_epoch)? {
+            let next_contents = fs::read_to_string(&next_path)
+                .with_context(|| format!("read Old Faithful slot list {}", next_path.display()))?;
+            let next = decode_old_faithful_slot_list(&next_path, next_epoch, &next_contents)?;
+            let expected = next.current.first().copied().ok_or_else(|| {
+                anyhow!("{} has no current-epoch block slots", next_path.display())
+            })?;
+            if after != expected {
+                return Err(anyhow!(
+                    "{} after-epoch boundary {after} differs from the first current slot {expected} in {}",
+                    path.display(),
+                    next_path.display()
+                ));
+            }
+        }
+    }
+    let block_slots = decoded.current;
     eprintln!(
         "epoch={epoch}: ordered block slots={} from {}",
         block_slots.len(),
@@ -495,7 +517,40 @@ fn read_block_slots_from_old_faithful_slot_list(
     Ok(block_slots)
 }
 
-fn decode_old_faithful_slot_list(path: &Path, epoch: u64, contents: &str) -> Result<Vec<u64>> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DecodedOldFaithfulSlotList {
+    before: Option<u64>,
+    current: Vec<u64>,
+    after: Option<u64>,
+}
+
+fn find_old_faithful_slot_list(root: &Path, epoch: u64) -> Result<Option<PathBuf>> {
+    let existing = [
+        root.join(format!("epoch-{epoch}.slots.txt")),
+        root.join(format!("{epoch}.slots.txt")),
+    ]
+    .into_iter()
+    .filter(|path| path.is_file())
+    .collect::<Vec<_>>();
+    match existing.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        paths => Err(anyhow!(
+            "epoch={epoch}: multiple Old Faithful slot lists found: {}",
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn decode_old_faithful_slot_list(
+    path: &Path,
+    epoch: u64,
+    contents: &str,
+) -> Result<DecodedOldFaithfulSlotList> {
     let mut raw_lines = contents.split('\n').collect::<Vec<_>>();
     if raw_lines.last() == Some(&"") {
         raw_lines.pop();
@@ -531,19 +586,62 @@ fn decode_old_faithful_slot_list(path: &Path, epoch: u64, contents: &str) -> Res
     let epoch_end = epoch_start
         .checked_add(SLOTS_PER_EPOCH)
         .ok_or_else(|| anyhow!("epoch end slot overflow for epoch {epoch}"))?;
-    let current_slots = if epoch == 0 {
-        slots.as_slice()
-    } else {
-        let predecessor = slots[0];
-        let expected_predecessor = epoch_start - 1;
-        if predecessor != expected_predecessor {
+    let next_epoch_end = epoch_end
+        .checked_add(SLOTS_PER_EPOCH)
+        .ok_or_else(|| anyhow!("next epoch end overflow for epoch {epoch}"))?;
+    for (position, pair) in slots.windows(2).enumerate() {
+        if pair[1] <= pair[0] {
             return Err(anyhow!(
-                "{} line 1 predecessor slot is {predecessor}, expected epoch boundary slot {expected_predecessor}",
+                "{} slots are not strictly increasing at position {}: {} follows {}",
+                path.display(),
+                position + 1,
+                pair[1],
+                pair[0]
+            ));
+        }
+    }
+    let before = slots
+        .iter()
+        .copied()
+        .filter(|slot| *slot < epoch_start)
+        .collect::<Vec<_>>();
+    let current_slots = slots
+        .iter()
+        .copied()
+        .filter(|slot| (epoch_start..epoch_end).contains(slot))
+        .collect::<Vec<_>>();
+    let after = slots
+        .iter()
+        .copied()
+        .filter(|slot| *slot >= epoch_end)
+        .collect::<Vec<_>>();
+    if before.len() > 1 || after.len() > 1 {
+        return Err(anyhow!(
+            "{} has {} before-epoch and {} after-epoch boundary slots; at most one of each is allowed",
+            path.display(),
+            before.len(),
+            after.len()
+        ));
+    }
+    if let Some(slot) = before.first().copied() {
+        let previous_epoch_start = epoch_start
+            .checked_sub(SLOTS_PER_EPOCH)
+            .ok_or_else(|| anyhow!("{} epoch 0 cannot have a before-epoch slot", path.display()))?;
+        if slot < previous_epoch_start {
+            return Err(anyhow!(
+                "{} before-epoch slot {slot} is outside adjacent epoch range {previous_epoch_start}..{epoch_start}",
                 path.display()
             ));
         }
-        &slots[1..]
-    };
+    }
+    if let Some(slot) = after.first().copied() {
+        if slot >= next_epoch_end {
+            return Err(anyhow!(
+                "{} after-epoch slot {slot} is outside adjacent epoch range {epoch_end}..{next_epoch_end}",
+                path.display()
+            ));
+        }
+    }
     if current_slots.is_empty() {
         return Err(anyhow!(
             "{} has no current-epoch block slots for epoch {epoch}",
@@ -551,24 +649,11 @@ fn decode_old_faithful_slot_list(path: &Path, epoch: u64, contents: &str) -> Res
         ));
     }
 
-    let mut previous = None;
-    for (position, slot) in current_slots.iter().copied().enumerate() {
-        if !(epoch_start..epoch_end).contains(&slot) {
-            return Err(anyhow!(
-                "{} current slot {slot} at position {position} is outside epoch {epoch} range {epoch_start}..{epoch_end}",
-                path.display()
-            ));
-        }
-        if previous.is_some_and(|previous_slot| slot <= previous_slot) {
-            return Err(anyhow!(
-                "{} current slots are not strictly increasing at position {position}: {slot} follows {}",
-                path.display(),
-                previous.unwrap()
-            ));
-        }
-        previous = Some(slot);
-    }
-    Ok(current_slots.to_vec())
+    Ok(DecodedOldFaithfulSlotList {
+        before: before.first().copied(),
+        current: current_slots,
+        after: after.first().copied(),
+    })
 }
 
 fn read_block_slots_from_old_faithful_index(
@@ -1738,32 +1823,56 @@ mod tests {
     fn slot_list_names_and_format_are_strict() {
         let epoch = 4;
         let epoch_start = epoch * SLOTS_PER_EPOCH;
-        let valid = format!(
-            "{}\n{}\n{}\n",
-            epoch_start - 1,
-            epoch_start,
-            epoch_start + 2
-        );
+        let epoch_end = epoch_start + SLOTS_PER_EPOCH;
+        let before = epoch_start - 17;
+        let after = epoch_end + 11;
+        let valid = format!("{before}\n{}\n{}\n{after}\n", epoch_start, epoch_start + 2);
         assert_eq!(
             decode_old_faithful_slot_list(Path::new("fixture.slots.txt"), epoch, &valid)
                 .expect("decode valid list"),
-            vec![epoch_start, epoch_start + 2]
+            DecodedOldFaithfulSlotList {
+                before: Some(before),
+                current: vec![epoch_start, epoch_start + 2],
+                after: Some(after),
+            }
         );
         assert_eq!(
             decode_old_faithful_slot_list(Path::new("0.slots.txt"), 0, "0\n2\n")
                 .expect("epoch zero has no predecessor line"),
-            vec![0, 2]
+            DecodedOldFaithfulSlotList {
+                before: None,
+                current: vec![0, 2],
+                after: None,
+            }
         );
 
-        for (contents, expected) in [
-            ("", "no slot lines"),
-            ("1727999\n\n1728000\n", "line 2 is blank"),
-            ("1727999\nslot\n", "not a decimal u64"),
-            ("1728000\n1728001\n", "predecessor slot"),
-            ("1727999\n1728001\n1728000\n", "not strictly increasing"),
-            ("1727999\n2160000\n", "outside epoch 4"),
-        ] {
-            let error = decode_old_faithful_slot_list(Path::new("bad.slots.txt"), epoch, contents)
+        let malformed = [
+            ("".to_string(), "no slot lines"),
+            ("1727999\n\n1728000\n".to_string(), "line 2 is blank"),
+            ("1727999\nslot\n".to_string(), "not a decimal u64"),
+            (
+                "1727999\n1728001\n1728000\n".to_string(),
+                "not strictly increasing",
+            ),
+            (
+                format!("{}\n{}\n{epoch_start}\n", epoch_start - 2, epoch_start - 1),
+                "at most one",
+            ),
+            (
+                format!("{}\n{epoch_start}\n", epoch_start - SLOTS_PER_EPOCH - 1),
+                "outside adjacent epoch",
+            ),
+            (
+                format!("{epoch_start}\n{epoch_end}\n{}\n", epoch_end + 1),
+                "at most one",
+            ),
+            (
+                format!("{epoch_start}\n{}\n", epoch_end + SLOTS_PER_EPOCH),
+                "outside adjacent epoch",
+            ),
+        ];
+        for (contents, expected) in malformed {
+            let error = decode_old_faithful_slot_list(Path::new("bad.slots.txt"), epoch, &contents)
                 .expect_err("malformed slot list must fail");
             assert!(
                 error.to_string().contains(expected),
@@ -1780,6 +1889,38 @@ mod tests {
                 vec![epoch_start, epoch_start + 2]
             );
         }
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let previous_start = epoch_start - SLOTS_PER_EPOCH;
+        let previous_last = before;
+        fs::write(
+            temporary.path().join("3.slots.txt"),
+            format!("{previous_start}\n{previous_last}\n"),
+        )
+        .expect("write previous list");
+        fs::write(temporary.path().join("4.slots.txt"), &valid).expect("write current list");
+        fs::write(
+            temporary.path().join("5.slots.txt"),
+            format!("{after}\n{}\n", epoch_end + 23),
+        )
+        .expect("write next list");
+        assert_eq!(
+            read_block_slots_from_old_faithful_slot_list(epoch, temporary.path())
+                .expect("cross-check adjacent lists"),
+            vec![epoch_start, epoch_start + 2]
+        );
+        fs::write(
+            temporary.path().join("3.slots.txt"),
+            format!("{previous_start}\n{}\n", previous_last - 1),
+        )
+        .expect("write mismatched previous list");
+        let error = read_block_slots_from_old_faithful_slot_list(epoch, temporary.path())
+            .expect_err("mismatched adjacent predecessor must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("differs from the last current slot")
+        );
     }
 
     #[test]

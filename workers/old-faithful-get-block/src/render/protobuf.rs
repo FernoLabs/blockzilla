@@ -103,7 +103,7 @@ fn car_bytes_to_quick_protobuf_no_meta(
     let mut out = Vec::with_capacity(input_len);
     let mut writer = Writer::new(&mut out);
 
-    if previous_blockhash != "" {
+    if !previous_blockhash.is_empty() {
         writer
             .write_with_tag(10, |writer| writer.write_string(&previous_blockhash))
             .map_err(|err| format!("Failed to encode protobuf previous_blockhash: {err}"))?;

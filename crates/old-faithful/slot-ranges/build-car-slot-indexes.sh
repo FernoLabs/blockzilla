@@ -21,8 +21,12 @@ Environment:
   SEED_PREVIOUS_BLOCKHASH
                     Base58 seed for epoch 0. The wrapper uses the known
                     mainnet genesis hash by default when START_EPOCH=0.
-  SYNC_R2_AFTER=1   Validate and upload v2 indexes to
-                    r2:blockzilla/slot-index-v2 after the build.
+  SYNC_R2_AFTER=1   Validate and upload v2 indexes after the build. Requires
+                    SLOT_INDEX_V2_REMOTE.
+  SLOT_INDEX_V2_REMOTE
+                    Explicit v2 upload target. Use
+                    r2:blockzilla/slot-index-v2-verified for the verified-only
+                    Old Faithful Worker.
 
 The CAR scan is parallel per epoch. It writes raw slot ranges plus
 blockhash_registry.bin. Unless SCAN_ONLY=1, a second fast pass stitches
@@ -44,6 +48,12 @@ JOBS="${JOBS:-4}"
 SEED_PREVIOUS_BLOCKHASH="${SEED_PREVIOUS_BLOCKHASH:-}"
 if [[ "$START_EPOCH" == "0" && -z "$SEED_PREVIOUS_BLOCKHASH" ]]; then
   SEED_PREVIOUS_BLOCKHASH="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+fi
+if [[ "${SYNC_R2_AFTER:-0}" == "1" \
+  && "${SCAN_ONLY:-0}" != "1" \
+  && -z "${SLOT_INDEX_V2_REMOTE:-}" ]]; then
+  echo "SYNC_R2_AFTER=1 requires SLOT_INDEX_V2_REMOTE" >&2
+  exit 2
 fi
 
 scan_args=(
@@ -96,6 +106,6 @@ if [[ "${SCAN_ONLY:-0}" != "1" ]]; then
       SLOT_INDEX_START_EPOCH="$START_EPOCH" \
       SLOT_INDEX_END_EPOCH="$END_EPOCH" \
       "$SCRIPT_DIR/sync-slot-index-r2.sh" push-v2-authoritative \
-      "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR"
+      "$SLOT_INDEX_DIR" "$BLOCKHASH_DIR" "$SLOT_INDEX_V2_REMOTE"
   fi
 fi

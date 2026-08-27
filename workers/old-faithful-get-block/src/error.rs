@@ -55,6 +55,7 @@ pub(crate) type FetchResult<T> = std::result::Result<T, FetchError>;
 
 #[derive(Debug)]
 pub(crate) enum FetchError {
+    Configuration { name: String, reason: String },
     IndexUnavailable { keys: Vec<String> },
     MissingSlotIndex { key: String },
     PreviousBlockhashUnavailable { slot: u64 },
@@ -69,6 +70,7 @@ pub(crate) enum FetchError {
 impl FetchError {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
+            Self::Configuration { .. } => 500,
             Self::IndexUnavailable { .. } | Self::PreviousBlockhashUnavailable { .. } => 503,
             Self::MissingSlotIndex { .. } => 404,
             Self::MalformedSlotIndexEntry { .. }
@@ -83,6 +85,7 @@ impl FetchError {
 
     pub(crate) fn code(&self) -> &'static str {
         match self {
+            Self::Configuration { .. } => "configuration_error",
             Self::IndexUnavailable { .. } => "index_unavailable",
             Self::MissingSlotIndex { .. } => "slot_index_missing",
             Self::PreviousBlockhashUnavailable { .. } => "previous_blockhash_unavailable",
@@ -100,9 +103,12 @@ impl FetchError {
 
     pub(crate) fn client_message(&self) -> String {
         match self {
+            Self::Configuration { name, reason } => {
+                format!("Worker setting {name} is invalid: {reason}")
+            }
             Self::IndexUnavailable { keys } => {
                 format!(
-                    "compact index is missing from the serving index store: {}",
+                    "required index is missing from the serving index store: {}",
                     keys.join(", ")
                 )
             }
